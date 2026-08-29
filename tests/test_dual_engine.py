@@ -4,6 +4,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+from pydantic import SecretStr
 
 pytestmark = pytest.mark.asyncio
 
@@ -25,7 +26,7 @@ async def test_read_engine_is_writer_when_read_url_empty():
     from core_storage_api.config import settings
     from core_storage_api.database import init as db_init
 
-    with patch.object(settings, "read_database_url", ""):
+    with patch.object(settings, "read_database_url", SecretStr("")):
         writer = db_init.get_engine()
         reader = db_init.get_read_engine()
     assert writer is reader
@@ -38,7 +39,7 @@ async def test_read_engine_is_distinct_when_read_url_set():
     with patch.object(
         settings,
         "read_database_url",
-        "postgresql+asyncpg://reader:changeme@replica:5432/memclaw",
+        SecretStr("postgresql+asyncpg://reader:changeme@replica:5432/caura"),
     ):
         writer = db_init.get_engine()
         reader = db_init.get_read_engine()

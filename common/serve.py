@@ -46,7 +46,7 @@ from typing import Any
 
 import uvicorn
 
-from common.structlog_config import configure_logging
+from common.structlog_config import access_log_enabled, configure_logging
 
 
 def _load(path: str) -> Any:
@@ -105,11 +105,34 @@ def main(argv: list[str] | None = None) -> None:
         log_file=settings.log_file or None,
     )
 
+    # UVICORN_ACCESS_LOG=false drops uvicorn's per-request access line —
+    # the THIRD copy of one fact, and the only one of the three without a
+    # duration (the APM span and Cloud Run's own httpRequest entry both
+    # carry latency). Rationale and the opt-out default live on
+    # access_log_enabled(); the ENFORCEMENT lives in structlog_config's
+    # _route_third_party_to_root.
+    #
+    # Passing access_log=False below is necessary but NOT sufficient, which
+    # is why the enforcement is elsewhere. uvicorn's Config only uses this
+    # flag to clear uvicorn.access's handlers and set propagate=False; its
+    # HTTP protocols then re-derive the decision per connection from
+    # ``self.access_logger.hasHandlers()``. Our own logger rerouting runs
+    # afterwards (at app import, in every worker) and sets propagate=True
+    # to pull uvicorn's lines into structlog — which makes hasHandlers()
+    # find the root handler and answer True again. Shipping only this
+    # kwarg is exactly what made the 2026-08-28 rollout a no-op.
+    access_log = access_log_enabled()
+
     # log_config=None: do NOT let uvicorn install its own stream handlers.
     # That keeps uvicorn.{error,access} propagating to the structlog root
     # handler configured above (in the parent AND the workers), so every
     # uvicorn line — including the parent supervisor's — emits as JSON with a
     # Datadog status. Installing uvicorn's config would re-plain-text them.
+    #
+    # access_log is a separate lever from log_config: log_config decides how
+    # a record is FORMATTED, access_log decides whether uvicorn creates the
+    # record at all. Turning this off therefore costs nothing downstream —
+    # no handler, filter or sampling rule has to know about it.
     uvicorn.run(
         args.app,
         host=args.host,
@@ -118,6 +141,7 @@ def main(argv: list[str] | None = None) -> None:
         timeout_keep_alive=args.timeout_keep_alive,
         timeout_worker_healthcheck=args.timeout_worker_healthcheck,
         log_config=None,
+        access_log=access_log,
     )
 
 

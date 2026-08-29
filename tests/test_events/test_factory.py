@@ -10,6 +10,23 @@ from common.events.factory import reset_event_bus_for_testing
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture
+def dual_subscribe_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dual-subscribe setting every deployed service actually runs with.
+
+    Since ``lifecycle`` was flipped, a Pub/Sub bus constructed with the flag off
+    is refused at construction — a flipped family would otherwise publish under
+    a name the bus does not bind, which delivers nothing and raises nothing. The
+    tests below are about the FACTORY's backend selection and its
+    ``max_messages`` plumbing, not about the flag, so they take the setting all
+    12 pubsub-backed deployables were confirmed running at their live revision.
+    Setting the env var rather than emptying ``FLIPPED_FAMILIES`` keeps the real
+    flag-parsing path under test; the parse rule itself is covered in
+    ``test_topic_rename_cutover.py``.
+    """
+    monkeypatch.setenv("EVENT_BUS_DUAL_SUBSCRIBE", "true")
+
+
 async def test_default_backend_is_inprocess(monkeypatch: pytest.MonkeyPatch) -> None:
     await reset_event_bus_for_testing()
     monkeypatch.delenv("EVENT_BUS_BACKEND", raising=False)
@@ -49,6 +66,7 @@ async def test_pubsub_backend_requires_subscription_prefix(
 
 async def test_pubsub_backend_constructs_when_env_complete(
     monkeypatch: pytest.MonkeyPatch,
+    dual_subscribe_on: None,
 ) -> None:
     await reset_event_bus_for_testing()
     monkeypatch.setenv("EVENT_BUS_BACKEND", "pubsub")
@@ -84,6 +102,7 @@ async def test_pubsub_backend_fails_fast_when_sdk_missing(
 
 async def test_pubsub_backend_honors_max_messages_override(
     monkeypatch: pytest.MonkeyPatch,
+    dual_subscribe_on: None,
 ) -> None:
     await reset_event_bus_for_testing()
     monkeypatch.setenv("EVENT_BUS_BACKEND", "pubsub")
@@ -97,6 +116,7 @@ async def test_pubsub_backend_honors_max_messages_override(
 
 async def test_pubsub_backend_default_max_messages_when_unset(
     monkeypatch: pytest.MonkeyPatch,
+    dual_subscribe_on: None,
 ) -> None:
     await reset_event_bus_for_testing()
     monkeypatch.setenv("EVENT_BUS_BACKEND", "pubsub")
@@ -110,6 +130,7 @@ async def test_pubsub_backend_default_max_messages_when_unset(
 
 async def test_pubsub_backend_accepts_max_messages_upper_bound(
     monkeypatch: pytest.MonkeyPatch,
+    dual_subscribe_on: None,
 ) -> None:
     await reset_event_bus_for_testing()
     monkeypatch.setenv("EVENT_BUS_BACKEND", "pubsub")

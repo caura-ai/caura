@@ -4,6 +4,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.19.2](https://github.com/caura-ai/caura/compare/plugin-v2.19.1...plugin-v2.19.2) (2026-08-27)
+
+
+### Documentation
+
+* **rebrand:** two comments that use the old brand as the product's name ([#1015](https://github.com/caura-ai/caura/issues/1015)) ([e836d7b](https://github.com/caura-ai/caura/commit/e836d7b948f69338454059f81daeeb6574cde731))
+
+
+### Code Refactoring
+
+* **plugin:** rename the default export, reword stale comments ([#1013](https://github.com/caura-ai/caura/issues/1013)) ([b2518e6](https://github.com/caura-ai/caura/commit/b2518e6b45ea91ad49ced72d8f3ccae4c24a73da))
+
 ## [2.19.1](https://github.com/caura-ai/caura/compare/plugin-v2.19.0...plugin-v2.19.1) (2026-08-26)
 
 

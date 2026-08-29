@@ -170,53 +170,98 @@ async def _setup_schema(_engine):
     yield
     # Cleanup: drop test data (but keep schema for session reuse)
     async with _engine.begin() as conn:
-        for table in (
-            "relations",
-            "entities",
-            "memories",
-            "audit_log",
-            # One genesis row per tenant (``_audit_chain_one_tenant``), so a
-            # per-test tenant leaves one per test rather than one per run. It was
-            # never swept: a local DB had 9,186 ``test-tenant-`` rows here from
-            # earlier runs. Other tenant-scoped tables (recall_event,
-            # memory_conflicts, dedup_reviews, agents, session_traces) leak the
-            # same way but per-write, so they are a separate cleanup.
-            "audit_chain_head",
-            "agent_activity_digests",
-            # Keystones and other docs live here. Written through the API's own
-            # committed transaction, so the per-test session rollback never
-            # reaches them — without this they survive every run. That is not
-            # only untidy: the keystone listing is capped at 50 and ordered by
-            # weight, so accumulated rules eventually push a freshly-written one
-            # out of the response and a round-trip test fails for reasons that
-            # look nothing like accumulated state.
-            "documents",
-        ):
-            try:
-                await conn.execute(
-                    text(f"DELETE FROM {table} WHERE tenant_id LIKE :prefix"),
-                    {"prefix": f"{SWEEP_TENANT_PREFIX}%"},
-                )
-            except Exception:
-                # Best-effort, and the ONLY thing that ever removes rows written
-                # through the service layer — not a backstop behind the ``db``
-                # fixture's rollback. Most tests here write via ``sc``, which
-                # commits on its own connections, so that rollback never sees
-                # those rows. Per-test isolation comes from the unique
-                # ``tenant_id``; this sweep is end-of-run cleanup, so the table
-                # doesn't grow without bound.
-                pass
-        # memory_entity_links doesn't have tenant_id — clean via memory join
+        await purge_test_rows(conn, f"{SWEEP_TENANT_PREFIX}%")
+
+
+async def purge_test_rows(conn, prefix: str) -> None:
+    """DELETE every tenant-scoped row whose owner id matches ``prefix``.
+
+    Extracted from ``_setup_schema``'s teardown so it can be exercised
+    directly. That matters more here than it looks: every statement below
+    swallows its exception, so a DELETE naming a table that does not exist,
+    or filtering on a column that table does not have, is indistinguishable
+    from one that worked. ``tests/test_conftest_cleanup.py`` calls this with
+    a prefix unique to itself and asserts the rows are actually gone.
+    """
+    for table in (
+        "relations",
+        "entities",
+        "memories",
+        "audit_log",
+        # One genesis row per tenant (``_audit_chain_one_tenant``), so a
+        # per-test tenant leaves one per test rather than one per run. It was
+        # never swept: a local DB had 9,186 ``test-tenant-`` rows here from
+        # earlier runs. Other tenant-scoped tables (recall_event,
+        # memory_conflicts, dedup_reviews, agents, session_traces) leak the
+        # same way but per-write, so they are a separate cleanup.
+        "audit_chain_head",
+        "agent_activity_digests",
+        # Keystones and other docs live here. Written through the API's own
+        # committed transaction, so the per-test session rollback never
+        # reaches them — without this they survive every run. That is not
+        # only untidy: the keystone listing is capped at 50 and ordered by
+        # weight, so accumulated rules eventually push a freshly-written one
+        # out of the response and a round-trip test fails for reasons that
+        # look nothing like accumulated state.
+        "documents",
+    ):
         try:
             await conn.execute(
-                text(
-                    "DELETE FROM memory_entity_links WHERE memory_id IN "
-                    "(SELECT id FROM memories WHERE tenant_id LIKE :prefix)"
-                ),
-                {"prefix": f"{SWEEP_TENANT_PREFIX}%"},
+                text(f"DELETE FROM {table} WHERE tenant_id LIKE :prefix"),
+                {"prefix": prefix},
             )
         except Exception:
+            # Best-effort, and the ONLY thing that ever removes rows written
+            # through the service layer — not a backstop behind the ``db``
+            # fixture's rollback. Most tests here write via ``sc``, which
+            # commits on its own connections, so that rollback never sees
+            # those rows. Per-test isolation comes from the unique
+            # ``tenant_id``; this sweep is end-of-run cleanup, so the table
+            # doesn't grow without bound.
             pass
+    # memory_entity_links doesn't have tenant_id — clean via memory join
+    try:
+        await conn.execute(
+            text(
+                "DELETE FROM memory_entity_links WHERE memory_id IN "
+                "(SELECT id FROM memories WHERE tenant_id LIKE :prefix)"
+            ),
+            {"prefix": prefix},
+        )
+    except Exception:
+        pass
+    # organization_settings keys on ``org_id``, not ``tenant_id``, so it
+    # cannot join the loop above — and putting it there would look right
+    # while doing nothing, because the failing DELETE is swallowed.
+    #
+    # Unswept it is the most expensive leak here. Every test that opts a
+    # tenant into a feature writes a row, and the interviewer sweep
+    # enumerates EVERY enabled tenant on each tick — two storage round-trips
+    # apiece, sequentially. A local database reached 4,738 enabled orgs,
+    # which put the sweep in ``test_schedule_sweep_processes_pending_jobs``
+    # at 16s and that one test at 48s, growing with every run. CI never sees
+    # it: its Postgres is a fresh service container per run, so this is
+    # precisely the class of failure that reproduces only on a developer's
+    # machine and reads as flakiness rather than accumulated state.
+    try:
+        await conn.execute(
+            text("DELETE FROM organization_settings WHERE org_id LIKE :prefix"),
+            {"prefix": prefix},
+        )
+    except Exception:
+        pass
+    # ``organization_settings_audit`` is keyed on ``org_id`` too, and leaks
+    # faster than the table above: it is append-only, one row per settings
+    # change rather than one per org, so a test that writes settings twice
+    # leaves two. Same local database carried 8,676 of these against 8,238
+    # settings rows.
+    try:
+        await conn.execute(
+            text("DELETE FROM organization_settings_audit WHERE org_id LIKE :prefix"),
+            {"prefix": prefix},
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

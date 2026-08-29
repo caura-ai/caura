@@ -10,6 +10,49 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.34.0](https://github.com/caura-ai/caura/compare/backend-v2.33.1...backend-v2.34.0) (2026-08-27)
+
+
+### Features
+
+* **contradiction:** Path D — basis invalidation in shadow mode (A58) ([#1024](https://github.com/caura-ai/caura/issues/1024)) ([5f6f33c](https://github.com/caura-ai/caura/commit/5f6f33c368e0e9037acd832c4ae02ff29a116082))
+* **entities:** write the extraction-derived subject back to the memory row (A63) ([#1020](https://github.com/caura-ai/caura/issues/1020)) ([2ba13be](https://github.com/caura-ai/caura/commit/2ba13bedcea20683b84cbe3962b0c8dbd5824cc9))
+* **recall:** premise guard — challenge assumptions the memories refute (A64) ([#1022](https://github.com/caura-ai/caura/issues/1022)) ([59de373](https://github.com/caura-ai/caura/commit/59de373516f1aa7c9394513e36e19b2e4ddaf004))
+
+
+### Bug Fixes
+
+* **auth:** reject a tenantless enforce_tenant call instead of passing it ([#1018](https://github.com/caura-ai/caura/issues/1018)) ([0f37b8a](https://github.com/caura-ai/caura/commit/0f37b8abbfa114b187df0b6b4a27a6d48d9bf928))
+* **contradiction:** updates ARE contradictions — re-cut the temporal gate, let history questions see superseded values (A63) ([#1023](https://github.com/caura-ai/caura/issues/1023)) ([38649e1](https://github.com/caura-ai/caura/commit/38649e17bbc7e6c697265be3e30bb9618c1bbbf3))
+* **events:** claim a slot for the broadcast id instead of rolling a random one ([#1006](https://github.com/caura-ai/caura/issues/1006)) ([c799f8f](https://github.com/caura-ai/caura/commit/c799f8f2d6756a5b89b1f5824a8d5879c24b10be))
+* **interview:** stop the sweep reporting silent failure as an idle tick ([#1019](https://github.com/caura-ai/caura/issues/1019)) ([4dca006](https://github.com/caura-ai/caura/commit/4dca00679f2dd8a7b6a1d79a4a66bd90d61406e0))
+* **llm:** cap complete_json output and surface max-tokens truncation clearly ([#1009](https://github.com/caura-ai/caura/issues/1009)) ([c6a38cb](https://github.com/caura-ai/caura/commit/c6a38cbc4865fb14836b0558b89ab7cadcd6cab2))
+* **logging:** route warnings through logging so they stop counting as errors ([#979](https://github.com/caura-ai/caura/issues/979)) ([d5ef60b](https://github.com/caura-ai/caura/commit/d5ef60b11977343a95673168c04fc1d4c4f699cc))
+* **ratchet:** count removed exemptions per file, not as a repo-wide net ([#1017](https://github.com/caura-ai/caura/issues/1017)) ([d384154](https://github.com/caura-ai/caura/commit/d3841540f55dcb1cc422c5defe66e3582e8e45f8))
+* **settings:** mask api_keys in GET/PUT /settings responses (C36) ([#1010](https://github.com/caura-ai/caura/issues/1010)) ([8ad9c46](https://github.com/caura-ai/caura/commit/8ad9c4641e2999ed9f3683aba071f6c22a906f7b))
+
+
+### Performance
+
+* **contradiction:** sparse batch-judge verdict schema (E4) ([#1011](https://github.com/caura-ai/caura/issues/1011)) ([e61d999](https://github.com/caura-ai/caura/commit/e61d9993c0b711ee3c1c8ad0982e0cff33ca9fa8))
+
+
+### Dependencies
+
+* update uvicorn requirement from &lt;1,&gt;=0.37 to &gt;=0.52.4,&lt;1 ([#922](https://github.com/caura-ai/caura/issues/922)) ([d82eebd](https://github.com/caura-ai/caura/commit/d82eebdcaf403f7d645c16434f5a16d6e5aa2c50))
+
+
+### Documentation
+
+* cite this repo as caura, not its former name ([#1021](https://github.com/caura-ai/caura/issues/1021)) ([2f88344](https://github.com/caura-ai/caura/commit/2f8834471e4797e88d651be8afb2147550cc69c8))
+* drop the closed count-endpoint bug response ([#1016](https://github.com/caura-ai/caura/issues/1016)) ([3f6d582](https://github.com/caura-ai/caura/commit/3f6d5822c601bbeeb4fe42a2f6a0df2c0692b52c))
+* **rebrand:** two comments that use the old brand as the product's name ([#1015](https://github.com/caura-ai/caura/issues/1015)) ([e836d7b](https://github.com/caura-ai/caura/commit/e836d7b948f69338454059f81daeeb6574cde731))
+
+
+### Code Refactoring
+
+* **plugin:** rename the default export, reword stale comments ([#1013](https://github.com/caura-ai/caura/issues/1013)) ([b2518e6](https://github.com/caura-ai/caura/commit/b2518e6b45ea91ad49ced72d8f3ccae4c24a73da))
+
 ## [2.33.1](https://github.com/caura-ai/caura/compare/backend-v2.33.0...backend-v2.33.1) (2026-08-26)
 
 

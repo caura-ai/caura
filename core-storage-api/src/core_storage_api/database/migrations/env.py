@@ -51,7 +51,7 @@ async def run_migrations_cli():
     """CLI mode: create engine from settings and run migrations."""
     from core_storage_api.config import settings
 
-    engine = create_async_engine(settings.database_url)
+    engine = create_async_engine(settings.database_url.get_secret_value())
     async with engine.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await engine.dispose()

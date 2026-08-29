@@ -60,7 +60,7 @@ async def _ensure_schema():
 
     from core_storage_api.database.init import init_database
 
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = create_async_engine(settings.database_url.get_secret_value(), echo=False)
     async with engine.begin() as conn:
         # pgvector must exist before the migrations that declare vector columns.
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
