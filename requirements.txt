@@ -37,7 +37,7 @@ cachetools>=7.1.7
 croniter>=6.2.4
 
 # SQLite async driver (for OSS standalone storage backend)
-aiosqlite>=0.19,<1
+aiosqlite>=0.22.1,<1
 
 # Redis cache (optional — falls back to in-memory if not configured)
 redis[hiredis]>=8.1.0,<9
