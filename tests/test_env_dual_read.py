@@ -13,7 +13,6 @@ import re
 from pathlib import Path
 
 import pytest
-
 from core_api import constants
 from core_api.config import Settings
 
@@ -80,10 +79,11 @@ class TestVersionResolution:
         clean_env.setenv(OLD_VERSION_ENV, "1.2.3-old")
         assert constants._resolve_version() == "1.2.3-new"
 
-    def test_blank_new_name_does_not_shadow_the_old_one(self, clean_env):
+    @pytest.mark.parametrize("new_value", ["", "   "], ids=["empty", "whitespace"])
+    def test_blank_new_name_does_not_shadow_the_old_one(self, clean_env, new_value):
         # The regression this guards: an operator who blanks the new name in a
         # deploy template must not lose a working old one.
-        clean_env.setenv(NEW_VERSION_ENV, "")
+        clean_env.setenv(NEW_VERSION_ENV, new_value)
         clean_env.setenv(OLD_VERSION_ENV, "1.2.3-old")
         assert constants._resolve_version() == "1.2.3-old"
 

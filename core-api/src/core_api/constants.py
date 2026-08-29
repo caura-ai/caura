@@ -74,7 +74,8 @@ def _resolve_version() -> str:
     Precedence (most to least authoritative):
 
     1. ``CAURA_VERSION`` env, or its legacy alias below — explicit deploy /
-       ad-hoc override. The new name wins when both are set.
+       ad-hoc override. The first non-empty value wins, with the new name
+       checked first.
     2. ``VERSION`` file baked into the image at build time from
        ``pyproject.toml`` (see ``core-api/Dockerfile``). Deterministic and
        independent of installed-package metadata — the prod Dockerfile
@@ -84,9 +85,12 @@ def _resolve_version() -> str:
     3. Installed package metadata — editable dev installs (``pip install -e``).
     4. ``"dev"`` — source-only checkout with none of the above.
     """
-    env = os.environ.get("CAURA_VERSION") or os.environ.get("MEMCLAW_VERSION")  # legacy-name-ok: alias
-    if env and env.strip():
-        return env.strip()
+    for name in (
+        "CAURA_VERSION",
+        "MEMCLAW_VERSION",  # legacy-name-ok: rule 3 dual-read alias
+    ):
+        if version := os.environ.get(name, "").strip():
+            return version
     # constants.py → core_api → src → core-api → repo root (image: /app).
     version_file = Path(__file__).resolve().parents[3] / "VERSION"
     try:
