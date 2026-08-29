@@ -471,7 +471,7 @@ const cauraPlugin = {
               `agents cannot use: ${missing.join(", ")}`,
             );
             console.warn(
-              `[caura] Fix: run "openclaw gateway memclaw.allowlist.fix" or set CAURA_AUTO_FIX_CONFIG=true`, // legacy-name-ok: gateway command is namespaced by the frozen plugin id
+              `[caura] Fix: run "openclaw gateway memclaw.allowlist.fix" or set CAURA_AUTO_FIX_CONFIG=true`, // legacy-name-floor: gateway command is namespaced by the frozen plugin id
             );
           }
           if (!isContextEngineSlotClaimed(config)) {
@@ -482,8 +482,8 @@ const cauraPlugin = {
               `OpenClaw will fall back to the default "legacy" context engine.`,
             );
             console.warn(
-              `[caura] Fix: set plugins.slots.contextEngine to "memclaw" in ~/.openclaw/openclaw.json, ` +  // legacy-name-ok: "memclaw" is the kept plugin id the user must type
-              `or run "openclaw gateway memclaw.allowlist.fix" / set CAURA_AUTO_FIX_CONFIG=true`, // legacy-name-ok: gateway command is namespaced by the frozen plugin id
+              `[caura] Fix: set plugins.slots.contextEngine to "memclaw" in ~/.openclaw/openclaw.json, ` +  // legacy-name-floor: "memclaw" is the kept plugin id the user must type
+              `or run "openclaw gateway memclaw.allowlist.fix" / set CAURA_AUTO_FIX_CONFIG=true`, // legacy-name-floor: gateway command is namespaced by the frozen plugin id
             );
           }
         }
@@ -753,7 +753,7 @@ const cauraPlugin = {
         api.registerContextEngine("memclaw", (config: Record<string, unknown> | undefined | null) => {
           return new CauraContextEngine(config);
         });
-        console.log("[caura] ContextEngine 'memclaw' registered");  // legacy-name-ok: names the kept engine id (info.id)
+        console.log("[caura] ContextEngine 'memclaw' registered");  // legacy-name-floor: names the kept engine id (info.id)
       }
     } catch (e: unknown) {
       logError("registerContextEngine failed", e);

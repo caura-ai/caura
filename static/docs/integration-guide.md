@@ -287,7 +287,7 @@ Without the `contextEngine` slot, you still get all 11 agent-facing tools, promp
 [caura] Smoke test passed (score: 0.953)
 ```
 
-You will also see `ContextEngine 'memclaw' registered` in the same log — the context engine keeps the original plugin id. <!-- legacy-name-ok: frozen engine id shown in a log sample -->
+You will also see `ContextEngine 'memclaw' registered` in the same log — the context engine keeps the original plugin id. <!-- legacy-name-floor: frozen engine id shown in a log sample -->
 
 The node will appear in the Fleet page (`/ui/fleet.html`) within 60 seconds.
 
@@ -718,7 +718,7 @@ Content-hash rejects exact duplicates within a tenant+fleet scope (HTTP 409). Sa
 | Issue | Fix |
 |---|---|
 | Plugin tools don't appear | Ensure all three `plugins` keys are set in `openclaw.json`: `allow`, `entries`, and `load.paths`. Restart OpenClaw |
-| Tools not in agent sessions | Auto-fixed on first plugin load (adds v1.0 names, removes stale pre-v1.0 names). If it persists after restart, run `openclaw gateway memclaw.allowlist.fix` or check that `CAURA_AUTO_FIX_CONFIG` is not set to `false` <!-- legacy-name-ok: memclaw.allowlist.fix is the live gateway RPC method name --> |
+| Tools not in agent sessions | Auto-fixed on first plugin load (adds v1.0 names, removes stale pre-v1.0 names). If it persists after restart, run `openclaw gateway memclaw.allowlist.fix` or check that `CAURA_AUTO_FIX_CONFIG` is not set to `false` <!-- legacy-name-floor: memclaw.allowlist.fix is the live gateway RPC method name --> |
 | Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both |
 | All config issues | Use the "Fix Configuration" button in Fleet Browser Plugin Manager to auto-fix all settings |
 | `ECONNREFUSED` | Check `CAURA_API_URL`, ensure API is running |

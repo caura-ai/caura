@@ -693,7 +693,7 @@ _VALID_SKILL_AGENTS = {"claude-code", "codex", "both"}
 # reach either. ``memclaw`` is the default (the operational manual); the
 # opt-in ``company-brain`` posture skill layers on top of it.
 _SKILL_LABELS = {
-    "memclaw": "Caura",  # legacy-name-ok: wire — ?skill= param + on-disk dir
+    "memclaw": "Caura",  # legacy-name-floor: wire — ?skill= param + on-disk dir
     "company-brain": "Company Brain",
 }
 _VALID_SKILLS = frozenset(_SKILL_LABELS)

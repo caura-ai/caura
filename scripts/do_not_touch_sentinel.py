@@ -85,11 +85,18 @@ class Sentinel:
 
 # ── the list ─────────────────────────────────────────────────────────────────
 #
-# Entries whose pinned text contains the old brand carry ``legacy-name-ok``,
-# because this file is itself scanned by the ratchet, and the reason is the same
-# every time: the line exists to pin a string rule 3 keeps readable forever.
-# Entries pinning brand-free text need no marker and correctly have none — the
-# ratchet never sees them. Excluding this file from the ratchet instead would
+# Entries whose pinned text contains the old brand carry ``legacy-name-floor``,
+# because this file is itself scanned by the ratchet. The entry NAMES an exact
+# string rather than declaring that contract itself, even when the source line
+# it pins is a compat alias. A future entry that itself declares a compat alias
+# would carry ``legacy-name-ok`` instead.
+#
+# A marker here can be coupled to the line it pins. Where the pinned text
+# includes that line's own trailing comment, the marker is part of the string
+# being matched — so swapping one on the source line without swapping it here
+# (or the reverse) stops the pin matching, and this gate fails.
+#
+# Excluding this file from the ratchet instead would
 # leave a hole in that scan, which is the trade its author already refused once.
 
 SENTINELS: tuple[Sentinel, ...] = (
@@ -118,26 +125,26 @@ SENTINELS: tuple[Sentinel, ...] = (
     # -- The smoke probe: an emitter and a matcher that must move together. ----
     Sentinel(
         path="plugin/src/context-engine.ts",
-        text="memclaw-smoke-",  # legacy-name-ok: pinned floor string
+        text="memclaw-smoke-",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the health-check probe stops writing the title report_corpus.py filters on",
     ),
     Sentinel(
         path="core-api/src/core_api/services/report_corpus.py",
-        text="cache refresh|memclaw-smoke)",  # legacy-name-ok: pinned floor string
+        text="cache refresh|memclaw-smoke)",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="~200 probe facts/day stop being filtered and flood every per-agent report",
     ),
     # -- Wire contracts. A partial rename here does not degrade, it bricks. ----
     Sentinel(
         path="core-api/src/core_api/mcp_server.py",
-        text='name.startswith("memclaw_")',  # legacy-name-ok: pinned floor string
+        text='name.startswith("memclaw_")',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="every legacy-named tool call 404s — the alias shim is the whole promise",
     ),
     Sentinel(
         path="core-api/src/core_api/app.py",
-        text='prefix="/api/v1/memclaw"',  # legacy-name-ok: pinned floor string
+        text='prefix="/api/v1/memclaw"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the keystones route mount moves and every deployed plugin loses keystones",
     ),
@@ -149,19 +156,19 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="core-api/src/core_api/agent_ids.py",
-        text="memclaw-insighter",  # legacy-name-ok: pinned floor string
+        text="memclaw-insighter",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the insighter's existing rows orphan — migration 030 seeded this id",
     ),
     Sentinel(
         path="core-api/src/core_api/agent_ids.py",
-        text="memclaw-doc-indexer",  # legacy-name-ok: pinned floor string
+        text="memclaw-doc-indexer",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the doc indexer's existing rows orphan; nothing else references the literal",
     ),
     Sentinel(
         path="plugin/openclaw.plugin.json",
-        text='"id": "memclaw"',  # legacy-name-ok: pinned floor string
+        text='"id": "memclaw"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="every installed plugin is orphaned — the id keys the on-disk install",
     ),
@@ -172,7 +179,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     # is the half that produces a config OpenClaw cannot match.
     Sentinel(
         path="plugin/src/config.ts",
-        text='PLUGIN_ID = "memclaw"',  # legacy-name-ok: pinned floor string
+        text='PLUGIN_ID = "memclaw"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "the id this plugin writes into plugins.allow, plugins.entries.<id> "
@@ -183,32 +190,32 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="core-api/src/core_api/routes/plugin.py",
-        text=".openclaw/plugins/memclaw",  # legacy-name-ok: pinned floor string
+        text=".openclaw/plugins/memclaw",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the generated installer writes to a path no installed plugin reads",
     ),
     Sentinel(
         path="core-api/src/core_api/services/organization_settings.py",
-        text="memclaw.auto_upgrade_enabled",  # legacy-name-ok: pinned floor string
+        text="memclaw.auto_upgrade_enabled",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="stored tenant settings key off this string; a rename reverts them to default",
     ),
     # -- Published channel names. Renaming these strands installed users. ------
     Sentinel(
         path="clients/typescript/package.json",
-        text="@caura/memclaw-client",  # legacy-name-ok: pinned floor string
+        text="@caura/memclaw-client",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the published npm package name changes under everyone who installed it",
     ),
     Sentinel(
         path="clients/python/pyproject.toml",
-        text="memclaw-interviewer",  # legacy-name-ok: pinned floor string
+        text="memclaw-interviewer",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the installed console script disappears from every existing crontab",
     ),
     Sentinel(
         path="clients/python/src/caura_client/interviewer/installer.py",
-        text='".config" / "memclaw-interviewer"',  # legacy-name-ok: pinned floor string
+        text='".config" / "memclaw-interviewer"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the interviewer stops finding config customers already have on disk",
     ),
@@ -229,7 +236,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     # a false red is loud and a gate that quietly stopped protecting is not.
     Sentinel(
         path="clients/python/src/caura_client/interviewer/installer.py",
-        text='CRON_MARKER = "# memclaw-interviewer (managed)"',  # legacy-name-ok: pinned floor string
+        text='CRON_MARKER = "# memclaw-interviewer (managed)"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "uninstall stops finding crontab entries customers already have, "
@@ -238,13 +245,13 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path=".github/workflows/publish-python-client.yml",
-        text="memclaw-client-v*",  # legacy-name-ok: pinned floor string
+        text="memclaw-client-v*",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the release tag pattern stops triggering a publish",
     ),
     Sentinel(
         path=".github/workflows/publish-npm-client.yml",
-        text="memclaw-client-ts-v*",  # legacy-name-ok: pinned floor string
+        text="memclaw-client-ts-v*",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the release tag pattern stops triggering a publish",
     ),
@@ -252,9 +259,9 @@ SENTINELS: tuple[Sentinel, ...] = (
     Sentinel(
         path=(
             "core-storage-api/src/core_storage_api/database/migrations/versions/"
-            "030_register_memclaw_insighter.py"  # legacy-name-ok: pinned floor string
+            "030_register_memclaw_insighter.py"  # legacy-name-floor: floor
         ),
-        text="WHERE m.agent_id = 'memclaw-insighter'",  # legacy-name-ok: pinned floor string
+        text="WHERE m.agent_id = 'memclaw-insighter'",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="a replayed migration seeds a different agent id than the one in live rows",
     ),
@@ -263,7 +270,7 @@ SENTINELS: tuple[Sentinel, ...] = (
             "core-storage-api/src/core_storage_api/database/migrations/versions/"
             "012_vector_dim_1024.py"
         ),
-        text='os.environ.get("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS"',  # legacy-name-ok: pinned floor string
+        text='os.environ.get("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the destructive-migration opt-out stops being readable by the env that sets it",
     ),
@@ -272,7 +279,7 @@ SENTINELS: tuple[Sentinel, ...] = (
             "core-storage-api/src/core_storage_api/database/migrations/versions/"
             "019_tenant_suppression.py"
         ),
-        text="memclaw.org.suppression-changed",  # legacy-name-ok: pinned floor string
+        text="memclaw.org.suppression-changed",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the migration stops naming the topic it documents, before Phase 2 renames it",
     ),
@@ -298,7 +305,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     # matters is gone. Verified: each text below appears only on code lines.
     Sentinel(
         path="plugin/src/educate.ts",
-        text="const tag = `memclaw:${marker}`;",  # legacy-name-ok: pinned floor string
+        text="const tag = `memclaw:${marker}`;",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "the fence tag written into every install's TOOLS.md/AGENTS.md as an "
@@ -309,7 +316,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="plugin/src/educate.ts",
-        text='"## MemClaw —",',  # legacy-name-ok: pinned floor string
+        text='"## MemClaw —",',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "the legacyHeadingPrefix that finds pre-fence sections this plugin "
@@ -319,7 +326,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="plugin/src/educate.ts",
-        text='.memclaw-bak"',  # legacy-name-ok: pinned floor string
+        text='.memclaw-bak"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "the one-shot backup is written only when the path does not already "
@@ -330,7 +337,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     Sentinel(
         path="plugin/src/educate.ts",
         # Regex syntax, so this form cannot occur in prose about the phrase.
-        text="You have been connected to MemClaw[^\\n]*?always include your agent_id",  # legacy-name-ok: pinned floor string
+        text="You have been connected to MemClaw[^\\n]*?always include your agent_id",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "the pre-C1 blurb stops being stripped and accumulates alongside "
@@ -339,7 +346,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="plugin/src/educate.ts",
-        text='includes("MemClaw — Tools Available")',  # legacy-name-ok: pinned floor string
+        text='includes("MemClaw — Tools Available")',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="phantom plugin-written files under workspaces/ stop being collected",
     ),
@@ -348,13 +355,13 @@ SENTINELS: tuple[Sentinel, ...] = (
     # not-installed, which is the shape of bug that gets chased for a week.
     Sentinel(
         path="plugin/src/heartbeat.ts",
-        text='"HEARTBEAT.md"), "utf-8").includes("memclaw")',  # legacy-name-ok: pinned floor string
+        text='"HEARTBEAT.md"), "utf-8").includes("memclaw")',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="heartbeat reports heartbeat_md=false for every install written before the rename",
     ),
     Sentinel(
         path="plugin/src/heartbeat.ts",
-        text='"TOOLS.md"), "utf-8").toLowerCase().includes("memclaw")',  # legacy-name-ok: pinned floor string
+        text='"TOOLS.md"), "utf-8").toLowerCase().includes("memclaw")',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="heartbeat reports tools_md=false for every install written before the rename",
     ),
@@ -364,7 +371,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     # reason to think the marker should follow them. It must not.
     Sentinel(
         path="plugin/src/reconcile-skills.ts",
-        text='OWNED_MARKER = ".memclaw-owned"',  # legacy-name-ok: pinned floor string
+        text='OWNED_MARKER = ".memclaw-owned"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "the per-skill ownership marker already written into every managed "
@@ -390,7 +397,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     # If a future dual-read alias is added anywhere, it wants both.
     Sentinel(
         path="plugin/src/env.ts",
-        text="/^(?:CAURA|MEMCLAW)_[A-Z_]+$/",  # legacy-name-ok: pinned floor string
+        text="/^(?:CAURA|MEMCLAW)_[A-Z_]+$/",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "the gate deciding which .env keys may reach process.env — drop the "
@@ -405,7 +412,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     # the stricter one survived — a pin satisfied by the wrong line.
     Sentinel(
         path="plugin/src/env.ts",
-        text="/^(?:CAURA|MEMCLAW)_/.test(key)",  # legacy-name-ok: pinned floor string
+        text="/^(?:CAURA|MEMCLAW)_/.test(key)",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "deploy.ts filters the operator's existing .env through this and then "
@@ -416,7 +423,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="plugin/src/paths.ts",
-        text='join(getOpenClawBaseDir(), "plugins", "memclaw")',  # legacy-name-ok: pinned floor string
+        text='join(getOpenClawBaseDir(), "plugins", "memclaw")',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks=(
             "the install root on every user's disk — the .env, install.json, "

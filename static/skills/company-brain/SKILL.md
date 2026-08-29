@@ -1,6 +1,6 @@
 ---
 name: company-brain
-description: How an agent should operate as one mind inside a shared Company Brain built on Caura — recall before acting, obey fleet keystones, reuse and publish skills, and report outcomes so every task compounds across the whole organization. Use this whenever you work as part of a Caura-connected team or fleet and your work should build on, and feed back into, what the organization already knows; it sets the operating posture. For the mechanics of individual caura_* tools, see the companion "memclaw" skill. # legacy-name-ok: the companion skill's frozen slug
+description: How an agent should operate as one mind inside a shared Company Brain built on Caura — recall before acting, obey fleet keystones, reuse and publish skills, and report outcomes so every task compounds across the whole organization. Use this whenever you work as part of a Caura-connected team or fleet and your work should build on, and feed back into, what the organization already knows; it sets the operating posture. For the mechanics of individual caura_* tools, see the companion "memclaw" skill. # legacy-name-floor: the companion skill's frozen slug
 user-invocable: false
 ---
 

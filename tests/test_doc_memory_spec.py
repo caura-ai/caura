@@ -58,7 +58,7 @@ def test_legacy_scheme_is_never_minted_but_stays_recognized():
     from core_api.constants import DOC_MEMORY_URI_SCHEME, LEGACY_DOC_MEMORY_URI_SCHEMES
 
     assert DOC_MEMORY_URI_SCHEME == "caura-doc"
-    assert "memclaw-doc" in LEGACY_DOC_MEMORY_URI_SCHEMES  # legacy-name-ok: pins the scheme persisted in customers' memories.source_uri
+    assert "memclaw-doc" in LEGACY_DOC_MEMORY_URI_SCHEMES  # legacy-name-ok: compat pin
     # Minting must never use a legacy scheme.
     assert DOC_MEMORY_URI_SCHEME not in LEGACY_DOC_MEMORY_URI_SCHEMES
 

@@ -207,7 +207,7 @@ DOC_MEMORY_URI_SCHEME = "caura-doc"
 # recognizer for doc-memory URIs (the reconciliation pass above) must accept
 # these schemes alongside it.
 LEGACY_DOC_MEMORY_URI_SCHEMES = (
-    "memclaw-doc",  # legacy-name-ok: scheme already persisted in customers' memories.source_uri
+    "memclaw-doc",  # legacy-name-ok: compat scheme persisted in customers' memories.source_uri
 )
 
 assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (

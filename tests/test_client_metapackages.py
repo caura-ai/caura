@@ -44,7 +44,7 @@ PY_DISTS = {
 }
 
 NPM_DISTS = {
-    "typescript": "@caura/memclaw-client",  # legacy-name-ok: pins the immutable published implementation name
+    "typescript": "@caura/memclaw-client",  # legacy-name-floor: the published implementation name
     "npm-client": "@caura/client",
     "npm-sdk": "@caura/sdk",
 }

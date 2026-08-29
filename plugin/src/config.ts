@@ -28,7 +28,7 @@ export { getPluginDir, getOpenClawConfigPath };
  * declaration means a rename is one edit, and ``config.test.ts`` asserts this
  * value still equals the manifest's so the two cannot drift apart again.
  */
-export const PLUGIN_ID = "memclaw";  // legacy-name-ok: the id keys every existing on-disk install
+export const PLUGIN_ID = "memclaw";  // legacy-name-floor: the id keys every existing on-disk install
 
 export function getPluginSrcPath(): string {
   return join(getPluginDir(), "src", "index.ts");
