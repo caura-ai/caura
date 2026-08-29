@@ -1,4 +1,4 @@
-"""Typed payload for ``memclaw.lifecycle.purge-soft-deleted-requested``
+"""Typed payload for ``<brand>.lifecycle.purge-soft-deleted-requested``
 (CAURA-656). Diverges from
 :class:`~common.events.lifecycle_archive_request.LifecycleArchiveRequest`
 by carrying ``retention_days`` — the per-org policy snapshot that the

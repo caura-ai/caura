@@ -1,4 +1,4 @@
-"""Publishers for ``memclaw.lifecycle.<action>-requested`` topics
+"""Publishers for ``<brand>.lifecycle.<action>-requested`` topics
 (CAURA-655 archive, CAURA-656 purge, CAURA-657 pipeline).
 
 Most publishers share :class:`LifecycleArchiveRequest` (no per-message

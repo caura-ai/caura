@@ -1,4 +1,4 @@
-"""Consumer for ``memclaw.org.suppression-changed`` (CAURA-694).
+"""Consumer for ``<brand>.org.suppression-changed`` (CAURA-694).
 
 Lives in ``common/`` so the same code can run in core-worker (the
 default SaaS subscriber) or in core-api (if a future OSS-standalone
@@ -49,7 +49,7 @@ class SuppressionStorageAdapter:
 async def _handle_suppression_changed(
     event: Event, *, adapter: SuppressionStorageAdapter
 ) -> None:
-    """Subscriber for ``memclaw.org.suppression-changed``.
+    """Subscriber for ``<brand>.org.suppression-changed``.
 
     Iterates the tenant_ids in the payload and upserts each into the
     suppression mirror via the adapter. Any per-tenant failure raises

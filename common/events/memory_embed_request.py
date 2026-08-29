@@ -1,4 +1,4 @@
-"""Typed payload for the ``memclaw.memory.embed-requested`` topic.
+"""Typed payload for the ``<brand>.memory.embed-requested`` topic.
 
 The publisher (core-api, write hot path under CAURA-594 full form) emits
 one of these per memory written with ``embedding=NULL``. The consumer

@@ -1,4 +1,4 @@
-"""Typed payload for ``memclaw.org.settings-changed`` (CAURA-571).
+"""Typed payload for ``<brand>.org.settings-changed`` (CAURA-571).
 
 Published by core-api after an org's settings row is written. Carries
 the ``org_id`` whose settings changed so every core-api process can drop
@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 
 class OrgSettingsChangedEvent(BaseModel):
-    """Payload of ``memclaw.org.settings-changed`` — the ``org_id`` whose
+    """Payload of ``<brand>.org.settings-changed`` — the ``org_id`` whose
     cached settings every process should evict."""
 
     org_id: str

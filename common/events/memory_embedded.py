@@ -1,4 +1,4 @@
-"""Typed payload for the ``memclaw.memory.embedded`` topic.
+"""Typed payload for the ``<brand>.memory.embedded`` topic.
 
 Counterpart to :class:`~common.events.memory_embed_request.MemoryEmbedRequest`:
 core-worker emits one of these *after* successfully PATCHing an

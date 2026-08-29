@@ -1,6 +1,6 @@
 """Canonical topic names as str-valued enum members.
 
-Convention: `memclaw.<domain>.<verb-past-participle>` for events that
+Convention: `<brand>.<domain>.<verb-past-participle>` for events that
 announce something that already happened, `.<verb-requested>` for events
 that ask a subscriber to do work.
 
@@ -52,8 +52,8 @@ class Org(enum.StrEnum):
 
 
 class Lifecycle(enum.StrEnum):
-    # One topic per action — matches the `memclaw.memory.embed-requested`
-    # vs `memclaw.memory.enrich-requested` convention. Keeping each
+    # One topic per action — matches the `<brand>.memory.embed-requested`
+    # vs `<brand>.memory.enrich-requested` convention. Keeping each
     # operation on its own topic gives clean per-subscription filtering
     # and lets each action evolve its payload independently.
     ARCHIVE_EXPIRED_REQUESTED = "memclaw.lifecycle.archive-expired-requested"

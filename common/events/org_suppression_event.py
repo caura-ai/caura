@@ -1,4 +1,4 @@
-"""Typed payload for ``memclaw.org.suppression-changed`` (CAURA-694).
+"""Typed payload for ``<brand>.org.suppression-changed`` (CAURA-694).
 
 Published by enterprise platform-admin-api on every soft-delete /
 restore of an organization. Carries the list of tenant_ids the action
@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 
 class OrgSuppressionEvent(BaseModel):
-    """Payload of ``memclaw.org.suppression-changed``.
+    """Payload of ``<brand>.org.suppression-changed``.
 
     ``tenant_ids`` is the explicit list of tenants the action covers —
     one org has many tenants, and the publisher (platform-admin-api)

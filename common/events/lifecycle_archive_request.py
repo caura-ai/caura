@@ -1,4 +1,4 @@
-"""Typed payloads for ``memclaw.lifecycle.<action>-requested`` topics.
+"""Typed payloads for ``<brand>.lifecycle.<action>-requested`` topics.
 
 Both archive ops (CAURA-655) share one model — the per-action
 behaviour is parameterised by the topic, not by payload fields.

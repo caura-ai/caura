@@ -1,4 +1,4 @@
-"""Consumers for ``memclaw.lifecycle.<action>-requested`` topics
+"""Consumers for ``<brand>.lifecycle.<action>-requested`` topics
 (CAURA-655 archive ops, CAURA-656 purge, CAURA-657 pipeline ops).
 
 Lives in ``common/`` rather than under either service so the same code

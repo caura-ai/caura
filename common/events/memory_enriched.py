@@ -1,4 +1,4 @@
-"""Typed payload for the ``memclaw.memory.enriched`` topic (CAURA-595).
+"""Typed payload for the ``<brand>.memory.enriched`` topic (CAURA-595).
 
 Counterpart to :class:`~common.events.memory_enrich_request.MemoryEnrichRequest`:
 core-worker emits one of these *after* successfully PATCHing enrichment

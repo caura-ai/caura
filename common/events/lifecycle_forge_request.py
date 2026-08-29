@@ -1,4 +1,4 @@
-"""Typed payload for ``memclaw.lifecycle.forge-distill-requested`` (Skill Factory SF-007).
+"""Typed payload for ``<brand>.lifecycle.forge-distill-requested`` (Skill Factory SF-007).
 
 Per-run Forge invocation. Carries the standard four
 :class:`LifecycleRequestBase` fields (``audit_id``, ``org_id``,

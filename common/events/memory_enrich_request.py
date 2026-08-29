@@ -1,4 +1,4 @@
-"""Typed payload for the ``memclaw.memory.enrich-requested`` topic.
+"""Typed payload for the ``<brand>.memory.enrich-requested`` topic.
 
 Publisher (core-api, write hot path under CAURA-595) emits one of these
 per memory written without inline enrichment. Consumer (core-worker)
