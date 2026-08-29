@@ -570,7 +570,26 @@ async def _detect(
         # Symmetric to PATH_C_DETECTION entry log; lets us tell apart
         # "Path A ran but found no semantic candidates" from "Path A
         # ran, found candidates, and the LLM judge said no".
-        logger.info(
+        #
+        # All seven CAURA-132 diag sites in this module log at DEBUG, not
+        # INFO. They were added to answer one question — why the entity-
+        # aware judge returned verdict=False on populated contexts — and
+        # that wet-test has since run (see CAURA-133, whose test cites
+        # "the wet-test on dev v2.12.1 (CAURA-132 logs)"). What they cost
+        # in the meantime: two of them fire once per (memory x candidate)
+        # pair rather than once per memory, so on 2026-08-29 the seven
+        # accounted for 3,767 of this logger's 4,947 prod lines in 6h —
+        # 76% — against ~10 candidates per memory.
+        #
+        # DEBUG keeps them one env var away (LOG_LEVEL=DEBUG) rather than
+        # deleting them, because the question they answer can recur. What
+        # stays at INFO is everything that records an OUTCOME: the
+        # path_a/path_c_completed summaries (which already carry
+        # n_conflicts, n_candidates and elapsed_ms), the contradictions
+        # actually found, Path C retracting a Path A verdict, and the
+        # preflight fail-open notes. Losing those would cost real
+        # forensics; losing per-candidate trace lines does not.
+        logger.debug(
             "PATH_A_SEMANTIC entry memory=%s tenant=%s candidates_initial=%d",
             memory_id,
             tenant_id,
@@ -605,7 +624,7 @@ async def _detect(
             updates: dict[str, dict] = {}
             for candidate, (verdict, _confidence, _raw) in zip(candidates, judged):
                 # CAURA-132 diag — Path A semantic per-candidate verdict.
-                logger.info(
+                logger.debug(
                     "PATH_A_SEMANTIC verdict memory=%s candidate=%s verdict=%s confidence=%.2f",
                     memory_id,
                     candidate.get("id"),
@@ -2217,7 +2236,7 @@ async def detect_contradictions_by_entities_async(
         # could be either (a) zero candidates returned even though the
         # entity overlap exists, or (b) candidates returned but dropped
         # downstream. Without this log we can't distinguish them.
-        logger.info(
+        logger.debug(
             "PATH_C_DETECTION entry memory=%s tenant=%s fleet=%s candidates_initial=%d",
             memory_id,
             tenant_id,
@@ -2247,7 +2266,7 @@ async def detect_contradictions_by_entities_async(
         n_preflight_skipped = len(candidates) - len(filtered_candidates)
         candidates = filtered_candidates
         # CAURA-132 diag — A1 #17 outcome.
-        logger.info(
+        logger.debug(
             "PATH_C_DETECTION after_a1_17 memory=%s preflight_skipped=%d remaining=%d",
             memory_id,
             n_preflight_skipped,
@@ -2352,7 +2371,7 @@ async def detect_contradictions_by_entities_async(
                 # entity_links (eligible for the entity-aware judge) vs
                 # which are still in cold extraction (will fall back).
                 ctx_sizes = {cid: len(ctx) for cid, ctx in contexts.items()}
-                logger.info(
+                logger.debug(
                     "PATH_C_DETECTION context_fetched memory=%s new_ctx_size=%d cand_ctx_sizes=%s",
                     memory_id,
                     len(new_ctx),
@@ -2484,7 +2503,7 @@ async def detect_contradictions_by_entities_async(
         for c in candidates:
             cand_ctx = contexts.get(str(c.get("id")), []) if contexts_fetched else []
             judge_kinds.append("entity_aware" if (contexts_fetched and new_ctx and cand_ctx) else "base")
-        logger.info(
+        logger.debug(
             "PATH_C_DETECTION judge_selection memory=%s candidates=%d entity_aware=%d base=%d",
             memory_id,
             len(candidates),
@@ -2580,7 +2599,7 @@ async def detect_contradictions_by_entities_async(
             # the judge_kind so we can see whether the entity-aware
             # judge returns verdict=False when both contexts are
             # populated but no flag fires (the wet-test miss class).
-            logger.info(
+            logger.debug(
                 "PATH_C_DETECTION verdict memory=%s candidate=%s judge=%s verdict=%s confidence=%.2f",
                 memory_id,
                 candidate.get("id"),
