@@ -124,7 +124,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/caura-memclaw-${{ matrix.name }}
+          images: ghcr.io/${{ github.repository_owner }}/caura-memclaw-${{ matrix.name }} # legacy-name-floor: the published ghcr repository name
           # ``latest`` defaults to release-event-only — a
           # workflow_dispatch with an older tag must not silently rewind
           # ``latest``. For the recovery use case (e.g. transient

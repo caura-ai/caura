@@ -38,7 +38,7 @@ router = APIRouter(tags=["Document Store"])
 
 
 # ``skills`` is the agent-to-agent skill catalog (replaces the dropped
-# memclaw_share_skill / memclaw_unshare_skill MCP tools). Slugs become
+# memclaw_share_skill / memclaw_unshare_skill MCP tools). Slugs become  # legacy-name-floor: names the removed share/unshare tools
 # directory names on plugin-side reconciliation, so doc_id is constrained
 # to a filesystem-safe identifier; data["summary"] is embedded so other
 # agents can semantic-search the catalog (with a back-compat fallback to

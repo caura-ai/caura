@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "caura-client"
 version = "1.0.1"
-description = "Official Python client for Caura (formerly MemClaw; the memclaw_client import and MemClaw class remain permanent aliases) — governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native)."
+description = "Official Python client for Caura (formerly MemClaw; the memclaw_client import and MemClaw class remain permanent aliases) — governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native)."  # legacy-name-ok: rule 3 permanent import and class aliases
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Caura", email = "hello@caura.ai" }]
 keywords = [
     "caura",
-    "memclaw",
+    "memclaw",  # legacy-name-floor: published registry keyword
     "agent-memory",
     "ai-agents",
     "llm-memory",

@@ -10,12 +10,12 @@ name: Publish caura-client to PyPI
 #   3. Create a GitHub environment named `pypi`.
 #
 # Release: bump the version in clients/python/pyproject.toml, then push a tag
-# `memclaw-client-v<version>` (or run this workflow manually).
+# `memclaw-client-v<version>` (or run this workflow manually). # legacy-name-ok: names the tag pattern kept below
 
 on:
   push:
     tags:
-      - "memclaw-client-v*"
+      - "memclaw-client-v*" # legacy-name-ok: rule 3 keeps the published tag pattern working
   workflow_dispatch:
 
 jobs:

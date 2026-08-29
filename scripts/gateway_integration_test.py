@@ -713,7 +713,7 @@ class GatewayIntegrationTest:
         )
 
     def test_heartbeat_md_exists(self):
-        """Check HEARTBEAT.md exists in at least one workspace with memclaw content."""
+        """Check HEARTBEAT.md exists in at least one workspace with memclaw content."""  # legacy-name-floor: HEARTBEAT.md on-disk content
         workspaces = self._find_workspaces()
         if not workspaces:
             self.skip("Education: HEARTBEAT.md exists", "no workspaces found")
@@ -725,7 +725,7 @@ class GatewayIntegrationTest:
                 found = True
                 break
         self.check(
-            "Education: HEARTBEAT.md has memclaw content",
+            "Education: HEARTBEAT.md has memclaw content",  # legacy-name-floor: HEARTBEAT.md on-disk content
             found,
             f"checked {len(workspaces)} workspace(s)",
         )

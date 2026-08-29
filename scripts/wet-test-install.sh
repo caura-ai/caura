@@ -215,5 +215,5 @@ echo "  # or check logs for: [caura] Smoke test passed"
 echo ""
 echo "To uninstall:"
 echo "  rm -rf $PLUGIN_DIR $CLONE_DIR"
-echo "  # Then remove 'memclaw' entries from $OPENCLAW_CONFIG"
+echo "  # Then remove 'memclaw' entries from $OPENCLAW_CONFIG"  # legacy-name-floor: uninstall step names the config entries
 echo ""

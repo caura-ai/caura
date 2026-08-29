@@ -32,6 +32,6 @@ class NotFoundError(CauraAPIError):
 
 # Permanent legacy aliases (2026-08 rename): existing code catches these
 # names, and published 0.4.x examples teach them. Same objects, not copies —
-# ``except MemClawError`` keeps catching everything ``CauraError`` raises.
+# ``except MemClawError`` keeps catching everything ``CauraError`` raises.  # legacy-name-ok: rule 3 permanent exception alias
 MemClawError = CauraError
 MemClawAPIError = CauraAPIError

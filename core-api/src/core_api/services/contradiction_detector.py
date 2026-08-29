@@ -1917,7 +1917,7 @@ async def _llm_entity_aware_contradiction_check_batch(
 # as Path A's semantic judge. There is no entity context in the request
 # — it is the same LLM call rolled twice.
 #
-# Wet-tested on memclaw.net 2026-05-26 (S2 race probe, scripts/
+# Wet-tested on memclaw.net 2026-05-26 (S2 race probe, scripts/  # legacy-name-floor: historical
 # repro_contradictions_race.py). Two memories with directly conflicting
 # release dates about a synthetic proper-noun subject. Path A correctly
 # flagged the conflict; Path C's independent roll returned

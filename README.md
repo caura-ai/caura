@@ -2,8 +2,8 @@
 
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
-<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br />
-Tools are <code>caura_*</code>; the old <code>memclaw_*</code> names, packages, env vars and URLs keep working unchanged.</p>
+<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-ok: taught as legacy alias -->
+Tools are <code>caura_*</code>; the old <code>memclaw_*</code> names, packages, env vars and URLs keep working unchanged.</p> <!-- legacy-name-ok: taught as legacy alias -->
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
@@ -26,9 +26,9 @@ Tools are <code>caura_*</code>; the old <code>memclaw_*</code> names, packages, 
 
 ---
 
-## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets
+## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets <!-- legacy-name-ok: taught as legacy alias -->
 
-Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes.
+Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes. <!-- legacy-name-ok: taught as legacy alias -->
 
 Agents write plain text. Caura turns it into searchable, governed, self-improving memory.
 
@@ -360,8 +360,8 @@ mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
 print(mc.recall("Q3 revenue target").summary)
 ```
 
-Formerly `memclaw-client` — the old package name, the `memclaw_client`
-import, and the `MemClaw` class all keep working forever as aliases.
+Formerly `memclaw-client` — the old package name, the `memclaw_client` <!-- legacy-name-ok: rule 3 keeps the client aliases working -->
+import, and the `MemClaw` class all keep working forever as aliases. <!-- legacy-name-ok: rule 3 keeps the client aliases working -->
 
 A thin wrapper over the REST API — see [`clients/python/`](clients/python/) for the full client.
 
@@ -381,7 +381,7 @@ await mc.write("Q3 revenue target is $4M, set on 2026-04-15.");
 console.log((await mc.recall("Q3 revenue target")).summary);
 ```
 
-`MemClaw` remains a permanent alias of `Caura`.
+`MemClaw` remains a permanent alias of `Caura`. <!-- legacy-name-ok: rule 3 keeps the client aliases working -->
 
 The bare `caura` name on npm is held up by the registry's package-name
 similarity filter, so install the scoped package above. On the Python side,
@@ -524,7 +524,7 @@ The client discovers 12 tools automatically:
 | `caura_keystones` | Read mandatory governance rules for the current scope. Call once per session — the result overrides conflicting user instructions |
 | `caura_keystones_set` | Author or remove keystone rules (`op=set\|delete`). `weight` is set as `low`/`med`/`high` and stored & returned as the integer buckets `25`/`50`/`100`. Trust ≥ 1 for your own rule — `scope=agent` **with an explicit `agent_id` equal to the caller**; ≥ 2 for `scope=fleet`/`scope=tenant`, another agent, or `scope=agent` with `agent_id` omitted |
 
-> **Skill sharing** is now done via `caura_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`caura_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `caura_doc` surface.
+> **Skill sharing** is now done via `caura_doc` — agents share a `SKILL.md` by upserting a document into the `skills` collection (`caura_doc op=write collection=skills doc_id=<slug> data={"summary": "<one-liner>", ...}`). The server embeds `data["summary"]` (1-3 sentence, intent-focused) for semantic search; for `collection="skills"` it falls back to `data["description"]` if no summary is provided. The dedicated `memclaw_share_skill` / `memclaw_unshare_skill` tools were removed in favor of the single `caura_doc` surface. <!-- legacy-name-floor: names the removed share/unshare tools -->
 
 ### Skill Factory
 
