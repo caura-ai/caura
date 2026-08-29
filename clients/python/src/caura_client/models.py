@@ -72,3 +72,28 @@ class RecallResult:
             raw = data.get("items")
         memories = [Memory.from_dict(m) for m in (raw or [])]
         return cls(summary=data.get("summary"), supporting_memories=memories, raw=data)
+
+
+@dataclass
+class Stats:
+    """Public deployment counters, as returned by ``stats``.
+
+    These are deployment-wide totals, **not** scoped to your ``tenant_id`` —
+    the server counts across every tenant. The endpoint degrades rather than
+    fails: if a storage query stalls or errors, that counter comes back ``0``
+    rather than raising, so a zero may mean "none" or "unavailable".
+    """
+
+    tenant_count: int = 0
+    memory_count: int = 0
+    agent_count: int = 0
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Stats:
+        return cls(
+            tenant_count=data.get("tenant_count", 0),
+            memory_count=data.get("memory_count", 0),
+            agent_count=data.get("agent_count", 0),
+            raw=data,
+        )

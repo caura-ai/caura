@@ -18,13 +18,14 @@ from .exceptions import (
     MemClawError,
     NotFoundError,
 )
-from .models import Memory, RecallResult
+from .models import Memory, RecallResult, Stats
 
 __all__ = [
     "Caura",
     "MemClaw",
     "Memory",
     "RecallResult",
+    "Stats",
     "CauraError",
     "CauraAPIError",
     "MemClawError",

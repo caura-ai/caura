@@ -47,9 +47,25 @@ const mc = new Caura("standalone", { tenantId: "default", baseUrl: "http://local
 | `search(query, opts?)` | `POST /api/v1/search` | `Memory[]` |
 | `recall(query, opts?)` | `POST /api/v1/recall` | `RecallResult` |
 | `health()` | `GET /api/v1/health` | `object` |
+| `stats()` | `GET /api/v1/stats` | `Stats` |
 
 Failures throw `AuthError` (401/403), `NotFoundError` (404), or
 `CauraApiError`. Every result also exposes the full API payload on `.raw`.
+
+### Deployment stats
+
+`stats()` returns three counters — `tenantCount`, `memoryCount`,
+`agentCount` — for the landing-page status bar:
+
+```ts
+const s = await mc.stats();
+console.log(s.tenantCount, s.memoryCount, s.agentCount);
+```
+
+These are **deployment-wide totals, not scoped to your `tenantId`** — the
+server counts across every tenant on the deployment. The underlying endpoint
+is unauthenticated (no key required to call it directly), but this method
+still sends your API key header for consistency with every other call.
 
 ### Unknown fields on writes are rejected
 

@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from .exceptions import AuthError, CauraAPIError, NotFoundError
-from .models import Memory, RecallResult
+from .models import Memory, RecallResult, Stats
 
 DEFAULT_BASE_URL = "https://caura.ai"
 
@@ -114,6 +114,24 @@ class Caura:
         """Liveness probe (GET /api/v1/health)."""
         response = self._http.get("/api/v1/health")
         return response.json()
+
+    def stats(self) -> Stats:
+        """Deployment-wide counters for the landing-page status bar (GET /api/v1/stats).
+
+        These counts span the whole deployment — they are **not** scoped to
+        ``self.tenant_id``. The endpoint is unauthenticated, but the API key
+        header is still sent for consistency with every other call this
+        client makes.
+
+        Unlike ``health()``, which deliberately skips ``_raise_for_status``,
+        ``stats()`` deliberately includes it: a bad ``base_url`` or an old
+        deployment without this route would otherwise return a non-2xx body
+        whose bare ``.json()`` raises a confusing ``ValueError`` instead of a
+        clear ``CauraAPIError``.
+        """
+        response = self._http.get("/api/v1/stats")
+        self._raise_for_status(response)
+        return Stats.from_dict(response.json())
 
     def get_document(
         self,

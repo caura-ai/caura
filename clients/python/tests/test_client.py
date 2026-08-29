@@ -14,6 +14,7 @@ from caura_client import (
     Memory,
     NotFoundError,
     RecallResult,
+    Stats,
 )
 
 
@@ -161,6 +162,44 @@ def test_health():
         return httpx.Response(200, json={"status": "ok"})
 
     assert make_client(handler).health()["status"] == "ok"
+
+
+def test_stats_returns_deployment_totals():
+    def handler(request):
+        assert request.url.path == "/api/v1/stats"
+        assert request.url.query == b""
+        assert request.headers["X-API-Key"] == "mc_test"
+        return httpx.Response(
+            200,
+            json={"tenant_count": 12, "memory_count": 345, "agent_count": 7},
+        )
+
+    stats = make_client(handler).stats()
+    assert isinstance(stats, Stats)
+    assert stats.tenant_count == 12
+    assert stats.memory_count == 345
+    assert stats.agent_count == 7
+
+
+def test_stats_defaults_missing_keys_to_zero():
+    def handler(request):
+        assert request.url.path == "/api/v1/stats"
+        return httpx.Response(200, json={})
+
+    stats = make_client(handler).stats()
+    assert stats.tenant_count == 0
+    assert stats.memory_count == 0
+    assert stats.agent_count == 0
+
+
+def test_stats_raises_on_503():
+    def handler(request):
+        assert request.url.path == "/api/v1/stats"
+        return httpx.Response(503, json={"message": "degraded"})
+
+    with pytest.raises(CauraAPIError) as exc:
+        make_client(handler).stats()
+    assert exc.value.status_code == 503
 
 
 def test_auth_error_parses_envelope():
