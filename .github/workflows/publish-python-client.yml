@@ -26,6 +26,27 @@ jobs:
     permissions:
       id-token: write # required for PyPI trusted publishing
     steps:
+      # Fail before doing any work if this job cannot mint a publishing
+      # credential at all. The npm twin checks its NPM_TOKEN secret here; there
+      # is no stored token to check for trusted publishing, so the equivalent
+      # condition is whether GitHub is willing to issue an OIDC token — which it
+      # signals by setting these two variables, and only when the job actually
+      # holds `id-token: write`. Drop that permission while editing this file and
+      # the run would otherwise get all the way to the publish action before
+      # failing inside it, with the cause several layers down.
+      #
+      # Deliberately does NOT request a token. Minting one would additionally
+      # prove the endpoint is healthy, but it puts a live credential in this
+      # step for no gain the publish action does not already provide seconds
+      # later — and the check exists to catch a misconfigured workflow, which
+      # the variables answer on their own.
+      - name: The publish credential must be obtainable
+        run: |
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" ]]; then
+            echo "::error::No OIDC token-request context, so PyPI trusted publishing cannot authenticate. This job needs 'permissions: id-token: write'; there is no stored token to fall back on."
+            exit 1
+          fi
+          echo "OIDC token-request context is present"
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
