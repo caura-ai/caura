@@ -910,6 +910,43 @@ def test_a_net_zero_swap_of_exemptions_is_still_reported(repo: Path) -> None:
     assert "pre-existing alias one" not in out
 
 
+def test_a_net_zero_swap_is_reported_under_a_non_ascii_filename(repo: Path) -> None:
+    """Same swap, in a file git will not name plainly.
+
+    ``git diff --name-only`` honours ``core.quotePath`` and returns a path
+    holding any non-ASCII byte C-quoted — ``café.py`` comes back as
+    ``"caf\\303\\251.py"``, quotes included — while every other path in the
+    module is raw, because ``_grep`` reads them with ``-z``. A quoted path
+    matches nothing in the exempt tally, so the file drops out of the diff-based
+    selection and falls back to the risen tally alone, which is exactly the hole
+    this selection exists to close. The ASCII case above passes either way, so
+    this is the only test that pins the ``-z``.
+
+    Not a hypothetical class of file: ``_git`` pins UTF-8 rather than trusting
+    the locale precisely because the tree carries accented names in fixtures.
+    """
+    name = "café.py"
+    body = (
+        f'A = "{LEGACY}-one"  # legacy-name-ok: pre-existing alias one\n'
+        f'B = "{LEGACY}-two"  # legacy-name-ok: pre-existing alias two\n'
+    )
+    (repo / name).write_text(body, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "two aliases already here, under an accented name")
+    # "alias two" loses its marker and "alias three" arrives with one: flat.
+    (repo / name).write_text(
+        body.replace("  # legacy-name-ok: pre-existing alias two", "")
+        + f'C = "{LEGACY}-three"  # legacy-name-ok: brand new alias three\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", "-A")
+
+    out = _run(repo).stdout
+
+    assert "brand new alias three" in out
+    assert "1 exempt line(s) written by this change in 1 file(s)" in out
+
+
 def test_a_touched_file_whose_exemptions_are_all_old_says_nothing(repo: Path) -> None:
     """The cost of letting git choose the files, and the guard against paying it.
 

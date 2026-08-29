@@ -391,12 +391,23 @@ def _changed_paths(base: str) -> set[str] | None:
     ``None`` rather than an empty set on failure, because the two mean opposite
     things to the caller: "could not tell" must fall back to the old tally-based
     selection, while "nothing changed" must select nothing.
+
+    ``-z`` for the same reason :func:`_grep` passes it, and it is load bearing
+    here in a way that is easy to miss. Without it git honours ``core.quotePath``
+    and returns a path holding any non-ASCII byte C-quoted — ``café.py`` comes
+    back as the ten characters ``"caf\\303\\251.py"``, quotes included. Every
+    other path in this module is raw, because ``_grep`` reads them with ``-z``,
+    so a quoted path matches nothing in ``after`` and the file drops silently out
+    of the selection below. It then falls back to the risen tally alone, which
+    reopens the net-zero-swap hole this function exists to close — for exactly
+    the files the tree is known to contain, since ``_git`` pins UTF-8 precisely
+    because there are accented names in the fixtures.
     """
     try:
         return {
-            line
-            for line in _git(["git", "diff", "--name-only", base]).splitlines()
-            if line
+            path
+            for path in _git(["git", "diff", "--name-only", "-z", base]).split("\0")
+            if path
         }
     except RuntimeError:
         return None
