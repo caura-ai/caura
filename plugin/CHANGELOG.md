@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.19.4](https://github.com/caura-ai/caura/compare/plugin-v2.19.3...plugin-v2.19.4) (2026-08-29)
+
+
+### Code Refactoring
+
+* **plugin:** clean stale legacy-name prose ([#1051](https://github.com/caura-ai/caura/issues/1051)) ([3c346e6](https://github.com/caura-ai/caura/commit/3c346e6a0b4d03b479c59e9cbb8768c7431a49b5))
+
 ## [2.19.3](https://github.com/caura-ai/caura/compare/plugin-v2.19.2...plugin-v2.19.3) (2026-08-29)
 
 

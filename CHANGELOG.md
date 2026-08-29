@@ -10,6 +10,23 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.35.1](https://github.com/caura-ai/caura/compare/backend-v2.35.0...backend-v2.35.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **observability:** stop logging successful health and version probes ([#1050](https://github.com/caura-ai/caura/issues/1050)) ([9944673](https://github.com/caura-ai/caura/commit/99446734e2f5c6817daba4e296e4b29755aae818))
+
+
+### Documentation
+
+* **events:** use brand-neutral topic examples ([#1054](https://github.com/caura-ai/caura/issues/1054)) ([d0794c3](https://github.com/caura-ai/caura/commit/d0794c3065bbab4bbf70730ceb57d1c26c09d545))
+
+
+### Code Refactoring
+
+* **plugin:** clean stale legacy-name prose ([#1051](https://github.com/caura-ai/caura/issues/1051)) ([3c346e6](https://github.com/caura-ai/caura/commit/3c346e6a0b4d03b479c59e9cbb8768c7431a49b5))
+
 ## [2.35.0](https://github.com/caura-ai/caura/compare/backend-v2.34.0...backend-v2.35.0) (2026-08-29)
 
 
