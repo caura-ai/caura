@@ -10,7 +10,12 @@ from core_api import openapi_responses as _oar
 from core_api.cache import redis_healthy
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.constants import PROBE_TIMEOUT_SECONDS, VERSION
+from core_api.constants import (
+    HEALTH_PATH,
+    PROBE_TIMEOUT_SECONDS,
+    VERSION,
+    VERSION_PATH,
+)
 from core_api.providers._platform import (
     get_platform_embedding,
     get_platform_init_errors,
@@ -25,7 +30,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["System"])
 
 
-@router.get("/version", responses={200: {"model": _oar.VersionResponse}})
+@router.get(VERSION_PATH, responses={200: {"model": _oar.VersionResponse}})
 async def version():
     return {"version": VERSION}
 
@@ -175,7 +180,7 @@ async def _probe_dependencies() -> tuple[dict[str, Any], list[str]]:
     return result, unhealthy
 
 
-@router.get("/health", responses={200: {"model": _oar.HealthResponse}})
+@router.get(HEALTH_PATH, responses={200: {"model": _oar.HealthResponse}})
 async def health(response: Response):
     """Liveness + readiness probe.
 

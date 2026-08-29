@@ -10,6 +10,8 @@ Contract pinned here:
   * ``http_route`` is the TEMPLATE (``/things/{id}``), never the raw path,
   * mounted sub-apps label by mount prefix (``/mcp``), not ``"unmatched"``,
   * 404s and pre-routing failures bucket to ``"unmatched"``,
+  * a SUCCESSFUL liveness/readiness probe emits no event at all, while a
+    failing one still does,
   * a crashing endpoint still emits one event, defaulting to status 500,
   * duration reflects the full downstream call (streaming included),
   * ``tenant_id`` stashed on ``request.state`` reaches the event.
@@ -19,10 +21,11 @@ import asyncio
 import logging
 
 import pytest
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse, StreamingResponse
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from httpx import ASGITransport, AsyncClient
 
+from core_api.constants import PROBE_ROUTES, VERSION_PATH
 from core_api.middleware.request_observation import RequestObservationMiddleware
 
 pytestmark = pytest.mark.asyncio
@@ -198,3 +201,191 @@ async def test_app_level_root_path_does_not_leak_into_the_label(caplog):
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             await c.get("/nope")
     assert _events(caplog)[0].http_route == "unmatched"
+
+
+# --- Probe suppression -------------------------------------------------
+#
+# These build the app the way app.py really does — a router included under
+# ``prefix="/api/v1"`` — rather than hanging ``/health`` straight off the
+# app. That difference is the whole point. Since FastAPI 0.137 an
+# ``include_router(prefix=...)`` MOUNTS the router, so the label reaching
+# ``http_route`` is the inner ``/health``, not the requested
+# ``/api/v1/health``. A test that registered ``@app.get("/health")``
+# directly would produce the label ``/health`` too, and would therefore
+# pass whether or not the middleware handles the real prefixed case — the
+# kind of green that means nothing.
+
+
+def _build_probe_app(*, healthy: bool = True) -> FastAPI:
+    router = APIRouter()
+
+    @router.get("/health")
+    async def health():
+        if not healthy:
+            return JSONResponse({"ok": False}, status_code=503)
+        return {"ok": True}
+
+    @router.get("/version")
+    async def version():
+        return {"version": "1"}
+
+    @router.get("/things/{thing_id}")
+    async def get_thing(thing_id: str):
+        return {"id": thing_id}
+
+    app = FastAPI()
+    app.add_middleware(RequestObservationMiddleware)
+    app.include_router(router, prefix="/api/v1")
+    return app
+
+
+@pytest.mark.parametrize("path", ["/api/v1/health", "/api/v1/version"])
+async def test_successful_probe_emits_no_event(caplog, path):
+    """A 200 from a liveness/readiness probe must not be logged at all."""
+    app = _build_probe_app()
+    with caplog.at_level(logging.INFO, logger="core_api.access"):
+        resp = await _get(app, path)
+    assert resp.status_code == 200
+    events = _events(caplog)
+    assert events == [], (
+        f"{path} emitted {len(events)} event(s) "
+        f"({[e.http_route for e in events]}); successful probes are "
+        "infrastructure chatter and must be suppressed"
+    )
+
+
+async def test_failing_probe_is_still_logged(caplog):
+    """A probe that FAILS is the one an investigation needs — keep it.
+
+    Prod served 440 ``/health`` 503s in the week to 2026-08-29. Suppressing
+    by route alone would have discarded every one of them.
+    """
+    app = _build_probe_app(healthy=False)
+    with caplog.at_level(logging.INFO, logger="core_api.access"):
+        resp = await _get(app, "/api/v1/health")
+    assert resp.status_code == 503
+    events = _events(caplog)
+    assert len(events) == 1, (
+        f"a failing probe emitted {len(events)} events; it must emit exactly "
+        "one, otherwise the 503s vanish along with the healthy noise"
+    )
+    assert events[0].http_route == "/health"
+    assert events[0].http_status_code == 503
+
+
+async def test_prefixed_non_probe_route_still_logs_its_stripped_label(caplog):
+    """Pins the label space the suppression list is written against.
+
+    ``PROBE_ROUTES`` holds ``/health``, not ``/api/v1/health``, because
+    FastAPI mounts prefixed routers. If a future FastAPI went back to
+    flattening prefixes, ``http_route`` here would become
+    ``/api/v1/things/{thing_id}`` — and the suppression above would silently
+    stop matching anything. This assertion turns that into a red test rather
+    than a quiet return of the probe traffic.
+    """
+    app = _build_probe_app()
+    with caplog.at_level(logging.INFO, logger="core_api.access"):
+        resp = await _get(app, "/api/v1/things/42")
+    assert resp.status_code == 200
+    events = _events(caplog)
+    assert len(events) == 1
+    assert events[0].http_route == "/things/{thing_id}", (
+        f"prefixed route labelled {events[0].http_route!r}; PROBE_ROUTES is "
+        "written in this label space and must be updated together with it"
+    )
+
+
+async def test_real_health_router_probe_is_suppressed(caplog):
+    """The decisive one: the REAL router, not a hand-built stand-in.
+
+    Every other test here builds its own ``/health``, so all of them would
+    stay green if ``routes/health.py`` renamed the endpoint or app.py changed
+    how it is registered. This imports the production router and serves it
+    the way ``app.py`` does, so it answers the only question that matters:
+    does the traffic prod actually generates get suppressed?
+
+    ``/version`` is the probe to drive here because it has no dependencies —
+    ``/health`` returns 503 without redis/storage, which is a valid response
+    but tests the failure path rather than the suppression path.
+    """
+    from core_api.routes.health import router as real_health_router
+
+    app = FastAPI()
+    app.add_middleware(RequestObservationMiddleware)
+    app.include_router(real_health_router, prefix="/api/v1")
+
+    with caplog.at_level(logging.INFO, logger="core_api.access"):
+        resp = await _get(app, "/api/v1/version")
+    assert resp.status_code == 200, "the real /version route did not serve"
+    assert _events(caplog) == [], (
+        "the REAL /api/v1/version emitted an access event; the label it "
+        f"produces is not in PROBE_ROUTES ({sorted(PROBE_ROUTES)}) and probe "
+        "traffic is still being logged in production"
+    )
+
+
+async def test_probe_constants_are_the_ones_the_router_registers():
+    """PROBE_ROUTES and the route decorators must be the same strings.
+
+    They already are by construction — ``routes/health.py`` decorates with
+    these very constants — and this asserts that construction still holds, so
+    reintroducing a literal path in either place is caught here.
+    """
+    from core_api.routes.health import router as real_health_router
+
+    declared = {r.path for r in real_health_router.routes if hasattr(r, "methods")}
+    missing = PROBE_ROUTES - declared
+    assert not missing, (
+        f"{sorted(missing)} is suppressed from the access log but is not a "
+        f"path the health router registers ({sorted(declared)}) — the "
+        "suppression matches nothing and probe traffic is being logged"
+    )
+    assert VERSION_PATH in PROBE_ROUTES
+
+
+async def test_no_other_router_declares_a_probe_path():
+    """Suppression matches a bare label, so only ONE router may declare it.
+
+    ``PROBE_ROUTES`` holds router-relative templates (``/health``), and the
+    middleware matches on that string alone with no notion of which router
+    produced it. A second router declaring its own ``/health`` — an admin
+    sub-app, say — would therefore have its successful traffic silently
+    suppressed too, and nothing else in the system would say so.
+
+    Rather than couple the middleware to the health router at runtime, pin
+    the assumption here: exactly one declaration per probe path, across the
+    whole real app.
+
+    The walk descends through FastAPI's ``_IncludedRouter`` via
+    ``original_router``, since ``include_router(prefix=...)`` mounts the
+    router opaquely (``app.py`` documents the same obstacle). That is a
+    private attribute, so the count assertions below double as a check that
+    the walk still works: if it stops descending, the probes are found zero
+    times and this test fails rather than quietly passing.
+    """
+    import collections
+
+    from core_api.app import app
+
+    counts: collections.Counter = collections.Counter()
+
+    def walk(routes):
+        for r in routes:
+            inner = getattr(r, "original_router", None)
+            if inner is not None:
+                walk(inner.routes)
+                continue
+            path = getattr(r, "path", None)
+            if path is not None and hasattr(r, "methods"):
+                counts[path] += 1
+
+    walk(app.routes)
+
+    for probe in sorted(PROBE_ROUTES):
+        assert counts[probe] == 1, (
+            f"{probe!r} is declared by {counts[probe]} route(s) in the real "
+            f"app; the access-log suppression matches this label with no "
+            f"regard for which router owns it, so anything other than exactly "
+            f"1 means either the walk stopped working (0) or a second router "
+            f"is having its successful traffic silently dropped (>1)"
+        )

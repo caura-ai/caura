@@ -5,18 +5,27 @@ Pure ASGI middleware — matches the ``SecurityHeadersMiddleware`` /
 than ``BaseHTTPMiddleware`` (which wraps in Starlette's task groups and has
 known edge cases around cancellation and streaming responses).
 
-Emits exactly one structured ``http.request`` log event per HTTP request,
+Emits at most one structured ``http.request`` log event per HTTP request,
 carrying the *templated* route, method, status, and wall-clock duration.
 These events back a log-based distribution metric for per-endpoint
 API-usage dashboards on Cloud-Logging deployments; on file-logging
 deployments they land in the JSON log file just like any other log line.
 
+"At most" rather than "exactly": a liveness/readiness probe that SUCCEEDS
+is not logged, because it is infrastructure chatter rather than API usage.
+A probe that FAILS still is. See ``PROBE_ROUTES`` for the routes, the
+rationale, and what that costs.
+
 Cardinality contract
 --------------------
 ``http_route`` is ALWAYS one of three bounded things, in this order:
 
-1. the route template from ``scope["route"].path``
-   (e.g. ``/api/v1/memories/{id}``) — set by FastAPI's ``APIRoute``;
+1. the route template from ``scope["route"].path`` — set by FastAPI's
+   ``APIRoute``. Note this is the template as the ROUTER declares it, with
+   no router prefix on it: a GET of ``/api/v1/memories/abc`` is labelled
+   ``/memories/{memory_id}``. Since FastAPI 0.137,
+   ``include_router(prefix=...)`` mounts the router instead of flattening
+   it, so the prefix lives in ``root_path`` and never reaches this label;
 2. the mount prefix (``/mcp``, ``/static``) for traffic served by a
    mounted sub-app, which is NOT a FastAPI route and so never populates
    ``scope["route"]``;
@@ -62,9 +71,44 @@ from typing import Any
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
+from core_api.constants import PROBE_ROUTES
 from core_api.services.capability_usage import record_usage
 
 logger = logging.getLogger("core_api.access")
+
+# Liveness/readiness probe routes, whose SUCCESSFUL requests are not logged.
+#
+# ``PROBE_ROUTES`` is imported rather than restated because ``routes/health.py``
+# builds its route decorators from the very same constants — one string backs
+# both, so the endpoint cannot be renamed out from under this check. See the
+# note beside it in ``constants.py`` for why the values are router-relative
+# (``/health``, not ``/api/v1/health``).
+#
+# Why drop them: Cloud Run probes each instance on a fixed interval, so
+# these arrive at a near-constant rate no matter what real traffic does —
+# ~5.4k/day in prod, of which 100% over 7 days to 2026-08-29 (37,850 events)
+# were untenanted infrastructure calls, never a real API consumer. As a
+# SHARE of this metric they are wildly unstable for the same reason: 1.3% on
+# a busy day, 12.5% on a quiet one. The stable number is the absolute rate.
+#
+# Why only the successful ones: a probe that returns 200 answers no question
+# this metric exists to answer, but a failing one is exactly what an
+# incident investigation reaches for — prod served 440 ``/health`` 503s in
+# that same week. Suppressing by route alone would have thrown all 440 away
+# to save 1.2% more volume. Non-2xx probes stay.
+#
+# What this gives up: "are probes arriving at all?" can no longer be
+# answered from these logs, since silence now means both "healthy" and
+# "nothing is calling us". Cloud Run reports instance health directly, and a
+# probe that fails still logs, so that gap is covered elsewhere.
+#
+# And the denominator for these two routes is now gone, so a per-route ERROR
+# RATE (failures / total) is meaningless for them — every probe event that
+# survives is a failure, so any such ratio reads 100% the moment one 503
+# lands. For PROBE_ROUTES read the absolute failure COUNT instead. Nothing
+# in-repo derives a rate from this metric today; the point is that an alert
+# added later must not, and an on-call engineer seeing "100% errors on
+# /health" should recognise it as this suppression rather than an outage.
 
 # REST route-template → (capability, op) for the adoption signal. Keyed by
 # (METHOD, templated path) so the same path under different verbs maps to the
@@ -122,7 +166,11 @@ _REST_CAPABILITY: dict[tuple[str, str], tuple[str, str | None]] = {
 
 
 class RequestObservationMiddleware:
-    """ASGI middleware that emits one ``http.request`` event per request."""
+    """ASGI middleware emitting at most one ``http.request`` event per request.
+
+    "At most" because a SUCCESSFUL liveness/readiness probe emits none; see
+    ``PROBE_ROUTES``. Every other request, failed probes included, emits one.
+    """
 
     def __init__(self, app: ASGIApplication) -> None:
         self.app = app
@@ -149,8 +197,8 @@ class RequestObservationMiddleware:
         # is the mount prefix and nothing else. Subtracting an app-level
         # root_path any other way misfires — with the app served under one
         # (``--root-path /gw``), a genuine 404 would otherwise be labelled
-        # ``/gw``. Verified against fastapi 0.128 / starlette 0.50 with and
-        # without an app root_path.
+        # ``/gw``. Verified against the locked fastapi 0.141.1 / starlette
+        # 1.3.1, with and without an app root_path.
         root_before = scope.get("root_path") or ""
         start = time.monotonic()
         try:
@@ -164,7 +212,7 @@ class RequestObservationMiddleware:
             http_route = getattr(route, "path", None)
             if not http_route:
                 # Only FastAPI's APIRoute sets ``scope["route"]``; a Starlette
-                # ``Mount`` never does (starlette 0.50 has no such assignment
+                # ``Mount`` never does (starlette 1.3.1 has no such assignment
                 # at all). So every request into a mounted sub-app — app.py
                 # mounts ``/mcp`` and ``/static`` — fell into "unmatched"
                 # beside genuine 404s. In 6h of prod on 2026-08-29 that was
@@ -183,7 +231,7 @@ class RequestObservationMiddleware:
                 # mutates THIS scope dict in place, and that it never sets
                 # ``scope["route"]`` — neither of which the ASGI spec
                 # guarantees, and starlette is not pinned directly here (only
-                # transitively, via ``fastapi>=0.115,<1``). Two things make
+                # transitively, via ``fastapi>=0.141.1,<1``). Two things make
                 # that acceptable. It degrades safely: if either stops
                 # holding, the delta is empty and the label falls back to
                 # "unmatched", i.e. exactly today's behaviour, never a wrong
@@ -205,16 +253,24 @@ class RequestObservationMiddleware:
             state = scope.get("state") or {}
             tenant_id = state.get("tenant_id")
             method = scope.get("method", "?")
-            logger.info(
-                "http.request",
-                extra={
-                    "http_route": http_route,
-                    "http_method": method,
-                    "http_status_code": status_code,
-                    "http_duration_ms": round(duration_ms, 1),
-                    "tenant_id": tenant_id,
-                },
-            )
+            # A probe that SUCCEEDED tells us nothing this metric exists to
+            # answer, so don't pay to store it. One that failed is exactly
+            # what an investigation wants, so it still goes out — see
+            # ``PROBE_ROUTES``. Guard the emit with a condition rather than
+            # returning early: this is a ``finally`` block, and a ``return``
+            # here would swallow an in-flight exception from the downstream
+            # call.
+            if not (http_route in PROBE_ROUTES and status_code < 400):
+                logger.info(
+                    "http.request",
+                    extra={
+                        "http_route": http_route,
+                        "http_method": method,
+                        "http_status_code": status_code,
+                        "http_duration_ms": round(duration_ms, 1),
+                        "tenant_id": tenant_id,
+                    },
+                )
             # Adoption signal: record capability usage for mapped REST routes
             # (transport=rest). MCP traffic (POST /mcp) is recorded separately
             # by the call_tool wrapper, and /mcp isn't in the map, so there's

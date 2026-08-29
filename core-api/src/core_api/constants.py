@@ -150,6 +150,22 @@ MEMORY_STATUSES_PATTERN = (
 # — return ``0`` / "unreachable" rather than block landing-page hits).
 PROBE_TIMEOUT_SECONDS = 5.0
 
+# Probe route paths, declared here rather than inline in ``routes/health.py``
+# so that exactly one string backs both the route decorator and the
+# access-log suppression in ``middleware/request_observation.py``. Those two
+# have to agree or successful-probe traffic silently returns to the logs, and
+# a shared constant makes disagreement impossible instead of merely
+# detectable — renaming the endpoint moves the suppression with it.
+#
+# These are ROUTER-RELATIVE, which is what ``scope["route"].path`` carries and
+# therefore what the access log's ``http_route`` label is. ``app.py`` serves
+# them under ``include_router(prefix="/api/v1")``, so the URL a caller hits is
+# ``/api/v1/health`` while the label is ``/health``. Keep that distinction:
+# writing the prefixed form here would match nothing.
+HEALTH_PATH = "/health"
+VERSION_PATH = "/version"
+PROBE_ROUTES = frozenset({HEALTH_PATH, VERSION_PATH})
+
 # ── Memory visibility levels ──
 # Named constants are the SoT — ``MEMORY_VISIBILITIES`` and the regex below
 # derive from them so a rename here propagates to membership checks and
