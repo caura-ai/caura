@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.19.3](https://github.com/caura-ai/caura/compare/plugin-v2.19.2...plugin-v2.19.3) (2026-08-29)
+
+
+### Code Refactoring
+
+* **ratchet:** file permanent names under the floor marker ([#1046](https://github.com/caura-ai/caura/issues/1046)) ([b4e4525](https://github.com/caura-ai/caura/commit/b4e452535144d21dfb8cd6823064958a274cb7b1))
+
 ## [2.19.2](https://github.com/caura-ai/caura/compare/plugin-v2.19.1...plugin-v2.19.2) (2026-08-27)
 
 

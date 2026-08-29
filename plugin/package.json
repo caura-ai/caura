@@ -1,6 +1,6 @@
 {
   "name": "@caura/memclaw",
-  "version": "2.19.2",
+  "version": "2.19.3",
   "description": "OpenClaw plugin for Caura central memory",
   "license": "Apache-2.0",
   "private": true,

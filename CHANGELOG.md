@@ -10,6 +10,39 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.35.0](https://github.com/caura-ai/caura/compare/backend-v2.34.0...backend-v2.35.0) (2026-08-29)
+
+
+### Features
+
+* **events:** flip the lifecycle family's publishers to the caura twin ([#1038](https://github.com/caura-ai/caura/issues/1038)) ([3c8d93b](https://github.com/caura-ai/caura/commit/3c8d93b0baceb58c81e7626d45c5922725ecca21))
+* **serve:** let deployments opt out of uvicorn's per-request access log ([#1037](https://github.com/caura-ai/caura/issues/1037)) ([f53368f](https://github.com/caura-ai/caura/commit/f53368f8f706925de4af77066ebae7fb0d552602))
+
+
+### Bug Fixes
+
+* **interview:** count the tenants and nodes a sweep silently skipped ([#1036](https://github.com/caura-ai/caura/issues/1036)) ([eccdf0f](https://github.com/caura-ai/caura/commit/eccdf0f88e1db32357972630e4fea15e6903b955))
+* **logging:** UVICORN_ACCESS_LOG was inert — enforce it where it's undone ([#1041](https://github.com/caura-ai/caura/issues/1041)) ([32b28e3](https://github.com/caura-ai/caura/commit/32b28e3928a8a59e09a885687637f090ab824267))
+* **observability:** label mounted-app traffic instead of "unmatched" ([#1048](https://github.com/caura-ai/caura/issues/1048)) ([14c4b7d](https://github.com/caura-ai/caura/commit/14c4b7d0407643d19c55b478ea946986eaf0f1bd))
+* **ratchet:** pass -z when asking git which paths changed ([#1042](https://github.com/caura-ai/caura/issues/1042)) ([2568e30](https://github.com/caura-ai/caura/commit/2568e308732deba1c7be34e7b48cbd95abaf3a67))
+* **storage:** accept discrete AlloyDB settings ([#1034](https://github.com/caura-ai/caura/issues/1034)) ([ad333dd](https://github.com/caura-ai/caura/commit/ad333dda2353b7659b4261e55041592e3cfbdfa9))
+
+
+### Performance
+
+* **logs:** drop the CAURA-132 diagnostics to DEBUG ([#1045](https://github.com/caura-ai/caura/issues/1045)) ([9ca60a5](https://github.com/caura-ai/caura/commit/9ca60a54819257518604c6678bb4a7b46046d089))
+
+
+### Documentation
+
+* **forge:** correct lifecycle topic name ([#1047](https://github.com/caura-ai/caura/issues/1047)) ([b487a88](https://github.com/caura-ai/caura/commit/b487a88e03df71b271efa64d034d6076082b1a32))
+
+
+### Code Refactoring
+
+* **events:** remove the unprovisioned Memory.CREATED topic ([#1039](https://github.com/caura-ai/caura/issues/1039)) ([52c484c](https://github.com/caura-ai/caura/commit/52c484cd337aea6c07c337b97e8b31ad2de69684))
+* **ratchet:** file permanent names under the floor marker ([#1046](https://github.com/caura-ai/caura/issues/1046)) ([b4e4525](https://github.com/caura-ai/caura/commit/b4e452535144d21dfb8cd6823064958a274cb7b1))
+
 ## [2.34.0](https://github.com/caura-ai/caura/compare/backend-v2.33.1...backend-v2.34.0) (2026-08-27)
 
 
