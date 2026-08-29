@@ -8,6 +8,7 @@ surfaces as an attribute on the captured ``LogRecord``.
 Contract pinned here:
   * exactly one ``http.request`` event per request,
   * ``http_route`` is the TEMPLATE (``/things/{id}``), never the raw path,
+  * mounted sub-apps label by mount prefix (``/mcp``), not ``"unmatched"``,
   * 404s and pre-routing failures bucket to ``"unmatched"``,
   * a crashing endpoint still emits one event, defaulting to status 500,
   * duration reflects the full downstream call (streaming included),
@@ -19,7 +20,7 @@ import logging
 
 import pytest
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from httpx import ASGITransport, AsyncClient
 
 from core_api.middleware.request_observation import RequestObservationMiddleware
@@ -53,6 +54,14 @@ def _build_test_app() -> FastAPI:
             yield b"b"
 
         return StreamingResponse(gen(), media_type="text/plain")
+
+    # A mounted sub-app is NOT a FastAPI route, so it never populates
+    # scope["route"] — the case that used to disappear into "unmatched".
+    async def _sub(scope, receive, send):
+        await PlainTextResponse("ok")(scope, receive, send)
+
+    app.mount("/mcp", _sub)
+    app.mount("/static", _sub)
 
     return app
 
@@ -137,3 +146,55 @@ async def test_streaming_duration_covers_full_response(caplog):
     # The generator sleeps 150ms mid-stream; duration must span it, proving
     # we measure to the final body chunk, not to response start.
     assert e.http_duration_ms >= 150.0
+
+
+@pytest.mark.parametrize(
+    "mount,path", [("/mcp", "/mcp/session"), ("/static", "/static/x.css")]
+)
+async def test_mounted_subapp_labels_by_mount_prefix(caplog, mount, path):
+    """Mounted traffic must carry its mount prefix, not "unmatched".
+
+    Only FastAPI's APIRoute sets ``scope["route"]``; a Starlette ``Mount``
+    never does. So this traffic used to land in the same bucket as 404s: in
+    6h of prod on 2026-08-29 that was 5,027 of 5,099 "unmatched" events, all
+    of them successful, which made ~40% of the metric unattributable and hid
+    the MCP transport from the per-endpoint dashboard.
+    """
+    app = _build_test_app()
+    with caplog.at_level(logging.INFO, logger="core_api.access"):
+        resp = await _get(app, path)
+    assert resp.status_code == 200
+
+    events = _events(caplog)
+    assert len(events) == 1
+    assert events[0].http_route == mount, (
+        f"mounted traffic labelled {events[0].http_route!r}; it must carry the "
+        f"mount prefix {mount!r} or it is indistinguishable from a 404"
+    )
+    # Still bounded: the prefix, never the raw path underneath it.
+    assert events[0].http_route == mount and path != mount
+
+
+async def test_unmatched_still_wins_when_there_is_no_mount(caplog):
+    """The mount fallback must not swallow the genuine-404 label."""
+    app = _build_test_app()
+    with caplog.at_level(logging.INFO, logger="core_api.access"):
+        resp = await _get(app, "/definitely/not/mounted")
+    assert resp.status_code == 404
+    assert _events(caplog)[0].http_route == "unmatched"
+
+
+async def test_app_level_root_path_does_not_leak_into_the_label(caplog):
+    """With the app served under a root_path, a 404 must stay "unmatched".
+
+    The mount prefix is derived as the root_path DELTA across the downstream
+    call, precisely so an app-level root_path (``--root-path /gw``) is not
+    mistaken for a mount. Subtracting ``app_root_path`` instead would label
+    this request ``/gw``.
+    """
+    app = _build_test_app()
+    transport = ASGITransport(app=app, raise_app_exceptions=False, root_path="/gw")
+    with caplog.at_level(logging.INFO, logger="core_api.access"):
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            await c.get("/nope")
+    assert _events(caplog)[0].http_route == "unmatched"

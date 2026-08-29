@@ -13,11 +13,24 @@ deployments they land in the JSON log file just like any other log line.
 
 Cardinality contract
 --------------------
-``http_route`` is ALWAYS the route template read from
-``scope["route"].path`` (e.g. ``/api/v1/memories/{id}``) or the literal
-``"unmatched"`` when no route matched (404s, or failures before routing).
-It is NEVER the raw request path with path params interpolated — raw paths
-would explode the metric's label cardinality and make it expensive.
+``http_route`` is ALWAYS one of three bounded things, in this order:
+
+1. the route template from ``scope["route"].path``
+   (e.g. ``/api/v1/memories/{id}``) — set by FastAPI's ``APIRoute``;
+2. the mount prefix (``/mcp``, ``/static``) for traffic served by a
+   mounted sub-app, which is NOT a FastAPI route and so never populates
+   ``scope["route"]``;
+3. the literal ``"unmatched"`` — genuine 404s and failures before
+   routing.
+
+It is NEVER the raw request path with path params interpolated — raw
+paths would explode the metric's label cardinality and make it
+expensive. Mount prefixes are safe on that count because mounts are
+declared statically in ``app.py``: one extra label each.
+
+Case 2 was folded into case 3 until 2026-08-29, which made ~40% of prod
+events unattributable and hid MCP traffic from the per-endpoint
+dashboard entirely — see the fallback in ``__call__`` for the numbers.
 
 ``scope["route"]`` only exists AFTER the router has run, so this middleware
 must inspect it once the downstream app returns, not before.
@@ -131,6 +144,14 @@ class RequestObservationMiddleware:
                 status_code = message["status"]
             await send(message)
 
+        # Captured BEFORE the downstream call: a Starlette ``Mount`` appends
+        # its prefix to ``scope["root_path"]``, so the delta across the call
+        # is the mount prefix and nothing else. Subtracting an app-level
+        # root_path any other way misfires — with the app served under one
+        # (``--root-path /gw``), a genuine 404 would otherwise be labelled
+        # ``/gw``. Verified against fastapi 0.128 / starlette 0.50 with and
+        # without an app root_path.
+        root_before = scope.get("root_path") or ""
         start = time.monotonic()
         try:
             await self.app(scope, receive, _send)
@@ -140,7 +161,44 @@ class RequestObservationMiddleware:
             # read it now, never before. Fall back to "unmatched" so 404s and
             # pre-routing failures bucket into a single bounded label.
             route = scope.get("route")
-            http_route = getattr(route, "path", None) or "unmatched"
+            http_route = getattr(route, "path", None)
+            if not http_route:
+                # Only FastAPI's APIRoute sets ``scope["route"]``; a Starlette
+                # ``Mount`` never does (starlette 0.50 has no such assignment
+                # at all). So every request into a mounted sub-app — app.py
+                # mounts ``/mcp`` and ``/static`` — fell into "unmatched"
+                # beside genuine 404s. In 6h of prod on 2026-08-29 that was
+                # 5,027 of 5,099 unmatched events (98.6%), every one of them
+                # SUCCESSFUL: ~40% of this metric's volume was unattributable
+                # and the MCP transport was invisible in the per-endpoint
+                # dashboard, while "unmatched" looked like a 404 problem.
+                #
+                # Labelling by mount prefix keeps the cardinality contract
+                # above: mounts are declared statically in app.py, so this
+                # adds one bounded label per mount, never a raw path. Genuine
+                # 404s and pre-routing failures have no mount and still read
+                # "unmatched", which now means what the contract says.
+                #
+                # This leans on two Starlette internals — that ``Mount``
+                # mutates THIS scope dict in place, and that it never sets
+                # ``scope["route"]`` — neither of which the ASGI spec
+                # guarantees, and starlette is not pinned directly here (only
+                # transitively, via ``fastapi>=0.115,<1``). Two things make
+                # that acceptable. It degrades safely: if either stops
+                # holding, the delta is empty and the label falls back to
+                # "unmatched", i.e. exactly today's behaviour, never a wrong
+                # or unbounded label. And it degrades LOUDLY in CI rather
+                # than silently in prod, because
+                # ``tests/test_request_observation.py`` drives real
+                # ``app.mount()`` calls through this middleware over a real
+                # ASGI transport — nothing about the framework is mocked — so
+                # a dependency bump that changes either behaviour turns those
+                # tests red. Keep them that way; a mock there would give the
+                # pin-free dependency a silent path back in.
+                root_after = scope.get("root_path") or ""
+                http_route = (
+                    root_after[len(root_before) :] if root_after.startswith(root_before) else ""
+                ) or "unmatched"
             # ``request.state`` is backed by ``scope["state"]``; ``get_auth_context``
             # stashes ``tenant_id`` there once the caller is authenticated. Absent
             # for unauthenticated routes and 401s — logged as None, which is fine.
