@@ -189,7 +189,7 @@ class GatewayIntegrationTest:
             self.test_educated_flag_exists,
             self.test_skill_md_exists,
             self.test_tools_md_has_tools_section,
-            self.test_agents_md_has_memclaw,
+            self.test_agents_md_has_memory_v2,
             self.test_heartbeat_md_exists,
             # ── Section 6: Memory prompt section injection ──
             self.test_prompt_section_file,
@@ -311,7 +311,7 @@ class GatewayIntegrationTest:
             )
 
     def test_openclaw_config_allowlist(self):
-        """Verify memclaw is in plugins.allow in openclaw.json."""
+        """Verify the plugin id is in plugins.allow in openclaw.json."""
         config_path = Path(self.openclaw_dir) / "openclaw.json"
         if not config_path.exists():
             self.skip("OpenClaw config: allowlist", "openclaw.json not found")
@@ -319,13 +319,13 @@ class GatewayIntegrationTest:
         config = json.loads(config_path.read_text())
         allow = config.get("plugins", {}).get("allow", [])
         self.check(
-            "OpenClaw config: memclaw in plugins.allow",
+            "OpenClaw config: plugin id in plugins.allow",
             "memclaw" in allow,
             f"allow={allow}",
         )
 
     def test_openclaw_config_tools(self):
-        """Verify all memclaw tools are in tools.alsoAllow."""
+        """Verify all Caura tools are in tools.alsoAllow."""
         config_path = Path(self.openclaw_dir) / "openclaw.json"
         if not config_path.exists():
             self.skip("OpenClaw config: tools", "openclaw.json not found")
@@ -694,7 +694,7 @@ class GatewayIntegrationTest:
             f"checked {len(workspaces)} workspace(s)",
         )
 
-    def test_agents_md_has_memclaw(self):
+    def test_agents_md_has_memory_v2(self):
         """Check AGENTS.md in at least one workspace has Memory V2 section."""
         workspaces = self._find_workspaces()
         if not workspaces:

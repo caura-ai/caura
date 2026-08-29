@@ -23,7 +23,7 @@ The script reads Caura connection params from the standard env
 (``DATABASE_URL``, ``OPENAI_API_KEY``) — see ``core_api.config``.
 
 This is NOT a production-grade scheduler. The real Forge run flows
-through the ``memclaw.lifecycle.forge-distill-requested`` event
+through the ``<brand>.lifecycle.forge-distill-requested`` event
 (SF-007); the scheduled-tick worker handler lands in Phase 1's
 final wiring step alongside the public lifecycle endpoint.
 """
