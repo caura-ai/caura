@@ -1,7 +1,7 @@
 """Integration tests: full search_memories pipeline with all P0 fixes.
 
 Requires a running PostgreSQL instance with pgvector.
-Set TEST_DATABASE_URL env var or use defaults (memclaw_test on localhost).
+Set TEST_DATABASE_URL env var, or use the default DSN in tests/conftest.py.
 
 These tests exercise the actual SQL expressions — freshness, recall boost,
 scoring blend, entity matching — end-to-end via the service layer.

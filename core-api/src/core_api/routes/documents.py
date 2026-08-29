@@ -70,7 +70,7 @@ _SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")
 # validator):
 #
 #   {
-#     "schema":               "memclaw.skill-factory.rollback.v1",
+#     "schema":               "caura.skill-factory.rollback.v1",
 #     "skill_slug":           "<slug>",
 #     "written_at":           "<iso>",
 #     "target_path":          "<absolute target file path>",

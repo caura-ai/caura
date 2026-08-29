@@ -73,6 +73,8 @@ RUN if [ "$WITH_RERANK_LOCAL" = "1" ]; then \
 # to find (the endpoint silently served "dev"). Read by
 # core_api.constants._resolve_version().
 ARG CAURA_VERSION=
+# Keep the legacy build arg unmarked: Docker treats inline ``#`` text as its
+# default value, so the ratchet's same-line marker would break the fallback.
 ARG MEMCLAW_VERSION=
 RUN VER="${CAURA_VERSION:-${MEMCLAW_VERSION:-$(python -c "import tomllib; print(tomllib.load(open('core-api/pyproject.toml','rb'))['project']['version'])")}}" && printf '%s' "$VER" > /app/VERSION && echo "Stamped Caura version: $VER" # legacy-name-ok: rule 3 dual-read alias
 

@@ -179,15 +179,16 @@ def test_version_is_resolved_not_dev():
 
 
 def test_version_env_override_wins(monkeypatch):
-    """An explicit ``MEMCLAW_VERSION`` env beats file/metadata resolution."""
-    monkeypatch.setenv("MEMCLAW_VERSION", "9.9.9-test")
+    """An explicit ``CAURA_VERSION`` env beats file/metadata resolution."""
+    monkeypatch.setenv("CAURA_VERSION", "9.9.9-test")
     assert _resolve_version() == "9.9.9-test"
 
 
 def test_version_blank_env_override_ignored(monkeypatch):
-    """A blank/whitespace ``MEMCLAW_VERSION`` must not win — it falls through
+    """A blank/whitespace legacy version env must not win — it falls through
     to the file/metadata chain rather than serving an empty version."""
-    monkeypatch.setenv("MEMCLAW_VERSION", "   ")
+    monkeypatch.delenv("CAURA_VERSION", raising=False)
+    monkeypatch.setenv("MEMCLAW_VERSION", "   ")  # legacy-name-ok: rule 3 - a blank legacy value must not win
     resolved = _resolve_version()
     assert resolved.strip() == resolved
     assert resolved not in ("", "dev")
