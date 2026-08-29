@@ -9,7 +9,7 @@ import asyncio
 import logging
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
 from core_api.services import capability_usage as cu
@@ -151,17 +151,27 @@ async def test_rest_middleware_records_mapped_capability(monkeypatch):
         lambda **kw: calls.append(kw),
     )
 
-    app = FastAPI()
-    app.add_middleware(RequestObservationMiddleware)
+    # Registered through include_router(prefix=...), the way app.py does it —
+    # NOT as @app.post("/api/v1/recall") directly on the app. The distinction
+    # is the entire point: FastAPI 0.137 mounts a prefixed router, so the
+    # label reaching _REST_CAPABILITY is the router-relative "/recall". Hung
+    # off the app directly the label would be "/api/v1/recall" instead, which
+    # is a shape production never produces — and this test passed for ~2.5
+    # months against a map that could not match a single real request.
+    router = APIRouter()
 
-    @app.post("/api/v1/recall")
+    @router.post("/recall")
     async def recall(request: Request):
         request.state.tenant_id = "t-rest"
         return {"ok": True}
 
-    @app.get("/api/v1/unmapped")
+    @router.get("/unmapped")
     async def unmapped():
         return {"ok": True}
+
+    app = FastAPI()
+    app.add_middleware(RequestObservationMiddleware)
+    app.include_router(router, prefix="/api/v1")
 
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
@@ -226,3 +236,55 @@ async def test_mcp_call_tool_records_error_on_raise(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["capability"] == "write"
     assert calls[0]["status"] == "error"
+
+
+async def test_every_capability_key_matches_a_real_route():
+    """Every map key must correspond to a real (method, label) on the real app.
+
+    This is the guard that would have caught the ~2.5-month outage: when
+    FastAPI 0.137 moved the router prefix out of ``scope["route"].path``,
+    all 35 keys stopped matching at once and nothing said so. Asserting the
+    keys against the app itself makes that failure loud, and also catches
+    the mundane version — a route renamed or removed while its capability
+    entry is left behind, silently switching that capability off.
+
+    Deliberately a test rather than an import-time check in ``app.py``.
+    Recovering the label space means descending through FastAPI's
+    ``_IncludedRouter`` via the private ``original_router``, because
+    ``include_router(prefix=...)`` mounts opaquely; the existing
+    ``_TIMEOUT_OPT_OUT_PATHS`` guard can live at import time only because
+    ``app.openapi()`` is public and prefixed. Wiring a private attribute
+    into startup would turn a dependency bump into a production boot
+    failure. Failing CI is the right blast radius for this.
+
+    Self-validating: if the walk stops descending, no key matches and this
+    fails loudly rather than passing on an empty comparison.
+    """
+    import collections
+
+    from core_api.app import app
+    from core_api.middleware.request_observation import _REST_CAPABILITY
+
+    real: dict[str, set[str]] = collections.defaultdict(set)
+
+    def walk(routes):
+        for r in routes:
+            inner = getattr(r, "original_router", None)
+            if inner is not None:
+                walk(inner.routes)
+                continue
+            path, methods = getattr(r, "path", None), getattr(r, "methods", None)
+            if path is not None and methods:
+                real[path] |= set(methods)
+
+    walk(app.routes)
+
+    missing = sorted(
+        (m, p) for (m, p) in _REST_CAPABILITY if m not in real.get(p, ())
+    )
+    assert not missing, (
+        f"{len(missing)} of {len(_REST_CAPABILITY)} capability keys match no "
+        f"route on the real app, so those capabilities record nothing: "
+        f"{missing[:5]}{'...' if len(missing) > 5 else ''}. Keys are "
+        f"router-relative ('/memories'), not URL paths ('/api/v1/memories')."
+    )

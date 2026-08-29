@@ -116,52 +116,78 @@ logger = logging.getLogger("core_api.access")
 # tool vocabulary (mcp_server tool names minus the ``caura_`` prefix, and
 # the manage/doc sub-ops) so REST and MCP roll up together in the report.
 #
+# The paths are ROUTER-RELATIVE — ``/memories``, not ``/api/v1/memories`` —
+# because that is what ``scope["route"].path`` carries and therefore what
+# ``http_route`` is matched against below. Same label space as
+# ``PROBE_ROUTES``; the note beside it in ``constants.py`` explains why.
+#
+# They were prefixed until 2026-08-29, and every lookup missed. #353 added
+# this map on 2026-06-14 when ``include_router(prefix=...)`` still flattened
+# the prefix into each route's own path, so the keys were right; #391 adopted
+# FastAPI 0.137 the very next day, which mounts the router instead and moves
+# the prefix into ``root_path``. The REST half of the adoption signal
+# recorded nothing at all from then until this was re-keyed. It failed
+# silently rather than loudly because the MCP half kept working, so the
+# report stayed plausible instead of going empty — and because the test
+# covering this registered its route directly on the app rather than through
+# a prefixed router, which is the one shape that makes a prefixed key match.
+#
+# ``/keystones`` is served twice: under the canonical ``/api/v1`` mount and
+# under the permanent legacy brand-prefixed alias mount beside it in
+# ``app.py``. Since the label drops the prefix, those two now collapse to a
+# single entry per verb rather than the two they needed before. That is only
+# safe because both mounts carry the same capability; the two URL forms are
+# no longer distinguishable in this signal, which is fine for adoption
+# accounting and would not be if they ever diverge.
+#
 # Routes NOT in this map are simply not recorded as capability usage (admin,
 # list/registry, ingest pipeline, health, plugin bootstrap). Extend this when
 # a new capability-bearing route is added — it's the REST half of the
 # transport-agnostic taxonomy; the MCP half is automatic via call_tool.
+# ``tests/test_capability_usage.py`` asserts every key here matches a real
+# route on the real app, so a typo or a rename fails CI rather than quietly
+# switching a capability off.
 _REST_CAPABILITY: dict[tuple[str, str], tuple[str, str | None]] = {
     # memories
-    ("POST", "/api/v1/memories"): ("write", None),
-    ("GET", "/api/v1/memories"): ("list", None),
-    ("GET", "/api/v1/memories/stats"): ("stats", None),
-    ("POST", "/api/v1/memories/bulk-delete"): ("manage", "bulk_delete"),
-    ("DELETE", "/api/v1/memories"): ("manage", "bulk_delete"),
-    ("GET", "/api/v1/memories/{memory_id}"): ("manage", "read"),
-    ("GET", "/api/v1/memories/{memory_id}/contradictions"): ("manage", "read"),
-    ("DELETE", "/api/v1/memories/{memory_id}"): ("manage", "delete"),
-    ("PATCH", "/api/v1/memories/{memory_id}/status"): ("manage", "transition"),
-    ("PATCH", "/api/v1/memories/{memory_id}"): ("manage", "update"),
-    ("POST", "/api/v1/search"): ("search", None),
-    ("POST", "/api/v1/recall"): ("recall", None),
+    ("POST", "/memories"): ("write", None),
+    ("GET", "/memories"): ("list", None),
+    ("GET", "/memories/stats"): ("stats", None),
+    ("POST", "/memories/bulk-delete"): ("manage", "bulk_delete"),
+    ("DELETE", "/memories"): ("manage", "bulk_delete"),
+    ("GET", "/memories/{memory_id}"): ("manage", "read"),
+    ("GET", "/memories/{memory_id}/contradictions"): ("manage", "read"),
+    ("DELETE", "/memories/{memory_id}"): ("manage", "delete"),
+    ("PATCH", "/memories/{memory_id}/status"): ("manage", "transition"),
+    ("PATCH", "/memories/{memory_id}"): ("manage", "update"),
+    ("POST", "/search"): ("search", None),
+    ("POST", "/recall"): ("recall", None),
     # documents
-    ("POST", "/api/v1/documents"): ("doc", "write"),
-    ("GET", "/api/v1/documents"): ("doc", "read"),
-    ("GET", "/api/v1/documents/{doc_id}"): ("doc", "read"),
-    ("GET", "/api/v1/documents/collections"): ("doc", "list_collections"),
-    ("POST", "/api/v1/documents/query"): ("doc", "query"),
-    ("POST", "/api/v1/documents/search"): ("doc", "search"),
-    ("DELETE", "/api/v1/documents/{doc_id}"): ("doc", "delete"),
-    # keystones (router prefix /memclaw/keystones)
-    # Canonical brand-neutral paths (2026-08-14) + the permanent legacy alias.
-    ("GET", "/api/v1/keystones"): ("keystones", None),
-    ("POST", "/api/v1/keystones"): ("keystones_set", "set"),
-    ("DELETE", "/api/v1/keystones/{doc_id}"): ("keystones_set", "delete"),
-    ("GET", "/api/v1/memclaw/keystones"): ("keystones", None),
-    ("POST", "/api/v1/memclaw/keystones"): ("keystones_set", "set"),
-    ("DELETE", "/api/v1/memclaw/keystones/{doc_id}"): ("keystones_set", "delete"),
+    ("POST", "/documents"): ("doc", "write"),
+    ("GET", "/documents"): ("doc", "read"),
+    ("GET", "/documents/{doc_id}"): ("doc", "read"),
+    ("GET", "/documents/collections"): ("doc", "list_collections"),
+    ("POST", "/documents/query"): ("doc", "query"),
+    ("POST", "/documents/search"): ("doc", "search"),
+    ("DELETE", "/documents/{doc_id}"): ("doc", "delete"),
+    # keystones — one entry per verb covers BOTH the canonical mount
+    # (brand-neutral, 2026-08-14) and the permanent legacy brand-prefixed
+    # alias, since the label drops the prefix that distinguished them. See
+    # the note above the map.
+    ("GET", "/keystones"): ("keystones", None),
+    ("POST", "/keystones"): ("keystones_set", "set"),
+    ("DELETE", "/keystones/{doc_id}"): ("keystones_set", "delete"),
     # knowledge graph / entities
-    ("GET", "/api/v1/entities"): ("entity", "list"),
-    ("GET", "/api/v1/graph"): ("entity", "graph"),
-    ("POST", "/api/v1/entities/upsert"): ("entity", "write"),
-    ("GET", "/api/v1/entities/{entity_id}"): ("entity", "read"),
-    ("POST", "/api/v1/relations/upsert"): ("entity", "write"),
+    ("GET", "/entities"): ("entity", "list"),
+    ("GET", "/graph"): ("entity", "graph"),
+    ("POST", "/entities/upsert"): ("entity", "write"),
+    ("GET", "/entities/{entity_id}"): ("entity", "read"),
+    ("POST", "/relations/upsert"): ("entity", "write"),
     # insights / evolve / stats / tune
-    ("POST", "/api/v1/insights/generate"): ("insights", None),
-    ("POST", "/api/v1/evolve/report"): ("evolve", None),
-    ("GET", "/api/v1/stats"): ("stats", None),
-    ("GET", "/api/v1/agents/{agent_id}/tune"): ("tune", "read"),
-    ("PATCH", "/api/v1/agents/{agent_id}/tune"): ("tune", "update"),
+    ("POST", "/insights/generate"): ("insights", None),
+    ("POST", "/evolve/report"): ("evolve", None),
+    ("GET", "/stats"): ("stats", None),
+    ("GET", "/agents/{agent_id}/tune"): ("tune", "read"),
+    ("PATCH", "/agents/{agent_id}/tune"): ("tune", "update"),
 }
 
 
