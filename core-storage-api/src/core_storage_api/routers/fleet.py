@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 
 from core_storage_api.schemas import FLEET_COMMAND_FIELDS, FLEET_NODE_FIELDS, orm_to_dict
-from core_storage_api.services.postgres_service import PostgresService
+from core_storage_api.services.postgres_service import UNSCOPED, PostgresService
 
 router = APIRouter(prefix="/fleet", tags=["Fleet"])
 _svc = PostgresService()
@@ -208,18 +208,37 @@ async def deploy_attempt_count(node_id: UUID, target_version: str, since: dateti
 async def update_command_status(command_id: UUID, request: Request) -> dict:
     """Update a command's status / result.
 
-    ``tenant_id`` (when present in the body) scopes the UPDATE so a tenant
-    can only complete its own commands — keying on ``command_id`` alone let
-    any caller that knew a command UUID mark another tenant's command
-    done/failed (cross-tenant BOLA). ``ok`` reports whether a row actually
-    matched so the caller can surface 404 instead of silently succeeding.
+    ``tenant_id`` scopes the UPDATE so a tenant can only complete its own
+    commands — keying on ``command_id`` alone let any caller that knew a
+    command UUID mark another tenant's command done/failed (cross-tenant
+    BOLA). ``ok`` reports whether a row actually matched so the caller can
+    surface 404 instead of silently succeeding.
+
+    The key must be **present**; ``null`` is the admin/unscoped opt-out.
+    Absent and null used to be the same request, which made the unscoped
+    UPDATE what a caller got by omission — the one mistake this endpoint
+    cannot afford, since storage authenticates nothing and trusts the
+    tenant its caller names. Distinguishing them costs the caller nothing:
+    core-api already sends ``{"tenant_id": auth.tenant_id}`` on every
+    call and serializes the admin case as an explicit ``null``.
     """
     body: dict = await request.json()
+    if "tenant_id" not in body:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required; send null to update unscoped (admin callers)",
+        )
+    raw_tenant_id = body["tenant_id"]
+    if raw_tenant_id is not None and not isinstance(raw_tenant_id, str):
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' must be a string or null",
+        )
     completed_at_raw = body.get("completed_at")
     matched = await _svc.fleet_update_command_result(
         command_id=command_id,
         status=body["status"],
-        tenant_id=body.get("tenant_id"),
+        tenant_id=UNSCOPED if raw_tenant_id is None else raw_tenant_id,
         result=body.get("result"),
         completed_at=(datetime.fromisoformat(completed_at_raw) if completed_at_raw else datetime.now(UTC)),
     )

@@ -636,6 +636,38 @@ class BulkValidationError(ValueError):
     """
 
 
+class Unscoped:
+    """Marker for a call that deliberately spans every tenant.
+
+    A tenant-scope parameter typed ``str | None = None`` has the wrong
+    default: the value that means "no filter" is also the value you get by
+    forgetting the argument. GHSA-xw4x-jwf5-8m9h was that shape one layer
+    up — a request that named a tenant it was entitled to while addressing
+    a row belonging to another — and the fix for it left the storage-side
+    parameter defaulted to the unscoped behaviour it had just closed.
+
+    Typing the parameter ``str | Unscoped`` with no default moves both
+    failure modes to where they can be caught. Omitting it is a
+    ``TypeError`` at the call site rather than a silent cross-tenant
+    statement, and passing ``None`` is a mypy error rather than an accidental
+    opt-out, so widening the scope has to be spelled: ``tenant_id=UNSCOPED``.
+    That spelling is greppable and reviewable, which ``=None`` never was.
+
+    Deliberately not an ``Enum`` or ``object()``: a named class gives the
+    annotation a name that says what it means at every call site, and
+    ``isinstance`` narrows it for the type checker without a cast.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSCOPED"
+
+
+UNSCOPED = Unscoped()
+"""The only ``Unscoped`` instance. Compare with ``isinstance``, not ``is``."""
+
+
 class PostgresService:
     """Single point of DB access for all core tables.
 
@@ -9023,7 +9055,7 @@ class PostgresService:
         *,
         command_id: UUID,
         status: str,
-        tenant_id: str | None = None,
+        tenant_id: str | Unscoped,
         result: dict | None = None,
         completed_at: datetime | None = None,
     ) -> bool:
@@ -9032,8 +9064,13 @@ class PostgresService:
         ``tenant_id`` scopes the UPDATE so a caller can only touch its own
         tenant's commands — keying on ``command_id`` alone let any
         authenticated tenant complete another tenant's command by UUID
-        (cross-tenant BOLA). ``None`` (admin / unscoped callers) skips the
-        filter. Returns ``True`` iff a row matched.
+        (cross-tenant BOLA). Returns ``True`` iff a row matched.
+
+        Required, and ``Unscoped`` rather than ``None``, because this method
+        previously defaulted to skipping the filter: the caller that forgot
+        the argument got the pre-fix cross-tenant UPDATE back with nothing to
+        notice it. Admin callers legitimately run unscoped and now say so —
+        ``tenant_id=UNSCOPED``. See :class:`Unscoped`.
         """
         values: dict
         if status == "acked":
@@ -9046,7 +9083,7 @@ class PostgresService:
                 values["completed_at"] = completed_at
         async with get_session() as session:
             stmt = sql_update(FleetCommand).where(FleetCommand.id == command_id)
-            if tenant_id is not None:
+            if not isinstance(tenant_id, Unscoped):
                 stmt = stmt.where(FleetCommand.tenant_id == tenant_id)
             res = await session.execute(stmt.values(**values))
             return (res.rowcount or 0) > 0  # type: ignore[attr-defined]
