@@ -61,6 +61,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 caura_client = ["py.typed"]
+memclaw_client = ["py.typed"]
 
 [tool.ruff]
 target-version = "py39"
