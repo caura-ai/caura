@@ -258,7 +258,7 @@ describe("discoverAgentWorkspaces", () => {
 
 describe("writeEducationFiles", () => {
   // These are regression tests for the multi-agent education bug
-  // (memclaw memory 90b7d579-068a-4561-a740-73a76a74b1ac). The old
+  // (caura memory 90b7d579-068a-4561-a740-73a76a74b1ac). The old
   // implementation discovered workspaces via `readdirSync(baseDir)` filtered
   // by `startsWith("workspace")`, which silently skipped agents living under
   // `<baseDir>/workspaces/<name>/` and also wrote phantom education files
@@ -384,7 +384,7 @@ describe("writeEducationFiles", () => {
     assert.ok(!existsSync(join(base, "workspaces", "agent3", "TOOLS.md")) || !readFileSync(join(base, "workspaces", "agent3", "TOOLS.md"), "utf-8").includes("Caura"));
   });
 
-  test("cleans up pre-existing phantom MemClaw files at <baseDir>/workspaces/", () => {
+  test("cleans up pre-existing phantom Caura files at <baseDir>/workspaces/", () => {
     const base = tmpBase();
     mkdirSync(join(base, "workspaces"), { recursive: true });
     writeFileSync(join(base, "workspaces", "TOOLS.md"), buildToolsMd(), "utf-8");
@@ -396,9 +396,9 @@ describe("writeEducationFiles", () => {
     assert.ok(!existsSync(join(base, "workspaces", "AGENTS.md")));
   });
 
-  test("cleanup leaves non-MemClaw content at <baseDir>/workspaces/ alone", () => {
+  test("cleanup leaves foreign content at <baseDir>/workspaces/ alone", () => {
     // Defensive: if a user happens to have unrelated TOOLS.md/AGENTS.md at
-    // that path, we must not delete it. Cleanup is gated on memclaw markers.
+    // that path, we must not delete it. Cleanup is gated on our own section markers.
     const base = tmpBase();
     mkdirSync(join(base, "workspaces"), { recursive: true });
     writeFileSync(join(base, "workspaces", "TOOLS.md"), "# my own tools notes\n", "utf-8");
@@ -465,9 +465,9 @@ describe("writeEducationFiles", () => {
 
       const userBefore =
         "# Workspace tools\n\n" +
-        "Some user notes about tooling that predate MemClaw.\n\n";
+        "Some user notes about tooling that predate Caura.\n\n";
       const userAfter =
-        "\n\n## Notes\n\nMore user content below the MemClaw section.\n";
+        "\n\n## Notes\n\nMore user content below the Caura section.\n";
       const staleFenced =
         "<!-- memclaw:tools v=deadbeef -->\n" +
         "## MemClaw — Tools Available\n\nObsolete content from a previous version.\n" +
@@ -1426,7 +1426,7 @@ describe("buildAgentsMd", () => {
     // automatically by the runtime from the plugin manifest
     // (openclaw.plugin.json:skills). AGENTS.md — injected as bootstrap
     // every turn — must direct the model to open that skill before its
-    // first MemClaw tool call so the signatures, decision guidance, and
+    // first Caura tool call so the signatures, decision guidance, and
     // error codes are in context when needed.
     //
     // CAURA-000: AGENTS.md must NOT reference the skill by a filesystem

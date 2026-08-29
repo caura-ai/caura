@@ -9,7 +9,7 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 // Set API key before importing env.ts so resolveTenantId won't early-exit.
-// Must be MEMCLAW_*-prefixed — env.ts only loads those from .env.
+// Must carry the CAURA_ prefix — env.ts only loads prefixed keys from .env.
 process.env.CAURA_API_KEY = "mc_test_key_for_env_tests";
 // Clear tenant id so resolveTenantId actually attempts a fetch.
 delete process.env.CAURA_TENANT_ID;

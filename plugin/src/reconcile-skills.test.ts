@@ -489,7 +489,7 @@ describe("reconcileSkills — configured targets", () => {
     mkdirSync(ext(slug), { recursive: true });
     writeFileSync(ext(slug, "SKILL.md"), body, "utf-8");
   };
-  const plantOwned = (slug: string, body = "# memclaw owned\n") => {
+  const plantOwned = (slug: string, body = "# plugin owned\n") => {
     mkdirSync(ext(slug), { recursive: true });
     writeFileSync(ext(slug, "SKILL.md"), body, "utf-8");
     writeFileSync(ext(slug, OWNED_MARKER), "x", "utf-8");
@@ -544,9 +544,9 @@ describe("reconcileSkills — configured targets", () => {
     assert.ok(!summary.skipped.includes("deploy-runbook"), "collisions are not conflated into skipped");
   });
 
-  test("additive: a MemClaw-owned skill dropped from the catalog IS removed", async () => {
+  test("additive: a plugin-owned skill dropped from the catalog IS removed", async () => {
     plantOnDisk("memclaw");
-    plantOwned("old-skill"); // previously written by MemClaw (has marker)
+    plantOwned("old-skill"); // previously written by this plugin (has marker)
     plantForeign("client-skill"); // foreign neighbour — must survive
     useAdditive();
     mockCatalog = []; // old-skill no longer active

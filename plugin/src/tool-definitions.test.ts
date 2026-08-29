@@ -36,7 +36,7 @@ describe("tool-specs loader", () => {
   });
 
   test("getSpec throws for unknown tool", () => {
-    assert.throws(() => getSpec("memclaw_not_a_thing"), /Unknown tool/);
+    assert.throws(() => getSpec("caura_not_a_thing"), /Unknown tool/);
   });
 
   test("getSpec returns matching entry for known tool", () => {
@@ -119,7 +119,7 @@ describe("createToolFromSpec factory", () => {
 
   test("throws for a tool name not in tools.json", () => {
     assert.throws(
-      () => createToolFromSpec("memclaw_does_not_exist"),
+      () => createToolFromSpec("caura_does_not_exist"),
       /Unknown tool/,
     );
   });
@@ -334,7 +334,7 @@ describe("drift checks across tool surface artefacts", () => {
       );
     });
 
-    test("lists all currently-available MemClaw tools by name", () => {
+    test("lists all currently-available Caura tools by name", () => {
       for (const name of CAURA_TOOLS) {
         assert.ok(
           tools.includes(name),
@@ -383,7 +383,7 @@ describe("drift checks across tool surface artefacts", () => {
       );
     });
 
-    test("emits nothing when no MemClaw tools are available", () => {
+    test("emits nothing when no Caura tools are available", () => {
       const empty = cauraPromptSectionText(new Set());
       assert.equal(empty, "", "must emit empty string when no tools available");
     });
@@ -391,7 +391,7 @@ describe("drift checks across tool surface artefacts", () => {
 });
 
 describe("labelFor naming conversion", () => {
-  test("caura_doc → MemClaw Doc, caura_entity_get → MemClaw Entity Get", () => {
+  test("caura_doc → Caura Doc, caura_entity_get → Caura Entity Get", () => {
     assert.equal(createToolFromSpec("caura_doc").label, "Caura Doc");
     assert.equal(
       createToolFromSpec("caura_entity_get").label,

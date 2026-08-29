@@ -206,7 +206,7 @@ export function cleanupStaleHeartbeatEducation(
  * Delete orphan TOOLS.md / AGENTS.md at <baseDir>/workspaces/ that the
  * pre-fix discovery wrote when it mistakenly treated the plural parent
  * directory as a single workspace. Idempotent: missing files are no-op,
- * non-MemClaw content at that path is left alone.
+ * content this plugin did not write at that path is left alone.
  */
 function cleanupPhantomEducationFiles(baseDir: string): void {
   const phantomDir = join(baseDir, "workspaces");
@@ -215,12 +215,12 @@ function cleanupPhantomEducationFiles(baseDir: string): void {
     if (!existsSync(fpath)) continue;
     try {
       const content = readFileSync(fpath, "utf-8");
-      const isMemClawOrphan =
+      const isPluginOrphan =
         (fname === "TOOLS.md" &&
           (content.includes("MemClaw — Tools Available") ||
             content.includes("Caura — Tools Available"))) ||
         (fname === "AGENTS.md" && content.includes("## Memory V2"));
-      if (isMemClawOrphan) {
+      if (isPluginOrphan) {
         unlinkSync(fpath);
       }
     } catch (e: unknown) {
@@ -331,7 +331,7 @@ export function educateAgents(
 //                contract, write triggers, capture cadences, quality
 //                enforcement, prohibited behaviors. Short supersession
 //                paragraph instructs the model to read SKILL.md before
-//                its first MemClaw call.
+//                its first Caura call.
 //
 // AGENTS.md idempotency is keyed off the substring "## Memory V2" in
 // writeEducationFiles() below; buildAgentsMd() must continue to emit that
