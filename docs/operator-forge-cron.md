@@ -12,7 +12,7 @@ fanout pattern:
    Actions cron / `cron` in the deploy box) hits
    `POST /admin/lifecycle/fanout/forge-distill` periodically.
 2. **`core-api`** lists tenants with `skills_factory.enabled=true` and
-   publishes one `memclaw.lifecycle.forge-distill-requested` event per
+   publishes one `caura.lifecycle.forge-distill-requested` event per
    tenant.
 3. **The in-process consumer** in `core-api` (or `core-worker` in
    SaaS deployments) invokes `run_forge_cron_tick` for the tenant.
