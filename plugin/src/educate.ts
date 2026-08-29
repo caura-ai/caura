@@ -3,7 +3,7 @@
  * workspaces, and append Caura sections to TOOLS.md and AGENTS.md.
  *
  * SKILL.md is no longer written per-workspace: it ships as a static file at
- * `<plugin-root>/skills/memclaw/SKILL.md` and is discovered by OpenClaw via
+ * `<plugin-root>/skills/memclaw/SKILL.md` and is discovered by OpenClaw via // legacy-name-floor: shipped skill path
  * the `skills` field in `openclaw.plugin.json`.
  *
  * Security fixes:
@@ -130,12 +130,12 @@ export function discoverAgentWorkspaces(
 
 /**
  * Strip the legacy DEFAULT_EDUCATION paragraph from a HEARTBEAT.md
- * string, if present. Pre-C1 the plugin wrote a 4-sentence MemClaw
+ * string, if present. Pre-C1 the plugin wrote a 4-sentence MemClaw // legacy-name-floor: historical on-disk paragraph
  * intro into each workspace's HEARTBEAT.md on first install:
  *
- *   You have been connected to MemClaw — a shared persistent memory
+ *   You have been connected to MemClaw — a shared persistent memory // legacy-name-floor: historical on-disk paragraph
  *   system. You now have N tools for writing, searching, and managing
- *   memories. Check skills/memclaw/SKILL.md for full instructions.
+ *   memories. Check skills/memclaw/SKILL.md for full instructions. // legacy-name-floor: shipped skill path
  *   Key rules: always search before starting work, always write
  *   findings after completing work, always include your agent_id.
  *
@@ -147,7 +147,7 @@ export function discoverAgentWorkspaces(
  * HEARTBEAT.md left over from a prior install.
  *
  * Match strategy: anchor on the unique opening clause ("You have been
- * connected to MemClaw") and the unique closing clause ("always
+ * connected to MemClaw") and the unique closing clause ("always // legacy-name-floor: historical paragraph anchor
  * include your agent_id."), single-line `[^\n]*?` between. Optional
  * leading separator pattern `\n+---\n+` — flexible enough to match
  * both the canonical `\n\n---\n\n` (which is what `educateAgents`
@@ -308,7 +308,7 @@ export function educateAgents(
 //
 // Role separation — cost-aware split between per-turn and on-demand files.
 //
-//   SKILL.md   — static file, shipped at `<plugin-root>/skills/memclaw/`
+//   SKILL.md   — static file, shipped at `<plugin-root>/skills/memclaw/` // legacy-name-floor: shipped skill path
 //                via `openclaw.plugin.json:skills`. Loaded by the model
 //                via the `read` tool ON DEMAND; only the skill-list entry
 //                (name + description + path) appears in every turn. Owns
@@ -337,6 +337,8 @@ export function educateAgents(
 // writeEducationFiles() below; buildAgentsMd() must continue to emit that
 // exact substring.
 
+const SKILL_SLUG = "memclaw"; // legacy-name-floor: OpenClaw skill slug
+
 export function buildToolsMd(): string {
   return `
 ---
@@ -344,7 +346,7 @@ export function buildToolsMd(): string {
 ## Caura — Tools Available
 
 Persistent, cross-session, multi-agent memory. For per-tool signatures,
-decision guidance, constraints, and error codes, open the **memclaw**
+decision guidance, constraints, and error codes, open the **${SKILL_SLUG}**
 skill (your runtime loads it automatically — do NOT search the
 filesystem for it) before your first call in a session.
 
@@ -419,7 +421,7 @@ memories, not shared); share via \`op=write doc_id=<slug>\`.
 **Recall auto-gated** on trivial turns; call \`caura_recall\`
 directly when a short message needs LTM.
 
-Before your first Caura call this session, open the **memclaw**
+Before your first Caura call this session, open the **${SKILL_SLUG}**
 skill — your runtime loads it automatically, so do NOT search the
 filesystem for it — for signatures, cadences, quality, prohibitions,
 recall policy, and sharing. \`TOOLS.md\` carries the at-a-glance tool
@@ -432,9 +434,9 @@ list and enum vocabulary every turn.
 // Per-workspace TOOLS.md and AGENTS.md sections are wrapped in versioned
 // fence markers:
 //
-//   <!-- memclaw:tools v=<8-hex> -->
+//   <!-- memclaw:tools v=<8-hex> --> // legacy-name-floor: pinned on-disk fence tag
 //   …rendered block…
-//   <!-- /memclaw:tools -->
+//   <!-- /memclaw:tools --> // legacy-name-floor: pinned on-disk fence tag
 //
 // The version is the first 8 hex chars of the SHA-256 of the block string.
 // On subsequent runs, `spliceFencedBlock` decides what to do based on
@@ -447,13 +449,13 @@ list and enum vocabulary every turn.
 //   3. No fence, but a legacy heading (the pre-fence block layout from
 //      v1.x) → splice from one preceding `---` rule (if any) through
 //      the heading and on to the next H2 / EOF, then write the fenced
-//      block in its place. A one-shot `<filename>.memclaw-bak` is
+//      block in its place. A one-shot `<filename>.memclaw-bak` is // legacy-name-floor: pinned backup suffix
 //      written before the splice so users who hand-edited inside our
 //      block can recover.
 //   4. No fence, no legacy heading → append at EOF (fresh install).
 //
 // This replaces the pre-fix presence-based idempotency
-// (`includes("MemClaw")` / `includes("## Memory V2")`) which never
+// (`includes("MemClaw")` / `includes("## Memory V2")`) which never // legacy-name-floor: documents pre-fence matcher
 // updated stale content after a plugin upgrade.
 
 function blockHash(content: string): string {
@@ -465,14 +467,14 @@ function escapeRegex(s: string): string {
 }
 
 /**
- * Find the line range covered by a legacy MemClaw section (pre-fence
- * format), or null if no MemClaw legacy heading is present.
+ * Find the line range covered by a legacy MemClaw section (pre-fence // legacy-name-floor: historical heading family
+ * format), or null if no MemClaw legacy heading is present. // legacy-name-floor: historical heading family
  *
  * Uses **prefix matching** on the heading rather than exact-equality:
  * the plugin has emitted at least two heading forms over its history
- * (e.g. v0.98.5 wrote `## MemClaw — Long-Term Agent Memory (auto-added
- * by plugin)` for TOOLS.md; v1.x wrote `## MemClaw — Tools Available`).
- * Both share a stable prefix (`## MemClaw —`), so prefix matching
+ * (e.g. v0.98.5 wrote `## MemClaw — Long-Term Agent Memory (auto-added // legacy-name-floor: historical heading family
+ * by plugin)` for TOOLS.md; v1.x wrote `## MemClaw — Tools Available`). // legacy-name-floor: historical heading family
+ * Both share a stable prefix (`## MemClaw —`), so prefix matching // legacy-name-floor: historical heading family
  * catches every historical form in one pass without us having to
  * enumerate them.
  *
@@ -587,7 +589,7 @@ export function spliceFencedBlock(
     // backup behaviour: a user may have hand-edited inside the fenced
     // block (e.g. added a personal comment); a version bump would
     // otherwise silently discard those edits. The one-shot
-    // `<file>.memclaw-bak` preserves the pre-replace content for
+    // `<file>.memclaw-bak` preserves the pre-replace content for // legacy-name-floor: pinned backup suffix
     // recovery. Same one-shot semantics as case 3 below: if the
     // backup already exists, leave it alone.
     let backedUp = false;
@@ -653,7 +655,7 @@ export function spliceFencedBlock(
  * Append Caura sections to TOOLS.md and AGENTS.md in each agent workspace.
  *
  * SKILL.md is no longer written here: it ships as a static file at
- * `<plugin-root>/skills/memclaw/SKILL.md` and is discovered by OpenClaw
+ * `<plugin-root>/skills/memclaw/SKILL.md` and is discovered by OpenClaw // legacy-name-floor: shipped skill path
  * via the `skills` field in `openclaw.plugin.json` — one copy per node,
  * auto-gated by plugin enablement.
  *
@@ -690,10 +692,10 @@ export function writeEducationFiles(
         "tools",
         toolsMdSection,
         // Prefix, not exact match. Catches every legacy heading the
-        // plugin has emitted: `## MemClaw — Tools Available` (1.x),
-        // `## MemClaw — Long-Term Agent Memory (auto-added by plugin)`
+        // plugin has emitted: `## MemClaw — Tools Available` (1.x), // legacy-name-floor: historical heading family
+        // `## MemClaw — Long-Term Agent Memory (auto-added by plugin)` // legacy-name-floor: historical heading family
         // (0.98.5), and any future variant that keeps the same
-        // `## MemClaw —` lead.
+        // `## MemClaw —` lead. // legacy-name-floor: historical heading family
         "## MemClaw —",
         {
           force: options.force,
@@ -713,9 +715,9 @@ export function writeEducationFiles(
         existingAgents,
         "agents",
         agentsMdSection,
-        // Prefix, not exact match. Catches `## Memory V2 — MemClaw
+        // Prefix, not exact match. Catches `## Memory V2 — MemClaw // legacy-name-floor: historical heading family
         // Protocol (mandatory)` (1.x), `## Memory V2 (auto-added by
-        // MemClaw plugin — replaces any earlier memory section above)`
+        // MemClaw plugin — replaces any earlier memory section above)` // legacy-name-floor: historical heading family
         // (0.98.5), and any future variant under the same `## Memory V2`
         // family. The content-shape check (`caura_` token) prevents
         // false positives on user prose.

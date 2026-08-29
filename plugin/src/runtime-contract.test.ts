@@ -390,7 +390,7 @@ describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-
   // ``Number.isFinite(-1) === true``, so without an explicit positive
   // lower bound a negative ``nowMs`` (test mock, time-travel scenario,
   // accidental ``-Date.now()``) would produce a ``relativePath`` like
-  // ``memclaw/flush-1969-12-31.md``. The path-shape check would still
+  // ``memclaw/flush-1969-12-31.md``. The path-shape check would still // legacy-name-floor: historical workspace path
   // pass (it's just a valid YYYY-MM-DD) but the file name is meaningless
   // and confuses operators reading the workspace. Lock the lower bound.
 
@@ -450,7 +450,7 @@ describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-
 // Customer report 2026-05-25: ``context engine assemble failed, using
 // pipeline messages: TypeError: Cannot read properties of undefined
 // (reading 'slice')`` fired on every WhatsApp turn after the customer
-// set ``plugins.slots.contextEngine = "memclaw"``. OpenClaw's catch at
+// set ``plugins.slots.contextEngine = "memclaw"``. OpenClaw's catch at // legacy-name-floor: historical customer config
 // selection-BfCSa_QL.js:7689 calls ``String(err)`` which strips the
 // stack — so the throw was invisible in the gateway log past the
 // top-line.

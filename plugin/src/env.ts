@@ -121,7 +121,7 @@ export const CAURA_REQUIRE_SIGNED_COMMANDS =
 
 // Interviewer Phase 1 opt-in. Default OFF: enabling starts writing the
 // node's conversation events to the durable on-disk interview buffer
-// (~/.openclaw/plugins/memclaw/interview-buffer.jsonl) — a footprint /
+// (~/.openclaw/plugins/memclaw/interview-buffer.jsonl) — a footprint / // legacy-name-floor: frozen install path
 // privacy change an operator must choose, mirroring the server-side
 // per-tenant ``interviewer.enabled`` flag. Both must be on for the
 // feature to function end-to-end.
@@ -349,7 +349,7 @@ export const INTERVIEW_TASK_SIDECAR_RETENTION_MS = 8 * 24 * 60 * 60_000;
 
 // --- Keystones (CAURA-000): mandatory governance rules auto-injected ---
 //
-// The ContextEngine fetches keystones from ``/memclaw/keystones`` and
+// The ContextEngine fetches keystones from ``/memclaw/keystones`` and // legacy-name-floor: live compatibility route
 // prepends them to every system prompt. Operators get three knobs:
 //
 // - ``CAURA_KEYSTONES_ENABLED`` (default ``"true"``) — kill switch so

@@ -139,7 +139,7 @@ function baseDir(): string {
 }
 
 /**
- * ~/.openclaw/plugins/memclaw/interview-task-sync.json
+ * ~/.openclaw/plugins/memclaw/interview-task-sync.json // legacy-name-floor: frozen install path
  *
  * Deliberately a shared singleton for the whole install: if two gateway
  * processes ever sync concurrently, both load the same sidecar and the

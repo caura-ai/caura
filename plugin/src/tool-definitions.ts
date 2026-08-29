@@ -249,7 +249,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
         // it to false for any object schema lacking explicit ``properties``).
         // Without this, every plugin-routed ``caura_doc op=write`` call from
         // an agent fails with "data: must not have additional properties" —
-        // surfaced wet-testing the Phase B skill-share flow on memclaw.dev
+        // surfaced wet-testing the Phase B skill-share flow on memclaw.dev // legacy-name-floor: historical wet-test host
         // (2026-05-06).
         additionalProperties: true,
       },
@@ -632,7 +632,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     return apiCall("GET", "/memories/stats", undefined, query, signal);
   },
 
-  // GET /api/v1/memclaw/keystones — read-only; trust gate is open (PR3).
+  // GET /api/v1/memclaw/keystones — read-only; trust gate is open (PR3). // legacy-name-floor: live compatibility route
   // The plugin's ContextEngine fetches this at session start and prepends
   // the result to the system prompt (see ``plugin/src/keystones.ts``).
   // Exposing it as a callable tool too gives agents a way to re-fetch

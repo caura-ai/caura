@@ -71,7 +71,7 @@ export const PROTECTED_SKILLS: ReadonlySet<string> = new Set(["memclaw"]);
 // dirs. Caura writes this sentinel inside every skill dir it creates
 // there, and only ever updates/removes a ``<slug>`` that carries it — so
 // a skill it doesn't own is never touched. The marker lives INSIDE the
-// skill dir (``<dir>/<slug>/.memclaw-owned``); OpenClaw's loader reads
+// skill dir (``<dir>/<slug>/.memclaw-owned``); OpenClaw's loader reads // legacy-name-floor: pinned ownership marker
 // only ``SKILL.md`` and halts recursion at a skill root, so the marker is
 // invisible to it (verified against agent-core skills.ts / session.ts).
 // Choosing a per-skill marker over a central manifest makes the safety
@@ -100,7 +100,7 @@ export interface ReconcileSummary {
   // the standing truth: "these active skills are present on this node
   // right now." Surfaced on the heartbeat so an operator can confirm an
   // approved/active skill actually landed on the fleet. Excludes the
-  // bundled ``memclaw`` onboarding skill (reported via ``protected``).
+  // bundled ``memclaw`` onboarding skill (reported via ``protected``). // legacy-name-floor: bundled protected skill slug
   // Aggregated across all reconciled targets (deduplicated, sorted).
   installed: string[];
   added: string[];
@@ -410,7 +410,7 @@ function reconcileAdditiveDir(
     if (desired.has(slug)) continue;
     // Ownership gates everything in an additive dir: a foreign slug is left
     // alone even if its name collides with a PROTECTED one. A foreign
-    // "memclaw" dir (no marker) is the client's, not ours — ignore it
+    // "memclaw" dir (no marker) is the client's, not ours — ignore it // legacy-name-floor: bundled protected skill slug
     // rather than misreport it as a Caura-protected skill. An OWNED
     // protected dir still survives via the protected check below.
     if (!isCauraOwned(join(skillsRoot, slug))) continue; // foreign — leave alone
@@ -640,7 +640,7 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   // Aggregate across targets at slug granularity — a skill present in
   // more than one target is one slug, not N — deduped + sorted for a
   // stable heartbeat payload. ``installed`` excludes the bundled
-  // ``memclaw`` skill (filtered per dir). For the default single target
+  // ``memclaw`` skill (filtered per dir). For the default single target // legacy-name-floor: bundled protected skill slug
   // this is identical to the un-aggregated per-dir lists.
   summary.added = [...new Set(addedAll)].sort();
   summary.removed = [...new Set(removedAll)].sort();

@@ -309,12 +309,12 @@ describe("drift checks across tool surface artefacts", () => {
   describe("prompt-section.ts (per-turn system-prompt fragment)", () => {
     const tools = cauraPromptSectionText(new Set(CAURA_TOOLS));
 
-    test("includes header, identity, and pointer to the memclaw skill (by name)", () => {
+    test("includes header, identity, and pointer to the memclaw skill (by name)", () => { // legacy-name-floor: OpenClaw skill slug
       assert.ok(tools.includes("## Caura Memory"), "missing header");
       assert.ok(tools.includes("`agent_id`"), "missing agent_id mention");
       assert.ok(tools.includes("never fabricate") || tools.includes("Never fabricate"),
         "missing identity 'never fabricate' clause");
-      // CAURA-000: the per-turn fragment must point at the **memclaw**
+      // CAURA-000: the per-turn fragment must point at the **memclaw** // legacy-name-floor: OpenClaw skill slug
       // skill by NAME, not a filesystem path — a path pointer made cron
       // agents run OpenClaw's `search` tool to find a file that isn't in
       // their workspace (the skill is manifest-discovered at plugin-root),
@@ -326,7 +326,7 @@ describe("drift checks across tool surface artefacts", () => {
       );
       assert.ok(
         /\*\*memclaw\*\* skill/i.test(flat),
-        "must reference the **memclaw** skill by name",
+        "must reference the **memclaw** skill by name", // legacy-name-floor: OpenClaw skill slug
       );
       assert.ok(
         /do NOT search the filesystem/i.test(flat),

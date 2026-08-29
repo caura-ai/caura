@@ -2,7 +2,7 @@
  * Keystone auto-injection (CAURA-000).
  *
  * Keystones are governance rules the agent MUST obey. The ContextEngine
- * fetches them from ``GET /api/v1/memclaw/keystones`` once per identity
+ * fetches them from ``GET /api/v1/memclaw/keystones`` once per identity // legacy-name-floor: live compatibility route
  * (tenant, fleet, agent) and prepends a ``<keystone_rules>`` block to
  * every system prompt so the rules are deterministically present
  * regardless of whether ``shouldRecall`` gates the per-turn ``/search``

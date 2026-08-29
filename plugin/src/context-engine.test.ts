@@ -147,7 +147,7 @@ describe("shouldRecall — policy=keywords", () => {
     assert.equal(r.reason, "explicit-recall-trigger");
   });
 
-  test("matches MemClaw / LTM / long term keywords (case-insensitive)", () => {
+  test("matches MemClaw / LTM / long term keywords (case-insensitive)", () => { // legacy-name-ok: recall trigger keyword alias
     for (const p of [
       "any memclaw context here?",
       "check LTM",
@@ -299,7 +299,7 @@ describe("shouldRecall — policy=auto (the default)", () => {
     assert.equal(r.reason, "explicit-recall-trigger");
   });
 
-  test("trigger keyword 'memclaw' fires recall on otherwise-skip prompt", () => {
+  test("trigger keyword 'memclaw' fires recall on otherwise-skip prompt", () => { // legacy-name-ok: recall trigger keyword alias
     // Rule 3: the old name keeps triggering forever.
     const r = shouldRecall(input({ prompt: "memclaw?" }));
     assert.equal(r.recall, true);

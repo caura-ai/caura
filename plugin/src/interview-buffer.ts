@@ -53,7 +53,7 @@ export interface InterviewEventInput {
   outcome?: string;
 }
 
-/** ~/.openclaw/plugins/memclaw/interview-buffer.jsonl */
+/** ~/.openclaw/plugins/memclaw/interview-buffer.jsonl */ // legacy-name-floor: frozen install path
 export function getInterviewBufferPath(): string {
   return _pathOverride ?? join(getPluginDir(), "interview-buffer.jsonl");
 }

@@ -9,7 +9,7 @@
  *
  * Per-turn token budget: this fragment is paid on every model call. The
  * deep reference (three rules, write triggers, capture cadence, quality,
- * prohibitions, per-tool signatures) lives in `skills/memclaw/SKILL.md`
+ * prohibitions, per-tool signatures) lives in `skills/memclaw/SKILL.md` // legacy-name-floor: shipped skill path
  * and is loaded on demand via the skill `read` path. The per-workspace
  * `TOOLS.md` and `AGENTS.md` carry the slim every-turn cues. This file
  * is intentionally minimal: a header, the available tool list, the

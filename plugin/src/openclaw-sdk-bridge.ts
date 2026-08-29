@@ -11,7 +11,7 @@
  * bare-spec ``openclaw/plugin-sdk`` to OpenClaw's bundled SDK location.
  * Native-loaded ``.js`` plugins do NOT see that alias map — bare-spec
  * resolution falls back to standard Node resolution, which from
- * ``~/.openclaw/plugins/memclaw/dist/index.js`` walks the directory tree
+ * ``~/.openclaw/plugins/memclaw/dist/index.js`` walks the directory tree // legacy-name-floor: frozen install path
  * upward and never reaches OpenClaw's global install. Result:
  *
  *     import("openclaw/plugin-sdk")       // ERR_MODULE_NOT_FOUND

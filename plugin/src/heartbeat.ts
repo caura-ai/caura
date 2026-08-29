@@ -524,7 +524,7 @@ export async function sendHeartbeat(): Promise<void> {
     // safe and cheap: writeEducationFiles uses versioned fence markers and
     // is a no-op when each workspace already carries the current-version
     // block. The pre-A1 filter ("only workspaces whose TOOLS.md does not
-    // already mention memclaw") would skip workspaces with stale-version
+    // already mention memclaw") would skip workspaces with stale-version // legacy-name-floor: historical matcher behavior
     // content — exactly the population we now need to migrate.
     try {
       const filesResult = writeEducationFiles(

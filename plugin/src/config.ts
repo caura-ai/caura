@@ -66,7 +66,7 @@ export function isCauraAllowed(config: Record<string, any>): boolean {
   // in the array in those cases; it's allowed by default. Pre-fix this
   // function returned `false` for missing/empty allow, which drove
   // `autoFixAllowlist` step 1 to *create* an array containing only
-  // `"memclaw"` — flipping the user's permissive config into a
+  // `"memclaw"` — flipping the user's permissive config into a // legacy-name-floor: historical customer config
   // restrictive one and silently locking out every other built-in
   // plugin including `openai`. Customer-reported on a fresh 2.8.1
   // install: "Unknown model: openai/gpt-5.5" 2 minutes after install.
@@ -140,7 +140,7 @@ export function autoFixAllowlist(options?: {
 
   // 1. Ensure the plugin is in `plugins.allow` IF — and only if — the
   //    user has an explicit, non-empty allowlist. CAURA-000: pre-fix
-  //    this branch unconditionally created `["memclaw"]` from a
+  //    this branch unconditionally created `["memclaw"]` from a // legacy-name-floor: historical customer config
   //    missing/empty array, converting a permissive OpenClaw config
   //    into a restrictive one that locked out every other plugin
   //    (the customer's "openai disabled after 2.8.1 install"

@@ -450,7 +450,7 @@ const cauraPlugin = {
       //
       //   1. Missing tools in ``tools.alsoAllow`` → agents can't invoke
       //      those tools. Mutes the tool surface.
-      //   2. ``plugins.slots.contextEngine !== "memclaw"`` → OpenClaw
+      //   2. ``plugins.slots.contextEngine !== "memclaw"`` → OpenClaw // legacy-name-floor: frozen plugin id
       //      falls back to the default "legacy" context engine, so our
       //      ``ContextEngine.assemble()`` is never called and the
       //      ``<keystone_rules>`` block never reaches the system prompt.
@@ -518,7 +518,7 @@ const cauraPlugin = {
     // context, but it ALSO needs the file to exist because that's the
     // only filesystem write surface OpenClaw exposes to it. Mirror
     // memory-core's memory/YYYY-MM-DD.md layout but namespace under
-    // memclaw/ so we don't collide on hosts running both plugins.
+    // memclaw/ so we don't collide on hosts running both plugins. // legacy-name-floor: frozen workspace namespace
     // The outer try here only catches REGISTRATION-time failure. The
     // resolver itself runs later in OpenClaw's agent-runner stack — any
     // throw there propagates up and crashes the flush turn. Pre-fix two

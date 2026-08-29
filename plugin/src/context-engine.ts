@@ -121,7 +121,7 @@ export function _resetBootstrapForTests(): void {
  * 409 (5xx, network, auth) still routes to the normal error logger.
  *
  * Matches the error message format from ``transport.ts:82``:
- *   ``new Error("Caura API " + status + ": " + body)`` (legacy "MemClaw API" matched too)
+ *   ``new Error("Caura API " + status + ": " + body)`` (legacy "MemClaw API" matched too) // legacy-name-floor: legacy error text
  */
 export function isDuplicateMemoryError(e: unknown): boolean {
   if (!(e instanceof Error)) return false;

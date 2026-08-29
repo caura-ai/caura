@@ -69,7 +69,7 @@ describe("isMemorySlotClaimed", () => {
     assert.equal(isMemorySlotClaimed(c), false);
   });
 
-  test("true when memory slot is memclaw", () => {
+  test("true when memory slot is memclaw", () => { // legacy-name-floor: frozen plugin id
     assert.equal(isMemorySlotClaimed(happyConfig()), true);
   });
 });
@@ -82,19 +82,19 @@ describe("isCauraFullyConfigured", () => {
     assert.equal(isCauraFullyConfigured(happyConfig()), true);
   });
 
-  test("false when memclaw is not in a restrictive allowlist", () => {
+  test("false when memclaw is not in a restrictive allowlist", () => { // legacy-name-floor: frozen plugin id
     // CAURA-000: pre-fix this test used `plugins.allow = []` to mean
     // "not allowlisted", which assumed empty = restrictive. The
     // OpenClaw runtime actually treats empty (and missing) as
     // PERMISSIVE — "no restriction". Use an explicit non-empty
-    // allowlist that excludes memclaw to express the real
+    // allowlist that excludes memclaw to express the real // legacy-name-floor: frozen plugin id
     // "not allowlisted" case.
     const c = happyConfig();
     (c as any).plugins.allow = ["some-other-plugin"];
     assert.equal(isCauraFullyConfigured(c), false);
   });
 
-  test("false when memclaw is disabled", () => {
+  test("false when memclaw is disabled", () => { // legacy-name-floor: frozen plugin id
     const c = happyConfig();
     (c as any).plugins.entries.memclaw.enabled = false;
     assert.equal(isCauraFullyConfigured(c), false);
@@ -116,7 +116,7 @@ describe("isCauraFullyConfigured", () => {
 
 describe("isContextEngineSlotClaimed (CAURA-000 — keystone-injection gate)", () => {
   // OpenClaw 2026.5.4 dist/registry-DFFgCbcm.js:241 resolveContextEngine
-  // reads config.plugins.slots.contextEngine. Without it set to "memclaw",
+  // reads config.plugins.slots.contextEngine. Without it set to "memclaw", // legacy-name-floor: frozen plugin id
   // OpenClaw uses its default "legacy" engine and our assemble() is never
   // called — so the <keystone_rules> block never reaches the prompt.
 
@@ -138,7 +138,7 @@ describe("isContextEngineSlotClaimed (CAURA-000 — keystone-injection gate)", (
     assert.equal(isContextEngineSlotClaimed(c), false);
   });
 
-  test("true when contextEngine slot is memclaw", () => {
+  test("true when contextEngine slot is memclaw", () => { // legacy-name-floor: frozen plugin id
     assert.equal(isContextEngineSlotClaimed(happyConfig()), true);
   });
 });
@@ -216,7 +216,7 @@ describe("shouldRunAutoFix — allowlist drift gate", () => {
 // it is BOTH present AND non-empty. A missing or empty array means "no
 // restriction" — every enabled plugin can load. Pre-fix our predicate
 // reported "not allowed" for the empty/missing case, which caused
-// `autoFixAllowlist` to *create* `["memclaw"]` — silently converting a
+// `autoFixAllowlist` to *create* `["memclaw"]` — silently converting a // legacy-name-floor: historical customer config
 // permissive config into a restrictive one and locking out built-ins
 // like the bundled `openai` provider plugin.
 
@@ -231,14 +231,14 @@ describe("isCauraAllowed — permissive when allow is missing or empty (CAURA-00
     assert.equal(isCauraAllowed(c), true);
   });
 
-  test("true when plugins.allow is non-empty AND includes memclaw", () => {
+  test("true when plugins.allow is non-empty AND includes memclaw", () => { // legacy-name-floor: frozen plugin id
     const c: any = {
       plugins: { allow: ["memclaw", "browser"], entries: {}, load: {}, slots: {} },
     };
     assert.equal(isCauraAllowed(c), true);
   });
 
-  test("false when plugins.allow is non-empty AND excludes memclaw (the only real 'not allowed' case)", () => {
+  test("false when plugins.allow is non-empty AND excludes memclaw (the only real 'not allowed' case)", () => { // legacy-name-floor: frozen plugin id
     const c: any = {
       plugins: { allow: ["browser"], entries: {}, load: {}, slots: {} },
     };
@@ -298,7 +298,7 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
   test("does NOT create plugins.allow when it was missing (fresh-install regression)", () => {
     // Mirrors a vanilla openclaw.json that the user / installer never
     // touched — no `plugins.allow` field at all. Pre-fix autoFix would
-    // CREATE `plugins.allow = ["memclaw"]` here, the customer's
+    // CREATE `plugins.allow = ["memclaw"]` here, the customer's // legacy-name-floor: historical customer config
     // observed crash mechanism.
     const ctx = _autoFixWithConfig({
       plugins: {
@@ -339,9 +339,9 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
     }
   });
 
-  test("DOES add memclaw to an existing non-empty allowlist that excludes it", () => {
+  test("DOES add memclaw to an existing non-empty allowlist that excludes it", () => { // legacy-name-floor: frozen plugin id
     // User has explicitly opted into a restrictive allowlist. We must
-    // add memclaw to it so memclaw itself can still load — otherwise
+    // add memclaw to it so memclaw itself can still load — otherwise // legacy-name-floor: frozen plugin id
     // we'd disable our own plugin while leaving the user's allowlist
     // semantics intact.
     const ctx = _autoFixWithConfig({
@@ -358,7 +358,7 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
       const allow: string[] = written?.plugins?.allow ?? [];
       assert.ok(
         allow.includes("memclaw"),
-        `expected memclaw to be added; got: ${JSON.stringify(allow)}`,
+        `expected memclaw to be added; got: ${JSON.stringify(allow)}`, // legacy-name-floor: frozen plugin id
       );
       assert.ok(allow.includes("browser"), "must preserve existing entries");
       assert.ok(allow.includes("filesystem"), "must preserve existing entries");
@@ -367,7 +367,7 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
     }
   });
 
-  test("does NOT add memclaw twice when already in a non-empty allowlist", () => {
+  test("does NOT add memclaw twice when already in a non-empty allowlist", () => { // legacy-name-floor: frozen plugin id
     const ctx = _autoFixWithConfig({
       plugins: {
         allow: ["browser", "memclaw", "filesystem"],
@@ -383,7 +383,7 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
       assert.equal(
         allow.filter((p) => p === "memclaw").length,
         1,
-        `memclaw must appear exactly once; got: ${JSON.stringify(allow)}`,
+        `memclaw must appear exactly once; got: ${JSON.stringify(allow)}`, // legacy-name-floor: frozen plugin id
       );
     } finally {
       ctx.cleanup();
