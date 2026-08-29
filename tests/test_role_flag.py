@@ -43,7 +43,11 @@ async def client_for_role():
     async def _make(role: str) -> AsyncClient:
         app = _APP_CACHE.setdefault(role, _build_app(role))
         transport = ASGITransport(app=app, raise_app_exceptions=False)
-        client = AsyncClient(transport=transport, base_url="http://test")
+        client = AsyncClient(
+            transport=transport,
+            base_url="http://test",
+            headers={"X-Storage-Secret": "test-storage-secret"},
+        )
         clients.append(client)
         return client
 

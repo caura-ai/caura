@@ -1,8 +1,10 @@
 import logging
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+from common.storage_auth import read_shared_secret_file
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +350,17 @@ class Settings(BaseSettings):
     crystallizer_dedup_sample_size: int = 1000
     crystallizer_dedup_threshold: float = 0.95
     core_storage_api_url: str = "http://localhost:8002"
+    core_storage_shared_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
+    core_storage_shared_secret_file: str = ""
+
+    @model_validator(mode="after")
+    def resolve_core_storage_shared_secret(self) -> Self:
+        if not self.core_storage_shared_secret.get_secret_value():
+            self.core_storage_shared_secret = SecretStr(
+                read_shared_secret_file(self.core_storage_shared_secret_file)
+            )
+        return self
+
     # Enterprise SaaS splits core-storage-api into writer + reader Cloud Run
     # services (CAURA-591 Part B). When this is set, the storage client
     # routes GET + tagged-read POST calls here instead of ``core_storage_api_url``;

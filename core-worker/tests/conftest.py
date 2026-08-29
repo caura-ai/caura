@@ -14,3 +14,4 @@ if _repo_root not in sys.path:
 
 # In-process bus by default — every test runs without a real Pub/Sub.
 os.environ.setdefault("EVENT_BUS_BACKEND", "inprocess")
+os.environ.setdefault("CORE_STORAGE_SHARED_SECRET", "test-storage-secret")

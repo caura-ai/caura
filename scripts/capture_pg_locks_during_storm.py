@@ -29,16 +29,20 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 import time
 import urllib.error
 import urllib.request
 
 
-def _snapshot(base: str, timeout: float = 5.0) -> dict:
+def _snapshot(base: str, secret: str, timeout: float = 5.0) -> dict:
     """Fetch one /_debug/pg_locks payload."""
     url = f"{base.rstrip('/')}/api/v1/storage/_debug/pg_locks"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "X-Storage-Secret": secret},
+    )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
@@ -49,6 +53,11 @@ def main() -> int:
         "--base",
         default="http://localhost:8080",
         help="Base URL of the local proxy to storage-api (default: http://localhost:8080)",
+    )
+    parser.add_argument(
+        "--secret",
+        default=os.environ.get("CORE_STORAGE_SHARED_SECRET", ""),
+        help="Storage shared secret (default: CORE_STORAGE_SHARED_SECRET)",
     )
     parser.add_argument(
         "--duration",
@@ -68,6 +77,8 @@ def main() -> int:
         help="Output JSONL path (default: stdout)",
     )
     args = parser.parse_args()
+    if not args.secret:
+        parser.error("--secret or CORE_STORAGE_SHARED_SECRET is required")
 
     # ``contextlib.nullcontext(sys.stdout)`` keeps the ``with`` shape
     # consistent across stdout and a real file, and inlining ``open()``
@@ -86,7 +97,7 @@ def main() -> int:
             while time.monotonic() < deadline:
                 t0 = time.monotonic()
                 try:
-                    payload = _snapshot(args.base)
+                    payload = _snapshot(args.base, args.secret)
                     sink.write(
                         json.dumps(
                             {

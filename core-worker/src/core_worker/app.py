@@ -78,6 +78,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info("Starting core-worker", extra={"environment": settings.environment})
 
+    if not settings.core_storage_shared_secret.get_secret_value():
+        logger.error(
+            "CORE_STORAGE_SHARED_SECRET is not configured; outbound storage requests "
+            "would omit X-Storage-Secret and protected storage services would reject them"
+        )
+        raise RuntimeError("CORE_STORAGE_SHARED_SECRET is required for core-worker")
+
     # Eager platform-provider init: builds BOTH the embedding and LLM
     # singletons from ``PLATFORM_EMBEDDING_*`` / ``PLATFORM_LLM_*``. The
     # LLM half is what ``handle_enrich_request`` falls through to when

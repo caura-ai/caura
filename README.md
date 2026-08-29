@@ -173,25 +173,38 @@ Anthropic, Gemini, and OpenRouter don't offer embedding APIs here — pair them 
 docker compose up -d
 ```
 
-By default this **pulls the multi-arch images from `ghcr.io`** (`linux/amd64` + `linux/arm64`) on first run — takes ~30 seconds. Subsequent `up` commands re-use the cached image (no registry round-trip, works offline). To pin a specific version, set `CAURA_VERSION=v1.2.3` in your `.env`. To build from local source instead (e.g. when iterating on a fork), run `docker compose up --build --no-pull`.
+> **Security requirement:** port 8002 belongs to the internal storage data
+> plane and must never be exposed to the host or any untrusted network. The
+> shipped Compose file does not publish it; `core-api` reaches it only across
+> the private Compose network and authenticates with a random, per-installation
+> secret generated into a private Docker volume.
+> Do not add an `8002:8002` port mapping. If local debugging absolutely requires
+> host access, bind only `127.0.0.1:8002:8002` and keep the
+> `CORE_STORAGE_SHARED_SECRET` check enabled. Only exact `GET /healthz` and
+> `GET /readyz` probes are public; every storage data route requires the secret.
+
+By default this **pulls the multi-arch images from `ghcr.io`** (`linux/amd64` + `linux/arm64`) on first run — takes ~30 seconds. Subsequent `up` commands re-use the cached image (no registry round-trip, works offline). To pin a specific version, set `CAURA_VERSION=v1.2.3` in your `.env`. To build from local source instead (e.g. when iterating on a fork), run `docker compose up --build --pull never`.
 
 To upgrade to a newer image at the same tag (e.g. `:latest` after we cut a new release), run `docker compose pull && docker compose up -d`. Without an explicit `pull`, the local cache wins — there's no silent version drift.
 
 > **Offline / air-gapped operation**: depending on whether the image is already cached locally:
-> - **Image cached, no network**: `docker compose up -d` works as-is — `pull_policy: missing` doesn't try to pull when the image is present. Use `docker compose up --no-pull` if you want to be explicit.
-> - **No local image, no network**: `docker compose up --build --no-pull` (build from source, don't try to pull).
+> - **Image cached, no network**: `docker compose up -d` works as-is — `pull_policy: missing` doesn't try to pull when the image is present. Use `docker compose up -d --pull never` if you want to be explicit.
+> - **No local image, no network**: `docker compose up --build --pull never` (build from source, don't try to pull).
 > - **Strict no-network guarantee** (e.g. an air-gapped pipeline that should never reach `ghcr.io`): drop a `docker-compose.override.yml` setting `pull_policy: never` for both services — Compose then fails fast if the image is absent rather than attempting a pull.
 
 | Service | URL |
 |---|---|
 | Core API (REST + MCP) | http://localhost:8000 |
-| Core Storage API | http://localhost:8002 |
 | PostgreSQL (pgvector) | localhost:5432 |
 | Redis | localhost:6379 |
 
+`core-storage-api` is intentionally reachable only by other services on the
+Compose network; it has no host URL.
+
 #### What the stack contains — and what it doesn't
 
-`docker compose up` starts exactly four containers:
+`docker compose up` starts four long-running containers plus a one-shot
+`storage-secret-init` container that creates the internal credential:
 
 | Container | Role |
 |---|---|
@@ -744,8 +757,16 @@ The **reader/writer split** is an opt-in topology for high-write-rate deploys th
 - Set `CORE_STORAGE_ROLE=writer` on the write-serving instance; `=reader` on the read-serving instance(s).
 - Set `CORE_STORAGE_READ_URL` on `core-api` to the reader service URL. Leave `CORE_STORAGE_API_URL` pointing at the writer.
 - `READ_DATABASE_URL` on each `core-storage-api` can point at a read replica if you have one.
+- Set the same non-empty `CORE_STORAGE_SHARED_SECRET` on `core-api`, every
+  `core-storage-api` writer/reader, and any other internal storage caller. All
+  storage requests must carry it as `X-Storage-Secret`; missing or incorrect
+  credentials are rejected before routing.
 
-**Defaults:** `CORE_STORAGE_ROLE=hybrid` and `CORE_STORAGE_READ_URL=""` — both null-safe, so single-node deploys need zero configuration to get the legacy single-service behavior.
+**Topology defaults:** `CORE_STORAGE_ROLE=hybrid` and
+`CORE_STORAGE_READ_URL=""`, so a single storage instance still serves both
+reads and writes. Docker Compose wires storage authentication automatically;
+manual deployments must configure `CORE_STORAGE_SHARED_SECRET` (or
+`CORE_STORAGE_SHARED_SECRET_FILE`) on the storage service and every caller.
 
 ---
 
@@ -1184,7 +1205,7 @@ These mirror the Configuration table above. See it for defaults.
 | Group | Vars |
 |---|---|
 | Database | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_USE_IAM_AUTH`, `POSTGRES_REQUIRE_SSL` |
-| Auth | `ADMIN_API_KEY`, `CAURA_API_KEY`, `IS_STANDALONE` |
+| Auth | `ADMIN_API_KEY`, `CAURA_API_KEY`, `CORE_STORAGE_SHARED_SECRET`, `CORE_STORAGE_SHARED_SECRET_FILE`, `IS_STANDALONE` |
 | Providers | `EMBEDDING_PROVIDER`, `ENTITY_EXTRACTION_PROVIDER`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `USE_LLM_FOR_MEMORY_CREATION` |
 | Runtime | `CORS_ORIGINS`, `ENVIRONMENT`, `SETTINGS_ENCRYPTION_KEY`, `REDIS_URL` |
 

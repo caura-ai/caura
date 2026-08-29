@@ -116,15 +116,21 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_with_headers)
 
 
-def _validate_production_settings(app_settings) -> None:  # type: ignore[no-untyped-def]
-    """Refuse to boot a production deployment that is missing a safety control.
+def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped-def]
+    """Refuse to boot when a required safety control is missing.
 
     Extracted from ``lifespan`` so these guards are reachable by tests. Buried in
     the lifespan they were untestable in practice, which is why a block whose
     entire job is to prevent unsafe production boots had no tests of its own.
 
-    No-op outside ``ENVIRONMENT=production``.
+    Storage authentication is required in every environment because the storage
+    service enforces it unconditionally. The remaining guards are production-only.
     """
+    storage_secret = app_settings.core_storage_shared_secret
+    if hasattr(storage_secret, "get_secret_value"):
+        storage_secret = storage_secret.get_secret_value()
+    if not storage_secret or not str(storage_secret).strip():
+        raise RuntimeError("CORE_STORAGE_SHARED_SECRET is required for core-api")
     if app_settings.environment != "production":
         return
     if app_settings.is_standalone:
@@ -204,6 +210,9 @@ async def lifespan(app):
     # post-import re-run from the ASGI lifespan startup safely routes them.
     reroute_third_party_loggers()
 
+    # Validate before initializing providers or accepting any request.
+    _validate_startup_settings(app_settings)
+
     # Increase default thread pool for concurrent LLM calls via asyncio.to_thread()
     import asyncio as _aio
     from concurrent.futures import ThreadPoolExecutor
@@ -242,9 +251,6 @@ async def lifespan(app):
     from core_api.providers._platform import init_platform_providers
 
     init_platform_providers()
-
-    # Fail-fast: validate production environment
-    _validate_production_settings(app_settings)
 
     async with mcp_lifespan():
         # Standalone mode: initialise fixed tenant id

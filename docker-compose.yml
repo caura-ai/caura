@@ -35,6 +35,25 @@ services:
 
   # ── Core Storage API (PostgreSQL CRUD) ──────────────────────────
 
+  storage-secret-init:
+    image: ghcr.io/caura-ai/caura-memclaw-core-storage-api:${CAURA_VERSION:-${MEMCLAW_VERSION:-latest}}  # legacy-name-ok: rule 3 dual-read alias
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: core-storage-api/Dockerfile
+    user: "0:0"
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        from pathlib import Path
+        import secrets
+        path = Path("/run/caura-storage/shared-secret")
+        if not path.exists() or not path.read_text().strip():
+            path.write_text(secrets.token_urlsafe(48))
+        path.chmod(0o444)
+    volumes:
+      - storage_secret:/run/caura-storage
+
   core-storage-api:
     # Pulls the published multi-arch image from ghcr.io.
     #
@@ -51,7 +70,7 @@ services:
     #     docker compose pull && docker compose up -d
     #
     # The ``build:`` block is for ``docker compose up --build
-    # --no-pull`` (``--no-pull`` is needed when no local image is
+    # --pull never`` (``--pull never`` is needed when no local image is
     # cached and you want to build from source without network: without
     # it, ``pull_policy: missing`` triggers a pull attempt before the
     # build starts and fails if the registry is unreachable. When the
@@ -74,8 +93,6 @@ services:
     build:
       context: .
       dockerfile: core-storage-api/Dockerfile
-    ports:
-      - "${STORAGE_API_PORT:-8002}:8002"
     environment:
       DATABASE_URL: postgresql+asyncpg://memclaw:changeme@db:5432/memclaw
       POSTGRES_HOST: db
@@ -86,11 +103,17 @@ services:
       POSTGRES_REQUIRE_SSL: "false"
       ENVIRONMENT: development
       LOG_FORMAT_JSON: "false"
+      CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"
+      CORE_STORAGE_SHARED_SECRET_FILE: /run/caura-storage/shared-secret
+    volumes:
+      - storage_secret:/run/caura-storage:ro
     depends_on:
+      storage-secret-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/healthz')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/readyz')"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -116,6 +139,8 @@ services:
       # Override DB host for Docker network
       POSTGRES_HOST: db
       CORE_STORAGE_API_URL: http://core-storage-api:8002
+      CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"
+      CORE_STORAGE_SHARED_SECRET_FILE: /run/caura-storage/shared-secret
       REDIS_URL: redis://redis:6379/0
       # Provider keys and embedding config (OPENAI_API_KEY, ANTHROPIC_API_KEY,
       # OPENROUTER_API_KEY, OPENAI_EMBEDDING_BASE_URL / _MODEL / _SEND_DIMENSIONS /
@@ -141,6 +166,8 @@ services:
       tei:
         condition: service_healthy
         required: false  # only enforced when --profile embed-local is active
+    volumes:
+      - storage_secret:/run/caura-storage:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 15s
@@ -195,4 +222,5 @@ services:
 volumes:
   pgdata:
   redis_data:
+  storage_secret:
   tei_cache:

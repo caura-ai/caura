@@ -28,6 +28,7 @@ _TEST_DEFAULTS = {
     # silently break tests; flag-off / deferred-path tests override
     # this to ``"deferred"``.
     "DEPLOYMENT_MODE": "inline",
+    "CORE_STORAGE_SHARED_SECRET": "test-storage-secret",
     # Interviewer async submit (#665) defaults ON in prod, but the legacy
     # route tests (tests/test_api_interview.py) assert the inline path's
     # response shape (committed/memories_written/504-on-timeout), so tests
@@ -270,6 +271,7 @@ async def purge_test_rows(conn, prefix: str) -> None:
 
 _storage_asgi_http = None
 _storage_sc = None
+_storage_app = None
 
 
 @pytest.fixture(autouse=True)
@@ -280,7 +282,7 @@ async def _patch_storage_client(_engine, _setup_schema):
     in-process, so tests don't need a running server on port 8002.
     The core-storage-api session factory is pointed at the test engine.
     """
-    global _storage_asgi_http, _storage_sc
+    global _storage_asgi_http, _storage_sc, _storage_app
     import httpx
     from httpx import ASGITransport
     from core_storage_api.app import create_app as create_storage_app
@@ -299,8 +301,8 @@ async def _patch_storage_client(_engine, _setup_schema):
         )
 
     if _storage_asgi_http is None:
-        storage_app = create_storage_app()
-        transport = ASGITransport(app=storage_app)
+        _storage_app = create_storage_app()
+        transport = ASGITransport(app=_storage_app)
         _storage_asgi_http = httpx.AsyncClient(
             transport=transport,
             base_url="http://test-storage:8002",
@@ -355,7 +357,7 @@ async def sc():
 
 
 @pytest.fixture
-def storage_http(_patch_storage_client):
+async def storage_http(_patch_storage_client):
     """Raw httpx client bridged to the in-process core-storage-api app.
 
     For tests that POST malformed/raw bodies the typed storage client would
@@ -363,7 +365,22 @@ def storage_http(_patch_storage_client):
     Depends on ``_patch_storage_client`` so the ASGI bridge + test-engine
     session factory are wired up first.
     """
-    return _storage_asgi_http
+    import httpx
+    from httpx import ASGITransport
+
+    # This client exists specifically for tests that address storage routes
+    # directly. Keep its credentials separate from ``_storage_asgi_http``:
+    # that unadorned transport is injected into ``CoreStorageClient``, so the
+    # ordinary core-api path only succeeds when the production client adds
+    # its own shared-secret header.
+    transport = ASGITransport(app=_storage_app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test-storage:8002",
+        follow_redirects=True,
+        headers={"X-Storage-Secret": _TEST_DEFAULTS["CORE_STORAGE_SHARED_SECRET"]},
+    ) as raw_client:
+        yield raw_client
 
 
 @pytest.fixture

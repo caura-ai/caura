@@ -123,3 +123,22 @@ def test_unconfigured_database_keeps_the_local_default(monkeypatch: pytest.Monke
     _clear_database_env(monkeypatch)
 
     assert Settings(_env_file=None).database_url.get_secret_value() == LOCAL_DATABASE_URL
+
+
+def test_storage_secret_loads_from_file_and_stays_out_of_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.delenv("CORE_STORAGE_SHARED_SECRET", raising=False)
+    monkeypatch.delenv("CORE_STORAGE_SHARED_SECRET_FILE", raising=False)
+    secret_file = tmp_path / "storage-secret"
+    secret_file.write_text("file-storage-secret\n")
+
+    settings = Settings(
+        _env_file=None,
+        core_storage_shared_secret_file=str(secret_file),
+    )
+
+    assert settings.core_storage_shared_secret.get_secret_value() == "file-storage-secret"
+    assert "file-storage-secret" not in repr(settings)
+    assert "core_storage_shared_secret" not in settings.model_dump()

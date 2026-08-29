@@ -16,6 +16,7 @@ os.environ.setdefault(
     "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw",
 )
 os.environ.setdefault("LOG_LEVEL", "WARNING")
+os.environ.setdefault("CORE_STORAGE_SHARED_SECRET", "test-storage-secret")
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -81,7 +82,11 @@ async def client(_ensure_schema) -> AsyncClient:
     from core_storage_api.app import app
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Storage-Secret": settings.core_storage_shared_secret.get_secret_value()},
+    ) as c:
         yield c
 
 

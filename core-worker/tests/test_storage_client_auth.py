@@ -1,7 +1,8 @@
 """Tests for CAURA-591 Y3 / CAURA-595: storage_client signs every
 request with a Cloud Run ID token bound to the writer service URL,
-evicts the cached token on 401, and retries once with a fresh token
-so a credential rotation is invisible to callers.
+evicts the cached token on an identity-layer 401, and retries once with a fresh
+token so a credential rotation is invisible to callers. Storage-secret 401s do
+not evict or retry because an identity-token refresh cannot repair them.
 
 Auth is wired through one private helper, ``_signed_call`` — these
 tests exercise it indirectly via the public endpoint helpers
@@ -30,6 +31,7 @@ def _reset_module_state() -> None:
     audience to the next test's HTTP mock."""
     storage_client._client = None
     storage_client._audience = None
+    storage_client._storage_shared_secret = None
     identity_token._cache.clear()
     identity_token._failure_cache.clear()
     identity_token._audience_locks.clear()
@@ -68,9 +70,7 @@ def _ok_response() -> MagicMock:
 
 
 async def test_unauthenticated_when_audience_unset() -> None:
-    """``get_storage_client()`` not called yet → no audience to sign
-    against; the request goes out without an Authorization header
-    so the docker-compose ``allUsers`` writer continues to accept it."""
+    """Local calls omit Cloud Run identity but retain the storage secret."""
     assert storage_client._audience is None
 
     client = MagicMock(spec=httpx.AsyncClient)
@@ -85,9 +85,10 @@ async def test_unauthenticated_when_audience_unset() -> None:
 
     headers = client.patch.await_args.kwargs["headers"]
     assert "Authorization" not in headers
+    assert headers["X-Storage-Secret"] == "test-storage-secret"
 
 
-# ── update_memory_embedding signs requests + evicts on 401 ───────────
+# ── update_memory_embedding signs requests + handles auth 401s ───────
 
 
 async def test_update_memory_embedding_sends_auth_header() -> None:
@@ -105,7 +106,10 @@ async def test_update_memory_embedding_sends_auth_header() -> None:
     )
 
     headers = client.patch.await_args.kwargs["headers"]
-    assert headers == {"Authorization": "Bearer tok-embed"}
+    assert headers == {
+        "Authorization": "Bearer tok-embed",
+        "X-Storage-Secret": "test-storage-secret",
+    }
 
 
 async def test_401_recovers_via_one_shot_retry_with_fresh_token() -> None:
@@ -133,8 +137,14 @@ async def test_401_recovers_via_one_shot_retry_with_fresh_token() -> None:
     assert client.patch.await_count == 2
     first_headers = client.patch.await_args_list[0].kwargs["headers"]
     second_headers = client.patch.await_args_list[1].kwargs["headers"]
-    assert first_headers == {"Authorization": "Bearer stale"}
-    assert second_headers == {"Authorization": "Bearer fresh"}
+    assert first_headers == {
+        "Authorization": "Bearer stale",
+        "X-Storage-Secret": "test-storage-secret",
+    }
+    assert second_headers == {
+        "Authorization": "Bearer fresh",
+        "X-Storage-Secret": "test-storage-secret",
+    }
     # Cache holds the rotated token, ready for the next request.
     assert identity_token._cache["https://writer.run.app"] == {"Authorization": "Bearer fresh"}
 
@@ -166,6 +176,42 @@ async def test_persistent_401_propagates_after_retry() -> None:
 
     # Two PATCHes: original + one retry, then propagate.
     assert client.patch.await_count == 2
+
+
+async def test_storage_secret_401_does_not_evict_or_retry() -> None:
+    """A mismatched service secret must not churn the metadata server."""
+    _seed_audience()
+    _seed_token("https://writer.run.app", "valid-token")
+
+    response = MagicMock(status_code=401)
+    response.json = MagicMock(return_value={"detail": "invalid storage service credentials"})
+    response.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            "storage auth",
+            request=MagicMock(),
+            response=response,
+        )
+    )
+    client = MagicMock(spec=httpx.AsyncClient)
+    client.patch = AsyncMock(return_value=response)
+
+    with (
+        patch.object(
+            identity_token,
+            "_fetch_blocking",
+            side_effect=AssertionError("identity token must not be refreshed"),
+        ),
+        pytest.raises(httpx.HTTPStatusError),
+    ):
+        await storage_client.update_memory_embedding(
+            client,
+            memory_id=uuid4(),
+            tenant_id="tenant-A",
+            embedding=[0.1] * 8,
+        )
+
+    assert client.patch.await_count == 1
+    assert identity_token._cache["https://writer.run.app"] == {"Authorization": "Bearer valid-token"}
 
 
 async def test_update_memory_embedding_does_not_evict_on_403() -> None:
@@ -211,7 +257,10 @@ async def test_update_memory_enrichment_sends_auth_header() -> None:
     )
 
     headers = client.patch.await_args.kwargs["headers"]
-    assert headers == {"Authorization": "Bearer tok-enrich"}
+    assert headers == {
+        "Authorization": "Bearer tok-enrich",
+        "X-Storage-Secret": "test-storage-secret",
+    }
 
 
 async def test_update_memory_enrichment_skips_empty_patch_without_signing() -> None:
@@ -257,7 +306,10 @@ async def test_find_embedding_by_content_hash_sends_auth_header() -> None:
 
     assert result == [0.1] * 8
     headers = client.get.await_args.kwargs["headers"]
-    assert headers == {"Authorization": "Bearer tok-cache"}
+    assert headers == {
+        "Authorization": "Bearer tok-cache",
+        "X-Storage-Secret": "test-storage-secret",
+    }
 
 
 async def test_find_embedding_by_content_hash_returns_none_on_null_body() -> None:
@@ -313,7 +365,11 @@ async def test_get_storage_client_strips_trailing_slash_for_audience(monkeypatch
     """A trailing slash in ``CORE_STORAGE_API_URL`` would produce a
     different audience claim than Cloud Run validates against the
     canonical service URL — strip it before binding."""
-    monkeypatch.setenv("CORE_STORAGE_API_URL", "https://writer.run.app/")
+    monkeypatch.setattr(
+        storage_client.settings,
+        "core_storage_api_url",
+        "https://writer.run.app/",
+    )
 
     client = storage_client.get_storage_client()
     try:

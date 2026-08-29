@@ -13,6 +13,7 @@ import httpx
 
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS, with_connect_phase_retry, with_retry
+from common.storage_auth import is_storage_shared_secret_rejection
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
@@ -363,11 +364,11 @@ class CoreStorageClient:
     # -- internal helpers ------------------------------------------------
 
     async def _auth_headers(self, *, read: bool) -> dict[str, str]:
-        """Identity-token Authorization header for Cloud Run
-        ``--no-allow-unauthenticated`` targets (CAURA-591 Part B Y3).
-        Empty when no credentials available (tests / local / legacy
-        allUsers services). The dict is cached and shared per audience
-        — httpx merges headers without mutation, so this is safe.
+        """Storage shared secret plus Cloud Run identity when applicable.
+
+        The shared secret authenticates every in-cluster request. HTTPS Cloud
+        Run targets additionally receive an identity-token Authorization
+        header for ``--no-allow-unauthenticated`` (CAURA-591 Part B Y3).
 
         Skip the metadata-server call entirely when the audience is
         plain HTTP — Cloud Run ``--no-allow-unauthenticated`` always
@@ -378,17 +379,25 @@ class CoreStorageClient:
         (not ``Exception``) which the inner catch misses, and the
         health endpoint flips to ``storage: unreachable`` for the
         duration of the failure-cache TTL."""
+        headers: dict[str, str] = {}
+        shared_secret = settings.core_storage_shared_secret.get_secret_value()
+        if shared_secret:
+            headers["X-Storage-Secret"] = shared_secret
+
         audience = self._read_base_url if read else self._base_url
         if audience.startswith("http://"):
-            return {}
-        return await fetch_auth_header(audience)
+            return headers
+        headers.update(await fetch_auth_header(audience))
+        return headers
 
     def _maybe_evict_on_auth_error(self, resp: httpx.Response, *, read: bool) -> None:
-        """If the target rejected our token, drop it from the cache so
-        the next request forces a fresh fetch. Self-heals after a
-        mid-TTL credential rotation or SA/binding fix instead of
-        making the operator wait out the 50 min cache."""
-        if resp.status_code == 401:
+        """Evict a rejected ID token, but retain it on secret mismatch.
+
+        Storage's own 401 has a distinct body and cannot be repaired by an ID
+        token refresh. Other 401s may come from Cloud Run IAM, where eviction
+        self-heals a mid-TTL credential rotation or service-account fix.
+        """
+        if resp.status_code == 401 and not is_storage_shared_secret_rejection(resp):
             audience = self._read_base_url if read else self._base_url
             _evict_id_token(audience)
 

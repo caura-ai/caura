@@ -12,12 +12,8 @@ Module-level singleton client (``get_storage_client()``) so connection
 pooling persists across pull-loop iterations. Closed via
 :func:`close_storage_client` from the FastAPI lifespan.
 
-CAURA-591 Y3 / CAURA-595 follow-up: every outbound request is signed
-with a Cloud Run ID token whose audience is the storage service URL.
-The identity_token helper transparently returns ``{}`` when no creds
-are available (local dev / OSS) so the unauthenticated docker-compose
-path continues to work; on Cloud Run the metadata server issues a
-real token and the writer's ``--no-allow-unauthenticated`` accepts it.
+Every outbound request carries the storage service shared secret. On Cloud Run
+it is also signed with an ID token whose audience is the storage service URL.
 """
 
 from __future__ import annotations
@@ -32,8 +28,10 @@ import httpx
 
 from common.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
 from common.http_retry import with_connect_phase_retry
+from common.storage_auth import is_storage_shared_secret_rejection
 from core_worker.clients.identity_token import evict as _evict_id_token
 from core_worker.clients.identity_token import fetch_auth_header
+from core_worker.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,41 +41,37 @@ _client: httpx.AsyncClient | None = None
 # rstrip'd ``core_storage_api_url`` from settings, used both as the
 # httpx ``base_url`` and as the Cloud Run audience claim.
 _audience: str | None = None
+_storage_shared_secret: str | None = None
 _PREFIX = "/api/v1/storage"
 
 
 def get_storage_client() -> httpx.AsyncClient:
     """Return the singleton :class:`httpx.AsyncClient` used by the consumer.
 
-    Settings are read from a freshly-built ``Settings()`` on first call
-    only — subsequent calls return the cached instance regardless of
-    any env changes. Tests that need a different config call
-    :func:`close_storage_client` between cases to force re-construction.
+    Configuration comes from the module singleton; the HTTP client itself is
+    built on first call and reused until :func:`close_storage_client`.
     """
-    global _client, _audience
+    global _client, _audience, _storage_shared_secret
     if _client is None:
-        # Lazy import — avoids paying the pydantic-settings load cost
-        # on cold-start for the worker's healthz probe.
-        from core_worker.config import Settings
-
-        s = Settings()  # type: ignore[call-arg]
         # ``rstrip("/")`` so a trailing slash in the env var doesn't
         # produce a different audience string than Cloud Run validates.
-        _audience = s.core_storage_api_url.rstrip("/")
+        _audience = settings.core_storage_api_url.rstrip("/")
+        _storage_shared_secret = settings.core_storage_shared_secret.get_secret_value()
         _client = httpx.AsyncClient(
             base_url=_audience,
-            timeout=httpx.Timeout(s.storage_http_timeout_s),
+            timeout=httpx.Timeout(settings.storage_http_timeout_s),
         )
     return _client
 
 
 async def close_storage_client() -> None:
     """Close the singleton (idempotent). Called from app lifespan shutdown."""
-    global _client, _audience
+    global _client, _audience, _storage_shared_secret
     if _client is not None:
         await _client.aclose()
-        _client = None
-        _audience = None
+    _client = None
+    _audience = None
+    _storage_shared_secret = None
 
 
 async def _signed_call(
@@ -85,27 +79,22 @@ async def _signed_call(
     *args: Any,
     **kwargs: Any,
 ) -> httpx.Response:
-    """Issue ``fn(*args, **kwargs)`` with the Cloud Run ID-token
-    Authorization header attached, with one transparent retry on 401.
+    """Issue ``fn(*args, **kwargs)`` with storage and Cloud Run credentials.
 
     ``fn`` is a bound method on the caller's ``httpx.AsyncClient``
     (``client.get``, ``client.patch``, etc.) — single integration point
     so a future endpoint helper can't add a request without auth or
     skip the eviction-on-401 path.
 
-    On 401: evict the cached token (so a mid-TTL credential rotation or
-    SA/binding fix self-heals instead of waiting out the 50 min cache),
-    fetch a fresh token, and retry the request once. Without this
-    retry, every in-flight task during a rotation burns one Pub/Sub
-    delivery attempt against the DLQ budget; the retry makes a rotation
-    invisible to callers. A second 401 (rotation didn't help, or the
-    SA was actually unbound) propagates to the caller's normal
-    error-handling path.
+    On an identity-layer 401: evict the cached token (so a mid-TTL credential
+    rotation or SA/binding fix self-heals instead of waiting out the 50 min
+    cache), fetch a fresh token, and retry the request once. Storage's distinct
+    shared-secret 401 skips that ineffective refresh. A second identity 401
+    propagates to the caller's normal error-handling path.
 
-    On the OSS / local-dev path (``_audience`` unset, or google.auth
-    unavailable) the merged auth header is empty and the call goes
-    out unauthenticated — matching the docker-compose ``allUsers``
-    writer. 403 is intentionally NOT a trigger for eviction: 403 means
+    On the OSS / local-dev path the Cloud Run Authorization header may be
+    absent, but ``X-Storage-Secret`` is still required. 403 is intentionally
+    NOT a trigger for eviction: 403 means
     the token was accepted but IAM rejected the caller, which the
     cache cannot fix.
 
@@ -119,14 +108,19 @@ async def _signed_call(
     Pub/Sub delivery attempt against the DLQ budget for a request
     that never even reached storage (the 2026-06-11 incident shape).
     """
+    global _storage_shared_secret
     headers = dict(kwargs.pop("headers", None) or {})
+    if _storage_shared_secret is None:
+        _storage_shared_secret = settings.core_storage_shared_secret.get_secret_value()
+    if _storage_shared_secret:
+        headers["X-Storage-Secret"] = _storage_shared_secret
     if _audience is not None:
         headers.update(await fetch_auth_header(_audience))
     method = getattr(fn, "__name__", "?").upper()
     path = args[0] if args else ""
     label = f"{method} {path}".rstrip()
     resp = await with_connect_phase_retry(lambda: fn(*args, headers=headers, **kwargs), label=label)
-    if resp.status_code == 401 and _audience is not None:
+    if resp.status_code == 401 and _audience is not None and not is_storage_shared_secret_rejection(resp):
         _evict_id_token(_audience)
         # Rebind to a NEW dict rather than ``.update()`` in place — the
         # first call still holds a reference to the original headers

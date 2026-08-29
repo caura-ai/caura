@@ -8,6 +8,8 @@ from urllib.parse import quote
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from common.storage_auth import read_shared_secret_file
+
 LOCAL_DATABASE_URL = "postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw"  # legacy-name-ok: existing local-dev compatibility default
 
 
@@ -119,6 +121,18 @@ class Settings(BaseSettings):
     # migrations, skips write routes, and uses the read-pool URL as
     # its primary connection.
     core_storage_role: Literal["writer", "reader", "hybrid"] = "hybrid"
+    # Internal caller credential. Empty is deliberately not an auth bypass:
+    # the middleware rejects every HTTP request until a value is configured.
+    core_storage_shared_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
+    core_storage_shared_secret_file: str = ""
+
+    @model_validator(mode="after")
+    def resolve_core_storage_shared_secret(self) -> Settings:
+        if not self.core_storage_shared_secret.get_secret_value():
+            self.core_storage_shared_secret = SecretStr(
+                read_shared_secret_file(self.core_storage_shared_secret_file)
+            )
+        return self
 
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"

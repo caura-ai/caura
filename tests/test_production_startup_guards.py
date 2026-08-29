@@ -1,4 +1,4 @@
-"""``_validate_production_settings`` — the guards that refuse an unsafe prod boot.
+"""Startup guards that refuse an unusable or unsafe boot.
 
 H-11 of the 2026-08-14 OSS/platform audit: production did not require
 ``GATEWAY_SHARED_SECRET``, and the X-Tenant-ID header-trust path's perimeter check
@@ -15,7 +15,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from core_api.app import _validate_production_settings
+from core_api.app import _validate_startup_settings
+from pydantic import SecretStr
 
 
 def _prod(**overrides):
@@ -28,19 +29,20 @@ def _prod(**overrides):
         "admin_api_key": "a-real-admin-key",
         "gateway_shared_secret": "a-real-gateway-secret",
         "memclaw_api_key": None,
+        "core_storage_shared_secret": SecretStr("a-real-storage-secret"),
     }
     base.update(overrides)
     return SimpleNamespace(**base)
 
 
 def test_a_fully_configured_production_boot_is_allowed():
-    _validate_production_settings(_prod())
+    _validate_startup_settings(_prod())
 
 
 @pytest.mark.parametrize("environment", ["development", "sandbox"])
-def test_non_production_environments_are_not_gated(environment):
-    """The guards are production-only; dev/sandbox keep booting bare."""
-    _validate_production_settings(
+def test_non_production_environments_skip_production_only_guards(environment):
+    """With storage auth configured, dev/sandbox skip production-only guards."""
+    _validate_startup_settings(
         _prod(
             environment=environment,
             gateway_shared_secret=None,
@@ -58,13 +60,13 @@ def test_production_requires_a_perimeter():
     weakening it — the check is ``if gw_secret and not compare_digest(...)``.
     """
     with pytest.raises(RuntimeError, match="GATEWAY_SHARED_SECRET"):
-        _validate_production_settings(_prod(gateway_shared_secret=None))
+        _validate_startup_settings(_prod(gateway_shared_secret=None))
 
 
 def test_empty_strings_count_as_unset():
     """`""` is the shape a missing env var actually takes in a container."""
     with pytest.raises(RuntimeError, match="GATEWAY_SHARED_SECRET"):
-        _validate_production_settings(
+        _validate_startup_settings(  # fmt: skip - preserve the ratcheted legacy-key line
             _prod(gateway_shared_secret="", memclaw_api_key="")
         )
 
@@ -79,35 +81,57 @@ def test_api_key_alone_is_an_acceptable_perimeter():
     Sentry, and must not be forced to invent a gateway secret it has no gateway
     for.
     """
-    _validate_production_settings(
+    _validate_startup_settings(
         _prod(gateway_shared_secret=None, memclaw_api_key="a-real-memclaw-key")
     )
 
 
 def test_gateway_secret_alone_is_an_acceptable_perimeter():
-    _validate_production_settings(
+    _validate_startup_settings(
         _prod(gateway_shared_secret="a-real-gateway-secret", memclaw_api_key=None)
     )
 
 
 def test_production_refuses_standalone_mode():
     with pytest.raises(RuntimeError, match="IS_STANDALONE=true is not allowed"):
-        _validate_production_settings(_prod(is_standalone=True))
+        _validate_startup_settings(_prod(is_standalone=True))
 
 
 def test_production_requires_the_settings_encryption_key():
     with pytest.raises(RuntimeError, match="SETTINGS_ENCRYPTION_KEY must be set"):
-        _validate_production_settings(_prod(settings_encryption_key=None))
+        _validate_startup_settings(_prod(settings_encryption_key=None))
 
 
 def test_production_requires_the_admin_api_key():
     with pytest.raises(RuntimeError, match="ADMIN_API_KEY must be set"):
-        _validate_production_settings(_prod(admin_api_key=None))
+        _validate_startup_settings(_prod(admin_api_key=None))
+
+
+@pytest.mark.parametrize("environment", ["development", "sandbox", "production"])
+def test_every_environment_requires_the_storage_shared_secret(environment):
+    with pytest.raises(RuntimeError, match="CORE_STORAGE_SHARED_SECRET"):
+        _validate_startup_settings(
+            _prod(
+                environment=environment,
+                core_storage_shared_secret=SecretStr(""),
+            )
+        )
+
+
+@pytest.mark.parametrize("secret_value", [" ", "\t"])
+def test_blank_storage_shared_secrets_are_also_rejected(secret_value):
+    with pytest.raises(RuntimeError, match="CORE_STORAGE_SHARED_SECRET"):
+        _validate_startup_settings(
+            _prod(
+                environment="development",
+                core_storage_shared_secret=SecretStr(secret_value),
+            )
+        )
 
 
 def test_production_refuses_the_default_jwt_secret():
     with pytest.raises(RuntimeError, match="JWT_SECRET must be changed"):
-        _validate_production_settings(_prod(jwt_secret="change-me-in-production"))
+        _validate_startup_settings(_prod(jwt_secret="change-me-in-production"))
 
 
 def test_a_secretstr_wrapped_default_is_still_caught():
@@ -121,6 +145,4 @@ def test_a_secretstr_wrapped_default_is_still_caught():
             return self._v
 
     with pytest.raises(RuntimeError, match="JWT_SECRET must be changed"):
-        _validate_production_settings(
-            _prod(jwt_secret=_Secret("change-me-in-production"))
-        )
+        _validate_startup_settings(_prod(jwt_secret=_Secret("change-me-in-production")))

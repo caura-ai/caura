@@ -35,6 +35,23 @@ services:
 
   # ── Core Storage API (hot-reload) ───────────────────────────────
 
+  storage-secret-init:
+    build:
+      context: .
+      dockerfile: core-storage-api/Dockerfile
+    user: "0:0"
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        from pathlib import Path
+        import secrets
+        path = Path("/run/caura-storage/shared-secret")
+        if not path.exists() or not path.read_text().strip():
+            path.write_text(secrets.token_urlsafe(48))
+        path.chmod(0o444)
+    volumes:
+      - storage_secret:/run/caura-storage
+
   core-storage-api:
     build:
       context: .
@@ -54,10 +71,11 @@ services:
       --reload-dir /app/core-storage-api/src
       --reload-dir /app/common
     ports:
-      - "8002:8002"
+      - "127.0.0.1:${STORAGE_API_PORT:-8002}:8002"
     volumes:
       - ./common:/app/common
       - ./core-storage-api/src:/app/core-storage-api/src
+      - storage_secret:/run/caura-storage:ro
     environment:
       PYTHONPATH: /app/core-storage-api/src:/app
       DATABASE_URL: postgresql+asyncpg://memclaw:changeme@db:5432/memclaw
@@ -68,11 +86,15 @@ services:
       POSTGRES_DB: memclaw
       POSTGRES_REQUIRE_SSL: "false"
       ENVIRONMENT: development
+      CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"
+      CORE_STORAGE_SHARED_SECRET_FILE: /run/caura-storage/shared-secret
     depends_on:
+      storage-secret-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/healthz')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/readyz')"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -107,10 +129,13 @@ services:
       - ./migrations:/app/migrations
       - ./plugin:/app/plugin
       - ./static:/app/static
+      - storage_secret:/run/caura-storage:ro
     environment:
       PYTHONPATH: /app/core-api/src:/app
       POSTGRES_HOST: db
       CORE_STORAGE_API_URL: http://core-storage-api:8002
+      CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"
+      CORE_STORAGE_SHARED_SECRET_FILE: /run/caura-storage/shared-secret
       REDIS_URL: redis://redis:6379/0
       # Pass through provider keys from host
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
@@ -171,4 +196,5 @@ services:
 volumes:
   pgdata:
   redis_data:
+  storage_secret:
   tei_cache:

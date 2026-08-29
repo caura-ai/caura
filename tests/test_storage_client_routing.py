@@ -271,6 +271,7 @@ async def test_authorization_header_attached_on_reader_calls() -> None:
         )
         await client.get_memory("11111111-1111-1111-1111-111111111111")
     assert reader.requests[0].headers["Authorization"] == "Bearer tok-reader"
+    assert reader.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 
 
 async def test_authorization_header_attached_on_writer_calls() -> None:
@@ -281,6 +282,7 @@ async def test_authorization_header_attached_on_writer_calls() -> None:
         )
         await client.create_memory({"tenant_id": "t", "content": "c"})
     assert writer.requests[0].headers["Authorization"] == "Bearer tok-writer"
+    assert writer.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 
 
 async def test_authorization_header_attached_on_patch() -> None:
@@ -289,8 +291,11 @@ async def test_authorization_header_attached_on_patch() -> None:
         client, writer, reader = await _fresh_client(
             writer_url="https://writer:8002", reader_url="https://reader:8002"
         )
-        await client.update_embedding("11111111-1111-1111-1111-111111111111", "t", [0.1])
+        await client.update_embedding(
+            "11111111-1111-1111-1111-111111111111", "t", [0.1]
+        )
     assert writer.requests[0].headers["Authorization"] == "Bearer tok-writer"
+    assert writer.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 
 
 async def test_authorization_header_attached_on_delete() -> None:
@@ -301,6 +306,7 @@ async def test_authorization_header_attached_on_delete() -> None:
         )
         await client.delete_agent("agent-1", tenant_id="t")
     assert writer.requests[0].headers["Authorization"] == "Bearer tok-writer"
+    assert writer.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 
 
 async def test_http_audience_skips_token_fetch() -> None:
@@ -316,6 +322,7 @@ async def test_http_audience_skips_token_fetch() -> None:
         )
         await client.get_memory("11111111-1111-1111-1111-111111111111")
     assert "Authorization" not in reader.requests[0].headers
+    assert reader.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 
 
 async def test_no_authorization_header_when_no_credentials() -> None:
@@ -329,6 +336,7 @@ async def test_no_authorization_header_when_no_credentials() -> None:
         )
         await client.get_memory("11111111-1111-1111-1111-111111111111")
     assert "Authorization" not in reader.requests[0].headers
+    assert reader.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 
 
 class _StatusCodeTransport(httpx.AsyncBaseTransport):
@@ -338,17 +346,21 @@ class _StatusCodeTransport(httpx.AsyncBaseTransport):
     permission denial by the target and does NOT imply the token is
     bad, so we keep the cache intact."""
 
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, content: bytes = b"{}") -> None:
         self.requests: list[httpx.Request] = []
         self._status = status_code
+        self._content = content
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        return httpx.Response(self._status, content=b"{}", request=request)
+        return httpx.Response(self._status, content=self._content, request=request)
 
 
 async def _run_auth_status_test(
-    status_code: int, *, expect_evicted: bool
+    status_code: int,
+    *,
+    expect_evicted: bool,
+    content: bytes = b"{}",
 ) -> None:
     """Shared harness — seed a cached token, issue a request that
     gets ``status_code`` back, and assert whether the cache entry
@@ -371,7 +383,7 @@ async def _run_auth_status_test(
         client = CoreStorageClient()
 
     client._http = httpx.AsyncClient(
-        transport=_StatusCodeTransport(status_code),
+        transport=_StatusCodeTransport(status_code, content),
         timeout=client._http.timeout,
     )
     client._read_http = httpx.AsyncClient(
@@ -392,6 +404,15 @@ async def test_401_response_evicts_cached_id_token() -> None:
     cache entry must go so the next request forces a fresh fetch —
     otherwise every request 401s for 50 min."""
     await _run_auth_status_test(401, expect_evicted=True)
+
+
+async def test_storage_secret_401_keeps_cached_id_token() -> None:
+    """A storage-secret mismatch cannot be repaired by refreshing IAM."""
+    await _run_auth_status_test(
+        401,
+        expect_evicted=False,
+        content=b'{"detail":"invalid storage service credentials"}',
+    )
 
 
 async def test_403_response_keeps_cached_id_token() -> None:

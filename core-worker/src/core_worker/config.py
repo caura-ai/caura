@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from common.storage_auth import read_shared_secret_file
 
 
 class Settings(BaseSettings):
@@ -21,6 +23,16 @@ class Settings(BaseSettings):
     # Storage backend — the worker PATCHes embeddings to core-storage-api
     # via this URL. Defaults to the local docker-compose service name.
     core_storage_api_url: str = "http://oss-core-storage-api:8002"
+    core_storage_shared_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
+    core_storage_shared_secret_file: str = ""
+
+    @model_validator(mode="after")
+    def resolve_core_storage_shared_secret(self) -> Settings:
+        if not self.core_storage_shared_secret.get_secret_value():
+            self.core_storage_shared_secret = SecretStr(
+                read_shared_secret_file(self.core_storage_shared_secret_file)
+            )
+        return self
 
     # Event bus — `inprocess` for tests/standalone OSS, `pubsub` for SaaS.
     event_bus_backend: Literal["inprocess", "pubsub"] = "inprocess"

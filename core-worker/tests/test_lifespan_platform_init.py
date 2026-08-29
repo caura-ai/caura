@@ -20,9 +20,11 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
-from core_worker.app import create_app
+from core_worker.app import create_app, settings
 
 
 def test_lifespan_calls_init_platform_providers():
@@ -54,3 +56,25 @@ def test_lifespan_calls_init_platform_providers():
             pass
 
         init_mock.assert_called_once_with()
+
+
+def test_lifespan_refuses_to_consume_without_storage_credentials():
+    bus = MagicMock()
+    bus.start = AsyncMock(return_value=None)
+    bus.stop = AsyncMock(return_value=None)
+    bus.is_healthy = True
+
+    with (
+        patch.object(settings, "core_storage_shared_secret", SecretStr("")),
+        patch("core_worker.app.init_platform_providers"),
+        patch("core_worker.app.configure_consumer"),
+        patch("core_worker.app.register_consumers"),
+        patch("core_worker.app.get_event_bus", return_value=bus),
+        patch("core_worker.app.close_storage_client", new=AsyncMock()),
+    ):
+        app = create_app()
+        with pytest.raises(RuntimeError, match="CORE_STORAGE_SHARED_SECRET is required"):
+            with TestClient(app):
+                pass
+
+    bus.start.assert_not_awaited()

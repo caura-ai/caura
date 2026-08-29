@@ -27,7 +27,10 @@ configure_logging(
 )
 
 from core_storage_api.database.init import get_engine, init_database
-from core_storage_api.middleware import RejectWritesOnReaderMiddleware
+from core_storage_api.middleware import (
+    RejectWritesOnReaderMiddleware,
+    RequireStorageSharedSecretMiddleware,
+)
 from core_storage_api.routers import (
     agents_router,
     audit_router,
@@ -64,6 +67,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         "Starting core-storage-api",
         extra={"core_storage_role": settings.core_storage_role},
     )
+    if not settings.core_storage_shared_secret.get_secret_value():
+        logger.error(
+            "CORE_STORAGE_SHARED_SECRET is not configured; GET /readyz will return 503 "
+            "and storage data requests will reject authentication"
+        )
     await init_database()
     yield
     logger.info("Shutting down core-storage-api")
@@ -118,11 +126,17 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=422, content={"detail": "request body must be valid JSON"})
 
     # Order matters: Starlette executes middlewares in reverse registration
-    # order (last added = outermost). Register the reader filter FIRST so
-    # that CORS ends up outermost and its headers decorate the 405 response
-    # too — otherwise browsers see a CORS failure instead of the real 405.
+    # order (last added = outermost). Register the reader filter first, then the
+    # credential boundary, and CORS last. CORS can then answer browser preflight
+    # requests and decorate both authentication 401s and reader-role 405s;
+    # every actual data request still reaches authentication before a handler.
     if settings.core_storage_role == "reader":
         app.add_middleware(RejectWritesOnReaderMiddleware)
+
+    app.add_middleware(
+        RequireStorageSharedSecretMiddleware,
+        shared_secret=settings.core_storage_shared_secret.get_secret_value(),
+    )
 
     # Internal service — restrict CORS to known callers only. On the
     # reader role, narrow allow_methods so CORS preflights don't
@@ -184,9 +198,8 @@ def create_app() -> FastAPI:
     app.include_router(tenants_router, prefix=prefix)
     app.include_router(purge_router, prefix=prefix)
     # CAURA-696: per-tenant row counts for the deletion-preview panel.
-    # Mirrors ``purge``'s VPC-only trust model: no router-level auth,
-    # trusted callers only reach storage via core-api which applies
-    # the admin check.
+    # The app-wide storage-secret middleware authenticates the caller;
+    # core-api applies the route's admin authorization check.
     app.include_router(preview_router, prefix=prefix)
     # CAURA-694: tenant-suppression mirror. POST upsert for the OSS
     # suppression consumer (core-worker); GET is the boundary-guard
