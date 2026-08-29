@@ -195,6 +195,33 @@ SENTINELS: tuple[Sentinel, ...] = (
         breaks="the generated installer writes to a path no installed plugin reads",
     ),
     Sentinel(
+        path="core-api/src/core_api/routes/plugin.py",
+        text='cat > "$_SD_DIR/memclaw-tls.conf" << SDEOF',  # legacy-name-floor: pinned floor string
+        kind=LITERAL,
+        breaks="re-install writes a second systemd drop-in instead of replacing the customer file",
+    ),
+    Sentinel(
+        path="core-api/src/core_api/routes/plugin.py",
+        text='_RC_MARKER="# memclaw-onprem CA - managed by install-plugin"',  # legacy-name-floor: pinned floor string
+        kind=LITERAL,
+        breaks=(
+            "re-install stops finding the managed block in customer shell rc files "
+            "and appends a duplicate to each one"
+        ),
+    ),
+    Sentinel(
+        path="core-api/src/core_api/services/organization_settings.py",
+        text='"memclaw": {',  # legacy-name-floor: pinned floor string
+        kind=LITERAL,
+        breaks="stored tenant auto-upgrade overrides live under this permanent namespace",
+    ),
+    Sentinel(
+        path="core-api/src/core_api/routes/fleet.py",
+        text='flag = raw.get("memclaw", {}).get("auto_upgrade_enabled")',  # legacy-name-floor: pinned floor string
+        kind=LITERAL,
+        breaks="the reader stops finding stored auto-upgrade overrides under their namespace",
+    ),
+    Sentinel(
         path="core-api/src/core_api/services/organization_settings.py",
         text="memclaw.auto_upgrade_enabled",  # legacy-name-floor: floor
         kind=LITERAL,
@@ -218,6 +245,12 @@ SENTINELS: tuple[Sentinel, ...] = (
         text='".config" / "memclaw-interviewer"',  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the interviewer stops finding config customers already have on disk",
+    ),
+    Sentinel(
+        path="clients/python/src/caura_client/interviewer/cli.py",
+        text='lock_path = Path(tempfile.gettempdir()) / f"memclaw-interviewer-{getpass.getuser()}.lock"',  # legacy-name-floor: pinned floor string
+        kind=LITERAL,
+        breaks="partly upgraded installs can drain the same transcripts concurrently",
     ),
     # The whole assignment, not the marker value alone — and this one is a
     # judgement call the comment-only guard below CANNOT make for us.
