@@ -26,6 +26,7 @@ except ImportError:
         pass  # type: ignore[misc]
 
 
+from core_api.config import settings
 from core_api.constants import (
     CRYSTALLIZER_DEDUP_BATCH_SIZE,
     CRYSTALLIZER_DEDUP_NEIGHBORS,
@@ -44,6 +45,11 @@ from core_api.constants import (
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 
 logger = logging.getLogger(__name__)
+
+# A59 — bounded read for the subject-local Type-II sweep. Subjects are small
+# (~1.4 memories each in practice), so this page covers a large tenant while
+# keeping one predictable storage round-trip.
+TYPE_II_FETCH_LIMIT = 2000
 
 MAX_AFFECTED_IDS = 20
 
@@ -382,6 +388,38 @@ async def _execute_crystallization(
             "duplicate_facts": 0,
             "failed_facts": 0,
         }
+        # A59 — Type-II state materialization, shadow phase. Independent of
+        # ``auto_crystallize``: it writes no memories, so the auto-curate
+        # consent gate does not apply, and it must still produce its audit
+        # section on tenants that keep curation off. Failure is contained here
+        # so a Type-II error can never abort the report the rest of the sweep
+        # just produced.
+        type_ii = {"enabled": False}
+        if settings.type_ii_materializer_shadow:
+            try:
+                from core_api.services.organization_settings import resolve_config
+                from core_api.services.type_ii_materializer import run_shadow
+
+                # Subject-local sweep needs the tenant's live rows. One
+                # bounded read; the phase itself caps subjects and bundles.
+                subject_rows = await sc.list_memories_by_filters(
+                    {
+                        "tenant_id": tenant_id,
+                        "fleet_id": fleet_id,
+                        "limit": TYPE_II_FETCH_LIMIT,
+                    }
+                )
+                if isinstance(subject_rows, dict):
+                    subject_rows = subject_rows.get("items") or subject_rows.get("memories") or []
+                type_ii = await run_shadow(
+                    subject_rows,
+                    tenant_id,
+                    await resolve_config(tenant_id),
+                )
+            except Exception:
+                logger.warning("type_ii shadow phase failed for %s", tenant_id, exc_info=True)
+                type_ii = {"enabled": True, "error": True}
+
         if auto_crystallize:
             try:
                 crystallization = await _run_crystallization(tenant_id, fleet_id, hygiene)
@@ -418,6 +456,9 @@ async def _execute_crystallization(
                     "info": info,
                 },
                 "hygiene": hygiene,
+                # A59 — audit section for the Type-II shadow sweep (empty
+                # ``{"enabled": False}`` when the flag is off).
+                "type_ii_staleness": type_ii,
                 "health": health,
                 "usage_data": usage,
                 "issues": issues,

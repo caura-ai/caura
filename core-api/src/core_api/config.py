@@ -345,6 +345,16 @@ class Settings(BaseSettings):
     # enforcing path (``unsafe`` status). Skipped when the new memory has no
     # resolved subject_entity_id.
     basis_invalidation_shadow: bool = False
+    # A59 — Type-II state materialization, subject-local and batch (runs in the
+    # nightly crystallizer, not per write). SHADOW ONLY at this setting: one
+    # LLM call per CHANGED multi-memory subject proposes which of that
+    # subject's own memories stopped being safe current defaults and what
+    # should stand instead; proposals are validated deterministically and
+    # emitted as an auditable report section. Nothing is written to memories.
+    # Precision is scored by hand off that section before a write mode is
+    # built (the A58 spike could not be scored because its verdicts only went
+    # to logs). Default off.
+    type_ii_materializer_shadow: bool = False
     crystallizer_enabled: bool = True
     crystallizer_stale_days: int = 180
     crystallizer_dedup_sample_size: int = 1000
