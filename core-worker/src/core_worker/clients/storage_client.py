@@ -498,7 +498,7 @@ async def update_memory_enrichment(
     pre-validated dict of column→value pairs the consumer wants to write
     (memory_type, weight, title, summary, tags, status, ts_valid_*,
     contains_pii, pii_types, retrieval_hint). The storage-side
-    ``memory_update`` filters by ``hasattr(Memory, key)`` so unknown keys
+    ``memory_update`` filters by ``_MEMORY_UPDATABLE_FIELDS`` so unknown keys
     are silently dropped — caller still validates upstream against
     ``EnrichmentResult`` so a typo surfaces as a Pydantic error, not a
     silent no-op.

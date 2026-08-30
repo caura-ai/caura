@@ -330,7 +330,7 @@ _ENRICHMENT_ALWAYS_WRITE_METADATA: frozenset[str] = frozenset(
 )
 
 # Defence-in-depth: a typo in the tuples above would silently drop in
-# the storage layer's ``hasattr(Memory, key)`` filter, *and* a future
+# the storage layer's ``_MEMORY_UPDATABLE_FIELDS`` filter, *and* a future
 # ``EnrichmentResult`` field that no one wires to a routing tuple
 # would silently fall on the floor. Catch both at module import.
 _unrouted = (

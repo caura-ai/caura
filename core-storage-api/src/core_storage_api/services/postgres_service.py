@@ -327,6 +327,32 @@ _MEMORY_VALID_FIELDS = frozenset(
     {c.key for c in Memory.__table__.columns} | {a.key for a in Memory.__mapper__.column_attrs}
 )
 
+# Columns a caller may never rewrite on an existing memory. All four are
+# legitimately SET on insert, so ``_filter_memory_fields`` keeps using the full
+# set above; it is the by-id patch that must not reach them.
+#
+#   id             identity — the reported defect (#1118)
+#   tenant_id      scope
+#   fleet_id       scope
+#   search_vector  trigger-maintained, and the trigger is
+#                  ``BEFORE INSERT OR UPDATE OF content, title`` (migration
+#                  034), so a patch naming ONLY this column does not fire it:
+#                  the caller's tsvector persists verbatim and the row leaves
+#                  keyword recall with no content change to explain it.
+#
+# Same four classes ``_ENTITY_UPDATABLE_FIELDS`` below excludes by listing what
+# it admits.
+_MEMORY_IMMUTABLE_FIELDS = frozenset({"id", "tenant_id", "fleet_id", "search_vector"})
+
+# Columns ``memory_update`` may write. A subtraction rather than the explicit
+# list the entity set uses, because ``Memory`` has 34 columns and many writers
+# (the public ``MemoryUpdate`` surface, core-worker's re-embed, governance
+# remediation, enrichment, the TESTING-gated time-warp route): an allowlist
+# assembled by inspection would be a guess, and a wrong guess silently drops a
+# production write. Entity's is four columns and two callers, so it can be
+# enumerated exactly. Both arrive at the same guarantee.
+_MEMORY_UPDATABLE_FIELDS = _MEMORY_VALID_FIELDS - _MEMORY_IMMUTABLE_FIELDS
+
 # Columns ``entity_update`` may write. Deliberately a subset, not
 # ``Entity.__table__.columns`` the way ``_MEMORY_VALID_FIELDS`` above is: the
 # previous ``hasattr(entity, key)`` test admitted every mapped column, so a
@@ -334,9 +360,8 @@ _MEMORY_VALID_FIELDS = frozenset(
 # row's primary key. ``tenant_id`` and ``fleet_id`` are scope rather than
 # content and no caller writes them; ``search_vector`` is trigger-maintained.
 # Keys outside the set are dropped silently rather than rejected: this service
-# validates request shape upstream in core-api, not here. ``memory_update``
-# drops unlisted keys the same way but still tests ``hasattr(Memory, key)``
-# rather than an allowlist, so its primary key is still writable — #1118.
+# validates request shape upstream in core-api, not here — the same contract
+# ``_MEMORY_UPDATABLE_FIELDS`` above follows.
 _ENTITY_UPDATABLE_FIELDS = frozenset({"canonical_name", "entity_type", "attributes", "name_embedding"})
 
 # Columns the admin memory-list endpoint may sort by. Allowlisted so an
@@ -1044,12 +1069,12 @@ class PostgresService:
         wasn't enough on its own under READ COMMITTED.
         """
         metadata_patch = patch.get("metadata_patch") if isinstance(patch, dict) else None
-        # Map JSON keys to model columns. ``metadata_patch`` is handled
-        # via a separate JSONB-merge statement below; skip it here so it
-        # doesn't accidentally land as a column write.
-        values: dict = {
-            key: val for key, val in patch.items() if key != "metadata_patch" and hasattr(Memory, key)
-        }
+        # Map JSON keys to model columns. ``_MEMORY_UPDATABLE_FIELDS`` rather
+        # than ``hasattr(Memory, key)``, which was true of ``id`` — see the
+        # constant. The synthetic ``metadata_patch`` key needs no explicit
+        # exclusion here: it is not a column, so the set already drops it, and
+        # the JSONB-merge statement below is what consumes it.
+        values: dict = {key: val for key, val in patch.items() if key in _MEMORY_UPDATABLE_FIELDS}
         # Embedding provenance, derived here rather than at every call site.
         # A patch that rewrites ``content`` carries the new ``content_hash``
         # and the re-embedded vector together (see ``update_memory``), so the

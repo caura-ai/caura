@@ -299,7 +299,7 @@ class TestMemories:
            the cast is a no-op on already-jsonb columns so the test
            still validates the corrected SQL shape.
         2. ``metadata_patch`` is a SYNTHETIC key — the body's other
-           top-level fields hit ``hasattr(Memory, key)`` and become
+           top-level fields pass ``_MEMORY_UPDATABLE_FIELDS`` and become
            ``UPDATE ... SET <col>``. Locks that the worker's PATCH
            shape ``{"embedding": ..., "metadata_patch": {...}}``
            applies BOTH branches in the same transaction.
