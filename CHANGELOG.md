@@ -10,6 +10,32 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.36.0](https://github.com/caura-ai/caura/compare/backend-v2.35.4...backend-v2.36.0) (2026-08-30)
+
+
+### Features
+
+* **crystallizer:** subject-local Type-II state materializer, shadow phase (A59) ([#1077](https://github.com/caura-ai/caura/issues/1077)) ([3c7998e](https://github.com/caura-ai/caura/commit/3c7998e12af2bd1eb4b6c236916e1d8736ead3de))
+* **storage:** gate the tenancy invariant in CI ([#1069](https://github.com/caura-ai/caura/issues/1069)) ([d7bb4ca](https://github.com/caura-ai/caura/commit/d7bb4ca48a1651d642568251969e5a3a54f318c3))
+
+
+### Bug Fixes
+
+* **contradiction:** lower the candidate floor to 0.45 so paraphrased updates reach the judge (A63) ([#1025](https://github.com/caura-ai/caura/issues/1025)) ([0868e4d](https://github.com/caura-ai/caura/commit/0868e4d625974418f2170edea051964441d05921))
+* **crystallizer:** Type-II precision gates — 10% -&gt; 80% on the same corpus (A59) ([#1079](https://github.com/caura-ai/caura/issues/1079)) ([debfb42](https://github.com/caura-ai/caura/commit/debfb42de1c2d34126fdf84663769c0322addbba))
+* **search:** preserve lexical matches through candidate limits ([#1092](https://github.com/caura-ai/caura/issues/1092)) ([e92464a](https://github.com/caura-ai/caura/commit/e92464af97cae97b2652b61e9595bf5262041ff3))
+* **storage:** require a binding tenant on quality-metrics ([#1101](https://github.com/caura-ai/caura/issues/1101)) ([f9fbb1b](https://github.com/caura-ai/caura/commit/f9fbb1b01a597a4e6499860159aa1b338d013922))
+
+
+### Documentation
+
+* **readme:** fix the quickstart write, field paths, and single-agent framing ([#1076](https://github.com/caura-ai/caura/issues/1076)) ([455c5dd](https://github.com/caura-ai/caura/commit/455c5dd25595e5ce9dff4419edfb9b46a2036e65))
+
+
+### Code Refactoring
+
+* **npm:** make @caura/client the implementation ([#1099](https://github.com/caura-ai/caura/issues/1099)) ([01780ea](https://github.com/caura-ai/caura/commit/01780eac72d276b92c42fc20d6fa10b074f2ad5e))
+
 ## [2.35.4](https://github.com/caura-ai/caura/compare/backend-v2.35.3...backend-v2.35.4) (2026-08-30)
 
 
