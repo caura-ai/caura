@@ -14,6 +14,7 @@ that make buffered counting safe for billing, each pinned separately:
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -152,6 +153,25 @@ async def test_stop_flushes_what_is_buffered(sc):
     await meter.stop()
 
     assert _rows(sc)[0]["count"] == 4
+
+
+async def test_a_failed_final_flush_logs_the_stranded_counter(sc, caplog):
+    sc.increment_tenant_usage.side_effect = RuntimeError("storage down")
+    meter = UsageMeter()
+    await meter.record(tenant_id="tenant-a", operation="search", count=7)
+    period_start = next(iter(meter._counts))[2].isoformat()
+
+    with caplog.at_level(logging.ERROR, logger="core_api.services.usage_meter"):
+        await meter.stop()
+
+    stranded = [
+        record
+        for record in caplog.records
+        if f"tenant=tenant-a operation=search period_start={period_start} count=7"
+        in record.getMessage()
+    ]
+    assert len(stranded) == 1
+    assert stranded[0].levelno == logging.ERROR
 
 
 async def test_a_shutdown_landing_inside_a_flush_does_not_drop_the_batch(sc):

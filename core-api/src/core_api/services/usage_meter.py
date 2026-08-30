@@ -175,6 +175,14 @@ class UsageMeter:
             self._task = None
         try:
             await asyncio.wait_for(self.flush(), timeout=timeout)
+            for (tenant_id, operation, period), count in self._counts.items():
+                logger.error(
+                    "usage meter counter row lost to shutdown: tenant=%s operation=%s period_start=%s count=%d",
+                    tenant_id,
+                    operation,
+                    period.isoformat(),
+                    count,
+                )
         except TimeoutError:
             logger.warning(
                 "usage meter final flush did not complete within %ss; %d counter rows are lost to shutdown",
