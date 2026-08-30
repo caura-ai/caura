@@ -9043,16 +9043,41 @@ class PostgresService:
         self,
         *,
         command_ids: list[UUID],
+        tenant_id: str,
         now: datetime,
-    ) -> None:
+    ) -> int:
+        """Mark this tenant's commands acked. Returns how many rows matched.
+
+        ``tenant_id`` scopes the UPDATE. Keyed on ``command_ids`` alone, any
+        caller that knew a command UUID could ack another tenant's commands —
+        the same cross-tenant BOLA as GHSA-xw4x-jwf5-8m9h in this subsystem,
+        and as ``fleet_update_command_result`` above, which was scoped for it.
+
+        Required and plainly ``str``, NOT the ``Unscoped`` sentinel the sibling
+        takes. That sentinel exists because core-api genuinely serializes an
+        admin case as ``{"tenant_id": null}`` when completing a command; ack has
+        no such caller. Its one call path is the heartbeat, whose ``tenant_id``
+        is a non-optional ``str`` on ``HeartbeatIn``. An opt-out nobody needs is
+        just an unlocked door.
+
+        The count is what actually matched, not what was asked for, so a caller
+        acking a command that is not its own is told nothing happened rather
+        than getting a silent success. It is not an existence oracle: a UUID
+        belonging to another tenant and a UUID that does not exist both return
+        0, which is the property ``fleet_update_command_result`` documents.
+        """
         if not command_ids:
-            return
+            return 0
         async with get_session() as session:
-            await session.execute(
+            result = await session.execute(
                 sql_update(FleetCommand)
-                .where(FleetCommand.id.in_(command_ids))
+                .where(
+                    FleetCommand.id.in_(command_ids),
+                    FleetCommand.tenant_id == tenant_id,
+                )
                 .values(status="acked", acked_at=now)
             )
+            return result.rowcount or 0  # type: ignore[attr-defined]
 
     async def fleet_update_command_result(
         self,

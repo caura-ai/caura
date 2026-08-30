@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
+from core_storage_api.routers._validation import _require
 from core_storage_api.schemas import FLEET_COMMAND_FIELDS, FLEET_NODE_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import UNSCOPED, PostgresService
 
@@ -247,10 +248,28 @@ async def update_command_status(command_id: UUID, request: Request) -> dict:
 
 @router.post("/commands/ack")
 async def ack_commands(request: Request) -> dict:
+    """Mark commands acked. ``tenant_id`` scopes which ones can be touched.
+
+    Keyed on ``command_ids`` alone, this took a bare list of UUIDs and acked
+    every row that matched, whichever tenant owned it — cross-tenant BOLA, the
+    same shape as GHSA-xw4x-jwf5-8m9h in this subsystem and as
+    ``PATCH /commands/{command_id}/status`` above, which was scoped for it.
+
+    Unlike that route there is no ``null`` admin opt-out, because nothing acks
+    across tenants: the only caller is core-api's heartbeat, whose
+    ``tenant_id`` is a required ``str``. ``_require`` rejects a missing or
+    empty one with a 422.
+
+    ``count`` is the number of rows that actually matched rather than the
+    number asked for, so acking a command that is not yours reports 0 instead
+    of a silent success.
+    """
     body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
     command_ids = [UUID(cid) if isinstance(cid, str) else cid for cid in body["command_ids"]]
-    await _svc.fleet_ack_commands(
+    matched = await _svc.fleet_ack_commands(
         command_ids=command_ids,
+        tenant_id=tenant_id,
         now=datetime.now(UTC),
     )
-    return {"ok": True, "count": len(command_ids)}
+    return {"ok": True, "count": matched}

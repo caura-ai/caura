@@ -2348,8 +2348,18 @@ class CoreStorageClient:
             node_name=node_name,
         )
 
-    async def ack_commands(self, command_ids: list[str]) -> dict:
-        return await self._post("/fleet/commands/ack", {"command_ids": command_ids})  # type: ignore[return-value]
+    async def ack_commands(self, command_ids: list[str], tenant_id: str) -> dict:
+        """Ack commands for one tenant. ``tenant_id`` is required, not optional.
+
+        Storage scopes the UPDATE by it; without it the ack keyed on command
+        UUIDs alone and reached other tenants' rows. Positional and
+        non-defaulted so a caller cannot omit it and silently get the old
+        behaviour back.
+        """
+        return await self._post(  # type: ignore[return-value]
+            "/fleet/commands/ack",
+            {"command_ids": command_ids, "tenant_id": tenant_id},
+        )
 
     async def fleet_exists(self, tenant_id: str, fleet_id: str) -> bool:
         result = await self._get(

@@ -849,7 +849,7 @@ async def heartbeat(
         commands = pending
 
     if commands:
-        await sc.ack_commands([c.get("id") for c in commands])
+        await sc.ack_commands([c.get("id") for c in commands], body.tenant_id)
 
     return {
         "ok": True,

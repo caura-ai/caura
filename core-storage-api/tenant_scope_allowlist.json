@@ -140,13 +140,6 @@
       "note": "Tracked in #1081."
     },
     {
-      "id": "method:fleet_ack_commands",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1086."
-    },
-    {
       "id": "method:fleet_add_command",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -611,13 +604,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "opaque-body-write"
-    },
-    {
-      "id": "route:POST /api/v1/storage/fleet/commands/ack",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1086."
     },
     {
       "id": "route:POST /api/v1/storage/fleet/nodes",
