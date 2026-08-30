@@ -109,7 +109,7 @@ type drawn from this list:
 | `test`, `build`, `ci`, `chore` | Hidden from CHANGELOG, no release impact |
 
 Append `!` (`feat!: …`) or a `BREAKING CHANGE:` footer for changes
-that break the [Public API](README.md#public-api--stability) — these
+that break the [Public API](docs/public-api-stability.md) — these
 trigger a major bump once we ship 1.0.0. Before 1.0.0 they're treated
 as minor (`bump-minor-pre-major: true` in `release-please-config.json`).
 

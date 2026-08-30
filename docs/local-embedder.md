@@ -38,8 +38,8 @@ docker compose --profile embed-local logs -f tei
 
 In another terminal, fire one write → search round-trip:
 
-> These examples assume `IS_STANDALONE=true` in `.env` (see the
-> [Auth modes](../README.md#self-hosted-open-source) section in README).
+> These examples assume `IS_STANDALONE=true` in `.env` (see
+> [Authentication modes](self-hosting.md#authentication-modes)).
 > Replace `standalone` with your actual API key if you're using `ADMIN_API_KEY`
 > or `CAURA_API_KEY` instead, and add `tenant_id` matching your setup.
 
@@ -278,15 +278,15 @@ container start. Just bring the stack up per the [TL;DR](#tldr) above.
 
 **Upgrading from v1.x.** This is destructive — every existing 768-dim
 embedding is set to `NULL` so the column can be widened to 1024-dim.
-**Follow the canonical procedure in the README's
-[Upgrading from v1.x](../README.md#upgrading-from-v1x) section** — it
+**Follow the canonical procedure in the
+[Upgrading from v1.x](upgrading-from-v1.md) guide** — it
 sequences DB snapshot, opt-in env var, migration trigger, and re-embed in
 the order that won't lose data.
 
 The procedure expects you to run a stand-alone backfill CLI to re-embed
 existing rows (`python -m core_storage_api.scripts.backfill_embeddings`)
 after the migration completes. Both the OSS standalone CLI and the
-event-driven `core-worker` task work; the README documents both. For
+event-driven `core-worker` task work; the upgrade guide documents both. For
 multi-tenant production cutovers prefer the event-driven path.
 
 ## Switching back to OpenAI hosted

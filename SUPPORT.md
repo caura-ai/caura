@@ -12,7 +12,7 @@ Open a [Bug report](https://github.com/caura-ai/caura/issues/new?template=bug_re
 
 Before filing:
 - Search existing issues and Discussions for duplicates.
-- Confirm the behavior contradicts the [Public API & Stability](README.md#public-api--stability) section. Behavior of internal surfaces (e.g. database schema, gateway-injected headers, `/admin/*` routes) can change without notice and isn't tracked as a bug.
+- Confirm the behavior contradicts the [Public API & Stability](docs/public-api-stability.md) contract. Behavior of internal surfaces (e.g. database schema, gateway-injected headers, `/admin/*` routes) can change without notice and isn't tracked as a bug.
 
 ## Feature requests
 

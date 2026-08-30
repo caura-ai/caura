@@ -91,7 +91,9 @@ The OSS API supports three auth paths. Pick one:
 IS_STANDALONE=true
 ```
 
-Restart the server. All API calls work without `X-API-Key`. The MCP server still expects an `X-API-Key` header, so set any non-admin value (e.g. `X-API-Key: standalone`) — it's ignored in standalone mode.
+Restart the server. REST and MCP calls work without `X-API-Key`. Supplying a
+placeholder such as `X-API-Key: standalone` is harmless and can make the same
+client configuration easier to reuse with authenticated modes.
 
 **Path 2 — Admin key (multi-tenant, full access).** Set in your `.env`:
 
@@ -166,7 +168,7 @@ Use MCP if your agent supports it. Use the plugin if you're running on OpenClaw.
 ## Verify Your Connection
 
 ```bash
-# Example: standalone mode (tenant_id="default", any non-admin X-API-Key works)
+# Example: standalone mode (tenant_id="default"; the placeholder key is optional)
 CAURA_URL=http://localhost:8000
 KEY=standalone
 
@@ -252,6 +254,6 @@ If you see search latency materially above ~50 ms p50 after warm-up, the pgvecto
 ## Full Reference
 
 For complete tool documentation with parameters, examples, memory types, status lifecycle, best practices, and
-project structure, see the [README API reference](README.md#api-reference) and
-[README project structure](README.md#project-structure). For benchmark methodology and competitive context, see
+project structure, see the [API reference](docs/api-reference.md) and
+[project structure](docs/api-reference.md#project-structure). For benchmark methodology and competitive context, see
 [`docs/performance.md`](docs/performance.md).
