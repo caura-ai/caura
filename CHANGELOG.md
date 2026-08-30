@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.36.1](https://github.com/caura-ai/caura/compare/backend-v2.36.0...backend-v2.36.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **npm:** enforce client tag and package brand agreement ([#1103](https://github.com/caura-ai/caura/issues/1103)) ([8b323fc](https://github.com/caura-ai/caura/commit/8b323fcf60cda7e5bd839b4bb189e7ad637cb791))
+* **usage:** log counters stranded at shutdown ([#1102](https://github.com/caura-ai/caura/issues/1102)) ([83a43d1](https://github.com/caura-ai/caura/commit/83a43d1bb488d44f6e49e291c06992d494c52047))
+
+
+### Documentation
+
+* **readme:** split reference material ([#1100](https://github.com/caura-ai/caura/issues/1100)) ([72129a4](https://github.com/caura-ai/caura/commit/72129a4ccf2ef2b1b826cd97e94f51c60fc2c239))
+
 ## [2.36.0](https://github.com/caura-ai/caura/compare/backend-v2.35.4...backend-v2.36.0) (2026-08-30)
 
 
