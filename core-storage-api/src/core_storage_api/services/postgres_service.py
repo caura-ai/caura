@@ -327,6 +327,18 @@ _MEMORY_VALID_FIELDS = frozenset(
     {c.key for c in Memory.__table__.columns} | {a.key for a in Memory.__mapper__.column_attrs}
 )
 
+# Columns ``entity_update`` may write. Deliberately a subset, not
+# ``Entity.__table__.columns`` the way ``_MEMORY_VALID_FIELDS`` above is: the
+# previous ``hasattr(entity, key)`` test admitted every mapped column, so a
+# caller who satisfied the route's tenant predicate could still repoint the
+# row's primary key. ``tenant_id`` and ``fleet_id`` are scope rather than
+# content and no caller writes them; ``search_vector`` is trigger-maintained.
+# Keys outside the set are dropped silently rather than rejected: this service
+# validates request shape upstream in core-api, not here. ``memory_update``
+# drops unlisted keys the same way but still tests ``hasattr(Memory, key)``
+# rather than an allowlist, so its primary key is still writable — #1118.
+_ENTITY_UPDATABLE_FIELDS = frozenset({"canonical_name", "entity_type", "attributes", "name_embedding"})
+
 # Columns the admin memory-list endpoint may sort by. Allowlisted so an
 # unexpected ``sort`` value falls back to created_at instead of raising
 # AttributeError (500) at ``getattr(Memory, sort)`` — the endpoint is callable
@@ -5313,7 +5325,7 @@ class PostgresService:
                 # but real window), ``entity_update`` returns None — surface
                 # as "missing" rather than reporting a "merged" that didn't
                 # actually happen.
-                updated = await self.entity_update(existed_before.id, merge_values)
+                updated = await self.entity_update(existed_before.id, item["tenant_id"], merge_values)
                 results[item["input_idx"]] = {
                     "input_idx": item["input_idx"],
                     "entity_id": str(existed_before.id),
@@ -5464,14 +5476,25 @@ class PostgresService:
                 entity = winner
             return entity
 
-    async def entity_update(self, entity_id: UUID, data: dict) -> Entity | None:
-        """Update an existing entity by ID with the given fields."""
+    async def entity_update(self, entity_id: UUID, tenant_id: str, data: dict) -> Entity | None:
+        """Update an existing entity by ID, scoped to its home tenant.
+
+        ``tenant_id`` is in the WHERE for the reason given on
+        ``entity_bulk_upsert``'s update branch. Returning ``None`` for both
+        "no such entity" and "not yours" is what keeps the route from
+        answering as an existence oracle for entity UUIDs.
+
+        Only ``_ENTITY_UPDATABLE_FIELDS`` are applied — see that constant for
+        why the writable set is narrower than "every mapped column".
+        """
         async with get_session() as session:
-            entity = await session.get(Entity, entity_id)
+            entity = await session.scalar(
+                select(Entity).where(Entity.id == entity_id, Entity.tenant_id == tenant_id)
+            )
             if entity is None:
                 return None
             for key, value in data.items():
-                if hasattr(entity, key):
+                if key in _ENTITY_UPDATABLE_FIELDS:
                     setattr(entity, key, value)
             await session.flush()
             return entity

@@ -1317,8 +1317,10 @@ class CoreStorageClient:
     async def get_entity(self, entity_id: str) -> dict | None:
         return await self._get(f"/entities/{entity_id}")
 
-    async def update_entity(self, entity_id: str, data: dict) -> dict | None:
-        return await self._patch(f"/entities/{entity_id}", data)
+    async def update_entity(self, entity_id: str, tenant_id: str, data: dict) -> dict | None:
+        # Same contract as ``update_memory`` above, for the same reason.
+        # The explicit arg wins over any ``tenant_id`` in ``data``.
+        return await self._patch(f"/entities/{entity_id}", {**data, "tenant_id": tenant_id})
 
     async def find_exact_entity(
         self,

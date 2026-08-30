@@ -104,7 +104,7 @@ async def upsert_entity(
         if name_embedding is not None:
             update_data["name_embedding"] = name_embedding
 
-        updated = await sc.update_entity(str(entity_id), update_data)
+        updated = await sc.update_entity(str(entity_id), data.tenant_id, update_data)
         entity = updated or entity
     else:
         # Create new entity. Coerce ``attributes=None`` to ``{}`` so

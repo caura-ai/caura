@@ -645,7 +645,14 @@ async def get_entity(entity_id: UUID) -> dict:
 @router.patch("/{entity_id}")
 async def update_entity(entity_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
-    entity = await _svc.entity_update(entity_id, body)
+    # Tenant guard, same shape as ``PATCH /memories/{memory_id}``: ``tenant_id``
+    # is the row's home tenant, removed from the body so it scopes the fetch
+    # rather than landing as a patched column (``Entity`` has a ``tenant_id``
+    # column). ``_ENTITY_UPDATABLE_FIELDS`` would drop it anyway; both are kept
+    # because either alone closes the hop and they fail independently.
+    tenant_id = _require(body, "tenant_id")
+    del body["tenant_id"]
+    entity = await _svc.entity_update(entity_id, tenant_id, body)
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
     return orm_to_dict(entity, ENTITY_FIELDS)

@@ -133,13 +133,6 @@
       "note": "Join table has no tenant column; rows are tenant-scoped only via the ids."
     },
     {
-      "id": "method:entity_update",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1081."
-    },
-    {
       "id": "method:fleet_add_command",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -496,13 +489,6 @@
       "evidence": "no binding tenant read from the request",
       "category": "id-addressed-write",
       "note": "Tracked in #1084."
-    },
-    {
-      "id": "route:PATCH /api/v1/storage/entities/{entity_id}",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1081."
     },
     {
       "id": "route:PATCH /api/v1/storage/lifecycle-audit/{audit_id}",
