@@ -25,10 +25,12 @@ both:
 from __future__ import annotations
 
 import json
-import tomllib
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
+import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLIENTS = REPO_ROOT / "clients"
@@ -61,6 +63,9 @@ NPM_REEXPORT_TARGET = {
 # they all depend on.
 PY_METAPACKAGES = ("caura-meta", "caura-sdk-meta")
 NPM_METAPACKAGES = ("npm-legacy-client", "npm-sdk")
+LEGACY_NPM_CLIENT_TAG = (
+    "memclaw-client-ts-v1.0.2"  # legacy-name-ok: guard compatibility case
+)
 
 
 def _pyproject(directory: str) -> dict:
@@ -69,6 +74,53 @@ def _pyproject(directory: str) -> dict:
 
 def _package_json(directory: str) -> dict:
     return json.loads((CLIENTS / directory / "package.json").read_text())
+
+
+def _workflow_step_script(workflow: str, step_name: str) -> str:
+    """Return the literal shell body GitHub Actions runs for one workflow step."""
+    lines = (WORKFLOWS / workflow).read_text().splitlines(keepends=True)
+    marker = f"      - name: {step_name}\n"
+    assert marker in lines, f"workflow has no {step_name!r} step"
+    start = lines.index(marker)
+    step_end = next(
+        (i for i in range(start + 1, len(lines)) if lines[i].startswith("      - ")),
+        len(lines),
+    )
+    run = next(
+        (i for i in range(start + 1, step_end) if lines[i] == "        run: |\n"),
+        None,
+    )
+    assert run is not None, f"workflow step {step_name!r} has no literal run block"
+    end = next(
+        (
+            i
+            for i in range(run + 1, step_end)
+            if lines[i].strip() and not lines[i].startswith("          ")
+        ),
+        step_end,
+    )
+    return "".join(line[10:] for line in lines[run + 1 : end])
+
+
+def _run_workflow_step(
+    workflow: str, step_name: str, working_directory: Path, tag: str
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-eo",
+            "pipefail",
+            "-c",
+            _workflow_step_script(workflow, step_name),
+        ],
+        cwd=working_directory,
+        env={"GITHUB_REF_NAME": tag, "PATH": os.environ["PATH"]},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.mark.unit
@@ -136,6 +188,97 @@ def test_npm_alias_dependency_direction_avoids_historical_cycle() -> None:
 
     canonical = _package_json("typescript")
     assert NPM_DISTS["npm-legacy-client"] not in canonical.get("dependencies", {})
+
+
+@pytest.mark.unit
+def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() -> None:
+    workflow = (WORKFLOWS / "publish-npm-client.yml").read_text()
+    guard = "      - name: The tag must agree with package.json\n"
+    assert workflow.index(guard) < workflow.index("      - name: Install + build\n")
+    guard_header = workflow[
+        workflow.index(guard) : workflow.index(
+            "        run: |\n", workflow.index(guard)
+        )
+    ]
+    assert "if: startsWith(github.ref, 'refs/tags/')" in guard_header
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tag", "directory", "should_pass", "message"),
+    [
+        ("caura-client-ts-v1.0.1", "typescript", True, "both Caura-spelled"),
+        ("caura-npm-v1.0.1", "typescript", True, "both Caura-spelled"),
+        (
+            "caura-client-ts-v1.0.1",
+            "npm-legacy-client",
+            False,
+            "is Caura-spelled but package.json publishes",
+        ),
+        (
+            "unrelated-v1.0.1",
+            "typescript",
+            False,
+            "does not use a supported client prefix",
+        ),
+        (
+            "caura-client-ts-v9.9.9",
+            "typescript",
+            False,
+            "says 9.9.9 but package.json says 1.0.1",
+        ),
+    ],
+)
+def test_npm_client_tag_package_agreement_behavior(
+    tag: str,
+    directory: str,
+    should_pass: bool,
+    message: str,
+) -> None:
+    result = _run_workflow_step(
+        "publish-npm-client.yml",
+        "The tag must agree with package.json",
+        CLIENTS / directory,
+        tag,
+    )
+    assert (result.returncode == 0) is should_pass, result.stdout + result.stderr
+    assert message in result.stdout
+
+
+@pytest.mark.unit
+def test_npm_client_tag_package_agreement_rejects_an_unknown_brand(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({"name": "@other/client"}))
+    result = _run_workflow_step(
+        "publish-npm-client.yml",
+        "The tag must agree with package.json",
+        tmp_path,
+        "caura-client-ts-v1.0.1",
+    )
+    assert result.returncode != 0
+    assert (
+        "package.json publishes @other/client, whose brand is not recognized"
+        in result.stdout
+    )
+
+
+@pytest.mark.unit
+def test_legacy_npm_tag_still_publishes_the_legacy_alias() -> None:
+    workflow = (WORKFLOWS / "publish-npm-legacy-client.yml").read_text()
+    tag_pattern = LEGACY_NPM_CLIENT_TAG.removesuffix("1.0.2") + "*"
+    assert f'- "{tag_pattern}"' in workflow
+    assert "working-directory: clients/npm-legacy-client" in workflow
+
+    result = _run_workflow_step(
+        "publish-npm-legacy-client.yml",
+        "The tag must agree with package.json",
+        CLIENTS / "npm-legacy-client",
+        LEGACY_NPM_CLIENT_TAG,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    published_alias = "@caura/memclaw-client@1.0.2"  # legacy-name-ok: alias path
+    assert f"publishing {published_alias}" in result.stdout
 
 
 @pytest.mark.unit

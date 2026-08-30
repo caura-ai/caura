@@ -25,6 +25,7 @@ name: Publish the canonical TypeScript client to npm
 
 on:
   push:
+    # Keep these two patterns aligned with the single pre-build agreement step.
     tags:
       - "caura-client-ts-v*"
       - "caura-npm-v*"
@@ -50,6 +51,42 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
+      # A tag that disagrees with package.json does not fail naturally: npm
+      # publishes the manifest's name and version under a misleading release
+      # tag. Validate both in one place before any credential or build work.
+      - name: The tag must agree with package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          case "${GITHUB_REF_NAME}" in
+            caura-client-ts-v*) TAG_VERSION="${GITHUB_REF_NAME#caura-client-ts-v}" ;;
+            caura-npm-v*) TAG_VERSION="${GITHUB_REF_NAME#caura-npm-v}" ;;
+            *)
+              echo "::error::tag ${GITHUB_REF_NAME} does not use a supported client prefix"
+              exit 1
+              ;;
+          esac
+
+          case "${PKG_NAME}" in
+            *memclaw*) # legacy-name-ok: reject the preserved alias name on this canonical path
+              echo "::error::tag ${GITHUB_REF_NAME} is Caura-spelled but package.json publishes ${PKG_NAME}"
+              exit 1
+              ;;
+            @caura/*) ;;
+            *)
+              echo "::error::tag ${GITHUB_REF_NAME} is Caura-spelled but package.json publishes ${PKG_NAME}, whose brand is not recognized"
+              exit 1
+              ;;
+          esac
+          echo "tag ${GITHUB_REF_NAME} and package.json name ${PKG_NAME} are both Caura-spelled"
+
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "${TAG_VERSION}" != "${PKG_VERSION}" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but package.json says ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "publishing ${PKG_NAME}@${PKG_VERSION}"
+
       # Checked explicitly because the failure it prevents is a confusing one.
       # Without the secret, `npm publish` authenticates as nobody and fails
       # with a 401 or ENEEDAUTH that reads like an npm-side problem rather
@@ -65,28 +102,6 @@ jobs:
 
       - name: Install + build
         run: npm install
-
-      # A tag that disagrees with package.json does not fail — it publishes
-      # whatever package.json says, under a tag claiming otherwise. The release
-      # then looks done while the registry serves a different version. Both
-      # supported prefixes are stripped so either runbook gets the same check.
-      - name: The tag must agree with package.json
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          case "${GITHUB_REF_NAME}" in
-            caura-client-ts-v*) TAG_VERSION="${GITHUB_REF_NAME#caura-client-ts-v}" ;;
-            caura-npm-v*) TAG_VERSION="${GITHUB_REF_NAME#caura-npm-v}" ;;
-            *)
-              echo "::error::tag ${GITHUB_REF_NAME} does not use a supported canonical-client prefix"
-              exit 1
-              ;;
-          esac
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
-            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but package.json says ${PKG_VERSION}"
-            exit 1
-          fi
-          echo "publishing $(node -p "require('./package.json').name")@${PKG_VERSION}"
 
       - name: Publish
         run: npm publish --access public --provenance
