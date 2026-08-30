@@ -247,6 +247,11 @@ def assert_round_trip(
     memory_id = write_response.get("id")
     if not isinstance(memory_id, str) or not memory_id:
         raise QuickstartError(f"write response has no memory id: {write_response!r}")
+    title = write_response.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise QuickstartError(
+            f"write response has no generated title: {write_response!r}"
+        )
 
     items = search_response.get("items")
     if not isinstance(items, list):

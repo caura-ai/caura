@@ -68,7 +68,7 @@ docker compose up -d --wait                                 # Postgres + pgvecto
 # Write a memory — no API key needed
 curl -X POST http://localhost:8000/api/v1/memories \
   -H "X-API-Key: standalone" -H "Content-Type: application/json" \
-  -d '{"tenant_id": "default", "agent_id": "quickstart", "content": "Our auth service uses JWT with 15-minute expiry."}'
+  -d '{"tenant_id": "default", "agent_id": "quickstart", "write_mode": "strong", "content": "Our auth service uses JWT with 15-minute expiry."}'
 
 # Find it by keyword — no provider key needed
 curl -X POST http://localhost:8000/api/v1/search \
@@ -77,7 +77,7 @@ curl -X POST http://localhost:8000/api/v1/search \
 ```
 <!-- readme-quickstart-ci:end -->
 
-The keyless write response includes `memory_type`, `title`, `status`, and `weight` — plus a `summary` under `metadata` — all derived by a deterministic local heuristic from the single `content` field. With a configured AI provider, those values are model-inferred and `metadata` can also include `tags`.
+The keyless strong-write response includes `memory_type`, `title`, `status`, and `weight` — plus a `summary` under `metadata` — all derived by a deterministic local heuristic from the single `content` field. With a configured AI provider, those values are model-inferred and `metadata` can also include `tags`.
 
 > **Want semantic paraphrases?** The keyless query deliberately reuses words from the memory. After
 > configuring an embedding provider in the next section, try `"authentication token lifetime"`

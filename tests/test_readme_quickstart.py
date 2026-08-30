@@ -38,6 +38,7 @@ def test_readme_keyless_quickstart_is_the_expected_keyword_round_trip() -> None:
     assert write.payload == {
         "tenant_id": "default",
         "agent_id": "quickstart",
+        "write_mode": "strong",
         "content": "Our auth service uses JWT with 15-minute expiry.",
     }
     assert search.payload == {"tenant_id": "default", "query": "JWT expiry"}
@@ -160,4 +161,15 @@ def test_runtime_override_stays_on_localhost() -> None:
 
 def test_round_trip_requires_search_to_return_the_created_memory() -> None:
     with pytest.raises(QuickstartError, match="did not return"):
-        assert_round_trip({"id": "created-id"}, {"items": [{"id": "other-id"}]})
+        assert_round_trip(
+            {"id": "created-id", "title": "Generated title"},
+            {"items": [{"id": "other-id"}]},
+        )
+
+
+def test_round_trip_requires_the_title_promised_by_the_readme() -> None:
+    with pytest.raises(QuickstartError, match="title"):
+        assert_round_trip(
+            {"id": "created-id", "title": None},
+            {"items": [{"id": "created-id"}]},
+        )
