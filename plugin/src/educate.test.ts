@@ -434,7 +434,7 @@ describe("writeEducationFiles", () => {
 
   // ── Fenced-block migration (A1) ──
   //
-  // Pre-A1 idempotency was substring-based (`includes("Caura")` /
+  // Pre-A1 idempotency was substring-based (`includes("MemClaw")` / // legacy-name-floor: historical matcher behavior
   // `includes("## Memory V2")`), so once a workspace had any MemClaw // legacy-name-floor: historical matcher behavior
   // content, plugin upgrades never refreshed it. Below: every behaviour
   // the new versioned-fence implementation must guarantee.
