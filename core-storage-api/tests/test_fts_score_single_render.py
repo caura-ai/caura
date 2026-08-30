@@ -32,7 +32,10 @@ from core_storage_api.services.postgres_service import _saturate_rank
 # cost back, a fall means the inner-projection work landed. Either way,
 # re-measure and move the number deliberately rather than loosening the check.
 _EXPECTED_TS_RANK_CD_RENDERS = 9
-_EXPECTED_TSQUERY_RENDERS = 18
+# The main and reserved candidate branches each carry ``fts_match`` into the
+# candidate CTE. Projecting it there keeps the expression ahead of entity-link
+# fanout, where an outer render would evaluate it once per joined row.
+_EXPECTED_TSQUERY_RENDERS = 20
 
 
 def _scaled_rank():

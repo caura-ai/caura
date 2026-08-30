@@ -18,7 +18,10 @@ from uuid import uuid4
 
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.search import track_recalls as tr
-from core_api.pipeline.steps.search.load_and_serialize import LoadAndSerialize, _score_parts
+from core_api.pipeline.steps.search.load_and_serialize import (
+    LoadAndSerialize,
+    _score_parts,
+)
 from core_api.pipeline.steps.search.post_filter_results import PostFilterResults
 from core_api.pipeline.steps.search.resolve_search_profile import ResolveSearchProfile
 
@@ -80,6 +83,7 @@ async def test_min_similarity_override_beats_profile():
     )
     await ResolveSearchProfile().execute(ctx)
     assert ctx.data["search_params"]["min_similarity"] == 0.9
+    assert ctx.data["allow_fts_global_floor_bypass"] is False
 
 
 async def test_profile_min_similarity_kept_without_override():
@@ -94,6 +98,7 @@ async def test_profile_min_similarity_kept_without_override():
     )
     await ResolveSearchProfile().execute(ctx)
     assert ctx.data["search_params"]["min_similarity"] == 0.5
+    assert ctx.data["allow_fts_global_floor_bypass"] is False
 
 
 # --- PostFilterResults: diagnostic trace --------------------------------------

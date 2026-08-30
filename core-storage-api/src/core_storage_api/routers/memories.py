@@ -224,6 +224,7 @@ async def scored_search(request: Request) -> list[dict]:
             row["score"] = float(r.score) if r.score is not None else 0.0
             row["similarity"] = float(r.similarity) if r.similarity is not None else 0.0
             row["vec_sim"] = float(r.vec_sim) if r.vec_sim is not None else 0.0
+            row["fts_match"] = bool(getattr(r, "fts_match", False))
             # CAURA-594: authoritative signal for async-embed callers;
             # `vec_sim == 0.0` is ambiguous with an orthogonal embedding.
             # Default to False on missing attribute — the only readers

@@ -91,7 +91,7 @@ from core_api.schemas import (
     MemoryUpdate,
     ScoreParts,
 )
-from core_api.search_trim import trim_reserving_fts_only
+from core_api.search_trim import passes_relevance_filter, trim_reserving_fts_matches
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.governance_gate import (
@@ -3978,6 +3978,20 @@ def resolve_search_params(
     }
 
 
+def _uses_global_min_similarity(
+    search_profile: dict | None,
+    tenant_config,
+    request_override: float | None,
+) -> bool:
+    """Return whether search fell through to the untuned global floor."""
+    if request_override is not None or (search_profile and "min_similarity" in search_profile):
+        return False
+    if tenant_config is None:
+        return True
+    tenant_default = getattr(tenant_config, "default_search_profile", {}) or {}
+    return "min_similarity" not in tenant_default
+
+
 def _normalize_query_for_cache(query: str) -> str:
     """Normalize query for cache key: lowercase, strip, collapse whitespace."""
     return re.sub(r"\s+", " ", query.strip().lower())
@@ -4605,6 +4619,14 @@ async def _search_memories_legacy(
     # D12 — per-request floor beats the resolved profile, same precedence as
     # ResolveSearchProfile applies on the pipeline path.
     _min_similarity = min_similarity if min_similarity is not None else sp["min_similarity"]
+    fts_enabled = float(sp["fts_weight"]) > 0.0
+    # Match the pipeline's provenance-aware exception: only the global fallback
+    # can yield to lexical evidence, never a request/agent/tenant floor.
+    allow_fts_bypass = fts_enabled and _uses_global_min_similarity(
+        search_profile,
+        tenant_config,
+        min_similarity,
+    )
 
     # Temporal hint
     temporal_window = _extract_temporal_hint(query)
@@ -4690,33 +4712,22 @@ async def _search_memories_legacy(
         rows = await sc.scored_search(search_data)
 
     # Post-filter by min_similarity, then trim to top_k.
-    #
-    # `has_embedding is False` is the clause that matters, and it was missing:
-    # the invariant the old comment here relied on ("the scored_search SQL
-    # enforces `Memory.embedding IS NOT NULL`") stopped holding at CAURA-594,
-    # which admits NULL-embedding rows that FTS-match via
-    # `or_(embedding IS NOT NULL, fts_guard)`. The storage layer coerces those
-    # rows' cosine to 0.0 rather than NULL — as that comment itself noted — so
-    # the `vec_sim is None` branch never fires for them and `0.0 >= threshold`
-    # gated out exactly the FTS-only rows CAURA-679 exists to keep discoverable
-    # during the deferred-embed window. `has_embedding` is the authoritative
-    # NULL signal for precisely this reason. Now genuinely mirrors the
-    # pipeline's post_filter step, which has carried this clause since CAURA-679.
     rows = [
         r
         for r in rows
-        if r.get("has_embedding") is False
-        or r.get("vec_sim") is None
-        or float(r["vec_sim"]) >= _min_similarity
+        if passes_relevance_filter(
+            has_embedding=r.get("has_embedding", True),
+            vec_sim=r.get("vec_sim"),
+            min_similarity=_min_similarity,
+            fts_match=bool(r.get("fts_match", False)),
+            allow_fts_global_floor_bypass=allow_fts_bypass,
+        )
     ]
-    # #687: the same reservation the pipeline post-filter applies — exempting
-    # FTS-only rows from the cosine gate above does not make them reachable,
-    # because they score on fts_score alone and a plain head slice drops them once
-    # enough embedded rows sit above. Shared with that path via
-    # `trim_reserving_fts_only` so the two cannot drift; rows here are dicts, so
-    # the predicate reads `has_embedding` with `.get` (matching the gate above)
-    # where the pipeline uses attribute access.
-    rows = trim_reserving_fts_only(rows, _top_k, lambda r: r.get("has_embedding") is False)
+    rows = trim_reserving_fts_matches(
+        rows,
+        _top_k,
+        lambda r: r.get("has_embedding") is False or (fts_enabled and bool(r.get("fts_match", False))),
+    )
 
     # Build results from storage API response
     memory_ids = [row.get("id") for row in rows if row.get("id")]

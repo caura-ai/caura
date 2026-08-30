@@ -193,6 +193,7 @@ class ExecuteScoredSearch:
                                 "recall_boost",
                                 "temporal_boost",
                                 "status_penalty",
+                                "fts_match",
                                 "entity_links",
                                 "has_embedding",
                             )
@@ -207,6 +208,7 @@ class ExecuteScoredSearch:
                     recall_boost=row.get("recall_boost"),
                     temporal_boost=row.get("temporal_boost"),
                     status_penalty=row.get("status_penalty"),
+                    fts_match=bool(row.get("fts_match", False)),
                     has_embedding=row.get("has_embedding", True),
                     entity_links=[],
                 )

@@ -265,20 +265,17 @@ def _entity_uf_union(parent: dict[UUID, UUID], rank: dict[UUID, int], a: UUID, b
         rank[ra] += 1
 
 
-# #687: how many candidate slots the scored search reserves for rows that
-# FTS-match but have no embedding yet. Deliberately small: the guarantee needed
-# is "discoverable", not "ranked highly", and the population is transient — rows
-# carry a NULL embedding only until the deferred backfill lands. Set to 0 to
-# restore the pre-#687 behaviour where such rows are cut by the candidate LIMIT.
+# How many candidate slots scored search reserves for full-text matches. The
+# lexical scoring path needs this before the candidate LIMIT: a strong vector-only
+# cohort can otherwise cut every lexical hit before core-api sees it. When
+# keyword scoring is disabled, the reservation narrows to #687's transient
+# NULL-embedding fallback.
 #
 # This also floors what the result layer can promote: core-api's
-# ``FTS_ONLY_RESERVED_RESULTS`` (currently 1) reserves result slots only among
-# rows that already reached it, and this branch is the only supply it is
-# guaranteed — the main branch carries FTS-only rows just when they earn a slot
-# on score. So keep this >= that constant; above it, the extra promotions are
-# satisfied only incidentally. core-storage-api must not import core-api, so the
-# coupling is documented here rather than enforced.
-_FTS_ONLY_RESERVED_CANDIDATES = 3
+# ``FTS_RESERVED_RESULTS`` (currently 1) reserves result slots only among rows
+# that already reached it. Keep this >= that constant. core-storage-api must not
+# import core-api, so the coupling is documented here rather than enforced.
+_FTS_RESERVED_CANDIDATES = 3
 
 
 def _saturate_rank(scaled_rank: Any) -> Any:
@@ -2087,12 +2084,14 @@ class PostgresService:
         # weight bug. Gate on the Python-side query string so the
         # operator is only emitted when there's actual text to match.
         _fts_guard = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
+        fts_match = _fts_guard.label("fts_match")
         scored_stmt = (
             select(
                 Memory.id.label("mem_id"),
                 score,
                 similarity,
                 vec_sim,
+                fts_match,
                 has_embedding,
                 status_penalty,
             )
@@ -2233,27 +2232,22 @@ class PostgresService:
             # always meant to ask for.
             main_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(top_k)
 
-        # #687: reserve candidate slots for FTS-only rows.
+        # Reserve candidate slots for full-text matches.
         #
-        # CAURA-594 admits a NULL-embedding row when it FTS-matches, and CAURA-679
-        # scores it on ``fts_score`` alone so the blend's haircut can't bury it —
-        # both so a memory stays discoverable during the deferred-embed window.
-        # Neither helps it survive the LIMIT above: ``fts_score`` is
-        # ``ts_rank_cd/(1+ts_rank_cd)``, single digits of a percent for one term,
-        # while embedded rows near the query score far higher. Measured on prod
-        # (#687): embedded rows 0.35-0.39, the FTS-only row 0, a 10-row window —
-        # so the row was cut here, upstream of every exemption downstream of it.
+        # A lexical hit can score below enough strong vector-only candidates to
+        # miss the LIMIT above. That is fatal because core-api can only reserve
+        # rows storage returns. With lexical scoring enabled, reserve any FTS match;
+        # otherwise preserve #687's narrower NULL-embedding fallback only.
         #
-        # A small dedicated branch, ordered by FTS relevance and separately capped,
-        # guarantees such rows reach the caller without touching how anything else
-        # ranks: they enter the pool at their own true (low) score and the outer
-        # ORDER BY still places them last. Bounded twice over — the cap, and the
-        # fact that NULL-embedding rows exist only until the backfill lands.
-        if _FTS_ONLY_RESERVED_CANDIDATES > 0 and query and query.strip():
+        # The dedicated branch is separately capped and the outer ORDER BY keeps
+        # every row at its true score, so this changes candidate admission rather
+        # than the ranking formula.
+        if _FTS_RESERVED_CANDIDATES > 0 and query and query.strip():
+            reserve_filter = _fts_guard if _fts_weight > 0.0 else and_(Memory.embedding.is_(None), _fts_guard)
             reserved_stmt = (
-                scored_stmt.where(and_(Memory.embedding.is_(None), _fts_guard))
+                scored_stmt.where(reserve_filter)
                 .order_by(fts_score.desc(), Memory.created_at.desc())
-                .limit(_FTS_ONLY_RESERVED_CANDIDATES)
+                .limit(_FTS_RESERVED_CANDIDATES)
             )
             # Each operand is wrapped in its own subquery so its ORDER BY/LIMIT is
             # applied BEFORE the union, not hoisted to the compound statement — the
@@ -2269,6 +2263,7 @@ class PostgresService:
                 scored_cte.c.score,
                 scored_cte.c.similarity,
                 scored_cte.c.vec_sim,
+                scored_cte.c.fts_match,
                 scored_cte.c.has_embedding,
                 scored_cte.c.status_penalty,
                 MemoryEntityLink.entity_id,
@@ -2300,6 +2295,7 @@ class PostgresService:
                     score=row.score,
                     similarity=row.similarity,
                     vec_sim=row.vec_sim,
+                    fts_match=row.fts_match,
                     has_embedding=row.has_embedding,
                     status_penalty=row.status_penalty,
                     entity_links=[],

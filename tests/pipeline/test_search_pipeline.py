@@ -167,10 +167,9 @@ async def test_extract_temporal_hint_uses_valid_at_as_reference():
 
 
 @pytest.mark.asyncio
-async def test_post_filter_results():
-    """PostFilterResults filters rows below min_similarity."""
+async def test_post_filter_results_keeps_configured_cosine_floor_strict():
+    """PostFilterResults keeps an explicit cosine floor strict."""
     from types import SimpleNamespace
-    from unittest.mock import AsyncMock
 
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.search.post_filter_results import PostFilterResults
@@ -180,7 +179,12 @@ async def test_post_filter_results():
             vec_sim=0.8, Memory=None, score=0.7, similarity=0.7, entity_links=[]
         ),
         SimpleNamespace(
-            vec_sim=0.3, Memory=None, score=0.2, similarity=0.2, entity_links=[]
+            vec_sim=0.3,
+            fts_match=True,
+            Memory=None,
+            score=0.2,
+            similarity=0.2,
+            entity_links=[],
         ),
         SimpleNamespace(
             vec_sim=0.6, Memory=None, score=0.5, similarity=0.5, entity_links=[]
@@ -197,6 +201,54 @@ async def test_post_filter_results():
 
     assert len(ctx.data["filtered_rows"]) == 2
     assert all(float(r.vec_sim) >= 0.5 for r in ctx.data["filtered_rows"])
+
+
+@pytest.mark.asyncio
+async def test_post_filter_results_allows_fts_match_past_global_default_floor():
+    """Only a lexical hit may bypass the untuned global fallback."""
+    from types import SimpleNamespace
+
+    from core_api.pipeline.context import PipelineContext
+    from core_api.pipeline.steps.search.post_filter_results import PostFilterResults
+
+    lexical = SimpleNamespace(
+        vec_sim=0.1,
+        fts_match=True,
+        has_embedding=True,
+        Memory=None,
+        score=0.2,
+    )
+    unrelated = SimpleNamespace(
+        vec_sim=0.1,
+        fts_match=False,
+        has_embedding=True,
+        Memory=None,
+        score=0.2,
+    )
+    ctx = PipelineContext(
+        data={
+            "raw_rows": [lexical, unrelated],
+            "search_params": {"min_similarity": 0.3, "fts_weight": 0.6},
+            "allow_fts_global_floor_bypass": True,
+            "diagnostic": True,
+        },
+    )
+
+    await PostFilterResults().execute(ctx)
+
+    assert ctx.data["filtered_rows"] == [lexical]
+    assert ctx.data["diagnostic_results"][0]["fts_global_floor_bypass"] is True
+    assert ctx.data["diagnostic_results"][1]["excluded"] == "below_min_similarity"
+
+    disabled_ctx = PipelineContext(
+        data={
+            "raw_rows": [lexical, unrelated],
+            "search_params": {"min_similarity": 0.3, "fts_weight": 0.0},
+            "allow_fts_global_floor_bypass": True,
+        },
+    )
+    await PostFilterResults().execute(disabled_ctx)
+    assert disabled_ctx.data["filtered_rows"] == []
 
 
 @pytest.mark.asyncio
@@ -668,59 +720,74 @@ async def test_recall_returns_memory_with_pending_embedding(db, monkeypatch, use
 
 
 # ---------------------------------------------------------------------------
-# Bounds of the FTS-only result reservation (#687)
+# Bounds of the full-text result reservation
 # ---------------------------------------------------------------------------
 
 
 class _Row:
-    """Minimal stand-in for a scored row: the reservation reads has_embedding only."""
+    """Minimal stand-in for a scored row used by the reservation helper."""
 
-    def __init__(self, rid, has_embedding):
+    def __init__(self, rid, *, fts_match=False, has_embedding=True):
         self.id = rid
+        self.fts_match = fts_match
         self.has_embedding = has_embedding
 
 
-def test_fts_only_reservation_is_bounded_and_only_fires_when_needed():
-    """The #687 reservation must be a floor of one, not a general reordering.
+def test_fts_reservation_is_bounded_and_only_fires_when_needed():
+    """The lexical reservation must be a floor of one, not a reordering.
 
-    It exists so a row that FTS-matches while its embedding is still pending
-    stays reachable. It must not become a licence to displace good results, so
-    this pins the three boundaries: it promotes at most
-    FTS_ONLY_RESERVED_RESULTS, it stays out of the way when the head already
-    contains such a row, and it does nothing at all to an ordinary result set.
+    It promotes at most ``FTS_RESERVED_RESULTS``, stays out of the way when the
+    head already contains a lexical match, and preserves #687's NULL-embedding
+    fallback when keyword scoring is disabled.
     """
-    from core_api.constants import FTS_ONLY_RESERVED_RESULTS
-    from core_api.pipeline.steps.search.post_filter_results import _is_fts_only
-    from core_api.search_trim import trim_reserving_fts_only
+    from core_api.constants import FTS_RESERVED_RESULTS
+    from core_api.pipeline.steps.search.post_filter_results import (
+        _is_reservable_fts_match,
+    )
+    from core_api.search_trim import trim_reserving_fts_matches
 
-    def _trim(rows, top_k):
-        return trim_reserving_fts_only(rows, top_k, _is_fts_only)
+    def _trim(rows, top_k, *, fts_enabled=True):
+        return trim_reserving_fts_matches(
+            rows,
+            top_k,
+            lambda row: _is_reservable_fts_match(row, fts_enabled),
+        )
 
-    # No FTS-only rows anywhere → identical to a plain head slice.
-    embedded = [_Row(i, True) for i in range(10)]
+    # No FTS matches anywhere → identical to a plain head slice.
+    embedded = [_Row(i) for i in range(10)]
     assert [r.id for r in _trim(embedded, 5)] == [0, 1, 2, 3, 4]
 
-    # An FTS-only row already inside the head → untouched, nothing promoted.
-    head_has_one = [_Row(0, True), _Row(1, False)] + [_Row(i, True) for i in range(2, 10)]
+    # An FTS match already inside the head → untouched, nothing promoted.
+    head_has_one = [_Row(0), _Row(1, fts_match=True)] + [_Row(i) for i in range(2, 10)]
     assert [r.id for r in _trim(head_has_one, 5)] == [0, 1, 2, 3, 4]
 
-    # FTS-only rows only beyond the cutoff → exactly the reserved count is
+    # Lexical matches only beyond the cutoff → exactly the reserved count is
     # promoted, displacing the same number from the tail of the head, and the
     # result length is unchanged.
-    beyond = [_Row(i, True) for i in range(5)] + [_Row(100 + i, False) for i in range(4)]
+    beyond = [_Row(i) for i in range(5)] + [
+        _Row(100 + i, fts_match=True) for i in range(4)
+    ]
     out = _trim(beyond, 5)
     assert len(out) == 5, "the reservation must not change how many rows are returned"
-    promoted = [r.id for r in out if not r.has_embedding]
-    assert len(promoted) == FTS_ONLY_RESERVED_RESULTS, (
-        f"promoted {len(promoted)} FTS-only rows, expected exactly "
-        f"FTS_ONLY_RESERVED_RESULTS={FTS_ONLY_RESERVED_RESULTS} — an unbounded "
-        f"promotion would let a bulk import of unembedded rows flood results"
+    promoted = [r.id for r in out if r.fts_match]
+    assert len(promoted) == FTS_RESERVED_RESULTS, (
+        f"promoted {len(promoted)} FTS matches, expected exactly "
+        f"FTS_RESERVED_RESULTS={FTS_RESERVED_RESULTS} — an unbounded "
+        f"promotion would let lexical matches flood results"
     )
     # The strongest results survive; only the weakest are displaced.
-    assert [r.id for r in out][0] == 0
+    assert out[0].id == 0
+
+    # Embedded lexical matches are not promoted if keyword scoring is disabled,
+    # but #687's pending-embedding fallback remains discoverable.
+    assert [r.id for r in _trim(beyond, 5, fts_enabled=False)] == [0, 1, 2, 3, 4]
+    pending = [_Row(i) for i in range(5)] + [
+        _Row(100, fts_match=True, has_embedding=False)
+    ]
+    assert [r.id for r in _trim(pending, 5, fts_enabled=False)] == [0, 1, 2, 3, 100]
 
     # Fewer rows than top_k → head slice semantics preserved.
-    assert len(_trim([_Row(0, True)], 5)) == 1
+    assert len(_trim([_Row(0)], 5)) == 1
 
     # The reservation must never consume the ENTIRE head. top_k=1 is a valid
     # input (schemas.py: ge=1), and answering a "give me your single best match"
@@ -728,30 +795,25 @@ def test_fts_only_reservation_is_bounded_and_only_fires_when_needed():
     # result — is a worse answer than not surfacing the stub at all. #687
     # promises such a row is discoverable, not that it outranks the best match;
     # storage's candidate reservation is what keeps that promise here.
-    best_then_stub = [_Row(0, True), _Row(100, False)]
+    best_then_stub = [_Row(0), _Row(100, fts_match=True, has_embedding=False)]
     assert [r.id for r in _trim(best_then_stub, 1)] == [0], (
         "a top_k=1 caller must keep their true best match; promoting into the "
         "only slot displaces it entirely rather than displacing the weakest"
     )
     # One slot above the reserved count is the first size that can promote.
-    assert [r.id for r in _trim(best_then_stub, FTS_ONLY_RESERVED_RESULTS + 1)] == [0, 100]
+    assert [r.id for r in _trim(best_then_stub, FTS_RESERVED_RESULTS + 1)] == [0, 100]
 
 
-def test_fts_only_reservation_constants_stay_in_step_across_services():
+def test_fts_reservation_constants_stay_in_step_across_services():
     """core-api can only reserve result slots among rows storage sent it.
 
-    ``_FTS_ONLY_RESERVED_CANDIDATES`` (core-storage-api) is the only supply of
-    FTS-only candidates the result layer is *guaranteed* — the main branch
-    carries such rows just when they earn a slot on score. The two constants sit
-    in separately deployed packages and core-storage-api must not import
-    core-api, so nothing but this test stops them drifting apart.
+    The two constants sit in separately deployed packages and core-storage-api
+    must not import core-api, so nothing but this test stops them drifting apart.
     """
-    from core_api.constants import FTS_ONLY_RESERVED_RESULTS
-    from core_storage_api.services.postgres_service import _FTS_ONLY_RESERVED_CANDIDATES
+    from core_api.constants import FTS_RESERVED_RESULTS
+    from core_storage_api.services.postgres_service import _FTS_RESERVED_CANDIDATES
 
-    assert _FTS_ONLY_RESERVED_CANDIDATES >= FTS_ONLY_RESERVED_RESULTS, (
-        f"storage reserves {_FTS_ONLY_RESERVED_CANDIDATES} FTS-only candidate "
-        f"slots but core-api tries to reserve {FTS_ONLY_RESERVED_RESULTS} result "
-        f"slots — the surplus can only be filled incidentally, so the #687 "
-        f"discoverability guarantee silently weakens"
+    assert _FTS_RESERVED_CANDIDATES >= FTS_RESERVED_RESULTS, (
+        f"storage reserves {_FTS_RESERVED_CANDIDATES} FTS candidate slots but "
+        f"core-api tries to reserve {FTS_RESERVED_RESULTS} result slots"
     )

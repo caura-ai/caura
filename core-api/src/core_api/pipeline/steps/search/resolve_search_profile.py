@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
-from core_api.services.memory_service import resolve_search_params
+from core_api.services.memory_service import _uses_global_min_similarity, resolve_search_params
 
 
 class ResolveSearchProfile:
@@ -32,4 +32,12 @@ class ResolveSearchProfile:
         override = ctx.data.get("min_similarity_override")
         if override is not None:
             ctx.data["search_params"]["min_similarity"] = float(override)
+        # An actual lexical hit may relax only the untuned global fallback.
+        # Keep this provenance outside search_params: it is core filtering state,
+        # not a storage scoring knob.
+        ctx.data["allow_fts_global_floor_bypass"] = _uses_global_min_similarity(
+            ctx.data.get("search_profile"),
+            ctx.tenant_config,
+            override,
+        )
         return None

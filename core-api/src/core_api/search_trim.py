@@ -1,9 +1,8 @@
-"""Head-slice trim that reserves result slots for FTS-only rows (#687).
+"""Shared post-processing helpers for scored search results.
 
 Lives at the package root, importing only :mod:`core_api.constants`, so both the
 pipeline post-filter step and the legacy search path can use it without an import
-cycle. One implementation on purpose: the two paths trim independently, and when
-this logic was duplicated a boundary bug had to be fixed in both copies.
+cycle.
 """
 
 from __future__ import annotations
@@ -11,30 +10,51 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from core_api.constants import FTS_ONLY_RESERVED_RESULTS
+from core_api.constants import FTS_RESERVED_RESULTS
 
 
-def trim_reserving_fts_only(
+def passes_relevance_filter(
+    *,
+    has_embedding: bool | None,
+    vec_sim: float | None,
+    min_similarity: float,
+    fts_match: bool = False,
+    allow_fts_global_floor_bypass: bool = False,
+) -> bool:
+    """Apply the relevance floor, including its two lexical exceptions.
+
+    Storage admits an unembedded row only through full-text search and represents
+    its missing cosine as ``0.0``. ``has_embedding`` distinguishes that sentinel
+    from a real orthogonal vector. An embedded full-text match may bypass only
+    the untuned global fallback; request, agent, and tenant floors remain strict.
+    """
+    return (
+        has_embedding is False
+        or vec_sim is None
+        or float(vec_sim) >= min_similarity
+        or (allow_fts_global_floor_bypass and fts_match)
+    )
+
+
+def trim_reserving_fts_matches(
     rows: list[Any],
     top_k: int,
-    is_fts_only: Callable[[Any], bool],
+    is_fts_match: Callable[[Any], bool],
 ) -> list[Any]:
-    """Trim ``rows`` to ``top_k``, keeping one FTS-only row if any exist.
+    """Trim ``rows`` to ``top_k``, keeping one full-text match if available.
 
-    #687: exempting FTS-only rows from the cosine gate is not enough to make them
-    reachable. They score on ``fts_score`` alone — single digits of a percent for
-    one term — so with enough embedded rows above them a plain head slice drops
-    them, having already survived storage's candidate LIMIT only because that
-    reserves slots for them too.
+    A full-text match can rank below vector-only candidates and fall outside a
+    plain head slice. Storage reserves matching candidates for the same reason;
+    this final trim makes one of those candidates visible without changing the
+    ordering of the remaining results. It also preserves #687's guarantee for a
+    matching row whose embedding backfill has not landed yet.
 
     The reservation is deliberately minimal: it promotes at most
-    ``FTS_ONLY_RESERVED_RESULTS`` rows, displacing the same number from the tail
+    ``FTS_RESERVED_RESULTS`` rows, displacing the same number from the tail
     of the head — the weakest results — and only when the head contains none
-    already. It never reorders anything. The population is transient: a row is
-    FTS-only just until the deferred embed backfill lands, after which it competes
-    on cosine normally.
+    already. It never reorders anything.
 
-    ``is_fts_only`` is passed in because the two callers hold different row
+    ``is_fts_match`` is passed in because the two callers hold different row
     shapes: the pipeline has objects (attribute access), the legacy path dicts.
 
     Never consumes the whole head. A ``top_k=1`` caller (valid input —
@@ -45,17 +65,17 @@ def trim_reserving_fts_only(
     never that the row outranks the best result.
     """
     head = rows[:top_k]
-    if FTS_ONLY_RESERVED_RESULTS <= 0 or top_k <= 0:
+    if FTS_RESERVED_RESULTS <= 0 or top_k <= 0:
         return head
-    if any(is_fts_only(r) for r in head):
+    if any(is_fts_match(r) for r in head):
         return head
     # The ``- 1`` is what stops the promotion taking every slot: it keeps
     # ``top_k - len(promoted)`` in the slice below at 1 or more, so at least one
     # row that earned its place on score always survives.
-    budget = min(FTS_ONLY_RESERVED_RESULTS, top_k - 1)
+    budget = min(FTS_RESERVED_RESULTS, top_k - 1)
     if budget <= 0:
         return head
-    promoted = [r for r in rows[top_k:] if is_fts_only(r)][:budget]
+    promoted = [r for r in rows[top_k:] if is_fts_match(r)][:budget]
     if not promoted:
         return head
     return head[: top_k - len(promoted)] + promoted

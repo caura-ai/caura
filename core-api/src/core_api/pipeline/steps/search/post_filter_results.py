@@ -1,11 +1,11 @@
-"""PostFilterResults — filter raw rows by min_similarity gate on vec_sim."""
+"""PostFilterResults — apply the similarity floor and final result limit."""
 
 from __future__ import annotations
 
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
-from core_api.search_trim import trim_reserving_fts_only
+from core_api.search_trim import passes_relevance_filter, trim_reserving_fts_matches
 
 
 class PostFilterResults:
@@ -19,27 +19,22 @@ class PostFilterResults:
             return StepResult(outcome=StepOutcome.SKIPPED)
 
         min_similarity = ctx.data["search_params"]["min_similarity"]
-        # NULL-embedding rows reach this point only when storage admitted them
-        # via the FTS half of `embedding IS NOT NULL OR search_vector @@ query`
-        # (relaxed in CAURA-594 so writes deferred via EMBED_REQUESTED stay
-        # searchable during the embed-pending window). Storage coerces their
-        # missing cosine to a 0.0 sentinel and emits `has_embedding=False` to
-        # disambiguate that from a real orthogonal match — trust that flag
-        # here and bypass the vec_sim threshold for FTS-only rows. Without
-        # this, the entire FTS-fallback contract is silently broken for any
-        # row whose embedding hasn't been PATCHed yet by core-worker.
+        fts_enabled = float(ctx.data["search_params"].get("fts_weight", 0.0)) > 0.0
+        allow_fts_bypass = fts_enabled and bool(ctx.data.get("allow_fts_global_floor_bypass", False))
         filtered = [
             row
             for row in ctx.data["raw_rows"]
-            if (not getattr(row, "has_embedding", True))
-            or row.vec_sim is None
-            or float(row.vec_sim) >= min_similarity
+            if _passes_relevance_filter(row, min_similarity, allow_fts_bypass)
         ]
         below_floor = len(ctx.data["raw_rows"]) - len(filtered)
         # Trim to the user-requested top_k (storage returned top_k * overfetch_factor)
         final_top_k = ctx.data.get("final_top_k")
         if final_top_k is not None:
-            filtered = trim_reserving_fts_only(filtered, final_top_k, _is_fts_only)
+            filtered = trim_reserving_fts_matches(
+                filtered,
+                final_top_k,
+                lambda row: _is_reservable_fts_match(row, fts_enabled),
+            )
         ctx.data["filtered_rows"] = filtered
 
         # D12 — diagnostic trace: capture the FULL widened candidate set with
@@ -50,11 +45,7 @@ class PostFilterResults:
             kept_ids = {id(row) for row in filtered}
             passed_floor_ids = set()
             for row in ctx.data["raw_rows"]:
-                if (
-                    (not getattr(row, "has_embedding", True))
-                    or row.vec_sim is None
-                    or float(row.vec_sim) >= min_similarity
-                ):
+                if _passes_relevance_filter(row, min_similarity, allow_fts_bypass):
                     passed_floor_ids.add(id(row))
             candidates = []
             for row in ctx.data["raw_rows"]:
@@ -73,6 +64,12 @@ class PostFilterResults:
                         "score": _f(getattr(row, "score", None)),
                         "vec_sim": _f(getattr(row, "vec_sim", None)),
                         "fts_score": _f(getattr(row, "fts_score", None)),
+                        "fts_match": bool(getattr(row, "fts_match", False)),
+                        "fts_global_floor_bypass": _used_fts_global_floor_bypass(
+                            row,
+                            min_similarity,
+                            allow_fts_bypass,
+                        ),
                         "freshness": _f(getattr(row, "freshness", None)),
                         "entity_boost": _f(getattr(row, "entity_boost", None)),
                         "recall_boost": _f(getattr(row, "recall_boost", None)),
@@ -97,19 +94,37 @@ def _f(v) -> float | None:
     return round(float(v), 4) if v is not None else None
 
 
-def _is_fts_only(row) -> bool:
-    """True for a row storage admitted on FTS alone, with no embedding yet.
+def _passes_relevance_filter(
+    row,
+    min_similarity: float,
+    allow_fts_global_floor_bypass: bool,
+) -> bool:
+    return passes_relevance_filter(
+        has_embedding=getattr(row, "has_embedding", True),
+        vec_sim=row.vec_sim,
+        min_similarity=min_similarity,
+        fts_match=bool(getattr(row, "fts_match", False)),
+        allow_fts_global_floor_bypass=allow_fts_global_floor_bypass,
+    )
 
-    Same test as the cosine-gate exemption above, which has used this form since
-    CAURA-679 — kept identical so the gate and the reservation cannot disagree
-    about what "FTS-only" means.
 
-    ``row`` is a ``SimpleNamespace``, hence ``getattr``; the legacy path in
-    ``memory_service`` holds dicts and reads the same field with ``.get``. The
-    value is always a real ``bool``, never ``None``: storage computes it as
-    ``Memory.embedding.is_not(None)`` — a non-nullable SQL boolean — and
-    ``execute_scored_search`` carries it onto the namespace with a ``True``
-    default. So truthiness and ``is False`` cannot diverge on any reachable
-    input here.
-    """
-    return not getattr(row, "has_embedding", True)
+def _used_fts_global_floor_bypass(
+    row,
+    min_similarity: float,
+    allow_fts_global_floor_bypass: bool,
+) -> bool:
+    vec_sim = getattr(row, "vec_sim", None)
+    return bool(
+        allow_fts_global_floor_bypass
+        and getattr(row, "has_embedding", True)
+        and getattr(row, "fts_match", False)
+        and vec_sim is not None
+        and float(vec_sim) < min_similarity
+    )
+
+
+def _is_reservable_fts_match(row, fts_enabled: bool) -> bool:
+    """Include embedded matches only while keyword scoring is enabled."""
+    return (not getattr(row, "has_embedding", True)) or (
+        fts_enabled and bool(getattr(row, "fts_match", False))
+    )

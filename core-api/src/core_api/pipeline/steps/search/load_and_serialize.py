@@ -164,10 +164,12 @@ class LoadAndSerialize:
                 # ``score`` is the multiplicative ranking composite (similarity *
                 # freshness * entity/recall/temporal boosts) which routinely
                 # exceeds 1.0, so it's useless for client-side threshold gating.
-                # ``vec_sim`` is the 0..1 cosine and matches the ``min_similarity``
-                # gate in PostFilterResults. Rank order is unchanged (rows are
-                # already ordered by ``score`` upstream). None for FTS-only hits,
-                # which have no vector similarity.
+                # ``vec_sim`` is the raw cosine compared by ``min_similarity`` in
+                # PostFilterResults. An actual lexical hit may relax only the
+                # untuned global fallback; configured floors stay strict. Rank
+                # order is unchanged (rows are already ordered by ``score``
+                # upstream). None for FTS-only hits, which have no vector
+                # similarity.
                 similarity=(round(float(row.vec_sim), 4) if row.vec_sim is not None else None),
                 # D12 — the composite that ordered this row, and its factors.
                 # The storage SQL has always computed these per row; this is the

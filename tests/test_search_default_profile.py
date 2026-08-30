@@ -137,6 +137,51 @@ async def test_precedence_empty_tenant_default_is_neutral():
     assert params["min_similarity"] == MIN_SEARCH_SIMILARITY
 
 
+async def test_keyword_strategy_keeps_the_global_semantic_floor():
+    step = ResolveSearchProfile()
+    ctx = PipelineContext(
+        data={"query": "JWT expiry", "top_k": 5, "search_profile": None},
+        tenant_config=None,
+    )
+
+    await step.execute(ctx)
+
+    assert ctx.data["search_params"]["min_similarity"] == MIN_SEARCH_SIMILARITY
+    assert ctx.data["allow_fts_global_floor_bypass"] is True
+
+
+async def test_keyword_strategy_keeps_a_tuned_floor():
+    step = ResolveSearchProfile()
+    ctx = PipelineContext(
+        data={
+            "query": "JWT expiry",
+            "top_k": 5,
+            "search_profile": {"min_similarity": 0.55},
+        },
+        tenant_config=None,
+    )
+
+    await step.execute(ctx)
+
+    assert ctx.data["search_params"]["min_similarity"] == 0.55
+    assert ctx.data["allow_fts_global_floor_bypass"] is False
+
+
+async def test_keyword_strategy_keeps_a_tenant_floor_strict():
+    step = ResolveSearchProfile()
+    ctx = PipelineContext(
+        data={"query": "JWT expiry", "top_k": 5, "search_profile": None},
+        tenant_config=ResolvedConfig(
+            {"search": {"default_profile": {"min_similarity": 0.42}}}
+        ),
+    )
+
+    await step.execute(ctx)
+
+    assert ctx.data["search_params"]["min_similarity"] == 0.42
+    assert ctx.data["allow_fts_global_floor_bypass"] is False
+
+
 # ── fts_rank_scale (#687) ──
 
 
