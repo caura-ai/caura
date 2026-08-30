@@ -124,6 +124,49 @@ of them. The other seven have none, so porting the helper there would be dead co
 release automation is added to another repository, recheck all three signals before
 porting the exception.
 
+### The lifecycle probes share a contract, not an implementation
+
+Do not extract the two `lifecycle_smoke.py` files into one installable package. Verified
+2026-08-31 against `caura-enterprise/dev` at `efcb8b81` and `caura-test-automation/main`
+at `a73c13f`: the enterprise deploy and rollback gate is 1,839 lines, while the nightly
+fail-closed canary is 788. With test automation as the old input and enterprise as the
+new input, `diff -u` contains 2,207 changed content lines — 578 removed and 1,629 added,
+excluding the two headers.
+
+The spec's 2,210 does not reproduce, for two reasons, neither of them algorithmic. The
+larger is that it measured different files: it predates the service-target repair, which
+changed both inputs. The smaller is that `diff -u | grep -c '^[+-]'` over-counts by
+exactly two, because `---` and `+++` are themselves lines beginning with `-` and `+`;
+that command reports 2,209 here against the 2,207 real changed lines.
+
+Treat the total as evidence of scale rather than a stable architecture metric — and note
+that it is unstable in the ordinary course of work, not merely in principle. Both files
+are under active development, and re-running this measurement hours apart across a single
+merge into `dev` moved it. Pin the commits, as above, or the number will not mean what it
+says by the time it is read. The architectural figures are the durable ones: the files
+have 41 and 19 top-level function definitions respectively, with only three names in
+common — `_point_value`, `_resolve_core_api_url`, and `main` — and that shape has held
+across every measurement of it.
+
+That divergence is functional. Enterprise warms and probes a deployment, covers seven
+lifecycle actions, integrates with promote and rollback break-glass handling, and owns
+the broader rolling health gate. Test automation runs one audit-ID-correlated nightly
+canary and turns its evidence into the repository's findings and gate verdict. The
+three-repository repair (`caura` publisher/API, enterprise deploy gate, and test-
+automation canary) was a coordinated change to a shared product contract; it was not a
+mechanical edit to two interchangeable copies. A common package would add version and
+rollout coupling without removing that coordination.
+
+The counter-evidence is real: both files retained the same hardcoded core-api service
+map through that repair, so one shared defect needed two fixes. Keep that narrow seam
+shared as configuration and contract tests instead. Each probe now composes
+`<environment service prefix>-core-api` from its repository's established input shape:
+enterprise workflows provide `SP` or `PP`, while the test-automation probe accepts
+`STAGING_SERVICE_PREFIX` and `PROD_SERVICE_PREFIX` and currently falls back when its
+nightly caller omits them. Those fallbacks preserve the current names until the later
+variable flip. Reconsider code extraction only if a larger piece of behaviour, rather
+than another small contract, starts changing in lockstep.
+
 Neither gate looks at **values**. A setting correctly renamed to `CAURA_*` that still
 *holds* an old-brand value scores as fully migrated forever. Renaming is not migrating.
 
