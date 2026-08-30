@@ -24,6 +24,14 @@ from common.models.base import Base
 class LifecycleAudit(Base):
     __tablename__ = "lifecycle_audit"
     __table_args__ = (
+        # Supports cross-org recent-window health summaries. The older
+        # org/action-leading index cannot serve a predicate on started_at
+        # alone, so the smoke endpoint would otherwise scan the full audit
+        # history as this append-only table grows.
+        Index(
+            "idx_lifecycle_audit_started_at",
+            text("started_at DESC"),
+        ),
         Index(
             "idx_lifecycle_audit_org_action_started",
             "org_id",

@@ -1,19 +1,16 @@
 """Lifecycle audit endpoints (CAURA-655).
 
-Two routes back the per-fanout audit row referenced in the operations
-architecture: ``POST`` creates a ``pending`` row and returns its id;
-``PATCH`` flips the row to ``in_progress`` (worker on receipt) or
-``success`` / ``failure`` (worker on completion). Lives here, not in
-core-api, to preserve the "no DB outside core-storage-api" rule —
-both core-api and core-worker call these via their existing
-storage_clients.
+The write routes create and advance the per-fanout audit row referenced in the
+operations architecture. Read routes expose one row for exact probe correlation
+and an uncapped aggregate for deployment health checks. Everything lives here,
+not in core-api, to preserve the "no DB outside core-storage-api" rule.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from core_storage_api.services.postgres_service import PostgresService
+from core_storage_api.services.postgres_service import UNSCOPED, PostgresService
 
 router = APIRouter(prefix="/lifecycle-audit", tags=["Lifecycle"])
 _svc = PostgresService()
@@ -61,6 +58,48 @@ async def has_recent_success(org_id: str, action: str, since_hours: int) -> dict
         org_id=org_id, action=action, since_hours=since_hours
     )
     return {"has_recent_success": found}
+
+
+@router.post("/summary")
+async def summarize_lifecycle_audits(request: Request) -> dict:
+    """Aggregate lifecycle rows under an explicit tenant-scope choice."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    if "org_id" not in body:
+        raise HTTPException(
+            status_code=422,
+            detail="'org_id' is required; send null for the admin-wide aggregate",
+        )
+    raw_org_id = body["org_id"]
+    if raw_org_id is not None and not isinstance(raw_org_id, str):
+        raise HTTPException(status_code=422, detail="'org_id' must be a string or null")
+    since_hours = body.get("since_hours", 30)
+    if type(since_hours) is not int or since_hours < 1 or since_hours > 168:
+        raise HTTPException(
+            status_code=422,
+            detail="'since_hours' must be in [1, 168] (hours)",
+        )
+    triggered_by = body.get("triggered_by")
+    if triggered_by is not None and not isinstance(triggered_by, str):
+        raise HTTPException(status_code=422, detail="'triggered_by' must be a string or null")
+    return await _svc.lifecycle_audit_summary(
+        org_id=UNSCOPED if raw_org_id is None else raw_org_id,
+        since_hours=since_hours,
+        triggered_by=triggered_by,
+    )
+
+
+@router.get("/{audit_id}")
+async def get_lifecycle_audit(audit_id: int, org_id: str) -> dict:
+    """Return one audit row so a caller can follow its exact message."""
+    row = await _svc.lifecycle_audit_get(audit_id, org_id=org_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"lifecycle_audit {audit_id} not found")
+    return row
 
 
 @router.patch("/{audit_id}")

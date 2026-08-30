@@ -236,6 +236,47 @@ async def fanout_lifecycle_action(
     return {"action": action, "published": published, "failed": failed}
 
 
+@router.get("/admin/lifecycle/audits/summary")
+async def lifecycle_audit_summary(
+    since_hours: int = 30,
+    triggered_by: str | None = None,
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Return recent lifecycle status counts for deployment health checks.
+
+    The response is aggregate-only and uncapped, so a large fanout cannot push
+    an early failure out of view. Admin auth is required because the result
+    spans every organization in the deployment.
+    """
+    auth.enforce_admin()
+    if since_hours < 1 or since_hours > 168:
+        raise HTTPException(
+            status_code=422,
+            detail="'since_hours' must be in [1, 168] (hours)",
+        )
+    return await get_storage_client().get_lifecycle_audit_summary(
+        since_hours=since_hours,
+        triggered_by=triggered_by,
+    )
+
+
+@router.get("/admin/lifecycle/audits/{audit_id}")
+async def get_lifecycle_audit(
+    audit_id: int,
+    org_id: str,
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Return one audit row for an active canary's exact message."""
+    auth.enforce_admin()
+    row = await get_storage_client().get_lifecycle_audit_row(
+        audit_id,
+        org_id=org_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"lifecycle audit {audit_id} not found")
+    return row
+
+
 @router.get("/admin/lifecycle/embedding-coverage")
 async def embedding_coverage_all_tenants(
     auth: AuthContext = Depends(get_auth_context),

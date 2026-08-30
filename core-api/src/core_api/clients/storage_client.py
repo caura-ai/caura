@@ -2579,6 +2579,44 @@ class CoreStorageClient:
         )
         return result["audit_id"]  # type: ignore[index]
 
+    async def get_lifecycle_audit_row(
+        self,
+        audit_id: int,
+        *,
+        org_id: str,
+    ) -> dict | None:
+        """Read one row from the writer for exact post-publish polling.
+
+        The normal GET path may use a replica. A smoke probe polling a newly
+        created id needs read-after-write behaviour, otherwise replica lag can
+        manufacture a transient 404 unrelated to lifecycle delivery.
+        """
+        return await self._get(
+            f"/lifecycle-audit/{audit_id}",
+            read=False,
+            org_id=org_id,
+        )
+
+    async def get_lifecycle_audit_summary(
+        self,
+        *,
+        since_hours: int,
+        triggered_by: str | None = None,
+    ) -> dict:
+        """Return uncapped recent status counts grouped by action."""
+        params: dict[str, Any] = {"since_hours": since_hours}
+        if triggered_by is not None:
+            params["triggered_by"] = triggered_by
+        result = await self._post(
+            "/lifecycle-audit/summary",
+            {"org_id": None, **params},
+            read=True,
+            idempotent=True,
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError("lifecycle audit summary endpoint returned a non-object")
+        return result
+
     async def update_lifecycle_audit_row(
         self,
         audit_id: int,

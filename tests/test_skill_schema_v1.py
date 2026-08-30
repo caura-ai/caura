@@ -731,7 +731,7 @@ class TestMigrationChain:
         """
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"040"}, f"Expected single head '040', got {sorted(heads)}"
+        assert heads == {"041"}, f"Expected single head '041', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -776,6 +776,8 @@ class TestMigrationChain:
         # 040: one LIVE memory per (tenant, fleet, agent, content_hash) — the
         # dedup contract had no schema behind it (OSS #814)
         assert chain.get("040") == "039", "040 must follow 039"
+        # 041: lifecycle_audit.started_at recency index for cross-org summaries
+        assert chain.get("041") == "040", "041 must follow 040"
 
     def test_no_plain_set_not_null_on_large_tables(self):
         """Tightening a column to NOT NULL on a large table must not full-scan

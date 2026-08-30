@@ -8,6 +8,7 @@ collapses both back to a single URL — the OSS / pre-split default.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import httpx
@@ -88,6 +89,43 @@ async def test_find_duplicate_hash_stays_on_writer() -> None:
     await client.find_duplicate_hash("t", "abc123")
     assert len(writer.requests) == 1
     assert len(reader.requests) == 0
+
+
+async def test_exact_lifecycle_audit_read_stays_on_writer() -> None:
+    """A just-created canary audit must not transiently 404 on a replica."""
+    client, writer, reader = await _fresh_client(
+        writer_url="http://writer:8002", reader_url="http://reader:8002"
+    )
+
+    await client.get_lifecycle_audit_row(41, org_id="canary")
+
+    assert len(writer.requests) == 1
+    assert len(reader.requests) == 0
+    assert writer.requests[0].url.path.endswith("/lifecycle-audit/41")
+    assert writer.requests[0].url.params["org_id"] == "canary"
+
+
+async def test_lifecycle_audit_summary_uses_reader_with_explicit_unscoped_body() -> (
+    None
+):
+    client, writer, reader = await _fresh_client(
+        writer_url="http://writer:8002", reader_url="http://reader:8002"
+    )
+
+    await client.get_lifecycle_audit_summary(
+        since_hours=30,
+        triggered_by="core-operations",
+    )
+
+    assert len(writer.requests) == 0
+    assert len(reader.requests) == 1
+    assert reader.requests[0].method == "POST"
+    assert reader.requests[0].url.path.endswith("/lifecycle-audit/summary")
+    assert json.loads(reader.requests[0].content) == {
+        "org_id": None,
+        "since_hours": 30,
+        "triggered_by": "core-operations",
+    }
 
 
 async def test_get_idempotency_stays_on_writer() -> None:

@@ -9427,6 +9427,95 @@ class PostgresService:
             await session.flush()
             return row.id
 
+    async def lifecycle_audit_get(
+        self,
+        audit_id: int,
+        *,
+        org_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one lifecycle audit row for exact probe correlation."""
+        async with get_session() as session:
+            result = await session.execute(
+                select(LifecycleAudit).where(
+                    LifecycleAudit.id == audit_id,
+                    LifecycleAudit.org_id == org_id,
+                )
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                return None
+            return {
+                "audit_id": row.id,
+                "org_id": row.org_id,
+                "action": row.action,
+                "triggered_by": row.triggered_by,
+                "started_at": row.started_at,
+                "finished_at": row.finished_at,
+                "status": row.status,
+                "stats": row.stats,
+                "error_message": row.error_message,
+            }
+
+    async def lifecycle_audit_summary(
+        self,
+        *,
+        org_id: str | Unscoped,
+        since_hours: int,
+        triggered_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate recent lifecycle rows by action and status.
+
+        This is intentionally an aggregate rather than a capped row listing: a
+        large fanout must not push an early failure out of the response and turn
+        a partial outage into a green deployment probe.
+        """
+        stmt = (
+            select(
+                LifecycleAudit.action,
+                LifecycleAudit.status,
+                func.count().label("row_count"),
+                func.max(LifecycleAudit.started_at).label("latest_started_at"),
+                func.max(LifecycleAudit.finished_at).label("latest_finished_at"),
+            )
+            .where(LifecycleAudit.started_at > func.now() - timedelta(hours=since_hours))
+            .group_by(LifecycleAudit.action, LifecycleAudit.status)
+        )
+        if triggered_by is not None:
+            stmt = stmt.where(LifecycleAudit.triggered_by == triggered_by)
+        if not isinstance(org_id, Unscoped):
+            stmt = stmt.where(LifecycleAudit.org_id == org_id)
+
+        async with get_read_session() as session:
+            rows = (await session.execute(stmt)).all()
+
+        actions: dict[str, dict[str, Any]] = {}
+        for action, status, row_count, latest_started_at, latest_finished_at in rows:
+            summary = actions.setdefault(
+                action,
+                {
+                    "total": 0,
+                    "statuses": {},
+                    "latest_started_at": None,
+                    "latest_finished_at": None,
+                },
+            )
+            count = int(row_count)
+            summary["total"] += count
+            summary["statuses"][status] = count
+            if summary["latest_started_at"] is None or latest_started_at > summary["latest_started_at"]:
+                summary["latest_started_at"] = latest_started_at
+            if latest_finished_at is not None and (
+                summary["latest_finished_at"] is None or latest_finished_at > summary["latest_finished_at"]
+            ):
+                summary["latest_finished_at"] = latest_finished_at
+
+        return {
+            "org_id": None if isinstance(org_id, Unscoped) else org_id,
+            "since_hours": since_hours,
+            "triggered_by": triggered_by,
+            "actions": {action: actions[action] for action in sorted(actions)},
+        }
+
     async def lifecycle_audit_finalize(
         self,
         audit_id: int,
