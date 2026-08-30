@@ -54,32 +54,34 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 ### Try it locally — no API key, no signup
 
-The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura and write a memory in four commands. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
 cd caura
 cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
-docker compose up -d                                        # Postgres + pgvector + Redis + API (~30s)
+docker compose up -d --wait                                 # Postgres + pgvector + Redis + API (~30s)
+```
 
+<!-- readme-quickstart-ci:start -->
+```bash
 # Write a memory — no API key needed
 curl -X POST http://localhost:8000/api/v1/memories \
   -H "X-API-Key: standalone" -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "agent_id": "quickstart", "content": "Our auth service uses JWT with 15-minute expiry."}'
 
-# Try semantic recall (requires a real embedding provider; see below)
+# Find it by keyword — no provider key needed
 curl -X POST http://localhost:8000/api/v1/search \
   -H "X-API-Key: standalone" -H "Content-Type: application/json" \
-  -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
+  -d '{"tenant_id": "default", "query": "JWT expiry"}'
 ```
+<!-- readme-quickstart-ci:end -->
 
-The write response comes back enriched with an LLM-inferred `memory_type`, `title`, `status`, and `weight` — plus a `summary` and `tags` under `metadata` — all from a single `content` field.
+The keyless write response includes `memory_type`, `title`, `status`, and `weight` — plus a `summary` under `metadata` — all derived by a deterministic local heuristic from the single `content` field. With a configured AI provider, those values are model-inferred and `metadata` can also include `tags`.
 
-> **This query is the one that needs a provider key.** Matching "authentication token lifetime" to a
-> memory that says "JWT with 15-minute expiry" is semantic recall, and it needs real embeddings. The
-> keyless setup above boots with dummy ones, so on that path search matches keywords only — try
-> `"JWT"` instead, and set an embedding provider (next section) before expecting the paraphrase to
-> land.
+> **Want semantic paraphrases?** The keyless query deliberately reuses words from the memory. After
+> configuring an embedding provider in the next section, try `"authentication token lifetime"`
+> instead — matching that phrase to "JWT with 15-minute expiry" exercises semantic recall.
 
 Ready for semantic recall, multi-tenant, a managed host, or an OpenClaw fleet? Pick a path below.
 
@@ -176,7 +178,7 @@ Anthropic, Gemini, and OpenRouter don't offer embedding APIs here — pair them 
 #### 2. Start the stack
 
 ```bash
-docker compose up -d
+docker compose up -d --wait
 ```
 
 > **Security requirement:** port 8002 belongs to the internal storage data

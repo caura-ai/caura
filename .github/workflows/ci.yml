@@ -570,13 +570,30 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # Local-only tag shared by the two images used for the README Compose
+      # check below. Keeping this job's existing display name avoids changing
+      # the branch-protection status context while broadening its runtime-image
+      # coverage.
+      CAURA_VERSION: readme-ci
+      COMPOSE_PROFILES: ""
+      README_COMPOSE_PROJECT: "readme-quickstart-${{ github.run_id }}"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Build core-api image
-        run: docker build --platform linux/amd64 --target runtime -t core-api-versiontest -f core-api/Dockerfile .
+        run: |
+          docker build --platform linux/amd64 --target runtime \
+            -t core-api-versiontest \
+            -f core-api/Dockerfile .
+          compose_image="$(
+            docker compose --env-file /dev/null --file docker-compose.yml \
+              --project-name "$README_COMPOSE_PROJECT" config --format json |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["core-api"]["image"])'
+          )"
+          docker tag core-api-versiontest "$compose_image"
 
       - name: Assert baked version is a real semver matching pyproject
         run: |
@@ -606,6 +623,46 @@ jobs:
             echo "::error::numpy is missing from the core-api image — insights discover mode would silently fall back to non-clustered analysis. It must stay declared in core-api/pyproject.toml (see services/insights_service.py::_numpy_kmeans)."
             exit 1
           }
+
+      - name: Build core-storage-api image for README quickstart
+        run: |
+          docker build --platform linux/amd64 --target runtime \
+            -t core-storage-api-readmetest \
+            -f core-storage-api/Dockerfile .
+          compose_image="$(
+            docker compose --env-file /dev/null --file docker-compose.yml \
+              --project-name "$README_COMPOSE_PROJECT" config --format json |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["core-storage-api"]["image"])'
+          )"
+          docker tag core-storage-api-readmetest "$compose_image"
+
+      - name: Start the documented keyless stack
+        run: |
+          if [ ! -f .env.example ] || [ -L .env.example ]; then
+            echo "::error::.env.example must be a regular file"
+            exit 1
+          fi
+          rm -f -- .env
+          install -m 0600 -- .env.example .env
+          echo "IS_STANDALONE=true" >> .env
+          docker compose --env-file /dev/null --file docker-compose.yml \
+            --project-name "$README_COMPOSE_PROJECT" \
+            up --detach --no-build --wait --wait-timeout 180
+
+      - name: Run README write-and-search curl block
+        run: python3 scripts/check_readme_quickstart.py
+
+      - name: Show README quickstart logs on failure
+        if: failure()
+        run: |
+          docker compose --env-file /dev/null --file docker-compose.yml \
+            --project-name "$README_COMPOSE_PROJECT" logs --no-color
+
+      - name: Stop README quickstart stack
+        if: always()
+        run: |
+          docker compose --env-file /dev/null --file docker-compose.yml \
+            --project-name "$README_COMPOSE_PROJECT" down --volumes
 
   legacy-name-ratchet:
     # Hard rule 7 of the sunset plan: mint nothing new carrying the old brand.
