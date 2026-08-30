@@ -1841,6 +1841,26 @@ async def update_memory_entities(memory_id: UUID, request: Request) -> dict:
 
 
 @router.delete("/{memory_id}")
-async def soft_delete_memory(memory_id: UUID) -> dict:
-    await _svc.memory_soft_delete(memory_id)
+async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> dict:
+    """Soft-delete one memory, within ``tenant_id``.
+
+    ``tenant_id`` is a **required** query parameter, matching the ``GET`` twin
+    above. This route read no tenant at all and deleted by primary key, so a
+    caller who knew a UUID could destroy another tenant's memory through a
+    service that authenticates nothing — the write form of
+    GHSA-wgvw-28pq-jc36, which the ``GET`` was fixed for in caura-ai/caura#1075.
+
+    404 covers "no such memory" and "not yours" alike, so this does not become
+    an existence oracle for memory UUIDs.
+
+    Delegates to ``memory_soft_delete_by_ids`` rather than carrying its own
+    single-row variant. That method was already tenant-scoped and is what the
+    bulk delete routes use; keeping a second, unscoped path to the same write
+    is what let this one drift. It also filters ``deleted_at IS NULL``, so
+    deleting an already-deleted memory is a 404 rather than a silent re-stamp
+    that moved the retention clock forward.
+    """
+    deleted = await _svc.memory_soft_delete_by_ids(tenant_id, [memory_id])
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Memory not found")
     return {"ok": True}

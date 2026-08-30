@@ -107,7 +107,7 @@ async def test_pii_drop_acks_and_skips_detection(sc, detect, monkeypatch):
 
     await consumer.handle_memory_enriched(_event(mid))
 
-    sc.soft_delete_memory.assert_awaited_once_with(str(mid))
+    sc.soft_delete_memory.assert_awaited_once_with(str(mid), "tenant-gov")
     detect.assert_not_awaited()  # dropped by policy → contradiction detection skipped
 
 

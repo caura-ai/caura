@@ -94,7 +94,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutco
                 # audit is the only trace — must survive queue overflow.
                 critical=True,
             )
-            await sc.soft_delete_memory(memory_id)
+            await sc.soft_delete_memory(memory_id, tenant_id)
             logger.info("governance: dropped fast-mode memory %s (pii)", memory_id)
             return RemediationOutcome(dropped=True)
         # mask/flag: the LLM gives no offsets to redact a free-form span, and in
@@ -129,7 +129,7 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutco
                 # Destructive: see the PII-drop branch — audit is the only trace.
                 critical=True,
             )
-            await sc.soft_delete_memory(memory_id)
+            await sc.soft_delete_memory(memory_id, tenant_id)
             logger.info("governance: dropped fast-mode memory %s (non-business)", memory_id)
             return RemediationOutcome(dropped=True)
         if nb_cfg.disposition == "keep_private":

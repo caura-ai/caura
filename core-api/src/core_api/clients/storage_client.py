@@ -597,8 +597,15 @@ class CoreStorageClient:
         # patch. The explicit arg wins over any ``tenant_id`` in ``data``.
         return await self._patch(f"/memories/{memory_id}", {**data, "tenant_id": tenant_id})
 
-    async def soft_delete_memory(self, memory_id: str) -> bool:
-        return await self._delete(f"/memories/{memory_id}")
+    async def soft_delete_memory(self, memory_id: str, tenant_id: str) -> bool:
+        """Soft-delete one memory within ``tenant_id``. False when nothing matched.
+
+        ``tenant_id`` is required, not optional: storage scopes the UPDATE by
+        it, and without it the delete keyed on the memory UUID alone and
+        reached other tenants' rows. Positional and non-defaulted so a caller
+        cannot omit it and quietly get the old behaviour back.
+        """
+        return await self._delete(f"/memories/{memory_id}", tenant_id=tenant_id)
 
     async def set_subject_entity_if_null(
         self, memory_id: str, tenant_id: str, subject_entity_id: str

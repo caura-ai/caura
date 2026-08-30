@@ -999,13 +999,6 @@ class PostgresService:
                 out.append({"client_request_id": crid, "id": None, "was_inserted": False})
         return out
 
-    async def memory_soft_delete(self, memory_id: UUID) -> None:
-        async with get_session() as session:
-            memory = await session.get(Memory, memory_id)
-            if memory is not None:
-                memory.deleted_at = datetime.now(UTC)
-                memory.status = "deleted"
-
     async def memory_update(self, memory_id: UUID, tenant_id: str, patch: dict) -> bool:
         """Apply arbitrary field updates to a memory.
 
@@ -1033,8 +1026,8 @@ class PostgresService:
         the row is absent or soft-deleted, which the route turns into
         404. Both UPDATE branches run inside a single
         ``SELECT ... FOR UPDATE`` snapshot so a concurrent
-        ``memory_soft_delete`` can't commit between them and leave the
-        row in a torn state (status updated, metadata not, or vice
+        ``memory_soft_delete_by_ids`` can't commit between them and leave
+        the row in a torn state (status updated, metadata not, or vice
         versa) — the bare per-statement ``deleted_at IS NULL`` guard
         wasn't enough on its own under READ COMMITTED.
         """

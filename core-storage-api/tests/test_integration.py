@@ -444,7 +444,7 @@ class TestMemories:
         mem = (await client.post(f"{PREFIX}/memories", json=payload)).json()
         memory_id = mem["id"]
 
-        resp = await client.delete(f"{PREFIX}/memories/{memory_id}")
+        resp = await client.delete(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
@@ -490,8 +490,9 @@ class TestMemories:
         mem = (await client.post(f"{PREFIX}/memories", json=payload)).json()
         memory_id = mem["id"]
 
-        # 1. Soft-delete the row.
-        await client.delete(f"{PREFIX}/memories/{memory_id}")
+        # 1. Soft-delete the row. ``tenant_id`` is required on this route now
+        # (it deleted by primary key alone before), so pass the fixture tenant.
+        await client.delete(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})
 
         # 2. PATCH it. Both the column-set branch (status) and the
         # metadata-merge branch (metadata_patch) must no-op, and the
@@ -1394,8 +1395,12 @@ class TestMemories:
         assert (await client.get(f"{PREFIX}/memories/distinct-tenants")).json()["count"] >= before_tenants
 
         # Soft-delete both. ``deleted_at`` is set; ``status`` flips to ``"deleted"``.
-        assert (await client.delete(f"{PREFIX}/memories/{m1['id']}")).status_code == 200
-        assert (await client.delete(f"{PREFIX}/memories/{m2['id']}")).status_code == 200
+        assert (
+            await client.delete(f"{PREFIX}/memories/{m1['id']}", params={"tenant_id": tenant_id})
+        ).status_code == 200
+        assert (
+            await client.delete(f"{PREFIX}/memories/{m2['id']}", params={"tenant_id": tenant_id})
+        ).status_code == 200
 
         # Live counters must roll back our two contributions.
         post_total = (await client.get(f"{PREFIX}/memories/count")).json()["count"]

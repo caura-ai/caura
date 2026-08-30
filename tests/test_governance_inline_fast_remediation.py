@@ -215,7 +215,7 @@ async def test_inline_fast_write_drops_a_personal_memory_when_configured():
         storage=sc,
         memory_id=mid,
     )
-    sc.soft_delete_memory.assert_awaited_once_with(str(mid))
+    sc.soft_delete_memory.assert_awaited_once_with(str(mid), TENANT)
 
 
 async def test_inline_fast_write_drops_a_pii_memory_when_configured():
@@ -228,7 +228,7 @@ async def test_inline_fast_write_drops_a_pii_memory_when_configured():
         storage=sc,
         memory_id=mid,
     )
-    sc.soft_delete_memory.assert_awaited_once_with(str(mid))
+    sc.soft_delete_memory.assert_awaited_once_with(str(mid), TENANT)
 
 
 async def test_keep_private_downgrades_visibility_instead_of_dropping():
@@ -302,7 +302,7 @@ async def test_a_stale_read_replica_cannot_defeat_the_verdict():
         storage=sc,
         memory_id=mid,
     )
-    sc.soft_delete_memory.assert_awaited_once_with(str(mid))
+    sc.soft_delete_memory.assert_awaited_once_with(str(mid), TENANT)
 
 
 # ── Wiring: which callers may remediate ───────────────────────────────────────

@@ -3477,7 +3477,7 @@ async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
     if not mem:
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    await sc.soft_delete_memory(str(memory_id))
+    await sc.soft_delete_memory(str(memory_id), tenant_id)
 
     _hooks = get_hooks()
     if _hooks.audit_log:

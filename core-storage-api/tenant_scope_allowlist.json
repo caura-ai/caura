@@ -271,13 +271,6 @@
       "category": "admin-unscoped"
     },
     {
-      "id": "method:memory_soft_delete",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1080."
-    },
-    {
       "id": "method:recall_log_write",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -350,13 +343,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
       "category": "cross-tenant-by-design"
-    },
-    {
-      "id": "route:DELETE /api/v1/storage/memories/{memory_id}",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1080."
     },
     {
       "id": "route:GET /api/v1/storage/_debug/pg_locks",

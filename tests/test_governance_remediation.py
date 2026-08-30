@@ -34,8 +34,8 @@ def storage(monkeypatch):
     actions: list[tuple] = []
 
     class _SC:
-        async def soft_delete_memory(self, mid):
-            actions.append(("soft_delete", mid))
+        async def soft_delete_memory(self, mid, tenant_id):
+            actions.append(("soft_delete", mid, tenant_id))
 
         async def update_memory(self, mid, tenant_id, patch):
             actions.append(("update", mid, tenant_id, patch))
@@ -86,7 +86,7 @@ async def test_pii_drop_soft_deletes_and_audits(emitted, storage):
     mem = _mem(metadata={"contains_pii": True, "pii_types": ["health"]})
     outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
     assert outcome.dropped is True
-    assert ("soft_delete", "m1") in storage
+    assert ("soft_delete", "m1", "t1") in storage
     assert any(c["action"] == "pii_drop" for c in emitted)
 
 
@@ -124,7 +124,7 @@ async def test_nonbusiness_drop_soft_deletes(emitted, storage):
     mem = _mem(metadata={"business_relevance": "personal"})
     outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
     assert outcome.dropped is True
-    assert ("soft_delete", "m1") in storage
+    assert ("soft_delete", "m1", "t1") in storage
     assert any(c["action"] == "nonbusiness_drop" for c in emitted)
 
 
@@ -165,7 +165,7 @@ async def test_drop_audits_before_soft_delete(
         order.append(f"audit:{kw['action']}")
 
     class _SC:
-        async def soft_delete_memory(self, _mid):
+        async def soft_delete_memory(self, _mid, _tenant_id):
             order.append("soft_delete")
 
     monkeypatch.setattr(governance_remediation, "emit_governance_audit", _audit)
