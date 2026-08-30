@@ -34,7 +34,7 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 **One loop, three pillars: write, recall, compound** — every interaction makes the next one smarter.
 
-**Built for fleets, not single agents.** Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape. The deployment shape we see in production is the opposite: dozens or thousands of agents working on behalf of a company, sharing what they learn under governance. Caura is architected around that shape from day one — scoped memory, cross-agent outcome propagation, fleet-wide trust tiers — and competes on the axes that compound with agent count: latency, token efficiency, and governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://caura.ai/blog/caura-benchmarks).
+**Optimized for fleets.** One agent works, and that's where most teams start — nothing below changes for a single-agent setup. What Caura adds is headroom: scoped memory, cross-agent outcome propagation, and fleet-wide trust tiers are there from the first write, and they keep paying off as agents multiply. Public agent-memory benchmarks (LoCoMo, LongMemEval) measure one agent, one user, one long conversation — the single-chatbot shape — so they score the on-ramp rather than the axes that compound with agent count: latency, token efficiency, and governance. That second shape is what we see in production: dozens or thousands of agents working on behalf of one company, sharing what they learn under governance. See [Performance](#performance) for the numbers, or read the [benchmarks write-up](https://caura.ai/blog/caura-benchmarks).
 
 > **In production at eToro (NASDAQ: ETOR):** 300+ AI agents on one governed
 > memory — 26,500+ memories, 1,372 shared skills, 23 ms p50 search.
@@ -54,7 +54,7 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 ### Try it locally — no API key, no signup
 
-The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — write and recall a memory in four commands. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura and write a memory in four commands. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
@@ -65,15 +65,21 @@ docker compose up -d                                        # Postgres + pgvecto
 # Write a memory — no API key needed
 curl -X POST http://localhost:8000/api/v1/memories \
   -H "X-API-Key: standalone" -H "Content-Type: application/json" \
-  -d '{"tenant_id": "default", "content": "Our auth service uses JWT with 15-minute expiry."}'
+  -d '{"tenant_id": "default", "agent_id": "quickstart", "content": "Our auth service uses JWT with 15-minute expiry."}'
 
-# Search for it
+# Try semantic recall (requires a real embedding provider; see below)
 curl -X POST http://localhost:8000/api/v1/search \
   -H "X-API-Key: standalone" -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
 ```
 
-The write response comes back enriched with an LLM-inferred `memory_type`, `title`, `summary`, `tags`, `status`, and `weight` — all from a single `content` field.
+The write response comes back enriched with an LLM-inferred `memory_type`, `title`, `status`, and `weight` — plus a `summary` and `tags` under `metadata` — all from a single `content` field.
+
+> **This query is the one that needs a provider key.** Matching "authentication token lifetime" to a
+> memory that says "JWT with 15-minute expiry" is semantic recall, and it needs real embeddings. The
+> keyless setup above boots with dummy ones, so on that path search matches keywords only — try
+> `"JWT"` instead, and set an embedding provider (next section) before expecting the paraphrase to
+> land.
 
 Ready for semantic recall, multi-tenant, a managed host, or an OpenClaw fleet? Pick a path below.
 
@@ -229,14 +235,18 @@ curl http://localhost:8000/api/v1/health
 curl -X POST http://localhost:8000/api/v1/memories \
   -H "X-API-Key: standalone" \
   -H "Content-Type: application/json" \
-  -d '{"tenant_id": "default", "content": "Our auth service uses JWT with 15-minute expiry."}'
+  -d '{"tenant_id": "default", "agent_id": "quickstart", "content": "Our auth service uses JWT with 15-minute expiry."}'
 
-# Search for it
+# Search for it — semantic, once an embedding provider is configured above
 curl -X POST http://localhost:8000/api/v1/search \
   -H "X-API-Key: standalone" \
   -H "Content-Type: application/json" \
   -d '{"tenant_id": "default", "query": "authentication token lifetime"}'
 ```
+
+`agent_id` names the writer, so every memory carries provenance. It's optional on the standalone path
+in current source — it defaults to `mcp-agent` — but published images through `v2.x` still require it,
+so the examples pass it explicitly and work against every version.
 
 A write body accepts only the fields the API declares. Send one it doesn't — a
 typo, or a plausible-looking key like `tags` — and you get a `422` naming it in
@@ -245,7 +255,7 @@ dropped. Search and filter bodies still ignore unknown fields on purpose; the
 asymmetry is explained in
 [`docs/api-surfaces.md`](docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
 
-The write response carries an LLM-inferred `memory_type`, `title`, `summary`, `tags`, `status`, and a `weight` (the importance score) — all derived from a single `content` field. On the default fast-write path, enrichment is applied asynchronously: the immediate response is marked `enrichment_pending` and the inferred fields populate within moments.
+The write response carries an LLM-inferred `memory_type`, `title`, `status`, and a `weight` (the importance score) — all derived from a single `content` field. Two more inferred values, `summary` and `tags`, live under `metadata` rather than at the top level, so read them as `metadata.summary` and `metadata.tags`. On the default fast-write path, enrichment is applied asynchronously: the immediate response carries `metadata.enrichment_pending: true` and the inferred fields populate within moments.
 
 `POST /search` returns matches under an `items` array, each entry the full memory plus a `similarity` score:
 
@@ -454,10 +464,12 @@ fleet capability and governance:
 | MCP-native | ✅ | ✅ | ✅ | ⚠️ |
 | OSS license | Apache 2.0 | Apache 2.0 | Apache 2.0 | Apache 2.0 |
 
-Mem0, Zep, and Letta are solid projects for single-agent memory. Caura's
-lane is **governed memory across agent fleets** — multiple agents, teams,
-and vendors on one auditable memory plane. Comparison reflects our reading
-of public docs as of June 2026 — corrections welcome via issue or PR.
+Mem0, Zep, and Letta are solid projects; for a single agent, any of them
+will serve you well — and so will Caura. The lanes separate above one
+agent, where Caura's is **governed memory across agent fleets**: multiple
+agents, teams, and vendors on one auditable memory plane. Comparison
+reflects our reading of public docs as of June 2026 — corrections welcome
+via issue or PR.
 
 ---
 
