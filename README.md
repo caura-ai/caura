@@ -83,6 +83,37 @@ The keyless write response includes `memory_type`, `title`, `status`, and `weigh
 > configuring an embedding provider in the next section, try `"authentication token lifetime"`
 > instead — matching that phrase to "JWT with 15-minute expiry" exercises semantic recall.
 
+### See the fleet effect
+
+Connect two MCP clients to the same fleet. Agent A records an operational
+lesson with `caura_write`:
+
+```json
+{
+  "agent_id": "deploy-agent",
+  "fleet_id": "platform",
+  "visibility": "scope_team",
+  "content": "Roll back auth-service with: deployctl rollback auth-service --to <version>."
+}
+```
+
+Agent B asks `caura_recall` from that fleet:
+
+```json
+{
+  "agent_id": "incident-agent",
+  "fleet_ids": ["platform"],
+  "query": "How do I roll back auth-service?"
+}
+```
+
+The result identifies `deploy-agent` as the author: one agent learned it, and
+another reused it. `scope_agent` would keep the memory private;
+`scope_team` shares it within the fleet; `scope_org` enables governed
+cross-fleet recall subject to the [trust ladder](docs/integration-without-plugin.md#4-elevate-trust-when-needed).
+For production, give each client its own
+[agent-scoped credential](docs/integration-without-plugin.md#1-mint-an-agent-scoped-credential).
+
 Ready for semantic recall, multi-tenant, a managed host, or an OpenClaw fleet? Pick a path below.
 
 ---
