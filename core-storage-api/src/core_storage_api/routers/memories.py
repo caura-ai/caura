@@ -1370,10 +1370,20 @@ async def quality_metrics(request: Request) -> dict:
     readable_tenant_ids?}``. Returns ``{total, reused, total_recalls,
     top_recalls, by_type:{type:{total,reused}}}``. Same scope/visibility as
     ``/stats-breakdown``; read-only.
+
+    ``tenant_id`` is required, and ``readable_tenant_ids`` does not substitute
+    for it. The guard used to accept either, which made this the only one of
+    the eight ``readable_tenant_ids`` routes where a caller could name its own
+    scope and supply no home tenant: the grant is read verbatim from the body
+    by a service that authenticates nothing, so accepting it in place of a
+    tenant is strictly weaker than requiring one. The error message already
+    said ``tenant_id is required`` while the condition did not enforce it.
+    With a tenant always present, omitting the grant narrows to that tenant —
+    fail-closed — which is what the other seven sites have always done.
     """
     body: dict = await request.json()
     tenant_id = body.get("tenant_id")
-    if not tenant_id and not body.get("readable_tenant_ids"):
+    if not tenant_id:
         raise HTTPException(status_code=422, detail="tenant_id is required")
     ca = body.get("created_after")
     try:

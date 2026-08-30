@@ -731,13 +731,6 @@
       "note": "Tracked in #1088."
     },
     {
-      "id": "route:POST /api/v1/storage/memories/quality-metrics",
-      "verdict": "OPTIONAL",
-      "evidence": "reads tenant_id with .get() and never rejects a missing one",
-      "category": "grant-in-lieu-of-tenant",
-      "note": "Accepts a caller-supplied readable_tenant_ids in place of a binding tenant: 'if not tenant_id and not readable_tenant_ids: raise'. Its three sibling stats routes (stats-breakdown, daily-durable-counts, list) all require tenant_id outright, and this one's own docstring lists tenant_id as non-optional. Tracked in #1096."
-    },
-    {
       "id": "route:POST /api/v1/storage/reports",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
