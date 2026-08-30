@@ -6012,23 +6012,6 @@ class PostgresService:
 
         return [idx_to_result[it["input_idx"]] for it in items]
 
-    async def entity_delete_entity_links(
-        self,
-        links_data: list[dict],
-    ) -> None:
-        """Delete entity links by (memory_id, entity_id) pairs."""
-        async with get_session() as session:
-            for ld in links_data:
-                link = await session.execute(
-                    select(MemoryEntityLink).where(
-                        MemoryEntityLink.memory_id == ld["memory_id"],
-                        MemoryEntityLink.entity_id == ld["entity_id"],
-                    )
-                )
-                obj = link.scalar_one_or_none()
-                if obj is not None:
-                    await session.delete(obj)
-
     # ------------------------------------------------------------------
     # Crystallizer helpers (entity)
     # ------------------------------------------------------------------

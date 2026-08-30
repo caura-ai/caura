@@ -106,13 +106,6 @@
       "note": "Join table has no tenant column; rows are tenant-scoped only via the ids."
     },
     {
-      "id": "method:entity_delete_entity_links",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Join table has no tenant column; rows are tenant-scoped only via the ids. Tracked in #1091."
-    },
-    {
       "id": "method:entity_find_entity_link",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
