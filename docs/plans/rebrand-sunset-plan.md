@@ -114,6 +114,16 @@ old-brand string always passes — including when that string was load-bearing.
 **`do_not_touch_sentinel.py`** asserts that specific strings still **exist**. It is the
 only thing standing between a well-meaning sweep and a silently broken dependant.
 
+### The release-please branch exemption is repo-specific
+
+`_release_please_branch()` belongs only in ratchets that can run on a release-please
+branch. Verified 2026-08-30 across the nine-repository estate — eight live repositories
+plus archived `loadtest` — on all three signals: workflow, configuration, and current or
+historical `release-please--*` PR branches. Only `caura` and `caura-enterprise` have any
+of them. The other seven have none, so porting the helper there would be dead code. If
+release automation is added to another repository, recheck all three signals before
+porting the exception.
+
 Neither gate looks at **values**. A setting correctly renamed to `CAURA_*` that still
 *holds* an old-brand value scores as fully migrated forever. Renaming is not migrating.
 
