@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.37.1](https://github.com/caura-ai/caura/compare/backend-v2.37.0...backend-v2.37.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **memory:** keep identity and scope columns out of the by-id patch ([#1122](https://github.com/caura-ai/caura/issues/1122)) ([fc17848](https://github.com/caura-ai/caura/commit/fc178481d4ac67b406ba3eb0109a094f3d8ac3af))
+
 ## [2.37.0](https://github.com/caura-ai/caura/compare/backend-v2.36.1...backend-v2.37.0) (2026-08-30)
 
 
