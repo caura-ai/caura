@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from typing import Any
 
 from core_api.config import settings
@@ -59,6 +60,20 @@ MAX_SAMPLES = 20
 
 _LIVE_STATUSES = {"active", "confirmed"}
 
+# Rows that are raw conversation turns rather than distilled state claims.
+# Measured 2026-08-30: 9 of 13 accepted proposals in the first real sweep came
+# from consecutive dialogue turns, where "an earlier state and a later one" is
+# just the topic moving on. ``memory_type`` does NOT separate these — the false
+# positives were typed ``fact``/``preference`` exactly like the true ones — but
+# the content shape does. A turn is not a claim about the subject's current
+# state, so it can neither be a stale default nor evidence that one broke.
+_TURN_PREFIXES = ("user:", "assistant:", "system:", "human:", "ai:")
+# Jaccard overlap above which a "replacement" is really a restatement of the
+# stale claim. The dangerous failure mode: proposing "based in Seattle" as the
+# successor to "based in Seattle" after evidence of a move would enshrine the
+# error with a fresh timestamp — strictly worse than leaving the row alone.
+MAX_RESTATEMENT_OVERLAP = 0.6
+
 TYPE_II_PROMPT = """\
 Below are memories about ONE subject, oldest first, each with an id and date.
 
@@ -78,10 +93,13 @@ NOT stale: a fact that is merely older, merely related, or about a different \
 aspect that still holds. Most subjects have NOTHING stale — an empty list is \
 the common, correct answer.
 
-For each stale default, write the replacement the store should hold instead: \
-state what IS currently true, in the vocabulary of the stale memory, so a \
-question phrased like the stale memory still finds it. If the replacement \
-value is unknown, say so explicitly rather than inventing one.
+For each stale default, write the replacement the store should hold instead. \
+The replacement MUST say what is NO LONGER true, in the vocabulary of the stale \
+memory, so a question phrased like the stale memory still finds it. Never simply \
+restate the stale claim, and never assert the stale claim and the new evidence \
+together as if both still govern — deciding between them is the whole point. If \
+the value that replaces it is unknown, say the old one no longer holds and that \
+the current value is unknown, rather than inventing one.
 
 Return JSON only:
 {{"stale": [{{"stale_memory_id": "<id from the list>", \
@@ -102,6 +120,22 @@ def _parse_json(raw: Any) -> dict:
 
 def _created(m: dict) -> str:
     return str(m.get("created_at") or "")
+
+
+def is_transcript_turn(content: str) -> bool:
+    return (content or "").lstrip().lower().startswith(_TURN_PREFIXES)
+
+
+def _tokens(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9']+", (text or "").lower()) if len(w) > 3}
+
+
+def restates(replacement: str, stale: str) -> bool:
+    """True when the proposed replacement mostly repeats the stale claim."""
+    a, b = _tokens(replacement), _tokens(stale)
+    if not a or not b:
+        return False
+    return len(a & b) / len(a | b) >= MAX_RESTATEMENT_OVERLAP
 
 
 def proposal_key(subject_id: str, stale_id: str) -> str:
@@ -130,6 +164,8 @@ def group_subjects(memories: list[dict]) -> dict[str, list[dict]]:
         if (m.get("status") or "active") not in _LIVE_STATUSES:
             continue
         if m.get("deleted_at"):
+            continue
+        if is_transcript_turn(m.get("content") or ""):
             continue
         bundles.setdefault(str(subject), []).append(m)
     for subject, rows in bundles.items():
@@ -184,6 +220,10 @@ def validate_proposal(p: dict, subject_id: str, rows: list[dict]) -> tuple[dict 
     if confidence < MIN_CONFIDENCE:
         return None, "below_confidence_floor"
     stale_row = by_id[stale_id]
+    if restates(replacement, stale_row.get("content") or ""):
+        # Measured failure mode: the model returns the stale claim (or the
+        # stale claim merged with the new evidence) as its own successor.
+        return None, "replacement_restates_stale"
     return (
         {
             "key": proposal_key(subject_id, stale_id),

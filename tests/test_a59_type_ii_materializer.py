@@ -186,3 +186,81 @@ def test_flag_defaults_off_and_phase_is_wired():
     # nested under hygiene on purpose: analysis_reports has fixed columns, so
     # a new top-level report key never reaches storage or the API
     assert 'hygiene["type_ii_staleness"] = type_ii' in src
+
+
+def test_transcript_turns_are_excluded_from_bundles():
+    """Raw dialogue turns are not state claims. Measured: 9 of 13 accepted
+    proposals in the first real sweep came from consecutive turns, and
+    memory_type does NOT separate them (false positives were typed
+    fact/preference exactly like the true ones) — the content shape does."""
+    rows = [
+        _m(
+            "t1",
+            "S1",
+            "2026-01-01",
+            content="User: I'm looking for book recommendations",
+        ),
+        _m(
+            "t2",
+            "S1",
+            "2026-02-01",
+            content="Assistant: Here are some historical fiction picks",
+        ),
+        _m("real", "S1", "2026-03-01", content="Robin commutes by bicycle every day"),
+    ]
+    b = tm.group_subjects(rows)
+    assert [m["id"] for m in b["S1"]] == ["real"]
+
+
+def test_restatement_is_rejected():
+    """The dangerous failure: proposing the stale claim as its own successor
+    would enshrine the error with a fresh timestamp."""
+    rows = [
+        _m(
+            "old",
+            "S1",
+            "2026-01-01",
+            content="Robin has been based in Seattle for the last few years",
+        ),
+        _m(
+            "new",
+            "S1",
+            "2026-06-01",
+            content="Robin switched their license and voter registration after the move",
+        ),
+    ]
+    accepted, reason = tm.validate_proposal(
+        {
+            "stale_memory_id": "old",
+            "supporting_memory_ids": ["new"],
+            # restates the stale claim instead of retiring it
+            "replacement_content": "Robin has been based in Seattle for the last few years, and completed the paperwork",
+            "confidence": 0.9,
+        },
+        "S1",
+        rows,
+    )
+    assert accepted is None and reason == "replacement_restates_stale"
+
+
+def test_genuine_replacement_still_passes():
+    rows = [
+        _m(
+            "old",
+            "S1",
+            "2026-01-01",
+            content="Robin sees friends twice a week and keeps those nights open",
+        ),
+        _m("new", "S1", "2026-06-01", content="Robin started a night-shift rotation"),
+    ]
+    accepted, _ = tm.validate_proposal(
+        {
+            "stale_memory_id": "old",
+            "supporting_memory_ids": ["new"],
+            "replacement_content": "Robin is no longer free two evenings a week; the night-shift rotation leaves only one",
+            "confidence": 0.8,
+        },
+        "S1",
+        rows,
+    )
+    assert accepted is not None
