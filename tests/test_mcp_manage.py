@@ -32,7 +32,7 @@ VALID_UID = str(uuid4())
 
 
 def _memory_dict(status="active", agent_id="alice", content="hello"):
-    """Storage-client memory row (Fix 2 Phase 4: ``sc.get_memory_for_tenant``
+    """Storage-client memory row (Fix 2 Phase 4: ``sc.get_memory``
     returns a plain dict, not an ORM row). ``caura_manage`` reads it via
     ``.get(...)`` so all the fields the read/transition shaping touches are
     present as dict keys."""
@@ -82,14 +82,14 @@ async def test_manage_invalid_uuid_errors(mcp_env):
 
 
 async def test_manage_read_not_found(mcp_env, monkeypatch):
-    stub_storage_client(monkeypatch, get_memory_for_tenant=None)
+    stub_storage_client(monkeypatch, get_memory=None)
     out = await mcp_server.caura_manage(op="read", memory_id=VALID_UID)
     assert "Memory not found" in strip_latency(out)
 
 
 async def test_manage_read_happy_path(mcp_env, monkeypatch):
     memory = _memory_dict()
-    stub_storage_client(monkeypatch, get_memory_for_tenant=memory)
+    stub_storage_client(monkeypatch, get_memory=memory)
     monkeypatch.setattr(mcp_server, "authorize_memory_access", _async_return(True))
     out = await mcp_server.caura_manage(op="read", memory_id=VALID_UID)
     payload = parse_envelope(out)
@@ -113,7 +113,7 @@ async def test_manage_transition_invalid_status_errors(mcp_env):
 
 
 async def test_manage_transition_not_found(mcp_env, monkeypatch):
-    stub_storage_client(monkeypatch, get_memory_for_tenant=None)
+    stub_storage_client(monkeypatch, get_memory=None)
     out = await mcp_server.caura_manage(
         op="transition", memory_id=VALID_UID, status="archived"
     )
@@ -124,7 +124,7 @@ async def test_manage_transition_happy_path(mcp_env, monkeypatch):
     memory = _memory_dict(status="active")
     sc = stub_storage_client(
         monkeypatch,
-        get_memory_for_tenant=memory,
+        get_memory=memory,
         update_memory_status=None,
     )
     monkeypatch.setattr(mcp_server, "authorize_memory_access", _async_return(True))

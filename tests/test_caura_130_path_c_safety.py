@@ -233,7 +233,7 @@ def _sc_for_forward_path(
     """
     sc = AsyncMock()
 
-    async def get_memory(mid: str):
+    async def get_memory(mid: str, tenant_id: str, **_kw):
         if mid == new_mem["id"]:
             return new_mem
         for c in candidates:

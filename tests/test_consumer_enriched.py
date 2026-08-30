@@ -104,7 +104,7 @@ async def test_handle_memory_enriched_invokes_contradiction_detection(
     # the worker PATCHes then publishes immediately, so a replica read races
     # replication and the miss ack-drops, killing one of only two
     # contradiction-detection triggers on the deferred path.
-    mock_storage_client.get_memory.assert_awaited_once_with(str(memory_id), read=False)
+    mock_storage_client.get_memory.assert_awaited_once_with(str(memory_id), "tenant-A", read=False)
     # ``new_memory`` is passed kwarg-only — threading the row through
     # eliminates the redundant second ``get_memory`` inside
     # ``detect_contradictions_async``.
@@ -337,7 +337,7 @@ async def test_embedded_handler_reads_the_writer_not_the_replica(
         _embedded_event(memory_id)
     )
 
-    mock_storage_client.get_memory.assert_awaited_once_with(str(memory_id), read=False)
+    mock_storage_client.get_memory.assert_awaited_once_with(str(memory_id), "tenant-A", read=False)
 
 
 @pytest.mark.asyncio

@@ -70,8 +70,8 @@ async def test_batch_update_status_backward_compat_2field_shape(sc):
     assert result["ok"] is True
     assert result["skipped"] == []
 
-    a_post = await sc.get_memory(a["id"])
-    b_post = await sc.get_memory(b["id"])
+    a_post = await sc.get_memory(a["id"], tid)
+    b_post = await sc.get_memory(b["id"], tid)
     assert a_post["status"] == "archived"
     assert b_post["status"] == "conflicted"
 
@@ -97,7 +97,7 @@ async def test_batch_update_status_sets_supersedes(sc):
     assert result["ok"] is True
     assert result["skipped"] == []
 
-    newer_post = await sc.get_memory(newer["id"])
+    newer_post = await sc.get_memory(newer["id"], tid)
     assert newer_post["status"] == "active"
     assert str(newer_post["supersedes_id"]) == str(older["id"])
 
@@ -126,7 +126,7 @@ async def test_batch_update_status_unset_supersedes(sc):
     )
     assert result["ok"] is True
 
-    newer_post = await sc.get_memory(newer["id"])
+    newer_post = await sc.get_memory(newer["id"], tid)
     assert newer_post["supersedes_id"] is None
 
 
@@ -158,7 +158,7 @@ async def test_batch_update_status_cas_skip_on_mismatch(sc):
     )
     # CAS gate fires: row reported as skipped, status untouched.
     assert newer["id"] in result["skipped"]
-    newer_post = await sc.get_memory(newer["id"])
+    newer_post = await sc.get_memory(newer["id"], tid)
     assert newer_post["status"] == "conflicted"
     assert str(newer_post["supersedes_id"]) == str(other["id"])
 
@@ -761,7 +761,7 @@ async def test_batch_update_status_partial_validation_failure_writes_nothing(sc)
     assert exc.value.response.status_code == 422
 
     # Critical: the valid row in position 0 must NOT have been committed.
-    post = await sc.get_memory(target["id"])
+    post = await sc.get_memory(target["id"], tid)
     assert post["status"] == original_status, (
         "validation pre-pass failed: status was committed before the "
         f"batch was rejected (expected {original_status!r}, got {post['status']!r})"

@@ -263,7 +263,7 @@ class TestBatchANNIntegration:
         await _check_near_duplicates(tenant_id, fleet_id)
 
         sc = get_storage_client()
-        refreshed = await sc.get_memory(mem["id"])
+        refreshed = await sc.get_memory(mem["id"], tenant_id)
         assert refreshed["last_dedup_checked_at"] is not None, (
             "last_dedup_checked_at should be set after processing"
         )

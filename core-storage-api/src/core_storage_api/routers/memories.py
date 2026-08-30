@@ -1597,17 +1597,27 @@ async def get_memory_contradictions(memory_id: UUID, tenant_id: str) -> dict:
 
 
 @router.get("/{memory_id}")
-async def get_memory(memory_id: UUID, tenant_id: str | None = None) -> dict:
+async def get_memory(memory_id: UUID, tenant_id: str) -> dict:
+    """Fetch one memory by id, within ``tenant_id``.
+
+    ``tenant_id`` is a **required** query parameter. It used to default to
+    ``None``, and ``None`` meant "fetch by primary key with no tenant
+    predicate" — so a caller who knew a UUID got the row's full content
+    whichever tenant owned it, from a service that authenticates nothing. That
+    is GHSA-wgvw-28pq-jc36 in its single-row form; ``POST /memories/bulk-get``
+    was the batch one, and its optionality was justified in review as
+    "mirroring" this endpoint.
+
+    404 covers "no such memory" and "not yours" alike, so this does not become
+    an existence oracle for memory UUIDs.
+    """
     t_start = time.perf_counter()
     db_timer = None
     memory = None
     success = True
     try:
         with bind_timer() as db_timer:
-            if tenant_id is not None:
-                memory = await _svc.memory_get_by_id_for_tenant(memory_id, tenant_id)
-            else:
-                memory = await _svc.memory_get_by_id(memory_id)
+            memory = await _svc.memory_get_by_id_for_tenant(memory_id, tenant_id)
     except Exception:
         success = False
         raise

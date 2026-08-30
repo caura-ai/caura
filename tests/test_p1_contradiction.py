@@ -534,7 +534,7 @@ class TestContradictionIntegration:
         assert str(contradictions[0].old_memory_id) == old["id"]
         assert contradictions[0].reason == "rdf_conflict"
         # Verify old memory was marked outdated via re-fetch
-        refreshed_old = await sc.get_memory(old["id"])
+        refreshed_old = await sc.get_memory(old["id"], tenant_id)
         assert refreshed_old["status"] == "outdated"
 
     async def test_semantic_contradiction_with_fake_llm(self, tenant_id):

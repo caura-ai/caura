@@ -181,7 +181,7 @@ def _sc_for_path_c(
     )
     sc = _base_sc()
 
-    async def get_memory(mid: str) -> dict | None:
+    async def get_memory(mid: str, tenant_id: str, **_kw) -> dict | None:
         return {NEW_ID: new_mem, CAND_ID: cand_mem}.get(mid)
 
     sc.get_memory = AsyncMock(side_effect=get_memory)

@@ -115,7 +115,7 @@ async def test_bulk_write_demotes_deprecated_semantic_to_fact():
     resp = await create_memories_bulk(req, bulk_attempt_id=uuid.uuid4().hex)
     assert resp.results[0].status == "created", resp.results[0]
 
-    mem = await get_storage_client().get_memory(resp.results[0].id)
+    mem = await get_storage_client().get_memory(resp.results[0].id, tenant)
     assert mem["memory_type"] == DEFAULT_MEMORY_TYPE  # "fact" — demoted from "semantic"
 
 
@@ -137,7 +137,7 @@ async def test_bulk_write_keeps_non_deprecated_type():
     resp = await create_memories_bulk(req, bulk_attempt_id=uuid.uuid4().hex)
     assert resp.results[0].status == "created", resp.results[0]
 
-    mem = await get_storage_client().get_memory(resp.results[0].id)
+    mem = await get_storage_client().get_memory(resp.results[0].id, tenant)
     assert mem["memory_type"] == "decision"
 
 
@@ -163,7 +163,7 @@ async def test_update_demotes_deprecated_semantic_to_fact():
     )
     assert updated.memory_type == DEFAULT_MEMORY_TYPE  # demoted from "semantic"
 
-    mem = await get_storage_client().get_memory(created.id)
+    mem = await get_storage_client().get_memory(created.id, tenant)
     assert mem["memory_type"] == DEFAULT_MEMORY_TYPE
 
 
@@ -187,5 +187,5 @@ async def test_update_semantic_on_fact_row_is_noop():
     )
     assert updated.memory_type == DEFAULT_MEMORY_TYPE  # unchanged — stays "fact"
 
-    mem = await get_storage_client().get_memory(created.id)
+    mem = await get_storage_client().get_memory(created.id, tenant)
     assert mem["memory_type"] == DEFAULT_MEMORY_TYPE

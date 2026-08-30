@@ -172,7 +172,7 @@ async def test_bulk_write_demotes_new_deprecated_slug_to_default(slug: str) -> N
     resp = await create_memories_bulk(req, bulk_attempt_id=uuid.uuid4().hex)
     assert resp.results[0].status == "created", resp.results[0]
 
-    mem = await get_storage_client().get_memory(resp.results[0].id)
+    mem = await get_storage_client().get_memory(resp.results[0].id, tenant)
     assert mem["memory_type"] == DEFAULT_MEMORY_TYPE, (
         f"{slug!r} was stored verbatim instead of being demoted to "
         f"{DEFAULT_MEMORY_TYPE!r}"

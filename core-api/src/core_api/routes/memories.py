@@ -1499,9 +1499,9 @@ async def delete_memory(
     if auth.tenant_id and caller_agent_id:
         await enforce_delete(tenant_id, caller_agent_id)
         # Cross-fleet / scope_agent row authorization (write threshold).
-        # ``get_memory_for_tenant`` already filters out soft-deleted /
+        # ``get_memory`` already filters out soft-deleted /
         # cross-tenant rows server-side, so a returned row is live + owned.
-        target = await get_storage_client().get_memory_for_tenant(tenant_id, str(memory_id))
+        target = await get_storage_client().get_memory(str(memory_id), tenant_id)
         if target:
             allowed = await authorize_memory_access(
                 tenant_id,
@@ -1556,9 +1556,9 @@ async def update_memory_status(
             detail=f"Invalid status. Must be one of: {', '.join(MEMORY_STATUSES)}",
         )
     sc = get_storage_client()
-    # ``get_memory_for_tenant`` filters out soft-deleted / cross-tenant rows
+    # ``get_memory`` filters out soft-deleted / cross-tenant rows
     # server-side, so a returned row is live + owned.
-    memory = await sc.get_memory_for_tenant(tenant_id, str(memory_id))
+    memory = await sc.get_memory(str(memory_id), tenant_id)
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
     # Cross-fleet / scope_agent row authorization for the authenticated agent

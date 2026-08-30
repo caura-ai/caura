@@ -396,7 +396,7 @@ async def test_bulk_mask_redacts_stored_item():
     resp = await create_memories_bulk(_bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
     assert resp.results[0].status == "created"
-    mem = await get_storage_client().get_memory(resp.results[0].id)
+    mem = await get_storage_client().get_memory(resp.results[0].id, tenant)
     assert "jane.roe@example.com" not in mem["content"]  # stored masked
     rows = await _governance_audit_rows(tenant)
     assert any(
@@ -411,7 +411,7 @@ async def test_bulk_flag_marks_stored_metadata():
     resp = await create_memories_bulk(_bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
     assert resp.results[0].status == "created"
-    mem = await get_storage_client().get_memory(resp.results[0].id)
+    mem = await get_storage_client().get_memory(resp.results[0].id, tenant)
     md = mem.get("metadata_") or mem.get("metadata") or {}
     assert md.get("contains_pii") is True
     assert "jane.roe@example.com" in mem["content"]  # flag does not redact

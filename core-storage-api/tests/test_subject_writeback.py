@@ -78,7 +78,7 @@ class TestSubjectWriteback:
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"updated": True}
 
-        row = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
+        row = (await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})).json()
         assert row["subject_entity_id"] == entity_id
 
     async def test_never_clobbers_an_existing_subject(
@@ -100,7 +100,7 @@ class TestSubjectWriteback:
         )
         assert r2.json() == {"updated": False}
 
-        row = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
+        row = (await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})).json()
         assert row["subject_entity_id"] == first
 
     async def test_foreign_tenant_matches_no_row(
@@ -116,5 +116,5 @@ class TestSubjectWriteback:
         assert resp.status_code == 200
         assert resp.json() == {"updated": False}
 
-        row = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
+        row = (await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})).json()
         assert row["subject_entity_id"] is None

@@ -59,7 +59,7 @@ def _enrichment(**over):
 
 
 def _row(**over):
-    """A stored row as ``get_memory_for_tenant`` returns it — all defaults."""
+    """A stored row as ``get_memory`` returns it — all defaults."""
     base = dict(
         id=str(uuid.uuid4()),
         memory_type="fact",  # schema default

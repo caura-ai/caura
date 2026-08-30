@@ -113,7 +113,7 @@ def _mock_sc_with_retraction_setup(
         content="old statement that looked similar but is about subject Y",
     )
 
-    async def get_memory(mid: str) -> dict | None:
+    async def get_memory(mid: str, tenant_id: str, **_kw) -> dict | None:
         if mid == str(new_id):
             return new_mem
         if mid == str(cand_id):

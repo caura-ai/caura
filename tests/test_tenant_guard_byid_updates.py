@@ -61,12 +61,12 @@ async def test_memory_update_wrong_tenant_is_noop(sc):
 
     applied = await svc.memory_update(mem_id, _t(), {"weight": 0.99})
     assert applied is False, "wrong-tenant update matches no row"
-    row = await svc.memory_get_by_id(mem_id)
+    row = await svc.memory_get_by_id_for_tenant(mem_id, owner)
     assert row is not None and row.weight == 0.5, "weight untouched by wrong tenant"
 
     applied_owner = await svc.memory_update(mem_id, owner, {"weight": 0.99})
     assert applied_owner is True
-    assert (await svc.memory_get_by_id(mem_id)).weight == 0.99
+    assert (await svc.memory_get_by_id_for_tenant(mem_id, owner)).weight == 0.99
 
 
 async def test_memory_update_metadata_patch_wrong_tenant_is_noop(sc):
@@ -75,12 +75,12 @@ async def test_memory_update_metadata_patch_wrong_tenant_is_noop(sc):
     mem_id = UUID(await _seed_memory(sc, owner, metadata={"k": "orig"}))
 
     await svc.memory_update(mem_id, _t(), {"metadata_patch": {"k": "hacked"}})
-    assert (await svc.memory_get_by_id(mem_id)).metadata_ == {"k": "orig"}, (
+    assert (await svc.memory_get_by_id_for_tenant(mem_id, owner)).metadata_ == {"k": "orig"}, (
         "metadata merge blocked for wrong tenant"
     )
 
     await svc.memory_update(mem_id, owner, {"metadata_patch": {"k": "new", "added": 1}})
-    assert (await svc.memory_get_by_id(mem_id)).metadata_ == {"k": "new", "added": 1}
+    assert (await svc.memory_get_by_id_for_tenant(mem_id, owner)).metadata_ == {"k": "new", "added": 1}
 
 
 async def test_update_memory_route_wrong_tenant_returns_none(sc):
@@ -90,11 +90,11 @@ async def test_update_memory_route_wrong_tenant_returns_none(sc):
 
     result = await sc.update_memory(mem_id, _t(), {"weight": 0.42})
     assert result is None, "wrong-tenant PATCH 404s -> client returns None"
-    assert (await PostgresService().memory_get_by_id(UUID(mem_id))).weight == 0.5
+    assert (await PostgresService().memory_get_by_id_for_tenant(UUID(mem_id), owner)).weight == 0.5
 
     ok = await sc.update_memory(mem_id, owner, {"weight": 0.42})
     assert ok == {"ok": True}
-    assert (await PostgresService().memory_get_by_id(UUID(mem_id))).weight == 0.42
+    assert (await PostgresService().memory_get_by_id_for_tenant(UUID(mem_id), owner)).weight == 0.42
 
 
 async def test_update_memory_route_requires_tenant(sc):
@@ -115,18 +115,18 @@ async def test_update_embedding_wrong_tenant_is_noop(sc):
     svc = PostgresService()
     owner = _t()
     mem_id = await _seed_memory(sc, owner)  # seeded without an embedding
-    assert (await svc.memory_get_by_id(UUID(mem_id))).embedding is None
+    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).embedding is None
 
     # Wrong tenant matches no row -> route 404 -> client returns None, no write.
     wrong = await sc.update_embedding(mem_id, _t(), fake_embedding("vector"))
     assert wrong is None, "wrong-tenant embedding write 404s -> client None"
-    assert (await svc.memory_get_by_id(UUID(mem_id))).embedding is None, (
+    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).embedding is None, (
         "wrong tenant must not write the embedding"
     )
 
     ok = await sc.update_embedding(mem_id, owner, fake_embedding("vector"))
     assert ok == {"ok": True}
-    assert (await svc.memory_get_by_id(UUID(mem_id))).embedding is not None
+    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).embedding is not None
 
 
 async def test_update_embedding_requires_tenant(sc):
@@ -145,15 +145,15 @@ async def test_mark_dedup_checked_wrong_tenant_is_noop(sc):
     svc = PostgresService()
     owner = _t()
     mem_id = await _seed_memory(sc, owner)
-    assert (await svc.memory_get_by_id(UUID(mem_id))).last_dedup_checked_at is None
+    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).last_dedup_checked_at is None
 
     await sc.mark_dedup_checked([mem_id], _t())
-    assert (await svc.memory_get_by_id(UUID(mem_id))).last_dedup_checked_at is None, (
+    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).last_dedup_checked_at is None, (
         "wrong tenant must not stamp last_dedup_checked_at"
     )
 
     await sc.mark_dedup_checked([mem_id], owner)
-    assert (await svc.memory_get_by_id(UUID(mem_id))).last_dedup_checked_at is not None
+    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).last_dedup_checked_at is not None
 
 
 async def test_mark_dedup_checked_requires_tenant(sc):

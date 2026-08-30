@@ -147,7 +147,7 @@ class TestMemories:
         assert body["tenant_id"] == tenant_id
 
         # GET by id
-        resp2 = await client.get(f"{PREFIX}/memories/{memory_id}")
+        resp2 = await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})
         assert resp2.status_code == 200
         assert resp2.json()["id"] == memory_id
 
@@ -175,7 +175,9 @@ class TestMemories:
         assert created["is_inferred"] is True
         assert created["scope"] == {"role": "engineer", "location": "us"}
 
-        fetched = (await client.get(f"{PREFIX}/memories/{created['id']}")).json()
+        fetched = (
+            await client.get(f"{PREFIX}/memories/{created['id']}", params={"tenant_id": tenant_id})
+        ).json()
         assert fetched["confidence"] == 0.9
         assert fetched["is_inferred"] is True
         assert fetched["scope"] == {"role": "engineer", "location": "us"}
@@ -189,7 +191,9 @@ class TestMemories:
         """A write that omits the A55 fields gets the server defaults on read:
         ``confidence`` NULL, ``is_inferred`` false, ``scope`` ``{}``."""
         created = (await client.post(f"{PREFIX}/memories", json=_memory_payload(tenant_id, fleet_id))).json()
-        fetched = (await client.get(f"{PREFIX}/memories/{created['id']}")).json()
+        fetched = (
+            await client.get(f"{PREFIX}/memories/{created['id']}", params={"tenant_id": tenant_id})
+        ).json()
         assert fetched["confidence"] is None
         assert fetched["is_inferred"] is False
         assert fetched["scope"] == {}
@@ -270,7 +274,7 @@ class TestMemories:
         assert resp.json()["ok"] is True
 
         # Verify via GET
-        updated = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
+        updated = (await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})).json()
         assert updated["status"] == "archived"
 
     async def test_metadata_patch_jsonb_merge(
@@ -316,7 +320,7 @@ class TestMemories:
         )
         assert resp.status_code == 200, resp.text
 
-        updated = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
+        updated = (await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})).json()
         # Storage serialises the ORM attribute name verbatim, so the wire key
         # is ``metadata_`` (as the seed payload above already uses) — not the
         # ``metadata`` spelling core-api uses in its own internal field dicts.
@@ -365,7 +369,7 @@ class TestMemories:
         assert resp.status_code == 200, resp.text
         assert resp.json()["ok"] is True
 
-        updated = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
+        updated = (await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})).json()
         # Round-trips back as ISO strings on read; confirm the values
         # we sent landed at the right ORM columns.
         assert updated["ts_valid_start"].startswith("2026-09-14T00:00:00")
@@ -444,10 +448,23 @@ class TestMemories:
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
-        # Verify deleted_at is set
-        fetched = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
-        assert fetched["deleted_at"] is not None
-        assert fetched["status"] == "deleted"
+        # A soft-deleted row is gone as far as a tenant-scoped read is
+        # concerned. That was always true of the scoped path — this assertion
+        # used to reach the row only because the fetch went through the
+        # UNSCOPED one, which no longer exists.
+        fetched = await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})
+        assert fetched.status_code == 404, fetched.text
+
+        # The row is soft-deleted rather than gone: it still counts under an
+        # explicit include_deleted listing.
+        listed = await client.post(
+            f"{PREFIX}/memories/admin-list",
+            json={"tenant_id": tenant_id, "include_deleted": True},
+        )
+        assert listed.status_code == 200, listed.text
+        rows = {r["id"]: r for r in listed.json()}
+        assert memory_id in rows
+        assert rows[memory_id]["deleted_at"] is not None
 
     async def test_patch_after_delete_does_not_resurrect(
         self,
@@ -489,9 +506,20 @@ class TestMemories:
         )
         assert resp.status_code == 404, resp.text
 
-        # 3. Re-read: deleted_at is still set, status is still 'deleted',
-        # metadata is unchanged.
-        after = (await client.get(f"{PREFIX}/memories/{memory_id}")).json()
+        # 3. Re-read: still deleted, and the PATCH did not merge into it.
+        # Read through the include_deleted listing rather than the by-id GET —
+        # a tenant-scoped by-id read has always excluded soft-deleted rows, and
+        # this assertion previously reached one only via the UNSCOPED path,
+        # which no longer exists. The properties under test are unchanged.
+        assert (
+            await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})
+        ).status_code == 404
+        listed = await client.post(
+            f"{PREFIX}/memories/admin-list",
+            json={"tenant_id": tenant_id, "include_deleted": True},
+        )
+        assert listed.status_code == 200, listed.text
+        after = next(r for r in listed.json() if r["id"] == memory_id)
         assert after["deleted_at"] is not None
         assert after["status"] == "deleted"
         # ``metadata_``, not ``metadata`` — with the wrong key this assertion
@@ -712,7 +740,7 @@ class TestMemories:
         # ordering and prove nothing about the tie-break.
         stamps = set()
         for mid in inserted:
-            row = await client.get(f"{PREFIX}/memories/{mid}")
+            row = await client.get(f"{PREFIX}/memories/{mid}", params={"tenant_id": tenant_id})
             assert row.status_code == 200, row.text
             stamps.add(row.json()["created_at"])
         assert len(stamps) == 1, f"expected one shared created_at, got {stamps}"
@@ -822,9 +850,10 @@ class TestMemories:
     async def test_get_nonexistent_memory_returns_404(
         self,
         client: AsyncClient,
+        tenant_id: str,
     ) -> None:
         fake_id = str(uuid.uuid4())
-        resp = await client.get(f"{PREFIX}/memories/{fake_id}")
+        resp = await client.get(f"{PREFIX}/memories/{fake_id}", params={"tenant_id": tenant_id})
         assert resp.status_code == 404
 
     async def test_scored_search_rejects_a_payload_without_nested_search_params(

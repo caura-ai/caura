@@ -150,7 +150,7 @@ async def test_skip_reason_no_related_ids_on_partial_without_ids():
 
 @pytest.mark.asyncio
 async def test_skip_reason_no_memories_fetched_when_all_fetch_fail():
-    """All ``sc.get_memory_for_tenant`` calls failed → ``_generate_rule``
+    """All ``sc.get_memory`` calls failed → ``_generate_rule``
     returns ``None`` with reason."""
     result = await _run(
         "failure",

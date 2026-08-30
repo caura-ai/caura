@@ -459,7 +459,7 @@ async def _generate_rule(
     # originate from agent writes and can contain injection attempts.
     async def _fetch(mid_str: str) -> tuple[str, dict | None]:
         try:
-            return mid_str, await sc.get_memory_for_tenant(tenant_id, mid_str)
+            return mid_str, await sc.get_memory(mid_str, tenant_id)
         except Exception:
             logger.warning("evolve: fetch failed for memory %s", mid_str, exc_info=True)
             return mid_str, None

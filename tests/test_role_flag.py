@@ -81,7 +81,7 @@ async def test_reader_allows_get(client_for_role) -> None:
     """GET /memories/{id} must reach the handler on reader — the handler
     then returns 404 (memory doesn't exist), not 405."""
     c = await client_for_role("reader")
-    r = await c.get(f"/api/v1/storage/memories/{uuid4()}")
+    r = await c.get(f"/api/v1/storage/memories/{uuid4()}", params={"tenant_id": "t1"})
     assert r.status_code == 404
 
 

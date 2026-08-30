@@ -113,15 +113,23 @@ async def _handle_set_field(body: TimeWarpRequest, auth: AuthContext) -> TimeWar
 
     sc = get_storage_client()
     if body.table == "memories":
-        # Tenant isolation: verify the memory belongs to the caller's tenant
-        row = await sc.get_memory(body.id)
+        # Tenant isolation. This used to fetch the row unscoped and then compare
+        # ``row["tenant_id"] != auth.tenant_id`` in Python — a correct check, but
+        # one that pulled another tenant's row across the boundary to make it.
+        # The fetch is scoped now, so a row belonging to someone else is never
+        # read; the 404 below covers "no such memory" and "not yours" alike,
+        # which is also one less existence oracle for memory UUIDs.
+        if auth.tenant_id is None:
+            # Admin credentials carry no tenant. The old comparison rejected
+            # them here too — ``memories.tenant_id`` is NOT NULL, so it could
+            # never equal None — and there is no tenant to scope the fetch to.
+            raise HTTPException(status_code=403, detail="Tenant mismatch")
+        row = await sc.get_memory(body.id, auth.tenant_id)
         if not row:
             raise HTTPException(status_code=404, detail="Memory not found")
-        if row.get("tenant_id") != auth.tenant_id:
-            raise HTTPException(status_code=403, detail="Tenant mismatch")
-        # Pass the row's HOME tenant (verified == auth.tenant_id just above) so
-        # the storage-side guard scopes the write; row["tenant_id"] is a non-null
-        # column, unlike the Optional auth.tenant_id.
+        # Pass the row's HOME tenant so the storage-side guard scopes the write;
+        # row["tenant_id"] is a non-null column, unlike the Optional
+        # auth.tenant_id.
         result = await sc.update_memory(body.id, row["tenant_id"], {body.field: parsed_value.isoformat()})
         affected = 1 if result else 0
     else:

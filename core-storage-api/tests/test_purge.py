@@ -51,7 +51,7 @@ class TestPurgeTenantData:
 
         # The memories are physically gone (not just soft-deleted).
         for memory_id in ids:
-            got = await client.get(f"{PREFIX}/memories/{memory_id}")
+            got = await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})
             assert got.status_code == 404
 
     async def test_purge_is_idempotent(self, client: AsyncClient) -> None:
@@ -72,7 +72,7 @@ class TestPurgeTenantData:
         await client.post(f"{PREFIX}/purge/tenant-data", json={"tenant_id": drop_tenant})
 
         # The other tenant's memory survives.
-        got = await client.get(f"{PREFIX}/memories/{keep['id']}")
+        got = await client.get(f"{PREFIX}/memories/{keep['id']}", params={"tenant_id": keep_tenant})
         assert got.status_code == 200
 
     async def test_purge_requires_tenant_id(self, client: AsyncClient) -> None:
@@ -147,10 +147,10 @@ class TestPurgeFleetData:
 
         # The purged fleet's memories are physically gone (not just soft-deleted).
         for memory_id in drop_ids:
-            got = await client.get(f"{PREFIX}/memories/{memory_id}")
+            got = await client.get(f"{PREFIX}/memories/{memory_id}", params={"tenant_id": tenant_id})
             assert got.status_code == 404
         # The same tenant's OTHER fleet is untouched.
-        survivor = await client.get(f"{PREFIX}/memories/{keep['id']}")
+        survivor = await client.get(f"{PREFIX}/memories/{keep['id']}", params={"tenant_id": tenant_id})
         assert survivor.status_code == 200
 
     async def test_purge_fleet_is_idempotent(self, client: AsyncClient) -> None:
@@ -181,7 +181,7 @@ class TestPurgeFleetData:
             f"{PREFIX}/purge/fleet-data", json={"tenant_id": drop_tenant, "fleet_id": drop_fleet}
         )
 
-        got = await client.get(f"{PREFIX}/memories/{keep['id']}")
+        got = await client.get(f"{PREFIX}/memories/{keep['id']}", params={"tenant_id": keep_tenant})
         assert got.status_code == 200
 
     async def test_purge_fleet_requires_tenant_and_fleet(self, client: AsyncClient) -> None:

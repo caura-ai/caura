@@ -84,7 +84,7 @@ async def handle_memory_enriched(event: Event) -> None:
     # typically sub-second, so a replica read races replication. On the replica the
     # miss lands in the ack-drop below, which never redelivers, and this handler is
     # one of only two contradiction-detection triggers on the deferred path.
-    memory = await sc.get_memory(str(payload.memory_id), read=False)
+    memory = await sc.get_memory(str(payload.memory_id), payload.tenant_id, read=False)
     if memory is None:
         # Genuinely deleted between the worker's PATCH and this handler — which the
         # writer read makes true. Read from the replica it was not: an unreplicated
@@ -193,7 +193,7 @@ async def handle_memory_embedded(event: Event) -> None:
     # event ever fires to cover for it, so a lagged read dropped detection
     # unconditionally. Contradictory memories then both stay ``active`` and recall
     # keeps returning the stale one.
-    memory = await sc.get_memory(str(payload.memory_id), read=False)
+    memory = await sc.get_memory(str(payload.memory_id), payload.tenant_id, read=False)
     if memory is None:
         # Genuinely deleted — true against the writer, not against a replica, where
         # an unreplicated row is indistinguishable from a deleted one.

@@ -104,13 +104,13 @@ async def test_route_status_update_cross_tenant_finds_no_row(sc):
     # Wrong tenant: guarded out → 404 → None, and the row is untouched.
     result = await sc.update_memory_status(mid, "archived", tenant_id=tenant_b)
     assert result is None
-    untouched = await sc.get_memory(mid)
+    untouched = await sc.get_memory(mid, tenant_a)
     assert untouched["status"] == "active"
 
     # Correct tenant succeeds.
     result = await sc.update_memory_status(mid, "archived", tenant_id=tenant_a)
     assert result is not None
-    post = await sc.get_memory(mid)
+    post = await sc.get_memory(mid, tenant_a)
     assert post["status"] == "archived"
 
 

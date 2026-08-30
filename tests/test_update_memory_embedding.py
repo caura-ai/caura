@@ -68,7 +68,7 @@ async def test_content_change_with_failed_embedding_nulls_the_vector(
     assert resp.status_code == 200, resp.text
 
     # The content change must have landed...
-    got = await get_storage_client().get_memory_for_tenant(tenant_id, memory_id)
+    got = await get_storage_client().get_memory(memory_id, tenant_id)
     assert got is not None
     assert got["content"] == f"REPLACED content {tag}"
 

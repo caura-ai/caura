@@ -90,7 +90,7 @@ async def test_retraction_clears_supersedes_and_sets_status_active(sc):
     await _establish_conflicted(sc, conflicted=b, by=a)
 
     # Sanity: B is conflicted-by-A before retraction.
-    b_pre = await sc.get_memory(b["id"])
+    b_pre = await sc.get_memory(b["id"], TENANT_ID)
     assert b_pre["status"] == "conflicted"
     assert str(b_pre["supersedes_id"]) == str(a["id"])
 
@@ -105,7 +105,7 @@ async def test_retraction_clears_supersedes_and_sets_status_active(sc):
     assert result is not None  # PATCH succeeded
 
     # Assert: B is back to active and the supersedes pointer is cleared.
-    b_post = await sc.get_memory(b["id"])
+    b_post = await sc.get_memory(b["id"], TENANT_ID)
     assert b_post["status"] == "active", (
         f"Retraction must move status back to 'active'; got {b_post['status']!r}"
     )
@@ -147,7 +147,7 @@ async def test_retraction_rejects_when_supersedes_changed_under_us(sc):
     )
 
     # B unchanged.
-    b_post = await sc.get_memory(b["id"])
+    b_post = await sc.get_memory(b["id"], TENANT_ID)
     assert b_post["status"] == "conflicted"
     assert str(b_post["supersedes_id"]) == str(c["id"]), (
         f"Stale retraction must not touch the current supersedes_id; "
@@ -189,7 +189,7 @@ async def test_retraction_is_idempotent_on_already_cleared_row(sc):
     )
     assert result is not None
 
-    b_post = await sc.get_memory(b["id"])
+    b_post = await sc.get_memory(b["id"], TENANT_ID)
     assert b_post["status"] == "active"
     assert b_post["supersedes_id"] is None
 

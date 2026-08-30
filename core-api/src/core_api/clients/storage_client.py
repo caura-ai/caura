@@ -573,19 +573,22 @@ class CoreStorageClient:
                 _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
             ) from exc
 
-    async def get_memory(self, memory_id: str, *, read: bool = True) -> dict | None:
-        """Fetch one memory by id.
+    async def get_memory(self, memory_id: str, tenant_id: str, *, read: bool = True) -> dict | None:
+        """Fetch one memory by id, within ``tenant_id``.
+
+        ``tenant_id`` is required. This method used to take an id alone, and
+        eleven call sites used it — none of them passing a tenant, which is what
+        an optional scoping argument reliably produces. There was a second,
+        correctly scoped ``get_memory``; having both meant the unsafe
+        one was always a shorter name away. Now there is one, and the unscoped
+        call cannot be written rather than merely being discouraged.
 
         ``read=False`` routes to the WRITER. Pass it for a read-your-write — a
-        read-back of a row this request (or an event's producer) just wrote, where
-        replica lag would make the row or the freshly-PATCHed column invisible.
-        Same reasoning as the write-path dedup gate below, which passes it for the
-        same reason.
+        read-back of a row this request (or an event's producer) just wrote,
+        where replica lag would make the row or the freshly-PATCHed column
+        invisible. Same reasoning as the write-path dedup gate below.
         """
-        return await self._get(f"/memories/{memory_id}", read=read)
-
-    async def get_memory_for_tenant(self, tenant_id: str, memory_id: str) -> dict | None:
-        return await self._get(f"/memories/{memory_id}", tenant_id=tenant_id)
+        return await self._get(f"/memories/{memory_id}", tenant_id=tenant_id, read=read)
 
     async def update_memory(self, memory_id: str, tenant_id: str, data: dict) -> dict | None:
         # ``tenant_id`` (the row's home tenant) scopes the by-id UPDATE on

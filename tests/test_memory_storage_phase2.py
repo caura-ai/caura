@@ -250,8 +250,8 @@ async def test_soft_delete_by_ids(sc):
     # Re-deleting already-deleted rows is a no-op (deleted_at filter).
     assert await sc.soft_delete_by_ids(tid, [a["id"], b["id"]]) == 0
     # The untouched row is still live.
-    assert await sc.get_memory_for_tenant(tid, c["id"]) is not None
-    assert await sc.get_memory_for_tenant(tid, a["id"]) is None
+    assert await sc.get_memory(c["id"], tid) is not None
+    assert await sc.get_memory(a["id"], tid) is None
 
 
 async def test_soft_delete_by_ids_tenant_scoped(sc):
@@ -259,7 +259,7 @@ async def test_soft_delete_by_ids_tenant_scoped(sc):
     mem = await _write_memory(sc, tid_a)
     # Deleting under the wrong tenant matches nothing.
     assert await sc.soft_delete_by_ids(tid_b, [mem["id"]]) == 0
-    assert await sc.get_memory_for_tenant(tid_a, mem["id"]) is not None
+    assert await sc.get_memory(mem["id"], tid_a) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +276,8 @@ async def test_soft_delete_by_filter_metadata_exact_match(sc):
         {"tenant_id": tid, "metadata_filter": {"run": "r2"}}
     )
     assert deleted == 1
-    assert await sc.get_memory_for_tenant(tid, drop["id"]) is None
-    assert await sc.get_memory_for_tenant(tid, keep["id"]) is not None
+    assert await sc.get_memory(drop["id"], tid) is None
+    assert await sc.get_memory(keep["id"], tid) is not None
 
 
 async def test_soft_delete_by_filter_multi_pair_and_semantics(sc):
@@ -292,8 +292,8 @@ async def test_soft_delete_by_filter_multi_pair_and_semantics(sc):
         {"tenant_id": tid, "metadata_filter": {"k1": "v1", "k2": "v2"}}
     )
     assert deleted == 1
-    assert await sc.get_memory_for_tenant(tid, match["id"]) is None
-    assert await sc.get_memory_for_tenant(tid, partial["id"]) is not None
+    assert await sc.get_memory(match["id"], tid) is None
+    assert await sc.get_memory(partial["id"], tid) is not None
 
 
 async def test_soft_delete_by_filter_exclude_ids(sc):
@@ -305,8 +305,8 @@ async def test_soft_delete_by_filter_exclude_ids(sc):
         {"tenant_id": tid, "agent_id": "ag", "exclude_ids": [a["id"]]}
     )
     assert deleted == 1
-    assert await sc.get_memory_for_tenant(tid, a["id"]) is not None
-    assert await sc.get_memory_for_tenant(tid, b["id"]) is None
+    assert await sc.get_memory(a["id"], tid) is not None
+    assert await sc.get_memory(b["id"], tid) is None
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +326,9 @@ async def test_soft_delete_by_run_requires_ingest_source(sc):
 
     deleted = await sc.soft_delete_by_run(tid, run, metadata_source="ingest")
     assert deleted == 1
-    assert await sc.get_memory_for_tenant(tid, ingest["id"]) is None
+    assert await sc.get_memory(ingest["id"], tid) is None
     # Same run_id but non-ingest source is untouched (belt-and-braces).
-    assert await sc.get_memory_for_tenant(tid, other["id"]) is not None
+    assert await sc.get_memory(other["id"], tid) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -355,11 +355,11 @@ async def test_redistribute_moves_promotes_skips_and_reports_not_found(sc):
     assert outcome["not_found"] == [ghost]
 
     # The scope_agent row was promoted and reassigned.
-    moved_private = await sc.get_memory_for_tenant(tid, private["id"])
+    moved_private = await sc.get_memory(private["id"], tid)
     assert moved_private["agent_id"] == "target"
     assert moved_private["visibility"] == "scope_team"
     # The scope_team row kept its visibility.
-    moved_team = await sc.get_memory_for_tenant(tid, team["id"])
+    moved_team = await sc.get_memory(team["id"], tid)
     assert moved_team["agent_id"] == "target"
     assert moved_team["visibility"] == "scope_team"
 

@@ -1329,7 +1329,7 @@ async def caura_manage(
                     t0,
                 )
             if op == "read":
-                memory = await sc.get_memory_for_tenant(tenant_id, str(uid))
+                memory = await sc.get_memory(str(uid), tenant_id)
                 if not memory:
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
                 # Fleet/agent-scope authorization: honor the same scope_agent +
@@ -1380,7 +1380,7 @@ async def caura_manage(
                         t0,
                     )
                 # WRITE → home tenant only.
-                memory = await sc.get_memory_for_tenant(tenant_id, str(uid))
+                memory = await sc.get_memory(str(uid), tenant_id)
                 if not memory:
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
                 # Cross-fleet / scope_agent authorization (write threshold).
@@ -1449,7 +1449,7 @@ async def caura_manage(
                 # Trust gate (>= 3) + cross-fleet / scope_agent row authorization,
                 # mirroring REST DELETE /memories/{id}.
                 await enforce_delete(tenant_id, caller_agent_id)
-                target = await sc.get_memory_for_tenant(tenant_id, str(uid))
+                target = await sc.get_memory(str(uid), tenant_id)
                 if target and not await authorize_memory_access(
                     tenant_id,
                     caller_agent_id,

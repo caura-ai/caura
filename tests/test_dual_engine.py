@@ -48,7 +48,7 @@ async def test_read_engine_is_distinct_when_read_url_set():
 
 
 async def test_read_methods_use_read_session_factory(sc, tenant_id):
-    """Read methods (memory_get_by_id, memory_count_active, etc.) must
+    """Read methods (memory_get_by_id_for_tenant, memory_count_active, etc.) must
     consult the reader factory; spy both and assert the split."""
     import core_storage_api.services.postgres_service as pg_svc
 
@@ -74,7 +74,7 @@ async def test_read_methods_use_read_session_factory(sc, tenant_id):
     pg_svc._read_session_factory = _SpyFactory("reader", real_reader)  # type: ignore[assignment]
     try:
         svc = pg_svc.PostgresService()
-        await svc.memory_get_by_id(uuid4())
+        await svc.memory_get_by_id_for_tenant(uuid4(), tenant_id)
         await svc.memory_count_active(tenant_id=tenant_id)
     finally:
         pg_svc._session_factory = real_writer

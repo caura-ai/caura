@@ -251,7 +251,7 @@ async def detect_contradictions_async(
     try:
         if new_memory is None:
             sc = get_storage_client()
-            new_memory = await sc.get_memory(str(memory_id))
+            new_memory = await sc.get_memory(str(memory_id), tenant_id)
         if not new_memory or new_memory.get("deleted_at") is not None:
             # Resolved before the lock is taken, so a gone row never holds one.
             return
@@ -1985,7 +1985,7 @@ async def _attempt_path_c_retraction(
     if not retraction_target_id:
         return False
 
-    candidate = await sc.get_memory(str(retraction_target_id))
+    candidate = await sc.get_memory(str(retraction_target_id), str(new_memory["tenant_id"]))
     if not candidate or candidate.get("deleted_at") is not None:
         return False
     # Only retract rows still in the conflicted state Path A produced.
@@ -2186,7 +2186,7 @@ async def detect_contradictions_by_entities_async(
         # work the lock protects, and fetching first also means a soft-deleted
         # row no longer burns a lock for the rest of the TTL.
         sc = get_storage_client()
-        new_memory = await sc.get_memory(str(memory_id))
+        new_memory = await sc.get_memory(str(memory_id), tenant_id)
         if not new_memory or new_memory.get("deleted_at") is not None:
             return
 
@@ -2217,7 +2217,7 @@ async def detect_contradictions_by_entities_async(
             n_retractions = 1
             # The new memory's ``supersedes_id`` was just cleared.
             # Re-fetch so the detection phase below sees the fresh state.
-            refreshed = await sc.get_memory(str(memory_id))
+            refreshed = await sc.get_memory(str(memory_id), tenant_id)
             if refreshed and refreshed.get("deleted_at") is None:
                 new_memory = refreshed
 

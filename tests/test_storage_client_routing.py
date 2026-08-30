@@ -63,7 +63,7 @@ async def test_get_goes_to_reader_when_read_url_set() -> None:
     client, writer, reader = await _fresh_client(
         writer_url="http://writer:8002", reader_url="http://reader:8002"
     )
-    await client.get_memory("11111111-1111-1111-1111-111111111111")
+    await client.get_memory("11111111-1111-1111-1111-111111111111", "t1")
     assert len(reader.requests) == 1
     assert len(writer.requests) == 0
     assert reader.requests[0].url.host == "reader"
@@ -269,7 +269,7 @@ async def test_authorization_header_attached_on_reader_calls() -> None:
         client, writer, reader = await _fresh_client(
             writer_url="https://writer:8002", reader_url="https://reader:8002"
         )
-        await client.get_memory("11111111-1111-1111-1111-111111111111")
+        await client.get_memory("11111111-1111-1111-1111-111111111111", "t1")
     assert reader.requests[0].headers["Authorization"] == "Bearer tok-reader"
     assert reader.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 
@@ -320,7 +320,7 @@ async def test_http_audience_skips_token_fetch() -> None:
         client, writer, reader = await _fresh_client(
             writer_url="http://writer:8002", reader_url="http://reader:8002"
         )
-        await client.get_memory("11111111-1111-1111-1111-111111111111")
+        await client.get_memory("11111111-1111-1111-1111-111111111111", "t1")
     assert "Authorization" not in reader.requests[0].headers
     assert reader.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 
@@ -334,7 +334,7 @@ async def test_no_authorization_header_when_no_credentials() -> None:
         client, writer, reader = await _fresh_client(
             writer_url="http://writer:8002", reader_url="http://reader:8002"
         )
-        await client.get_memory("11111111-1111-1111-1111-111111111111")
+        await client.get_memory("11111111-1111-1111-1111-111111111111", "t1")
     assert "Authorization" not in reader.requests[0].headers
     assert reader.requests[0].headers["X-Storage-Secret"] == "test-storage-secret"
 

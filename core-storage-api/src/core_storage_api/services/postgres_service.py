@@ -683,25 +683,35 @@ class PostgresService:
     # A) Core CRUD
     # ------------------------------------------------------------------
 
-    async def memory_get_by_id(self, memory_id: UUID) -> Memory | None:
-        # Wrap the full session block so db_ms includes connection-pool
-        # wait time — a saturated pool shows up as slow "DB" here, which
-        # is exactly how we want to see it in Cloud Logging.
-        with db_measure():
-            async with get_read_session() as session:
-                return await session.get(Memory, memory_id)
-
     async def memory_get_by_id_for_tenant(
         self,
         memory_id: UUID,
         tenant_id: str,
     ) -> Memory | None:
+        """Fetch one memory by id within one tenant, or None.
+
+        There was an unscoped sibling, ``memory_get_by_id``, that took an id
+        alone and returned whatever it matched. It is gone: it was the
+        single-row form of GHSA-wgvw-28pq-jc36's primitive, and the route above
+        reached it whenever ``tenant_id`` was omitted from the query string.
+
+        The predicate is in the statement rather than in Python after the fetch.
+        The previous version did ``session.get`` and then compared
+        ``memory.tenant_id != tenant_id`` — correct, but it let another tenant's
+        row cross the database boundary first, and the protection was a
+        comparison a later edit could drop with no test failing.
+        """
+        # Wrap the full session block so db_ms includes connection-pool
+        # wait time — a saturated pool shows up as slow "DB" here, which
+        # is exactly how we want to see it in Cloud Logging.
         with db_measure():
             async with get_read_session() as session:
-                memory = await session.get(Memory, memory_id)
-                if memory is None or memory.tenant_id != tenant_id or memory.deleted_at is not None:
-                    return None
-                return memory
+                stmt = select(Memory).where(
+                    Memory.id == memory_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                )
+                return (await session.execute(stmt)).scalar_one_or_none()
 
     @staticmethod
     def _filter_fields(model_cls, data: dict) -> dict:

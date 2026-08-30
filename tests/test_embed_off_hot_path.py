@@ -455,7 +455,7 @@ async def test_bulk_reembed_preserves_batching() -> None:
 
     sc = MagicMock()
     sc.get_memory = AsyncMock(
-        side_effect=lambda mid: {"id": mid, "deleted_at": None, "fleet_id": "f"}
+        side_effect=lambda mid, tenant_id, **_kw: {"id": mid, "deleted_at": None, "fleet_id": "f"}
     )
     sc.update_embedding = AsyncMock()
 
@@ -767,7 +767,7 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
     mem_a_id = uuid.uuid4()
     mem_b_id = uuid.uuid4()
 
-    async def _get_memory(mid: str):
+    async def _get_memory(mid: str, tenant_id: str, **_kw):
         if mid == str(mem_a_id):
             raise RuntimeError("storage transient error for item A")
         return {"id": mid, "deleted_at": None, "fleet_id": "f", "embedding": None}
@@ -839,7 +839,7 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
     mem_a_id = uuid.uuid4()
     mem_b_id = uuid.uuid4()
 
-    async def _get_memory(mid: str):
+    async def _get_memory(mid: str, tenant_id: str, **_kw):
         return {"id": mid, "deleted_at": None, "fleet_id": "f", "embedding": None}
 
     # Accepts ``embedded_content_hash``: the re-embed paths now record which
@@ -912,7 +912,7 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
     mem_a_id = uuid.uuid4()
     mem_b_id = uuid.uuid4()
 
-    def _get_memory(mid: str):
+    def _get_memory(mid: str, tenant_id: str, **_kw):
         if mid == str(mem_a_id):
             return {
                 "id": mid,

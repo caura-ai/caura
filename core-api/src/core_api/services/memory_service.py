@@ -2645,7 +2645,7 @@ async def _reembed_memory(
 
     try:
         sc = get_storage_client()
-        mem = await sc.get_memory(str(memory_id))
+        mem = await sc.get_memory(str(memory_id), tenant_id)
         if mem is None or mem.get("deleted_at") is not None:
             return
         # Race guard: _enrich_memory_background may have already written a
@@ -2823,7 +2823,7 @@ async def _reembed_memories_bulk(
     # storage p99 = 5s wall-clock before the first PATCH). gather with
     # return_exceptions=True so one failed read doesn't nuke the rest.
     mems = await asyncio.gather(
-        *[sc.get_memory(str(memory_id)) for (memory_id, _), _ in pairs],
+        *[sc.get_memory(str(memory_id), tenant_id) for (memory_id, _), _ in pairs],
         return_exceptions=True,
     )
 
@@ -3031,7 +3031,7 @@ async def _enrich_memory_background(
 
     try:
         sc = get_storage_client()
-        mem = await sc.get_memory(str(memory_id))
+        mem = await sc.get_memory(str(memory_id), tenant_id)
         if mem is None or mem.get("deleted_at") is not None:
             return None
 
@@ -3473,7 +3473,7 @@ async def _enrich_memory_background(
 
 async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
     sc = get_storage_client()
-    mem = await sc.get_memory_for_tenant(tenant_id, str(memory_id))
+    mem = await sc.get_memory(str(memory_id), tenant_id)
     if not mem:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -3503,7 +3503,7 @@ async def update_memory(
     from core_api.services.organization_settings import resolve_config
 
     sc = get_storage_client()
-    mem = await sc.get_memory_for_tenant(tenant_id, str(memory_id))
+    mem = await sc.get_memory(str(memory_id), tenant_id)
     if not mem:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -3783,7 +3783,7 @@ async def update_memory(
             logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
     # Re-fetch updated memory
-    updated = await sc.get_memory(str(memory_id))
+    updated = await sc.get_memory(str(memory_id), tenant_id)
 
     # Post-commit async tasks for content changes
     if content_changed:

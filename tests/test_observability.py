@@ -135,7 +135,7 @@ async def test_end_to_end_memory_get_404_emits_log_line(
     from uuid import uuid4
 
     caplog.set_level(logging.INFO, logger="caura.observability")
-    result = await sc.get_memory(uuid4())
+    result = await sc.get_memory(uuid4(), "t1")
     assert result is None
 
     obs_records = [r for r in caplog.records if r.name == "caura.observability"]

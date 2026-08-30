@@ -125,7 +125,7 @@ async def test_unknown_agent_allowed(patch_lookup):
 
 def _fake_read_row(*, visibility, agent_id, fleet_id):
     # Fix 2 Phase 4: ``caura_manage`` op=read fetches via the storage client
-    # (``sc.get_memory_for_tenant``), which returns a plain dict — not an ORM
+    # (``sc.get_memory``), which returns a plain dict — not an ORM
     # row. The authz contract under test (``authorize_memory_access`` over the
     # row's visibility / owner / fleet) is unchanged; only the row SHAPE is.
     mid = uuid.uuid4()
@@ -155,7 +155,7 @@ async def _mcp_read(mcp_env, monkeypatch, *, caller, row):
     # Stub the storage client's by-id read; the real ``authorize_memory_access``
     # then runs over the returned row (``lookup_agent`` is controlled by
     # ``patch_lookup``), exactly as the pre-migration test exercised it.
-    stub_storage_client(monkeypatch, get_memory_for_tenant=mem)
+    stub_storage_client(monkeypatch, get_memory=mem)
     monkeypatch.setattr(mcp_server, "_get_agent_id", lambda: caller)
     return await mcp_server.caura_manage(op="read", memory_id=str(mid))
 
