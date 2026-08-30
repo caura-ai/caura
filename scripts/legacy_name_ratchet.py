@@ -1263,7 +1263,13 @@ def main() -> int:
     base = base_scan.counts()
 
     if args.report:
-        report_summary = _change_summary(args.base, base_scan, head_scan)
+        try:
+            report_summary = _change_summary(args.base, base_scan, head_scan)
+        except Exception as exc:  # noqa: BLE001
+            # The inventory above is still valid. Its documented exit-0 contract
+            # must not depend on optional chronology reporting staying healthy.
+            print(f"Change from {args.base} unavailable: {exc}", file=sys.stderr)
+            return 0
         print(
             f"Change from {args.base}: {report_summary.added} added, "
             f"{report_summary.annotated} annotated, "
@@ -1328,12 +1334,21 @@ def main() -> int:
             print(f"  {path}")
 
     if not grown:
-        gate_summary = _change_summary(
-            args.base,
-            base_scan,
-            head_scan,
-            max_commits=_GATE_REPLAY_LIMIT,
-        )
+        try:
+            gate_summary = _change_summary(
+                args.base,
+                base_scan,
+                head_scan,
+                max_commits=_GATE_REPLAY_LIMIT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # The gate decision is already made; optional reporting cannot turn
+            # this passing input into an infrastructure failure.
+            print(
+                "Gate passes: no new lines currently fail it. "
+                f"Change split unavailable: {exc}"
+            )
+            return 0
         if gate_summary is None:
             print(
                 "No new lines fail the gate. Change split omitted: the range exceeds the "
@@ -1343,7 +1358,8 @@ def main() -> int:
             return 0
         if gate_summary.added:
             print(
-                f"No new lines fail the gate. {gate_summary.added} added, "
+                "Gate passes: no new lines currently fail it. Range history: "
+                f"{gate_summary.added} added, "
                 f"{gate_summary.annotated} annotated, "
                 f"{gate_summary.removed} removed, "
                 f"{gate_summary.moved} {_move_label(gate_summary.moved)} "

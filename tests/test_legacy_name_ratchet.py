@@ -1408,7 +1408,14 @@ def test_summary_replays_transient_addition_and_removal(repo: Path) -> None:
     _stage(repo, "new.py", "")
     _git(repo, "commit", "-qm", "remove the transient legacy line")
 
-    result = subprocess.run(
+    gate = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~2"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report = subprocess.run(
         [sys.executable, str(SCRIPT), "--base", "HEAD~2", "--report"],
         cwd=repo,
         capture_output=True,
@@ -1416,10 +1423,14 @@ def test_summary_replays_transient_addition_and_removal(repo: Path) -> None:
         check=False,
     )
 
-    assert result.returncode == 0
+    assert gate.returncode == report.returncode == 0
+    assert (
+        "Gate passes: no new lines currently fail it. Range history: "
+        "1 added, 0 annotated, 1 removed, 0 excused moves (+0 net)." in gate.stdout
+    )
     assert (
         "Change from HEAD~2: 1 added, 0 annotated, 1 removed, "
-        "0 excused moves (+0 net)." in result.stdout
+        "0 excused moves (+0 net)." in report.stdout
     )
 
 
@@ -1563,6 +1574,55 @@ def test_change_summary_falls_back_when_replay_cannot_spawn_git(
     monkeypatch.setitem(change_summary.__globals__, "_git", cannot_spawn)
 
     assert change_summary("HEAD", base, head) == summary_type(0, 0, 1, 0, -1)
+
+
+def test_report_survives_an_unexpected_change_summary_failure(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT))
+    main = namespace["main"]
+
+    def cannot_summarize(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("broken matcher")
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--base", "HEAD", "--report"])
+    monkeypatch.setitem(main.__globals__, "_change_summary", cannot_summarize)
+
+    assert main() == 0
+    captured = capsys.readouterr()
+    assert "1 lines across 1 files" in captured.out
+    assert "Change from HEAD unavailable: broken matcher" in captured.err
+
+
+def test_passing_gate_survives_an_unexpected_change_summary_failure(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
+    namespace = runpy.run_path(str(SCRIPT))
+    main = namespace["main"]
+
+    def cannot_summarize(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("broken matcher")
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("GITHUB_HEAD_REF", "release-please--branches--main")
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--base", "HEAD"])
+    monkeypatch.setitem(main.__globals__, "_change_summary", cannot_summarize)
+
+    assert main() == 0
+    assert (
+        capsys.readouterr()
+        .out.rstrip()
+        .endswith(
+            "Gate passes: no new lines currently fail it. "
+            "Change split unavailable: broken matcher"
+        )
+    )
 
 
 def test_summary_replays_a_file_becoming_binary_then_text(repo: Path) -> None:
@@ -1938,8 +1998,8 @@ def test_a_release_changelog_addition_is_not_hidden_from_the_net(repo: Path) -> 
 
     assert result.returncode == 0
     assert (
-        "No new lines fail the gate. 1 added, 0 annotated, 1 removed, "
-        "0 excused moves (+0 net)." in result.stdout
+        "Gate passes: no new lines currently fail it. Range history: "
+        "1 added, 0 annotated, 1 removed, 0 excused moves (+0 net)." in result.stdout
     )
 
 
