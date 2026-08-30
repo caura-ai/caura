@@ -1,7 +1,7 @@
 {
-  "name": "@caura/client",
-  "version": "1.0.0",
-  "description": "Caura — governed shared memory for AI agent fleets. The official TypeScript client.",
+  "name": "@caura/memclaw-client",
+  "version": "1.0.2",
+  "description": "Compatibility alias for the canonical @caura/client package.",
   "license": "Apache-2.0",
   "author": "Caura <hello@caura.ai>",
   "type": "module",
@@ -9,9 +9,9 @@
   "types": "index.d.ts",
   "files": ["index.js", "index.d.ts", "README.md"],
   "dependencies": {
-    "@caura/memclaw-client": "^1.0.0"
+    "@caura/client": "^1.0.1"
   },
   "homepage": "https://caura.ai",
-  "repository": { "type": "git", "url": "git+https://github.com/caura-ai/caura.git", "directory": "clients/npm-client" },
+  "repository": { "type": "git", "url": "git+https://github.com/caura-ai/caura.git", "directory": "clients/npm-legacy-client" },
   "keywords": ["caura", "agent-memory", "ai-agents", "mcp", "multi-agent"]
 }

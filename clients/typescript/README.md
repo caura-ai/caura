@@ -1,4 +1,4 @@
-# @caura/memclaw-client
+# @caura/client
 
 Official TypeScript/JavaScript client for [Caura](https://caura.ai) —
 governed shared memory for AI agent fleets (multi-agent, multi-tenant,
@@ -11,13 +11,13 @@ Zero runtime dependencies — uses native `fetch` (Node 18+).
 ## Install
 
 ```bash
-npm install @caura/memclaw-client
+npm install @caura/client
 ```
 
 ## Quickstart
 
 ```ts
-import { Caura } from "@caura/memclaw-client";
+import { Caura } from "@caura/client";
 
 const mc = new Caura("mc_xxx", { tenantId: "my-team", agentId: "my-agent" });
 
@@ -74,6 +74,12 @@ fields, deliberately. See
 For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
 [per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
+
+## Not `npm install caura`
+
+The unscoped name is unavailable. npm's registry rejects it as too similar to
+`csurf`, a long-established package, and that rejection is not appealable in
+practice — the scoped name is the supported route rather than a workaround.
 
 ## License
 

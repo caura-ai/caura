@@ -1,11 +1,11 @@
-name: Publish the TypeScript client to npm
+name: Publish the canonical TypeScript client to npm
 
-# Publishes `clients/typescript` to npm.
+# Publishes `clients/typescript` as `@caura/client`, the implementation package.
+# Version 1.0.0 under that name was a thin alias; 1.0.1 is the first version to
+# carry the implementation directly. The public API is unchanged.
 #
-# THIS WORKFLOW HAS NEVER RUN. No tag matching either pattern below has ever
-# existed; the 1.0.0 on the registry was uploaded by hand on 2026-08-17. Treat
-# the first real run as unproven, and check the registry afterwards rather than
-# the green tick.
+# THIS WORKFLOW HAS NEVER RUN. Treat the first real run as unproven, and check
+# the registry afterwards rather than trusting the green tick.
 #
 # One-time setup by a maintainer:
 #   1. Ensure the @caura npm org/scope exists and the publisher has access.
@@ -14,14 +14,11 @@ name: Publish the TypeScript client to npm
 #      design; an OTP is never entered in CI. As of 2026-08-23 this secret does
 #      NOT exist, so this workflow cannot publish.
 #
-# Release: bump the version in clients/typescript/package.json, then push a tag
-# `caura-client-ts-v<version>` (or run this workflow manually).
-#
-# The legacy tag pattern below still triggers, and stays: rule 3 of the rename
-# programme keeps old names working rather than replacing them, and a tag
-# pattern is exactly the kind of thing sitting in someone's runbook. New
-# releases should use the caura-named tag, because rule 7 is "mint nothing new
-# carrying the old brand" and a release under the old pattern mints one.
+# Release: bump the version in clients/typescript/package.json, then push
+# `caura-client-ts-v<version>` or `caura-npm-v<version>` (or run this workflow
+# manually). Both Caura-spelled tag patterns now reach the same canonical
+# artifact; the latter was the original runbook for `@caura/client` and remains
+# supported.
 #
 # The package name is read from package.json throughout rather than written
 # out, so the rename lands in one place and these steps keep working.
@@ -30,7 +27,7 @@ on:
   push:
     tags:
       - "caura-client-ts-v*"
-      - "memclaw-client-ts-v*" # legacy-name-ok: rule 3 keeps the published tag pattern working
+      - "caura-npm-v*"
   workflow_dispatch:
 
 jobs:
@@ -72,12 +69,18 @@ jobs:
       # A tag that disagrees with package.json does not fail — it publishes
       # whatever package.json says, under a tag claiming otherwise. The release
       # then looks done while the registry serves a different version. Both
-      # prefixes are stripped so the check works on either tag.
+      # supported prefixes are stripped so either runbook gets the same check.
       - name: The tag must agree with package.json
         if: startsWith(github.ref, 'refs/tags/')
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#caura-client-ts-v}"
-          TAG_VERSION="${TAG_VERSION#memclaw-client-ts-v}" # legacy-name-ok: strips the tag pattern kept above
+          case "${GITHUB_REF_NAME}" in
+            caura-client-ts-v*) TAG_VERSION="${GITHUB_REF_NAME#caura-client-ts-v}" ;;
+            caura-npm-v*) TAG_VERSION="${GITHUB_REF_NAME#caura-npm-v}" ;;
+            *)
+              echo "::error::tag ${GITHUB_REF_NAME} does not use a supported canonical-client prefix"
+              exit 1
+              ;;
+          esac
           PKG_VERSION=$(node -p "require('./package.json').version")
           if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
             echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but package.json says ${PKG_VERSION}"

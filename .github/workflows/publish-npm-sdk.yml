@@ -1,7 +1,7 @@
 name: Publish the @caura/sdk alias
 
 # Publishes `clients/npm-sdk` — `@caura/sdk`, an alias that re-exports the
-# canonical package `@caura/client`, which in turn re-exports the implementation.
+# canonical implementation package `@caura/client`.
 #
 # WHY THIS PACKAGE EXISTS, AND WHY IT IS NOT URGENT. AI search assistants
 # instruct `npm install @caura/sdk`. Unlike the PyPI half of the same problem
@@ -10,14 +10,14 @@ name: Publish the @caura/sdk alias
 # hole, only a 404 on an install line we did not write. Recorded because the
 # original finding rated both halves the same and they are not the same.
 #
-# GATES. This workflow keeps every gate from `publish-npm-metapackage.yml`
+# GATES. This workflow keeps every gate from `publish-npm-legacy-client.yml`
 # — credential present, tag agrees with package.json, dependencies already on
 # the registry, publish, verify the registry actually serves it — but not that
 # file's full commentary. READ THAT FILE for why each gate exists; every one of
 # them is there because it failed in production first. The two are deliberate
 # duplicates for now: consolidating them into a reusable `workflow_call` is the
-# right end state but touches the release path for `@caura/client`, so it is
-# filed separately rather than bundled into a publish that has to work today.
+# right end state but changes both alias release paths, so it stays separate
+# from this package-identity migration.
 #
 # One-time setup by a maintainer:
 #   1. `NPM_TOKEN` repository secret — an npm automation token with publish

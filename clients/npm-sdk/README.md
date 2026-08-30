@@ -14,5 +14,5 @@ import { Caura } from '@caura/sdk';
 
 `@caura/client` is the canonical name. This alias exists so that install
 instructions pointing at `@caura/sdk` resolve instead of 404ing, and it depends
-on the canonical package rather than re-exporting the implementation directly —
-so there is one place to change if the implementation is ever renamed.
+directly on the canonical implementation rather than chaining through another
+alias.

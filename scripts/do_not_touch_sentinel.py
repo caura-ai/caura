@@ -229,10 +229,10 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     # -- Published channel names. Renaming these strands installed users. ------
     Sentinel(
-        path="clients/typescript/package.json",
+        path="clients/npm-legacy-client/package.json",
         text="@caura/memclaw-client",  # legacy-name-floor: floor
         kind=LITERAL,
-        breaks="the published npm package name changes under everyone who installed it",
+        breaks="the permanent npm compatibility alias disappears for existing installs",
     ),
     Sentinel(
         path="clients/python/pyproject.toml",
@@ -283,7 +283,7 @@ SENTINELS: tuple[Sentinel, ...] = (
         breaks="the release tag pattern stops triggering a publish",
     ),
     Sentinel(
-        path=".github/workflows/publish-npm-client.yml",
+        path=".github/workflows/publish-npm-legacy-client.yml",
         text="memclaw-client-ts-v*",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="the release tag pattern stops triggering a publish",

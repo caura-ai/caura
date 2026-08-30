@@ -1,11 +1,11 @@
 """Invariants for the client metapackages under ``clients/``.
 
 Three distributions on PyPI (``caura``, ``caura-sdk``, ``caura-client``) and
-three on npm (``@caura/client``, ``@caura/sdk``, and the implementation they
-re-export) install the same client. The aliases exist because install instructions in the
-wild — much of it AI-generated — point at names we did not choose, and a name
-that 404s is either a dead instruction or, on PyPI where anyone may claim an
-unused name, an open door.
+three on npm (``@caura/client``, ``@caura/sdk``, and the legacy alias they
+preserve) install the same client. The aliases exist because install
+instructions in the wild — much of it AI-generated — point at names we did not
+choose, and a name that 404s is either a dead instruction or, on PyPI where
+anyone may claim an unused name, an open door.
 
 That shape has two failure modes with no natural symptom, and this module pins
 both:
@@ -44,24 +44,23 @@ PY_DISTS = {
 }
 
 NPM_DISTS = {
-    "typescript": "@caura/memclaw-client",  # legacy-name-floor: the published implementation name
-    "npm-client": "@caura/client",
+    "typescript": "@caura/client",
+    "npm-legacy-client": "@caura/memclaw-client",  # legacy-name-ok: published alias
     "npm-sdk": "@caura/sdk",
 }
 
-# Each alias re-exports the package it declares as a dependency. They differ on
-# purpose: ``@caura/client`` wraps the implementation, and ``@caura/sdk`` wraps
-# ``@caura/client`` rather than reaching past it — so a future rename of the
-# implementation is a one-package change, not a two-package change.
+# Each alias re-exports the canonical implementation package it declares as a
+# dependency. Neither alias reaches through another alias, so a future client
+# change remains a one-package change.
 NPM_REEXPORT_TARGET = {
-    "npm-client": NPM_DISTS["typescript"],
+    "npm-legacy-client": NPM_DISTS["typescript"],
     "npm-sdk": "@caura/client",
 }
 
 # Metapackages only — the implementation is excluded, since it is the thing
 # they all depend on.
 PY_METAPACKAGES = ("caura-meta", "caura-sdk-meta")
-NPM_METAPACKAGES = ("npm-client", "npm-sdk")
+NPM_METAPACKAGES = ("npm-legacy-client", "npm-sdk")
 
 
 def _pyproject(directory: str) -> dict:
@@ -127,6 +126,16 @@ def test_npm_metapackages_reexport_what_they_depend_on(directory: str) -> None:
         # A file missing from `files` is absent from the published tarball —
         # the package installs and then fails to resolve its own main.
         assert entry in pkg["files"]
+
+
+@pytest.mark.unit
+def test_npm_alias_dependency_direction_avoids_historical_cycle() -> None:
+    """The old canonical 1.0.0 wrapper must not satisfy the forward alias."""
+    legacy_alias = _package_json("npm-legacy-client")
+    assert legacy_alias["dependencies"]["@caura/client"] == "^1.0.1"
+
+    canonical = _package_json("typescript")
+    assert NPM_DISTS["npm-legacy-client"] not in canonical.get("dependencies", {})
 
 
 @pytest.mark.unit

@@ -1,0 +1,191 @@
+name: Publish the legacy npm client alias
+
+# Publishes `clients/npm-legacy-client`, the permanent compatibility alias for
+# `@caura/memclaw-client`. # legacy-name-ok: published alias
+#
+# Versions 1.0.0 and 1.0.1 under this name contain the implementation directly
+# and are immutable floor. Starting at 1.0.2, the package re-exports the Caura-
+# named implementation so existing install lines continue to receive fixes.
+#
+# ORDERING. Publish and verify the `@caura/client` version required by this
+# manifest first. npm does not resolve dependencies at publish time, so
+# reversing that order would successfully publish an alias that nobody can
+# install. The dependency gate below enforces the order against the public
+# registry rather than trusting a workflow tick.
+#
+# The legacy tag pattern moved here with the package it names. This keeps the
+# existing release runbook working while ensuring that Caura-spelled client
+# tags reach only the Caura-named implementation workflow.
+#
+# One-time setup by a maintainer:
+#   1. Add an `NPM_TOKEN` repository secret — an npm automation token with
+#      publish rights to the `@caura` scope. Automation tokens are exempt from
+#      2FA/OTP prompts by design; an OTP is never entered in CI.
+#
+# Release the alias by pushing a tag matching this manifest:
+# `memclaw-client-ts-v<version>`. # legacy-name-ok: preserved release tag
+
+on:
+  push:
+    tags:
+      - "memclaw-client-ts-v*" # legacy-name-ok: preserved release tag
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # Both, and `contents: read` is not redundant: declaring a permissions
+      # block sets every scope NOT listed to `none`, so naming only id-token
+      # leaves `contents: none` and `actions/checkout` authenticating with a
+      # token that cannot read the repo.
+      contents: read
+      id-token: write # npm provenance
+    defaults:
+      run:
+        working-directory: clients/npm-legacy-client
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # Checked explicitly because the failure it prevents is a confusing one.
+      # Without the secret, `npm publish` authenticates as nobody and fails
+      # with a 401 or ENEEDAUTH that reads like an npm-side problem rather
+      # than a missing repository secret. This has already cost a debugging
+      # round once.
+      - name: The publish credential must exist
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NPM_TOKEN}" ]]; then
+            echo "::error::NPM_TOKEN repository secret is not set. Add an npm automation token with publish rights; nothing here can publish without it."
+            exit 1
+          fi
+
+      # A tag that disagrees with package.json does not fail — it publishes
+      # whatever package.json says, under a tag claiming otherwise. The
+      # release then looks done and the registry serves a different version.
+      - name: The tag must agree with package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            memclaw-client-ts-v*) TAG_VERSION="${GITHUB_REF_NAME#memclaw-client-ts-v}" ;; # legacy-name-ok: preserved release tag
+            *)
+              echo "::error::tag ${GITHUB_REF_NAME} does not use the supported legacy-client prefix"
+              exit 1
+              ;;
+          esac
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but package.json says ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "publishing $(node -p "require('./package.json').name")@${PKG_VERSION}"
+
+      # The ORDERING note in the header is the one risk here with no natural
+      # symptom: npm does not resolve dependencies at publish time, so
+      # publishing this against a client version that is not on the registry
+      # SUCCEEDS, and produces a package that fails for the first person who
+      # installs it. Every other risk named in this file has a check; this one
+      # was described and left to the operator, which is the shape of comment
+      # that goes stale and is worth even less than no comment.
+      #
+      # Every dependency is checked, not just the one that exists today, so
+      # adding a second cannot quietly skip it.
+      - name: Every dependency must already be on the registry
+        run: |
+          node -p "Object.entries(require('./package.json').dependencies || {}).map(([n, r]) => n + '@' + r).join('\n')" \
+            > /tmp/deps.txt
+          # Retried on the same schedule as the post-publish check below, and
+          # for the same reason: the expected release order is canonical client
+          # then legacy alias, minutes apart, so this lookup runs exactly when
+          # the dependency is newest and least likely to have propagated. A
+          # single attempt would turn npm's own CDN lag into a failed release.
+          while read -r SPEC; do
+            [[ -z "$SPEC" ]] && continue
+            RESOLVED=""
+            LAST_KIND="unchecked"
+            LAST_STATE="dependency check did not run"
+            for attempt in 1 2 3 4 5; do
+              # `--json` gives successful lookups a string/array contract and
+              # gives a missing spec an E404 code. Keep the command status:
+              # authentication and network failures are inability to check,
+              # never evidence that the dependency is absent.
+              if VIEW_OUTPUT=$(npm view "$SPEC" version --json 2>/dev/null); then
+                if RESOLVED=$(printf '%s' "$VIEW_OUTPUT" | node -e '
+                  let s = "";
+                  process.stdin.on("data", d => s += d).on("end", () => {
+                    try {
+                      const j = JSON.parse(s);
+                      const a = Array.isArray(j) ? j : [j];
+                      const last = a[a.length - 1];
+                      if (typeof last !== "string") process.exit(2);
+                      process.stdout.write(last);
+                    } catch { process.exit(2); }
+                  });'); then
+                  [[ -n "$RESOLVED" ]] && break
+                fi
+                LAST_KIND="unverified"
+                LAST_STATE="registry replied but its version response could not be checked"
+              else
+                ERROR_CODE=$(printf '%s' "$VIEW_OUTPUT" | node -e '
+                  let s = "";
+                  process.stdin.on("data", d => s += d).on("end", () => {
+                    try {
+                      const j = JSON.parse(s);
+                      process.stdout.write(typeof j?.error?.code === "string" ? j.error.code : "");
+                    } catch {}
+                  });' || true)
+                if [[ "$ERROR_CODE" == "E404" ]]; then
+                  LAST_KIND="absent"
+                  LAST_STATE="${SPEC} is not on the registry"
+                else
+                  LAST_KIND="unverified"
+                  LAST_STATE="could not check ${SPEC}: npm view failed${ERROR_CODE:+ with ${ERROR_CODE}}"
+                fi
+              fi
+              if [[ "$attempt" -lt 5 ]]; then
+                echo "attempt ${attempt}: ${LAST_STATE}, waiting"
+                sleep 10
+              else
+                echo "attempt ${attempt}: ${LAST_STATE}"
+              fi
+            done
+            if [[ -z "$RESOLVED" ]]; then
+              if [[ "$LAST_KIND" == "absent" ]]; then
+                echo "::error::${LAST_STATE}. Publish it first (publish-npm-client.yml) — npm would accept this package anyway and it would be uninstallable."
+              else
+                echo "::error::${LAST_STATE}; dependency presence is unverified, so publishing is blocked."
+              fi
+              exit 1
+            fi
+            echo "${SPEC} -> ${RESOLVED}"
+          done < /tmp/deps.txt
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # A green publish step is not evidence the registry serves it. Today
+      # `#870` merged a version bump, every check passed, and both registries
+      # went on serving the old build because no tag had been pushed — the
+      # tick meant "nothing went wrong", not "it shipped". Ask the registry.
+      - name: The registry must actually serve it
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          for attempt in 1 2 3 4 5; do
+            PUBLISHED=$(npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null || true)
+            if [[ "$PUBLISHED" == "$PKG_VERSION" ]]; then
+              echo "registry serves ${PKG_NAME}@${PUBLISHED}"
+              exit 0
+            fi
+            echo "attempt ${attempt}: registry does not serve ${PKG_VERSION} yet, waiting"
+            sleep 10
+          done
+          echo "::error::published without error but the registry does not serve ${PKG_NAME}@${PKG_VERSION}"
+          exit 1
