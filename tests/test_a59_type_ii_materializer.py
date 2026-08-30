@@ -183,4 +183,6 @@ def test_flag_defaults_off_and_phase_is_wired():
     assert settings.type_ii_materializer_shadow is False
     src = Path(cs.__file__).read_text()
     assert "type_ii_materializer_shadow" in src
-    assert '"type_ii_staleness": type_ii' in src
+    # nested under hygiene on purpose: analysis_reports has fixed columns, so
+    # a new top-level report key never reaches storage or the API
+    assert 'hygiene["type_ii_staleness"] = type_ii' in src

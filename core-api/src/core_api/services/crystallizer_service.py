@@ -419,6 +419,12 @@ async def _execute_crystallization(
             except Exception:
                 logger.warning("type_ii shadow phase failed for %s", tenant_id, exc_info=True)
                 type_ii = {"enabled": True, "error": True}
+            # Nested under ``hygiene`` deliberately: ``analysis_reports`` has
+            # FIXED columns (summary/hygiene/health/usage_data/issues/
+            # crystallization), so a NEW top-level report key is silently
+            # dropped by storage and never reaches the API. Nesting needs no
+            # migration and rides the route that already serialises hygiene.
+            hygiene["type_ii_staleness"] = type_ii
 
         if auto_crystallize:
             try:
@@ -456,9 +462,6 @@ async def _execute_crystallization(
                     "info": info,
                 },
                 "hygiene": hygiene,
-                # A59 — audit section for the Type-II shadow sweep (empty
-                # ``{"enabled": False}`` when the flag is off).
-                "type_ii_staleness": type_ii,
                 "health": health,
                 "usage_data": usage,
                 "issues": issues,
