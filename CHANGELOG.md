@@ -10,6 +10,28 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.35.4](https://github.com/caura-ai/caura/compare/backend-v2.35.3...backend-v2.35.4) (2026-08-30)
+
+
+### Bug Fixes
+
+* **fleet:** require an explicit tenant scope on the command-status update ([#1067](https://github.com/caura-ai/caura/issues/1067)) ([a6f7952](https://github.com/caura-ai/caura/commit/a6f79527cdd02e4f88020f094d9fc6757f00036b))
+* **memories:** require a tenant scope on bulk-get, and apply it in SQL ([#1074](https://github.com/caura-ai/caura/issues/1074)) ([a943a44](https://github.com/caura-ai/caura/commit/a943a44058dbc09c67c2639fc113e4e24ee9cacd))
+* **memories:** require a tenant scope on GET /memories/{id} ([#1075](https://github.com/caura-ai/caura/issues/1075)) ([812e0cd](https://github.com/caura-ai/caura/commit/812e0cd7181d1e8ce9f09e363c9cce235adc9053))
+* **storage:** require shared-secret authentication ([#1066](https://github.com/caura-ai/caura/issues/1066)) ([d6fd10b](https://github.com/caura-ai/caura/commit/d6fd10b920d23ca270e4153dd164cc37989a623e))
+* **version:** honor whitespace-empty overrides ([#1065](https://github.com/caura-ai/caura/issues/1065)) ([00abbf3](https://github.com/caura-ai/caura/commit/00abbf305a3c38317cd3fae117158e0955938bb7))
+
+
+### Dependencies
+
+* update pgvector requirement from &lt;1,&gt;=0.3 to &gt;=0.5.0,&lt;1 ([#921](https://github.com/caura-ai/caura/issues/921)) ([f95ee96](https://github.com/caura-ai/caura/commit/f95ee96710280d773175e09f4fad88fd848f8cdd))
+* update sqlalchemy requirement from &lt;3,&gt;=2.0 to &gt;=2.0.52,&lt;3 ([#920](https://github.com/caura-ai/caura/issues/920)) ([784e52b](https://github.com/caura-ai/caura/commit/784e52b33aeaaf374dbaf5a67c6374a883c53251))
+
+
+### Code Refactoring
+
+* **core:** refresh stale legacy-name prose ([#1063](https://github.com/caura-ai/caura/issues/1063)) ([594e173](https://github.com/caura-ai/caura/commit/594e173fc91ed0da3c6bdee29057a3f5153f8d45))
+
 ## [2.35.3](https://github.com/caura-ai/caura/compare/backend-v2.35.2...backend-v2.35.3) (2026-08-29)
 
 
