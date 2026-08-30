@@ -600,8 +600,13 @@ def _only_inserts(before: str, after: str) -> bool:
     return after[mismatch + inserted :] == before[mismatch:]
 
 
-def _transition_summary(base: Scan, head: Scan) -> _ChangeSummary:
-    """Classify one tree-to-tree transition without affecting the gate."""
+_LineCounts = dict[tuple[str, str], int]
+
+
+def _transition_delta(
+    base: Scan, head: Scan
+) -> tuple[_LineCounts, _LineCounts, _LineCounts]:
+    """Lines that left or entered the ratcheted and exempt populations."""
     lost = {
         (path, text): n
         for path, lines in base.by_file.items()
@@ -617,7 +622,11 @@ def _transition_summary(base: Scan, head: Scan) -> _ChangeSummary:
         for path, lines in head.exempt_by_file.items()
         for text, n in (lines - base.exempt_by_file.get(path, Counter())).items()
     }
+    return lost, gained, gained_exempt
 
+
+def _match_annotations(lost: _LineCounts, gained_exempt: _LineCounts) -> int:
+    """Consume losses that gained a marker in the same transition."""
     annotated = 0
     for (destination, marked), available in sorted(gained_exempt.items()):
         candidates = sorted(
@@ -631,7 +640,11 @@ def _transition_summary(base: Scan, head: Scan) -> _ChangeSummary:
             lost[key] -= matched
             if not available:
                 break
+    return annotated
 
+
+def _match_moves(lost: _LineCounts, gained: _LineCounts) -> int:
+    """Consume byte-identical lines that reappeared in another file."""
     moved = 0
     for (destination, text), available in sorted(gained.items()):
         sources = sorted(
@@ -647,6 +660,25 @@ def _transition_summary(base: Scan, head: Scan) -> _ChangeSummary:
             gained[(destination, text)] -= matched
             if not available:
                 break
+    return moved
+
+
+def _match_readditions(lost: _LineCounts, gained: _LineCounts) -> int:
+    """Consume lines that left and later returned to the same file."""
+    readded = 0
+    for key, available in sorted(gained.items()):
+        matched = min(available, lost.get(key, 0))
+        readded += matched
+        lost[key] = lost.get(key, 0) - matched
+        gained[key] -= matched
+    return readded
+
+
+def _transition_summary(base: Scan, head: Scan) -> _ChangeSummary:
+    """Classify one tree-to-tree transition without affecting the gate."""
+    lost, gained, gained_exempt = _transition_delta(base, head)
+    annotated = _match_annotations(lost, gained_exempt)
+    moved = _match_moves(lost, gained)
 
     return _ChangeSummary(
         added=sum(gained.values()),
@@ -724,26 +756,42 @@ def _change_summary(
         if sum(bool(paths) for _, paths in transitions) + bool(worktree_paths) <= 1:
             return endpoint
 
-        parts: list[_ChangeSummary] = []
+        # Annotation means a marker was added without first removing the line,
+        # so it is paired only inside one transition. A move can be written as
+        # either delete-then-add or copy-then-delete, so residual gains and
+        # losses wait for a counterpart across transitions. Same-path returns
+        # are add/remove churn rather than moves and take precedence.
+        lost_pool: _LineCounts = {}
+        gained_pool: _LineCounts = {}
+        annotated = moved = readded = 0
         current = base
-        for index, (commit, paths) in enumerate(transitions):
-            if index == len(transitions) - 1 and not worktree_paths:
+        replay_steps: list[tuple[str | None, list[str]]] = list(transitions)
+        if worktree_paths:
+            replay_steps.append((None, worktree_paths))
+        for index, (tree, paths) in enumerate(replay_steps):
+            if tree is None or index == len(replay_steps) - 1:
                 following = head
             else:
-                following = _updated_scan(current, commit, paths)
-            parts.append(_transition_summary(current, following))
+                following = _updated_scan(current, tree, paths)
+
+            lost, gained, gained_exempt = _transition_delta(current, following)
+            annotated += _match_annotations(lost, gained_exempt)
+            for key, count in lost.items():
+                lost_pool[key] = lost_pool.get(key, 0) + count
+            for key, count in gained.items():
+                gained_pool[key] = gained_pool.get(key, 0) + count
+            readded += _match_readditions(lost_pool, gained_pool)
+            moved += _match_moves(lost_pool, gained_pool)
             current = following
-        if worktree_paths:
-            parts.append(_transition_summary(current, head))
-    except RuntimeError:
+    except (OSError, RuntimeError):
         return endpoint
 
     return _ChangeSummary(
-        added=sum(part.added for part in parts),
-        annotated=sum(part.annotated for part in parts),
-        removed=sum(part.removed for part in parts),
-        moved=sum(part.moved for part in parts),
-        net=sum(part.net for part in parts),
+        added=readded + sum(gained_pool.values()),
+        annotated=annotated,
+        removed=readded + sum(lost_pool.values()),
+        moved=moved,
+        net=sum(head.counts().values()) - sum(base.counts().values()),
     )
 
 

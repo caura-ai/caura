@@ -13,8 +13,10 @@ case-insensitive match are all git's behaviour, not ours.
 from __future__ import annotations
 
 import os
+import runpy
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import NamedTuple
 
@@ -1467,6 +1469,100 @@ def test_summary_replays_a_pure_rename_before_removal(repo: Path) -> None:
         "Change from HEAD~2: 0 added, 0 annotated, 1 removed, "
         "1 excused move (-1 net)." in result.stdout
     )
+
+
+@pytest.mark.parametrize(
+    "delete_first", [True, False], ids=["delete-add", "add-delete"]
+)
+def test_summary_pairs_a_move_across_separate_commits(
+    repo: Path, delete_first: bool
+) -> None:
+    if delete_first:
+        _git(repo, "rm", "existing.py")
+        _git(repo, "commit", "-qm", "remove the legacy URL")
+    else:
+        _stage(repo, "moved.py", f'URL = "https://{LEGACY}.net"\n')
+        _git(repo, "commit", "-qm", "copy the URL elsewhere")
+    _stage(repo, "clean.py", "VALUE = 2\n")
+    _git(repo, "commit", "-qm", "unrelated edit")
+    if delete_first:
+        _stage(repo, "moved.py", f'URL = "https://{LEGACY}.net"\n')
+        _git(repo, "commit", "-qm", "restore the URL elsewhere")
+    else:
+        _git(repo, "rm", "existing.py")
+        _git(repo, "commit", "-qm", "remove the original URL")
+
+    gate = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~3"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~3", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert gate.returncode == report.returncode == 0
+    assert "1 line(s) treated as moved rather than added" in gate.stdout
+    assert (
+        "No new lines. 0 annotated, 0 removed, 1 excused move (+0 net)." in gate.stdout
+    )
+    assert (
+        "Change from HEAD~3: 0 added, 0 annotated, 0 removed, "
+        "1 excused move (+0 net)." in report.stdout
+    )
+
+
+def test_summary_does_not_reuse_a_loss_after_same_path_readdition(
+    repo: Path,
+) -> None:
+    _git(repo, "rm", "existing.py")
+    _git(repo, "commit", "-qm", "remove the legacy URL")
+    _stage(repo, "existing.py", f'URL = "https://{LEGACY}.net"\n')
+    _git(repo, "commit", "-qm", "restore the URL")
+    _stage(repo, "copied.py", f'URL = "https://{LEGACY}.net"\n')
+    _git(repo, "commit", "-qm", "copy the URL elsewhere")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~3", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert (
+        "Change from HEAD~3: 2 added, 0 annotated, 1 removed, "
+        "0 excused moves (+1 net)." in result.stdout
+    )
+
+
+def test_change_summary_falls_back_when_replay_cannot_spawn_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT))
+    change_summary = namespace["_change_summary"]
+    scan_type = namespace["Scan"]
+    summary_type = namespace["_ChangeSummary"]
+    base = scan_type(
+        {"existing.py": Counter({"legacy text": 1})},
+        Counter({"legacy text": 1}),
+        {},
+    )
+    head = scan_type({}, Counter(), {})
+
+    def cannot_spawn(_: list[str]) -> str:
+        raise OSError("argument list too long")
+
+    monkeypatch.setitem(change_summary.__globals__, "_git", cannot_spawn)
+
+    assert change_summary("HEAD", base, head) == summary_type(0, 0, 1, 0, -1)
 
 
 def test_summary_replays_a_file_becoming_binary_then_text(repo: Path) -> None:
