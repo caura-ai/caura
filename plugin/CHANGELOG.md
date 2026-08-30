@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.19.5](https://github.com/caura-ai/caura/compare/plugin-v2.19.4...plugin-v2.19.5) (2026-08-30)
+
+
+### Documentation
+
+* **plugin:** correct pre-A1 matcher history ([#1113](https://github.com/caura-ai/caura/issues/1113)) ([a750d35](https://github.com/caura-ai/caura/commit/a750d35ea36cc0eb3d742371925e9bc2ed9561fd))
+
 ## [2.19.4](https://github.com/caura-ai/caura/compare/plugin-v2.19.3...plugin-v2.19.4) (2026-08-29)
 
 

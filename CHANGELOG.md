@@ -10,6 +10,36 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.37.0](https://github.com/caura-ai/caura/compare/backend-v2.36.1...backend-v2.37.0) (2026-08-30)
+
+
+### Features
+
+* expose lifecycle audit observation for active probes ([#1108](https://github.com/caura-ai/caura/issues/1108)) ([a5a5e49](https://github.com/caura-ai/caura/commit/a5a5e4921657274926a30e0296b9054d428dea54))
+
+
+### Bug Fixes
+
+* **entity:** scope the single-row update to the caller's tenant ([#1119](https://github.com/caura-ai/caura/issues/1119)) ([f93f4e1](https://github.com/caura-ai/caura/commit/f93f4e187908fa2c59549c3f60b20a0473fd3814))
+* **fleet:** scope the command ack to the caller's tenant ([#1111](https://github.com/caura-ai/caura/issues/1111)) ([f6921e1](https://github.com/caura-ai/caura/commit/f6921e19e02bf277a1aa26c64360d79d2fc3585f))
+* **memory:** scope the single-row delete to the caller's tenant ([#1115](https://github.com/caura-ai/caura/issues/1115)) ([108453e](https://github.com/caura-ai/caura/commit/108453ec7bd6f1becc7c2a49e5d8203dd04c9164))
+* **ratchet:** harden passing change summaries ([#1117](https://github.com/caura-ai/caura/issues/1117)) ([a9688c3](https://github.com/caura-ai/caura/commit/a9688c3b361d144564f8d277af9f67ffbd54c7c0))
+* **ratchet:** reconcile moves across commits ([#1116](https://github.com/caura-ai/caura/issues/1116)) ([e397326](https://github.com/caura-ai/caura/commit/e397326668dc53ac815238d6b7fa5a2a84f9004d))
+* **ratchet:** separate annotations from removals ([#1105](https://github.com/caura-ai/caura/issues/1105)) ([87a68a1](https://github.com/caura-ai/caura/commit/87a68a12e9046e718d69bdf1c757c157f08d5dfb))
+
+
+### Dependencies
+
+* update aiosqlite requirement from &lt;1,&gt;=0.19 to &gt;=0.22.1,&lt;1 ([#919](https://github.com/caura-ai/caura/issues/919)) ([fe493dc](https://github.com/caura-ai/caura/commit/fe493dc047a4f4f64ce899e73f79b0c3f2b12fd5))
+
+
+### Documentation
+
+* **plugin:** correct pre-A1 matcher history ([#1113](https://github.com/caura-ai/caura/issues/1113)) ([a750d35](https://github.com/caura-ai/caura/commit/a750d35ea36cc0eb3d742371925e9bc2ed9561fd))
+* **readme:** show cross-agent fleet recall ([#1107](https://github.com/caura-ai/caura/issues/1107)) ([853b020](https://github.com/caura-ai/caura/commit/853b0205835ded06355ce42b68d428e40be70720))
+* **rebrand:** record release-please ratchet scope ([#1114](https://github.com/caura-ai/caura/issues/1114)) ([4ed86dc](https://github.com/caura-ai/caura/commit/4ed86dc02a142beec6f37affe4bacbd5fcb477ee))
+* **sunset:** record why the lifecycle probes stay separate ([#1120](https://github.com/caura-ai/caura/issues/1120)) ([6742621](https://github.com/caura-ai/caura/commit/6742621e8bc69c1d99ca1eda0fae0ff850592a63))
+
 ## [2.36.1](https://github.com/caura-ai/caura/compare/backend-v2.36.0...backend-v2.36.1) (2026-08-30)
 
 
