@@ -520,8 +520,68 @@ def test_removing_a_line_passes_and_reports_progress(repo: Path) -> None:
     result = _run(repo)
 
     assert result.returncode == 0
-    assert "1 removed" in result.stdout
-    assert "-1 net" in result.stdout
+    assert (
+        "No new lines. 0 annotated, 1 removed, 0 excused moves (-1 net)."
+        in result.stdout
+    )
+
+
+def test_annotating_a_line_is_not_reported_as_removing_it(repo: Path) -> None:
+    """A marker changes the ratchet count, but the underlying line remains."""
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert (
+        "No new lines. 1 annotated, 0 removed, 0 excused moves (-1 net)."
+        in result.stdout
+    )
+
+
+def test_an_unrelated_marked_line_does_not_disguise_a_removal(repo: Path) -> None:
+    (repo / "existing.py").write_text(f"{LEGACY}\n")
+    _git(repo, "add", "existing.py")
+    _git(repo, "commit", "-qm", "use a short legacy line")
+    _stage(
+        repo,
+        "existing.py",
+        f'NEW = "{LEGACY}-cli"  # legacy-name-ok: permanent command alias\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert (
+        "No new lines. 0 annotated, 1 removed, 0 excused moves (-1 net)."
+        in result.stdout
+    )
+
+
+def test_removing_an_old_exemption_does_not_hide_an_annotation(repo: Path) -> None:
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"\n'
+        f'ALIAS = "{LEGACY}-cli"  # legacy-name-ok: old alias\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add an exempt alias")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert (
+        "No new lines. 1 annotated, 0 removed, 0 excused moves (-1 net)."
+        in result.stdout
+    )
 
 
 def test_an_addition_is_not_masked_by_a_deletion_elsewhere(repo: Path) -> None:
@@ -736,6 +796,27 @@ def test_an_excused_move_is_always_named(repo: Path) -> None:
     assert "treated as moved rather than added" in result.stdout
     assert "somewhere-unrelated.py" in result.stdout
     assert "was in: existing.py" in result.stdout
+    assert (
+        "No new lines. 0 annotated, 0 removed, 1 excused move (+0 net)."
+        in result.stdout
+    )
+
+
+def test_a_line_moved_while_being_annotated_is_not_removed(repo: Path) -> None:
+    _stage(repo, "existing.py", "")
+    _stage(
+        repo,
+        "moved.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert (
+        "No new lines. 1 annotated, 0 removed, 0 excused moves (-1 net)."
+        in result.stdout
+    )
 
 
 def test_a_file_that_kept_its_copy_is_not_named_as_the_source(repo: Path) -> None:
@@ -1250,6 +1331,312 @@ def test_report_mode_never_fails(repo: Path) -> None:
 
     assert result.returncode == 0
     assert "2 lines across 2 files" in result.stdout
+    assert (
+        "Change from HEAD: 1 added, 0 annotated, 0 removed, "
+        "0 excused moves (+1 net)." in result.stdout
+    )
+
+
+def test_report_mode_keeps_counts_when_the_base_is_unresolvable(repo: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "no-such-ref", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "1 lines across 1 files" in result.stdout
+    assert "Change from no-such-ref unavailable" in result.stderr
+
+
+def test_report_mode_separates_annotation_from_removal(repo: Path) -> None:
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+
+    result = _run(repo, "--report")
+
+    assert result.returncode == 0
+    assert "0 lines across 0 files" in result.stdout
+    assert (
+        "Change from HEAD: 0 added, 1 annotated, 0 removed, "
+        "0 excused moves (-1 net)." in result.stdout
+    )
+
+
+def test_summary_replays_annotation_before_later_exempt_churn(repo: Path) -> None:
+    """A later deletion cannot rewrite an earlier annotation as a removal."""
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+    _git(repo, "commit", "-qm", "annotate the URL")
+    _stage(repo, "existing.py", 'URL = "https://caura.ai"\n')
+    _stage(
+        repo,
+        "new.py",
+        f'ALIAS = "{LEGACY}-cli"  # legacy-name-ok: permanent command alias\n',
+    )
+    _git(repo, "commit", "-qm", "replace the URL and add an alias")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~2", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert (
+        "Change from HEAD~2: 0 added, 1 annotated, 0 removed, "
+        "0 excused moves (-1 net)." in result.stdout
+    )
+
+
+def test_summary_replays_transient_addition_and_removal(repo: Path) -> None:
+    """Endpoint equality must not erase gross churn inside the range."""
+    _stage(repo, "new.py", f'KEY = "{LEGACY}"\n')
+    _git(repo, "commit", "-qm", "add a transient legacy line")
+    _stage(repo, "new.py", "")
+    _git(repo, "commit", "-qm", "remove the transient legacy line")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~2", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert (
+        "Change from HEAD~2: 1 added, 0 annotated, 1 removed, "
+        "0 excused moves (+0 net)." in result.stdout
+    )
+
+
+def test_summary_does_not_call_a_removed_then_readded_line_annotated(
+    repo: Path,
+) -> None:
+    _stage(repo, "existing.py", 'URL = "https://caura.ai"\n')
+    _git(repo, "commit", "-qm", "remove the legacy URL")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+    _git(repo, "commit", "-qm", "restore the URL as a floor mention")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~2", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert (
+        "Change from HEAD~2: 0 added, 0 annotated, 1 removed, "
+        "0 excused moves (-1 net)." in result.stdout
+    )
+
+
+def test_summary_replays_a_pure_rename_before_removal(repo: Path) -> None:
+    _git(repo, "mv", "existing.py", "moved.py")
+    _git(repo, "commit", "-qm", "move the legacy URL")
+    _stage(repo, "moved.py", 'URL = "https://caura.ai"\n')
+    _git(repo, "commit", "-qm", "remove the legacy URL")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~2", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert (
+        "Change from HEAD~2: 0 added, 0 annotated, 1 removed, "
+        "1 excused move (-1 net)." in result.stdout
+    )
+
+
+def test_summary_replays_a_file_becoming_binary_then_text(repo: Path) -> None:
+    original = f'URL = "https://{LEGACY}.net"\n'.encode()
+    (repo / "existing.py").write_bytes(original + b"\0binary payload\n")
+    _git(repo, "add", "existing.py")
+    _git(repo, "commit", "-qm", "make the legacy file binary")
+    (repo / "existing.py").write_bytes(original)
+    _git(repo, "add", "existing.py")
+    _git(repo, "commit", "-qm", "make the legacy file text again")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~2", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert (
+        "Change from HEAD~2: 1 added, 0 annotated, 1 removed, "
+        "0 excused moves (+0 net)." in result.stdout
+    )
+
+
+@pytest.mark.parametrize(
+    ("empty_commits", "expected_greps"),
+    [(False, 6), (True, 2)],
+)
+def test_multi_commit_summary_avoids_full_tree_replay(
+    repo: Path, empty_commits: bool, expected_greps: int
+) -> None:
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+    _git(repo, "commit", "-qm", "annotate the URL")
+    for i in range(4):
+        if empty_commits:
+            _git(repo, "commit", "--allow-empty", "-qm", f"empty {i}")
+        else:
+            _stage(repo, "clean.py", f"VALUE = {i}\n")
+            _git(repo, "commit", "-qm", f"unrelated edit {i}")
+    trace = repo / "git-trace.log"
+    env = {k: v for k, v in os.environ.items() if k != "GITHUB_HEAD_REF"}
+    env["GIT_TRACE"] = str(trace)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~5", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    grep_calls = [
+        line for line in trace.read_text().splitlines() if " git grep " in line
+    ]
+    assert result.returncode == 0
+    assert (
+        "Change from HEAD~5: 0 added, 1 annotated, 0 removed, "
+        "0 excused moves (-1 net)." in result.stdout
+    )
+    assert len(grep_calls) == expected_greps
+    assert sum(line.endswith(" -- :/") for line in grep_calls) == 2
+
+
+def test_single_commit_summary_replays_a_dirty_worktree(repo: Path) -> None:
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+    _git(repo, "commit", "-qm", "annotate the URL")
+    _stage(repo, "existing.py", 'URL = "https://caura.ai"\n')
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~1", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert (
+        "Change from HEAD~1: 0 added, 1 annotated, 0 removed, "
+        "0 excused moves (-1 net)." in result.stdout
+    )
+
+
+def test_gate_caps_replay_but_report_remains_exact(repo: Path) -> None:
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: published URL\n',
+    )
+    _git(repo, "commit", "-qm", "annotate the URL")
+    _stage(repo, "existing.py", 'URL = "https://caura.ai"\n')
+    _git(repo, "commit", "-qm", "remove the annotated URL")
+    for i in range(62):
+        _git(repo, "commit", "--allow-empty", "-qm", f"empty {i}")
+
+    at_limit = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~64"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    _git(repo, "commit", "--allow-empty", "-qm", "empty 62")
+    gate = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~65"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    report = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "HEAD~65", "--report"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert at_limit.returncode == 0
+    assert (
+        "No new lines. 1 annotated, 0 removed, 0 excused moves (-1 net)."
+        in at_limit.stdout
+    )
+    assert gate.returncode == 0
+    assert "No new lines fail the gate. Change split omitted" in gate.stdout
+    assert "range exceeds the 64-commit gate replay limit" in gate.stdout
+    assert " net)." not in gate.stdout
+    assert report.returncode == 0
+    assert (
+        "Change from HEAD~65: 0 added, 1 annotated, 0 removed, "
+        "0 excused moves (-1 net)." in report.stdout
+    )
+
+
+def test_a_marker_swap_stays_visible_as_exemption_churn(repo: Path) -> None:
+    """A kind change is neither annotation nor removal from the floor tally."""
+    old = f'ALIAS = "{LEGACY}"  # legacy-name-ok: permanent alias\n'
+    (repo / "alias.py").write_text(old)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add marked alias")
+    _stage(
+        repo,
+        "alias.py",
+        f'ALIAS = "{LEGACY}"  # legacy-name-floor: published name\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert "1 exempt line(s) written by this change" in result.stdout
+    assert "1 exempt line(s) removed by this change" in result.stdout
+    assert result.stdout.rstrip().endswith("No new lines.")
+    assert " annotated," not in result.stdout
+
+    report = _run(repo, "--report")
+    assert (
+        "Change from HEAD: 0 added, 0 annotated, 0 removed, "
+        "0 excused moves (+0 net)." in report.stdout
+    )
 
 
 # ── removed exemptions: reported, never fatal ────────────────────────────────
@@ -1445,6 +1832,19 @@ def test_a_changelog_passes_on_a_release_please_branch(repo: Path) -> None:
     assert result.returncode == 0, result.stdout
     assert "1 generated CHANGELOG file(s) exempt on this" in result.stdout
     assert "CHANGELOG.md" in result.stdout
+
+
+def test_a_release_changelog_addition_is_not_hidden_from_the_net(repo: Path) -> None:
+    _stage(repo, "existing.py", 'URL = "https://caura.ai"\n')
+    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
+
+    result = _run(repo, env=_RELEASE_ENV)
+
+    assert result.returncode == 0
+    assert (
+        "No new lines fail the gate. 1 added, 0 annotated, 1 removed, "
+        "0 excused moves (+0 net)." in result.stdout
+    )
 
 
 def test_the_same_changelog_fails_off_the_bot_branch(repo: Path) -> None:
