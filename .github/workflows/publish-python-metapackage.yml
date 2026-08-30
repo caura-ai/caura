@@ -37,16 +37,83 @@ jobs:
     permissions:
       id-token: write # required for PyPI trusted publishing
     steps:
+      # Trusted publishing has no stored token to check. GitHub exposes both
+      # request variables only when this job can obtain an OIDC credential.
+      # Check the context without minting a live token in this step.
+      - name: The publish credential must be obtainable
+        run: |
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" ]]; then
+            echo "::error::No OIDC token-request context, so PyPI trusted publishing cannot authenticate. This job needs 'permissions: id-token: write'; there is no stored token to fall back on."
+            exit 1
+          fi
+          echo "OIDC token-request context is present"
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # This package was created under the Caura name and has no legacy tag
+      # history, so tag-triggered releases accept only caura-meta-v*.
+      - name: The tag must agree with pyproject.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [[ "${GITHUB_REF_NAME}" != caura-meta-v* ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} must start with caura-meta-v"
+            exit 1
+          fi
+          TAG_VERSION="${GITHUB_REF_NAME#caura-meta-v}"
+          PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but pyproject.toml says ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "publishing $(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['name'])")==${PKG_VERSION}"
+        working-directory: clients/caura-meta
       - name: Build
         run: |
-          pip install build
+          pip install build packaging
           python -m build
         working-directory: clients/caura-meta
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: clients/caura-meta/dist/
+
+      - name: PyPI must actually serve it
+        run: |
+          PKG_NAME=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['name'])")
+          PKG_VERSION=$(python -c "import tomllib; from packaging.version import Version; print(Version(tomllib.load(open('pyproject.toml','rb'))['project']['version']))")
+          # Ask for the project and test version membership. PyPI's missing-
+          # version endpoint can make curl report exit 56, which cannot be
+          # distinguished from a genuine network failure.
+          ATTEMPTS=10
+          LAST_STATE="never ran"
+          for attempt in $(seq 1 "${ATTEMPTS}"); do
+            if ! HTTP_STATUS=$(curl -sSL --connect-timeout 5 --max-time 15 "https://pypi.org/pypi/${PKG_NAME}/json" -o /tmp/pypi.json -w "%{http_code}"); then
+              LAST_STATE="could not reach the PyPI index"
+              echo "attempt ${attempt}/${ATTEMPTS}: ${LAST_STATE}, retrying"
+            elif [ "${HTTP_STATUS}" = "404" ]; then
+              LAST_STATE="index reachable but project ${PKG_NAME} is not in it"
+              echo "attempt ${attempt}/${ATTEMPTS}: ${LAST_STATE}, waiting"
+            elif [[ "${HTTP_STATUS}" != 2?? ]]; then
+              LAST_STATE="index reachable but returned HTTP ${HTTP_STATUS}"
+              echo "attempt ${attempt}/${ATTEMPTS}: ${LAST_STATE}, retrying"
+            elif python -c "import json,sys; releases=json.load(open('/tmp/pypi.json'))['releases']; sys.exit(2 if not isinstance(releases,dict) else (0 if sys.argv[1] in releases else 3))" "${PKG_VERSION}"; then
+              echo "PyPI serves ${PKG_NAME}==${PKG_VERSION}"
+              exit 0
+            else
+              CHECK_STATUS=$?
+              if [ "${CHECK_STATUS}" -eq 3 ]; then
+                LAST_STATE="index reachable but ${PKG_VERSION} is not in it"
+                echo "attempt ${attempt}/${ATTEMPTS}: ${LAST_STATE}, waiting"
+              else
+                LAST_STATE="index reachable but its response could not be checked"
+                echo "attempt ${attempt}/${ATTEMPTS}: ${LAST_STATE}, retrying"
+              fi
+            fi
+            if [ "${attempt}" -lt "${ATTEMPTS}" ]; then
+              sleep $((attempt * 5))
+            fi
+          done
+          echo "::error::published without error, but after ${ATTEMPTS} attempts: ${LAST_STATE} (${PKG_NAME}==${PKG_VERSION})"
+          exit 1
+        working-directory: clients/caura-meta
