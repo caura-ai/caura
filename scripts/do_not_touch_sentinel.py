@@ -229,6 +229,48 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     # -- Published channel names. Renaming these strands installed users. ------
     Sentinel(
+        path="clients/python/src/memclaw_client/__init__.py",  # legacy-name-floor: pinned floor path
+        text="from caura_client import *",
+        kind=LITERAL,
+        breaks="both pip install spellings lose the permanent legacy import surface",
+    ),
+    Sentinel(
+        path="clients/python/src/caura_client/client.py",
+        text="MemClaw = Caura",  # legacy-name-floor: pinned floor assignment
+        kind=LITERAL,
+        breaks="existing legacy imports stop resolving to the canonical client class",
+    ),
+    Sentinel(
+        path="clients/python/src/caura_client/exceptions.py",
+        text="MemClawError = CauraError",  # legacy-name-floor: pinned floor assignment
+        kind=LITERAL,
+        breaks="existing legacy error handlers stop catching canonical client errors",
+    ),
+    Sentinel(
+        path="clients/python/src/caura_client/exceptions.py",
+        text="MemClawAPIError = CauraAPIError",  # legacy-name-floor: pinned floor assignment
+        kind=LITERAL,
+        breaks="existing legacy API-error handlers stop catching canonical API errors",
+    ),
+    Sentinel(
+        path="clients/python/tests/test_legacy_alias.py",
+        text="assert memclaw_client.MemClaw is caura_client.Caura",  # legacy-name-floor: pinned floor assertion
+        kind=LITERAL,
+        breaks="the end-to-end legacy client identity contract can disappear with its test",
+    ),
+    Sentinel(
+        path="clients/python/tests/test_legacy_alias.py",
+        text="assert memclaw_client.MemClawError is caura_client.CauraError",  # legacy-name-floor: pinned floor assertion
+        kind=LITERAL,
+        breaks="the end-to-end legacy error identity contract can disappear with its test",
+    ),
+    Sentinel(
+        path="clients/python/tests/test_legacy_alias.py",
+        text="assert memclaw_client.MemClawAPIError is caura_client.CauraAPIError",  # legacy-name-floor: pinned floor assertion
+        kind=LITERAL,
+        breaks="the end-to-end legacy API-error identity contract can disappear with its test",
+    ),
+    Sentinel(
         path="clients/npm-legacy-client/package.json",
         text="@caura/memclaw-client",  # legacy-name-floor: floor
         kind=LITERAL,
