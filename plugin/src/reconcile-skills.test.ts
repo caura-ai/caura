@@ -4,11 +4,11 @@
  * Locked-in invariants:
  *
  *   1. **Bundled skill protected** — empty catalog must NEVER delete
- *      the bundled ``memclaw`` skill, even though it isn't a catalog // legacy-name-floor: bundled protected skill slug
+ *      the bundled protected skill, even though it isn't a catalog
  *      row. Wiping it on every fresh-tenant heartbeat would be
  *      catastrophic — the skill is the agent's onboarding doc.
  *   2. **Cold start pulls everything** — fresh node with only the
- *      bundled ``memclaw`` skill must materialise every catalog skill // legacy-name-floor: bundled protected skill slug
+ *      bundled protected skill must materialise every catalog skill
  *      on first heartbeat.
  *   3. **Convergence after offline period** — skills present in catalog
  *      but missing from disk get added; skills on disk but absent from
@@ -113,7 +113,7 @@ describe("reconcileSkills", () => {
     restoreFetch();
   });
 
-  test("invariant 1: bundled `memclaw` skill is never deleted (empty catalog)", async () => { // legacy-name-floor: bundled protected skill slug
+  test("invariant 1: bundled protected skill is never deleted (empty catalog)", async () => {
     plantOnDisk("memclaw", "# bundled onboarding skill — should survive\n");
     plantOnDisk("foo", "# orphan from a previous unshared skill\n");
     mockCatalog = []; // empty catalog
@@ -123,7 +123,7 @@ describe("reconcileSkills", () => {
     assert.deepEqual(listSkillDirs(), ["memclaw"]); // foo gone, memclaw stays
     assert.deepEqual(summary.removed, ["foo"]);
     assert.deepEqual(summary.protected, ["memclaw"]);
-    // No catalog-active skills → nothing installed (the bundled memclaw // legacy-name-floor: bundled protected skill slug
+    // No catalog-active skills → nothing installed (the bundled skill
     // is protected, not "installed" from the catalog).
     assert.deepEqual(summary.installed, []);
     // Bundled content must be untouched
@@ -150,7 +150,7 @@ describe("reconcileSkills", () => {
     assert.deepEqual(summary.added.sort(), ["deploy-runbook", "git-rebase-safety", "incident-triage"]);
     assert.deepEqual(summary.removed, []);
     // ``installed`` = the converged catalog-active set on disk (sorted),
-    // excluding the bundled ``memclaw`` skill. // legacy-name-floor: bundled protected skill slug
+    // excluding the bundled protected skill.
     assert.deepEqual(summary.installed, [
       "deploy-runbook", "git-rebase-safety", "incident-triage",
     ]);
@@ -591,8 +591,8 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("additive: a FOREIGN dir whose name matches a protected slug is ignored, not reported protected", async () => {
-    // No memclaw in the default owned dir (resetSkillsDir cleared it), so any // legacy-name-floor: bundled protected skill slug
-    // "memclaw" in summary.protected could only come from the additive dir. // legacy-name-floor: bundled protected skill slug
+    // No protected skill in the default owned dir (resetSkillsDir cleared it), so any
+    // protected slug in summary.protected could only come from the additive dir.
     plantForeign("memclaw", "# client's own thing named memclaw\n"); // foreign, no marker
     useAdditive();
     mockCatalog = []; // nothing active

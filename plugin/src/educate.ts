@@ -130,7 +130,7 @@ export function discoverAgentWorkspaces(
 
 /**
  * Strip the legacy DEFAULT_EDUCATION paragraph from a HEARTBEAT.md
- * string, if present. Pre-C1 the plugin wrote a 4-sentence MemClaw // legacy-name-floor: historical on-disk paragraph
+ * string, if present. Pre-C1 the plugin wrote a 4-sentence onboarding
  * intro into each workspace's HEARTBEAT.md on first install:
  *
  *   You have been connected to MemClaw — a shared persistent memory // legacy-name-floor: historical on-disk paragraph
@@ -337,7 +337,7 @@ export function educateAgents(
 // writeEducationFiles() below; buildAgentsMd() must continue to emit that
 // exact substring.
 
-const SKILL_SLUG = "memclaw"; // legacy-name-floor: OpenClaw skill slug
+const SKILL_SLUG = "memclaw"; // legacy-name-ok: generated education deliberately bears the accepted legacy skill slug
 
 export function buildToolsMd(): string {
   return `
@@ -467,8 +467,8 @@ function escapeRegex(s: string): string {
 }
 
 /**
- * Find the line range covered by a legacy MemClaw section (pre-fence // legacy-name-floor: historical heading family
- * format), or null if no MemClaw legacy heading is present. // legacy-name-floor: historical heading family
+ * Find the line range covered by a legacy plugin section (pre-fence
+ * format), or null if no matching legacy heading is present.
  *
  * Uses **prefix matching** on the heading rather than exact-equality:
  * the plugin has emitted at least two heading forms over its history
