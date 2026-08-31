@@ -159,6 +159,36 @@ old-brand string always passes — including when that string was load-bearing.
 **`do_not_touch_sentinel.py`** asserts that specific strings still **exist**. It is the
 only thing standing between a well-meaning sweep and a silently broken dependant.
 
+### A vendored file can be counted in neither repository's total
+
+`caura-enterprise` vendors part of `common/` from this repository, and
+`scripts/vendored_files_manifest.json` gives every vendored path a policy:
+
+- **`identical`** — must match the source byte for byte; the drift check fails on any diff.
+- **`manual`** — carries intentional enterprise modifications; a diff is reported as
+  **`INFO`** and **nothing fails**.
+
+`common/events/topics.py` is `manual`. Three consequences, each reasonable alone and a
+blind spot together:
+
+1. The ratchet **excludes** vendored paths from the enterprise count, and discloses it:
+   *"Excluded from the count above: 36 line(s) in 2 mirror(s), gated where authored."*
+2. The drift check **will not fail** when the two copies disagree.
+3. **Nothing syncs them** — the drift check's own docstring says so: *"the copies do not
+   auto-sync."*
+
+So a retired name can sit in the enterprise copy indefinitely: not counted there, not
+enforced against the source, not propagated from it. **"Gated where authored" holds only
+while somebody authors the same change in both places.**
+
+Not hypothetical. `common/structlog_config.py` fell behind this repository's
+`_add_logrecord_extras` processor and the platform services silently dropped structured
+log fields — found 2026-06-11, months late. That file carries `identical` policy today
+*because* of the incident.
+
+**When you change a vendored file here, open the enterprise pull request in the same
+sitting.** A `manual` policy makes the mirror your responsibility, not the gate's.
+
 ### The release-please branch exemption is repo-specific
 
 `_release_please_branch()` belongs only in ratchets that can run on a release-please
@@ -362,6 +392,39 @@ To exempt a line the ratchet would otherwise fail, annotate it in that file's ow
 comment syntax with `legacy-name-ok:` followed by the reason. Exemptions are reported
 on every run, so a PR that adds them is visible as such to a reviewer. Use them for
 contract, not for convenience.
+
+### The step after the flip has no owner by default
+
+The drain finding above answers *can we delete yet* — no. It does not answer *what is
+the next action*, and the two get conflated. The order is fixed:
+
+    flip publishers -> contract the enum members -> let the pool drain -> only then delete
+
+**A flipped family sits at step 2 until somebody contracts its enum members.** Nothing
+schedules that, nothing measures it, and no count falls while it waits — so a family can
+be described as flipped for weeks and be no closer to having its topics deleted. The
+enterprise-only families have been through step 2; at the time of writing the largest
+shared one has not.
+
+**Do not read "already flipped" as "retires automatically."** Terraform lines naming an
+already-flipped family are *overdue*, not permanent. They retire when someone performs
+step 2 and step 4 — not on their own.
+
+### `pipeline` must not be flipped
+
+`pipeline` is declared in `common/events/topics.py` and has **zero live topics in either
+environment**. Rule 1 is why that matters more than it looks: a publish to a topic that
+does not exist is silent loss, not an error. **Flipping `pipeline` would move no traffic
+and report success** — the exact failure shape this plan exists to prevent.
+
+The remaining shared families are not interchangeable, and their order is not arbitrary:
+
+| family | status |
+| --- | --- |
+| `memory` | ready — 16 of 16 twin durable subscriptions, no ephemerals |
+| `org` | shared, and its staging ephemeral pool was under investigation as a suspected subscription leak |
+| `audit` | **last, unconditionally** — the rows are hash-chained, and a lost or reordered audit event is the one failure here that replay cannot repair |
+| `pipeline` | **never, while it has no live topics** |
 
 ### A mention gets reworded, a contract gets the marker
 
