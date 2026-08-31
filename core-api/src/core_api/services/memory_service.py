@@ -4796,7 +4796,10 @@ async def _search_memories_legacy(
     # Increment recall_count and update last_recalled_at for returned memories
     if memory_ids:
         try:
-            await get_storage_client().increment_recall([str(m) for m in memory_ids])
+            await get_storage_client().increment_recall(
+                [str(m) for m in memory_ids],
+                tenant_id=tenant_id,
+            )
         except Exception:
             logger.debug("Recall tracking failed (non-critical)", exc_info=True)
 

@@ -1525,14 +1525,21 @@ async def redistribute(request: Request) -> dict:
 async def increment_recall(request: Request) -> dict:
     """Bump ``recall_count`` + ``last_recalled_at`` for many memories by id.
 
-    Exposes the existing ``PostgresService.memory_increment_recall`` (a by-id
-    UPDATE; no tenant scope — matches its prior in-process semantics from
-    core-api's ``track_recalls`` hook). Body: ``{"memory_ids": [str,...]}`` →
-    ``{"updated": int}``. Fail-closed 422 if ``memory_ids`` is missing/not a
-    list; a malformed UUID 422s (mirrors the evolve/entities validation
-    pattern) rather than 500ing inside the service.
+    ``tenant_id`` binds the by-id UPDATE to the caller's tenant. Body:
+    ``{"tenant_id": str, "memory_ids": [str,...]}`` → ``{"updated": int}``.
+    Fail-closed 422 if either field is missing or invalid; a malformed UUID
+    422s (mirrors the evolve/entities validation pattern) rather than 500ing
+    inside the service.
     """
     body: dict = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required and must be a non-empty string",
+        )
     raw_ids = body.get("memory_ids")
     if not isinstance(raw_ids, list):
         raise HTTPException(status_code=422, detail="'memory_ids' must be a list")
@@ -1542,7 +1549,7 @@ async def increment_recall(request: Request) -> dict:
         memory_ids = [UUID(str(mid)) for mid in raw_ids]
     except (ValueError, AttributeError) as exc:
         raise HTTPException(status_code=422, detail=f"invalid UUID in memory_ids: {exc}") from exc
-    updated = await _svc.memory_increment_recall(memory_ids)
+    updated = await _svc.memory_increment_recall(memory_ids, tenant_id=tenant_id)
     return {"updated": updated}
 
 

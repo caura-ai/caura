@@ -543,7 +543,7 @@ async def test_report_value_highlights_ranked_by_recall(client):
         )
     # Bump the older memory's lifetime recall so it is the top by recall.
     for _ in range(3):
-        assert await sc.increment_recall([older]) == 1
+        assert await sc.increment_recall([older], tenant_id=tenant_id) == 1
 
     resp = await client.get(
         "/api/v1/reports",
@@ -598,8 +598,8 @@ async def test_report_quality_metrics(client):
     await _seed(client, headers, tenant_id, fleet, a1, "episode", 1)
     # Reuse: d1 twice, f1 once → 2 of 4 durable memories ever reused; 3 total recalls.
     for _ in range(2):
-        assert await sc.increment_recall([d1]) == 1
-    assert await sc.increment_recall([f1]) == 1
+        assert await sc.increment_recall([d1], tenant_id=tenant_id) == 1
+    assert await sc.increment_recall([f1], tenant_id=tenant_id) == 1
 
     resp = await client.get(
         "/api/v1/reports",

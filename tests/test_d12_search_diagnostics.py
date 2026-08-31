@@ -179,6 +179,7 @@ async def test_track_recalls_still_counts_normal(monkeypatch):
             "caller_agent_id": "brandclaw",
             "diagnostic": False,
             "filtered_rows": [SimpleNamespace(Memory=SimpleNamespace(id=uuid4()))],
+            "tenant_id": "test-tenant-track-recalls-diagnostic",
         }
     )
     await tr.TrackRecalls().execute(ctx)

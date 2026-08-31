@@ -3798,14 +3798,22 @@ class PostgresService:
     # G) Recall tracking
     # ------------------------------------------------------------------
 
-    async def memory_increment_recall(self, memory_ids: list[UUID]) -> int:
-        """Bump recall_count/last_recalled_at by id; returns rows actually updated."""
+    async def memory_increment_recall(
+        self,
+        memory_ids: list[UUID],
+        *,
+        tenant_id: str,
+    ) -> int:
+        """Bump recall stats for ids owned by ``tenant_id``; return rows updated."""
         if not memory_ids:
             return 0
         async with get_session() as session:
             result = await session.execute(
                 sql_update(Memory)
-                .where(Memory.id.in_(memory_ids))
+                .where(
+                    Memory.id.in_(memory_ids),
+                    Memory.tenant_id == tenant_id,
+                )
                 .values(
                     recall_count=Memory.recall_count + 1,
                     last_recalled_at=func.now(),
