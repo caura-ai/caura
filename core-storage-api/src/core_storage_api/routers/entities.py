@@ -470,16 +470,24 @@ async def find_entity_link(
 @router.post("/memory-ids-by-entity-ids")
 async def get_memory_ids_by_entity_ids(request: Request) -> list[dict]:
     body: dict = await request.json()
+    # This route's payload IS memory ids, and its caller looks them up next, so
+    # unscoped it handed out ids of other tenants' memories to fetch.
+    tenant_id = _require(body, "tenant_id")
     entity_ids = [UUID(eid) for eid in body["entity_ids"]]
-    links = await _svc.entity_get_memory_ids_by_entity_ids(entity_ids)
+    links = await _svc.entity_get_memory_ids_by_entity_ids(entity_ids, tenant_id)
     return [{"memory_id": str(mid), "entity_id": str(eid), "role": role} for mid, eid, role in links]
 
 
 @router.post("/count-memories")
 async def count_memories_per_entity(request: Request) -> dict:
     body: dict = await request.json()
+    # ``core-api``'s client has always sent ``tenant_id`` in this body; the route
+    # read only ``entity_ids`` and dropped it on the floor, so the count spanned
+    # every tenant sharing the entity. Nothing changes on the caller's side —
+    # this reads the field it was already being sent.
+    tenant_id = _require(body, "tenant_id")
     entity_ids = [UUID(eid) for eid in body["entity_ids"]]
-    counts = await _svc.entity_count_memories_per_entity(entity_ids)
+    counts = await _svc.entity_count_memories_per_entity(entity_ids, tenant_id)
     return {str(eid): count for eid, count in counts.items()}
 
 

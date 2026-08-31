@@ -27,11 +27,11 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from core_storage_api.services.postgres_service import get_read_session
+from sqlalchemy import select, text
 
 from common.embedding import fake_embedding
 from common.models.audit import AuditLog
-from core_storage_api.services.postgres_service import PostgresService, get_read_session
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -76,8 +76,21 @@ async def _entity(sc, tenant: str, name: str) -> str:
 
 
 async def _links(memory_id: UUID) -> dict[str, str]:
-    by_entity = await PostgresService().memory_get_entity_links_for_memories([memory_id])
-    return {str(link["entity_id"]): link["role"] for link in by_entity.get(memory_id, [])}
+    """Read the raw join table, tenant-blind, to assert what actually persisted.
+
+    SQL rather than ``memory_get_entity_links_for_memories``, which is now
+    tenant-scoped on both ends. Everything here lives in one tenant so a scoped
+    read would agree today, but an oracle that filters by the same predicate the
+    code under test applies is one refactor away from asserting nothing.
+    """
+    async with get_read_session() as session:
+        rows = (
+            await session.execute(
+                text("SELECT entity_id, role FROM memory_entity_links WHERE memory_id = :mid"),
+                {"mid": memory_id},
+            )
+        ).all()
+    return {str(entity_id): role for entity_id, role in rows}
 
 
 async def _patch_links(memory_id: UUID, tenant: str, links: list[dict]) -> None:

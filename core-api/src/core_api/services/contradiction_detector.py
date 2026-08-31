@@ -1671,7 +1671,7 @@ async def _bounded_gather(coros, limit=_ENTITY_CTX_FANOUT_LIMIT):
     return await asyncio.gather(*(_run(c) for c in coros))
 
 
-async def _fetch_entity_context(sc, memory_id: str) -> list[dict]:
+async def _fetch_entity_context(sc, memory_id: str, tenant_id: str) -> list[dict]:
     """Fetch and denormalise ``MemoryEntityLink`` rows for a single memory.
 
     Two storage round-trips at worst:
@@ -1686,7 +1686,7 @@ async def _fetch_entity_context(sc, memory_id: str) -> list[dict]:
     function never raises on missing data.
     """
     try:
-        links_by_mem = await sc.get_entity_links_for_memories([memory_id])
+        links_by_mem = await sc.get_entity_links_for_memories([memory_id], tenant_id)
     except Exception as e:
         logger.warning(
             "Path C entity-context fetch failed (links) for memory %s: %s",
@@ -1985,7 +1985,10 @@ async def _attempt_path_c_retraction(
     if not retraction_target_id:
         return False
 
-    candidate = await sc.get_memory(str(retraction_target_id), str(new_memory["tenant_id"]))
+    # Bound once: both the candidate lookup and the entity-context fetches below
+    # are by bare id and must be scoped to the row's own tenant.
+    retraction_tenant_id = str(new_memory["tenant_id"])
+    candidate = await sc.get_memory(str(retraction_target_id), retraction_tenant_id)
     if not candidate or candidate.get("deleted_at") is not None:
         return False
     # Only retract rows still in the conflicted state Path A produced.
@@ -2016,8 +2019,8 @@ async def _attempt_path_c_retraction(
     try:
         new_entities, old_entities = await asyncio.wait_for(
             asyncio.gather(
-                _fetch_entity_context(sc, str(new_memory.get("id"))),
-                _fetch_entity_context(sc, str(candidate.get("id"))),
+                _fetch_entity_context(sc, str(new_memory.get("id")), retraction_tenant_id),
+                _fetch_entity_context(sc, str(candidate.get("id")), retraction_tenant_id),
             ),
             timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
         )
@@ -2356,8 +2359,8 @@ async def detect_contradictions_by_entities_async(
                 fetched = await asyncio.wait_for(
                     _bounded_gather(
                         [
-                            _fetch_entity_context(sc, str(memory_id)),
-                            *(_fetch_entity_context(sc, str(c.get("id"))) for c in candidates),
+                            _fetch_entity_context(sc, str(memory_id), tenant_id),
+                            *(_fetch_entity_context(sc, str(c.get("id")), tenant_id) for c in candidates),
                         ]
                     ),
                     timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,

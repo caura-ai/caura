@@ -608,8 +608,14 @@ async def mark_dedup_checked(request: Request) -> dict:
 @router.post("/entity-links")
 async def get_entity_links_for_memories(request: Request) -> dict:
     body: dict = await request.json()
+    # Read side of #1085: the body carried bare memory ids and no tenant, so
+    # knowing a UUID returned that memory's entity graph — and, on rows
+    # predating the write fixes, another tenant's entity ids with it. Memories
+    # outside the tenant are simply absent from the response, which is the same
+    # answer this route already gave for a memory with no links.
+    tenant_id = _require(body, "tenant_id")
     memory_ids = [UUID(mid) for mid in body["memory_ids"]]
-    links = await _svc.memory_get_entity_links_for_memories(memory_ids)
+    links = await _svc.memory_get_entity_links_for_memories(memory_ids, tenant_id)
     # Serialise UUID keys to strings
     return {
         str(k): [{"entity_id": str(el["entity_id"]), "role": el["role"]} for el in v]

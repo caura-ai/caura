@@ -19,9 +19,10 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from core_storage_api.services.postgres_service import PostgresService, get_read_session
+from sqlalchemy import text
 
 from common.embedding import fake_embedding
-from core_storage_api.services.postgres_service import PostgresService
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -180,10 +181,9 @@ async def test_update_memory_surfaces_a_refused_entity_link(sc):
     The memory here belongs to the caller; only the entity is foreign, so this
     is the entity half of the storage predicate seen from core-api.
     """
-    from fastapi import HTTPException
-
     from core_api.schemas import MemoryUpdate
     from core_api.services.memory_service import update_memory
+    from fastapi import HTTPException
 
     owner, stranger = _t(), _t()
     mem_id = UUID(await _seed_memory(sc, owner, embedding=fake_embedding("linkable")))
@@ -206,5 +206,15 @@ async def test_update_memory_surfaces_a_refused_entity_link(sc):
 
     assert exc.value.status_code == 422
     assert "entity_links" in str(exc.value.detail)
-    links = await PostgresService().memory_get_entity_links_for_memories([mem_id])
-    assert links.get(mem_id, []) == [], "the foreign entity was linked anyway"
+    # Raw SQL, not ``memory_get_entity_links_for_memories``: that method is now
+    # tenant-scoped on BOTH ends, so it would hide the very row this asserts is
+    # absent — a link from the owner's memory to the stranger's entity — and the
+    # assertion would hold even if the link had been written.
+    async with get_read_session() as session:
+        leaked = (
+            await session.execute(
+                text("SELECT count(*) FROM memory_entity_links WHERE memory_id = :mid"),
+                {"mid": mem_id},
+            )
+        ).scalar_one()
+    assert leaked == 0, "the foreign entity was linked anyway"
