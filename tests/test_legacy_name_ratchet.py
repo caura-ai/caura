@@ -12,6 +12,7 @@ case-insensitive match are all git's behaviour, not ours.
 
 from __future__ import annotations
 
+import json
 import os
 import runpy
 import subprocess
@@ -24,15 +25,36 @@ import pytest
 
 pytestmark = [pytest.mark.unit]
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "legacy_name_ratchet.py"
+SCRIPT = Path(
+    os.environ.get(
+        "LEGACY_NAME_RATCHET_SCRIPT",
+        Path(__file__).resolve().parents[1] / "scripts" / "legacy_name_ratchet.py",
+    )
+)
 
 # Assembled rather than written out, so this file does not itself carry the
 # literal the gate scans for and need exempting.
 LEGACY = "mem" + "claw"
 
+_DEFAULT_CONFIG: dict[str, object] = {
+    "default_base": "HEAD",
+    "release_please_changelogs": True,
+    "mirror_paths": [],
+    "mirror_manifest": None,
+    "marker_inventory_meta_paths": [],
+}
+
 
 def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _write_config(repo: Path, **updates: object) -> None:
+    """Write the complete strict config, changing only named feature values."""
+    config = {**_DEFAULT_CONFIG, **updates}
+    path = repo / "scripts" / "legacy_name_ratchet.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{json.dumps(config, indent=2)}\n")
 
 
 @pytest.fixture
@@ -49,13 +71,18 @@ def repo(tmp_path: Path) -> Path:
     _git(r, "config", "user.name", "t")
     (r / "existing.py").write_text(f'URL = "https://{LEGACY}.net"\n')
     (r / "clean.py").write_text("VALUE = 1\n")
+    _write_config(r)
     _git(r, "add", "-A")
     _git(r, "commit", "-qm", "base")
     return r
 
 
 def _run(
-    repo: Path, *extra: str, env: dict[str, str] | None = None
+    repo: Path,
+    *extra: str,
+    env: dict[str, str] | None = None,
+    base: str | None = "HEAD",
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the script; ``env`` entries are merged over the inherited environment.
 
@@ -67,9 +94,12 @@ def _run(
     """
     merged = {k: v for k, v in os.environ.items() if k != "GITHUB_HEAD_REF"}
     merged.update(env or {})
+    command = [sys.executable, str(SCRIPT)]
+    if base is not None:
+        command += ["--base", base]
     return subprocess.run(
-        [sys.executable, str(SCRIPT), "--base", "HEAD", *extra],
-        cwd=repo,
+        [*command, *extra],
+        cwd=cwd or repo,
         capture_output=True,
         text=True,
         check=False,  # a non-zero exit is the thing under test
@@ -1316,6 +1346,7 @@ def test_finding_nothing_at_all_fails_rather_than_passing(tmp_path: Path) -> Non
     _git(r, "config", "user.email", "t@example.com")
     _git(r, "config", "user.name", "t")
     (r / "clean.py").write_text("VALUE = 1\n")
+    _write_config(r)
     _git(r, "add", "-A")
     _git(r, "commit", "-qm", "base")
 
@@ -1681,9 +1712,9 @@ def test_multi_commit_summary_avoids_full_tree_replay(
         env=env,
     )
 
-    grep_calls = [
-        line for line in trace.read_text().splitlines() if " git grep " in line
-    ]
+    trace_lines = trace.read_text().splitlines()
+    grep_calls = [line for line in trace_lines if " git grep " in line]
+    root_calls = [line for line in trace_lines if " rev-parse --show-toplevel" in line]
     assert result.returncode == 0
     assert (
         "Change from HEAD~5: 0 added, 1 annotated, 0 removed, "
@@ -1691,6 +1722,7 @@ def test_multi_commit_summary_avoids_full_tree_replay(
     )
     assert len(grep_calls) == expected_greps
     assert sum(line.endswith(" -- :/") for line in grep_calls) == 2
+    assert len(root_calls) == 1
 
 
 def test_single_commit_summary_replays_a_dirty_worktree(repo: Path) -> None:
@@ -1760,6 +1792,7 @@ def test_gate_caps_replay_but_report_remains_exact(repo: Path) -> None:
     assert gate.returncode == 0
     assert "No new lines fail the gate. Change split omitted" in gate.stdout
     assert "range exceeds the 64-commit gate replay limit" in gate.stdout
+    assert "run --report --base HEAD~65 for the exact split" in gate.stdout
     assert " net)." not in gate.stdout
     assert report.returncode == 0
     assert (
@@ -2027,3 +2060,349 @@ def test_the_exemption_is_path_scoped_to_changelogs(repo: Path) -> None:
     offenders = result.stdout.split("adds the legacy name in", 1)[1]
     assert "new.py" in offenders
     assert "CHANGELOG.md" not in offenders
+
+
+def test_release_please_changelogs_can_be_disabled(repo: Path) -> None:
+    _write_config(repo, release_please_changelogs=False)
+    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
+
+    result = _run(repo, env=_RELEASE_ENV)
+
+    assert result.returncode == 1
+    assert "CHANGELOG.md" in result.stdout
+
+
+# ── canonical per-repository configuration and inventory contract ───────────
+
+
+def test_the_config_rejects_unknown_fields(repo: Path) -> None:
+    _write_config(repo, surprise=True)
+
+    result = _run(repo)
+
+    assert result.returncode == 2
+    assert "unknown surprise" in result.stderr
+
+
+def test_the_config_rejects_missing_fields(repo: Path) -> None:
+    path = repo / "scripts" / "legacy_name_ratchet.json"
+    config = json.loads(path.read_text())
+    del config["mirror_manifest"]
+    path.write_text(f"{json.dumps(config)}\n")
+
+    result = _run(repo)
+
+    assert result.returncode == 2
+    assert "missing mirror_manifest" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("default_base", ""),
+        ("release_please_changelogs", 1),
+        ("mirror_paths", "generated.json"),
+        ("mirror_paths", ["."]),
+        ("mirror_paths", ["generated.json", "generated.json"]),
+        ("mirror_manifest", 7),
+        ("mirror_manifest", r"..\outside.json"),
+        ("mirror_manifest", r"C:\outside.json"),
+        ("mirror_manifest", "C:/outside.json"),
+        ("marker_inventory_meta_paths", ["../outside.md"]),
+    ],
+)
+def test_the_config_rejects_invalid_field_values(
+    repo: Path, field: str, value: object
+) -> None:
+    _write_config(repo, **{field: value})
+
+    result = _run(repo)
+
+    assert result.returncode == 2
+    assert field in result.stderr
+
+
+def test_the_gate_uses_the_configured_default_base(repo: Path) -> None:
+    _write_config(repo, default_base="no-such-ref")
+
+    result = _run(repo, base=None)
+
+    assert result.returncode == 2
+    assert "no-such-ref" in result.stderr
+
+
+def test_the_configured_default_base_cannot_be_a_git_option(repo: Path) -> None:
+    _write_config(repo, default_base="--cached")
+
+    result = _run(repo, base=None)
+
+    assert result.returncode == 2
+    assert "default_base must be a ref" in result.stderr
+
+
+def test_an_explicit_empty_base_does_not_fall_back_to_the_default(repo: Path) -> None:
+    result = _run(repo, base="")
+
+    assert result.returncode == 2
+    assert "--base must be a non-empty ref" in result.stderr
+
+
+def test_an_explicit_empty_report_base_keeps_inventory_available(repo: Path) -> None:
+    result = _run(repo, "--report", "--json", base="")
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["change"] == {
+        "available": False,
+        "base": "",
+        "error": "--base must be a non-empty ref without outer whitespace",
+    }
+    assert "Traceback" not in result.stderr
+
+
+def test_a_bare_report_is_inventory_only(repo: Path) -> None:
+    _write_config(repo, default_base="no-such-ref")
+
+    result = _run(repo, "--report", base=None)
+
+    assert result.returncode == 0
+    assert "1 lines across 1 files" in result.stdout
+    assert "Change from" not in result.stdout
+    assert "no-such-ref" not in result.stderr
+
+
+def test_report_discloses_untracked_files_omitted_from_the_scan(repo: Path) -> None:
+    (repo / "untracked.py").write_text(f'KEY = "{LEGACY}-new"\n')
+    nested = repo / "nested"
+    nested.mkdir()
+
+    report = _run(repo, "--report", base=None)
+    nested_report = _run(repo, "--report", base=None, cwd=nested)
+    nested_json = json.loads(
+        _run(repo, "--report", "--json", base=None, cwd=nested).stdout
+    )
+    gate = _run(repo, base=None)
+
+    assert "1 lines across 1 files" in report.stdout
+    assert "Scope: tracked files only; 1 untracked file(s) omitted." in report.stdout
+    assert (
+        "Scope: tracked files only; 1 untracked file(s) omitted."
+        in nested_report.stdout
+    )
+    assert nested_json["scope"]["untracked_files_omitted"] == 1
+    assert gate.returncode == 0
+    assert "untracked.py" not in gate.stdout
+
+
+def test_json_exposes_only_the_gated_metric_as_aggregatable(repo: Path) -> None:
+    _write_mirror(repo, 2)
+    result = _run(repo, "--report", "--json", base=None)
+
+    payload = json.loads(result.stdout)
+    assert payload["headline"]["name"] == "gated"
+    assert payload["headline"]["aggregation"] == {
+        "allowed": True,
+        "operation": "sum",
+    }
+    present = payload["diagnostics"]["present"]
+    assert present["aggregation"]["allowed"] is False
+    assert set(present) == {"aggregation", "display"}
+    assert payload["diagnostics"]["mirrors"]["aggregation"]["allowed"] is False
+    assert payload["diagnostics"]["mirrors"]["lines"] == 2
+    assert payload["scope"] == {
+        "tracked_files_only": True,
+        "untracked_files_omitted": 0,
+    }
+    assert payload["change"] is None
+
+
+def test_json_includes_an_explicit_base_change_split(repo: Path) -> None:
+    _stage(repo, "new.py", f'KEY = "{LEGACY}-new"\n')
+
+    payload = json.loads(_run(repo, "--report", "--json").stdout)
+
+    assert payload["change"] == {
+        "available": True,
+        "base": "HEAD",
+        "added": 1,
+        "annotated": 0,
+        "removed": 0,
+        "moved": 0,
+        "net": 1,
+    }
+
+
+def test_json_keeps_inventory_when_an_explicit_base_is_unavailable(repo: Path) -> None:
+    result = _run(repo, "--report", "--json", base="no-such-ref")
+
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0
+    assert payload["headline"]["lines"] == 1
+    assert payload["change"]["available"] is False
+    assert payload["change"]["base"] == "no-such-ref"
+    assert "no-such-ref" in result.stderr
+
+
+def test_marker_meta_paths_are_analytics_only(repo: Path) -> None:
+    meta = "docs/plans/rebrand-sunset-plan.md"
+    _write_config(repo, marker_inventory_meta_paths=[meta])
+    path = repo / meta
+    path.parent.mkdir(parents=True)
+    path.write_text(f"{LEGACY} alias  # legacy-name-ok: programme example\n")
+    (repo / "compat.py").write_text(
+        f"{LEGACY.upper()} = True  # legacy-name-ok: ordinary compat alias\n"
+    )
+    _git(repo, "add", "-A")
+
+    report = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+    assert report["marker_inventory"]["counts"]["legacy-name-ok"] == 1
+
+    path.write_text(f"new {LEGACY} declaration\n")
+    _git(repo, "add", meta)
+    gate = _run(repo)
+
+    assert gate.returncode == 1
+    assert meta in gate.stdout
+
+
+# ── excluded mirrors, including D's seven disclosure fixtures ───────────────
+
+_MIRROR = "frontend/site/openapi.snapshot.json"
+
+
+def _mirror_body(lines: int) -> str:
+    payload = {f"{LEGACY}-id-{index}": True for index in range(lines)}
+    return f"{json.dumps(payload, indent=2)}\n"
+
+
+def _write_mirror(repo: Path, lines: int) -> None:
+    _write_config(repo, mirror_paths=[_MIRROR])
+    path = repo / _MIRROR
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_mirror_body(lines))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "regen the mirror")
+
+
+def test_the_mirror_is_still_excluded_from_the_count(repo: Path) -> None:
+    before = _run(repo, "--report", base=None).stdout.splitlines()[0]
+
+    _write_mirror(repo, 5)
+
+    assert _run(repo, "--report", base=None).stdout.splitlines()[0] == before
+
+
+def test_a_regenerated_mirror_still_cannot_fail_the_gate(repo: Path) -> None:
+    _write_mirror(repo, 5)
+    (repo / _MIRROR).write_text(_mirror_body(6))
+    _git(repo, "add", _MIRROR)
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert _MIRROR not in result.stdout
+
+
+def test_the_report_discloses_what_the_mirror_holds(repo: Path) -> None:
+    counted = int(_run(repo, "--report", base=None).stdout.split(" ", 1)[0])
+    _write_mirror(repo, 5)
+
+    out = _run(repo, "--report", base=None).stdout
+
+    assert "Excluded from the count above: 5 line(s) in 1 mirror(s)" in out
+    assert f"     5  {_MIRROR}" in out
+    assert f"Present in the tree: {counted + 5} lines across 2 files." in out
+
+
+def test_the_disclosure_is_absent_when_the_mirror_holds_nothing(repo: Path) -> None:
+    assert (
+        "Excluded from the count above" not in _run(repo, "--report", base=None).stdout
+    )
+
+    _write_mirror(repo, 0)
+
+    assert (
+        "Excluded from the count above" not in _run(repo, "--report", base=None).stdout
+    )
+
+
+def test_the_gate_says_nothing_about_mirrors(repo: Path) -> None:
+    _write_mirror(repo, 5)
+
+    result = _run(repo)
+
+    assert result.returncode == 0
+    assert result.stdout == "No new lines.\n"
+    assert result.stderr == ""
+
+
+def test_the_exclusions_hold_from_a_subdirectory(repo: Path) -> None:
+    _write_mirror(repo, 5)
+    sub = repo / "frontend" / "site"
+
+    from_root = _run(repo, "--report", base=None).stdout
+    from_sub = _run(repo, "--report", base=None, cwd=sub).stdout
+
+    assert from_root.splitlines()[0] == from_sub.splitlines()[0]
+
+
+def test_the_disclosure_holds_from_a_subdirectory(repo: Path) -> None:
+    _write_mirror(repo, 5)
+    sub = repo / "frontend" / "site"
+    (repo / "outside-subdirectory.txt").write_text("untracked\n")
+    disclosure = "Excluded from the count above: 5 line(s) in 1 mirror(s)"
+
+    from_root = _run(repo, "--report", base=None).stdout
+    from_sub = _run(repo, "--report", base=None, cwd=sub).stdout
+
+    assert disclosure in from_root
+    assert from_sub == from_root
+
+
+def test_the_manifest_declares_vendored_mirrors(repo: Path) -> None:
+    manifest = "scripts/vendored_files_manifest.json"
+    mirrored = "common/events/topics.py"
+    _write_config(repo, mirror_manifest=manifest)
+    (repo / manifest).write_text(f"{json.dumps({mirrored: 'manual'})}\n")
+    path = repo / mirrored
+    path.parent.mkdir(parents=True)
+    path.write_text(_mirror_body(3))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "vendor source files")
+
+    report = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+    path.write_text(_mirror_body(4))
+    _git(repo, "add", mirrored)
+    gate = _run(repo)
+
+    assert report["headline"]["lines"] == 1
+    assert report["diagnostics"]["mirrors"]["by_file"] == {mirrored: 3}
+    assert gate.returncode == 0
+    assert mirrored not in gate.stdout
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        (None, "cannot read mirror_manifest"),
+        ("{bad", "cannot read mirror_manifest"),
+        ("[]", "mirror_manifest must contain a JSON object"),
+        (
+            json.dumps({"../outside.py": "manual"}),
+            "mirror_manifest path must be normalized and repository-relative",
+        ),
+    ],
+)
+def test_a_declared_mirror_manifest_must_be_usable(
+    repo: Path, contents: str | None, message: str
+) -> None:
+    manifest = "scripts/vendored_files_manifest.json"
+    _write_config(repo, mirror_manifest=manifest)
+    if contents is not None:
+        (repo / manifest).write_text(contents)
+
+    result = _run(repo, "--report", base=None)
+
+    assert result.returncode == 2
+    assert message in result.stderr
+    assert "Traceback" not in result.stderr

@@ -253,12 +253,17 @@ printed in the CI output whether the check passes or not. That is deliberate: it
 is the one move the ratchet cannot adjudicate for itself, so it is the one that
 must never be quiet.
 
-To see the current footprint, or to check a change before pushing:
+To see the current tracked footprint, request an explicit change split, or run
+the gate before pushing:
 
 ```bash
 python3 scripts/legacy_name_ratchet.py --report
+python3 scripts/legacy_name_ratchet.py --report --base origin/main
 python3 scripts/legacy_name_ratchet.py --base origin/main
 ```
+
+The bare report is inventory only. Add `--json` for the machine-readable form;
+its gated headline is fleet-summable and its present-tree diagnostic is not.
 
 ### Keep the old brand out of the commit subject
 

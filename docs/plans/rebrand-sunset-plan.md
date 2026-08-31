@@ -131,26 +131,23 @@ and *never* are different words, and only the second one is floor.
 Both are required checks. Neither is sufficient alone, and the gap between them is
 where the real risk lives.
 
-### The ratchet is eight copies, not one
+### Historical ratchet audit and canonical engine
 
-`scripts/legacy_name_ratchet.py` exists in **eight repositories**, and they are not the
-same file. By length they fall into four variants:
+The 31 August 2026 audit found `scripts/legacy_name_ratchet.py` copied across
+eight repositories in four variants. That finding is the historical input to
+Package AB, not the intended steady state.
 
-| lines | copies |
-| ---: | --- |
-| 1,417 | three |
-| 1,418 | two |
-| 1,453 | two, including this repo |
-| 1,589 | one — it alone carries the generated-mirror exclusion |
+Package AB supersedes the copied-engine design: every repository receives the
+same engine bytes and selects its approved local behavior through an exact
+five-field JSON configuration. The rollout starts in `caura` and proceeds one
+repository at a time, with a manual merge gate after each repository. The
+[canonical-engine plan](legacy-name-ratchet-engine.md) records the pinned
+census, the four audited variants, the aggregation contract, and the rollout
+order.
 
-Two things follow. **A change to the gate is an eight-repo port**, not a one-line commit:
-a fix that lands in one copy is invisible in the other seven, and stays invisible,
-because nothing compares them. And **a total that adds counts from different repos is
-only sound if the instruments agree** — a 172-line spread is room for two copies to mean
-different things by the same number.
-
-Before quoting a cross-repo total, check that the copies agree on whatever it depends on.
-Before changing the gate, plan for eight.
+Only the gated headline may be summed across repositories. The present-tree
+diagnostic includes generated or vendored mirrors and is intentionally
+non-additive.
 
 **`legacy_name_ratchet.py`** fails a PR when a file's old-brand count goes **up**. It
 stops the rename going backwards. It is *directional*, so a change that **deletes** an
@@ -189,15 +186,15 @@ log fields — found 2026-06-11, months late. That file carries `identical` poli
 **When you change a vendored file here, open the enterprise pull request in the same
 sitting.** A `manual` policy makes the mirror your responsibility, not the gate's.
 
-### The release-please branch exemption is repo-specific
+### The release-please branch exemption remains repo-specific
 
-`_release_please_branch()` belongs only in ratchets that can run on a release-please
-branch. Verified 2026-08-30 across the nine-repository estate — eight live repositories
-plus archived `loadtest` — on all three signals: workflow, configuration, and current or
-historical `release-please--*` PR branches. Only `caura` and `caura-enterprise` have any
-of them. The other seven have none, so porting the helper there would be dead code. If
-release automation is added to another repository, recheck all three signals before
-porting the exception.
+The canonical engine contains the release-please handling; the
+`release_please_changelogs` configuration field decides whether it is active in
+each repository. The 2026-08-30 workflow, configuration, and branch-history
+audit found live release automation only in `caura` and `caura-enterprise`.
+`openclaw-fleet-tester` nevertheless retains `true` through the mechanical port
+as an explicitly documented known-dead flag; removing it is a separate behavior
+change. Recheck those three signals before changing any repository's value.
 
 ### The lifecycle probes share a contract, not an implementation
 
