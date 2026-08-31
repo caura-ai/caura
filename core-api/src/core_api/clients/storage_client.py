@@ -1639,8 +1639,16 @@ class CoreStorageClient:
     async def update_trust_level(self, agent_id: str, data: dict) -> dict | None:
         return await self._patch(f"/agents/{agent_id}/trust-level", data)
 
-    async def update_search_profile(self, agent_id: str, data: dict) -> dict | None:
-        return await self._patch(f"/agents/{agent_id}/search-profile", data)
+    async def update_search_profile(
+        self,
+        agent_id_pk: str,
+        tenant_id: str,
+        search_profile: dict,
+    ) -> dict | None:
+        return await self._patch(
+            f"/agents/{agent_id_pk}/search-profile",
+            {"tenant_id": tenant_id, "search_profile": search_profile},
+        )
 
     async def reset_search_profile(
         self,

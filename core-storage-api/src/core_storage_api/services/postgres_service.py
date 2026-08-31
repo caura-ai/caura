@@ -7028,12 +7028,19 @@ class PostgresService:
     async def agent_update_search_profile(
         self,
         agent_id_pk: object,
+        *,
+        tenant_id: str,
         search_profile: dict,
     ) -> None:
-        """Update an agent's search_profile by primary key (Agent.id)."""
+        """Update one tenant's agent search profile by primary key."""
         async with get_session() as session:
             await session.execute(
-                sql_update(Agent).where(Agent.id == agent_id_pk).values(search_profile=search_profile)
+                sql_update(Agent)
+                .where(
+                    Agent.id == agent_id_pk,
+                    Agent.tenant_id == tenant_id,
+                )
+                .values(search_profile=search_profile)
             )
 
     async def agent_reset_search_profile(

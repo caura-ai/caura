@@ -1550,17 +1550,15 @@ async def caura_tune(
         return _with_latency(_error_response("INVALID_ARGUMENTS", f"{e}"), t0)
 
     updates = profile.model_dump(exclude_none=True)
-    # WRITE → home tenant only. ``get_or_create_agent`` is storage-routed and
-    # scopes the lookup/create to ``tenant_id``; the search-profile PATCH then
-    # targets that agent's PK (``agent["id"]``). No cross-tenant widening — a
-    # tune never touches a foreign tenant's agent row.
+    # WRITE → home tenant only. ``get_or_create_agent`` scopes the lookup or
+    # create, and the search-profile PATCH binds that same tenant to the update.
     try:
         agent = await get_or_create_agent(tenant_id, agent_id)
         current = agent.get("search_profile") or {}
         if updates:
             current.update(updates)
             current = validate_search_profile(current)
-            await get_storage_client().update_search_profile(agent["id"], {"search_profile": current})
+            await get_storage_client().update_search_profile(agent["id"], tenant_id, current)
         return _with_latency(json.dumps({"agent_id": agent_id, "search_profile": current}, indent=2), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)

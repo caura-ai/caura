@@ -147,7 +147,7 @@ async def patch_agent_tune(
     if updates:
         current.update(updates)
         current = validate_search_profile(current)
-        await sc.update_search_profile(agent["id"], {"tenant_id": tenant_id, "search_profile": current})
+        await sc.update_search_profile(agent["id"], tenant_id, current)
         # Re-fetch to get the updated agent with full fields
         refreshed = await sc.get_agent(agent_id, tenant_id)
         if refreshed:
