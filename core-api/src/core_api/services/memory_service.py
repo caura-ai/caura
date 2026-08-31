@@ -3750,7 +3750,7 @@ async def update_memory(
         entity_link_dicts = [
             {"entity_id": str(link.entity_id), "role": link.role} for link in data.entity_links
         ]
-        await sc.update_memory_entities(str(memory_id), entity_link_dicts)
+        await sc.update_memory_entities(str(memory_id), tenant_id, entity_link_dicts)
         changes["entity_links"] = {
             "old": "replaced",
             "new": f"{len(data.entity_links)} links",

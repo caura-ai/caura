@@ -966,11 +966,15 @@ class CoreStorageClient:
     async def update_memory_entities(
         self,
         memory_id: str,
+        tenant_id: str,
         entity_links: list[dict],
     ) -> dict | None:
+        # Same contract as ``update_memory`` above, for the same reason: the
+        # memory is addressed by bare UUID, so the tenant has to travel with it.
+        # Storage scopes the memory AND every named entity to it.
         return await self._patch(
             f"/memories/{memory_id}/entities",
-            {"entity_links": entity_links},
+            {"tenant_id": tenant_id, "entity_links": entity_links},
         )
 
     async def get_entity_links_for_memories(

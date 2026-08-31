@@ -4020,25 +4020,70 @@ class PostgresService:
     async def memory_add_entity_links(
         self,
         memory_id: UUID,
+        tenant_id: str,
         links: list[dict],
-    ) -> None:
+    ) -> bool:
+        """Link entities to one memory, both endpoints scoped to ``tenant_id``.
+
+        Returns ``False`` when the memory is not in ``tenant_id`` or any named
+        entity is not, having written nothing; ``True`` when the links are in.
+
+        ``memory_entity_links`` has no ``tenant_id`` of its own, so the join row
+        cannot carry a predicate — but both parents do (``Memory.tenant_id``,
+        ``Entity.tenant_id``), which is what makes an existence check sufficient
+        and a schema change unnecessary.
+
+        **Both sides are load-bearing and neither implies the other.** Checking
+        only the memory lets a caller staple a foreign entity onto their own
+        memory, pulling another tenant's graph node into their namespace;
+        checking only the entities lets them staple their own entity onto a
+        foreign memory. The two failures are independent, so the checks are too.
+
+        One ``False`` for "no such memory", "not your memory" and "not your
+        entity" alike: distinguishing them would answer as an existence oracle
+        for memory and entity UUIDs, which is the thing a service that
+        authenticates nothing (GHSA-wgvw-28pq-jc36) must not do.
+
+        The check and the insert share a session and neither parent's
+        ``tenant_id`` is caller-writable — ``_ENTITY_UPDATABLE_FIELDS`` omits it
+        on entities (#1081) and ``_MEMORY_IMMUTABLE_FIELDS`` names it on
+        memories (#1118) — so a row cannot change hands between the two.
+
+        Shares ``_owned_link_endpoints`` with the two ``POST /entities/links``
+        paths (#1124), so all three writers to this join table resolve ownership
+        the same way and a fix to one cannot miss the others.
+        """
         # Bulk-insert with ``ON CONFLICT (memory_id, entity_id) DO NOTHING``
         # so two concurrent writes targeting the same ``(memory_id,
         # entity_id)`` pair don't serialise on ``Lock/transactionid``
         # (CAURA-686). Each ``link`` dict carries ``entity_id`` (UUID) and
         # ``role`` (str).
         if not links:
-            return
+            # Nothing is written, so there is nothing to scope. Reported as
+            # success rather than checked-then-succeeded: the answer is the
+            # same for every tenant, so it discloses nothing either way.
+            return True
+        entity_ids = {link["entity_id"] for link in links}
         rows = [
             {"memory_id": memory_id, "entity_id": link["entity_id"], "role": link["role"]} for link in links
         ]
         async with get_session() as session:
+            owned_memories, owned_entities = await self._owned_link_endpoints(
+                session, tenant_id, {memory_id}, entity_ids
+            )
+            # Set difference on the entity side, not a count: a caller who
+            # repeats one owned id enough times would satisfy
+            # ``len(found) == len(requested)`` while a foreign id rode along in
+            # the same request.
+            if memory_id not in owned_memories or entity_ids - owned_entities:
+                return False
             stmt = (
                 pg_insert(MemoryEntityLink)
                 .values(rows)
                 .on_conflict_do_nothing(index_elements=["memory_id", "entity_id"])
             )
             await session.execute(stmt)
+            return True
 
     async def memory_get_entity_links_for_memories(
         self,
