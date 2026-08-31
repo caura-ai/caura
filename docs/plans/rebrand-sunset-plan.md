@@ -167,6 +167,149 @@ nightly caller omits them. Those fallbacks preserve the current names until the 
 variable flip. Reconsider code extraction only if a larger piece of behaviour, rather
 than another small contract, starts changing in lockstep.
 
+### Lifecycle drain finding: no subscription is removable
+
+Verified 2026-08-31 against `caura/main` at `51c33d9f` and
+`caura-enterprise/dev` at `7301fee3`. The Terraform declaration from the earlier
+investigation still holds at the latter revision, and live `describe` calls found all
+72 lifecycle subscriptions active and attached to the expected topic: 18 legacy and
+18 current subscriptions in each environment, split nine work and nine DLQ.
+
+The source-side family premise needed correction before measuring. The publish path's
+`FLIPPED_FAMILIES` values establish this status:
+
+| Family | `caura/main` | `caura-enterprise/dev` | Source-side status |
+| --- | --- | --- | --- |
+| lifecycle | current | current | Flipped in both repositories; drain scope below |
+| memory | legacy | legacy | Not flipped |
+| org | legacy | legacy | Not flipped |
+| audit | legacy | legacy | Not flipped |
+| security | not declared | current | Enterprise-only; flipped 2026-08-26, outside this drain scope |
+| fleet | not declared | current | Enterprise-only; flipped 2026-08-25, outside this drain scope |
+
+So lifecycle is the only **shared** family that has flipped, but not the only family.
+No drain query below was widened to security or fleet. Source status is also not runtime
+evidence: production still published to legacy lifecycle topics inside the measured
+window.
+
+#### Window, instruments and notation
+
+The bounded window is **2026-08-29 00:30:00Z through 2026-08-31 00:30:00Z**
+(48 hours). It crosses two 02:00 lifecycle sweeps and two 04:00 embed-backfill runs,
+so it is longer than one complete daily cycle. It was deliberately not shortened after
+the first non-zero legacy reading.
+
+- `gcloud pubsub subscriptions describe` supplied configuration only: existence,
+  `ACTIVE` state, topic attachment and DLQ policy. It supplied no traffic or backlog
+  number.
+- Direct Cloud Monitoring `projects.timeSeries.list` GETs supplied every number below.
+  Topic publishes are the count of `topic/message_sizes`; pull activity is
+  `subscription/pull_request_count`; backlog is
+  `subscription/num_undelivered_messages`; age is
+  `subscription/oldest_unacked_message_age`.
+- `subscription/open_streaming_pulls` returned **no time series** for any of the 72
+  subscriptions, current twins included. That is recorded as `no-series`, never as
+  zero. These consumers issue unary Pull RPCs, and their non-zero Pull counts are the
+  direct attachment witness.
+- No subscription pull was issued, so no message was acknowledged. Cloud Logging was
+  not used for a drain number: the publish path has no success log keyed by topic, so
+  log absence would be another unvalidated zero.
+
+`L/C` means legacy/current twin from the same query and window. `Y` means the condition
+was established and its zero has a non-zero current control. `N` means a legacy non-zero
+directly disproved the condition. `?` means the legacy side read zero but the twin also
+read zero or no series, so the instrument did not validate that negative. For backlog,
+`n=end/max` and `age=end/max` report the end-of-window gauge and window maximum; ages are
+seconds. On a work row C4 reads its paired DLQ; on a DLQ row C4 explicitly reads itself.
+
+The high-signal results are not marginal:
+
+- Every legacy work subscription was still attached: 20,726–20,999 Pull requests per
+  staging core-worker subscription, 178,366–182,435 per staging core-api subscription,
+  and comparable non-zero counts in production. Each current twin was independently
+  non-zero under the same query.
+- Production legacy topics received the 2026-08-29 scheduled cycle: 131 messages on
+  each of six scheduled topics, three purge messages, and 131 embed-backfill messages;
+  one on-demand message followed at 05:42Z. The current twins then carried the
+  2026-08-30 cycle (134 messages on each scheduled topic and four purge messages).
+- Four staging legacy DLQs ended the window with **833 undelivered messages**:
+  crystallize 308, crystallize-on-demand 1, entity-link 295 and insights 229. Their
+  oldest messages were 441,070–593,304 seconds old at the window end.
+
+#### Staging
+
+| Legacy subscription | C1 nothing publishes | C2 nothing attached | C3 backlog zero | C4 DLQ empty | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `core-worker--staging--memclaw.lifecycle.archive-expired-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | Y — msgs L/C=0/176 | N — Pull L/C=20,726/20,659; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-worker--staging--memclaw.lifecycle.archive-expired-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-worker--staging--memclaw.lifecycle.archive-stale-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | Y — msgs L/C=0/164 | N — Pull L/C=20,916/20,687; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-worker--staging--memclaw.lifecycle.archive-stale-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-worker--staging--memclaw.lifecycle.purge-soft-deleted-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | Y — msgs L/C=0/12 | N — Pull L/C=20,805/20,791; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-worker--staging--memclaw.lifecycle.purge-soft-deleted-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-worker--staging--memclaw.lifecycle.embed-backfill-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | Y — msgs L/C=0/164 | N — Pull L/C=20,999/20,576; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-worker--staging--memclaw.lifecycle.embed-backfill-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-api--staging--memclaw.lifecycle.crystallize-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | Y — msgs L/C=0/173 | N — Pull L/C=181,188/181,750; stream L/C=no-series/no-series | Y — L n=0/0 age=0/0s; C n=0/8 age=0/104s | N — paired L n=308/543 age=593253/604910s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.crystallize-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | N — L n=308/543 age=593253/604910s; C n=0/0 age=0/0s | N — self L n=308/543 age=593253/604910s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.crystallize-on-demand-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | N — Pull L/C=182,435/180,577; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | N — paired L n=1/1 age=441070/441070s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.crystallize-on-demand-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | N — L n=1/1 age=441070/441070s; C n=0/0 age=0/0s | N — self L n=1/1 age=441070/441070s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.entity-link-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | Y — msgs L/C=0/164 | N — Pull L/C=178,366/181,019; stream L/C=no-series/no-series | Y — L n=0/0 age=0/0s; C n=0/5 age=0/137s | N — paired L n=295/593 age=593304/604909s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.entity-link-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | N — L n=295/593 age=593304/604909s; C n=0/0 age=0/0s | N — self L n=295/593 age=593304/604909s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.insights-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | Y — msgs L/C=0/164 | N — Pull L/C=180,495/181,682; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | N — paired L n=229/426 age=593269/604874s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.insights-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | N — L n=229/426 age=593269/604874s; C n=0/0 age=0/0s | N — self L n=229/426 age=593269/604874s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.forge-distill-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | N — Pull L/C=182,035/180,864; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--staging--memclaw.lifecycle.forge-distill-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+
+Verdicts: **13 not drained**, **5 could not establish**, **0 drained and removable**.
+
+#### Production
+
+| Legacy subscription | C1 nothing publishes | C2 nothing attached | C3 backlog zero | C4 DLQ empty | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| `core-worker--prod--memclaw.lifecycle.archive-expired-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | N — msgs L/C=131/134 | N — Pull L/C=21,930/22,057; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-worker--prod--memclaw.lifecycle.archive-expired-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-worker--prod--memclaw.lifecycle.archive-stale-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | N — msgs L/C=131/134 | N — Pull L/C=21,610/21,868; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-worker--prod--memclaw.lifecycle.archive-stale-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-worker--prod--memclaw.lifecycle.purge-soft-deleted-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | N — msgs L/C=3/4 | N — Pull L/C=21,765/21,810; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-worker--prod--memclaw.lifecycle.purge-soft-deleted-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-worker--prod--memclaw.lifecycle.embed-backfill-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | N — msgs L/C=131/134 | N — Pull L/C=22,057/21,715; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-worker--prod--memclaw.lifecycle.embed-backfill-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-api--prod--memclaw.lifecycle.crystallize-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | N — msgs L/C=131/134 | N — Pull L/C=181,935/182,423; stream L/C=no-series/no-series | Y — L n=0/0 age=0/0s; C n=0/45 age=0/102s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--prod--memclaw.lifecycle.crystallize-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-api--prod--memclaw.lifecycle.crystallize-on-demand-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | N — msgs L/C=1/0 | N — Pull L/C=182,264/181,902; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--prod--memclaw.lifecycle.crystallize-on-demand-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-api--prod--memclaw.lifecycle.entity-link-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | N — msgs L/C=131/134 | N — Pull L/C=182,264/183,369; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--prod--memclaw.lifecycle.entity-link-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-api--prod--memclaw.lifecycle.insights-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | N — msgs L/C=131/134 | N — Pull L/C=182,177/180,032; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--prod--memclaw.lifecycle.insights-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+| `core-api--prod--memclaw.lifecycle.forge-distill-requested` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | N — Pull L/C=183,548/180,584; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — paired L n=0/0 age=0/0s; C n=0/0 age=0/0s | **not drained** |
+| `core-api--prod--memclaw.lifecycle.forge-distill-requested-dlq` <!-- legacy-name-ok: live subscription id required for per-queue drain evidence --> | ? — msgs L/C=0/0 | ? — Pull L/C=0/0; stream L/C=no-series/no-series | ? — L n=0/0 age=0/0s; C n=0/0 age=0/0s | ? — self L n=0/0 age=0/0s; C n=0/0 age=0/0s | **could not establish** |
+
+Verdicts: **9 not drained**, **9 could not establish**, **0 drained and removable**.
+
+#### Removal order refused
+
+There is no evidence-backed removal order. Recommending one would turn active Pull
+traffic, in-window production publishes and an 833-message staging DLQ backlog into a
+deletion plan.
+
+Evidence could exist after all of these happen, in order, but each change is outside
+this read-only finding:
+
+1. Find and stop the production path that still published legacy messages, then start a
+   new window after its last observed publish. A deploy or publisher change is a write.
+2. Contract the dual subscription binding and deploy it everywhere, then prove legacy
+   Pull requests stop. That is also a write; an empty backlog while these Pull counts
+   continue is not idle.
+3. Inspect and decide the disposition of the 833 staging DLQ messages without
+   acknowledging them. Replay, export, acknowledgement or purge changes data and needs
+   a separate authorized runbook.
+4. Run the same Monitoring queries for at least 48 hours, spanning the 02:00 and 04:00
+   cycles. Where a current twin remains zero or `no-series`, produce an explicit safe
+   positive control or keep the legacy condition as `could not establish`.
+
+Until then the successful outcome of this package is: **the drain evidence does not
+exist yet; remove none of these subscriptions.**
+
 Neither gate looks at **values**. A setting correctly renamed to `CAURA_*` that still
 *holds* an old-brand value scores as fully migrated forever. Renaming is not migrating.
 
