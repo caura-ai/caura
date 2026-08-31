@@ -19,8 +19,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core_api.routes.plugin import router
+from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 
 pytestmark = pytest.mark.unit
+
+CLAUDE_SKILL_DIR = f"$HOME/.claude/skills/{FROZEN_PLUGIN_SLUG}"
+CODEX_SKILL_DIR = f"$HOME/.agents/skills/{FROZEN_PLUGIN_SLUG}"
+DEFAULT_SKILL_ENDPOINT = f"/api/v1/skill/{FROZEN_PLUGIN_SLUG}"
 
 
 def _client() -> TestClient:
@@ -104,24 +109,24 @@ def test_both_agent_emits_both_install_blocks():
     client = _client()
     resp = client.get("/api/v1/install-skill?agent=both")
     assert resp.status_code == 200
-    assert "$HOME/.claude/skills/memclaw" in resp.text
-    assert "$HOME/.agents/skills/memclaw" in resp.text
+    assert CLAUDE_SKILL_DIR in resp.text
+    assert CODEX_SKILL_DIR in resp.text
 
 
 def test_claude_code_only_skips_codex_block():
     client = _client()
     resp = client.get("/api/v1/install-skill?agent=claude-code")
     assert resp.status_code == 200
-    assert "$HOME/.claude/skills/memclaw" in resp.text
-    assert "$HOME/.agents/skills/memclaw" not in resp.text
+    assert CLAUDE_SKILL_DIR in resp.text
+    assert CODEX_SKILL_DIR not in resp.text
 
 
 def test_codex_only_skips_claude_block():
     client = _client()
     resp = client.get("/api/v1/install-skill?agent=codex")
     assert resp.status_code == 200
-    assert "$HOME/.agents/skills/memclaw" in resp.text
-    assert "$HOME/.claude/skills/memclaw" not in resp.text
+    assert CODEX_SKILL_DIR in resp.text
+    assert CLAUDE_SKILL_DIR not in resp.text
 
 
 # --- skill selector (?skill=) -------------------------------------------------
@@ -136,15 +141,15 @@ def test_default_skill_slug_unchanged():
     assert resp.status_code == 200
     script = resp.text
     assert "=== Caura Skill Installer (direct-MCP) ===" in script
-    assert "$HOME/.claude/skills/memclaw" in script
-    assert "$HOME/.agents/skills/memclaw" in script
-    assert "/api/v1/skill/memclaw" in script
+    assert CLAUDE_SKILL_DIR in script
+    assert CODEX_SKILL_DIR in script
+    assert DEFAULT_SKILL_ENDPOINT in script
     assert "company-brain" not in script
 
 
 def test_skill_company_brain_installs_to_company_brain_dirs():
     """``?skill=company-brain`` swaps the skill name through the paths, the
-    fetch URL, and the title — and never touches the memclaw dirs."""
+    fetch URL, and the title — and never touches the default skill dirs."""
     client = _client()
     resp = client.get("/api/v1/install-skill?agent=both&skill=company-brain")
     assert resp.status_code == 200
@@ -153,7 +158,7 @@ def test_skill_company_brain_installs_to_company_brain_dirs():
     assert "$HOME/.claude/skills/company-brain" in script
     assert "$HOME/.agents/skills/company-brain" in script
     assert "/api/v1/skill/company-brain" in script
-    assert "skills/memclaw" not in script
+    assert f"skills/{FROZEN_PLUGIN_SLUG}" not in script
 
 
 def test_invalid_skill_returns_400():
@@ -177,9 +182,9 @@ def test_skill_param_is_allowlisted_no_path_traversal():
 
 def test_serve_default_skill_still_works():
     client = _client()
-    resp = client.get("/api/v1/skill/memclaw")
+    resp = client.get(DEFAULT_SKILL_ENDPOINT)
     assert resp.status_code == 200
-    assert "name: memclaw" in resp.text
+    assert f"name: {FROZEN_PLUGIN_SLUG}" in resp.text
 
 
 def test_serve_company_brain_skill():

@@ -8,9 +8,9 @@ route. Every entity-token query KeyError'd at line 214, the broad
 ``except Exception:`` at line 123 swallowed it, and the pipeline fell
 through to keyword/semantic search.
 
-Confirmed in prod logs before fix:
-  staging-memclaw-core-api : 1,327 occurrences / 24h
-  prod-memclaw-core-api    : 206 occurrences / 24h
+Confirmed in service logs before the fix:
+  staging core API: 1,327 occurrences / 24h
+  production core API: 206 occurrences / 24h
 
 This test pins the dict-shape contract. It mocks storage to return the
 shape the real ``expand_graph`` route emits and asserts ``ClassifyQuery``

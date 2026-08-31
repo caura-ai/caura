@@ -248,7 +248,7 @@ async def test_falls_back_to_service_identity_only_when_no_caller(patched, missi
 
     (payload,) = patched.create_memory.call_args.args
     assert payload.agent_id == DOC_INDEXER_AGENT_ID
-    # Self-registered on first use, mirroring memclaw-insighter.
+    # Self-registered on first use, mirroring the insights service identity.
     patched.get_or_create_agent.assert_awaited_once()
     args = patched.get_or_create_agent.call_args.args
     assert args[0] == "t1"

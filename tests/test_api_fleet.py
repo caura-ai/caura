@@ -5,6 +5,7 @@ import uuid
 import pytest
 
 from tests.conftest import get_test_auth, uid as _uid
+from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +274,7 @@ async def test_heartbeat_persists_reconcile_summary(client):
         "added": ["deploy-runbook"],
         "removed": [],
         "skipped": ["../evil"],
-        "protected": ["memclaw"],
+        "protected": [FROZEN_PLUGIN_SLUG],
     }
     resp = await client.post(
         "/api/v1/fleet/heartbeat",
@@ -313,7 +314,7 @@ async def test_heartbeat_reconcile_latest_snapshot_wins(client):
                     "added": [],
                     "removed": [],
                     "skipped": [],
-                    "protected": ["memclaw"],
+                    "protected": [FROZEN_PLUGIN_SLUG],
                 },
             },
             headers=headers,

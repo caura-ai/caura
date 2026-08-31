@@ -19,6 +19,7 @@ import pytest
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem
+from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def _disable_standalone(monkeypatch):
     branch under test is gated on ``not settings.is_standalone``, so
     this fixture flips it off for the install-credential tests only."""
     monkeypatch.setattr(settings, "is_standalone", False)
-    monkeypatch.setattr(settings, "memclaw_api_key", "")
+    monkeypatch.setattr(settings, LEGACY_API_KEY_FIELD, "")
     monkeypatch.setattr(settings, "admin_api_key", "")
     monkeypatch.setattr(settings, "api_key", "")
 

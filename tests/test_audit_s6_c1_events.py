@@ -25,6 +25,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests._legacy_contracts import frozen_topic
+
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
@@ -162,7 +164,7 @@ async def test_non_dict_lifecycle_payload_is_dropped():
     # simulate a malformed wire payload reaching the handler.
     event = Event.model_construct(
         event_id=uuid.uuid4(),
-        event_type="memclaw.lifecycle.archive-expired-requested",
+        event_type=frozen_topic("lifecycle.archive-expired-requested"),
         payload=["not", "a", "dict"],
     )
     # Must return cleanly (drop) — the kwargs-splat raised TypeError which

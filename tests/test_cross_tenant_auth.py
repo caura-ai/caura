@@ -17,6 +17,7 @@ import pytest
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
 from core_api.tenant_context import get_readable_tenants
+from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def _disable_standalone(monkeypatch):
     """Match the install-credential test fixture: turn off standalone
     + key-gate paths so Path 4 (X-Tenant-ID header) executes."""
     monkeypatch.setattr(settings, "is_standalone", False)
-    monkeypatch.setattr(settings, "memclaw_api_key", "")
+    monkeypatch.setattr(settings, LEGACY_API_KEY_FIELD, "")
     monkeypatch.setattr(settings, "admin_api_key", "")
     monkeypatch.setattr(settings, "api_key", "")
 

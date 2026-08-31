@@ -464,7 +464,7 @@ async def test_stats_without_a_scope_is_unchanged(client):
 # JSON BODY are validated by a Pydantic model and are not silently dropped the
 # same way, so they are classified rather than checked here.
 _QUERY_PARAM_TOOLS = {
-    # caura_keystones dispatches to the /api/v1/memclaw legacy alias, which is
+    # caura_keystones dispatches to the hidden compatibility alias, which is
     # mounted with include_in_schema=False; the canonical path below is the
     # same router and therefore the same signature.
     "caura_keystones": "/api/v1/keystones",

@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import get_test_auth, uid as _uid
+from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 
 pytestmark = pytest.mark.asyncio
 
@@ -83,7 +84,8 @@ async def _set_keystone(client, headers, tenant_id, **overrides):
         "weight": "med",
     }
     payload.update(overrides)
-    resp = await client.post("/api/v1/memclaw/keystones", json=payload, headers=headers)
+    route = f"/api/v1/{FROZEN_PLUGIN_SLUG}/keystones"
+    resp = await client.post(route, json=payload, headers=headers)
     return resp
 
 
