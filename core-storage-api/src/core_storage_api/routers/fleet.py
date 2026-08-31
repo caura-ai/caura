@@ -114,7 +114,10 @@ async def delete_node(
         raise HTTPException(status_code=404, detail="Node not found")
     fleet_id = getattr(node, "fleet_id", None)
     if fleet_id:
-        await _svc.fleet_delete_commands_for_nodes(node_ids=[node_id])
+        await _svc.fleet_delete_commands_for_nodes(
+            tenant_id=tenant_id,
+            node_ids=[node_id],
+        )
     return {"ok": True}
 
 

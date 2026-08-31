@@ -155,13 +155,6 @@
       "category": "id-addressed-read"
     },
     {
-      "id": "method:fleet_delete_commands_for_nodes",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1090."
-    },
-    {
       "id": "method:fleet_get_command_by_id",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",

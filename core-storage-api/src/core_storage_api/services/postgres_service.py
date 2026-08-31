@@ -9220,12 +9220,20 @@ class PostgresService:
     async def fleet_delete_commands_for_nodes(
         self,
         *,
+        tenant_id: str,
         node_ids: list[UUID],
     ) -> None:
         if not node_ids:
             return
         async with get_session() as session:
-            await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id.in_(node_ids)))
+            await session.execute(
+                _table(FleetCommand)
+                .delete()
+                .where(
+                    FleetCommand.tenant_id == tenant_id,
+                    FleetCommand.node_id.in_(node_ids),
+                )
+            )
 
     # ══════════════════════════════════════════════════════════════════════
     #  AUDIT
