@@ -25,6 +25,13 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+# ``_fetch_entity_context`` now takes the binding tenant, because the links read
+# it makes is tenant-scoped on both ends. These are pure-mock unit tests — no
+# database, no rows — so the value is only threaded through to the mock; the
+# ``test-tenant-`` prefix is kept for consistency with the suite's sweep
+# convention rather than out of necessity.
+TENANT = "test-tenant-fetch-entity-context"
+
 
 # ---------------------------------------------------------------------------
 # ENTITY_AWARE_CONTRADICTION_PROMPT template invariants
@@ -443,7 +450,7 @@ async def test_fetch_entity_context_composes_two_round_trips():
 
     sc.get_entity = AsyncMock(side_effect=get_entity)
 
-    out = await _fetch_entity_context(sc, mem_id)
+    out = await _fetch_entity_context(sc, mem_id, TENANT)
     by_name = {e["name"]: e for e in out}
     assert by_name["Project Helios"]["entity_type"] == "project"
     assert by_name["Project Helios"]["role"] == "subject"
@@ -460,7 +467,7 @@ async def test_fetch_entity_context_empty_when_no_links():
     sc.get_entity_links_for_memories = AsyncMock(return_value={mem_id: []})
     sc.get_entity = AsyncMock()
 
-    out = await _fetch_entity_context(sc, mem_id)
+    out = await _fetch_entity_context(sc, mem_id, TENANT)
     assert out == []
     sc.get_entity.assert_not_called()
 
@@ -480,7 +487,7 @@ async def test_fetch_entity_context_falls_back_to_name_if_no_canonical_name():
     sc.get_entity = AsyncMock(
         return_value={"name": "Legacy Entity", "entity_type": "project"}
     )
-    out = await _fetch_entity_context(sc, mem_id)
+    out = await _fetch_entity_context(sc, mem_id, TENANT)
     assert out[0]["name"] == "Legacy Entity"
 
 
@@ -494,7 +501,7 @@ async def test_fetch_entity_context_swallows_links_lookup_error():
     sc.get_entity_links_for_memories = AsyncMock(
         side_effect=RuntimeError("storage down")
     )
-    out = await _fetch_entity_context(sc, str(uuid4()))
+    out = await _fetch_entity_context(sc, str(uuid4()), TENANT)
     assert out == []
 
 
@@ -522,7 +529,7 @@ async def test_fetch_entity_context_swallows_per_entity_error():
         return {"canonical_name": "Fine Entity", "entity_type": "project"}
 
     sc.get_entity = AsyncMock(side_effect=get_entity)
-    out = await _fetch_entity_context(sc, mem_id)
+    out = await _fetch_entity_context(sc, mem_id, TENANT)
     assert len(out) == 1
     assert out[0]["name"] == "Fine Entity"
 

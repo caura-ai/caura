@@ -3860,7 +3860,7 @@ async def update_memory(
         )
 
     # Load entity links for response
-    links_data = await sc.get_entity_links_for_memories([str(memory_id)])
+    links_data = await sc.get_entity_links_for_memories([str(memory_id)], tenant_id)
     entity_links = [
         EntityLinkOut(entity_id=el.get("entity_id"), role=el.get("role"))
         for el in links_data.get(str(memory_id), [])
@@ -4231,7 +4231,9 @@ async def _entity_boost_pipeline(
         if matched_entity_ids:
             # Collect memories linked to discovered entities via storage client
             all_entity_ids = list(entity_hops.keys())
-            all_links_raw = await sc.get_memory_ids_by_entity_ids([str(eid) for eid in all_entity_ids])
+            all_links_raw = await sc.get_memory_ids_by_entity_ids(
+                [str(eid) for eid in all_entity_ids], tenant_id
+            )
 
             # Process links in hop order (closest entities first)
             all_links = [
@@ -4770,7 +4772,9 @@ async def _search_memories_legacy(
 
     # Fetch entity links for all result memories
     links_data = (
-        await sc.get_entity_links_for_memories([str(mid) for mid in memory_ids]) if memory_ids else {}
+        await sc.get_entity_links_for_memories([str(mid) for mid in memory_ids], tenant_id)
+        if memory_ids
+        else {}
     )
 
     results = []

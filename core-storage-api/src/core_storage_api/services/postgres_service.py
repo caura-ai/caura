@@ -372,6 +372,45 @@ _ENTITY_UPDATABLE_FIELDS = frozenset({"canonical_name", "entity_type", "attribut
 # word at a time. The true cause is logged, never returned.
 _LINK_REJECTED = "entity link rejected: memory_id or entity_id does not exist, or the link already exists"
 
+
+def _link_within_tenant(tenant_id: str) -> ColumnElement[bool]:
+    """Confine a ``memory_entity_links`` row to ``tenant_id``, via both parents.
+
+    ``memory_entity_links`` has no ``tenant_id``, so a link row carries no
+    predicate of its own — but both parents do (``Memory.tenant_id``,
+    ``Entity.tenant_id``). A row is visible to a tenant exactly when **both**
+    ends belong to it, which is the same invariant the write side enforces
+    (#1085, #1124): a link this tenant could not have created is a link it
+    cannot read.
+
+    Requiring both ends rather than only the one the caller named is what makes
+    this safe on historical data. Rows predating those fixes can still straddle
+    two tenants, and returning one would hand back the other tenant's memory or
+    entity UUID — so the end the caller did *not* name has to be checked too,
+    even though no new such row can be created.
+
+    Correlated ``EXISTS`` rather than a JOIN so this composes into any query
+    over ``MemoryEntityLink`` regardless of its select shape — the four readers
+    variously select the ORM row, three columns, or a ``count()`` aggregate, and
+    a join would change the grouping of the last one. Both subqueries are a
+    primary-key lookup plus an indexed ``tenant_id``.
+
+    Deliberately NOT ``_owned_link_endpoints`` (the write-side helper): that one
+    takes the two id sets up front, which a read does not have — it learns the
+    entity ids *from* the rows it is filtering. Fetching first and filtering in
+    Python would also pull other tenants' rows into the process, which this
+    avoids by keeping the predicate in SQL.
+    """
+    return and_(
+        select(Memory.id)
+        .where(Memory.id == MemoryEntityLink.memory_id, Memory.tenant_id == tenant_id)
+        .exists(),
+        select(Entity.id)
+        .where(Entity.id == MemoryEntityLink.entity_id, Entity.tenant_id == tenant_id)
+        .exists(),
+    )
+
+
 # Columns ``fleet_upsert_node``'s ON CONFLICT DO UPDATE must not rewrite. The
 # insert half of that statement still uses every key the caller sent; this is
 # only the branch that lands on a row that already exists.
@@ -4111,12 +4150,27 @@ class PostgresService:
     async def memory_get_entity_links_for_memories(
         self,
         memory_ids: list[UUID],
+        tenant_id: str,
     ) -> dict[UUID, list[dict]]:
+        """Links for these memories, restricted to ``tenant_id`` on both ends.
+
+        A memory outside the tenant is absent from the result rather than
+        rejected: the caller passes a list, and a per-id error would say which
+        of the ids exist elsewhere. Absent and "has no links" are already the
+        same answer here — the old code omitted link-less memories too — so the
+        result shape discloses nothing new.
+
+        See ``_link_within_tenant`` for why both ends are checked and not just
+        the memory side the caller named.
+        """
         if not memory_ids:
             return {}
         async with get_session() as session:
             result = await session.execute(
-                select(MemoryEntityLink).where(MemoryEntityLink.memory_id.in_(memory_ids))
+                select(MemoryEntityLink).where(
+                    MemoryEntityLink.memory_id.in_(memory_ids),
+                    _link_within_tenant(tenant_id),
+                )
             )
             links_by_memory: dict[UUID, list[dict]] = {}
             for link in result.scalars().all():
@@ -5949,14 +6003,29 @@ class PostgresService:
     async def entity_count_memories_per_entity(
         self,
         entity_ids: list[UUID],
+        tenant_id: str,
     ) -> dict[UUID, int]:
-        """Return {entity_id: count} for the given entity IDs."""
+        """Return {entity_id: count} for the given entity IDs, within ``tenant_id``.
+
+        The count is over links whose memory AND entity are both in the tenant,
+        so it is the number of the caller's own memories referencing the entity
+        — not a tenant-wide popularity figure. Without the memory side, an
+        entity shared by two tenants reported the other tenant's link count,
+        which is a row count for data the caller cannot read.
+
+        ``core-api``'s client has always sent ``tenant_id`` in the body for this
+        endpoint; the route read only ``entity_ids`` and dropped it. This is the
+        parameter it was already being handed.
+        """
         if not entity_ids:
             return {}
         async with get_session() as session:
             result = await session.execute(
                 select(MemoryEntityLink.entity_id, func.count())
-                .where(MemoryEntityLink.entity_id.in_(entity_ids))
+                .where(
+                    MemoryEntityLink.entity_id.in_(entity_ids),
+                    _link_within_tenant(tenant_id),
+                )
                 .group_by(MemoryEntityLink.entity_id)
             )
             return dict(result.all())  # type: ignore[arg-type]
@@ -5983,8 +6052,15 @@ class PostgresService:
     async def entity_get_memory_ids_by_entity_ids(
         self,
         entity_ids: list[UUID],
+        tenant_id: str,
     ) -> list[tuple[UUID, UUID, str]]:
-        """Return (memory_id, entity_id, role) tuples for the given entity IDs."""
+        """Return (memory_id, entity_id, role) tuples within ``tenant_id``.
+
+        This one returns memory ids, so the memory end is not incidental: it is
+        the payload. It feeds the search graph-boost path, which then fetches
+        those memories — unscoped, it handed the caller ids of memories in other
+        tenants to look up. Both ends are checked; see ``_link_within_tenant``.
+        """
         if not entity_ids:
             return []
         async with get_session() as session:
@@ -5992,7 +6068,10 @@ class PostgresService:
                 MemoryEntityLink.memory_id,
                 MemoryEntityLink.entity_id,
                 MemoryEntityLink.role,
-            ).where(MemoryEntityLink.entity_id.in_(entity_ids))
+            ).where(
+                MemoryEntityLink.entity_id.in_(entity_ids),
+                _link_within_tenant(tenant_id),
+            )
             result = await session.execute(stmt)
             return list(result.all())  # type: ignore[arg-type]
 

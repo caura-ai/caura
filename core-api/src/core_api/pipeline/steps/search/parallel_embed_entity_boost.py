@@ -114,6 +114,7 @@ async def _entity_boost_via_storage(
 
             raw_links = await sc.get_memory_ids_by_entity_ids(
                 [str(eid) for eid in all_entity_ids],
+                tenant_id,
             )
 
             # Sort by hop order (closest entities first).

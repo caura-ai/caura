@@ -980,8 +980,16 @@ class CoreStorageClient:
     async def get_entity_links_for_memories(
         self,
         memory_ids: list[str],
+        tenant_id: str,
     ) -> dict:
-        return await self._post("/memories/entity-links", {"memory_ids": memory_ids}, read=True)  # type: ignore[return-value]
+        # Memories are addressed by bare UUID, so the tenant travels with them.
+        # Storage restricts each link to rows whose memory AND entity are both
+        # in it, so a memory outside the tenant is absent from the result.
+        return await self._post(  # type: ignore[return-value]
+            "/memories/entity-links",
+            {"memory_ids": memory_ids, "tenant_id": tenant_id},
+            read=True,
+        )
 
     async def get_memory_stats(
         self,
@@ -1499,10 +1507,14 @@ class CoreStorageClient:
     async def get_memory_ids_by_entity_ids(
         self,
         entity_ids: list[str],
+        tenant_id: str,
     ) -> list[dict]:
+        # The returned memory ids get fetched next, so an unscoped call handed
+        # this caller other tenants' rows to look up. Storage restricts each
+        # link to rows with both ends in ``tenant_id``.
         result = await self._post(
             "/entities/memory-ids-by-entity-ids",
-            {"entity_ids": entity_ids},
+            {"entity_ids": entity_ids, "tenant_id": tenant_id},
         )
         return result  # type: ignore[return-value]
 

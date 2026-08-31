@@ -1563,7 +1563,7 @@ class TestMemories:
         links_after_first = (
             await client.post(
                 f"{PREFIX}/memories/entity-links",
-                json={"memory_ids": [memory_id]},
+                json={"memory_ids": [memory_id], "tenant_id": tenant_id},
             )
         ).json()[memory_id]
         assert sorted(link["entity_id"] for link in links_after_first) == sorted(entity_ids)
@@ -1597,7 +1597,7 @@ class TestMemories:
         final_links = (
             await client.post(
                 f"{PREFIX}/memories/entity-links",
-                json={"memory_ids": [memory_id]},
+                json={"memory_ids": [memory_id], "tenant_id": tenant_id},
             )
         ).json()[memory_id]
         by_entity = {link["entity_id"]: link["role"] for link in final_links}

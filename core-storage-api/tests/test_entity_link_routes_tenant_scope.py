@@ -77,16 +77,33 @@ async def _entity(client: AsyncClient, tenant_id: str) -> str:
 
 
 async def _links(client: AsyncClient, memory_id: str) -> list[dict]:
-    """Read the links back regardless of tenant, to assert what actually persisted.
+    """Read the raw join table, tenant-blind, to assert what actually persisted.
 
-    Deliberately goes through ``POST /memories/entity-links``, which is still
-    unscoped (allowlisted ``id-addressed-read``) and so answers for any tenant —
-    that is what makes it a usable oracle here. When that route gains a required
-    tenant, this helper needs one too.
+    Reads ``memory_entity_links`` with SQL rather than through
+    ``POST /memories/entity-links``, which it used to use. That route is now
+    tenant-scoped and returns only rows whose memory AND entity are both in the
+    given tenant — precisely the rows these tests are checking for the ABSENCE
+    of. Asking it would answer "no links" for a cross-tenant row that exists,
+    so every assertion below would hold with the bug reintroduced.
+
+    ``client`` is unused but kept in the signature so the call sites read the
+    same and the helper stays swappable; the raw read is the point.
     """
-    resp = await client.post(f"{PREFIX}/memories/entity-links", json={"memory_ids": [memory_id]})
-    assert resp.status_code == 200, resp.text
-    return resp.json().get(memory_id, [])
+    from sqlalchemy import text
+
+    from core_storage_api.services.postgres_service import get_session
+
+    async with get_session() as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT entity_id, role FROM memory_entity_links "
+                    "WHERE memory_id = CAST(:mid AS uuid) ORDER BY entity_id"
+                ),
+                {"mid": memory_id},
+            )
+        ).all()
+    return [{"entity_id": str(entity_id), "role": role} for entity_id, role in rows]
 
 
 class TestSingleLinkRouteTenantScope:

@@ -381,6 +381,7 @@ class ClassifyQuery:
         # Returns list of {"memory_id", "entity_id", "role"} dicts.
         raw_links = await sc.get_memory_ids_by_entity_ids(
             [str(eid) for eid in all_entity_ids],
+            tenant_id,
         )
 
         # Sort by hop distance so closest entities are processed first.
