@@ -100,12 +100,57 @@ not. Run it to see what is protected and why:
 python3 scripts/do_not_touch_sentinel.py --list
 ```
 
+### Expensive to move is not floor
+
+Environment Terraform is the standing counter-example. About 300 old-brand lines sit in
+the two deployment environment files, every review of this programme so far has called
+them floor, and **none of them is**. Neither file carries a floor marker today, and that
+is correct rather than an oversight.
+
+Of the staging file's 115 lines, **107 are Pub/Sub family names** — and those families
+are not in the same state as each other:
+
+| the line names a family that | lines | why it is not floor |
+| --- | ---: | --- |
+| has **already** flipped | 65 | the rename reached it; the name is behind the work, not beyond it |
+| has **not yet** flipped | 42 | live infrastructure, renamed when its family flips |
+
+A line whose family flipped last week is the opposite of permanent: it is outstanding
+work. Marking it stops it being counted and starts it being **trusted**, which is much
+the more expensive of the two mistakes — a floor marker is a claim that nobody will ever
+need to look again.
+
+So the test is not what a rename would cost. **It is whether a rename will ever happen.**
+Infrastructure is deferred because recreating a live resource is expensive; *deferred*
+and *never* are different words, and only the second one is floor.
+
 ---
 
 ## The two gates, and what each one misses
 
 Both are required checks. Neither is sufficient alone, and the gap between them is
 where the real risk lives.
+
+### The ratchet is eight copies, not one
+
+`scripts/legacy_name_ratchet.py` exists in **eight repositories**, and they are not the
+same file. By length they fall into four variants:
+
+| lines | copies |
+| ---: | --- |
+| 1,417 | three |
+| 1,418 | two |
+| 1,453 | two, including this repo |
+| 1,589 | one — it alone carries the generated-mirror exclusion |
+
+Two things follow. **A change to the gate is an eight-repo port**, not a one-line commit:
+a fix that lands in one copy is invisible in the other seven, and stays invisible,
+because nothing compares them. And **a total that adds counts from different repos is
+only sound if the instruments agree** — a 172-line spread is room for two copies to mean
+different things by the same number.
+
+Before quoting a cross-repo total, check that the copies agree on whatever it depends on.
+Before changing the gate, plan for eight.
 
 **`legacy_name_ratchet.py`** fails a PR when a file's old-brand count goes **up**. It
 stops the rename going backwards. It is *directional*, so a change that **deletes** an
