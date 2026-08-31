@@ -9241,9 +9241,25 @@ class PostgresService:
         self,
         *,
         node_id: UUID,
+        tenant_id: str,
     ) -> FleetNode | None:
+        """One node, scoped to its tenant. ``None`` when either half misses.
+
+        ``tenant_id`` is required. No caller could reach another tenant's node
+        through this before — two derive ``node_id`` from the tenant-scoped
+        ``fleet_get_node_id``, and ``create_command`` compared
+        ``node.tenant_id`` after the fetch — so this removes an unscoped
+        primitive rather than a live hole. It is the form that survives the
+        next caller: a predicate cannot be forgotten the way a follow-up
+        comparison can.
+        """
         async with get_session() as session:
-            return await session.get(FleetNode, node_id)
+            return await session.scalar(
+                select(FleetNode).where(
+                    FleetNode.id == node_id,
+                    FleetNode.tenant_id == tenant_id,
+                )
+            )
 
     async def fleet_list_nodes(
         self,
@@ -9290,14 +9306,6 @@ class PostgresService:
 
     # -- Commands --
 
-    async def fleet_get_command_by_id(
-        self,
-        *,
-        command_id: UUID,
-    ) -> FleetCommand | None:
-        async with get_session() as session:
-            return await session.get(FleetCommand, command_id)
-
     async def fleet_get_pending_commands(
         self,
         *,
@@ -9326,6 +9334,7 @@ class PostgresService:
         self,
         *,
         node_id: UUID,
+        tenant_id: str,
         since: datetime,
     ) -> bool:
         """True if a ``deploy`` command for this node is still in flight.
@@ -9334,6 +9343,12 @@ class PostgresService:
         ``created_at >= since``. Used by the auto-upgrade gate to suppress
         queueing duplicate deploys when a previous one has been sent to
         the plugin but never reported back as completed/failed.
+
+        Scoped on the node/tenant PAIR for the same reason
+        ``fleet_get_pending_commands`` is: a ``node_id``-only predicate reads as
+        tenant-safe and is not. Unscoped, this answered for any node whose UUID
+        the caller could name, which disclosed another tenant's rollouts as they
+        happened.
         """
         # Primary (writer) session, not get_read_session: this is a read-after-write
         # deploy-dedup gate — a replica read under lag could miss a just-queued command
@@ -9343,6 +9358,7 @@ class PostgresService:
                 select(FleetCommand.id)
                 .where(
                     FleetCommand.node_id == node_id,
+                    FleetCommand.tenant_id == tenant_id,
                     FleetCommand.command == "deploy",
                     FleetCommand.status.in_(("pending", "acked")),
                     FleetCommand.created_at >= since,
@@ -9355,6 +9371,7 @@ class PostgresService:
         self,
         *,
         node_id: UUID,
+        tenant_id: str,
         target_version: str,
         since: datetime,
     ) -> int:
@@ -9365,6 +9382,10 @@ class PostgresService:
         statuses is deliberate: the nastiest mode is ``status=done`` with
         no version progress, which a status filter would miss. Keyed on
         ``target_version`` so a NEW release starts a fresh budget.
+
+        Scoped on the node/tenant pair. Unscoped, this both counted another
+        tenant's attempts and answered "is this node moving to version X" for a
+        caller-named version — an oracle for someone else's release schedule.
         """
         # Primary (writer) session, not get_read_session: the attempt budget must
         # count deploys queued by a prior heartbeat (replica lag would under-count
@@ -9373,6 +9394,7 @@ class PostgresService:
             result = await session.execute(
                 select(func.count(FleetCommand.id)).where(
                     FleetCommand.node_id == node_id,
+                    FleetCommand.tenant_id == tenant_id,
                     FleetCommand.command == "deploy",
                     FleetCommand.payload["target_version"].astext == target_version,
                     FleetCommand.created_at >= since,

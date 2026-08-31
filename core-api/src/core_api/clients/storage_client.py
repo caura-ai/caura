@@ -2410,7 +2410,7 @@ class CoreStorageClient:
     async def delete_fleet(self, tenant_id: str, fleet_id: str) -> bool:
         return await self._delete(f"/fleet/{fleet_id}", tenant_id=tenant_id)
 
-    async def fleet_in_flight_deploy(self, *, node_id: UUID, since: datetime) -> bool:
+    async def fleet_in_flight_deploy(self, *, node_id: UUID, tenant_id: str, since: datetime) -> bool:
         result = await self._get(
             "/fleet/commands/in-flight-deploy",
             # primary, not replica: read-after-write deploy-dedup gate — it must see
@@ -2418,15 +2418,19 @@ class CoreStorageClient:
             # duplicate through (the acked-stuck-queue storm this gate prevents).
             read=False,
             node_id=str(node_id),
+            tenant_id=tenant_id,
             since=since.isoformat(),
         )
         return bool((result or {}).get("in_flight"))
 
-    async def fleet_deploy_attempt_count(self, *, node_id: UUID, target_version: str, since: datetime) -> int:
+    async def fleet_deploy_attempt_count(
+        self, *, node_id: UUID, tenant_id: str, target_version: str, since: datetime
+    ) -> int:
         result = await self._get(
             "/fleet/commands/deploy-attempt-count",
             read=False,  # primary: attempt budget must count just-queued deploys (see fleet_in_flight_deploy)
             node_id=str(node_id),
+            tenant_id=tenant_id,
             target_version=target_version,
             since=since.isoformat(),
         )

@@ -93,30 +93,6 @@
       "note": "Verified: data['tenant_id'] is stored directly on the FleetNode row."
     },
     {
-      "id": "method:fleet_count_recent_deploys_for_target",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read"
-    },
-    {
-      "id": "method:fleet_get_command_by_id",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read"
-    },
-    {
-      "id": "method:fleet_get_node_by_id",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read"
-    },
-    {
-      "id": "method:fleet_has_recent_in_flight_deploy",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read"
-    },
-    {
       "id": "method:fleet_upsert_node",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -276,18 +252,6 @@
       "evidence": "reads tenant_id with .get() and never rejects a missing one",
       "category": "id-addressed-read",
       "note": "Scopes to the entity's OWN tenant when omitted \u2014 self-authorizing."
-    },
-    {
-      "id": "route:GET /api/v1/storage/fleet/commands/deploy-attempt-count",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-read"
-    },
-    {
-      "id": "route:GET /api/v1/storage/fleet/commands/in-flight-deploy",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-read"
     },
     {
       "id": "route:GET /api/v1/storage/healthz",
