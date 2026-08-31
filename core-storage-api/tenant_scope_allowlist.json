@@ -73,13 +73,6 @@
       "note": "Verified: every item carries tenant_id, which scopes updates, inserts, race recovery, and winner lookups."
     },
     {
-      "id": "method:entity_find_entity_link",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read",
-      "note": "Join table has no tenant column; rows are tenant-scoped only via the ids."
-    },
-    {
       "id": "method:entity_get_by_id",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -263,12 +256,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "no-tenant-data"
-    },
-    {
-      "id": "route:GET /api/v1/storage/entities/links/find",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-read"
     },
     {
       "id": "route:GET /api/v1/storage/entities/relations/find",

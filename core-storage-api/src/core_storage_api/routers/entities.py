@@ -453,20 +453,6 @@ async def bulk_upsert_memory_entity_links(request: Request) -> list[dict]:
     return await _svc.entity_bulk_upsert_links(tenant_id, items)
 
 
-@router.get("/links/find")
-async def find_entity_link(
-    memory_id: str,
-    entity_id: str,
-) -> dict | None:
-    link = await _svc.entity_find_entity_link(
-        memory_id=UUID(memory_id),
-        entity_id=UUID(entity_id),
-    )
-    if link is None:
-        raise HTTPException(status_code=404, detail="Link not found")
-    return orm_to_dict(link, MEMORY_ENTITY_LINK_FIELDS)
-
-
 @router.post("/memory-ids-by-entity-ids")
 async def get_memory_ids_by_entity_ids(request: Request) -> list[dict]:
     body: dict = await request.json()

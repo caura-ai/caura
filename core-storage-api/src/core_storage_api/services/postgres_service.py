@@ -6075,20 +6075,6 @@ class PostgresService:
             result = await session.execute(stmt)
             return list(result.all())  # type: ignore[arg-type]
 
-    async def entity_find_entity_link(
-        self,
-        memory_id: UUID,
-        entity_id: UUID,
-    ) -> MemoryEntityLink | None:
-        async with get_session() as session:
-            result = await session.execute(
-                select(MemoryEntityLink).where(
-                    MemoryEntityLink.memory_id == memory_id,
-                    MemoryEntityLink.entity_id == entity_id,
-                )
-            )
-            return result.scalar_one_or_none()
-
     async def _owned_link_endpoints(
         self,
         session: AsyncSession,

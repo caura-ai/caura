@@ -1475,13 +1475,6 @@ class CoreStorageClient:
     async def create_relation(self, data: dict) -> dict:
         return await self._post("/entities/relations", data)  # type: ignore[return-value]
 
-    async def find_entity_link(self, memory_id: str, entity_id: str) -> dict | None:
-        return await self._get(
-            "/entities/links/find",
-            memory_id=memory_id,
-            entity_id=entity_id,
-        )
-
     async def create_entity_link(self, tenant_id: str, data: dict) -> dict:
         # The link is addressed by two bare UUIDs, so the tenant has to travel
         # with them: storage scopes both ends to it. The explicit arg wins over
