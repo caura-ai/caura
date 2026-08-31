@@ -295,7 +295,18 @@ class MemoryUpdate(BaseModel):
     ts_valid_start: datetime | None = None
     ts_valid_end: datetime | None = None
     expires_at: datetime | None = None
-    entity_links: list[EntityLinkIn] | None = None
+    entity_links: list[EntityLinkIn] | None = Field(
+        default=None,
+        description=(
+            "Entity links to **add** to this memory. Additive, unlike "
+            "``metadata``: links already on the memory are kept even when this "
+            "list does not name them, and re-sending a pair already present "
+            "leaves its existing ``role`` unchanged rather than overwriting it. "
+            "There is no replace mode and no way to remove a link through this "
+            "endpoint. An ``entity_id`` outside the caller's tenant is rejected "
+            "with 422."
+        ),
+    )
 
     @model_validator(mode="after")
     def metadata_mode_requires_metadata(self) -> "MemoryUpdate":

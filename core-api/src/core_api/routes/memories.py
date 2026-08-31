@@ -1629,6 +1629,12 @@ async def update_memory_endpoint(
       overwrite. Two concurrent PATCHes that each set a distinct metadata key
       will therefore leave **both keys present** on the row — that is the
       defined behaviour, not a partial-merge anomaly.
+    - ``entity_links`` is **add-only**, and has no replace mode. Links already
+      on the memory survive a PATCH that does not name them, and re-sending a
+      pair already present keeps its existing ``role`` rather than overwriting
+      it (the insert is ``ON CONFLICT DO NOTHING``). So concurrent PATCHes
+      naming different entities leave **both links present**, and there is no
+      request through this endpoint that removes one.
     """
     auth.enforce_tenant(tenant_id)
     # C3/C8: server-reserved types (outcome/rule/insight) are authored only by

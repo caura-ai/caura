@@ -3745,7 +3745,9 @@ async def update_memory(
         # else (empty dict in merge mode) → storage no-op, no audit
         # entry, no patch field.
 
-    # Entity links: replace if explicitly provided
+    # Entity links: ADD the named links when explicitly provided. Never a
+    # replace — see the ``changes`` entry below for what the storage call does
+    # and does not do. There is no API path that removes a link today.
     if "entity_links" in fields_set and data.entity_links is not None:
         entity_link_dicts = [
             {"entity_id": str(link.entity_id), "role": link.role} for link in data.entity_links
@@ -3768,9 +3770,26 @@ async def update_memory(
                 status_code=422,
                 detail="entity_links names an entity that does not exist in this tenant",
             )
+        # Additive, and the audit record has to say so. ``memory_add_entity_links``
+        # inserts with ``ON CONFLICT (memory_id, entity_id) DO NOTHING`` and has no
+        # delete branch, so links already on the row survive a PATCH that does not
+        # name them, and a re-sent pair keeps its original role. This entry used to
+        # read ``{"old": "replaced", ...}``, which claimed a removal that has never
+        # happened on this path — the trail said the link set was replaced while the
+        # row still held the old links.
+        #
+        # ``mode`` states the semantic explicitly, the way the ``metadata`` entry
+        # above distinguishes merge from replace, rather than leaving an auditor to
+        # infer it from a count.
+        #
+        # No ``old``: ``sc.get_memory`` does not return ``entity_links`` (the field
+        # on the response is populated separately), so the previous link set is not
+        # in hand here, and reporting a count we did not read would be the same
+        # class of error this replaces. ``added`` is what was requested — an upper
+        # bound on rows actually inserted, since a pair already present is a no-op.
         changes["entity_links"] = {
-            "old": "replaced",
-            "new": f"{len(data.entity_links)} links",
+            "added": f"{len(data.entity_links)} links",
+            "mode": "add",
         }
 
     # Apply the patch via storage client
