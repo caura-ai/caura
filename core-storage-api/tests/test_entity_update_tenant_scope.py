@@ -47,14 +47,33 @@ async def _entity(client: AsyncClient, tenant_id: str, name: str) -> str:
 async def _read(client: AsyncClient, entity_id: str) -> dict:
     """Read the row back regardless of tenant, to assert what actually persisted.
 
-    Deliberately goes through ``GET /entities/{entity_id}``, which is still
-    unscoped (allowlisted ``id-addressed-read``) and so answers for any tenant
-    --- that is what makes it a usable oracle here. When that route gains a
-    required tenant, this helper needs one too.
+    Reads ``entities`` through the ORM rather than through
+    ``GET /entities/{entity_id}``, which it used to use. The note that stood
+    here said this helper would need a tenant the day that route took one; it
+    now does, and giving it one would have been the wrong repair. Every
+    assertion below asks "is the row still in the tenant that owned it, with
+    the fields it had" --- so an oracle scoped to a tenant answers about rows
+    already known to be in it, and could not observe a row that moved
+    namespace, which is the failure ``test_another_tenants_entity_is_not_updated``
+    exists to catch. Tenant-blind by construction, and so immune to any
+    further scoping of the route.
+
+    ``client`` is unused but kept in the signature so the call sites read the
+    same and the raw read stays swappable.
     """
-    resp = await client.get(f"{PREFIX}/entities/{entity_id}")
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+    from common.models import Entity
+    from core_storage_api.services.postgres_service import get_session
+
+    async with get_session() as session:
+        entity = await session.get(Entity, uuid.UUID(entity_id))
+    assert entity is not None, f"entity {entity_id} vanished"
+    return {
+        "id": str(entity.id),
+        "tenant_id": entity.tenant_id,
+        "fleet_id": entity.fleet_id,
+        "canonical_name": entity.canonical_name,
+        "attributes": entity.attributes,
+    }
 
 
 class TestEntityUpdateTenantScope:
@@ -148,4 +167,5 @@ class TestEntityUpdateTenantScope:
         row = await _read(client, entity_id)
         assert row["id"] == entity_id, "the primary key was repointed"
         assert row["fleet_id"] is None
-        assert (await client.get(f"{PREFIX}/entities/{stolen}")).status_code == 404
+        stolen_resp = await client.get(f"{PREFIX}/entities/{stolen}", params={"tenant_id": tenant})
+        assert stolen_resp.status_code == 404

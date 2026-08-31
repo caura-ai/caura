@@ -362,12 +362,12 @@ async def test_bulk_upsert_mixed_create_and_update(sc):
     assert results[1]["entity_id"] == existing["id"]
 
     # Verify the create landed
-    new_entity = await sc.get_entity(results[0]["entity_id"])
+    new_entity = await sc.get_entity(results[0]["entity_id"], tid)
     assert new_entity["canonical_name"] == "brand-new"
     assert new_entity["attributes"] == {"foo": "bar"}
 
     # Verify the update wrote merged attrs
-    updated = await sc.get_entity(existing["id"])
+    updated = await sc.get_entity(existing["id"], tid)
     assert updated["attributes"] == {"merged": True, "_aliases": ["old-name"]}
 
 
@@ -397,7 +397,7 @@ async def test_bulk_upsert_create_race_merges(sc):
     assert results[0]["action"] == "merged"
     assert results[0]["entity_id"] == existing["id"]
 
-    merged = await sc.get_entity(existing["id"])
+    merged = await sc.get_entity(existing["id"], tid)
     assert merged["attributes"] == {"from": "racy-write"}
 
 
@@ -837,7 +837,10 @@ async def test_bulk_upsert_update_cross_tenant_returns_missing(sc):
     tid_a = _t()
     tid_b = _t()
     foreign = await _create_entity(sc, tid_b, "foreign-entity")
-    foreign_pre = await sc.get_entity(foreign["id"])
+    # Read as tid_b, the row's OWN tenant, so the oracle can still see it. Using
+    # tid_a here would 404 and the "unchanged" assertions below would be
+    # asserting on nothing.
+    foreign_pre = await sc.get_entity(foreign["id"], tid_b)
 
     results = await sc.bulk_upsert_entities(
         items=[
@@ -856,7 +859,7 @@ async def test_bulk_upsert_update_cross_tenant_returns_missing(sc):
     assert results[0]["action"] == "missing"
 
     # Foreign tenant's row stays put — attributes and canonical_name unchanged.
-    post = await sc.get_entity(foreign["id"])
+    post = await sc.get_entity(foreign["id"], tid_b)
     assert post["attributes"] == foreign_pre["attributes"]
     assert post["canonical_name"] == foreign_pre["canonical_name"]
 

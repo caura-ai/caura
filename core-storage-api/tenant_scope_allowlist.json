@@ -73,12 +73,6 @@
       "note": "Verified: every item carries tenant_id, which scopes updates, inserts, race recovery, and winner lookups."
     },
     {
-      "id": "method:entity_get_by_id",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read"
-    },
-    {
       "id": "method:fleet_add_command",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -232,26 +226,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "no-tenant-data"
-    },
-    {
-      "id": "route:GET /api/v1/storage/entities/{entity_id}",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-read"
-    },
-    {
-      "id": "route:GET /api/v1/storage/entities/{entity_id}/relations",
-      "verdict": "OPTIONAL",
-      "evidence": "reads tenant_id with .get() and never rejects a missing one",
-      "category": "id-addressed-read",
-      "note": "Scopes to the entity's OWN tenant when omitted \u2014 self-authorizing."
-    },
-    {
-      "id": "route:GET /api/v1/storage/entities/{entity_id}/with-memories",
-      "verdict": "OPTIONAL",
-      "evidence": "reads tenant_id with .get() and never rejects a missing one",
-      "category": "id-addressed-read",
-      "note": "Scopes to the entity's OWN tenant when omitted \u2014 self-authorizing."
     },
     {
       "id": "route:GET /api/v1/storage/healthz",

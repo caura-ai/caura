@@ -1330,8 +1330,10 @@ class CoreStorageClient:
     async def create_entity(self, data: dict) -> dict:
         return await self._post("/entities", data)  # type: ignore[return-value]
 
-    async def get_entity(self, entity_id: str) -> dict | None:
-        return await self._get(f"/entities/{entity_id}")
+    async def get_entity(self, entity_id: str, tenant_id: str) -> dict | None:
+        # Same contract as ``get_memory``: the row is addressed by a bare UUID,
+        # so the tenant has to travel with it or storage has no predicate.
+        return await self._get(f"/entities/{entity_id}", tenant_id=tenant_id)
 
     async def update_entity(self, entity_id: str, tenant_id: str, data: dict) -> dict | None:
         # Same contract as ``update_memory`` above, for the same reason.
@@ -1450,14 +1452,13 @@ class CoreStorageClient:
             read=True,
         )
 
-    async def get_entity_with_linked_memories(self, entity_id: str) -> dict | None:
-        return await self._get(f"/entities/{entity_id}/with-memories")
+    async def get_entity_with_linked_memories(self, entity_id: str, tenant_id: str) -> dict | None:
+        return await self._get(f"/entities/{entity_id}/with-memories", tenant_id=tenant_id)
 
-    async def get_outgoing_relations(self, entity_id: str, tenant_id: str | None = None) -> list[dict]:
-        params: dict[str, Any] = {}
-        if tenant_id is not None:
-            params["tenant_id"] = tenant_id
-        return await self._get_list(f"/entities/{entity_id}/relations", **params)
+    async def get_outgoing_relations(self, entity_id: str, tenant_id: str) -> list[dict]:
+        # ``tenant_id`` was optional here and storage fell back to the addressed
+        # row's own tenant when it was omitted, so the optionality was the hole.
+        return await self._get_list(f"/entities/{entity_id}/relations", tenant_id=tenant_id)
 
     async def create_relation(self, data: dict) -> dict:
         return await self._post("/entities/relations", data)  # type: ignore[return-value]

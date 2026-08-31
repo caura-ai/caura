@@ -246,7 +246,7 @@ def _sc_for_forward_path(
     sc.update_memory_status = AsyncMock()
     sc.get_entity_links_for_memories = AsyncMock(return_value=links_by_mem)
 
-    async def get_entity(eid: str):
+    async def get_entity(eid: str, tenant_id: str):
         if entities is not None and eid in entities:
             return entities[eid]
         # Synthesize a minimal entity row keyed by id; tests pass the

@@ -88,7 +88,7 @@ def _sc(
     sc.update_memory_status = AsyncMock()
     sc.get_entity_links_for_memories = AsyncMock(return_value=links_by_mem)
 
-    async def get_entity(eid: str):
+    async def get_entity(eid: str, tenant_id: str):
         # ``entities`` decouples canonical_name from entity_id (WT-3:
         # the L3.4 drop is now scoped to SAME-name/different-id, so
         # collision tests must pin the name explicitly).

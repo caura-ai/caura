@@ -5135,9 +5135,24 @@ class PostgresService:
     # Entity CRUD
     # ------------------------------------------------------------------
 
-    async def entity_get_by_id(self, entity_id: UUID) -> Entity | None:
+    async def entity_get_by_id(self, entity_id: UUID, tenant_id: str) -> Entity | None:
+        """Fetch one entity, bound to the tenant that asked for it.
+
+        ``session.get`` addressed the row by primary key alone, which is the
+        shape of GHSA-wgvw-28pq-jc36 — knowing a UUID is not the same as being
+        entitled to the row behind it. ``Entity.tenant_id`` is indexed and
+        ``nullable=False``, so the predicate is a plain conjunct on the same
+        lookup rather than a second round-trip.
+
+        A foreign id returns ``None`` and its routes 404, which is what a
+        missing id already returned. That is deliberate: rejecting with a 403
+        would confirm the row exists in someone else's tenant, so filtering
+        leaks strictly less than refusing.
+        """
         async with get_session() as session:
-            return await session.get(Entity, entity_id)
+            return await session.scalar(
+                select(Entity).where(Entity.id == entity_id, Entity.tenant_id == tenant_id)
+            )
 
     async def entity_find_exact(
         self,

@@ -621,8 +621,12 @@ async def set_embeddings(request: Request) -> dict:
 
 
 @router.get("/{entity_id}")
-async def get_entity(entity_id: UUID) -> dict:
-    entity = await _svc.entity_get_by_id(entity_id)
+async def get_entity(entity_id: UUID, tenant_id: str) -> dict:
+    # Read guard, the mirror of ``PATCH /entities/{entity_id}`` above: the route
+    # took a bare UUID and returned the whole row, so knowing an id was enough to
+    # read another tenant's entity. ``tenant_id`` is a required query parameter —
+    # omitting it is a 422, not a fetch by primary key.
+    entity = await _svc.entity_get_by_id(entity_id, tenant_id)
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
     return orm_to_dict(entity, ENTITY_FIELDS)
@@ -647,13 +651,17 @@ async def update_entity(entity_id: UUID, request: Request) -> dict:
 @router.get("/{entity_id}/with-memories")
 async def get_entity_with_linked_memories(
     entity_id: UUID,
-    tenant_id: str | None = None,
+    tenant_id: str,
 ) -> dict:
-    entity = await _svc.entity_get_by_id(entity_id)
+    # ``tenant_id`` was optional and fell back to ``entity.tenant_id`` — the
+    # tenant of the row being addressed. That is not a check: it is satisfied by
+    # construction for any id, and an attacker closes it by simply omitting the
+    # parameter. The allowlist note calling it "self-authorizing" is retired
+    # with it. Required now; the downstream link read was already scoped.
+    entity = await _svc.entity_get_by_id(entity_id, tenant_id)
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
-    t_id = tenant_id or entity.tenant_id
-    rows = await _svc.entity_get_linked_memories(entity_id, t_id)
+    rows = await _svc.entity_get_linked_memories(entity_id, tenant_id)
     return {
         "entity": orm_to_dict(entity, ENTITY_FIELDS),
         "linked_memories": [
@@ -669,13 +677,15 @@ async def get_entity_with_linked_memories(
 @router.get("/{entity_id}/relations")
 async def get_outgoing_relations(
     entity_id: UUID,
-    tenant_id: str | None = None,
+    tenant_id: str,
 ) -> list[dict]:
-    entity = await _svc.entity_get_by_id(entity_id)
+    # Same retired fallback as ``/with-memories`` above, and the disclosure here
+    # is wider: the response carries each target entity in full, so an unscoped
+    # call walked one hop out into another tenant's graph.
+    entity = await _svc.entity_get_by_id(entity_id, tenant_id)
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
-    t_id = tenant_id or entity.tenant_id
-    rows = await _svc.relation_get_outgoing(entity_id, t_id)
+    rows = await _svc.relation_get_outgoing(entity_id, tenant_id)
     return [
         {
             "relation": orm_to_dict(rel, RELATION_FIELDS),
