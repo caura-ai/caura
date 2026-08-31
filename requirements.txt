@@ -22,7 +22,7 @@ requests>=2.34.2
 openai
 python-dateutil>=2.8,<3
 httpx>=0.27,<1
-mcp>=1.28.1,<2
+mcp>=2.1.1,<3
 
 # Optional: only needed if EMBEDDING_PROVIDER=openai
 # openai>=1.0,<2
