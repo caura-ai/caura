@@ -46,6 +46,7 @@ class _FakeAdapter:
         self.raise_on_dedup_check = raise_on_dedup_check
         self.archive_calls: list[tuple[str, str, str | None, int | None]] = []
         self.audit_calls: list[tuple[int, str, dict | None, str | None]] = []
+        self.audit_org_ids: list[str] = []
         self.dedup_calls: list[tuple[str, str, int]] = []
 
     async def archive_expired(self, *, org_id: str, fleet_id: str | None) -> int:
@@ -98,10 +99,12 @@ class _FakeAdapter:
         self,
         audit_id: int,
         *,
+        org_id: str,
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
     ) -> None:
+        self.audit_org_ids.append(org_id)
         self.audit_calls.append((audit_id, status, stats, error_message))
 
 
@@ -219,6 +222,7 @@ async def test_archive_expired_success_marks_audit_progress_then_success():
     # never-started one.
     statuses = [c[1] for c in adapter.audit_calls]
     assert statuses == ["in_progress", "success"]
+    assert adapter.audit_org_ids == ["tenant-x", "tenant-x"]
     final = adapter.audit_calls[-1]
     assert final[0] == 42
     assert final[2] == {"archived": 11}
@@ -276,6 +280,7 @@ async def test_failure_audit_update_error_does_not_swallow_original():
             self,
             audit_id: int,
             *,
+            org_id: str,
             status: str,
             stats: dict | None = None,
             error_message: str | None = None,
@@ -507,6 +512,7 @@ async def test_permanent_error_still_reraises_when_the_failure_row_could_not_be_
             self,
             audit_id: int,
             *,
+            org_id: str,
             status: str,
             stats: dict | None = None,
             error_message: str | None = None,

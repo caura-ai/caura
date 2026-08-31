@@ -2638,12 +2638,13 @@ class CoreStorageClient:
         self,
         audit_id: int,
         *,
+        org_id: str,
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
     ) -> None:
         """Flip the row to ``in_progress``, ``success``, or ``failure``."""
-        body: dict[str, Any] = {"status": status}
+        body: dict[str, Any] = {"org_id": org_id, "status": status}
         if stats is not None:
             body["stats"] = stats
         if error_message is not None:

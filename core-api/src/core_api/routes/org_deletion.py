@@ -91,13 +91,13 @@ async def purge_org_data(
     purged: dict[str, dict[str, int]] = {}
     failed: dict[str, str] = {}
 
-    async def _finalize(audit_id: int | None, **kwargs: Any) -> None:
+    async def _finalize(audit_id: int | None, *, org_id: str, **kwargs: Any) -> None:
         # The purge is the source of truth: a transient audit-write failure
         # must never mask a completed purge or abort the rest of the batch.
         if audit_id is None:
             return
         try:
-            await storage.update_lifecycle_audit_row(audit_id, **kwargs)
+            await storage.update_lifecycle_audit_row(audit_id, org_id=org_id, **kwargs)
         except Exception:
             logger.warning("failed to update lifecycle_audit row %s", audit_id, exc_info=True)
 
@@ -115,11 +115,21 @@ async def purge_org_data(
         except Exception as exc:
             logger.exception("purge_tenant_data failed for tenant %s", tenant_id)
             failed[tenant_id] = str(exc)
-            await _finalize(audit_id, status="failure", error_message=str(exc))
+            await _finalize(
+                audit_id,
+                org_id=tenant_id,
+                status="failure",
+                error_message=str(exc),
+            )
             continue
 
         purged[tenant_id] = counts
-        await _finalize(audit_id, status="success", stats={"deleted": counts})
+        await _finalize(
+            audit_id,
+            org_id=tenant_id,
+            status="success",
+            stats={"deleted": counts},
+        )
 
     logger.info(
         "purge_org_data: %d purged, %d failed (triggered_by=%s)",

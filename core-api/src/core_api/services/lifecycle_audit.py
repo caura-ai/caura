@@ -328,12 +328,17 @@ class _CoreApiLifecycleAdapter:
         self,
         audit_id: int,
         *,
+        org_id: str,
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
     ) -> None:
         await self._storage.update_lifecycle_audit_row(
-            audit_id, status=status, stats=stats, error_message=error_message
+            audit_id,
+            org_id=org_id,
+            status=status,
+            stats=stats,
+            error_message=error_message,
         )
 
 

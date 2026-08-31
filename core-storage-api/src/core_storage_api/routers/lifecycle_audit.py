@@ -105,13 +105,18 @@ async def get_lifecycle_audit(audit_id: int, org_id: str) -> dict:
 @router.patch("/{audit_id}")
 async def update_lifecycle_audit(audit_id: int, request: Request) -> dict:
     """Update status (+ optional stats / error_message). Body:
-    ``{status, stats?, error_message?}``. ``finished_at`` is stamped
+    ``{org_id, status, stats?, error_message?}``. ``finished_at`` is stamped
     server-side when ``status`` is terminal (``success``/``failure``).
     """
     try:
         body: dict = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    org_id = body.get("org_id")
+    if not isinstance(org_id, str) or not org_id:
+        raise HTTPException(status_code=422, detail="'org_id' must be a non-empty string")
     status = body.get("status")
     if status not in _VALID_STATUSES:
         raise HTTPException(
@@ -120,6 +125,7 @@ async def update_lifecycle_audit(audit_id: int, request: Request) -> dict:
         )
     result = await _svc.lifecycle_audit_finalize(
         audit_id,
+        org_id=org_id,
         status=status,
         stats=body.get("stats"),
         error_message=body.get("error_message"),

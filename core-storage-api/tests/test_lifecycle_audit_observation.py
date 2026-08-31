@@ -47,7 +47,11 @@ async def test_exact_read_and_uncapped_summary(
     entity_link_id = response.json()["audit_id"]
     failure = await client.patch(
         f"{PREFIX}/{entity_link_id}",
-        json={"status": "failure", "error_message": "synthetic failure"},
+        json={
+            "org_id": "test-tenant-lifecycle-observation",
+            "status": "failure",
+            "error_message": "synthetic failure",
+        },
     )
     assert failure.status_code == 200, failure.text
 
@@ -78,14 +82,22 @@ async def test_exact_read_and_uncapped_summary(
     noise_id = response.json()["audit_id"]
     noise_failure = await client.patch(
         f"{PREFIX}/{noise_id}",
-        json={"status": "failure", "error_message": "filter sentinel"},
+        json={
+            "org_id": "test-tenant-lifecycle-observation",
+            "status": "failure",
+            "error_message": "filter sentinel",
+        },
     )
     assert noise_failure.status_code == 200, noise_failure.text
 
     for audit_id in archive_ids:
         success = await client.patch(
             f"{PREFIX}/{audit_id}",
-            json={"status": "success", "stats": {"archived": 0}},
+            json={
+                "org_id": "test-tenant-lifecycle-observation",
+                "status": "success",
+                "stats": {"archived": 0},
+            },
         )
         assert success.status_code == 200, success.text
 
@@ -139,7 +151,11 @@ async def test_exact_read_and_uncapped_summary(
     other_org_id = response.json()["audit_id"]
     success = await client.patch(
         f"{PREFIX}/{other_org_id}",
-        json={"status": "success", "stats": {"archived": 0}},
+        json={
+            "org_id": "another-lifecycle-observation-tenant",
+            "status": "success",
+            "stats": {"archived": 0},
+        },
     )
     assert success.status_code == 200, success.text
 
