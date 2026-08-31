@@ -83,6 +83,11 @@ class Pair:
     note: str
 
 
+RECORDED_VERSION_SUBJECT = (
+    "memclaw"  # legacy-name-ok: fixture subject behind recorded baselines
+)
+
+
 PAIRS: list[Pair] = [
     # ----- Genuine conflicts (BOTH orders must flag) -----
     Pair(
@@ -127,8 +132,8 @@ PAIRS: list[Pair] = [
     ),
     Pair(
         label="version_conflict",
-        a="The running version of memclaw is 2.3.1.",
-        b="The running version of memclaw is 2.4.0.",
+        a=f"The running version of {RECORDED_VERSION_SUBJECT} is 2.3.1.",
+        b=f"The running version of {RECORDED_VERSION_SUBJECT} is 2.4.0.",
         expected_contradicts=True,
         shape="genuine_conflict",
         note="``running_version`` is single-valued.",

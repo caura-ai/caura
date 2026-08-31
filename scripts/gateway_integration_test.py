@@ -43,6 +43,9 @@ except ImportError:
     sys.exit(1)
 
 TIMEOUT = 30.0
+FROZEN_PLUGIN_ID = (
+    "memclaw"  # legacy-name-ok: existing on-disk plugin and skill identifier
+)
 
 
 class GatewayIntegrationTest:
@@ -65,6 +68,7 @@ class GatewayIntegrationTest:
         self.node_name = node_name
         self.fleet_id = fleet_id
         self.openclaw_dir = openclaw_dir or os.path.expanduser("~/.openclaw")
+        self.plugin_dir = Path(self.openclaw_dir) / "plugins" / FROZEN_PLUGIN_ID
         self.verbose = verbose
         self.json_output = json_output
 
@@ -268,9 +272,7 @@ class GatewayIntegrationTest:
 
     def test_plugin_manifest_exists(self):
         """Verify openclaw.plugin.json exists in the plugin directory."""
-        manifest = (
-            Path(self.openclaw_dir) / "plugins" / "memclaw" / "openclaw.plugin.json"
-        )
+        manifest = self.plugin_dir / "openclaw.plugin.json"
         exists = manifest.exists()
         self.check("Plugin manifest exists", exists, str(manifest))
         if exists:
@@ -289,12 +291,12 @@ class GatewayIntegrationTest:
 
     def test_plugin_dist_exists(self):
         """Verify compiled JS exists."""
-        dist = Path(self.openclaw_dir) / "plugins" / "memclaw" / "dist" / "index.js"
+        dist = self.plugin_dir / "dist" / "index.js"
         self.check("Plugin dist/index.js exists", dist.exists(), str(dist))
 
     def test_plugin_env_exists(self):
         """Verify .env exists with required vars."""
-        env_path = Path(self.openclaw_dir) / "plugins" / "memclaw" / ".env"
+        env_path = self.plugin_dir / ".env"
         exists = env_path.exists()
         self.check("Plugin .env exists", exists, str(env_path))
         if exists:
@@ -320,7 +322,7 @@ class GatewayIntegrationTest:
         allow = config.get("plugins", {}).get("allow", [])
         self.check(
             "OpenClaw config: plugin id in plugins.allow",
-            "memclaw" in allow,
+            FROZEN_PLUGIN_ID in allow,
             f"allow={allow}",
         )
 
@@ -361,8 +363,7 @@ class GatewayIntegrationTest:
             return
         config = json.loads(config_path.read_text())
         paths = config.get("plugins", {}).get("load", {}).get("paths", [])
-        plugin_dir = str(Path(self.openclaw_dir) / "plugins" / "memclaw")
-        has_path = any(plugin_dir in p for p in paths)
+        has_path = any(str(self.plugin_dir) in p for p in paths)
         self.check("OpenClaw config: plugin in load paths", has_path, f"paths={paths}")
 
     # ═══════════════════════════════════════════════════════════
@@ -617,7 +618,7 @@ class GatewayIntegrationTest:
 
     def test_educated_flag_exists(self):
         """Check that the .educated flag was written on first load."""
-        flag = Path(self.openclaw_dir) / "plugins" / "memclaw" / ".educated"
+        flag = self.plugin_dir / ".educated"
         self.check("Education: .educated flag exists", flag.exists(), str(flag))
 
     def _find_workspaces(self) -> list[Path]:
@@ -645,7 +646,7 @@ class GatewayIntegrationTest:
             return
         found = []
         for ws in workspaces:
-            skill = ws / "skills" / "memclaw" / "SKILL.md"
+            skill = ws / "skills" / FROZEN_PLUGIN_ID / "SKILL.md"
             if skill.exists():
                 found.append(str(skill))
         self.check(
@@ -721,7 +722,7 @@ class GatewayIntegrationTest:
         found = False
         for ws in workspaces:
             hb = ws / "HEARTBEAT.md"
-            if hb.exists() and "memclaw" in hb.read_text().lower():
+            if hb.exists() and FROZEN_PLUGIN_ID in hb.read_text().lower():
                 found = True
                 break
         self.check(
@@ -736,7 +737,7 @@ class GatewayIntegrationTest:
 
     def test_prompt_section_file(self):
         """Verify prompt-section.js exists and contains memory rules."""
-        dist = Path(self.openclaw_dir) / "plugins" / "memclaw" / "dist"
+        dist = self.plugin_dir / "dist"
         prompt_js = dist / "prompt-section.js"
         self.check(
             "Prompt section: dist/prompt-section.js exists",
