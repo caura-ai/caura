@@ -203,7 +203,14 @@ async def test_get_report_foreign_tenant_returns_404_not_403():
 
 
 async def test_get_report_foreign_tenant_admin_bypass():
-    """Admin keys keep their cross-tenant read ability (no 404 mask)."""
+    """Admin keys keep their cross-tenant read ability — by naming the tenant.
+
+    The capability is unchanged: an admin credential still reads any tenant's
+    report and is not 404-masked. What changed with #1167 is that it must say
+    which tenant, because storage now requires one and an admin key has no
+    tenant of its own to fall back on. The sibling ``GET /reports`` in this
+    package already asks admin keys for the same thing.
+    """
     from unittest.mock import AsyncMock, patch
     from uuid import uuid4
 
@@ -227,9 +234,86 @@ async def test_get_report_foreign_tenant_admin_bypass():
     sc_mock = AsyncMock()
     sc_mock.get_report = AsyncMock(return_value=foreign_report)
     with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
-        result = await get_report(report_id=uuid4(), auth=admin)
+        result = await get_report(report_id=uuid4(), tenant_id="tenant-A", auth=admin)
     # Admin sees the full payload.
     assert result["tenant_id"] == "tenant-A"
+    # And the tenant it named is the one storage was asked about — not a
+    # placeholder, and not omitted. Positional, matching the client signature.
+    assert sc_mock.get_report.await_args.args[1] == "tenant-A"
+
+
+async def test_get_report_admin_without_a_tenant_is_a_400():
+    """An admin key that names no tenant gets a request error, not an unscoped read.
+
+    This is the one behaviour #1167 takes away, so it is pinned rather than left
+    to the absence of a test. 400 and not 401: the credential IS authenticated
+    (the distinction #987 drew on the skills-inbox routes), and not 404 either —
+    nothing was looked up, so there is nothing to mask.
+
+    Storage is asserted untouched. Reaching it with ``tenant_id=None`` is the
+    failure mode that matters: the query string would carry the literal
+    ``None``, which matches no row, and the endpoint would answer 404 for every
+    report an admin ever asked for.
+    """
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    from core_api.auth import AuthContext
+    from core_api.routes.crystallizer import get_report
+
+    admin = AuthContext(tenant_id=None, is_admin=True)
+    sc_mock = AsyncMock()
+    sc_mock.get_report = AsyncMock(return_value=None)
+
+    with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
+        try:
+            await get_report(report_id=uuid4(), tenant_id=None, auth=admin)
+        except HTTPException as e:
+            assert e.status_code == 400, f"admin with no tenant must be a 400; got {e.status_code}"
+            assert e.detail["code"] == "TENANT_REQUIRED"
+        else:
+            raise AssertionError("Expected HTTPException(400) for an admin key naming no tenant")
+
+    sc_mock.get_report.assert_not_awaited()
+
+
+async def test_get_report_defaults_to_the_credentials_own_tenant():
+    """A tenant-scoped credential needs no query param and gets its own tenant.
+
+    The compatibility half of the change: every caller that worked before this
+    still works, because ``tenant_id`` is optional on the wire and resolves to
+    ``auth.tenant_id``. Only credentials with no tenant of their own have to
+    start naming one.
+    """
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4
+
+    from core_api.auth import AuthContext
+    from core_api.routes.crystallizer import get_report
+
+    own_report = {
+        "id": str(uuid4()),
+        "tenant_id": "tenant-B",
+        "fleet_id": None,
+        "trigger": "manual",
+        "status": "completed",
+        "summary": {},
+        "hygiene": {},
+        "health": {},
+        "issues": [],
+        "crystallization": {},
+    }
+    caller = AuthContext(tenant_id="tenant-B", is_admin=False)
+
+    sc_mock = AsyncMock()
+    sc_mock.get_report = AsyncMock(return_value=own_report)
+    with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
+        result = await get_report(report_id=uuid4(), auth=caller)
+
+    assert result["tenant_id"] == "tenant-B"
+    assert sc_mock.get_report.await_args.args[1] == "tenant-B"
 
 
 async def test_get_latest_report_empty_returns_200_null(client):

@@ -172,12 +172,6 @@
       "note": "Verified: data['tenant_id'] survives model-field filtering and is stored on CrystallizationReport."
     },
     {
-      "id": "method:report_get_by_id",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read"
-    },
-    {
       "id": "method:tenant_usage_increment",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -274,12 +268,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "no-tenant-data"
-    },
-    {
-      "id": "route:GET /api/v1/storage/reports/{report_id}",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-read"
     },
     {
       "id": "route:GET /api/v1/storage/tenants/active",
