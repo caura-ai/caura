@@ -1,7 +1,7 @@
 """ToolSpec for caura_write — single OR batch.
 
 Provide exactly one of {content, items}. The system auto-classifies type,
-weight, title, summary, tags, and temporal dates.
+weight, title, summary, and temporal dates.
 """
 
 from core_api import mcp_server
@@ -12,7 +12,7 @@ from ._types import ToolSpec
 
 _DESCRIPTION = (
     "Store NEW memories. Provide exactly one of {content, items} (batch ≤100). "
-    "System auto-classifies type, importance, title, tags, dates. "
+    "System auto-classifies type, importance, title, dates. "
     "visibility: scope_team (default) / scope_org / scope_agent. Prefer team/org for sharing. "
     "If the response has metadata.embedding_pending=true the memory is saved but not yet "
     "semantically searchable (~15-20s); it is already findable by keyword and in caura_list, "

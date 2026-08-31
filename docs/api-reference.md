@@ -170,7 +170,7 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `ENTITY_EXTRACTION_PROVIDER` | `openai` | `openai`, `gemini`, `anthropic`, `openrouter`, `fake`, or `none` |
 | `ENTITY_EXTRACTION_MODEL` | `gpt-5.4-nano` | LLM model for enrichment and entity extraction |
 | `OPENAI_API_KEY` | — | Required for OpenAI embeddings and enrichment |
-| `USE_LLM_FOR_MEMORY_CREATION` | `true` | LLM auto-classifies type, weight, title, summary, tags on write |
+| `USE_LLM_FOR_MEMORY_CREATION` | `true` | LLM auto-classifies type, weight, title, summary on write |
 | `ANTHROPIC_API_KEY` | — | Required for Anthropic |
 | `OPENROUTER_API_KEY` | — | Required for OpenRouter |
 | `GEMINI_API_KEY` | — | Required for Gemini (Developer API, from AI Studio) |

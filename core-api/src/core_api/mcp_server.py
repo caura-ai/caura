@@ -621,7 +621,7 @@ mcp = _InstrumentedFastMCP(
     instructions=(
         "Caura (formerly MemClaw) is a persistent memory platform for AI agents. "  # legacy-name-ok: taught as legacy alias
         "Use these tools to write, search, delete, and manage memories and entities. "
-        "Memories are auto-enriched with type, title, summary, and tags via LLM. "
+        "Memories are auto-enriched with type, title, and summary via LLM. "
         "Just provide the content — Caura handles the rest. "
         "First-time setup: install the 'memclaw' usage skill via this server's "  # legacy-name-floor: the on-disk skill slug
         "/api/v1/install-skill endpoint (see README § 'Install the skill'). The "
