@@ -1827,6 +1827,12 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
 @router.patch("/{memory_id}/entities")
 async def update_memory_entities(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
+    # Tenant guard, same shape as ``PATCH /memories/{memory_id}/embedding``
+    # above. This route validated the shape of ``entity_links`` carefully and
+    # read no tenant at all, so a caller who knew a memory UUID could hang
+    # entities off another tenant's row — and name another tenant's entities
+    # while doing it. Both endpoints of the link are scoped in the service.
+    tenant_id = _require(body, "tenant_id")
     entity_links = body.get("entity_links", [])
     if not isinstance(entity_links, list):
         raise HTTPException(status_code=422, detail="'entity_links' must be a list")
@@ -1836,7 +1842,13 @@ async def update_memory_entities(memory_id: UUID, request: Request) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if any(not isinstance(lnk["role"], str) or not lnk["role"] for lnk in links):
         raise HTTPException(status_code=422, detail="Each entity link must have a non-empty string 'role'")
-    await _svc.memory_add_entity_links(memory_id, links)
+    linked = await _svc.memory_add_entity_links(memory_id, tenant_id, links)
+    if not linked:
+        # One 404 for a memory that isn't there, a memory that isn't yours, and
+        # an entity that isn't yours. The detail names only the memory because
+        # saying which of the three it was would answer as an existence oracle
+        # for both id spaces — see the service docstring.
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
     return {"ok": True}
 
 

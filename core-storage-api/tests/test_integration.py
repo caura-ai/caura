@@ -1555,7 +1555,7 @@ class TestMemories:
         first = [{"entity_id": eid, "role": "mentioned"} for eid in entity_ids]
         resp = await client.patch(
             f"{PREFIX}/memories/{memory_id}/entities",
-            json={"entity_links": first},
+            json={"tenant_id": tenant_id, "entity_links": first},
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["ok"] is True
@@ -1590,7 +1590,7 @@ class TestMemories:
         ]
         resp2 = await client.patch(
             f"{PREFIX}/memories/{memory_id}/entities",
-            json={"entity_links": second},
+            json={"tenant_id": tenant_id, "entity_links": second},
         )
         assert resp2.status_code == 200, resp2.text
 
