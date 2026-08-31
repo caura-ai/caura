@@ -1,0 +1,137 @@
+# Canonical legacy-name ratchet
+
+The 31 August 2026 audit produced the first fleet-wide census of the rename
+ratchet. Counts below are the **gated** footprint at the pinned refs, so their
+partitions are disjoint and may be summed. The five rows marked “first census”
+had not previously been measured by the programme.
+
+| Repository | Ref | Gated lines | Files | Census status |
+|---|---:|---:|---:|---|
+| `caura` | `be311955` | 315 | 82 | previously measured |
+| `openclaw-fleet-tester` | `5a1aa063` | 260 | 27 | **first census** |
+| `caura-ops` | `5c835a8d` | 458 | 100 | previously measured |
+| `caura-onprem-installer` | `0913557f` | 396 | 36 | **first census** |
+| `caura-daemon` | `42137548` | **2,103** | **328** | **first census** |
+| `caura-onprem` | `6f42f7e1` | 478 | 39 | **first census** |
+| `caura-test-automation` | `8b490bec` | 616 | 72 | **first census** |
+| `caura-enterprise` | `a4742cce` | 1,060 | 173 | previously measured |
+| **Fleet** | | **5,686** | **857** | |
+
+The three previously measured repositories total 1,833 gated lines. The five
+new measurements account for the remaining 3,853; notably, `caura-daemon`
+alone is larger than `caura` and `caura-ops` combined.
+
+“Present” is a different, per-repository diagnostic and must never be added
+across repositories. Enterprise, for example, reported 1,060 gated lines and
+also disclosed: “Excluded from the count above: 36 line(s) in 2 mirror(s),
+gated where authored.” Its 1,096 present lines include copies whose authored
+lines already belong to another repository's gated partition.
+
+## Audit result
+
+Eight copies existed as four byte variants:
+
+- A: `caura` and `openclaw-fleet-tester`.
+- B: `caura-ops` and `caura-onprem-installer`.
+- C: `caura-daemon`, `caura-onprem`, and `caura-test-automation`.
+- D: `caura-enterprise`.
+
+B and C were genuinely different files, although their executable ASTs were
+identical at the measured refs. A and D both had release-please changelog
+handling; D's copy gained it in enterprise PR 1303. D alone had generated and
+vendored mirror exclusions and the corresponding inventory disclosure.
+
+All four variants produced the same 315-line, 82-file result when run against
+the same `caura` tree. The audited figures were therefore comparable; the cost
+was maintenance drift and repo-specific behavior hidden in copied code, not an
+already-proven mismatch in the headline metric.
+
+The direction was rechecked against the remote refs immediately before
+implementation. The trees still form A, B, C, and D as listed above, and the
+recent change-summary hardening in `caura` is absent from B and C. The canonical
+engine therefore starts in `caura` and moves outward. Adopting B or C into A
+would discard that hardening; adopting D wholesale would impose enterprise-only
+mirror policy on every repository.
+
+## Shape
+
+`scripts/legacy_name_ratchet.py` is the canonical engine. Every repository gets
+the same engine bytes and a local `scripts/legacy_name_ratchet.json`. The JSON
+object is strict: missing or unknown keys are errors, and its complete surface
+is exactly these five fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `default_base` | validated ref string | Gate comparison ref when `--base` is omitted. |
+| `release_please_changelogs` | boolean | Permit generated changelog lines only on release-please's own branch. |
+| `mirror_paths` | list of root-relative paths | Generated mirrors gated in their authoring repository. |
+| `mirror_manifest` | root-relative path or `null` | Existing vendored-file manifest whose keys are mirror paths. |
+| `marker_inventory_meta_paths` | list of root-relative paths | Paths omitted only from marker analytics. |
+
+No sixth field is part of this port. Engine-wide rules, including marker-system
+code/test exclusions and the meaning of the two markers, remain in the engine.
+A declared manifest must be a readable JSON object whose keys are valid
+repository-relative paths. Missing or malformed manifests fail closed rather
+than silently moving their mirrors into the fleet-summable headline.
+
+The `caura` reference configuration uses `origin/main`, enables release-please,
+has no mirrors or manifest, and declares
+`docs/plans/rebrand-sunset-plan.md` as its marker-inventory meta path.
+Enterprise will use `origin/dev`, its generated snapshot and vendored manifest,
+and `docs/rebrand-sunset-plan.md`. The sunset documents remain fully ratcheted;
+only analytics omit their self-referential markers.
+
+`openclaw-fleet-tester` keeps `release_please_changelogs=true` during the
+mechanical port even though the flag is currently dead there. Removing it is a
+separate behavior change requiring separate approval.
+
+## Report contract
+
+A bare `--report` is current inventory only. It does not resolve a base and
+cannot print a misleading all-zero split. `--report --base <ref>` adds the
+explicitly requested change split. The gate still uses `default_base` when its
+caller omits `--base`.
+
+Every report says that the scope is tracked files only and gives the number of
+untracked, non-ignored files omitted. This makes the existing tracked-only
+boundary visible without changing what the gate refuses.
+
+Human output leads with gated lines/files and labels them as the fleet-summable
+headline. It also prints present lines/files as a per-repository diagnostic,
+labels it “never sum,” and discloses any excluded mirror inventory.
+
+`--report --json` makes the boundary structural:
+
+- `headline.name` is `gated`; it contains numeric `lines` and `files` plus
+  `aggregation: {"allowed": true, "operation": "sum"}`.
+- `diagnostics.present` contains an explicit denied aggregation contract and a
+  display string. It deliberately has no numeric `lines` or `files` fields, so
+  a generic caller cannot select a `present` number and silently sum it.
+- Mirror details remain auditable under `diagnostics.mirrors`, also tagged with
+  denied aggregation.
+- `scope`, marker inventory, and an optional explicit-base change object carry
+  the remaining bounded diagnostics.
+
+## Gate invariants and tests
+
+The canonicalization does not change what `caura` refuses. The text-based mint
+decision, marker semantics, move reconciliation, removal/new-exemption reports,
+and release changelog net accounting remain intact. Configuration selects only
+the approved repo-specific base and exemptions; `caura`'s mirror set is empty.
+
+The common suite exercises every configuration feature independent of the
+local values. It includes A's release-changelog net-accounting regression and
+D's seven generated-mirror fixtures: exclusion from the headline, regenerated
+mirror pass, disclosure, empty-disclosure silence, gate-output silence, and
+root/subdirectory consistency for both the exclusion and disclosure. A
+manifest-backed mirror fixture covers the vendored half separately. Additional
+fixtures pin strict five-field validation, inventory-only bare reporting,
+tracked-only disclosure, JSON aggregation tags, default-base selection, and the
+analytics-only sunset-document exclusion.
+
+## Rollout
+
+Land and observe `caura` first. Stop at its manual merge gate. Only after that
+merge, port the identical engine and one local config to one repository at a
+time, rechecking open and recently merged ratchet PRs at each port. A broken
+gate must never be broadcast across all eight lanes in one change.
