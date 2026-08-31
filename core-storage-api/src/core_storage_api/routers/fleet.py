@@ -97,7 +97,7 @@ async def get_node(
     tenant_id: str,
 ) -> dict:
     node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
-    node = await _svc.fleet_get_node_by_id(node_id=node_id)
+    node = await _svc.fleet_get_node_by_id(node_id=node_id, tenant_id=tenant_id)
     if node is None:
         raise HTTPException(status_code=404, detail="Node not found")
     return orm_to_dict(node, FLEET_NODE_FIELDS)
@@ -109,7 +109,7 @@ async def delete_node(
     tenant_id: str,
 ) -> dict:
     node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
-    node = await _svc.fleet_get_node_by_id(node_id=node_id)
+    node = await _svc.fleet_get_node_by_id(node_id=node_id, tenant_id=tenant_id)
     if node is None:
         raise HTTPException(status_code=404, detail="Node not found")
     fleet_id = getattr(node, "fleet_id", None)
@@ -132,19 +132,28 @@ async def create_command(request: Request) -> dict:
     # The node must belong to the tenant the command is being filed under.
     # ``fleet_commands.node_id`` has an FK to ``fleet_nodes.id`` but there is no
     # cross-column tenant constraint, so an insert naming ANOTHER tenant's node
-    # UUID satisfies the FK and lands — and ``fleet_get_pending_commands`` keys
-    # on ``node_id`` alone, so that node collects the row on its next heartbeat.
-    # The caller's tenant gate upstream only ever sees ``tenant_id``, which the
-    # caller is free to set to its own; the node/tenant PAIR is checked nowhere
-    # else, so it has to be checked here.
+    # UUID satisfies the FK and lands. The caller's tenant gate upstream only
+    # ever sees ``tenant_id``, which the caller is free to set to its own, so
+    # the node/tenant PAIR has to be checked here.
+    #
+    # It is the fetch predicate now rather than a comparison afterwards:
+    # ``fleet_get_node_by_id`` takes the tenant and returns None when either
+    # half misses. Same outcome, one fewer thing a later caller can forget.
+    #
+    # ``_require`` rather than ``body.get``: a missing tenant would otherwise
+    # scope to nothing and surface as "Node not found" — fail-closed, but it
+    # says the wrong thing, and it leaves this route's scoping unreadable to the
+    # tenant-scope gate's AST pass, which is the whole of the ``blind-spot``
+    # category. A malformed request is a 422.
+    tenant_id = _require(body, "tenant_id")
     raw_node_id = body.get("node_id")
     node = None
     if raw_node_id is not None:
         try:
-            node = await _svc.fleet_get_node_by_id(node_id=UUID(str(raw_node_id)))
+            node = await _svc.fleet_get_node_by_id(node_id=UUID(str(raw_node_id)), tenant_id=tenant_id)
         except ValueError:
             node = None
-    if node is None or node.tenant_id != body.get("tenant_id"):
+    if node is None:
         # 404 for "no such node" and "not your node" alike. Splitting them would
         # make this route an existence oracle for node UUIDs — and an unguarded
         # insert of an unknown UUID raises ForeignKeyViolationError, which is an
@@ -189,19 +198,33 @@ async def get_pending_commands(
 
 
 @router.get("/commands/in-flight-deploy")
-async def in_flight_deploy(node_id: UUID, since: datetime) -> dict:
+async def in_flight_deploy(node_id: UUID, tenant_id: str, since: datetime) -> dict:
     """True if a ``deploy`` command for this node is still in flight
-    (status pending/acked, created_at >= since)."""
-    in_flight = await _svc.fleet_has_recent_in_flight_deploy(node_id=node_id, since=since)
+    (status pending/acked, created_at >= since), within ``tenant_id``.
+
+    ``tenant_id`` is a **required** query parameter. Without it this answered
+    for any node whose UUID the caller could name, from a service that
+    authenticates nothing — so another tenant's rollouts were observable as
+    they happened.
+    """
+    in_flight = await _svc.fleet_has_recent_in_flight_deploy(
+        node_id=node_id, tenant_id=tenant_id, since=since
+    )
     return {"in_flight": in_flight}
 
 
 @router.get("/commands/deploy-attempt-count")
-async def deploy_attempt_count(node_id: UUID, target_version: str, since: datetime) -> dict:
+async def deploy_attempt_count(node_id: UUID, tenant_id: str, target_version: str, since: datetime) -> dict:
     """Count auto-upgrade ``deploy`` commands for this node at
-    ``target_version`` since ``since`` — ALL statuses."""
+    ``target_version`` since ``since`` — ALL statuses, within ``tenant_id``.
+
+    ``tenant_id`` is **required**, as on ``in-flight-deploy``. Unscoped, this
+    also answered "is this node moving to version X" for a caller-named
+    version, which made it an oracle for another tenant's release schedule.
+    """
     count = await _svc.fleet_count_recent_deploys_for_target(
         node_id=node_id,
+        tenant_id=tenant_id,
         target_version=target_version,
         since=since,
     )

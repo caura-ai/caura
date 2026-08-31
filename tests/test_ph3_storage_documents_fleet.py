@@ -299,7 +299,7 @@ async def test_fleet_in_flight_deploy(sc):
 
     # Pending within the window → in flight.
     await _add_deploy_command(svc, tenant, node_id, status="pending", created_at=now)
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, since=since) is True
+    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is True
 
 
 async def test_fleet_in_flight_deploy_acked_counts(sc):
@@ -311,7 +311,7 @@ async def test_fleet_in_flight_deploy_acked_counts(sc):
 
     # Acked within the window also counts as in flight.
     await _add_deploy_command(svc, tenant, node_id, status="acked", created_at=now)
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, since=since) is True
+    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is True
 
 
 async def test_fleet_in_flight_deploy_false_when_older_or_none(sc):
@@ -322,17 +322,17 @@ async def test_fleet_in_flight_deploy_false_when_older_or_none(sc):
     since = now - timedelta(minutes=10)
 
     # No commands at all → not in flight.
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, since=since) is False
+    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is False
 
     # A pending deploy older than the window is abandoned → not in flight.
     await _add_deploy_command(
         svc, tenant, node_id, status="pending", created_at=now - timedelta(minutes=30)
     )
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, since=since) is False
+    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is False
 
     # A done deploy (terminal) within the window is not in flight.
     await _add_deploy_command(svc, tenant, node_id, status="done", created_at=now)
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, since=since) is False
+    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is False
 
 
 async def test_fleet_deploy_attempt_count_all_statuses_per_target(sc):
@@ -354,12 +354,20 @@ async def test_fleet_deploy_attempt_count_all_statuses_per_target(sc):
     )
 
     count = await sc.fleet_deploy_attempt_count(
-        node_id=node_id, target_version="2.4.0", since=since
+        node_id=node_id, tenant_id=tenant, target_version="2.4.0", since=since
     )
     assert count == 3, "counts all statuses for this target within the window"
 
     # Zero for a brand-new target → fresh budget.
     fresh = await sc.fleet_deploy_attempt_count(
-        node_id=node_id, target_version="9.9.9", since=since
+        node_id=node_id, tenant_id=tenant, target_version="9.9.9", since=since
     )
     assert fresh == 0
+
+    # And zero for a tenant that does not own the node — the client carries the
+    # scope end-to-end, not just the service method. Cheap to assert here
+    # because this test already has a real node and real commands behind it.
+    foreign = await sc.fleet_deploy_attempt_count(
+        node_id=node_id, tenant_id=_t(), target_version="2.4.0", since=since
+    )
+    assert foreign == 0

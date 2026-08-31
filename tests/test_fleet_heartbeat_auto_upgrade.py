@@ -141,6 +141,11 @@ class _FakeStorage:
         self.created_commands: list[dict] = []
         self.in_flight_fn = None
         self.count_fn = None
+        # Tenants the gate actually handed to storage, in call order. Recorded
+        # rather than asserted inline because the caller wraps both calls in a
+        # fail-open ``except`` — see
+        # ``test_auto_upgrade_gate_passes_the_tenant_to_storage``.
+        self.seen_tenants: list[str] = []
 
     async def get_pending_commands(self, _tenant_id, _node_name):
         return list(self.pending_commands)
@@ -149,12 +154,14 @@ class _FakeStorage:
         self.created_commands.append(data)
         return {"id": "fake-cmd-1"}
 
-    async def fleet_in_flight_deploy(self, *, node_id, since):
+    async def fleet_in_flight_deploy(self, *, node_id, tenant_id, since):
+        self.seen_tenants.append(tenant_id)
         if self.in_flight_fn is not None:
             return await self.in_flight_fn(node_id=node_id, since=since)
         return False
 
-    async def fleet_deploy_attempt_count(self, *, node_id, target_version, since):
+    async def fleet_deploy_attempt_count(self, *, node_id, tenant_id, target_version, since):
+        self.seen_tenants.append(tenant_id)
         if self.count_fn is not None:
             return await self.count_fn(
                 node_id=node_id, target_version=target_version, since=since
@@ -411,6 +418,48 @@ def test_has_recent_deploy_from_list_handles_non_dict_entries():
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_auto_upgrade_gate_passes_the_tenant_to_storage(monkeypatch):
+    """The tenant must actually reach storage, not merely be available here.
+
+    This pins the WIRING, not the predicate, and it needs its own test because
+    both calls in ``_maybe_queue_auto_upgrade`` are wrapped in a fail-open
+    ``except Exception`` that falls back to ALLOW. Drop ``tenant_id`` from
+    either call and the ``TypeError`` from ``_FakeStorage`` is swallowed there,
+    the gate proceeds, and every other test in this file still passes — a
+    tenant scope that reports success while doing nothing.
+
+    Asserting on what storage RECEIVED is what makes that visible: an argument
+    that never arrives records nothing.
+
+    ``node_id`` must be a real UUID. The same fail-open ``except`` also
+    swallows the ``ValueError`` from ``UUID("node-uuid-1")``, so the
+    placeholder used elsewhere in this file never reaches storage at all —
+    which is its own demonstration of how much that handler hides.
+    """
+    monkeypatch.setattr(fleet_mod, "MIN_RECOMMENDED_PLUGIN_VERSION", "2.4.0")
+    monkeypatch.setattr(fleet_mod, "MIN_AUTO_DEPLOY_PLUGIN_VERSION", "0.0.0")
+
+    async def _enabled(_tid):
+        return True
+
+    monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
+    sc = _FakeStorage()
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
+        body=_body("2.3.5"),
+        pending_commands=sc.pending_commands,
+        node_id="00000000-0000-0000-0000-000000000001",
+    )
+
+    # Both gates consulted, both told which tenant is asking.
+    assert sc.seen_tenants == ["tenant-1", "tenant-1"], (
+        "the in-flight and attempt-budget checks must both receive the tenant; "
+        f"storage saw {sc.seen_tenants}"
+    )
+    assert len(sc.created_commands) == 1, "the happy path must still queue"
 
 
 @pytest.mark.asyncio

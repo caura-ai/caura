@@ -555,6 +555,7 @@ async def _maybe_queue_auto_upgrade(
     try:
         in_flight = await sc.fleet_in_flight_deploy(
             node_id=UUID(node_id),
+            tenant_id=body.tenant_id,
             since=datetime.now(UTC) - DEPLOY_IN_FLIGHT_WINDOW,
         )
     except Exception:
@@ -585,6 +586,7 @@ async def _maybe_queue_auto_upgrade(
     try:
         recent_attempts = await sc.fleet_deploy_attempt_count(
             node_id=UUID(node_id),
+            tenant_id=body.tenant_id,
             target_version=target_version,
             since=datetime.now(UTC) - AUTO_UPGRADE_ATTEMPT_WINDOW,
         )
