@@ -23,6 +23,7 @@ import ast
 import json
 import subprocess
 import sys
+import textwrap
 import typing
 from pathlib import Path
 
@@ -1180,3 +1181,694 @@ def _live_entries() -> list[gate.Entry]:
     the caller actually made.
     """
     return gate.enumerate_methods() + gate.enumerate_routes()
+
+
+# ---------------------------------------------------------------------------
+# Identity-column writability — check 4
+# ---------------------------------------------------------------------------
+#
+# The three defects this check exists for were all tenant-bound at the time, so
+# checks 1-3 passed them. What these cases pin is the decision boundary of the
+# AST half: a silent miss here is a method that writes an identity column and
+# nothing objects, which is exactly how #1118 and #1121 reached main.
+
+
+def _sites(source: str) -> dict[str, str]:
+    return gate._caller_keyed_update_sites(textwrap.dedent(source))
+
+
+def test_setattr_over_caller_keys_is_a_site() -> None:
+    """``entity_update``'s shape before #1119."""
+    assert "m" in _sites(
+        """
+        async def m(self, row_id, tenant_id, data):
+            for key, value in data.items():
+                if hasattr(row, key):
+                    setattr(row, key, value)
+        """
+    )
+
+
+def test_a_loop_over_written_out_names_is_not_a_site() -> None:
+    """``agent_add``'s shape: the keys are in the source, so no caller reaches a column.
+
+    This is the case that decides whether the check is usable. Flagging it would
+    put a safe method in the registry, and a registry with entries nobody needed
+    is how a reviewer learns to add lines without reading them.
+    """
+    assert not _sites(
+        """
+        async def m(self, data):
+            for key in ("fleet_id", "trust_level", "display_name"):
+                if key in data:
+                    setattr(row, key, data[key])
+        """
+    )
+
+
+def test_an_unrelated_earlier_loop_does_not_vouch_for_a_later_one() -> None:
+    """Loop containment is ancestry, not line order.
+
+    The first version compared ``setattr.lineno >= loop.lineno``, so any loop
+    STARTING earlier counted — including a sibling that does not contain the
+    call. A harmless ``for flag in ("a", "b")`` above then vouched for an
+    unsafe ``setattr`` over ``data.items()`` below it, and the site went
+    unreported: a false negative in the one direction this check exists for.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, row_id, tenant_id, data):
+            for flag in ("a", "b"):
+                touched = flag
+            for key, value in data.items():
+                setattr(row, key, value)
+        """
+    )
+
+
+def test_a_literal_outer_loop_does_not_vouch_for_a_caller_keyed_inner_one() -> None:
+    """Provenance, not proximity: the innermost binding of the key is what counts.
+
+    Round 1 fixed sibling loops by switching to ancestry. That left the nested
+    case, where the literal loop really is an ancestor and still says nothing
+    about where ``key`` came from::
+
+        for group in ("core", "extra"):        # literal, and irrelevant
+            for key, value in data[group].items():
+                setattr(row, key, value)
+
+    ``any(enclosing loop is literal)`` called that safe.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, tenant_id, data):
+            for group in ("core", "extra"):
+                for key, value in data[group].items():
+                    setattr(row, key, value)
+        """
+    )
+
+
+def test_a_key_no_enclosing_loop_binds_is_not_assumed_safe() -> None:
+    """A key from somewhere else is unproven, and unproven fails toward reporting."""
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            key = data["column"]
+            setattr(row, key, data["value"])
+        """
+    )
+
+
+def test_an_update_values_comprehension_written_inline_is_a_site() -> None:
+    """The detection cannot depend on the comprehension being given a name first.
+
+    Requiring ``values = {…}`` then ``.values(**values)`` meant inlining the same
+    expression walked straight past the check.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, patch):
+            await session.execute(sql_update(Memory).values(**{k: v for k, v in patch.items()}))
+        """
+    )
+
+
+def test_an_update_values_given_the_dict_positionally_is_a_site() -> None:
+    """``.values(data)`` is the same defect as ``.values(**data)``.
+
+    SQLAlchemy's ``Update.values()`` takes a single dict positionally as well as
+    a ``**`` spread, and the positional form is the one that does not require
+    every key to be a valid Python identifier. Scanning only ``node.keywords``
+    saw the spread and never the argument, so the whole of #1081/#1118/#1121
+    reproduced with two characters removed would have passed the gate.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, patch):
+            await session.execute(sql_update(Memory).values(patch))
+        """
+    )
+
+
+def test_an_update_values_given_a_comprehension_positionally_is_a_site() -> None:
+    """The positional form gets the same provenance reading as the spread."""
+    assert "m" in _sites(
+        """
+        async def m(self, patch):
+            await session.execute(sql_update(Memory).values({k: v for k, v in patch.items()}))
+        """
+    )
+
+
+def test_an_update_values_given_a_literal_dict_positionally_is_not_a_site() -> None:
+    """Written-out keys stay safe whichever way they are passed.
+
+    Without this, "look at the positional argument too" could be satisfied by
+    reporting every ``.values(...)`` call, and the two tests above would pass
+    against a check that names every update in the file.
+    """
+    assert not _sites(
+        """
+        async def m(self, status):
+            await session.execute(sql_update(Memory).values({"status": status}))
+        """
+    )
+
+
+def test_update_values_named_keywords_are_not_a_site() -> None:
+    """``report_update_completed``'s shape: each column named in the source.
+
+    ``.values(status=status, completed_at=completed_at)`` puts real column names
+    in ``kw.arg``, which is the author typing them out — the opposite of a
+    caller-keyed dict. Widening to positional arguments must not sweep this in.
+    """
+    assert not _sites(
+        """
+        async def m(self, status, completed_at):
+            await session.execute(
+                sql_update(Report).where(Report.id == rid).values(
+                    status=status, completed_at=completed_at
+                )
+            )
+        """
+    )
+
+
+def test_an_update_values_built_by_spread_or_dict_call_is_a_site() -> None:
+    """``{**data}`` and ``dict(data)`` carry the caller's keys as surely as a comprehension.
+
+    The ``set_=`` branch already treated "not written out in the source" as
+    unsafe; this branch matched two specific node types instead, so every other
+    way of copying a caller's dict read as safe.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            values = {**data}
+            await session.execute(sql_update(Memory).where(x).values(**values))
+        """
+    )
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            values = dict(data)
+            await session.execute(sql_update(Memory).values(**values))
+        """
+    )
+
+
+def test_an_update_values_written_out_in_the_source_is_not_a_site() -> None:
+    """The conservative default must still let a written-out UPDATE through.
+
+    ``memory_update_status`` and ``lifecycle_audit_finalize`` name their own
+    columns; flagging them would put safe methods in the registry.
+    """
+    assert not _sites(
+        """
+        async def m(self, status):
+            await session.execute(sql_update(Memory).where(x).values(**{"status": status}))
+        """
+    )
+
+
+def test_an_async_for_over_caller_keys_is_a_site() -> None:
+    """``async for`` is a loop too.
+
+    It was invisible to the first version's ``isinstance(p, ast.For)`` test,
+    which happened to report the site anyway — an empty loop list reads as
+    "not literal". Right answer, wrong reason, and the reason is what would
+    have inverted the moment the keys were literal.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            async for key, value in data.items():
+                setattr(row, key, value)
+        """
+    )
+
+
+def test_an_async_for_over_written_out_names_is_not_a_site() -> None:
+    """The other half of the same fix: the accident above is now a real read."""
+    assert not _sites(
+        """
+        async def m(self, data):
+            async for key in ("fleet_id", "display_name"):
+                setattr(row, key, data[key])
+        """
+    )
+
+
+def test_a_nested_scope_does_not_decide_the_outer_one() -> None:
+    """``_all_literal_keys`` stops at a nested ``def``.
+
+    A closure assigning its own ``values`` says nothing about the ``values``
+    the method passes to ``.values(**…)``; letting it answer would move a
+    verdict in either direction.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, patch):
+            def helper():
+                values = {"weight": 1}
+                return values
+            values = {k: v for k, v in patch.items()}
+            await session.execute(sql_update(Memory).values(**values))
+        """
+    )
+
+
+def test_a_lambda_does_not_borrow_an_outer_loops_literal_names() -> None:
+    """A function boundary between a ``setattr`` and a loop breaks the loop's vouching.
+
+    ``_enclosing_loops`` matched the key by name against any lexically
+    enclosing loop, so a lambda parameter shadowing a literally-iterated outer
+    name was cleared by a loop it never read::
+
+        for key in ("a", "b"):
+            f = lambda key, value: setattr(row, key, value)
+            f(caller_key, caller_value)
+
+    The ``key`` inside the lambda is the lambda's own parameter, filled from
+    the caller. A ``def`` in that position is reported because every function
+    is scanned as its own scope, but a ``Lambda`` is not a ``FunctionDef`` and
+    so was never visited on its own — leaving the outer pass as the only
+    reader, and it cleared the site.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            for key in ("a", "b"):
+                f = lambda key, value: setattr(row, key, value)
+                f(caller_key, caller_value)
+        """
+    )
+
+
+def test_a_nested_def_is_reported_under_its_own_name() -> None:
+    """A nested ``def`` shadowing an outer literal loop name is not cleared.
+
+    The outer pass does clear it — the key matches the outer loop's literal
+    tuple by name — but the helper is also scanned as its own scope, where
+    there is no enclosing loop at all, so the site surfaces under ``helper``.
+    That second reading is what makes the shadowing case reported rather than
+    silent, and it is the reason the ``def`` form needed no fix while the
+    ``lambda`` form above did.
+
+    ``helper`` holds before and after the loop-boundary fix; ``m`` is the half
+    that fix adds, once a function boundary stops the outer loop from vouching.
+    """
+    sites = _sites(
+        """
+        async def m(self, data):
+            for key in ("a", "b", "c"):
+                def helper(key, value):
+                    setattr(row, key, value)
+                helper(caller_key, caller_value)
+        """
+    )
+    assert "helper" in sites
+    assert "m" in sites
+
+
+def test_a_loop_still_vouches_for_a_setattr_in_its_own_scope() -> None:
+    """``agent_add``'s shape: no function boundary in between, so it still clears.
+
+    The guard against fixing the above by simply never clearing anything.
+    """
+    assert not _sites(
+        """
+        async def m(self, data):
+            for key in ("fleet_id", "trust_level"):
+                setattr(row, key, data[key])
+        """
+    )
+
+
+def test_a_later_literal_reassignment_does_not_hide_a_caller_keyed_values() -> None:
+    """The dict that reaches the UPDATE is the one at the call, not the last one written.
+
+    Resolving a name to its final assignment answers "literal" here and the
+    site vanishes, even though the statement two lines above spread a
+    caller-keyed dict into an ``UPDATE ... SET``. Every assignment has to be
+    literal for the name to clear, which is the rule ``_statement_roots``
+    already applies to the statement builder: any origin can sink the verdict.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, patch):
+            values = {k: v for k, v in patch.items()}
+            await session.execute(sql_update(Memory).values(**values))
+            values = {"status": "ok"}
+            log_status(values)
+        """
+    )
+
+
+def test_a_later_literal_reassignment_does_not_hide_a_caller_keyed_conflict_set() -> None:
+    """Same hole on the ``set_=`` half — both call sites resolved the same way."""
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            update = {k: v for k, v in data.items()}
+            stmt = pg_insert(t).values(**data).on_conflict_do_update(
+                constraint="c",
+                set_=update,
+            )
+            update = {"weight": 1}
+            log_update(update)
+        """
+    )
+
+
+def test_a_name_literal_at_every_assignment_is_still_not_a_site() -> None:
+    """The other side of the rule: requiring ALL assignments must not flag the safe case.
+
+    Without this, "every origin must be literal" could be satisfied by never
+    clearing anything, and the two tests above would pass against a check that
+    reports every name it sees.
+    """
+    assert not _sites(
+        """
+        async def m(self, patch):
+            values = {"status": "running"}
+            await session.execute(sql_update(Memory).values(**values))
+            values = {"status": "done"}
+            await session.execute(sql_update(Memory).values(**values))
+        """
+    )
+
+
+def test_a_conflict_set_built_from_caller_keys_is_a_site() -> None:
+    """``fleet_upsert_node``'s shape before #1129 — a filter, but the wrong one."""
+    assert "m" in _sites(
+        """
+        async def m(self, values):
+            stmt = pg_insert(t).values(**values).on_conflict_do_update(
+                constraint="c",
+                set_={k: v for k, v in values.items() if k not in ("tenant_id",)},
+            )
+        """
+    )
+
+
+def test_a_conflict_set_written_out_in_the_source_is_not_a_site() -> None:
+    """``relation_add``'s shape: the SET names its own columns."""
+    assert not _sites(
+        """
+        async def m(self, data):
+            stmt = pg_insert(t).values(**data).on_conflict_do_update(
+                constraint="c",
+                set_={"weight": excluded.weight, "fleet_id": excluded.fleet_id},
+            )
+        """
+    )
+
+
+def test_an_insert_is_not_a_site() -> None:
+    """A caller naming the id of a row it is creating moves no existing row.
+
+    ``pg_insert(...).values(**data)`` with no DO UPDATE collides rather than
+    overwrites, so the identity of an existing row is never caller-controlled.
+    Counting inserts would flag ``relation_add``, ``agent_add`` and
+    ``agent_activity_digest_upsert`` for a defect none of them has.
+    """
+    assert not _sites(
+        """
+        async def m(self, data):
+            stmt = pg_insert(t).values(**data).on_conflict_do_nothing(index_elements=["a"])
+        """
+    )
+
+
+def test_a_private_helper_is_scanned_too() -> None:
+    """Delegation must not launder the pattern.
+
+    An earlier version skipped ``_``-prefixed functions, so moving the loop one
+    call deep hid it completely: the public method's own body is clean and the
+    helper was never looked at. The helper is reported under its own name, which
+    is also where the filter belongs.
+    """
+    found = _sites(
+        """
+        async def entity_update(self, entity_id, tenant_id, data):
+            return self._apply_patch(row, data)
+
+        def _apply_patch(self, row, data):
+            for key, value in data.items():
+                setattr(row, key, value)
+        """
+    )
+    assert "_apply_patch" in found, found
+
+
+def test_an_update_split_across_an_assignment_is_a_site() -> None:
+    """A statement does not have to be built in one expression."""
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            stmt = sql_update(Memory).where(cond)
+            await session.execute(stmt.values(**data))
+        """
+    )
+
+
+def test_a_self_referential_statement_assignment_is_a_site() -> None:
+    """``stmt = stmt.values(**data)`` makes the last assignment circular.
+
+    Resolving only the newest assignment answers ``stmt`` and the update
+    vanishes; every assignment of the name is considered so the original
+    ``sql_update`` is still found.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            stmt = sql_update(Memory)
+            stmt = stmt.values(**data)
+            await session.execute(stmt)
+        """
+    )
+
+
+def test_an_insert_built_through_a_variable_is_still_exempt() -> None:
+    """The INSERT exclusion has to survive resolving through locals."""
+    assert not _sites(
+        """
+        async def m(self, data):
+            stmt = pg_insert(t)
+            await session.execute(stmt.values(**data))
+        """
+    )
+
+
+def test_an_unrecognised_statement_builder_is_reported() -> None:
+    """Neither insert nor update resolves to "unknown", and unknown is reported.
+
+    The alternative is to assume an unrecognised builder is harmless, which is
+    the direction this check cannot afford to be wrong in.
+    """
+    assert "m" in _sites(
+        """
+        async def m(self, data):
+            await session.execute(some_helper(Memory).values(**data))
+        """
+    )
+
+
+def test_the_registry_covers_exactly_the_methods_that_need_it() -> None:
+    """Every caller-keyed UPDATE on the tree is registered, and none spuriously.
+
+    The trunk-is-green case for check 4. A method drifting into this shape
+    without a registration fails here as well as in CI, and a registration left
+    behind after a method stops writing from caller keys fails too — a stale one
+    reads as coverage that is not there.
+    """
+    source = Path(gate.inspect.getfile(_service())).read_text()
+    assert set(gate._caller_keyed_update_sites(source)) == set(gate.IDENTITY_WRITE_GUARDS)
+
+
+def test_no_registered_guard_admits_an_identity_column() -> None:
+    """The runtime half, against the models as they are now."""
+    assert gate._identity_writability_findings() == []
+
+
+def test_protected_columns_come_from_the_model_not_a_list() -> None:
+    """Primary key, tenant scope and database-maintained columns, all read off the model.
+
+    Named columns would go stale on a rename; these follow the schema.
+    """
+    from common.models import Memory
+
+    protected = gate._protected_columns(Memory)
+    assert protected["id"] == "primary key"
+    assert protected["tenant_id"] == "tenant scope"
+    assert protected["search_vector"] == "database-maintained"
+    assert "content" not in protected
+
+
+def test_a_guard_that_admits_the_primary_key_is_reported() -> None:
+    """The #1121 failure, injected: a filter that looks deliberate and is not.
+
+    Widens the real constant rather than registering a new name, so the method
+    still mentions what it is registered for and the run reaches the runtime
+    half. Pointing the registry at a fresh name instead stops at the reference
+    check, which is a different finding and would not prove this one fires.
+    """
+    from common.models import FleetNode
+
+    service = _service()
+    original = service._FLEET_NODE_IMMUTABLE_FIELDS
+    try:
+        service._FLEET_NODE_IMMUTABLE_FIELDS = frozenset({"tenant_id", "node_name"})  # id dropped
+        findings = gate._identity_writability_findings()
+    finally:
+        service._FLEET_NODE_IMMUTABLE_FIELDS = original
+
+    assert any("FleetNode.id (primary key)" in f for f in findings), findings
+    assert {c.key for c in FleetNode.__table__.primary_key.columns} == {"id"}
+    assert gate._identity_writability_findings() == [], "the constant was not restored"
+
+
+def test_a_registration_naming_a_model_the_method_never_writes_is_reported() -> None:
+    """The constant can be genuinely used and the entry still describe the wrong table.
+
+    ``memory_update`` really does reference ``_MEMORY_UPDATABLE_FIELDS``, so the
+    reference check clears it; naming ``Entity`` as the model then validates
+    that constant against Entity's columns. What is lost is specific:
+    ``Memory.search_vector`` is a TSVECTOR maintained by a trigger, and Entity
+    has no such column, so the derived-column protection stops being checked
+    while everything still reads as registered.
+
+    Checked by reference rather than by reading the model out of the statement:
+    ``entity_update`` has no statement to read — it is a ``select`` plus
+    ``setattr`` — so a statement-target comparison would have to exempt the one
+    shape that started this whole check.
+    """
+    original = gate.IDENTITY_WRITE_GUARDS.copy()
+    try:
+        gate.IDENTITY_WRITE_GUARDS["memory_update"] = (
+            "Entity",  # a real model, wrong one
+            "_MEMORY_UPDATABLE_FIELDS",  # genuinely referenced by memory_update
+            True,
+        )
+        findings = gate._identity_writability_findings()
+    finally:
+        gate.IDENTITY_WRITE_GUARDS.clear()
+        gate.IDENTITY_WRITE_GUARDS.update(original)
+
+    assert any("does not mention Entity" in f for f in findings), findings
+    assert gate._identity_writability_findings() == [], "the registry was not restored"
+
+
+def test_a_registration_the_method_no_longer_uses_is_reported() -> None:
+    """The registry is checked against the code, not trusted as a description of it.
+
+    Without this, ``IDENTITY_WRITE_GUARDS`` could name a correct constant while
+    the method had gone back to ``hasattr``: the runtime half validates the
+    constant, and a constant nobody reads protects nothing.
+    """
+    original = gate.IDENTITY_WRITE_GUARDS.copy()
+    try:
+        gate.IDENTITY_WRITE_GUARDS["entity_update"] = (
+            "Entity",
+            "_MEMORY_UPDATABLE_FIELDS",  # a real constant, wrong method
+            True,
+        )
+        findings = gate._identity_writability_findings()
+    finally:
+        gate.IDENTITY_WRITE_GUARDS.clear()
+        gate.IDENTITY_WRITE_GUARDS.update(original)
+
+    assert any("does not mention it" in f for f in findings), findings
+
+
+def _service():
+    import core_storage_api.services.postgres_service as service
+
+    return service
+
+
+# ---------------------------------------------------------------------------
+# The assumptions check 4's single-file scan rests on
+# ---------------------------------------------------------------------------
+
+
+def test_the_live_service_still_satisfies_the_scan_assumptions() -> None:
+    """The tripwires are silent on the tree as it stands, or they are just noise."""
+    assert gate._scan_assumption_findings(_service().PostgresService, gate._service_tree()) == []
+
+
+def test_a_base_class_on_the_service_is_reported() -> None:
+    """Check 4 reads one file; checks 1-3 enumerate the class.
+
+    ``_public_methods`` goes through ``inspect.getmembers`` precisely so a
+    method arriving from a mixin is not silently skipped. Check 4 parses the
+    text of one module instead, so the same mixin would be invisible to it —
+    the two halves of the gate would disagree about what they cover, and only
+    the quieter one would be wrong.
+
+    Closing that by walking every defining module is speculative work for a
+    case that cannot happen yet: ``PostgresService.__mro__`` is
+    ``(PostgresService, object)``. This fails loudly at the moment someone
+    makes it possible, which is when there is a real second module to point at.
+    """
+
+    class Mixin:
+        pass
+
+    class Derived(Mixin):
+        pass
+
+    findings = gate._scan_assumption_findings(Derived, ast.parse(""))
+
+    assert any("Mixin" in f for f in findings), findings
+
+
+def test_two_scanned_functions_sharing_a_name_are_reported() -> None:
+    """``sites`` and ``_names_referenced`` key by bare name, and disagree on collisions.
+
+    ``sites`` keeps the first (``setdefault``) and ``_names_referenced`` keeps
+    the last, so two same-named functions could have one supply the verdict and
+    the other supply the names it is checked against. A qualified key is not the
+    fix, because ``IDENTITY_WRITE_GUARDS`` is written by hand and a qualified
+    one would have to carry a class path that goes stale. Refusing the collision
+    keeps the registry readable and the ambiguity impossible.
+    """
+    findings = gate._scan_assumption_findings(
+        object,
+        ast.parse(
+            textwrap.dedent(
+                """
+                def apply_patch(self, data): ...
+                class Other:
+                    def apply_patch(self, data): ...
+                """
+            )
+        ),
+    )
+
+    assert any("apply_patch" in f for f in findings), findings
+
+
+def test_a_qualified_reference_counts_as_mentioning_the_name() -> None:
+    """``models.Entity`` is the same registration as ``Entity``.
+
+    The reference checks read ``ast.Name`` only, so switching this file to
+    qualified imports would report every guard as stale — a gate failure fixed
+    by reverting an import style, which is the wrong thing to teach. Attribute
+    access counts too; the check is "is this name spoken here at all", and it
+    is deliberately weak in the direction that does not block a green tree.
+    """
+    referenced = gate._names_referenced(
+        textwrap.dedent(
+            """
+            def m(self, patch):
+                values = {k: v for k, v in patch.items()}
+                return sql_update(models.Entity).values(**values), service._ENTITY_UPDATABLE_FIELDS
+            """
+        )
+    )
+
+    assert "Entity" in referenced["m"]
+    assert "_ENTITY_UPDATABLE_FIELDS" in referenced["m"]
