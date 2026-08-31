@@ -57,6 +57,7 @@ class ArchiveStorageAdapter(Protocol):
         self,
         audit_id: int,
         *,
+        org_id: str,
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
@@ -116,6 +117,7 @@ class PipelineStorageAdapter(Protocol):
         self,
         audit_id: int,
         *,
+        org_id: str,
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
@@ -218,6 +220,7 @@ async def _run_action(
             try:
                 await adapter.update_lifecycle_audit_row(
                     audit_id,
+                    org_id=org_id,
                     status="success",
                     stats={"skipped": True, "reason": "recent_success"},
                 )
@@ -243,7 +246,11 @@ async def _run_action(
     # still runs — dropping would silently skip an op the operator
     # asked for.
     try:
-        await adapter.update_lifecycle_audit_row(audit_id, status="in_progress")
+        await adapter.update_lifecycle_audit_row(
+            audit_id,
+            org_id=org_id,
+            status="in_progress",
+        )
     except Exception:
         logger.warning(
             "lifecycle audit in_progress update failed; continuing",
@@ -269,6 +276,7 @@ async def _run_action(
         try:
             await adapter.update_lifecycle_audit_row(
                 audit_id,
+                org_id=org_id,
                 status="failure",
                 stats={"terminal": True} if permanent else None,
                 error_message=str(exc)[:500],
@@ -308,6 +316,7 @@ async def _run_action(
 
     await adapter.update_lifecycle_audit_row(
         audit_id,
+        org_id=org_id,
         status="success",
         stats={stats_key: count},
     )

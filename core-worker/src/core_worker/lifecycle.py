@@ -38,6 +38,7 @@ class _CoreWorkerLifecycleAdapter:
         self,
         audit_id: int,
         *,
+        org_id: str,
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
@@ -45,6 +46,7 @@ class _CoreWorkerLifecycleAdapter:
         await update_lifecycle_audit_row(
             get_storage_client(),
             audit_id,
+            org_id=org_id,
             status=status,
             stats=stats,
             error_message=error_message,

@@ -724,6 +724,7 @@ async def handle_embed_backfill_request(event: Event) -> None:
         await update_lifecycle_audit_row(
             get_storage_client(),
             request.audit_id,
+            org_id=request.org_id,
             status="failure",
             error_message=message,
         )
@@ -743,6 +744,7 @@ async def handle_embed_backfill_request(event: Event) -> None:
         await update_lifecycle_audit_row(
             get_storage_client(),
             request.audit_id,
+            org_id=request.org_id,
             status="in_progress",
         )
     except Exception:
@@ -777,6 +779,7 @@ async def handle_embed_backfill_request(event: Event) -> None:
             await update_lifecycle_audit_row(
                 get_storage_client(),
                 request.audit_id,
+                org_id=request.org_id,
                 status="failure",
                 error_message=str(exc)[:500],
             )
@@ -793,6 +796,7 @@ async def handle_embed_backfill_request(event: Event) -> None:
     await update_lifecycle_audit_row(
         get_storage_client(),
         request.audit_id,
+        org_id=request.org_id,
         status="success",
         stats={
             "scanned": report.scanned,

@@ -9654,6 +9654,7 @@ class PostgresService:
         self,
         audit_id: int,
         *,
+        org_id: str,
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
@@ -9666,12 +9667,17 @@ class PostgresService:
           (the sticky-success gate skipped the UPDATE). A no-op, NOT
           an error — typically a Pub/Sub redelivery of an already-
           acked successful message.
-        * ``False`` — row not found at all (pruned, or a buggy
-          publisher invented an id).
+        * ``False`` — no row matches both ``audit_id`` and ``org_id``
+          (pruned, belongs to another org, or a buggy publisher
+          invented an id).
 
         ``finished_at`` is only stamped on terminal status values so the
         ``in_progress`` transition leaves the row addressable for a
         later success/failure update.
+
+        ``org_id`` is part of both the UPDATE and the no-op existence
+        check, so an id from another org is indistinguishable from a
+        missing row and cannot be finalized by id alone.
         """
         values: dict = {"status": status}
         if status in ("success", "failure"):
@@ -9704,7 +9710,10 @@ class PostgresService:
             # ``failure`` is NOT gated.
             stmt = (
                 sql_update(LifecycleAudit)
-                .where(LifecycleAudit.id == audit_id)
+                .where(
+                    LifecycleAudit.id == audit_id,
+                    LifecycleAudit.org_id == org_id,
+                )
                 .where(LifecycleAudit.status != "success")
                 .values(**values)
             )
@@ -9716,7 +9725,12 @@ class PostgresService:
             # instead of a misleading 404 that would surface as a
             # spurious "audit row not found" warning on every Pub/Sub
             # redelivery of an acked-but-late-acked successful message.
-            exists = await session.scalar(select(LifecycleAudit.id).where(LifecycleAudit.id == audit_id))
+            exists = await session.scalar(
+                select(LifecycleAudit.id).where(
+                    LifecycleAudit.id == audit_id,
+                    LifecycleAudit.org_id == org_id,
+                )
+            )
             return None if exists else False
 
     async def lifecycle_audit_has_recent_success(

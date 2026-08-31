@@ -457,12 +457,13 @@ async def update_lifecycle_audit_row(
     client: httpx.AsyncClient,
     audit_id: int,
     *,
+    org_id: str,
     status: str,
     stats: dict | None = None,
     error_message: str | None = None,
 ) -> None:
     """PATCH the lifecycle_audit row created by core-api fanout."""
-    body: dict[str, Any] = {"status": status}
+    body: dict[str, Any] = {"org_id": org_id, "status": status}
     if stats is not None:
         body["stats"] = stats
     if error_message is not None:
