@@ -10,6 +10,21 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.37.3](https://github.com/caura-ai/caura/compare/backend-v2.37.2...backend-v2.37.3) (2026-08-31)
+
+
+### Bug Fixes
+
+* **documents:** refuse an upsert that guts a stored document (C34) ([#1145](https://github.com/caura-ai/caura/issues/1145)) ([68126b9](https://github.com/caura-ai/caura/commit/68126b9ec9a708852dc7bfa7adc451f55498a6bf))
+* **memory:** say "add" where the entity-link trail said "replaced" ([#1156](https://github.com/caura-ai/caura/issues/1156)) ([b85027a](https://github.com/caura-ai/caura/commit/b85027aedf28401e1fd92487aa7072345108b516))
+* **memory:** surface an entity link storage refused ([#1153](https://github.com/caura-ai/caura/issues/1153)) ([617c482](https://github.com/caura-ai/caura/commit/617c4820ae13b254c0687a05a8739f88ce46e676))
+* **storage:** bind entity-link creation to the caller's tenant ([#1152](https://github.com/caura-ai/caura/issues/1152)) ([fd3ac96](https://github.com/caura-ai/caura/commit/fd3ac964c18aa45c6cb72fc0c913876eeefd08da))
+* **storage:** bind memory-entity links to the caller's tenant ([#1148](https://github.com/caura-ai/caura/issues/1148)) ([2e64c7a](https://github.com/caura-ai/caura/commit/2e64c7aa48041722e6d72e680a9852e08d08fbf4))
+* **storage:** scope dedup review decisions to tenant ([#1154](https://github.com/caura-ai/caura/issues/1154)) ([8b631e7](https://github.com/caura-ai/caura/commit/8b631e792bd3f94f9c97bf97e864fa9607e6319c))
+* **storage:** scope lifecycle audit finalization to org ([#1150](https://github.com/caura-ai/caura/issues/1150)) ([94437d1](https://github.com/caura-ai/caura/commit/94437d1f03b0d0b8eaf33c27986cc2cca8477f4b))
+* **storage:** scope recall increments to tenant ([#1159](https://github.com/caura-ai/caura/issues/1159)) ([5c1c1bc](https://github.com/caura-ai/caura/commit/5c1c1bc251de1206f29940463138ca4a0103512a)), closes [#1088](https://github.com/caura-ai/caura/issues/1088)
+* **storage:** scope report finalization to the owning tenant ([#1160](https://github.com/caura-ai/caura/issues/1160)) ([0dd15c2](https://github.com/caura-ai/caura/commit/0dd15c2cc018b45679d86df3310cd926b4434f09))
+
 ## [2.37.2](https://github.com/caura-ai/caura/compare/backend-v2.37.1...backend-v2.37.2) (2026-08-31)
 
 
