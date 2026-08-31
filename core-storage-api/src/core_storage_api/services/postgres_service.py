@@ -364,6 +364,14 @@ _MEMORY_UPDATABLE_FIELDS = _MEMORY_VALID_FIELDS - _MEMORY_IMMUTABLE_FIELDS
 # ``_MEMORY_UPDATABLE_FIELDS`` above follows.
 _ENTITY_UPDATABLE_FIELDS = frozenset({"canonical_name", "entity_type", "attributes", "name_embedding"})
 
+# The one answer ``entity_add_entity_link`` gives for every way a link can be
+# refused: either endpoint absent, either endpoint owned by another tenant, or
+# the pair already linked. A constant rather than the string repeated at each
+# raise, because the whole point is that the causes are indistinguishable on the
+# wire — two copies could drift apart and reintroduce the existence oracle one
+# word at a time. The true cause is logged, never returned.
+_LINK_REJECTED = "entity link rejected: memory_id or entity_id does not exist, or the link already exists"
+
 # Columns ``fleet_upsert_node``'s ON CONFLICT DO UPDATE must not rewrite. The
 # insert half of that statement still uses every key the caller sent; this is
 # only the branch that lands on a row that already exists.
@@ -5947,8 +5955,72 @@ class PostgresService:
             )
             return result.scalar_one_or_none()
 
-    async def entity_add_entity_link(self, data: dict) -> MemoryEntityLink:
+    async def _owned_link_endpoints(
+        self,
+        session: AsyncSession,
+        tenant_id: str,
+        memory_ids: set[UUID],
+        entity_ids: set[UUID],
+    ) -> tuple[set[UUID], set[UUID]]:
+        """Which of these memory / entity ids actually belong to ``tenant_id``.
+
+        ``memory_entity_links`` has no ``tenant_id`` of its own, so a link row
+        cannot carry a predicate — but both parents do (``Memory.tenant_id``,
+        ``Entity.tenant_id``), which is what lets an existence check stand in
+        for one and keeps this a data change rather than a schema change.
+
+        Returns the owned subset of each side rather than a bool, so a caller
+        holding many pairs can test membership per pair without a query each.
+        Callers must treat "not in the returned set" as refusal for **both**
+        ends: the two failures are independent, and checking one leaves the
+        other half of the hole open.
+        """
+        owned_memories = set(
+            (
+                await session.scalars(
+                    select(Memory.id).where(Memory.id.in_(memory_ids), Memory.tenant_id == tenant_id)
+                )
+            ).all()
+        )
+        owned_entities = set(
+            (
+                await session.scalars(
+                    select(Entity.id).where(Entity.id.in_(entity_ids), Entity.tenant_id == tenant_id)
+                )
+            ).all()
+        )
+        return owned_memories, owned_entities
+
+    async def entity_add_entity_link(self, tenant_id: str, data: dict) -> MemoryEntityLink:
+        """Create one memory→entity link, both ends scoped to ``tenant_id``.
+
+        Raises ``ValueError`` — which the router maps to 409 — when either end
+        is absent or belongs to another tenant. Deliberately the same exception,
+        with the same message, that a genuine FK violation already raised: a
+        distinguishable answer would make the route an existence oracle for both
+        id spaces, on a service that authenticates no request
+        (GHSA-wgvw-28pq-jc36).
+        """
         async with get_session() as session:
+            memory_id, entity_id = data["memory_id"], data["entity_id"]
+            if not isinstance(memory_id, UUID):
+                memory_id = UUID(memory_id)
+            if not isinstance(entity_id, UUID):
+                entity_id = UUID(entity_id)
+            owned_memories, owned_entities = await self._owned_link_endpoints(
+                session, tenant_id, {memory_id}, {entity_id}
+            )
+            if memory_id not in owned_memories or entity_id not in owned_entities:
+                logger.info(
+                    "Entity link rejected for memory %s → entity %s: not in tenant %s",
+                    memory_id,
+                    entity_id,
+                    tenant_id,
+                )
+                # Same message as the IntegrityError branch below, so the two
+                # causes are one answer on the wire. The distinct log line above
+                # is what keeps the real cause available to an operator.
+                raise ValueError(_LINK_REJECTED)
             link = MemoryEntityLink(**data)
             session.add(link)
             try:
@@ -5977,12 +6049,10 @@ class PostgresService:
                     data.get("entity_id"),
                     exc.orig,
                 )
-                raise ValueError(
-                    "entity link rejected: memory_id or entity_id does not exist, or the link already exists"
-                ) from exc
+                raise ValueError(_LINK_REJECTED) from exc
             return link
 
-    async def entity_bulk_upsert_links(self, items: list[dict]) -> list[dict]:
+    async def entity_bulk_upsert_links(self, tenant_id: str, items: list[dict]) -> list[dict]:
         """Idempotently create many memory→entity links in one statement.
 
         Each input item: ``{"input_idx", "memory_id", "entity_id", "role"}``.
@@ -5991,6 +6061,13 @@ class PostgresService:
         same composite PK ``(memory_id, entity_id)`` already existed;
         its ``role`` is preserved (mirrors today's ``find_entity_link``
         → ``create_entity_link`` flow which skips on a hit).
+
+        Every item is scoped to ``tenant_id`` on **both** ends. One binding
+        tenant for the request rather than one per item: a per-item tenant would
+        let a single batch span namespaces, which is the property this is here to
+        remove. An item whose memory or entity is not in ``tenant_id`` is
+        reported exactly like one whose endpoint does not exist — see
+        ``error="fk_violation"`` below.
 
         Cap enforced at the router level.
         """
@@ -6011,13 +6088,54 @@ class PostgresService:
         # second slot's result to map overwrite.
         idx_to_result: dict[int, dict[str, Any]] = {}
 
-        for it in items:
-            mid = it["memory_id"]
-            eid = it["entity_id"]
-            if not isinstance(mid, UUID):
-                mid = UUID(mid)
-            if not isinstance(eid, UUID):
-                eid = UUID(eid)
+        # Ownership resolved once for the whole batch, in its own session, then
+        # tested per item below. Two queries rather than two per item — and the
+        # sets are what the per-item test needs anyway, since a batch may name
+        # one memory many times.
+        #
+        # A separate session from the inserts is deliberate and safe: neither
+        # parent's ``tenant_id`` is caller-writable (``_MEMORY_IMMUTABLE_FIELDS``
+        # names it on memories, ``_ENTITY_UPDATABLE_FIELDS`` omits it on
+        # entities), so a row cannot change hands between this read and the
+        # write. Sharing one session instead would undo the per-item isolation
+        # the comment above describes.
+        pair_ids = [
+            (
+                mid if isinstance(mid, UUID) else UUID(mid),
+                eid if isinstance(eid, UUID) else UUID(eid),
+            )
+            for mid, eid in ((it["memory_id"], it["entity_id"]) for it in items)
+        ]
+        async with get_session() as session:
+            owned_memories, owned_entities = await self._owned_link_endpoints(
+                session,
+                tenant_id,
+                {mid for mid, _ in pair_ids},
+                {eid for _, eid in pair_ids},
+            )
+
+        for it, (mid, eid) in zip(items, pair_ids, strict=True):
+            if mid not in owned_memories or eid not in owned_entities:
+                # Same ``error`` value as the FK branch below, because the two
+                # are one answer to the caller: a row outside your tenant is
+                # not distinguishable from a row that is not there, and making
+                # it distinguishable would turn a batch endpoint into a
+                # bulk existence oracle. The log line carries the real cause.
+                logger.warning(
+                    "Entity link bulk-upsert refused: memory_id=%s entity_id=%s not in tenant %s",
+                    mid,
+                    eid,
+                    tenant_id,
+                )
+                idx_to_result[it["input_idx"]] = {
+                    "input_idx": it["input_idx"],
+                    "memory_id": str(mid),
+                    "entity_id": str(eid),
+                    "role": it["role"],
+                    "created": False,
+                    "error": "fk_violation",
+                }
+                continue
             # Annotated because ``literal_column("xmax")`` types as ``Any``, and
             # mypy will not infer a variable whose type is partly ``Any``.
             ins_stmt: ReturningInsert[tuple[UUID, UUID, str, Any]] = (

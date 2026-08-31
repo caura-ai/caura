@@ -56,11 +56,12 @@ async def _link_memory_to_entity(
 ) -> None:
     """Wire memory→entity in memory_entity_links so the SQL JOIN finds overlap."""
     await sc.create_entity_link(
+        TENANT_ID,
         {
             "memory_id": memory_id,
             "entity_id": entity_id,
             "role": role,
-        }
+        },
     )
 
 

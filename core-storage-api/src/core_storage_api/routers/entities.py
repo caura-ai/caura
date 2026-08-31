@@ -379,8 +379,16 @@ async def find_relation(
 @router.post("/links")
 async def create_memory_entity_link(request: Request) -> dict:
     body: dict = await request.json()
+    # Tenant guard, same shape as ``PATCH /entities/{entity_id}``: the body
+    # supplied only bare ``memory_id`` / ``entity_id`` / ``role``, so knowing two
+    # UUIDs was enough to create a graph edge across a tenant boundary (#1124).
+    # Removed from the body as well as read, because ``MemoryEntityLink`` has no
+    # ``tenant_id`` column — the join table is tenantless, which is the whole
+    # difficulty — and ``MemoryEntityLink(**data)`` would raise TypeError on it.
+    tenant_id = _require(body, "tenant_id")
+    del body["tenant_id"]
     try:
-        link = await _svc.entity_add_entity_link(body)
+        link = await _svc.entity_add_entity_link(tenant_id, body)
     except ValueError as e:
         # H-05 follow-up: a caller-supplied memory_id/entity_id that does not
         # exist, or a pair already linked, is a client error. It used to escape as
@@ -403,8 +411,13 @@ async def bulk_upsert_memory_entity_links(request: Request) -> list[dict]:
     flow which never overwrites role).
 
     Cap: 500 items per request.
+
+    ``tenant_id`` is required and binds every item, on both ends. One tenant for
+    the request rather than one per item: a per-item tenant would let a single
+    batch span namespaces, which is what #1124 is about.
     """
     body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
     items = body.get("items", [])
     if not isinstance(items, list):
         raise HTTPException(status_code=422, detail="'items' must be a list")
@@ -437,7 +450,7 @@ async def bulk_upsert_memory_entity_links(request: Request) -> list[dict]:
                     detail=f"invalid {field} UUID at input_idx {item.get('input_idx')!r}",
                 )
     _validate_input_idxs(items)
-    return await _svc.entity_bulk_upsert_links(items)
+    return await _svc.entity_bulk_upsert_links(tenant_id, items)
 
 
 @router.get("/links/find")

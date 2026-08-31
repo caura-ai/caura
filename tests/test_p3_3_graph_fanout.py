@@ -194,7 +194,7 @@ class TestGraphFanoutIntegration:
         ])
         memory_ids = [row["id"] for row in created]
         assert all(memory_ids), "bulk insert did not return an id for every memory"
-        await sc.bulk_upsert_entity_links([
+        await sc.bulk_upsert_entity_links(tenant_id, [
             {"input_idx": i, "memory_id": mid, "entity_id": entity["id"], "role": "subject"}
             for i, mid in enumerate(memory_ids)
         ])
