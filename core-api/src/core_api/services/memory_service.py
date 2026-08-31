@@ -3750,7 +3750,24 @@ async def update_memory(
         entity_link_dicts = [
             {"entity_id": str(link.entity_id), "role": link.role} for link in data.entity_links
         ]
-        await sc.update_memory_entities(str(memory_id), tenant_id, entity_link_dicts)
+        linked = await sc.update_memory_entities(str(memory_id), tenant_id, entity_link_dicts)
+        if linked is None:
+            # Storage refused: it scopes both ends of every link to the tenant,
+            # and ``_patch`` turns its 404 into ``None``. The memory itself was
+            # already confirmed to be in this tenant above, so what is left is an
+            # ``entity_id`` the caller does not own — raise rather than fall
+            # through, which would record the "replaced" change below and answer
+            # 200 for a write that did not happen.
+            #
+            # Naming the cause is safe here in a way it is not at the storage
+            # layer: this request is authenticated and already scoped to
+            # ``tenant_id``, so "not in your tenant" tells the caller nothing
+            # about rows outside it. Storage keeps its single indistinguishable
+            # answer for the unauthenticated case (GHSA-wgvw-28pq-jc36).
+            raise HTTPException(
+                status_code=422,
+                detail="entity_links names an entity that does not exist in this tenant",
+            )
         changes["entity_links"] = {
             "old": "replaced",
             "new": f"{len(data.entity_links)} links",
