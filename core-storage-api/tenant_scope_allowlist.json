@@ -93,13 +93,6 @@
       "category": "id-addressed-read"
     },
     {
-      "id": "method:entity_get_entity_links_for_memories",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read",
-      "note": "Join table has no tenant column; rows are tenant-scoped only via the ids."
-    },
-    {
       "id": "method:entity_get_memory_ids_by_entity_ids",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",

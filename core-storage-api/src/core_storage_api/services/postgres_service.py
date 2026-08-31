@@ -5980,19 +5980,6 @@ class PostgresService:
             result = await session.execute(stmt)
             return list(result.all())  # type: ignore[arg-type]
 
-    async def entity_get_entity_links_for_memories(
-        self,
-        memory_ids: list[UUID],
-    ) -> list[MemoryEntityLink]:
-        """Return all MemoryEntityLink rows for the given memory IDs."""
-        if not memory_ids:
-            return []
-        async with get_session() as session:
-            result = await session.execute(
-                select(MemoryEntityLink).where(MemoryEntityLink.memory_id.in_(memory_ids))
-            )
-            return list(result.scalars().all())
-
     async def entity_get_memory_ids_by_entity_ids(
         self,
         entity_ids: list[UUID],
