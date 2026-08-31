@@ -1708,23 +1708,38 @@ class PostgresService:
             return list(result.scalars().all())
 
     async def dedup_review_decide(
-        self, review_id: UUID, status: str, decided_by: str | None = None
+        self,
+        review_id: UUID,
+        *,
+        tenant_id: str,
+        status: str,
     ) -> DedupReview | None:
         """Transition a review from ``pending`` to one of the terminal
         statuses (``confirmed_duplicate`` / ``override_not_duplicate``
         / ``dismissed``). Returns the updated row, or None if the row
-        doesn't exist. Raises ``ValueError`` for unknown statuses."""
+        does not belong to ``tenant_id``. Raises ``ValueError`` for unknown
+        statuses.
+
+        This storage seam has no end-user identity to derive a reviewer from,
+        so decisions remain explicitly unattributed instead of persisting a
+        caller-supplied identity claim.
+        """
         from common.models.dedup_review import DEDUP_REVIEW_STATUSES
 
         if status not in DEDUP_REVIEW_STATUSES or status == "pending":
             raise ValueError(f"invalid terminal status: {status!r}")
 
         async with get_session() as session:
-            row = await session.get(DedupReview, review_id)
+            row = await session.scalar(
+                select(DedupReview).where(
+                    DedupReview.id == review_id,
+                    DedupReview.tenant_id == tenant_id,
+                )
+            )
             if row is None:
                 return None
             row.status = status
-            row.decided_by = decided_by
+            row.decided_by = None
             row.decided_at = datetime.now(UTC)
             await session.flush()
             return row

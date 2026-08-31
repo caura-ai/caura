@@ -791,12 +791,12 @@ class CoreStorageClient:
             **{k: v for k, v in params.items() if v is not None},
         )
 
-    async def decide_dedup_review(self, review_id, status: str, *, decided_by: str | None = None) -> dict:
+    async def decide_dedup_review(self, review_id, status: str, *, tenant_id: str) -> dict:
         """Record a terminal decision (confirmed_duplicate /
         override_not_duplicate / dismissed) on a review row."""
         return await self._post(  # type: ignore[return-value]
             f"/memories/dedup-reviews/{review_id}/decision",
-            {"status": status, "decided_by": decided_by},
+            {"status": status, "tenant_id": tenant_id},
             read=False,
         )
 

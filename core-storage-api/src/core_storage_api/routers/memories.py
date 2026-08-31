@@ -1116,12 +1116,28 @@ async def list_dedup_reviews(
 @router.post("/dedup-reviews/{review_id}/decision")
 async def decide_dedup_review(review_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required and must be a non-empty string",
+        )
     status = body.get("status")
-    decided_by = body.get("decided_by")
     if not isinstance(status, str):
         raise HTTPException(status_code=400, detail="status (string) required")
+    if "decided_by" in body:
+        raise HTTPException(
+            status_code=422,
+            detail="'decided_by' cannot be supplied at the storage boundary",
+        )
     try:
-        review = await _svc.dedup_review_decide(review_id, status, decided_by=decided_by)
+        review = await _svc.dedup_review_decide(
+            review_id,
+            tenant_id=tenant_id,
+            status=status,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if review is None:
