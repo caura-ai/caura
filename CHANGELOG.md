@@ -10,6 +10,24 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.38.0](https://github.com/caura-ai/caura/compare/backend-v2.37.3...backend-v2.38.0) (2026-08-31)
+
+
+### Features
+
+* **gate:** check that a tenant predicate cannot be rewritten by its own request ([#1143](https://github.com/caura-ai/caura/issues/1143)) ([84e4e78](https://github.com/caura-ai/caura/commit/84e4e78bcb5f8dac39982fabba7b5b619a18bef8))
+
+
+### Bug Fixes
+
+* **gate:** report tenancy allowlist composition ([#1166](https://github.com/caura-ai/caura/issues/1166)) ([06c4546](https://github.com/caura-ai/caura/commit/06c45460423b10812cb7ee9344b0a9e57fe6e6f8))
+* **storage:** scope the entity-link reads to the caller's tenant ([#1162](https://github.com/caura-ai/caura/issues/1162)) ([a70115d](https://github.com/caura-ai/caura/commit/a70115d3a4beb264e7cafa6b0688bef4a43b99e6))
+
+
+### Documentation
+
+* **sunset:** the step after the flip, and the mirror neither gate counts ([#1169](https://github.com/caura-ai/caura/issues/1169)) ([fdab945](https://github.com/caura-ai/caura/commit/fdab94583f0f9e2aab97d7a74ae082d6f083f467))
+
 ## [2.37.3](https://github.com/caura-ai/caura/compare/backend-v2.37.2...backend-v2.37.3) (2026-08-31)
 
 
