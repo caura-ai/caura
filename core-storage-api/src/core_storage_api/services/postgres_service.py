@@ -9290,14 +9290,6 @@ class PostgresService:
 
     # -- Commands --
 
-    async def fleet_get_command_by_id(
-        self,
-        *,
-        command_id: UUID,
-    ) -> FleetCommand | None:
-        async with get_session() as session:
-            return await session.get(FleetCommand, command_id)
-
     async def fleet_get_pending_commands(
         self,
         *,

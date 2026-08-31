@@ -99,12 +99,6 @@
       "category": "id-addressed-read"
     },
     {
-      "id": "method:fleet_get_command_by_id",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-read"
-    },
-    {
       "id": "method:fleet_get_node_by_id",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
