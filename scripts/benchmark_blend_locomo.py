@@ -32,13 +32,13 @@ exactly zero delta — a self-check that the plumbing isn't inventing difference
 
 Unlike the rerank harness this needs a **Postgres**, because ``ts_rank_cd`` is
 what it is measuring and reimplementing Postgres FTS in Python would measure
-something else. Any empty database works; the script creates a temp table per
+something else. Without ``--pg-dsn`` it uses the local benchmark default; any
+empty database can be supplied instead. The script creates a temp table per
 conversation and never touches application tables.
 
     python scripts/benchmark_blend_locomo.py \\
         --dataset locomo10.json \\
-        --embed-url http://localhost:8080 \\
-        --pg-dsn postgresql://memclaw:changeme@localhost:5433/memclaw
+        --embed-url http://localhost:8080
 
 Caveat to carry into any conclusion: this measures the blend in isolation. The
 real first-stage additionally applies freshness decay, weight blending and recall
@@ -73,6 +73,8 @@ from _locomo_bench import (  # noqa: E402  (path shim above must run first)
     recall,
     unit,
 )
+
+DEFAULT_PG_DSN = "postgresql://memclaw:changeme@localhost:5433/memclaw"  # legacy-name-ok: existing local benchmark database defaults
 
 # Recall first: it is the question this harness exists to answer, and the one the
 # ranking change can get wrong. The ordering metrics come along because a change
@@ -243,7 +245,7 @@ def main() -> None:
     ap.add_argument("--embed-url", required=True, help="base URL exposing /v1/embeddings")
     ap.add_argument(
         "--pg-dsn",
-        default="postgresql://memclaw:changeme@localhost:5433/memclaw",
+        default=DEFAULT_PG_DSN,
         help="any empty Postgres; used only for ts_rank_cd via a TEMP table",
     )
     ap.add_argument("--embed-model", default="BAAI/bge-m3")

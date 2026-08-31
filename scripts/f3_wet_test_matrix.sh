@@ -13,7 +13,7 @@
 #   scripts/f3_wet_test_matrix.sh deferred        # just the (F,F) cell
 #
 # Pre-reqs:
-#   - Enterprise stack up via memclaw-local-dev skill
+#   - Enterprise stack up via the local-dev skill
 #   - Real OPENAI_API_KEY in this repo's .env so embed + enrich actually fire
 #   - User authenticated (/tmp/local-dev.token, /tmp/local-dev.cookies)
 #
@@ -30,6 +30,7 @@ ENV_FILE="${REPO_ROOT}/.env"
 COMPOSE_OVERRIDE="${ENT_DIR}/docker-compose.override.yml"
 OUTPUT_DIR="${REPO_ROOT}/.f3-phase0-baseline"
 OBSERVER="${REPO_ROOT}/scripts/_f3_wet_test_observer.py"
+LOCAL_DEV_SKILL="memclaw-local-dev" # legacy-name-ok: existing local-dev skill directory
 
 mkdir -p "${OUTPUT_DIR}"
 trap 'rm -f "${COMPOSE_OVERRIDE}"' EXIT
@@ -99,7 +100,7 @@ EOF
 }
 
 # Refresh auth (bootstrap is idempotent; cookie/token may have expired).
-EMAIL="dev@example.com" "${HOME}/.claude/skills/memclaw-local-dev/bootstrap.sh" \
+EMAIL="dev@example.com" "${HOME}/.claude/skills/${LOCAL_DEV_SKILL}/bootstrap.sh" \
   > /dev/null 2>&1 || true
 
 run_cell() {

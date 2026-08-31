@@ -22,6 +22,7 @@ import urllib.request
 CONTAINER_CORE_API = "caura-enterprise-core-api-1"
 CONTAINER_POSTGRES = "caura-enterprise-postgres-1"
 TENANT = "dev-41fddf"
+LOCAL_DB_IDENTITY = "memclaw"  # legacy-name-ok: existing local database role and name
 
 
 def write_memory(content: str, agent: str, mode: str = "strong") -> dict:
@@ -56,9 +57,9 @@ def psql(sql: str) -> str:
             CONTAINER_POSTGRES,
             "psql",
             "-U",
-            "memclaw",
+            LOCAL_DB_IDENTITY,
             "-d",
-            "memclaw",
+            LOCAL_DB_IDENTITY,
             "-tAc",
             sql,
         ],
