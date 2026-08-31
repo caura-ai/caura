@@ -9,11 +9,6 @@
       "caura.lifecycle.insights-requested",
       "caura.memory.embedded",
       "caura.memory.enriched",
-      "memclaw.lifecycle.crystallize-on-demand-requested",
-      "memclaw.lifecycle.crystallize-requested",
-      "memclaw.lifecycle.entity-link-requested",
-      "memclaw.lifecycle.forge-distill-requested",
-      "memclaw.lifecycle.insights-requested",
       "memclaw.memory.embedded",
       "memclaw.memory.enriched"
     ],
@@ -24,10 +19,6 @@
       "caura.lifecycle.purge-soft-deleted-requested",
       "caura.memory.embed-requested",
       "caura.memory.enrich-requested",
-      "memclaw.lifecycle.archive-expired-requested",
-      "memclaw.lifecycle.archive-stale-requested",
-      "memclaw.lifecycle.embed-backfill-requested",
-      "memclaw.lifecycle.purge-soft-deleted-requested",
       "memclaw.memory.embed-requested",
       "memclaw.memory.enrich-requested"
     ]

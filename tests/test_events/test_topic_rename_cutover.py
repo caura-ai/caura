@@ -22,14 +22,13 @@ described:
 The rest is about which way each default points, because the two backends need
 opposite ones and a missing twin fails differently in each.
 
-THE FLIP CHANGED WHAT A DEFAULT-CONSTRUCTED BUS MEANS HERE. With ``lifecycle``
-in ``FLIPPED_FAMILIES`` and its twins unbound at ``dual=False``, the
-construction guard refuses that combination — so ``PubSubEventBus(...)`` with
-the flag off now raises in this repo too, by design. Tests that are about *the
-flag's parse rule* rather than *the flip* therefore take the ``nothing_flipped``
-fixture, which restores the pre-flip set for the duration. That is not the flip
-being papered over: the parse rule genuinely does not depend on which families
-are flipped, and the guard keeps its own dedicated tests further down.
+THE CONTRACT CHANGES WHAT A DEFAULT-CONSTRUCTED BUS MEANS AGAIN. ``lifecycle``
+stays in ``FLIPPED_FAMILIES``, but all nine of its enum members now carry the
+current name. ``renamed`` is therefore the identity for every member, so
+``publish_name`` and ``subscribe_names(dual=False)`` agree and the construction
+guard permits the default again. Tests about *the flag's parse rule* still take
+the ``nothing_flipped`` fixture so their precondition cannot depend on cutover
+state; flip and contract assertions use the real set below.
 """
 
 from __future__ import annotations
@@ -48,15 +47,13 @@ from common.events.factory import get_event_bus, reset_event_bus_for_testing
 
 @pytest.fixture
 def nothing_flipped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Restore the pre-flip set, for tests about the flag rather than the flip.
+    """Decouple flag-parse tests from the current family cutover state.
 
-    ``dual=False`` stopped being constructible here the moment ``lifecycle`` was
-    flipped, because its twins are then published-to and unbound. Several tests
-    below predate that and are asking a different question — does a blank value
-    read as off, does the Pub/Sub backend bind one name by default — whose
-    answer does not depend on the flipped set at all. Emptying the set is the
-    narrowest way to keep asking it: the bus, the factory and the parse are all
-    still the real ones, and only the guard's precondition is removed.
+    Contracting ``lifecycle`` makes ``dual=False`` constructible again, but the
+    tests using this fixture ask a separate question — whether blank parses as
+    off and whether the Pub/Sub backend defaults to one name. Emptying the set
+    keeps those tests independent of whichever family is flipped next while
+    leaving the bus, factory and parser themselves untouched.
 
     The alternative, passing ``dual_subscribe=True``, would silently change what
     those tests assert — they would stop covering the default path, which is the
@@ -67,8 +64,8 @@ def nothing_flipped(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def bus() -> PubSubEventBus:
-    # dual on: post-flip this is the only configuration a bus in this repo can
-    # be constructed in, and it is what all 12 deployables actually run.
+    # dual on: this is what all 12 pubsub-backed deployables actually run, and
+    # it remains the required operational setting for the other families.
     b = PubSubEventBus(
         project_id="proj", subscription_prefix="test", dual_subscribe=True
     )
@@ -89,10 +86,6 @@ async def handler(event: Event) -> None: ...
 
 def test_renamed_rewrites_only_the_first_segment() -> None:
     assert topics_mod.renamed(Topics.Memory.EMBEDDED) == "caura.memory.embedded"
-    assert (
-        topics_mod.renamed(Topics.Lifecycle.CRYSTALLIZE_REQUESTED)
-        == "caura.lifecycle.crystallize-requested"
-    )
 
 
 def test_renamed_is_idempotent() -> None:
@@ -135,30 +128,40 @@ def test_subscribe_names_dual_returns_both_without_duplicates() -> None:
 # ── publishing is unchanged: the property that makes step 2 shippable ─
 
 
-# Hand-spelled rather than derived from ``topics_mod``. Deriving them would make
+# Hand-spelled rather than derived from ``topics_mod``. Deriving it would make
 # every assertion below a tautology that holds for whatever the module happens to
 # say, including a family nobody meant to add. Spelling them here means a flip
-# has to be stated in exactly two places — the module, and this pair — and the
+# has to be stated in exactly two places — the module, and this literal — and the
 # equality in ``test_exactly_the_flipped_families_are_flipped`` is what turns the
 # second one into a deliberate stop rather than a chore.
 FLIPPED = frozenset({"lifecycle"})
-# Per topic, not comprehended from ``FLIPPED`` over ``all_topics()``. A topic
-# added to an already-flipped family is published under the new name from its
-# first commit, so it needs its twin provisioned before it can ship; failing
-# here is how whoever adds one finds that out.
-FLIPPED_TOPICS = sorted(
-    [
-        str(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED),
-        str(Topics.Lifecycle.ARCHIVE_STALE_REQUESTED),
-        str(Topics.Lifecycle.PURGE_SOFT_DELETED_REQUESTED),
-        str(Topics.Lifecycle.CRYSTALLIZE_REQUESTED),
-        str(Topics.Lifecycle.CRYSTALLIZE_ON_DEMAND_REQUESTED),
-        str(Topics.Lifecycle.ENTITY_LINK_REQUESTED),
-        str(Topics.Lifecycle.INSIGHTS_REQUESTED),
-        str(Topics.Lifecycle.EMBED_BACKFILL_REQUESTED),
-        str(Topics.Lifecycle.FORGE_DISTILL_REQUESTED),
-    ]
+# Hand-spelled independently of ``Topics.Lifecycle`` so a new member requires an
+# explicit contract decision. An already-contracted family has no legacy twin to
+# bind: its current-topic infrastructure must exist before a new member ships.
+EXPECTED_LIFECYCLE_NAMES = frozenset(
+    {
+        "caura.lifecycle.archive-expired-requested",
+        "caura.lifecycle.archive-stale-requested",
+        "caura.lifecycle.purge-soft-deleted-requested",
+        "caura.lifecycle.crystallize-requested",
+        "caura.lifecycle.crystallize-on-demand-requested",
+        "caura.lifecycle.entity-link-requested",
+        "caura.lifecycle.insights-requested",
+        "caura.lifecycle.embed-backfill-requested",
+        "caura.lifecycle.forge-distill-requested",
+    }
 )
+
+
+def test_all_nine_lifecycle_topics_are_fully_contracted() -> None:
+    """Each contracted member publishes and subscribes only on its current name."""
+    assert {str(topic) for topic in Topics.Lifecycle} == EXPECTED_LIFECYCLE_NAMES
+
+    for topic in Topics.Lifecycle:
+        current_name = str(topic)
+        assert topics_mod.publish_name(topic) == current_name
+        assert topics_mod.subscribe_names(topic, dual=False) == (current_name,)
+        assert topics_mod.subscribe_names(topic, dual=True) == (current_name,)
 
 
 def test_exactly_the_flipped_families_are_flipped() -> None:
@@ -272,23 +275,6 @@ def test_publish_name_is_the_identity_for_every_unflipped_family() -> None:
         if topics_mod.family(topic) in FLIPPED:
             continue
         assert topics_mod.publish_name(topic) == str(topic)
-
-
-def test_publish_name_moves_the_flipped_family_and_only_it() -> None:
-    """The flip itself: ``lifecycle`` publishes under the twin, nothing else."""
-    assert topics_mod.publish_name(Topics.Lifecycle.INSIGHTS_REQUESTED) == (
-        "caura.lifecycle.insights-requested"
-    )
-    # The twin literals themselves are pinned by
-    # ``test_renamed_rewrites_only_the_first_segment``; re-asserting them here
-    # would just duplicate it. What this test adds is that ``publish_name``
-    # actually routes to them, and that NOTHING ELSE moves.
-    moved = sorted(
-        t for t in topics_mod.all_topics() if topics_mod.publish_name(t) != str(t)
-    )
-    assert moved == FLIPPED_TOPICS, (
-        f"only the flipped family may change publish name; these moved: {moved}"
-    )
 
 
 async def test_publish_targets_the_unrenamed_topic(bus: PubSubEventBus) -> None:
@@ -513,43 +499,21 @@ async def test_dual_subscribe_flag_reads_anything_but_an_explicit_yes_as_off(
 
 # ── the guard: refuse to publish where nothing is bound (#913) ───────────────
 #
-# The combination the rest of this module documents as the one that fails with
-# no signal at all — a flipped family publishing under its renamed name while
-# the subscriber binds only the current one — is now refused at construction
-# instead of merely being described. These tests pin the refusal AND its
-# boundaries, because a guard that over-fires here would take out the default
-# configuration rather than the broken one.
+# A still-uncontracted flipped family publishing under its renamed name while a
+# dual-off subscriber binds only the legacy literal fails with no signal. The
+# construction guard refuses that mismatch, while permitting a contracted family
+# whose publish and subscribe names already agree. These tests pin both edges.
 
 
 def test_nothing_publishes_unbound_in_the_configuration_the_services_run() -> None:
-    """The shipped-state property, restated for a world with a family flipped.
+    """The deployed dual-on setting leaves no publisher unbound.
 
-    Before the flip this asserted emptiness at BOTH settings, which was the
-    byte-identical-behaviour claim that made binding both names safe to ship
-    ahead of any deploy. That claim is spent: flipping a publisher is precisely
-    the point at which behaviour stops being identical, and ``dual=False``
-    becomes a state this repo must refuse rather than one it must support.
-
-    What has to hold now is narrower and is the actual precondition of the flip:
-    at ``dual=True`` — the setting every one of the 12 pubsub-backed deployables
-    was confirmed running at its live revision before this landed — no topic
-    publishes anywhere unbound. That is the property that makes the flip
-    lossless.
+    Contracted lifecycle members are safe with either setting, but dual-on must
+    remain the operational invariant: later flips of the still-uncontracted
+    families depend on it. Every one of the 12 pubsub-backed deployables was
+    confirmed running this setting before the lifecycle flip.
     """
     assert topics_mod.unbound_publish_topics(dual=True) == ()
-
-
-def test_the_flip_is_hazardous_at_the_default_and_says_so() -> None:
-    """The counterfactual, so the test above cannot pass by the guard being dead.
-
-    ``dual=False`` is the default and is what standalone and on-prem
-    deployments run. Post-flip it is genuinely unsafe HERE, and the module has
-    to name every offending topic rather than merely return a bool — the
-    operator reading this is deciding whether their environment is the one that
-    is wrong, and there are nine names to give them.
-    """
-    unbound = topics_mod.unbound_publish_topics(dual=False)
-    assert sorted(unbound) == FLIPPED_TOPICS
 
 
 def test_unbound_publish_topics_names_a_flipped_family_when_dual_is_off(
@@ -603,9 +567,7 @@ def test_pubsub_bus_constructs_when_the_flip_is_matched_by_dual_subscribe(
     assert b._dual_subscribe is True
 
 
-def test_the_guard_does_not_fire_once_a_family_is_fully_contracted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_guard_does_not_fire_once_lifecycle_is_fully_contracted() -> None:
     """The false positive an emptiness check would cause — the reason this guard
     compares names instead of testing ``FLIPPED_FAMILIES`` for emptiness.
 
@@ -617,16 +579,11 @@ def test_the_guard_does_not_fire_once_a_family_is_fully_contracted(
     ``dual=False`` is the DEFAULT, so it would take out precisely the standalone
     and on-prem deployments that never run the Terraform the flag is gated on.
 
-    Simulated by declaring a topic whose name already carries the new prefix,
-    which is what the contract step leaves behind.
+    This uses the real nine-member family rather than a one-topic simulation so
+    one missed literal cannot hide behind the other eight contracted members.
     """
-    contracted = topics_mod.RENAMED_PREFIX + "memory.embedded"
-    assert topics_mod.renamed(contracted) == contracted, "precondition: idempotent"
-    monkeypatch.setattr(topics_mod, "all_topics", lambda: (contracted,))
-    monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"memory"}))
-
     # Non-empty FLIPPED_FAMILIES, dual off — and yet nothing is unbound.
-    assert topics_mod.FLIPPED_FAMILIES
+    assert topics_mod.FLIPPED_FAMILIES == frozenset({"lifecycle"})
     assert topics_mod.unbound_publish_topics(dual=False) == ()
     PubSubEventBus(project_id="proj", subscription_prefix="test")
 
