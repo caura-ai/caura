@@ -19,6 +19,7 @@ import {
   MemClawContextEngine as ContextEngine,  // legacy-name-ok: references the class as currently named
   type ShouldRecallInput,
 } from "./context-engine.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
 
 describe("prepareSubagentSpawn — OpenClaw's rollback contract", () => {
   // OpenClaw's contract is `Promise<SubagentSpawnPreparation | undefined>` with
@@ -149,7 +150,7 @@ describe("shouldRecall — policy=keywords", () => {
 
   test("matches MemClaw / LTM / long term keywords (case-insensitive)", () => { // legacy-name-ok: recall trigger keyword alias
     for (const p of [
-      "any memclaw context here?",
+      `any ${FROZEN_PLUGIN_ID} context here?`,
       "check LTM",
       "any long term notes about this",
       "Long-Term memory needed",
@@ -301,7 +302,7 @@ describe("shouldRecall — policy=auto (the default)", () => {
 
   test("trigger keyword 'memclaw' fires recall on otherwise-skip prompt", () => { // legacy-name-ok: recall trigger keyword alias
     // Rule 3: the old name keeps triggering forever.
-    const r = shouldRecall(input({ prompt: "memclaw?" }));
+    const r = shouldRecall(input({ prompt: `${FROZEN_PLUGIN_ID}?` }));
     assert.equal(r.recall, true);
     assert.equal(r.reason, "explicit-recall-trigger");
   });

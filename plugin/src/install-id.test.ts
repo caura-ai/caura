@@ -12,12 +12,13 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import { getInstallId, _resetInstallIdCacheForTesting } from "./install-id.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
 
 let _origHome: string | undefined;
 let _tmpHome: string | undefined;
 
 function pluginDir(home: string): string {
-  return join(home, ".openclaw", "plugins", "memclaw");
+  return join(home, ".openclaw", "plugins", FROZEN_PLUGIN_ID);
 }
 
 function installFile(home: string): string {

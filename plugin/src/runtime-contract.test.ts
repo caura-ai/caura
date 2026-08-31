@@ -29,12 +29,18 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import cauraPlugin from "./index.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
 import {
   _resetReachabilityForTests,
   getReachability,
   markReachable,
   markUnreachable,
 } from "./health.js";
+
+const FLUSH_PATH_RE = new RegExp(`^${FROZEN_PLUGIN_ID}/flush-\\d{4}-\\d{2}-\\d{2}\\.md$`);
+const FLUSH_YEAR_PATH_RE = new RegExp(
+  `^${FROZEN_PLUGIN_ID}/flush-(\\d{4})-\\d{2}-\\d{2}\\.md$`,
+);
 
 type RegisteredRuntime = {
   getMemorySearchManager: (p: Record<string, unknown>) => Promise<{
@@ -72,10 +78,10 @@ function loadRuntime(): RegisteredRuntime {
 describe("memory-runtime contract (OpenClaw MemoryPluginRuntime)", () => {
   beforeEach(() => _resetReachabilityForTests());
 
-  test("resolveMemoryBackendConfig returns { backend: 'memclaw' }", () => {
+  test("resolveMemoryBackendConfig returns the registered plugin id", () => {
     const rt = loadRuntime();
     const cfg = rt.resolveMemoryBackendConfig({}) as Record<string, unknown>;
-    assert.equal(cfg.backend, "memclaw");
+    assert.equal(cfg.backend, FROZEN_PLUGIN_ID);
   });
 
   test("getMemorySearchManager returns {manager:null, error} when unreachable — NOT silently a stub", async () => {
@@ -162,7 +168,7 @@ describe("memory-runtime contract (OpenClaw MemoryPluginRuntime)", () => {
     const s = manager.status();
     assert.equal(s.status, "unreachable");
     assert.ok(s.fallback, "status() must include a fallback block when unreachable");
-    assert.equal(s.fallback.from, "memclaw-api");
+    assert.equal(s.fallback.from, `${FROZEN_PLUGIN_ID}-api`);
     assert.match(s.fallback.reason, /backend restart/);
   });
 
@@ -304,7 +310,7 @@ describe("MemoryFlushPlan contract (OpenClaw agent-runner.runtime)", () => {
     assert.equal(rp.startsWith("/"), false);
     assert.equal(rp.startsWith("../"), false);
     assert.equal(rp.includes("/../"), false);
-    assert.match(rp, /^memclaw\//);
+    assert.ok(rp.startsWith(`${FROZEN_PLUGIN_ID}/`));
   });
 
   test("relativePath embeds the provided nowMs date stamp deterministically", () => {
@@ -344,7 +350,7 @@ describe("MemoryFlushPlan resolver — input-hardening (regression: review 2026-
     assert.equal(typeof (plan as Record<string, unknown>).relativePath, "string");
     assert.match(
       (plan as Record<string, unknown>).relativePath as string,
-      /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/,
+      FLUSH_PATH_RE,
     );
   });
 
@@ -353,7 +359,7 @@ describe("MemoryFlushPlan resolver — input-hardening (regression: review 2026-
     const plan = r({ nowMs: Number.NaN });
     assert.ok(plan);
     const rp = (plan as Record<string, unknown>).relativePath as string;
-    assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/, `bad rp=${rp}`);
+    assert.match(rp, FLUSH_PATH_RE, `bad rp=${rp}`);
   });
 
   test("resolver({nowMs: Infinity}) falls back to Date.now()", () => {
@@ -361,7 +367,7 @@ describe("MemoryFlushPlan resolver — input-hardening (regression: review 2026-
     const plan = r({ nowMs: Number.POSITIVE_INFINITY });
     assert.ok(plan);
     const rp = (plan as Record<string, unknown>).relativePath as string;
-    assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/);
+    assert.match(rp, FLUSH_PATH_RE);
   });
 
   test("resolver({nowMs: -Infinity}) falls back to Date.now()", () => {
@@ -369,7 +375,7 @@ describe("MemoryFlushPlan resolver — input-hardening (regression: review 2026-
     const plan = r({ nowMs: Number.NEGATIVE_INFINITY });
     assert.ok(plan);
     const rp = (plan as Record<string, unknown>).relativePath as string;
-    assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/);
+    assert.match(rp, FLUSH_PATH_RE);
   });
 
   test("resolver({nowMs: 'oops' as any}) ignores non-number and falls back", () => {
@@ -382,7 +388,7 @@ describe("MemoryFlushPlan resolver — input-hardening (regression: review 2026-
     });
     assert.ok(plan);
     const rp = (plan as Record<string, unknown>).relativePath as string;
-    assert.match(rp, /^memclaw\/flush-\d{4}-\d{2}-\d{2}\.md$/);
+    assert.match(rp, FLUSH_PATH_RE);
   });
 });
 
@@ -399,7 +405,7 @@ describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-
     const plan = r({ nowMs: -1 });
     assert.ok(plan);
     const rp = (plan as Record<string, unknown>).relativePath as string;
-    const yearMatch = rp.match(/^memclaw\/flush-(\d{4})-\d{2}-\d{2}\.md$/);
+    const yearMatch = rp.match(FLUSH_YEAR_PATH_RE);
     assert.ok(yearMatch, `unexpected path shape: ${rp}`);
     const yearInPath = Number.parseInt(yearMatch[1], 10);
     const currentYear = new Date().getUTCFullYear();
@@ -415,7 +421,7 @@ describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-
     const plan = r({ nowMs: -Date.now() });
     assert.ok(plan);
     const rp = (plan as Record<string, unknown>).relativePath as string;
-    const yearMatch = rp.match(/^memclaw\/flush-(\d{4})-\d{2}-\d{2}\.md$/);
+    const yearMatch = rp.match(FLUSH_YEAR_PATH_RE);
     assert.ok(yearMatch);
     assert.equal(Number.parseInt(yearMatch[1], 10), new Date().getUTCFullYear());
   });
@@ -425,7 +431,7 @@ describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-
     const plan = r({ nowMs: 0 });
     assert.ok(plan);
     const rp = (plan as Record<string, unknown>).relativePath as string;
-    const yearMatch = rp.match(/^memclaw\/flush-(\d{4})-\d{2}-\d{2}\.md$/);
+    const yearMatch = rp.match(FLUSH_YEAR_PATH_RE);
     assert.ok(yearMatch);
     assert.notEqual(
       Number.parseInt(yearMatch[1], 10),
@@ -438,9 +444,9 @@ describe("MemoryFlushPlan resolver — negative-timestamp guard (review 2026-05-
     const r = _loadFlushPlanResolver();
     const plan = r({ nowMs: Date.UTC(2026, 4, 24, 12, 0, 0) });
     assert.ok(plan);
-    assert.match(
-      (plan as Record<string, unknown>).relativePath as string,
-      /^memclaw\/flush-2026-05-24\.md$/,
+    assert.equal(
+      (plan as Record<string, unknown>).relativePath,
+      `${FROZEN_PLUGIN_ID}/flush-2026-05-24.md`,
     );
   });
 });
@@ -908,9 +914,9 @@ describe("ContextEngine.info compaction-ownership (v2.6.4)", () => {
     );
   });
 
-  test("info.id === 'memclaw' (slot resolver depends on this)", () => {
+  test("info.id matches the registered plugin id (slot resolver depends on this)", () => {
     const engine = new CauraContextEngine({});
-    assert.equal(engine.info.id, "memclaw");
+    assert.equal(engine.info.id, FROZEN_PLUGIN_ID);
   });
 });
 
