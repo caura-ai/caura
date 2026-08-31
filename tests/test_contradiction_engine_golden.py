@@ -195,7 +195,7 @@ def _sc_for_path_c(
         }
     )
 
-    async def get_entity(eid: str) -> dict | None:
+    async def get_entity(eid: str, tenant_id: str) -> dict | None:
         if eid == ent_new:
             return {"id": eid, "canonical_name": "Haifa", "entity_type": "place"}
         if eid == ent_cand:

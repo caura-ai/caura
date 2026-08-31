@@ -135,11 +135,15 @@ async def upsert_entity(
 
 async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | None = None) -> EntityOut | None:
     sc = get_storage_client()
-    result = await sc.get_entity_with_linked_memories(str(entity_id))
+    result = await sc.get_entity_with_linked_memories(str(entity_id), tenant_id)
     if not result:
         return None
 
     entity = result.get("entity", {})
+    # Kept although storage now applies the same predicate. This comparison used
+    # to be the ONLY thing scoping this read — the defect class being that the
+    # guarantee lived in one caller — and the two fail independently: this one
+    # covers a storage regression, the predicate covers any other caller.
     if entity.get("tenant_id") != tenant_id:
         return None
 

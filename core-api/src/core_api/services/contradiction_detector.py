@@ -1677,9 +1677,9 @@ async def _fetch_entity_context(sc, memory_id: str, tenant_id: str) -> list[dict
     Two storage round-trips at worst:
       1. ``get_entity_links_for_memories([memory_id])`` — batch endpoint;
          returns ``{memory_id: [{entity_id, role}, ...]}``.
-      2. ``get_entity(entity_id)`` per link, fan-out via ``asyncio.gather``
-         — Path C is post-commit async so the round-trip parallelism is
-         latency-invisible to the write path.
+      2. ``get_entity(entity_id, tenant_id)`` per link, fan-out via
+         ``asyncio.gather`` — Path C is post-commit async so the round-trip
+         parallelism is latency-invisible to the write path.
 
     Returns ``[]`` (not ``None``) when the memory has no resolved links;
     the caller treats empty as the skip-retraction signal so this
@@ -1703,7 +1703,7 @@ async def _fetch_entity_context(sc, memory_id: str, tenant_id: str) -> list[dict
         if not entity_id:
             return None
         try:
-            entity = await sc.get_entity(str(entity_id))
+            entity = await sc.get_entity(str(entity_id), tenant_id)
         except Exception as e:
             logger.warning(
                 "Path C entity-context fetch failed (entity %s) for memory %s: %s",

@@ -1802,7 +1802,7 @@ class TestEntities:
         assert body["canonical_name"] == name
 
         # GET by id
-        resp2 = await client.get(f"{PREFIX}/entities/{entity_id}")
+        resp2 = await client.get(f"{PREFIX}/entities/{entity_id}", params={"tenant_id": tenant_id})
         assert resp2.status_code == 200
         assert resp2.json()["canonical_name"] == name
 
@@ -2018,9 +2018,14 @@ class TestEntities:
     async def test_get_nonexistent_entity_returns_404(
         self,
         client: AsyncClient,
+        tenant_id: str,
     ) -> None:
+        # A tenant is passed so this stays a 404 test. Without one the route
+        # now 422s on the missing parameter, which would pass an
+        # ``!= 200`` reading of this assertion while testing nothing about
+        # whether a missing row 404s.
         fake_id = str(uuid.uuid4())
-        resp = await client.get(f"{PREFIX}/entities/{fake_id}")
+        resp = await client.get(f"{PREFIX}/entities/{fake_id}", params={"tenant_id": tenant_id})
         assert resp.status_code == 404
 
     async def test_link_to_ghost_entity_409s_without_leaking_driver_text(

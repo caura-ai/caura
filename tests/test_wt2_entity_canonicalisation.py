@@ -468,7 +468,7 @@ async def test_wet_test_replay_one_subject_one_entity_no_duplicate_links(
     assert "analytics service" in (subject.get("attributes") or {}).get("_aliases", [])
 
     # Both memories linked to the ONE subject entity — once each.
-    result = await sc.get_entity_with_linked_memories(subject["id"])
+    result = await sc.get_entity_with_linked_memories(subject["id"], tid)
     linked_ids = [entry.get("memory", entry)["id"] for entry in result["linked_memories"]]
     assert sorted(linked_ids) == sorted([mem1["id"], mem3["id"]])
     assert len(linked_ids) == len(set(linked_ids)), "duplicate link rows"

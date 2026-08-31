@@ -442,7 +442,11 @@ async def test_fetch_entity_context_composes_two_round_trips():
         }
     )
 
-    async def get_entity(eid: str) -> dict | None:
+    async def get_entity(eid: str, tenant_id: str) -> dict | None:
+        # Asserts rather than ignores: the hydration round-trip is by bare
+        # entity id, so the tenant travelling with it is the whole predicate.
+        # A stub that accepted **kwargs would let a caller drop it silently.
+        assert tenant_id == TENANT, f"entity hydration lost the tenant: {tenant_id!r}"
         return {
             ent_a: {"canonical_name": "Project Helios", "entity_type": "project"},
             ent_b: {"canonical_name": "2027-05-01", "entity_type": "date"},
@@ -523,7 +527,7 @@ async def test_fetch_entity_context_swallows_per_entity_error():
         }
     )
 
-    async def get_entity(eid: str) -> dict | None:
+    async def get_entity(eid: str, tenant_id: str) -> dict | None:
         if eid == ent_bad:
             raise RuntimeError("entity-row gone")
         return {"canonical_name": "Fine Entity", "entity_type": "project"}

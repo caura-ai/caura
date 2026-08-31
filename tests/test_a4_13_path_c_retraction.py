@@ -136,7 +136,7 @@ def _mock_sc_with_retraction_setup(
         }
     )
 
-    async def get_entity(eid: str) -> dict | None:
+    async def get_entity(eid: str, tenant_id: str) -> dict | None:
         if eid == _ent_new:
             return {"id": eid, "canonical_name": "Project X", "entity_type": "project"}
         if eid == _ent_cand:
