@@ -32,13 +32,6 @@
       "category": "cross-tenant-by-design"
     },
     {
-      "id": "method:agent_reset_search_profile",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1089."
-    },
-    {
       "id": "method:agent_update_search_profile",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",

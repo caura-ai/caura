@@ -7023,11 +7023,18 @@ class PostgresService:
     async def agent_reset_search_profile(
         self,
         agent_id_pk: object,
+        *,
+        tenant_id: str,
     ) -> None:
-        """Clear an agent's search_profile by primary key (Agent.id)."""
+        """Clear one tenant's agent search profile by primary key."""
         async with get_session() as session:
             await session.execute(
-                sql_update(Agent).where(Agent.id == agent_id_pk).values(search_profile=None)
+                sql_update(Agent)
+                .where(
+                    Agent.id == agent_id_pk,
+                    Agent.tenant_id == tenant_id,
+                )
+                .values(search_profile=None)
             )
 
     async def agent_backfill_from_memories(self) -> int:
