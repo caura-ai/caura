@@ -13,7 +13,6 @@ from core_api.constants import (
     LIFECYCLE_BATCH_SIZE,
     LIFECYCLE_STALE_ARCHIVE_WEIGHT,
 )
-from tests._legacy_contracts import frozen_topic
 
 
 @pytest.mark.unit
@@ -70,27 +69,27 @@ class TestLifecycleTopics:
 
         assert (
             Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED
-            == frozen_topic("lifecycle.archive-expired-requested")
+            == "caura.lifecycle.archive-expired-requested"
         )
         assert (
             Topics.Lifecycle.ARCHIVE_STALE_REQUESTED
-            == frozen_topic("lifecycle.archive-stale-requested")
+            == "caura.lifecycle.archive-stale-requested"
         )
         assert (
             Topics.Lifecycle.PURGE_SOFT_DELETED_REQUESTED
-            == frozen_topic("lifecycle.purge-soft-deleted-requested")
+            == "caura.lifecycle.purge-soft-deleted-requested"
         )
         assert (
             Topics.Lifecycle.CRYSTALLIZE_REQUESTED
-            == frozen_topic("lifecycle.crystallize-requested")
+            == "caura.lifecycle.crystallize-requested"
         )
         assert (
             Topics.Lifecycle.ENTITY_LINK_REQUESTED
-            == frozen_topic("lifecycle.entity-link-requested")
+            == "caura.lifecycle.entity-link-requested"
         )
         assert (
             Topics.Lifecycle.INSIGHTS_REQUESTED
-            == frozen_topic("lifecycle.insights-requested")
+            == "caura.lifecycle.insights-requested"
         )
 
     def test_topic_strenum_format(self):
@@ -101,7 +100,7 @@ class TestLifecycleTopics:
         # the embed/enrich topics rely on for Pub/Sub's ``topic_path``.
         assert (
             f"{Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED}"
-            == frozen_topic("lifecycle.archive-expired-requested")
+            == "caura.lifecycle.archive-expired-requested"
         )
 
 

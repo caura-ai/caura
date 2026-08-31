@@ -56,14 +56,14 @@ class Lifecycle(enum.StrEnum):
     # vs `<brand>.memory.enrich-requested` convention. Keeping each
     # operation on its own topic gives clean per-subscription filtering
     # and lets each action evolve its payload independently.
-    ARCHIVE_EXPIRED_REQUESTED = "memclaw.lifecycle.archive-expired-requested"
-    ARCHIVE_STALE_REQUESTED = "memclaw.lifecycle.archive-stale-requested"
-    PURGE_SOFT_DELETED_REQUESTED = "memclaw.lifecycle.purge-soft-deleted-requested"
+    ARCHIVE_EXPIRED_REQUESTED = "caura.lifecycle.archive-expired-requested"
+    ARCHIVE_STALE_REQUESTED = "caura.lifecycle.archive-stale-requested"
+    PURGE_SOFT_DELETED_REQUESTED = "caura.lifecycle.purge-soft-deleted-requested"
     # CAURA-657: pipeline ops. Subscriber is core-api (NOT core-worker)
     # because the consumer needs core-api's pipeline machinery —
     # ``run_crystallization`` and ``build_full_entity_linking_pipeline``
     # both live there and have transitive deps the worker doesn't carry.
-    CRYSTALLIZE_REQUESTED = "memclaw.lifecycle.crystallize-requested"
+    CRYSTALLIZE_REQUESTED = "caura.lifecycle.crystallize-requested"
     # OSS #817: the SAME operation, triggered by ``POST /crystallize`` instead of
     # the nightly fanout, and on its own topic because the fanout's handler is a
     # poor fit for an on-demand request — it needs a ``lifecycle_audit`` row to
@@ -72,22 +72,20 @@ class Lifecycle(enum.StrEnum):
     # for the same reason as above. One message per request; the run is not bounded
     # by an HTTP request budget, which is the whole point — completing a real run
     # does not fit in one. See ``common.events.crystallize_on_demand_request``.
-    CRYSTALLIZE_ON_DEMAND_REQUESTED = (
-        "memclaw.lifecycle.crystallize-on-demand-requested"
-    )
-    ENTITY_LINK_REQUESTED = "memclaw.lifecycle.entity-link-requested"
-    INSIGHTS_REQUESTED = "memclaw.lifecycle.insights-requested"
+    CRYSTALLIZE_ON_DEMAND_REQUESTED = "caura.lifecycle.crystallize-on-demand-requested"
+    ENTITY_LINK_REQUESTED = "caura.lifecycle.entity-link-requested"
+    INSIGHTS_REQUESTED = "caura.lifecycle.insights-requested"
     # Periodic sweep that re-embeds rows whose embedding is still NULL.
     # Subscriber is core-worker, which owns ``core_worker.backfill`` — the
     # only place that pages ``/memories/null-embedding-ids`` and republishes
     # EMBED_REQUESTED per row. One message per org; the per-org page loop
     # runs in the consumer, so it is not bounded by an HTTP request budget.
-    EMBED_BACKFILL_REQUESTED = "memclaw.lifecycle.embed-backfill-requested"
+    EMBED_BACKFILL_REQUESTED = "caura.lifecycle.embed-backfill-requested"
     # Skill Factory SF-007: Forge resident publishes one of these per
     # scheduled distillation run. Stub handler in Phase 0 (just logs);
     # real handler arrives in Phase 1 with the cluster fingerprint and
     # distillation pipeline. See ``common.events.lifecycle_forge_request``.
-    FORGE_DISTILL_REQUESTED = "memclaw.lifecycle.forge-distill-requested"
+    FORGE_DISTILL_REQUESTED = "caura.lifecycle.forge-distill-requested"
 
 
 class Topics:
