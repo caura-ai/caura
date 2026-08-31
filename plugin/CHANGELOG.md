@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.19.6](https://github.com/caura-ai/caura/compare/plugin-v2.19.5...plugin-v2.19.6) (2026-08-31)
+
+
+### Documentation
+
+* **plugin:** correct legacy floor classifications ([#1128](https://github.com/caura-ai/caura/issues/1128)) ([51c33d9](https://github.com/caura-ai/caura/commit/51c33d9fceafd78880b214498dcae472ed00ac99))
+
 ## [2.19.5](https://github.com/caura-ai/caura/compare/plugin-v2.19.4...plugin-v2.19.5) (2026-08-30)
 
 
