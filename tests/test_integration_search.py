@@ -117,9 +117,9 @@ async def _insert_entity(tenant_id, name, entity_type="concept", fleet_id=None):
     return entity
 
 
-async def _link_memory_entity(memory_id, entity_id, role="mentioned"):
+async def _link_memory_entity(tenant_id, memory_id, entity_id, role="mentioned"):
     sc = get_storage_client()
-    await sc.create_entity_link({
+    await sc.create_entity_link(tenant_id, {
         "memory_id": str(memory_id),
         "entity_id": str(entity_id),
         "role": role,
@@ -250,7 +250,7 @@ class TestSearchPipelineEndToEnd:
             "kafka cluster status healthy all nodes running",
             weight=0.7,
         )
-        await _link_memory_entity(mem["id"], entity["id"])
+        await _link_memory_entity(tenant_id, mem["id"], entity["id"])
 
         # Create unrelated memory
         await _insert_memory(            tenant_id,
@@ -285,7 +285,7 @@ class TestSearchPipelineEndToEnd:
             last_recalled_at=now - timedelta(hours=2),
             ts_valid_start=now - timedelta(days=1),
         )
-        await _link_memory_entity(mem2["id"], entity["id"])
+        await _link_memory_entity(tenant_id, mem2["id"], entity["id"])
 
         from core_api.services.memory_service import search_memories
 

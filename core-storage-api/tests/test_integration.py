@@ -1997,6 +1997,7 @@ class TestEntities:
         link_resp = await client.post(
             f"{PREFIX}/entities/links",
             json={
+                "tenant_id": tenant_id,
                 "memory_id": memory_id,
                 "entity_id": entity_id,
                 "role": "subject",
@@ -2041,6 +2042,7 @@ class TestEntities:
         resp = await client.post(
             f"{PREFIX}/entities/links",
             json={
+                "tenant_id": tenant_id,
                 "memory_id": mem["id"],
                 "entity_id": ghost_entity_id,
                 "role": "subject",

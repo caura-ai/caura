@@ -1466,19 +1466,26 @@ class CoreStorageClient:
             entity_id=entity_id,
         )
 
-    async def create_entity_link(self, data: dict) -> dict:
-        return await self._post("/entities/links", data)  # type: ignore[return-value]
+    async def create_entity_link(self, tenant_id: str, data: dict) -> dict:
+        # The link is addressed by two bare UUIDs, so the tenant has to travel
+        # with them: storage scopes both ends to it. The explicit arg wins over
+        # any ``tenant_id`` in ``data``.
+        return await self._post("/entities/links", {**data, "tenant_id": tenant_id})  # type: ignore[return-value]
 
-    async def bulk_upsert_entity_links(self, items: list[dict]) -> list[dict]:
+    async def bulk_upsert_entity_links(self, tenant_id: str, items: list[dict]) -> list[dict]:
         """Idempotently create many memory→entity links in one round-trip.
 
         Per-item: ``{"input_idx", "memory_id", "entity_id", "role"}``.
         Response aligned to input with ``{"input_idx", "memory_id",
         "entity_id", "role", "created": bool}``. ``created=False`` means
         the link already existed (its prior role preserved).
+
+        ``tenant_id`` binds every item on both ends. An item naming a memory or
+        entity outside it comes back as ``error="fk_violation"`` — the same
+        answer as an endpoint that does not exist, deliberately.
         """
         return await self._post(  # type: ignore[return-value]
-            "/entities/links/bulk", {"items": items}
+            "/entities/links/bulk", {"tenant_id": tenant_id, "items": items}
         )
 
     async def get_memory_ids_by_entity_ids(

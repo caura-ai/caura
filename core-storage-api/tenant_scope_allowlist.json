@@ -73,25 +73,11 @@
       "note": "Verified: data['tenant_id'] is stored on Entity and scopes the conflict-winner lookup."
     },
     {
-      "id": "method:entity_add_entity_link",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "No tenant is carried; bare memory_id and entity_id values mutate the tenantless join table. Tracked in #1124."
-    },
-    {
       "id": "method:entity_bulk_upsert",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
       "category": "opaque-body-write",
       "note": "Verified: every item carries tenant_id, which scopes updates, inserts, race recovery, and winner lookups."
-    },
-    {
-      "id": "method:entity_bulk_upsert_links",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "No tenant is carried; each item has only memory_id, entity_id, and role for the tenantless join table. Tracked in #1124."
     },
     {
       "id": "method:entity_count_memories_per_entity",
@@ -533,20 +519,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "id-addressed-read"
-    },
-    {
-      "id": "route:POST /api/v1/storage/entities/links",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "No tenant is carried; the body supplies only bare memory/entity ids and role. Tracked in #1124."
-    },
-    {
-      "id": "route:POST /api/v1/storage/entities/links/bulk",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "No tenant is carried; every item supplies only bare memory/entity ids and role. Tracked in #1124."
     },
     {
       "id": "route:POST /api/v1/storage/entities/memory-ids-by-entity-ids",

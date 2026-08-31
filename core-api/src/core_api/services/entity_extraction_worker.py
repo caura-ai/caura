@@ -401,7 +401,7 @@ async def process_entity_extraction(
                 )
                 link_idx += 1
             if link_items:
-                link_result = await sc.bulk_upsert_entity_links(items=link_items)
+                link_result = await sc.bulk_upsert_entity_links(tenant_id, items=link_items)
                 # Surface any FK violations from the per-item path
                 # (storage-side reports ``error="fk_violation"`` for rows
                 # whose memory_id or entity_id no longer exists). Same

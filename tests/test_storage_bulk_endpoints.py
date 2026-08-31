@@ -438,6 +438,7 @@ async def test_bulk_upsert_links_creates_all_new(sc):
     e2 = await _create_entity(sc, tid, "linked-two")
 
     results = await sc.bulk_upsert_entity_links(
+        tid,
         items=[
             {
                 "input_idx": 0,
@@ -469,6 +470,7 @@ async def test_bulk_upsert_links_is_idempotent_on_pk_collision(sc):
     e = await _create_entity(sc, tid, "the-entity")
 
     first = await sc.bulk_upsert_entity_links(
+        tid,
         items=[
             {
                 "input_idx": 0,
@@ -481,6 +483,7 @@ async def test_bulk_upsert_links_is_idempotent_on_pk_collision(sc):
     assert first[0]["created"] is True
 
     second = await sc.bulk_upsert_entity_links(
+        tid,
         items=[
             {
                 "input_idx": 0,
@@ -496,7 +499,7 @@ async def test_bulk_upsert_links_is_idempotent_on_pk_collision(sc):
 
 
 async def test_bulk_upsert_links_empty_input(sc):
-    assert await sc.bulk_upsert_entity_links(items=[]) == []
+    assert await sc.bulk_upsert_entity_links(_t(), items=[]) == []
 
 
 # ============================================================================
@@ -515,6 +518,7 @@ async def test_bulk_upsert_links_fk_violation_isolated_per_item(sc):
     ghost_entity = str(uuid4())  # No matching row → FK violation
 
     results = await sc.bulk_upsert_entity_links(
+        tid,
         items=[
             {
                 "input_idx": 0,
@@ -555,6 +559,7 @@ async def test_bulk_upsert_links_duplicate_input_pair_keeps_both_slots(sc):
     e = await _create_entity(sc, tid, "dup-target")
 
     results = await sc.bulk_upsert_entity_links(
+        tid,
         items=[
             {
                 "input_idx": 0,
@@ -779,6 +784,7 @@ async def test_bulk_upsert_links_input_idx_out_of_range_rejected_422(sc):
 
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await sc.bulk_upsert_entity_links(
+            tid,
             items=[
                 {
                     "input_idx": 7,  # out of range for 1-item batch
@@ -803,6 +809,7 @@ async def test_bulk_upsert_links_input_idx_duplicate_rejected_422(sc):
 
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await sc.bulk_upsert_entity_links(
+            tid,
             items=[
                 {
                     "input_idx": 0,
@@ -940,6 +947,7 @@ async def test_bulk_upsert_links_missing_required_field_returns_422(sc):
 
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await sc.bulk_upsert_entity_links(
+            tid,
             items=[
                 {
                     "input_idx": 0,
@@ -1048,6 +1056,7 @@ async def test_bulk_upsert_links_non_uuid_memory_id_returns_422(sc):
 
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await sc.bulk_upsert_entity_links(
+            tid,
             items=[
                 {
                     "input_idx": 0,
@@ -1069,6 +1078,7 @@ async def test_bulk_upsert_links_non_uuid_entity_id_returns_422(sc):
 
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await sc.bulk_upsert_entity_links(
+            tid,
             items=[
                 {
                     "input_idx": 0,

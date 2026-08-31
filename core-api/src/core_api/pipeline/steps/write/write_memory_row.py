@@ -125,6 +125,7 @@ class WriteMemoryRow:
         for link in data.entity_links:
             try:
                 await sc.create_entity_link(
+                    data.tenant_id,
                     {
                         "memory_id": memory["id"],
                         # Stringify the UUID for JSON transport — mirrors
@@ -133,7 +134,7 @@ class WriteMemoryRow:
                         # receive, so the persisted value is identical.
                         "entity_id": str(link.entity_id),
                         "role": link.role,
-                    }
+                    },
                 )
             except Exception as exc:
                 # Still degrade in EVERY case — the row is committed, and letting
