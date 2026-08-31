@@ -1459,19 +1459,6 @@ class CoreStorageClient:
             params["tenant_id"] = tenant_id
         return await self._get_list(f"/entities/{entity_id}/relations", **params)
 
-    async def find_relation(
-        self,
-        source_id: str,
-        target_id: str,
-        relation_type: str,
-    ) -> dict | None:
-        return await self._get(
-            "/entities/relations/find",
-            source_id=source_id,
-            target_id=target_id,
-            relation_type=relation_type,
-        )
-
     async def create_relation(self, data: dict) -> dict:
         return await self._post("/entities/relations", data)  # type: ignore[return-value]
 

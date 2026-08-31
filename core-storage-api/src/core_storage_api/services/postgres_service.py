@@ -5718,29 +5718,6 @@ class PostgresService:
     # Relations
     # ------------------------------------------------------------------
 
-    async def relation_find(
-        self,
-        tenant_id: str,
-        from_entity_id: UUID,
-        relation_type: str,
-        to_entity_id: UUID,
-        fleet_id: str | None = None,
-    ) -> Relation | None:
-        async with get_session() as session:
-            stmt = select(Relation).where(
-                Relation.tenant_id == tenant_id,
-                Relation.from_entity_id == from_entity_id,
-                Relation.relation_type == relation_type,
-                Relation.to_entity_id == to_entity_id,
-            )
-            if fleet_id:
-                stmt = stmt.where(Relation.fleet_id == fleet_id)
-            else:
-                stmt = stmt.where(Relation.fleet_id.is_(None))
-
-            result = await session.execute(stmt)
-            return result.scalar_one_or_none()
-
     async def relation_add(self, data: dict) -> Relation:
         """Idempotent UPSERT keyed on the natural key
         ``(tenant_id, from_entity_id, relation_type, to_entity_id)``.
