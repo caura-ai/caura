@@ -8,6 +8,32 @@ and ``EnrichmentResult`` mirrors it field-for-field.
 The ``memory_type`` vocabulary list and per-type bullets are rendered
 from :data:`common.enrichment.constants.MEMORY_TYPE_DESCRIPTIONS` at
 import time, so adding a type there propagates here automatically.
+
+CAURA-719 — ``tags`` and ``status`` are no longer asked of the LLM, so
+``EnrichmentResult`` is deliberately WIDER than this prompt:
+
+* ``tags`` — the platform had no reader. Nothing filters, queries, or
+  full-text-indexes them (the FTS vector is ``title || content``, see
+  migration 034), so 95% of rows carried generated tags that only ever
+  travelled back out again. They stay a CALLER-owned key (C25
+  ``CALLER_OWNABLE_KEYS``): a caller who supplies ``metadata["tags"]``
+  keeps them untouched, and the validator below still normalises those.
+* ``status`` — measured constant. All 48,374 rows of the eToro corpus
+  carried ``active``; the classifier never once chose ``pending`` or
+  ``confirmed``, so the field cost tokens to reproduce the schema
+  default. It is a LIFECYCLE field owned by explicit setters:
+  ``caura_manage``'s transition op, the contradiction detector
+  (``outdated`` / ``conflicted``), the crystallizer (``archived``), and
+  the delete path (``deleted``). Letting the classifier also assign it
+  was a live hazard: ~11 query paths filter the literal string
+  ``'active'`` rather than ``LIVE_MEMORY_STATUSES``, so a memory the LLM
+  labelled ``confirmed`` went invisible to insights — observed in
+  production and worked around by pinning ``status="active"`` in both
+  ``doc_memory.py`` and ``insights_service.py``.
+
+Both fields keep their schema entry, default, and validator so
+historical rows, caller-supplied values, and the deferred worker's
+patch path all continue to deserialise unchanged.
 """
 
 from __future__ import annotations
@@ -111,26 +137,13 @@ Analyze the following memory content and return a JSON object with these fields:
 
 4. "summary": 1-2 sentence condensed version capturing the key information
 
-5. "tags": array of 1-5 lowercase keyword tags for search and filtering
-   - Use SINGULAR form: "meeting" not "meetings", "decision" not "decisions",
-     "deployment" not "deployments". Stable singular keys join cleanly across memories.
-   - Multi-word tags use HYPHEN separator (kebab-case): "code-review" not "code review"
-     or "code_review" or "code reviews". Example tag set:
-     ["deployment", "post-mortem", "decision", "team-meeting"].
-   - At most 5 tags. Fewer is better — pick the highest-signal terms.
-
-6. "status": one of "active", "pending", "confirmed" (optional, default "active")
-   - active: default for most memories — current and valid
-   - pending: for tasks/plans not yet confirmed or started
-   - confirmed: for verified facts or completed actions
-
-7. "ts_valid_start": ISO 8601 datetime string (optional, null if not applicable)
+5. "ts_valid_start": ISO 8601 datetime string (optional, null if not applicable)
    - The earliest time this memory is valid/relevant
    - Extract from phrases like "starting March 1", "from next Monday", "after the meeting"
    - For events/meetings: the event start time
    - Today's date is {today}
 
-8. "ts_valid_end": ISO 8601 datetime string (optional, null if not applicable)
+6. "ts_valid_end": ISO 8601 datetime string (optional, null if not applicable)
    - The latest time this memory is valid/relevant
    - Set ONLY when the content explicitly bounds the validity interval:
        * deadlines ("deadline March 30", "by Friday", "due tomorrow")
@@ -145,15 +158,15 @@ Analyze the following memory content and return a JSON object with these fields:
    - When in doubt, leave ts_valid_end as null. A missing end date is a feature,
      not an omission — it means "no known expiry".
 
-9. "contains_pii": boolean (default false)
+7. "contains_pii": boolean (default false)
    - true if the content contains personally identifiable information
    - PII includes: email addresses, phone numbers, physical addresses, SSN/ID numbers, credit card numbers, dates of birth, full names paired with sensitive data
    - Do NOT flag generic first names, job titles, or company names alone
 
-10. "pii_types": array of strings (optional, empty if no PII)
+8. "pii_types": array of strings (optional, empty if no PII)
     - Types of PII detected, e.g. ["email", "phone", "address", "ssn", "credit_card", "date_of_birth"]
 
-11. "retrieval_hint": short clause (max ~15 words, may be empty) capturing the
+9. "retrieval_hint": short clause (max ~15 words, may be empty) capturing the
     memory's SEMANTIC ESSENCE in vocabulary a reader would use when asking
     about it LATER. Used to augment the embedding so queries that reference
     the significance/category of the memory can find it, not just ones that
@@ -172,7 +185,7 @@ Analyze the following memory content and return a JSON object with these fields:
     - Leave as an empty string "" if the content is already highly query-aligned
       (common nouns + verbs of the thing itself) and no extra framing helps.
 
-12. "atomic_facts": OPTIONAL — null in almost all cases. Populate only when
+10. "atomic_facts": OPTIONAL — null in almost all cases. Populate only when
     the content carries 2+ DISTINCT atomic claims that would be searched by
     DIFFERENT query vocabulary. Each entry becomes its own child memory with
     its own embedding.
@@ -189,10 +202,10 @@ Analyze the following memory content and return a JSON object with these fields:
     - Each fact object has:
         "content"        : self-contained claim (include names, dates, values)
         "suggested_type" : same vocabulary as field 1
-        "retrieval_hint" : same guidance as field 11 — short, query-aligned
+        "retrieval_hint" : same guidance as field 9 — short, query-aligned
     - When in doubt, leave atomic_facts as null.
 
-13. "business_relevance": one of "business" | "personal" (default "business")
+11. "business_relevance": one of "business" | "personal" (default "business")
     - "personal": private life unrelated to work — health, family, personal
       finance, relationships, errands, vacation planning, casual chat, idle ideas.
     - "business": work / professional / operational content (the default).
@@ -200,7 +213,7 @@ Analyze the following memory content and return a JSON object with these fields:
       confident the content is non-work.
 
 Return ONLY valid JSON (no markdown fences):
-{{"memory_type": "...", "weight": 0.0, "title": "...", "summary": "...", "tags": ["..."], "status": "active", "ts_valid_start": null, "ts_valid_end": null, "contains_pii": false, "pii_types": [], "retrieval_hint": "", "atomic_facts": null, "business_relevance": "business"}}
+{{"memory_type": "...", "weight": 0.0, "title": "...", "summary": "...", "ts_valid_start": null, "ts_valid_end": null, "contains_pii": false, "pii_types": [], "retrieval_hint": "", "atomic_facts": null, "business_relevance": "business"}}
 
 Content:
 {content}

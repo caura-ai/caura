@@ -128,7 +128,7 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 
 | Tool | Purpose |
 |---|---|
-| `caura_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, tags, embedding. Long content auto-chunked |
+| `caura_write` | Store a memory. Single write (`content`) or batch (`items` ≤100). LLM auto-infers type, title, summary, embedding. Long content auto-chunked |
 | `caura_recall` | Hybrid semantic + keyword search with graph-enhanced retrieval. `include_brief=true` returns an LLM-summarized context paragraph. Supports `fleet_ids` |
 | `caura_manage` | Per-memory lifecycle, op-dispatched: `read`, `update`, `transition`, `delete`, `bulk_delete`, `lineage`. Re-embeds on content updates |
 | `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
@@ -387,7 +387,8 @@ AFTER completing work:
 - Store findings with caura_write — just provide content
 - For batch writes, pass items=[...] (up to 100) to the same tool — batches
   embeddings and enrichment for much lower latency than looped single writes
-- Type, weight, status, title, summary, tags are auto-inferred by LLM
+- Type, weight, title, summary are auto-inferred by LLM (status defaults to
+  `active`; tags are caller-supplied)
 - Dates auto-extracted: "deadline March 30" → ts_valid_end
 - Contradictions auto-detected: conflicting older memories marked outdated
 - Long content (>2000 chars) is auto-chunked into atomic facts

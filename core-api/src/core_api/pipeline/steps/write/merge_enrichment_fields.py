@@ -1,4 +1,4 @@
-"""MergeEnrichmentFields — apply LLM-inferred type/weight/title/tags/dates to memory fields."""
+"""MergeEnrichmentFields — apply LLM-inferred type/weight/title/dates to memory fields."""
 
 from __future__ import annotations
 

@@ -72,11 +72,17 @@ class TestEnrichmentPromptSignalPhrases:
         )
 
     def test_prompt_structure_unchanged(self):
-        """JSON template should still be present and valid."""
+        """JSON template should still be present and valid.
+
+        CAURA-719 dropped the ``tags`` key from the template (the field is
+        caller-owned now and no longer asked of the LLM), so this pins the
+        keys that remain rather than the retired one. ``test_caura719_
+        tags_status_off_prompt.py`` owns the negative assertion.
+        """
         prompt = self._get_prompt()
         assert '"memory_type": "..."' in prompt
         assert '"weight": 0.0' in prompt
-        assert '"tags": ["..."]' in prompt
+        assert '"summary": "..."' in prompt
         assert "Content:" in prompt
 
 
