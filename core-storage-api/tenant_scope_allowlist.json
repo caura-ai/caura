@@ -15,13 +15,15 @@
       "id": "method:agent_activity_digest_upsert",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: data['tenant_id'] is in the upsert conflict key and the row re-fetch predicate."
     },
     {
       "id": "method:agent_add",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: data['tenant_id'] is stored on Agent and is part of the (tenant_id, agent_id) conflict key."
     },
     {
       "id": "method:agent_backfill_from_memories",
@@ -47,13 +49,15 @@
       "id": "method:audit_add_batch",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: every event carries tenant_id; the chained writer groups and writes events one tenant at a time."
     },
     {
       "id": "method:audit_add_batch_chained",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: ev['tenant_id'] partitions the batch and binds each tenant's chain transaction."
     },
     {
       "id": "method:capability_usage_insert",
@@ -72,31 +76,36 @@
       "id": "method:dedup_review_enqueue",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: payload['tenant_id'] is assigned directly to the DedupReview row."
     },
     {
       "id": "method:entity_add",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: data['tenant_id'] is stored on Entity and scopes the conflict-winner lookup."
     },
     {
       "id": "method:entity_add_entity_link",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "id-addressed-write",
+      "note": "No tenant is carried; bare memory_id and entity_id values mutate the tenantless join table. Tracked in #1124."
     },
     {
       "id": "method:entity_bulk_upsert",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: every item carries tenant_id, which scopes updates, inserts, race recovery, and winner lookups."
     },
     {
       "id": "method:entity_bulk_upsert_links",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "id-addressed-write",
+      "note": "No tenant is carried; each item has only memory_id, entity_id, and role for the tenantless join table. Tracked in #1124."
     },
     {
       "id": "method:entity_count_memories_per_entity",
@@ -136,13 +145,15 @@
       "id": "method:fleet_add_command",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: data['tenant_id'] is stored on FleetCommand after the route confirms the node has that tenant."
     },
     {
       "id": "method:fleet_add_node",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: data['tenant_id'] is stored directly on the FleetNode row."
     },
     {
       "id": "method:fleet_count_recent_deploys_for_target",
@@ -179,7 +190,8 @@
       "id": "method:fleet_upsert_node",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: values['tenant_id'] is stored and participates in the tenant-and-node conflict constraint."
     },
     {
       "id": "method:lifecycle_audit_finalize",
@@ -192,13 +204,15 @@
       "id": "method:memory_add",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: data['tenant_id'] survives field filtering, is stored on Memory, and scopes duplicate recovery."
     },
     {
       "id": "method:memory_add_all",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: every item carries tenant_id; the method rejects mixed-tenant batches and scopes conflict recovery to it."
     },
     {
       "id": "method:memory_add_entity_links",
@@ -217,7 +231,8 @@
       "id": "method:memory_conflict_record",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: payload['tenant_id'] is assigned directly to the MemoryConflict row."
     },
     {
       "id": "method:memory_count_all",
@@ -267,19 +282,22 @@
       "id": "method:recall_log_write",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: event['tenant_id'] is stored on RecallEvent; candidate rows are attached to that new event."
     },
     {
       "id": "method:relation_add",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: data['tenant_id'] is stored on Relation and scopes its conflict key and row re-fetch."
     },
     {
       "id": "method:report_add",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: data['tenant_id'] survives model-field filtering and is stored on CrystallizationReport."
     },
     {
       "id": "method:report_get_by_id",
@@ -298,7 +316,8 @@
       "id": "method:tenant_usage_increment",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: every row carries tenant_id, which is stored and participates in the usage-counter conflict key."
     },
     {
       "id": "method:tenant_usage_query",
@@ -515,7 +534,8 @@
       "id": "route:POST /api/v1/storage/agents",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: body tenant_id is consumed by agent_add as the inserted row's tenant and conflict scope."
     },
     {
       "id": "route:POST /api/v1/storage/agents/backfill-from-memories",
@@ -527,7 +547,8 @@
       "id": "route:POST /api/v1/storage/audit-logs/bulk",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: _REQUIRED_AUDIT_FIELDS requires tenant_id on every event before the batch is written."
     },
     {
       "id": "route:POST /api/v1/storage/capability-usage",
@@ -539,13 +560,15 @@
       "id": "route:POST /api/v1/storage/entities",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: body tenant_id is stored by entity_add and scopes its conflict-winner lookup."
     },
     {
       "id": "route:POST /api/v1/storage/entities/bulk-upsert",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: _REQUIRED_BASE requires tenant_id on every item and entity_bulk_upsert scopes every mutation to it."
     },
     {
       "id": "route:POST /api/v1/storage/entities/count-memories",
@@ -557,13 +580,15 @@
       "id": "route:POST /api/v1/storage/entities/links",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "id-addressed-write",
+      "note": "No tenant is carried; the body supplies only bare memory/entity ids and role. Tracked in #1124."
     },
     {
       "id": "route:POST /api/v1/storage/entities/links/bulk",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "id-addressed-write",
+      "note": "No tenant is carried; every item supplies only bare memory/entity ids and role. Tracked in #1124."
     },
     {
       "id": "route:POST /api/v1/storage/entities/memory-ids-by-entity-ids",
@@ -575,13 +600,15 @@
       "id": "route:POST /api/v1/storage/entities/relations",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: body tenant_id is stored by relation_add and scopes its conflict key and row re-fetch."
     },
     {
       "id": "route:POST /api/v1/storage/fleet/nodes",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: body tenant_id is stored and participates in fleet_upsert_node's tenant-and-node conflict constraint."
     },
     {
       "id": "route:POST /api/v1/storage/idempotency",
@@ -599,43 +626,50 @@
       "id": "route:POST /api/v1/storage/insights/contradictions",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
     },
     {
       "id": "route:POST /api/v1/storage/insights/discover-sample",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
     },
     {
       "id": "route:POST /api/v1/storage/insights/divergence",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
     },
     {
       "id": "route:POST /api/v1/storage/insights/failures",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
     },
     {
       "id": "route:POST /api/v1/storage/insights/patterns",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
     },
     {
       "id": "route:POST /api/v1/storage/insights/stale",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
     },
     {
       "id": "route:POST /api/v1/storage/memories",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: body tenant_id is stored by memory_add and scopes duplicate-content recovery."
     },
     {
       "id": "route:POST /api/v1/storage/memories/admin-list",
@@ -647,19 +681,22 @@
       "id": "route:POST /api/v1/storage/memories/bulk",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: every body item carries tenant_id; memory_add_all rejects mixed-tenant batches and scopes recovery."
     },
     {
       "id": "route:POST /api/v1/storage/memories/conflicts",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: body tenant_id is assigned directly to the MemoryConflict row by memory_conflict_record."
     },
     {
       "id": "route:POST /api/v1/storage/memories/dedup-reviews",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: body tenant_id is assigned directly to the DedupReview row by dedup_review_enqueue."
     },
     {
       "id": "route:POST /api/v1/storage/memories/dedup-reviews/{review_id}/decision",
@@ -685,13 +722,15 @@
       "id": "route:POST /api/v1/storage/reports",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: body tenant_id is stored on the CrystallizationReport row by report_add."
     },
     {
       "id": "route:POST /api/v1/storage/reports/agent-activity",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write"
+      "category": "opaque-body-write",
+      "note": "Verified: the required-fields loop rejects a missing tenant_id before agent_activity_digest_upsert."
     },
     {
       "id": "route:POST /api/v1/storage/tenant-usage/increment",
