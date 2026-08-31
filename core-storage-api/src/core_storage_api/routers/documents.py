@@ -21,6 +21,8 @@ async def upsert_document(request: Request) -> dict:
             doc_id=body["doc_id"],
             data=body["data"],
             fleet_id=body.get("fleet_id"),
+            # C34 — explicit opt-out of the catastrophic-shrink guard.
+            force=bool(body.get("force")),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -43,6 +45,8 @@ async def upsert_document_xmax(request: Request) -> dict:
             doc_id=body["doc_id"],
             data=body["data"],
             fleet_id=body.get("fleet_id"),
+            # C34 — explicit opt-out of the catastrophic-shrink guard.
+            force=bool(body.get("force")),
             embedding=body.get("embedding"),
         )
     except ValueError as exc:

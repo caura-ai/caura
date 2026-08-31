@@ -4,6 +4,7 @@ import logging
 import re
 from datetime import datetime
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -94,6 +95,12 @@ class DocWriteRequest(BaseModel):
     collection: str = Field(min_length=1, max_length=200)
     doc_id: str = Field(min_length=1, max_length=500)
     data: dict
+    # C34 — opt out of the server-side catastrophic-shrink guard, which
+    # refuses to replace a substantial document with a near-empty one. A
+    # truncated payload from a failed read looks exactly like an intentional
+    # wipe; that is how the shared task checklist was destroyed on
+    # 2026-08-27. Callers who genuinely mean to gut a document set this.
+    force: bool = False
     # Embed source is no longer caller-chosen. Server reads data["summary"]
     # (and, for collection="skills", falls back to data["description"] for
     # back-compat). See core_api.services.doc_indexing.
@@ -193,6 +200,23 @@ def _dict_to_out(d: dict) -> DocOut:
         created_at=d.get("created_at"),
         updated_at=d.get("updated_at"),
     )
+
+
+def _surface_storage_error(exc: httpx.HTTPStatusError) -> HTTPException:
+    """Carry a storage-api 4xx through with its status and message.
+
+    ``storage_client._post`` raises on non-2xx and the generic upstream
+    handler turns that into a 500, which would hide C34's shrink refusal
+    behind an opaque server error — the caller needs to see WHY the write was
+    refused and that ``force`` exists. Wet-testing caught exactly this: the
+    guard fired storage-side and the client saw a bare 500.
+    """
+    detail: object
+    try:
+        detail = exc.response.json()
+    except ValueError:
+        detail = exc.response.text or str(exc)
+    return HTTPException(status_code=exc.response.status_code, detail=detail)
 
 
 # ── Routes ──
@@ -328,16 +352,21 @@ async def upsert_document(
 
     sc = get_storage_client()
     if embedding is not None:
-        await sc.upsert_document_xmax(
-            {
-                "tenant_id": body.tenant_id,
-                "fleet_id": body.fleet_id,
-                "collection": body.collection,
-                "doc_id": body.doc_id,
-                "data": body.data,
-                "embedding": embedding,
-            }
-        )
+        try:
+            await sc.upsert_document_xmax(
+                {
+                    "tenant_id": body.tenant_id,
+                    "fleet_id": body.fleet_id,
+                    "collection": body.collection,
+                    "doc_id": body.doc_id,
+                    "data": body.data,
+                    # C34 — explicit opt-out of the catastrophic-shrink guard.
+                    "force": body.force,
+                    "embedding": embedding,
+                }
+            )
+        except httpx.HTTPStatusError as exc:
+            raise _surface_storage_error(exc) from exc
         # Storage-api commits in its own session, so no intermediate
         # ``db.commit()`` is needed. Re-fetch from the PRIMARY (read=False):
         # this is a read-after-write, so a replica read under replication lag
@@ -350,15 +379,20 @@ async def upsert_document(
             read=False,
         )
     else:
-        doc = await sc.upsert_document(
-            {
-                "tenant_id": body.tenant_id,
-                "fleet_id": body.fleet_id,
-                "collection": body.collection,
-                "doc_id": body.doc_id,
-                "data": body.data,
-            }
-        )
+        try:
+            doc = await sc.upsert_document(
+                {
+                    "tenant_id": body.tenant_id,
+                    "fleet_id": body.fleet_id,
+                    "collection": body.collection,
+                    "doc_id": body.doc_id,
+                    "data": body.data,
+                    # C34 — explicit opt-out of the catastrophic-shrink guard.
+                    "force": body.force,
+                }
+            )
+        except httpx.HTTPStatusError as exc:
+            raise _surface_storage_error(exc) from exc
     if doc is None:
         raise HTTPException(status_code=500, detail="Document upsert returned no rows")
     # Mint a memory carrying the document body so the BODY becomes reachable by
