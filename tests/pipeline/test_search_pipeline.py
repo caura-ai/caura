@@ -337,16 +337,28 @@ async def test_track_recalls_fire_and_forget():
 
     mock_db = AsyncMock()
     ctx = PipelineContext(
-                # caller_agent_id present → genuine agent recall, so recall_count
-                # is bumped (agentless recalls are skipped; see track_recalls).
-                data={"filtered_rows": rows, "caller_agent_id": "test-agent"},
+        # caller_agent_id present → genuine agent recall, so recall_count
+        # is bumped (agentless recalls are skipped; see track_recalls).
+        data={
+            "filtered_rows": rows,
+            "caller_agent_id": "test-agent",
+            "tenant_id": "test-tenant-track-recalls",
+        },
     )
 
-    with patch("core_api.pipeline.steps.search.track_recalls.track_task") as mock_track:
+    with (
+        patch("core_api.pipeline.steps.search.track_recalls.track_task") as mock_track,
+        patch(
+            "core_api.pipeline.steps.search.track_recalls._track_recalls_background"
+        ) as mock_background,
+    ):
         step = TrackRecalls()
         await step.execute(ctx)
 
-        # track_task should have been called with a coroutine
+        mock_background.assert_called_once_with(
+            [mem1.id, mem2.id],
+            tenant_id="test-tenant-track-recalls",
+        )
         mock_track.assert_called_once()
         # Close the coroutine to avoid RuntimeWarning
         coro = mock_track.call_args[0][0]
@@ -373,9 +385,12 @@ async def test_track_recalls_background_routes_to_storage():
         "core_api.pipeline.steps.search.track_recalls.get_storage_client",
         return_value=sc,
     ):
-        await _track_recalls_background(ids)
+        await _track_recalls_background(ids, tenant_id="test-tenant-track-recalls")
 
-    sc.increment_recall.assert_awaited_once_with([str(ids[0]), str(ids[1])])
+    sc.increment_recall.assert_awaited_once_with(
+        [str(ids[0]), str(ids[1])],
+        tenant_id="test-tenant-track-recalls",
+    )
 
 
 # ---------------------------------------------------------------------------

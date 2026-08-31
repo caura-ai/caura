@@ -210,13 +210,6 @@
       "note": "Join table has no tenant column; rows are tenant-scoped only via the ids."
     },
     {
-      "id": "method:memory_increment_recall",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1088."
-    },
-    {
       "id": "method:memory_list_null_embedding_rows",
       "verdict": "OPTIONAL",
       "evidence": "tenant_id is defaulted; omitting it drops the scope",
@@ -612,13 +605,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "id-addressed-read"
-    },
-    {
-      "id": "route:POST /api/v1/storage/memories/increment-recall",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1088."
     },
     {
       "id": "route:POST /api/v1/storage/reports",

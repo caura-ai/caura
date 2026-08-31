@@ -296,7 +296,10 @@ async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | Non
     memory_ids = [mem.get("id") for mem in linked_memories_raw if mem.get("id")]
     if memory_ids:
         try:
-            await get_storage_client().increment_recall([str(m) for m in memory_ids])
+            await get_storage_client().increment_recall(
+                [str(m) for m in memory_ids],
+                tenant_id=tenant_id,
+            )
         except Exception:
             pass  # Non-critical
 

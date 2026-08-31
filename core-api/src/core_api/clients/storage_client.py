@@ -1270,13 +1270,17 @@ class CoreStorageClient:
     # datetimes, so callers stringify UUIDs + ISO-format datetimes first.
     # =====================================================================
 
-    async def increment_recall(self, memory_ids: list[str]) -> int:
+    async def increment_recall(self, memory_ids: list[str], *, tenant_id: str) -> int:
         """Bump ``recall_count`` + ``last_recalled_at`` for memories by id.
 
         ``memory_ids`` must already be stringified (the storage endpoint
-        re-parses each as a UUID). Returns the rows-updated count.
+        re-parses each as a UUID). ``tenant_id`` binds the update to the
+        caller's tenant. Returns the rows-updated count.
         """
-        result = await self._post("/memories/increment-recall", {"memory_ids": memory_ids})
+        result = await self._post(
+            "/memories/increment-recall",
+            {"tenant_id": tenant_id, "memory_ids": memory_ids},
+        )
         return result.get("updated", 0)  # type: ignore[union-attr]
 
     async def log_recall(self, event: dict, candidates: list[dict]) -> str:
