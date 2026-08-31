@@ -4,7 +4,11 @@ Measures the Python-side computation overhead of the old vs new formulas.
 These are pure-math benchmarks (no DB) — they measure the scoring logic only,
 not the SQL query execution time (which is dominated by pgvector ANN search).
 
-Run with: pytest tests/test_benchmark_scoring.py -v -s --tb=short
+These carry ``@pytest.mark.benchmark``, which the root ``pytest.ini``
+deselects by default — a wall-clock budget cannot gate a 5,700-test suite on a
+shared machine. ``-m benchmark`` is required to select them, so:
+
+Run with: pytest tests/test_benchmark_scoring.py -m benchmark -v -s --tb=short
 """
 
 import statistics
