@@ -350,27 +350,6 @@ async def create_relation(request: Request) -> dict:
     return orm_to_dict(relation, RELATION_FIELDS)
 
 
-@router.get("/relations/find")
-async def find_relation(
-    source_id: str,
-    target_id: str,
-    relation_type: str,
-) -> dict | None:
-    # Derive tenant_id from source entity (client doesn't pass it).
-    source = await _svc.entity_get_by_id(UUID(source_id))
-    if source is None:
-        raise HTTPException(status_code=404, detail="Source entity not found")
-    relation = await _svc.relation_find(
-        tenant_id=source.tenant_id,
-        from_entity_id=UUID(source_id),
-        relation_type=relation_type,
-        to_entity_id=UUID(target_id),
-    )
-    if relation is None:
-        raise HTTPException(status_code=404, detail="Relation not found")
-    return orm_to_dict(relation, RELATION_FIELDS)
-
-
 # ------------------------------------------------------------------
 # Memory-entity links
 # ------------------------------------------------------------------
