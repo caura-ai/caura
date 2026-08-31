@@ -70,7 +70,11 @@ async def update_agent_fleet(agent_id: str, request: Request) -> dict:
 async def update_search_profile(agent_id: str, request: Request) -> dict:
     body: dict = await request.json()
     # agent_id here is the PK (Agent.id), not the string agent_id
-    await _svc.agent_update_search_profile(agent_id, body["search_profile"])
+    await _svc.agent_update_search_profile(
+        agent_id,
+        tenant_id=body["tenant_id"],
+        search_profile=body["search_profile"],
+    )
     return {"ok": True}
 
 
