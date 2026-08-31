@@ -161,3 +161,50 @@ async def test_mark_dedup_checked_requires_tenant(sc):
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await sc._post("/memories/mark-dedup-checked", {"memory_ids": [mem_id]})
     assert exc.value.response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# memory_add_entity_links (PATCH /memories/{id}/entities)
+# ---------------------------------------------------------------------------
+
+
+async def test_update_memory_surfaces_a_refused_entity_link(sc):
+    """A foreign ``entity_id`` must fail the PATCH, not be silently dropped.
+
+    Storage scopes both ends of every link to the tenant and answers 404, which
+    ``_patch`` turns into ``None``. Without an explicit check on that return,
+    ``update_memory`` fell through and recorded ``entity_links: replaced`` in the
+    audit trail before answering 200 — a success for a write that never
+    happened, which is worse to debug than the cross-tenant link it replaced.
+
+    The memory here belongs to the caller; only the entity is foreign, so this
+    is the entity half of the storage predicate seen from core-api.
+    """
+    from fastapi import HTTPException
+
+    from core_api.schemas import MemoryUpdate
+    from core_api.services.memory_service import update_memory
+
+    owner, stranger = _t(), _t()
+    mem_id = UUID(await _seed_memory(sc, owner, embedding=fake_embedding("linkable")))
+    foreign_entity = (
+        await sc.create_entity(
+            {
+                "tenant_id": stranger,
+                "entity_type": "person",
+                "canonical_name": f"Foreign-{uuid4().hex[:8]}",
+            }
+        )
+    )["id"]
+
+    with pytest.raises(HTTPException) as exc:
+        await update_memory(
+            mem_id,
+            owner,
+            MemoryUpdate(entity_links=[{"entity_id": foreign_entity, "role": "subject"}]),
+        )
+
+    assert exc.value.status_code == 422
+    assert "entity_links" in str(exc.value.detail)
+    links = await PostgresService().memory_get_entity_links_for_memories([mem_id])
+    assert links.get(mem_id, []) == [], "the foreign entity was linked anyway"
