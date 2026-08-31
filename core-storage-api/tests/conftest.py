@@ -13,7 +13,7 @@ import uuid
 os.environ.setdefault("TESTING", "1")
 os.environ.setdefault(
     "DATABASE_URL",
-    "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw",
+    "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw",  # legacy-name-ok: local test DB
 )
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("CORE_STORAGE_SHARED_SECRET", "test-storage-secret")

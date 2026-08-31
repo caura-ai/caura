@@ -9,6 +9,8 @@ from core_api.services.report_corpus import (
     resolve_parent,
 )
 
+HEALTH_PROBE_TITLE_PREFIX = "memclaw-smoke-"  # legacy-name-ok: deployed health-probe title prefix
+
 
 def test_resolve_parent_explicit_subagent_convention():
     known = frozenset({"quantclaw"})
@@ -66,13 +68,20 @@ def test_is_reserved_agent_predicate():
 
 
 def test_health_check_probe_dropped_as_noise():
-    # __health_check__ writes durable-typed 'fact' rows titled 'memclaw-smoke-*';
-    # both the reserved-agent gate and the title regex must drop them so the probe
-    # never tops the leaderboard.
-    probe = _m(mtype="fact", title="memclaw-smoke-1786983933574 identifier", agent="__health_check__")
+    # The health check writes durable-typed fact rows under its deployed title
+    # prefix. Both the reserved-agent gate and title regex must drop them.
+    probe = _m(
+        mtype="fact",
+        title=f"{HEALTH_PROBE_TITLE_PREFIX}1786983933574 identifier",
+        agent="__health_check__",
+    )
     assert not passes_noise_filter(probe) and not is_cohesive(probe)
-    # the memclaw-smoke title alone drops it even under a non-reserved id
-    smoke_titled = _m(mtype="fact", title="memclaw-smoke-123 identifier", agent="someagent")
+    # The title prefix alone drops it even under a non-reserved id.
+    smoke_titled = _m(
+        mtype="fact",
+        title=f"{HEALTH_PROBE_TITLE_PREFIX}123 identifier",
+        agent="someagent",
+    )
     assert not passes_noise_filter(smoke_titled)
 
 

@@ -17,6 +17,8 @@ import core_worker.consumer as consumer
 from common.enrichment import EnrichmentResult
 from common.events.base import Event
 
+ENRICH_REQUESTED_TOPIC = "memclaw.memory.enrich-requested"  # legacy-name-ok: deployed Pub/Sub topic
+
 
 def _make_event(payload: dict | None = None) -> Event:
     p = payload or {
@@ -27,7 +29,7 @@ def _make_event(payload: dict | None = None) -> Event:
         "openai_api_key": "sk-tenant",
     }
     return Event(
-        event_type="memclaw.memory.enrich-requested",
+        event_type=ENRICH_REQUESTED_TOPIC,
         tenant_id=p.get("tenant_id"),
         payload=p,
     )
@@ -481,7 +483,7 @@ async def test_validation_error_drops_silently(mock_storage_client, caplog):
     consumer.configure(mock_storage_client)
 
     # Missing required fields.
-    event = Event(event_type="memclaw.memory.enrich-requested", payload={})
+    event = Event(event_type=ENRICH_REQUESTED_TOPIC, payload={})
 
     with caplog.at_level("ERROR"):
         await consumer.handle_enrich_request(event)
