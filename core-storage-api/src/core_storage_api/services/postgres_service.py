@@ -7151,9 +7151,7 @@ class PostgresService:
     # guard stays out of the way of genuinely tiny documents.
     _SHRINK_MIN_STORED_BYTES = 2048
 
-    async def _guard_document_shrink(
-        self, tenant_id: str, collection: str, doc_id: str, data: dict
-    ) -> None:
+    async def _guard_document_shrink(self, tenant_id: str, collection: str, doc_id: str, data: dict) -> None:
         """Refuse an upsert that would replace a substantial document with a
         near-empty one. Raises ``ValueError`` (surfaced as 400) naming both
         sizes and the override, so a caller who MEANT it can retry."""
