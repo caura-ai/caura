@@ -16,7 +16,7 @@ failure. It is a row belonging to somebody else.
 This makes the invariant checkable. It does NOT attempt to prove that any
 particular statement is correctly scoped: that is a semantic question, a gate
 that guesses at semantics produces false positives, and a security gate with
-false positives gets switched off. What it checks instead are three things that
+false positives gets switched off. What it checks instead are four things that
 are exactly decidable:
 
 1. **Completeness.** Every route and every public service method is enumerated
@@ -25,6 +25,19 @@ are exactly decidable:
    appear in the allowlist with a reason someone wrote and a reviewer read.
 3. **Direction.** The allowlist may shrink. It may not grow. A new unscoped
    path fails the build (``--base``).
+4. **Immutability of what the predicate filters on.** A statement bound to
+   ``WHERE tenant_id = :tenant`` is only as good as the caller's inability to
+   rewrite ``tenant_id`` — or the primary key — in the same request. Any method
+   building an ``UPDATE ... SET`` from a caller-controlled dict must filter the
+   keys through a named set, and that set must exclude the model's identity,
+   scope and database-maintained columns.
+
+Checks 1–3 were the whole gate for its first month, and three primary-key
+rewrites got through them: #1081, #1118 and #1121. Two of the three were
+correctly tenant-bound, so nothing in 1–3 had any objection to make — the
+statement satisfied its predicate and then moved the row out from under it.
+Check 4 is that gap, and it is why "bound to a tenant" is reported separately
+from "cannot be unbound by the same request".
 
 The semantics stay a human claim, as they must, but the claim is forced into the
 diff where review can see it, and the population it has to cover can only get
@@ -68,6 +81,7 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +156,54 @@ FAIL_CLOSED_GUARDS = frozenset({"_require", "_require_dict", "_require_number"})
 # that must keep the scope out of a column update reads it that way, and it is
 # no less a read of the request for removing the key afterwards.
 DICT_READS = frozenset({"get", "pop"})
+
+# --- Identity-column writability: the write-side half of the same invariant ---
+#
+# A tenant predicate is worth exactly as much as the immutability of the column
+# it filters on. Three methods proved that in a week, and two of the three were
+# ALREADY passing the binding-scope checks above:
+#
+#   entity_update      (#1081/#1119)  ``if hasattr(entity, key): setattr(...)``
+#   memory_update      (#1118/#1122)  ``if hasattr(Memory, key)`` in a comprehension
+#   fleet_upsert_node  (#1121/#1129)  ``if k not in ("tenant_id", "node_name")``
+#
+# Each built an ``UPDATE ... SET`` from a caller-controlled dict, and each
+# admitted ``id``. The statement became ``SET id = <caller's choice> WHERE
+# id = :id AND tenant_id = :tenant``: predicate satisfied, primary key moved.
+# ``memory_update`` and ``fleet_upsert_node`` were correctly tenant-bound the
+# whole time, so nothing above had anything to say — the defect lives one layer
+# below where this gate was looking.
+#
+# ``IDENTITY_WRITE_GUARDS`` pairs each such method with the model it writes and
+# the constant that filters the caller's keys. ``admits`` records the polarity:
+# True for ``key in CONST`` (the constant lists what may be written), False for
+# ``key not in CONST`` (it lists what may not).
+IDENTITY_WRITE_GUARDS: dict[str, tuple[str, str, bool]] = {
+    "entity_update": ("Entity", "_ENTITY_UPDATABLE_FIELDS", True),
+    "memory_update": ("Memory", "_MEMORY_UPDATABLE_FIELDS", True),
+    "fleet_upsert_node": ("FleetNode", "_FLEET_NODE_IMMUTABLE_FIELDS", False),
+}
+
+# Column types a caller may never write because the database maintains them.
+# ``search_vector`` is the live case: its trigger fires ``BEFORE INSERT OR
+# UPDATE OF content, title``, so a patch naming only the vector does not fire it
+# and the caller's value persists — the row leaves keyword recall with no
+# content change to explain it (#1122). Matched on type rather than name, so a
+# second tsvector column is covered the day it is added.
+DERIVED_COLUMN_TYPES = frozenset({"TSVECTOR"})
+
+# What a ``.values(**…)`` chain has to hang off before it can move an existing
+# row. ``pg_insert(...).values(**data)`` is deliberately absent: naming the id of
+# a row you are creating collides rather than overwrites. Enumerated rather than
+# prefix-matched, for the reason ``FAIL_CLOSED_GUARDS`` gives — a set that
+# quietly grows to fit a new name is a set that stops meaning anything.
+UPDATE_STATEMENT_ROOTS = frozenset({"sql_update", "update"})
+
+# The statements that create rather than move a row. Named so that a chain
+# resolving to neither set is treated as an update: an unrecognised builder is
+# an unknown, and this check's stated bias is to report an unknown rather than
+# assume it is the harmless one.
+INSERT_STATEMENT_ROOTS = frozenset({"pg_insert", "insert"})
 
 # How much of a binding a verdict represents, so "weaker than" is a comparison
 # rather than a rule spelled out at each site. REQUIRED binds every call;
@@ -388,6 +450,453 @@ def _widening_grant_findings() -> list[Entry]:
                 )
             )
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Identity-column writability
+# ---------------------------------------------------------------------------
+
+
+def _literal_keys(node: ast.expr | None) -> bool:
+    """Whether ``node`` is a collection of constant strings written in the source.
+
+    A loop over ``("fleet_id", "trust_level", …)`` cannot reach a column the
+    author did not type, so it is safe however the caller's dict is shaped —
+    ``agent_add`` is the live example. A loop over ``data.items()`` can reach any
+    key the caller sends, and that is the shape this check looks for.
+    """
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts)
+    if isinstance(node, ast.Dict):
+        return all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in node.keys)
+    return False
+
+
+def _walk_scope(node: ast.AST) -> Iterator[ast.AST]:
+    """Walk ``node``'s subtree without descending into a nested function scope.
+
+    A closure defined inside a method has its own locals, so an assignment to
+    ``values`` in there says nothing about the ``values`` the method passes to
+    ``.values(**…)``. Walking through it would let an inner name decide whether
+    an outer statement is judged safe — in either direction.
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _walk_scope(child)
+
+
+def _enclosing_loops(fn: ast.FunctionDef | ast.AsyncFunctionDef, target: ast.AST) -> list[ast.AST]:
+    """The loops that actually contain ``target``, innermost first.
+
+    Ancestry, not line numbers. Comparing ``node.lineno >= loop.lineno`` counts
+    every loop that merely STARTS earlier, so an unrelated sibling loop over
+    written-out names — ``for flag in ("a", "b")`` — would vouch for a later
+    ``setattr`` over ``data.items()`` and the site would go unreported. That is
+    a false negative in the one direction this check exists to cover.
+
+    The ascent stops at a function boundary, because a loop only vouches for
+    names it actually binds. A nested scope rebinds them::
+
+        for key in ("a", "b"):
+            f = lambda key, value: setattr(row, key, value)
+            f(caller_key, caller_value)
+
+    Lexically the loop encloses that ``setattr``, and the key is spelled
+    ``key`` — but it is the lambda's parameter, filled by the caller. Matching
+    on the name alone let the loop clear a write it has nothing to do with.
+    A ``def`` in that position is caught anyway, since every function is
+    scanned as its own scope; a ``Lambda`` is not a ``FunctionDef`` and never
+    gets that second reading, so the boundary is what covers it.
+    """
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(fn):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    loops: list[ast.AST] = []
+    current = parents.get(target)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            break
+        if isinstance(current, (ast.For, ast.AsyncFor)):
+            loops.append(current)
+        current = parents.get(current)
+    return loops
+
+
+def _bound_names(target: ast.expr) -> set[str]:
+    """The names a ``for`` target binds, including through tuple unpacking."""
+    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+
+
+def _key_is_bound_to_literal_names(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call
+) -> bool:
+    """Whether the key handed to ``setattr`` provably comes from written-out names.
+
+    Provenance, not proximity. Asking whether ANY enclosing loop iterates literal
+    names lets an outer loop vouch for an inner one::
+
+        for group in ("core", "extra"):        # literal, and irrelevant
+            for key, value in data[group].items():
+                setattr(row, key, value)       # key comes from HERE
+
+    so the innermost binding is the only one that answers the question. A key
+    that no enclosing loop binds — a bare variable from somewhere else — is not
+    provably safe either, and falls through to being reported.
+    """
+    if len(call.args) < 2:
+        return False
+    key = call.args[1]
+    if isinstance(key, ast.Constant):
+        return True
+    if not isinstance(key, ast.Name):
+        return False
+    for loop in _enclosing_loops(fn, call):
+        target = getattr(loop, "target", None)
+        if target is not None and key.id in _bound_names(target):
+            return _literal_keys(getattr(loop, "iter", None))
+    return False
+
+
+def _local_assignments(fn: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[ast.expr]:
+    """Every value assigned to ``name`` in ``fn``'s own scope, in source order."""
+    found: list[ast.expr] = []
+    for node in _walk_scope(fn):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    found.append(node.value)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == name
+            and node.value
+        ):
+            found.append(node.value)
+    return found
+
+
+def _statement_roots(
+    expr: ast.expr,
+    fn: ast.FunctionDef | ast.AsyncFunctionDef | None = None,
+    seen: frozenset[str] = frozenset(),
+) -> set[str]:
+    """Every constructor a ``.values(...)`` chain could hang off.
+
+    A set rather than one answer because a name can be assigned more than once,
+    and ``stmt = sql_update(M)`` followed by ``stmt = stmt.values(**data)``
+    makes the LAST assignment self-referential — resolving only that one answers
+    ``stmt`` and the update disappears. Considering every assignment finds the
+    ``sql_update`` that the chain actually started from.
+    """
+    current: ast.AST = expr
+    while True:
+        if isinstance(current, ast.Call):
+            current = current.func
+        elif isinstance(current, ast.Attribute):
+            current = current.value
+        elif isinstance(current, ast.Name):
+            if fn is None or current.id in seen:
+                return {current.id}
+            origins = _local_assignments(fn, current.id)
+            if not origins:
+                return {current.id}
+            roots: set[str] = set()
+            for origin in origins:
+                roots |= _statement_roots(origin, fn, seen | {current.id})
+            return roots or {current.id}
+        else:
+            return set()
+
+
+def _is_update_statement(
+    expr: ast.expr, fn: ast.FunctionDef | ast.AsyncFunctionDef | None = None
+) -> bool:
+    """Whether a ``.values(...)`` chain hangs off something that moves an existing row.
+
+    An INSERT is exempt for the reason given on ``_caller_keyed_update_sites``.
+    Anything that resolves to neither an insert nor an update builder is treated
+    as an update: it is a shape this pass does not recognise, and reporting an
+    unknown costs one registry line a reviewer can delete, while assuming it is
+    an insert costs a silent miss.
+    """
+    roots = _statement_roots(expr, fn)
+    if roots & UPDATE_STATEMENT_ROOTS:
+        return True
+    return not (roots & INSERT_STATEMENT_ROOTS)
+
+
+def _all_literal_keys(fn: ast.FunctionDef | ast.AsyncFunctionDef, expr: ast.expr | None) -> bool:
+    """Whether ``expr``'s keys are written out in the source on *every* path to it.
+
+    A bare name is resolved through ``_local_assignments``, and all of them have
+    to be literal-keyed for the name to clear. Not a reaching-definitions pass:
+    this deliberately ignores which assignment reaches the call, because the
+    cheap alternative — take the last one — is wrong in the direction that
+    matters::
+
+        values = {k: v for k, v in patch.items()}   # caller-keyed
+        await session.execute(sql_update(M).values(**values))
+        values = {"status": "done"}                 # unrelated, later
+
+    The dict that reaches the UPDATE is the first one. Answering with the last
+    reports "literal" and the site disappears — a silent miss, where the failure
+    mode of being conservative is one registry line a reviewer deletes. Same
+    rule as ``_statement_roots``, for the same reason: any origin can sink the
+    verdict. Nested scopes are excluded — see ``_walk_scope``.
+    """
+    if not isinstance(expr, ast.Name):
+        return _literal_keys(expr)
+    origins = _local_assignments(fn, expr.id)
+    # A name with no local assignment is a parameter or a global: unreadable
+    # here, so it does not clear.
+    return bool(origins) and all(_literal_keys(origin) for origin in origins)
+
+
+def _caller_keyed_update_sites(source: str) -> dict[str, str]:
+    """Methods whose UPDATE keys come from a caller-controlled dict.
+
+    Three shapes, one per defect actually found:
+
+    * ``setattr(row, key, …)`` under a loop that is not over literal names.
+    * ``set_=`` given anything but a dict written out in the source — the
+      ``ON CONFLICT DO UPDATE`` half of an upsert.
+    * ``.values(**X)`` where ``X`` is built by a comprehension, which is how a
+      caller's dict gets filtered into an ``UPDATE ... SET``.
+
+    INSERT is deliberately not a site. ``pg_insert(...).values(**data)`` lets a
+    caller name the id of a row *they are creating*; colliding with an existing
+    key raises rather than overwriting, so no existing row moves. The defect is
+    an existing row's identity changing under it, which only the update paths
+    above can do. That cut is what keeps ``relation_add``, ``agent_add`` and
+    ``agent_activity_digest_upsert`` off this list.
+
+    Heuristic, and biased the way the route classifier is: it would rather name
+    a method that turns out to be safe — one registry line, which a reviewer can
+    read and delete — than miss one that is not, which is invisible.
+    """
+    tree = ast.parse(source)
+    sites: dict[str, str] = {}
+    # Private helpers are scanned too. Skipping them left a hole big enough to
+    # drive the whole defect through: move the ``setattr`` loop into
+    # ``_apply_patch`` and call it from a public method, and neither one is a
+    # site — the public method's own body is clean and the helper is invisible.
+    # A private helper that qualifies is reported under its own name, which is
+    # also where the guard belongs, since that is where the keys are applied.
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "setattr"
+                and not _key_is_bound_to_literal_names(fn, node)
+            ):
+                sites.setdefault(fn.name, "setattr over caller-supplied keys")
+            for kw in node.keywords:
+                if kw.arg == "set_" and not _all_literal_keys(fn, kw.value):
+                    sites.setdefault(fn.name, "ON CONFLICT set_ from caller-supplied keys")
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "values"
+                and _is_update_statement(node.func.value, fn)
+            ):
+                # Both ways of handing ``values()`` a whole dict. ``.values(**d)``
+                # puts it in ``keywords`` with ``arg=None``; ``.values(d)`` puts
+                # it in ``args``, and that form is if anything the more likely —
+                # it is what you must write when a key is not a valid Python
+                # identifier. Reading only ``keywords`` saw the spread and never
+                # the argument, so the whole defect with two characters removed
+                # went through.
+                #
+                # A NAMED keyword is deliberately not included: ``arg`` being a
+                # real column name is the author typing it out, which is the
+                # opposite of a caller-keyed dict, and is what keeps
+                # ``report_update_completed`` and every other explicit SET off
+                # this list.
+                spread = [kw.value for kw in node.keywords if kw.arg is None]
+                if any(not _all_literal_keys(fn, v) for v in [*node.args, *spread]):
+                    sites.setdefault(fn.name, "UPDATE values(…) from caller-supplied keys")
+    return sites
+
+
+def _names_referenced(source: str) -> dict[str, set[str]]:
+    """Every name each method mentions, so a registration can be checked.
+
+    Without this the registry is a claim about code rather than a reading of it:
+    ``IDENTITY_WRITE_GUARDS`` could name the right constant while the method had
+    gone back to ``hasattr``, and both other halves would still pass — the
+    runtime half validates the constant, not its use.
+
+    Attribute access counts as mentioning the name: ``models.Entity`` is the
+    same registration as ``Entity``. Reading only ``ast.Name`` meant a change to
+    qualified imports would report every guard in the file as stale — a red gate
+    fixed by reverting an import style, which is the wrong lesson. This makes
+    the check weaker in the direction that cannot block a correct tree, which is
+    the right way round for a question as loose as "is this name spoken here".
+    """
+    tree = ast.parse(source)
+    out: dict[str, set[str]] = {}
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        out[fn.name] = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | {
+            n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)
+        }
+    return out
+
+
+def _service_tree() -> ast.Module:
+    """The parsed source of the one module check 4 reads."""
+    import core_storage_api.services.postgres_service as service
+
+    return ast.parse(Path(inspect.getfile(service)).read_text())
+
+
+def _scan_assumption_findings(cls: type, tree: ast.Module) -> list[str]:
+    """The two things check 4's single-file, bare-name scan takes for granted.
+
+    Checks 1-3 enumerate the class through ``inspect.getmembers`` so a method
+    arriving from a mixin is never silently skipped — see ``_public_methods``.
+    Check 4 parses the text of one module instead, and keys everything by bare
+    function name. Both are true of the tree today and neither is guaranteed,
+    and each would fail SILENTLY: a mixin's ``setattr`` loop would simply not be
+    read, and two same-named functions would have one supply the verdict while
+    the other supplies the names it is checked against, since ``sites`` keeps
+    the first and ``_names_referenced`` the last.
+
+    Reported rather than handled. Walking every module that defines a reachable
+    method, or keying by a qualified name, are both real answers — but the first
+    is speculative machinery for a case that cannot arise yet, and the second
+    would push a class path into ``IDENTITY_WRITE_GUARDS``, which is written by
+    hand and would go stale. Failing here puts the decision in front of whoever
+    creates the situation, with a concrete second module or collision to look at.
+    """
+    errors: list[str] = []
+
+    bases = [base.__name__ for base in cls.__mro__[1:] if base is not object]
+    if bases:
+        errors.append(
+            f"{cls.__name__} now has a base class ({', '.join(bases)}), and check 4 only "
+            f"reads {cls.__name__}'s own module. A caller-keyed UPDATE inherited from one "
+            "would not be scanned, while checks 1-3 would still enumerate it. Scan every "
+            "module that defines a reachable method, or state here why the base cannot "
+            "carry one."
+        )
+
+    seen: dict[str, int] = {}
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        seen[fn.name] = seen.get(fn.name, 0) + 1
+    for name, count in sorted(seen.items()):
+        if count > 1:
+            errors.append(
+                f"the scanned module defines {count} functions named {name!r}, and check 4 "
+                "keys sites, references and IDENTITY_WRITE_GUARDS by bare name. One of them "
+                "would decide the verdict and the other would supply the names it is checked "
+                "against. Rename one."
+            )
+    return errors
+
+
+def _protected_columns(model: Any) -> dict[str, str]:
+    """Columns on ``model`` a caller must never write, and why.
+
+    All three reasons are read off the model, so a schema change moves them
+    without anybody remembering to update this file.
+    """
+    protected: dict[str, str] = {}
+    for column in model.__table__.primary_key.columns:
+        protected[column.key] = "primary key"
+    for column in model.__table__.columns:
+        if column.key in BINDING_SCOPE:
+            protected[column.key] = "tenant scope"
+        elif type(column.type).__name__.upper() in DERIVED_COLUMN_TYPES:
+            protected[column.key] = "database-maintained"
+    return protected
+
+
+def _identity_writability_findings() -> list[str]:
+    """No registered write filter admits an identity column, and none is missing.
+
+    Three failure modes, and they are genuinely different. The AST half answers
+    "is there a filter at all", which ``entity_update`` and ``memory_update``
+    failed. The reference check answers "does the method still use the filter it
+    is registered for", without which the registry is a claim nobody reads
+    against the code. The runtime half answers "does the filter actually exclude
+    the identity columns", which ``fleet_upsert_node`` failed while carrying a
+    filter that looked deliberate.
+
+    ``_scan_assumption_findings`` guards the ground all three stand on — that
+    the methods are one class in one file, addressable by bare name.
+    """
+    import core_storage_api.services.postgres_service as service
+
+    from common import models
+
+    errors: list[str] = []
+    source = Path(inspect.getfile(service)).read_text()
+    errors.extend(_scan_assumption_findings(service.PostgresService, ast.parse(source)))
+    sites = _caller_keyed_update_sites(source)
+    referenced = _names_referenced(source)
+
+    for method in sorted(set(sites) - set(IDENTITY_WRITE_GUARDS)):
+        errors.append(
+            f"method:{method} builds an UPDATE from caller-supplied keys ({sites[method]}) "
+            "with no registered identity guard. A tenant predicate does not protect a "
+            "column the same request can rewrite: filter the keys through a frozenset that "
+            "excludes the model's primary key and tenant scope, then register it in "
+            "IDENTITY_WRITE_GUARDS in scripts/tenant_scope_gate.py."
+        )
+
+    for method, (model_name, const_name, admits) in sorted(IDENTITY_WRITE_GUARDS.items()):
+        if method not in sites:
+            errors.append(
+                f"method:{method} is registered in IDENTITY_WRITE_GUARDS but no longer builds "
+                "an UPDATE from caller-supplied keys. Delete the entry — a registration "
+                "matching nothing reads as coverage nobody has."
+            )
+            continue
+        if const_name not in referenced.get(method, set()):
+            errors.append(
+                f"method:{method} is registered as guarded by {const_name} but does not "
+                "mention it. The registration is a claim about code that no longer reads "
+                "that way — point the filter back at the constant, or delete the entry and "
+                "let the unregistered-site check speak."
+            )
+            continue
+        # The model half of the same claim. A constant can be genuinely used and
+        # the entry still name the wrong table, and then the column check below
+        # runs against columns the method never writes: registering
+        # ``memory_update`` against ``Entity`` stops ``Memory.search_vector``
+        # being checked at all, because Entity has no TSVECTOR to find.
+        # By reference, not by reading the model off the statement — the
+        # ``setattr`` shape has no statement to read, and that is the shape the
+        # first of these defects had.
+        if model_name not in referenced.get(method, set()):
+            errors.append(
+                f"method:{method} is registered against {model_name} but does not mention "
+                f"{model_name}. The entry would validate {const_name} against a table this "
+                "method does not write, so the columns actually at risk go unchecked."
+            )
+            continue
+        model = getattr(models, model_name, None)
+        constant = getattr(service, const_name, None)
+        if model is None or constant is None:
+            errors.append(
+                f"method:{method} names {model_name}/{const_name}, which no longer both "
+                "exist. A guard that cannot be resolved is not a guard."
+            )
+            continue
+        columns = {c.key for c in model.__table__.columns}
+        written = set(constant) if admits else columns - set(constant)
+        for column, reason in sorted(_protected_columns(model).items()):
+            if column in written:
+                errors.append(
+                    f"method:{method} may write {model_name}.{column} ({reason}) — "
+                    f"{const_name} admits it. A caller who satisfies the tenant predicate can "
+                    "then move the row out from under it."
+                )
+    return errors
 
 
 # ---------------------------------------------------------------------------
@@ -1319,6 +1828,10 @@ def main() -> int:
 
     errors = check(entries, grants, previous)
     errors.extend(check_category_doc(ALLOWLIST_PATH))
+    # Deliberately not allowlisted. This invariant has no exceptions today, and
+    # one with none does not need a file to hold them: the first would be a
+    # decision worth arguing in review, not a line ``--write`` adds for you.
+    errors.extend(_identity_writability_findings())
     if args.base:
         try:
             errors.extend(ratchet(args.base, ALLOWLIST_PATH, {e.ident: e for e in exceptions(entries)}))
