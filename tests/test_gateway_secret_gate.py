@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from core_api import auth as auth_mod
+from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
 
 class _Req:
@@ -21,7 +22,7 @@ class _Req:
 async def _ctx(monkeypatch, headers, *, secret):
     monkeypatch.setattr(auth_mod.settings, "gateway_shared_secret", secret)
     monkeypatch.setattr(auth_mod.settings, "is_standalone", False)
-    monkeypatch.setattr(auth_mod.settings, "memclaw_api_key", None)
+    monkeypatch.setattr(auth_mod.settings, LEGACY_API_KEY_FIELD, None)
     monkeypatch.setattr(auth_mod, "get_admin_key", lambda: None)
 
     async def _noop(*a, **k):

@@ -4,7 +4,7 @@ Customer-side ground truth (goodclaw / tenant ``etoro0-40f488``, 2026-06-07):
 a search against a dense entity graph generated a single SQL statement
 with **42,146 bind parameters** on the ``relations`` table, exceeding
 asyncpg's safe window and crashing the ``core-storage-api`` request.
-Cascade visible upstream as 7 ``recall failed: MemClaw API 500`` lines
+Cascade visible upstream as 7 recall-API failure lines
 and 3 ``SMOKE TEST ERROR`` events in the gateway log.
 
 Two cap sites pinned here:

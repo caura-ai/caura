@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from common.events import Topics
+from tests._legacy_contracts import frozen_topic
 
 
 def test_members_compare_equal_to_their_string_value() -> None:
     assert Topics.Memory.ENRICHED == "memclaw.memory.enriched"  # legacy-name-ok: rule 3 — asserts the enum's current wire value
-    assert Topics.Audit.EVENT_RECORDED == "memclaw.audit.event-recorded"
+    assert Topics.Audit.EVENT_RECORDED == frozen_topic("audit.event-recorded")
 
 
 def test_members_format_as_their_string_value() -> None:
@@ -15,7 +16,7 @@ def test_members_format_as_their_string_value() -> None:
     # Pub/Sub's topic_path uses f-string interpolation; regressing here
     # breaks every publish.
     assert f"{Topics.Memory.ENRICHED}" == "memclaw.memory.enriched"  # legacy-name-ok: rule 3 — asserts the enum's current wire value
-    assert str(Topics.Memory.EMBED_REQUESTED) == "memclaw.memory.embed-requested"
+    assert str(Topics.Memory.EMBED_REQUESTED) == frozen_topic("memory.embed-requested")
 
 
 def test_members_hash_equal_to_their_string_value() -> None:

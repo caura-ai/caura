@@ -27,6 +27,10 @@ from common.events.pubsub import (
     _claim_broadcast_slot,
     _process_broadcast_slot_id,
 )
+from tests._legacy_contracts import frozen_topic
+
+EMBEDDED_TOPIC = frozen_topic("memory.embedded")
+EMBEDDED_EVENT_BYTES = json.dumps({"event_type": EMBEDDED_TOPIC}).encode()
 
 
 @pytest.fixture
@@ -67,7 +71,9 @@ async def test_publish_encodes_envelope_as_json(bus: PubSubEventBus) -> None:
 
     bus._publisher.publish.assert_called_once()
     topic_path, data = bus._publisher.publish.call_args[0]
-    assert topic_path == "projects/proj/topics/memclaw.memory.embed-requested"
+    assert (
+        topic_path == f"projects/proj/topics/{frozen_topic('memory.embed-requested')}"
+    )
     parsed = json.loads(data.decode())
     assert parsed["event_type"] == Topics.Memory.EMBED_REQUESTED
     assert parsed["tenant_id"] == "t1"
@@ -84,7 +90,7 @@ async def test_topic_prefix_scopes_publish(bus: PubSubEventBus) -> None:
     )
     await bus.publish(Topics.Memory.EMBEDDED, event)
     topic_path, _ = bus._publisher.publish.call_args[0]
-    assert topic_path == "projects/proj/topics/prod--memclaw.memory.embedded"
+    assert topic_path == f"projects/proj/topics/prod--{EMBEDDED_TOPIC}"
 
 
 def test_topic_name_prefix_and_no_op() -> None:
@@ -94,14 +100,12 @@ def test_topic_name_prefix_and_no_op() -> None:
         topic_prefix="prod",
         dual_subscribe=True,
     )
-    assert (
-        scoped._topic_name("memclaw.memory.embedded") == "prod--memclaw.memory.embedded"
-    )
+    assert scoped._topic_name(EMBEDDED_TOPIC) == f"prod--{EMBEDDED_TOPIC}"
     # Empty/unset prefix ⇒ the raw topic name (byte-identical to today's behaviour).
     noop = PubSubEventBus(
         project_id="proj", subscription_prefix="test", dual_subscribe=True
     )
-    assert noop._topic_name("memclaw.memory.embedded") == "memclaw.memory.embedded"
+    assert noop._topic_name(EMBEDDED_TOPIC) == EMBEDDED_TOPIC
 
 
 async def test_decode_accepts_well_formed_envelope() -> None:
@@ -1170,7 +1174,7 @@ async def test_pull_loop_drops_foreign_env_message_before_dispatch() -> None:
         dual_subscribe=True,
     )
     foreign = _make_received(
-        b'{"event_type": "memclaw.memory.embedded"}',
+        EMBEDDED_EVENT_BYTES,
         "ack-foreign",
         {"source_env": "sandbox"},
     )
@@ -1191,7 +1195,7 @@ async def test_pull_loop_processes_same_env_message() -> None:
         dual_subscribe=True,
     )
     local = _make_received(
-        b'{"event_type": "memclaw.memory.embedded"}',
+        EMBEDDED_EVENT_BYTES,
         "ack-local",
         {"source_env": "production"},
     )
@@ -1212,7 +1216,9 @@ async def test_pull_loop_processes_message_without_source_env_attribute() -> Non
         dual_subscribe=True,
     )
     legacy = _make_received(
-        b'{"event_type": "memclaw.memory.embedded"}', "ack-legacy", {}
+        EMBEDDED_EVENT_BYTES,
+        "ack-legacy",
+        {},
     )
 
     result = await _drive_one_batch(bus, [legacy])

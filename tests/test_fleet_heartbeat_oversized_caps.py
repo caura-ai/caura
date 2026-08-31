@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 
 from core_api.routes.fleet import HeartbeatIn
+from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 
 
 def _oversized(min_bytes: int) -> dict:
@@ -41,7 +42,7 @@ def test_oversized_recall_metrics_is_dropped_not_rejected():
 
 
 def test_normal_reconcile_passes_through_unchanged():
-    small = {"catalogCount": 1, "installed": ["memclaw"], "removed": []}
+    small = {"catalogCount": 1, "installed": [FROZEN_PLUGIN_SLUG], "removed": []}
     hb = HeartbeatIn(tenant_id="t", node_name="n", reconcile=small)
     assert hb.reconcile == small
 

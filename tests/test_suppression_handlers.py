@@ -24,6 +24,7 @@ from common.events.suppression_handlers import (
     SuppressionStorageAdapter,
     _handle_suppression_changed,
 )
+from tests._legacy_contracts import frozen_topic
 
 
 class _FakeAdapter(SuppressionStorageAdapter):
@@ -41,7 +42,7 @@ class _FakeAdapter(SuppressionStorageAdapter):
 
 def _event(payload: dict, *, correlation_id: str | None = "corr-abc") -> Event:
     return Event(
-        event_type="memclaw.org.suppression-changed",
+        event_type=frozen_topic("org.suppression-changed"),
         correlation_id=correlation_id,
         payload=payload,
     )
@@ -127,7 +128,7 @@ async def test_empty_tenant_ids_is_noop() -> None:
 async def test_missing_correlation_id_defaults_updated_by() -> None:
     adapter = _FakeAdapter()
     evt = Event(
-        event_type="memclaw.org.suppression-changed",
+        event_type=frozen_topic("org.suppression-changed"),
         payload={"tenant_ids": ["t1"], "action": "suppress"},
     )
     # No correlation_id on the envelope.

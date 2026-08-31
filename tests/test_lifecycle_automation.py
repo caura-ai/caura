@@ -13,6 +13,7 @@ from core_api.constants import (
     LIFECYCLE_BATCH_SIZE,
     LIFECYCLE_STALE_ARCHIVE_WEIGHT,
 )
+from tests._legacy_contracts import frozen_topic
 
 
 @pytest.mark.unit
@@ -69,27 +70,27 @@ class TestLifecycleTopics:
 
         assert (
             Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED
-            == "memclaw.lifecycle.archive-expired-requested"
+            == frozen_topic("lifecycle.archive-expired-requested")
         )
         assert (
             Topics.Lifecycle.ARCHIVE_STALE_REQUESTED
-            == "memclaw.lifecycle.archive-stale-requested"
+            == frozen_topic("lifecycle.archive-stale-requested")
         )
         assert (
             Topics.Lifecycle.PURGE_SOFT_DELETED_REQUESTED
-            == "memclaw.lifecycle.purge-soft-deleted-requested"
+            == frozen_topic("lifecycle.purge-soft-deleted-requested")
         )
         assert (
             Topics.Lifecycle.CRYSTALLIZE_REQUESTED
-            == "memclaw.lifecycle.crystallize-requested"
+            == frozen_topic("lifecycle.crystallize-requested")
         )
         assert (
             Topics.Lifecycle.ENTITY_LINK_REQUESTED
-            == "memclaw.lifecycle.entity-link-requested"
+            == frozen_topic("lifecycle.entity-link-requested")
         )
         assert (
             Topics.Lifecycle.INSIGHTS_REQUESTED
-            == "memclaw.lifecycle.insights-requested"
+            == frozen_topic("lifecycle.insights-requested")
         )
 
     def test_topic_strenum_format(self):
@@ -100,7 +101,7 @@ class TestLifecycleTopics:
         # the embed/enrich topics rely on for Pub/Sub's ``topic_path``.
         assert (
             f"{Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED}"
-            == "memclaw.lifecycle.archive-expired-requested"
+            == frozen_topic("lifecycle.archive-expired-requested")
         )
 
 

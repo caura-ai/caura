@@ -262,7 +262,7 @@ async def test_no_retraction_on_gate1_stochastic_signal():
     0.60) is the **stochastic flip case**: model said
     ``contradicts=True`` with ``same_subject=False`` and the parser
     overrode to False. Under the original threshold 0.60 this silently
-    retracted genuine Path A flags on memclaw.net. Now it must NOT
+    retracted genuine Path A flags in production. Now it must NOT
     retract."""
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,

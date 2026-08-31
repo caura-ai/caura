@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from core_api.routes import fleet as fleet_mod
+from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 
 
 # ---------------------------------------------------------------------------
@@ -86,10 +87,10 @@ async def test_auto_upgrade_enabled_default_true(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_auto_upgrade_enabled_override_false(monkeypatch):
-    """Tenant override `memclaw.auto_upgrade_enabled = false` → disabled."""
+    """A false override in the existing plugin namespace disables upgrades."""
 
     async def _fake(_tid):
-        return {"memclaw": {"auto_upgrade_enabled": False}}
+        return {FROZEN_PLUGIN_SLUG: {"auto_upgrade_enabled": False}}
 
     monkeypatch.setattr("core_api.routes.fleet.get_raw_settings", _fake)
     assert await fleet_mod._auto_upgrade_enabled_for_tenant("tenant-1") is False
@@ -97,10 +98,10 @@ async def test_auto_upgrade_enabled_override_false(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_auto_upgrade_enabled_override_true(monkeypatch):
-    """Tenant override `memclaw.auto_upgrade_enabled = true` → enabled."""
+    """A true override in the existing plugin namespace enables upgrades."""
 
     async def _fake(_tid):
-        return {"memclaw": {"auto_upgrade_enabled": True}}
+        return {FROZEN_PLUGIN_SLUG: {"auto_upgrade_enabled": True}}
 
     monkeypatch.setattr("core_api.routes.fleet.get_raw_settings", _fake)
     assert await fleet_mod._auto_upgrade_enabled_for_tenant("tenant-1") is True
