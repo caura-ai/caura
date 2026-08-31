@@ -2782,8 +2782,14 @@ class CoreStorageClient:
     async def create_report(self, data: dict) -> dict:
         return await self._post("/reports", data)  # type: ignore[return-value]
 
-    async def get_report(self, report_id: str, *, read: bool = True) -> dict | None:
-        """Fetch one analysis report.
+    async def get_report(self, report_id: str, tenant_id: str, *, read: bool = True) -> dict | None:
+        """Fetch one analysis report, within a tenant.
+
+        ``tenant_id`` is positional and required, matching ``update_report``
+        below: a report id alone used to be enough to READ any tenant's report,
+        as it once was to finalize one (#1082 / #1167). Positional rather than
+        keyword-only because there is no ``data`` dict here for a stray copy to
+        hide in.
 
         ``read`` defaults to True — the replica is right for the read paths that
         display a report. Pass ``read=False`` for a read-your-write, where replica
@@ -2793,7 +2799,7 @@ class CoreStorageClient:
         there re-runs a multi-minute LLM job. Same reason
         ``find_by_content_hash`` pins the writer.
         """
-        return await self._get(f"/reports/{report_id}", read=read)
+        return await self._get(f"/reports/{report_id}", read=read, tenant_id=tenant_id)
 
     async def update_report(self, report_id: str, data: dict, *, tenant_id: str) -> dict | None:
         """Finalize a report. ``tenant_id`` scopes the UPDATE and is required.

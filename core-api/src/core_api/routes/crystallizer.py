@@ -1,13 +1,16 @@
 """Memory Crystallizer routes."""
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from core_api import errors
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.errors import coded_detail
 from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.crystallizer_service import start_crystallization
 
@@ -132,21 +135,65 @@ async def list_reports(
 )
 async def get_report(
     report_id: UUID,
+    # ``Annotated[...] = None`` rather than the ``= Query(None)`` spelling used
+    # elsewhere in this tree, because this handler is one of the very few called
+    # DIRECTLY by tests rather than over HTTP — including the audit-finding-#22
+    # regression below it. With ``= Query(None)`` such a call receives the
+    # ``Query`` object itself, which is truthy and would sail past the check
+    # below as if it were a tenant: a value that looks like a scope and is not,
+    # which is the shape of mistake this whole PR is about. This way the
+    # function's default is a real ``None`` however it is invoked.
+    tenant_id: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Tenant that owns the report. Defaults to the calling credential's own "
+                "tenant; required for credentials that have none (admin keys), and used "
+                "to name one of the other tenants a cross-tenant read key may read."
+            ),
+        ),
+    ] = None,
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Get a full crystallization report by ID."""
     sc = get_storage_client()
-    report = await sc.get_report(str(report_id))
+    # Storage requires the owning tenant (#1167): it authenticates nothing, so a
+    # bare report UUID was enough to read any tenant's report off 0.0.0.0:8002.
+    # Which tenant to ask for has to be decided here, and it is a genuine
+    # decision because a report id does not say who owns it:
+    #
+    #   * a tenant-scoped credential asks about its own tenant by default;
+    #   * a cross-tenant read key names one of the tenants it may read — that
+    #     capability existed before this change and is preserved, not narrowed;
+    #   * an admin key has NO tenant of its own, so it must name one. That is
+    #     the one behaviour this change takes away, and it matches what the
+    #     sibling ``GET /reports`` in this package already requires of admin
+    #     keys.
+    scope = tenant_id or auth.tenant_id
+    if not scope:
+        # 400, not 401: the credential IS authenticated, this request just names
+        # no tenant — the distinction #987 drew on the skills-inbox routes.
+        raise HTTPException(
+            status_code=400,
+            detail=coded_detail(
+                errors.AUTH_TENANT_REQUIRED,
+                "This credential has no tenant of its own, so the report's tenant must be named.",
+                remediation="Retry with ?tenant_id=<owning tenant>.",
+            ),
+        )
+    # Compares two strings the caller already knows, before any lookup, so the
+    # 403 it can raise says something about the credential and nothing about
+    # whether the report — or the named tenant — exists.
+    auth.enforce_readable_tenant(scope)
+    report = await sc.get_report(str(report_id), scope)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    # Collapse foreign-tenant (403) into not-found (404) so callers
-    # can't probe for the existence of reports in other tenants by
-    # distinguishing 403 from 404 on random UUIDs (audit finding #22).
-    # Cross-tenant read keys (``readable_tenant_ids`` widened past the
-    # home tenant) are honoured here — the set always contains
-    # ``auth.tenant_id`` by construction (``AuthContext`` line 85-90),
-    # so the 404 mask still hides reports the caller has no read
-    # access to.
+    # Kept, though the scoped fetch above now makes it unreachable in normal
+    # operation. Collapsing foreign-tenant (403) into not-found (404) is what
+    # stops a caller probing for reports in other tenants by distinguishing the
+    # two on random UUIDs (audit finding #22), and the two checks fail
+    # independently: drop the ``scope`` argument and this still masks; drop this
+    # and storage still refuses. Neither is a reason to remove the other.
     if not auth.is_admin and report.get("tenant_id") not in auth.readable_tenant_ids:
         raise HTTPException(status_code=404, detail="Report not found")
     return {

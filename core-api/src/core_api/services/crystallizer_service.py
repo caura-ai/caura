@@ -254,7 +254,7 @@ async def execute_reserved_report(
     # already finished — and then the whole multi-minute run happens again, which
     # is the exact duplication this check exists to prevent. Same class as H-02
     # (#812), where replica lag on a back-channel read-back dropped the trigger.
-    existing = await sc.get_report(report_id, read=False)
+    existing = await sc.get_report(report_id, tenant_id, read=False)
     if existing is None:
         # Nothing to execute against. Reserving one here would hand back an id the
         # caller never asked for, so this drops — and the publisher's row going

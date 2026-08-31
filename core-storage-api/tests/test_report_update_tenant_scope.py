@@ -46,15 +46,22 @@ async def _report(client: AsyncClient, tenant_id: str) -> str:
     return resp.json()["id"]
 
 
-async def _read(client: AsyncClient, report_id: str) -> dict:
-    """Read the row back regardless of tenant, to assert what actually persisted.
+async def _read(client: AsyncClient, report_id: str, tenant_id: str) -> dict:
+    """Read the row back as its OWNER, to assert what actually persisted.
 
-    Deliberately goes through ``GET /reports/{report_id}``, which is still
-    unscoped (allowlisted ``id-addressed-read``) and so answers for any tenant
-    --- that is what makes it a usable oracle here. When that route gains a
-    required tenant, this helper needs one too.
+    This helper used to send no tenant, because ``GET /reports/{report_id}`` was
+    itself unscoped and so answered for anybody --- and it said so, ending "when
+    that route gains a required tenant, this helper needs one too". #1167 gave it
+    one, so here it is.
+
+    The tenant passed is always the report's owner, never the attacker's, and
+    that is what keeps this an oracle rather than a mirror of the check under
+    test. A successful cross-tenant PATCH would rewrite the victim's row in
+    place --- ``tenant_id`` is not among the columns it writes --- so the owner's
+    own read still sees the damage. Verified by reverting the write predicate,
+    not assumed: with it gone, all three cases below fail here.
     """
-    resp = await client.get(f"{PREFIX}/reports/{report_id}")
+    resp = await client.get(f"{PREFIX}/reports/{report_id}", params={"tenant_id": tenant_id})
     assert resp.status_code == 200, resp.text
     return resp.json()
 
@@ -87,7 +94,7 @@ class TestReportUpdateTenantScope:
         )
 
         assert resp.status_code == 404, resp.text
-        row = await _read(client, report_id)
+        row = await _read(client, report_id, victim)
         assert row["status"] == "running", "the victim's report was finalized"
         assert row["completed_at"] is None
         assert row["duration_ms"] is None
@@ -113,7 +120,7 @@ class TestReportUpdateTenantScope:
 
         assert resp.status_code == 422, resp.text
         assert "tenant_id" in resp.text
-        assert (await _read(client, report_id))["status"] == "running"
+        assert (await _read(client, report_id, tenant))["status"] == "running"
 
     async def test_own_report_is_completed(self, client: AsyncClient) -> None:
         """The supported call still works, with every blob it is meant to write."""
@@ -134,7 +141,7 @@ class TestReportUpdateTenantScope:
         )
 
         assert resp.status_code == 200, resp.text
-        row = await _read(client, report_id)
+        row = await _read(client, report_id, tenant)
         assert row["status"] == "completed"
         assert row["duration_ms"] == 1234
         assert row["completed_at"] is not None

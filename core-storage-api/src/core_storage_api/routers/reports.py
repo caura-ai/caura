@@ -31,7 +31,11 @@ async def find_running_report(
     report_id = await _svc.report_find_running(tenant_id, fleet_id)
     if report_id is None:
         raise HTTPException(status_code=404, detail="No running report found")
-    report = await _svc.report_get_by_id(report_id)
+    # ``report_find_running`` already matched on this tenant, so the id is this
+    # tenant's by construction. Passed anyway rather than relied on: a predicate
+    # derived from the row you are addressing is satisfied by construction, and
+    # this route is not where the next reader will look for the guarantee.
+    report = await _svc.report_get_by_id(report_id, tenant_id)
     if report is None:
         raise HTTPException(status_code=404, detail="No running report found")
     return orm_to_dict(report, REPORT_FIELDS)
@@ -129,8 +133,21 @@ async def prune_agent_activity_digests(request: Request) -> dict:
 
 
 @router.get("/{report_id}")
-async def get_report(report_id: UUID) -> dict:
-    report = await _svc.report_get_by_id(report_id)
+async def get_report(report_id: UUID, tenant_id: str) -> dict:
+    """One report, by id. ``tenant_id`` is the report's owning tenant.
+
+    Required, not optional: this took a bare UUID, so anyone who could reach the
+    port and knew an id read another tenant's report — its ``summary``,
+    ``hygiene``, ``health``, ``usage_data``, ``issues`` and ``crystallization``
+    blobs, plus its ``tenant_id`` and ``fleet_id``. Absent ⇒ 422, never "answer
+    for whichever tenant owns the row".
+
+    One 404 for both "no such report" and "not this tenant's report", so the
+    route cannot be used to test whether a report id exists somewhere else. That
+    collapse is the same one core-api's ``GET /crystallize/reports/{id}`` makes
+    deliberately (audit finding #22); it now holds one layer lower too.
+    """
+    report = await _svc.report_get_by_id(report_id, tenant_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     return orm_to_dict(report, REPORT_FIELDS)

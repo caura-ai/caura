@@ -10169,9 +10169,30 @@ class PostgresService:
     async def report_get_by_id(
         self,
         report_id: UUID,
+        tenant_id: str,
     ) -> CrystallizationReport | None:
+        """One report, by id, within a tenant.
+
+        ``tenant_id`` is required rather than optional: this was
+        ``session.get(CrystallizationReport, report_id)`` — a bare primary-key
+        fetch — so a caller who knew an id got the row, whichever tenant owned
+        it, along with the ``summary`` / ``hygiene`` / ``health`` /
+        ``usage_data`` / ``issues`` / ``crystallization`` blobs. #1082 fixed the
+        write half of this pair; this is the read half (#1167).
+
+        A `select` rather than `session.get`, because `get` takes a primary key
+        and cannot take a predicate. The cost is losing the identity-map short
+        circuit, which this path never relied on: each call opens its own
+        session.
+        """
         async with get_session() as session:
-            return await session.get(CrystallizationReport, report_id)
+            result = await session.execute(
+                select(CrystallizationReport).where(
+                    CrystallizationReport.id == report_id,
+                    CrystallizationReport.tenant_id == tenant_id,
+                )
+            )
+            return result.scalar_one_or_none()
 
     async def report_find_running(
         self,
