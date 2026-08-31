@@ -14,12 +14,14 @@ import core_worker.consumer as consumer
 from common.events.base import Event
 from core_worker.config import Settings
 
+EMBED_REQUESTED_TOPIC = "memclaw.memory.embed-requested"  # legacy-name-ok: deployed Pub/Sub topic
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
 def _make_event(payload: dict | None = None) -> Event:
     return Event(
-        event_type="memclaw.memory.embed-requested",
+        event_type=EMBED_REQUESTED_TOPIC,
         tenant_id=(payload or {}).get("tenant_id"),
         payload=payload
         or {
@@ -155,7 +157,7 @@ async def test_validation_error_drops_silently(settings, mock_provider, mock_sto
     consumer.configure(mock_storage_client)
 
     # Missing content + memory_id + tenant_id.
-    event = Event(event_type="memclaw.memory.embed-requested", payload={})
+    event = Event(event_type=EMBED_REQUESTED_TOPIC, payload={})
 
     with caplog.at_level("ERROR"):
         await consumer.handle_embed_request(event)
