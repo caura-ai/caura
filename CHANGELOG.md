@@ -10,6 +10,20 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.38.1](https://github.com/caura-ai/caura/compare/backend-v2.38.0...backend-v2.38.1) (2026-08-31)
+
+
+### Bug Fixes
+
+* **events:** contract lifecycle topic names (AD) ([#1176](https://github.com/caura-ai/caura/issues/1176)) ([d001857](https://github.com/caura-ai/caura/commit/d001857aa02bb282a5d4d6e05df8c7bb0675c491))
+* **storage:** scope the entity-by-id reads to the caller's tenant ([#1174](https://github.com/caura-ai/caura/issues/1174)) ([a245776](https://github.com/caura-ai/caura/commit/a245776733b8127c95be326a4fe9bddfc9679700))
+* **storage:** scope the fleet read paths to the caller's tenant ([#1173](https://github.com/caura-ai/caura/issues/1173)) ([73817f5](https://github.com/caura-ai/caura/commit/73817f544d9b6a516d0496da35402f7d789a97bc))
+
+
+### Dependencies
+
+* update google-cloud-aiplatform requirement from &lt;2,&gt;=1.80 to &gt;=2.0.1,&lt;3 ([#1131](https://github.com/caura-ai/caura/issues/1131)) ([6e83c48](https://github.com/caura-ai/caura/commit/6e83c482b28458b651686f45325906542f7a1caa))
+
 ## [2.38.0](https://github.com/caura-ai/caura/compare/backend-v2.37.3...backend-v2.38.0) (2026-08-31)
 
 
