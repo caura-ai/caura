@@ -31,7 +31,10 @@ async def find_running_report(
     report_id = await _svc.report_find_running(tenant_id, fleet_id)
     if report_id is None:
         raise HTTPException(status_code=404, detail="No running report found")
-    report = await _svc.report_get_by_id(report_id)
+    # ``report_id`` already came from the tenant-scoped ``report_find_running``,
+    # so this fetch could not cross tenants; passing the tenant costs nothing
+    # and leaves no unscoped call of this method behind.
+    report = await _svc.report_get_by_id(report_id, tenant_id)
     if report is None:
         raise HTTPException(status_code=404, detail="No running report found")
     return orm_to_dict(report, REPORT_FIELDS)
@@ -129,8 +132,21 @@ async def prune_agent_activity_digests(request: Request) -> dict:
 
 
 @router.get("/{report_id}")
-async def get_report(report_id: UUID) -> dict:
-    report = await _svc.report_get_by_id(report_id)
+async def get_report(report_id: UUID, tenant_id: str) -> dict:
+    """One report, within ``tenant_id``.
+
+    The read half of the pair whose write half is ``PATCH`` below. ``tenant_id``
+    is a **required** query parameter: omitting it used to mean "fetch by
+    primary key", which on a service that authenticates nothing meant anyone who
+    could reach the port and knew a UUID read the report behind it.
+
+    A report in another tenant and a report that does not exist both 404, so
+    this cannot be used to probe for report ids across tenants (audit finding
+    #22). The caller-facing route in ``core-api`` preserves that; see the
+    comment on ``GET /crystallize/reports/{report_id}`` there for where its 403
+    comes from and why it reveals nothing about any report.
+    """
+    report = await _svc.report_get_by_id(report_id, tenant_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Report not found")
     return orm_to_dict(report, REPORT_FIELDS)

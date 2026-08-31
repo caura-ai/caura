@@ -143,7 +143,7 @@ async def test_get_report_by_id(client):
     report_id = reports[0]["id"]
 
     resp = await client.get(
-        f"/api/v1/crystallize/reports/{report_id}",
+        f"/api/v1/crystallize/reports/{report_id}?tenant_id={tenant_id}",
         headers=headers,
     )
     assert resp.status_code == 200
@@ -156,10 +156,10 @@ async def test_get_report_by_id(client):
 
 async def test_get_report_not_found(client):
     """GET /api/crystallize/reports/{id} returns 404 for non-existent report."""
-    _, headers = get_test_auth()
+    tenant_id, headers = get_test_auth()
     fake_id = "00000000-0000-0000-0000-000000000000"
     resp = await client.get(
-        f"/api/v1/crystallize/reports/{fake_id}",
+        f"/api/v1/crystallize/reports/{fake_id}?tenant_id={tenant_id}",
         headers=headers,
     )
     assert resp.status_code == 404
@@ -170,6 +170,12 @@ async def test_get_report_foreign_tenant_returns_404_not_403():
     must see 404 (same as a missing report), not 403 — otherwise an
     attacker could enumerate report_ids across tenants by distinguishing
     the two status codes (audit finding #22).
+
+    The shape of this changed when storage stopped answering to a bare
+    primary key. The caller now names a tenant, and the only tenant it may
+    name is its own — so the way to reach another tenant's report is to ask
+    for it under YOUR tenant, and storage's predicate misses. The row never
+    leaves storage, where before it was fetched and then discarded here.
     """
     from unittest.mock import AsyncMock, patch
     from uuid import uuid4
@@ -179,18 +185,14 @@ async def test_get_report_foreign_tenant_returns_404_not_403():
     from core_api.auth import AuthContext
     from core_api.routes.crystallizer import get_report
 
-    foreign_report = {
-        "id": str(uuid4()),
-        "tenant_id": "tenant-A",  # owned by tenant A
-        "fleet_id": None,
-    }
     caller = AuthContext(tenant_id="tenant-B", is_admin=False)
 
     sc_mock = AsyncMock()
-    sc_mock.get_report = AsyncMock(return_value=foreign_report)
+    # Storage is scoped: asked for tenant-B, a tenant-A report is not a row.
+    sc_mock.get_report = AsyncMock(return_value=None)
     with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
         try:
-            await get_report(report_id=uuid4(), auth=caller)
+            await get_report(report_id=uuid4(), tenant_id="tenant-B", auth=caller)
         except HTTPException as e:
             assert e.status_code == 404, (
                 f"Foreign-tenant report read must surface as 404; got {e.status_code}"
@@ -200,19 +202,65 @@ async def test_get_report_foreign_tenant_returns_404_not_403():
             raise AssertionError(
                 "Expected HTTPException(404) for foreign-tenant report"
             )
+    # The tenant reached storage: without it the fetch is by primary key again
+    # and the 404 above would be answering a question nobody scoped.
+    assert sc_mock.get_report.await_args.args[1] == "tenant-B"
 
 
-async def test_get_report_foreign_tenant_admin_bypass():
-    """Admin keys keep their cross-tenant read ability (no 404 mask)."""
+async def test_get_report_403_is_keyed_on_the_tenant_not_the_report():
+    """The oracle contract of audit finding #22, stated as its whole matrix.
+
+    Requiring a ``tenant_id`` introduces a 403 on a path that previously had
+    only 404s, and a 403 that varied with ``report_id`` would be exactly the
+    enumeration oracle finding #22 closed. It does not vary:
+    ``enforce_readable_tenant`` runs BEFORE the fetch and sees only the named
+    tenant, so an unreadable tenant answers 403 for every id — including ids
+    that do not exist anywhere — and every question about a report's existence
+    still collapses to 404.
+
+    What the 403 discloses is "this credential may not read tenant T", which
+    the caller already knew about its own key.
+    """
     from unittest.mock import AsyncMock, patch
     from uuid import uuid4
+
+    from fastapi import HTTPException
 
     from core_api.auth import AuthContext
     from core_api.routes.crystallizer import get_report
 
-    foreign_report = {
+    caller = AuthContext(tenant_id="tenant-B", is_admin=False)
+    sc_mock = AsyncMock()
+    sc_mock.get_report = AsyncMock(return_value=None)
+
+    async def _status(tenant_id: str, report_id) -> int:
+        with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
+            try:
+                await get_report(report_id=report_id, tenant_id=tenant_id, auth=caller)
+            except HTTPException as e:
+                return e.status_code
+        return 200
+
+    real_looking = uuid4()
+    nonexistent = uuid4()
+
+    # Unreadable tenant: same 403 whichever id is named, so the id is not
+    # being answered. This is the assertion that makes it not an oracle.
+    assert await _status("tenant-A", real_looking) == 403
+    assert await _status("tenant-A", nonexistent) == 403
+    # ...and it fires before storage is consulted at all.
+    assert sc_mock.get_report.await_count == 0
+
+    # Readable tenant: absent rows are 404, as they always were.
+    assert await _status("tenant-B", nonexistent) == 404
+
+
+def _report_payload(tenant_id: str) -> dict:
+    from uuid import uuid4
+
+    return {
         "id": str(uuid4()),
-        "tenant_id": "tenant-A",
+        "tenant_id": tenant_id,
         "fleet_id": None,
         "trigger": "manual",
         "status": "completed",
@@ -222,14 +270,64 @@ async def test_get_report_foreign_tenant_admin_bypass():
         "issues": [],
         "crystallization": {},
     }
+
+
+async def test_get_report_foreign_tenant_admin_bypass():
+    """Admin keys keep their cross-tenant read ability — by NAMING the tenant.
+
+    An admin ``AuthContext`` has ``tenant_id=None``, so there is no tenant to
+    infer and storage now demands one. The capability is unchanged; what changed
+    is that the admin says which tenant it is reading, instead of the ability
+    falling out of an unscoped fetch. That is the whole of the API change this
+    endpoint takes.
+    """
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4
+
+    from core_api.auth import AuthContext
+    from core_api.routes.crystallizer import get_report
+
     admin = AuthContext(tenant_id=None, is_admin=True)
 
     sc_mock = AsyncMock()
-    sc_mock.get_report = AsyncMock(return_value=foreign_report)
+    sc_mock.get_report = AsyncMock(return_value=_report_payload("tenant-A"))
     with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
-        result = await get_report(report_id=uuid4(), auth=admin)
+        result = await get_report(report_id=uuid4(), tenant_id="tenant-A", auth=admin)
     # Admin sees the full payload.
     assert result["tenant_id"] == "tenant-A"
+    # And the tenant it named is what storage was asked for.
+    assert sc_mock.get_report.await_args.args[1] == "tenant-A"
+
+
+async def test_get_report_honours_a_cross_tenant_read_key():
+    """A widened read key reaches its non-home readable tenants.
+
+    ``enforce_readable_tenant``, not ``enforce_tenant``: the latter is the WRITE
+    gate and pins to the home tenant, so copying it onto this read path would
+    403 a credential that is entitled to the row. ``readable_tenant_ids`` comes
+    from the credential and never from the request, which is what keeps this
+    from being the "caller names its own scope" shape rejected as option C on
+    #1167.
+    """
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4
+
+    from core_api.auth import AuthContext
+    from core_api.routes.crystallizer import get_report
+
+    caller = AuthContext(
+        tenant_id="tenant-B",
+        is_admin=False,
+        readable_tenant_ids=["tenant-B", "tenant-A"],
+    )
+
+    sc_mock = AsyncMock()
+    sc_mock.get_report = AsyncMock(return_value=_report_payload("tenant-A"))
+    with patch("core_api.routes.crystallizer.get_storage_client", return_value=sc_mock):
+        result = await get_report(report_id=uuid4(), tenant_id="tenant-A", auth=caller)
+
+    assert result["tenant_id"] == "tenant-A"
+    assert sc_mock.get_report.await_args.args[1] == "tenant-A"
 
 
 async def test_get_latest_report_empty_returns_200_null(client):

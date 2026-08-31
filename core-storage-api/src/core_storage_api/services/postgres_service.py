@@ -10169,9 +10169,22 @@ class PostgresService:
     async def report_get_by_id(
         self,
         report_id: UUID,
+        tenant_id: str,
     ) -> CrystallizationReport | None:
+        """One report within ``tenant_id``. ``None`` when either half misses.
+
+        The read half of the pair whose write half was fixed in #1082: a bare
+        ``session.get`` handed whoever held a report UUID the row behind it,
+        including the ``summary`` / ``hygiene`` / ``health`` / ``usage_data`` /
+        ``issues`` / ``crystallization`` blobs, from a service that
+        authenticates nothing.
+        """
         async with get_session() as session:
-            return await session.get(CrystallizationReport, report_id)
+            stmt = select(CrystallizationReport).where(
+                CrystallizationReport.id == report_id,
+                CrystallizationReport.tenant_id == tenant_id,
+            )
+            return (await session.execute(stmt)).scalar_one_or_none()
 
     async def report_find_running(
         self,

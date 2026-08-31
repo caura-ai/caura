@@ -132,22 +132,41 @@ async def list_reports(
 )
 async def get_report(
     report_id: UUID,
+    tenant_id: str,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Get a full crystallization report by ID."""
+    """Get a full crystallization report by ID, from ``tenant_id``.
+
+    The caller names the tenant; the credential decides whether it may read it.
+    ``enforce_readable_tenant`` — not ``enforce_tenant``, which is the WRITE
+    gate and pins to the home tenant — so a cross-tenant read key still reaches
+    any tenant in its ``readable_tenant_ids``, and an admin key any tenant at
+    all. That set is derived from the credential, never from the request, which
+    is what keeps this from being the "caller names its own scope" shape.
+
+    **Report existence still collapses to 404** (audit finding #22). The 403
+    raised below is keyed on the NAMED TENANT and is independent of
+    ``report_id``: it says only "this credential may not read tenant T", which
+    the caller already knows about its own key. Every question about a report —
+    absent, or present in a tenant this request did not name — answers 404, so
+    a random UUID reveals nothing. There is a regression test for exactly this
+    matrix in ``tests/test_api_crystallizer.py``.
+
+    ``tenant_id`` is required for admin callers too. ``AuthContext`` for an
+    admin key has ``tenant_id=None``, so there is no tenant to infer, and
+    storage now demands one; naming it is the API change this endpoint takes in
+    exchange for storage no longer answering to a bare primary key.
+    """
+    auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
-    report = await sc.get_report(str(report_id))
+    # No post-fetch tenant comparison: storage scopes the fetch to the tenant
+    # authorized above, so a report outside it is already a 404 on the line
+    # below. The comparison that stood here ran AFTER storage had handed the
+    # row over — it protected this route's callers while leaving the storage
+    # route itself answering to a bare id, which is the half an attacker who
+    # can reach port 8002 does not go through.
+    report = await sc.get_report(str(report_id), tenant_id)
     if not report:
-        raise HTTPException(status_code=404, detail="Report not found")
-    # Collapse foreign-tenant (403) into not-found (404) so callers
-    # can't probe for the existence of reports in other tenants by
-    # distinguishing 403 from 404 on random UUIDs (audit finding #22).
-    # Cross-tenant read keys (``readable_tenant_ids`` widened past the
-    # home tenant) are honoured here — the set always contains
-    # ``auth.tenant_id`` by construction (``AuthContext`` line 85-90),
-    # so the 404 mask still hides reports the caller has no read
-    # access to.
-    if not auth.is_admin and report.get("tenant_id") not in auth.readable_tenant_ids:
         raise HTTPException(status_code=404, detail="Report not found")
     return {
         "id": str(report.get("id", "")),

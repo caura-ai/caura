@@ -49,14 +49,42 @@ async def _report(client: AsyncClient, tenant_id: str) -> str:
 async def _read(client: AsyncClient, report_id: str) -> dict:
     """Read the row back regardless of tenant, to assert what actually persisted.
 
-    Deliberately goes through ``GET /reports/{report_id}``, which is still
-    unscoped (allowlisted ``id-addressed-read``) and so answers for any tenant
-    --- that is what makes it a usable oracle here. When that route gains a
-    required tenant, this helper needs one too.
+    Reads ``crystallization_reports`` through the ORM rather than through
+    ``GET /reports/{report_id}``, which it used to use. The note that stood here
+    said this helper would need a tenant the day that route took one; it now
+    does, and giving it one would have been the wrong repair --- the same
+    conclusion ``test_entity_update_tenant_scope`` reached when its route was
+    scoped. Every assertion below asks "is the row still in the tenant that
+    owned it, holding the values it had", so an oracle scoped to a tenant can
+    only answer about rows already known to be in it, and could not observe a
+    row that moved namespace. That is precisely the failure
+    ``test_another_tenants_report_is_not_completed`` exists to catch, and the
+    last assertion in it (``row["tenant_id"] == victim``) is the one that would
+    go silently untested. Tenant-blind by construction, and so immune to any
+    further scoping of the route.
+
+    ``client`` is unused but kept in the signature so the call sites read the
+    same and the raw read stays swappable.
     """
-    resp = await client.get(f"{PREFIX}/reports/{report_id}")
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+    from common.models import CrystallizationReport
+    from core_storage_api.services.postgres_service import get_session
+
+    async with get_session() as session:
+        report = await session.get(CrystallizationReport, uuid.UUID(report_id))
+    assert report is not None, f"report {report_id} vanished"
+    return {
+        "id": str(report.id),
+        "tenant_id": report.tenant_id,
+        "status": report.status,
+        "completed_at": report.completed_at,
+        "duration_ms": report.duration_ms,
+        "summary": report.summary,
+        "hygiene": report.hygiene,
+        "health": report.health,
+        "usage_data": report.usage_data,
+        "issues": report.issues,
+        "crystallization": report.crystallization,
+    }
 
 
 def _completion(**extra: object) -> dict:
