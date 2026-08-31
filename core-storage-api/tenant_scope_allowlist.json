@@ -471,8 +471,8 @@
       "id": "route:POST /api/v1/storage/tenant-usage/increment",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "blind-spot",
-      "note": "Scoped per row: 'if not r.get(\"tenant_id\") or not r.get(\"operation\"): raise 422'. The AST pass cannot follow the derivation \u2014 r comes from 'for i, row in enumerate(rows)' then 'r = dict(row)', and the tracker follows subscript/get chains only, not loop targets or dict() copies."
+      "category": "opaque-body-write",
+      "note": "Verified: every row carries tenant_id, required per row before the batch is written ('if not r.get(\"tenant_id\") or not r.get(\"operation\"): raise 422'), and that field is stored and participates in the usage-counter conflict key. Reclassified from blind-spot, which describes a BINDING scope the AST cannot read; there is no binding tenant here to hide. The batch is cross-tenant by construction \u2014 usage_meter accumulates counts across every tenant in the process and flushes them as one request \u2014 so the tenant rides per row in the payload, which is this category. Matches method:tenant_usage_increment, already filed here, and the sibling row-list writes /audit-logs/bulk, /entities/bulk-upsert and /memories/bulk."
     },
     {
       "id": "route:POST /api/v1/storage/tenant-usage/query",

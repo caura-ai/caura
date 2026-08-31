@@ -52,6 +52,56 @@ def _row(tenant: str, operation: str, period: str, count: int) -> dict:
     }
 
 
+class TestIncrementRequiresATenantPerRow:
+    """The write half's per-row guard, which is what its classification rests on.
+
+    ``POST /tenant-usage/increment`` is filed ``opaque-body-write`` in
+    ``tenant_scope_allowlist.json``: the batch is cross-tenant by design, so
+    there is no binding tenant parameter and the scope rides in each row
+    instead. That category's whole claim is *"the binding is real but lives in
+    the row being written"* — which holds only while a row without a
+    ``tenant_id`` is refused.
+
+    Nothing pinned that. The rest of this file covers the read half, so the
+    guard could have been deleted and the only signal would have been the
+    allowlist note quietly becoming false. These two cases are the classification's
+    premise, written down so it fails loudly instead.
+    """
+
+    async def test_a_row_without_a_tenant_id_is_refused(self, client: AsyncClient):
+        tenant, operation = f"t-{_uid()}", f"op-{_uid()}"
+        r = await client.post(
+            f"{PREFIX}/tenant-usage/increment",
+            json={
+                "rows": [
+                    _row(tenant, operation, AUGUST, 1),
+                    {"operation": operation, "period_start": AUGUST, "count": 5},
+                ]
+            },
+        )
+
+        assert r.status_code == 422, r.text
+        # The offending row is named. ``_require`` would drop this index — see
+        # the rejected alternative in this PR's description.
+        assert "row 1" in r.text
+        assert "tenant_id" in r.text
+        # The whole batch is refused, so the well-formed row in it did not land
+        # either: the guard runs over every row before any write is attempted.
+        assert await _query(client, tenant_ids=[tenant], period_start=AUGUST) == {"periods": []}
+
+    async def test_a_row_without_an_operation_is_refused(self, client: AsyncClient):
+        tenant = f"t-{_uid()}"
+
+        r = await client.post(
+            f"{PREFIX}/tenant-usage/increment",
+            json={"rows": [{"tenant_id": tenant, "period_start": AUGUST, "count": 5}]},
+        )
+
+        assert r.status_code == 422, r.text
+        assert "row 0" in r.text
+        assert await _query(client, tenant_ids=[tenant], period_start=AUGUST) == {"periods": []}
+
+
 async def test_counts_sum_across_the_orgs_tenants(client: AsyncClient):
     """An org owns several tenants and is billed as one. Reporting a single
     tenant's counts would under-bill by however many tenants it has."""
