@@ -7097,6 +7097,7 @@ class PostgresService:
         data: dict,
         fleet_id: str | None = None,
         system: bool = False,
+        force: bool = False,
     ) -> Document:
         """INSERT ... ON CONFLICT DO UPDATE. Returns the upserted Document.
 
@@ -7105,9 +7106,19 @@ class PostgresService:
         Public ``/documents`` endpoint never sets the flag, so callers
         that accidentally target a system collection get a clear
         ``ValueError`` instead of polluting governance state.
+
+        C34 — the upsert is last-writer-wins over the whole ``data`` blob, so
+        a caller that computes an empty or truncated payload destroys the
+        stored document and gets a 200 for it. That is not hypothetical: on
+        2026-08-27 a failed GET left a client file empty, the follow-up upsert
+        of those 0 bytes replaced a 105KB shared checklist, and recovery meant
+        reconstructing it by hand. ``_guard_document_shrink`` refuses a
+        catastrophic shrink unless the caller passes ``force``.
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
+        if not force:
+            await self._guard_document_shrink(tenant_id, collection, doc_id, data)
         async with get_session() as session:
             stmt = (
                 pg_insert(Document)
@@ -7131,6 +7142,43 @@ class PostgresService:
             result = await session.execute(stmt)
             return result.scalar_one()
 
+    # C34 — a replacement this much smaller than what is stored is treated as
+    # a truncated payload, not an intentional edit. 10% keeps ordinary
+    # rewrites (even aggressive pruning) working while catching the
+    # empty/near-empty case that actually caused data loss.
+    _SHRINK_RATIO = 0.10
+    # Below this the absolute loss is small and the ratio gets noisy, so the
+    # guard stays out of the way of genuinely tiny documents.
+    _SHRINK_MIN_STORED_BYTES = 2048
+
+    async def _guard_document_shrink(self, tenant_id: str, collection: str, doc_id: str, data: dict) -> None:
+        """Refuse an upsert that would replace a substantial document with a
+        near-empty one. Raises ``ValueError`` (surfaced as 400) naming both
+        sizes and the override, so a caller who MEANT it can retry."""
+        async with get_session() as session:
+            stored = (
+                await session.execute(
+                    select(Document.data).where(
+                        Document.tenant_id == tenant_id,
+                        Document.collection == collection,
+                        Document.doc_id == doc_id,
+                    )
+                )
+            ).scalar_one_or_none()
+        if stored is None:
+            return
+        old_len = len(json.dumps(stored, ensure_ascii=False))
+        if old_len < self._SHRINK_MIN_STORED_BYTES:
+            return
+        new_len = len(json.dumps(data, ensure_ascii=False))
+        if new_len >= old_len * self._SHRINK_RATIO:
+            return
+        raise ValueError(
+            f"refusing to shrink document '{collection}/{doc_id}' from {old_len} to {new_len} bytes "
+            f"({new_len / old_len:.1%} of the stored size). A truncated payload from a failed read "
+            f"looks exactly like this. Retry with force=true if the shrink is intended."
+        )
+
     async def document_upsert_returning_xmax(
         self,
         *,
@@ -7141,6 +7189,7 @@ class PostgresService:
         fleet_id: str | None = None,
         embedding: list[float] | None = None,
         system: bool = False,
+        force: bool = False,
     ) -> tuple:
         """Upsert and return (id, created_at, updated_at, xmax) for MCP callers.
 
@@ -7156,6 +7205,12 @@ class PostgresService:
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
+        # C34 — same catastrophic-shrink guard as ``document_upsert``. This is
+        # the path INDEXED documents take (the one the 2026-08-27 data loss
+        # actually went through), so guarding only the sibling would have
+        # missed the real incident.
+        if not force:
+            await self._guard_document_shrink(tenant_id, collection, doc_id, data)
         async with get_session() as session:
             stmt = (
                 pg_insert(Document)
