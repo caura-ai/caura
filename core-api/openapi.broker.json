@@ -1214,6 +1214,7 @@
                 "type": "null"
               }
             ],
+            "description": "Entity links to **add** to this memory. Additive, unlike ``metadata``: links already on the memory are kept even when this list does not name them, and re-sending a pair already present leaves its existing ``role`` unchanged rather than overwriting it. There is no replace mode and no way to remove a link through this endpoint. An ``entity_id`` outside the caller's tenant is rejected with 422.",
             "title": "Entity Links"
           },
           "expires_at": {
@@ -2497,7 +2498,7 @@
         ]
       },
       "patch": {
-        "description": "Update a memory. Only provide fields you want to change.\n\nIf content changes, embedding and entity extraction are re-run automatically.\n\nConcurrency contract (intentional, not a bug):\n\n- Each top-level column is **last-write-wins**. Two concurrent PATCHes that\n  set the same column (e.g. ``title``) will both return 200 and the row\n  will hold whichever update commits second. There is no compare-and-swap\n  and no optimistic-lock token — callers that need that must coordinate\n  externally or use ``If-Match`` semantics layered on top.\n- ``metadata`` defaults to a **JSONB top-level merge** (``||``): keys not\n  present in the patch are preserved, keys present in both patches resolve\n  last-write-wins per key. Pass ``metadata_mode: \"replace\"`` for a full\n  overwrite. Two concurrent PATCHes that each set a distinct metadata key\n  will therefore leave **both keys present** on the row — that is the\n  defined behaviour, not a partial-merge anomaly.",
+        "description": "Update a memory. Only provide fields you want to change.\n\nIf content changes, embedding and entity extraction are re-run automatically.\n\nConcurrency contract (intentional, not a bug):\n\n- Each top-level column is **last-write-wins**. Two concurrent PATCHes that\n  set the same column (e.g. ``title``) will both return 200 and the row\n  will hold whichever update commits second. There is no compare-and-swap\n  and no optimistic-lock token — callers that need that must coordinate\n  externally or use ``If-Match`` semantics layered on top.\n- ``metadata`` defaults to a **JSONB top-level merge** (``||``): keys not\n  present in the patch are preserved, keys present in both patches resolve\n  last-write-wins per key. Pass ``metadata_mode: \"replace\"`` for a full\n  overwrite. Two concurrent PATCHes that each set a distinct metadata key\n  will therefore leave **both keys present** on the row — that is the\n  defined behaviour, not a partial-merge anomaly.\n- ``entity_links`` is **add-only**, and has no replace mode. Links already\n  on the memory survive a PATCH that does not name them, and re-sending a\n  pair already present keeps its existing ``role`` rather than overwriting\n  it (the insert is ``ON CONFLICT DO NOTHING``). So concurrent PATCHes\n  naming different entities leave **both links present**, and there is no\n  request through this endpoint that removes one.",
         "operationId": "update_memory_endpoint_api_v1_memories__memory_id__patch",
         "parameters": [
           {
