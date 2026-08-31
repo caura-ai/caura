@@ -64,6 +64,7 @@ def _classify(source: str) -> tuple[str, str]:
 def test_trunk_is_green() -> None:
     result = _run()
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "Allowlist comparison: no base given; nothing to compare." in result.stdout
 
 
 def test_every_allowlist_entry_claims_a_known_category() -> None:
@@ -992,6 +993,19 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
 
 
+def _write_allowlist(path: Path, rows: dict[str, str]) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "exceptions": [
+                    {"id": ident, "verdict": "NONE", "category": category}
+                    for ident, category in rows.items()
+                ]
+            }
+        )
+    )
+
+
 @pytest.fixture
 def base_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A repo whose committed allowlist already holds one exception.
@@ -1004,10 +1018,9 @@ def base_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     _git(repo, "init", "-q", "-b", "main")
     _git(repo, "config", "user.email", "t@example.com")
     _git(repo, "config", "user.name", "t")
-    (repo / "core-storage-api" / "tenant_scope_allowlist.json").write_text(
-        json.dumps(
-            {"exceptions": [{"id": "method:already_here", "verdict": "NONE", "category": "id-addressed-read"}]}
-        )
+    _write_allowlist(
+        repo / "core-storage-api" / "tenant_scope_allowlist.json",
+        {"method:already_here": "id-addressed-read"},
     )
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
@@ -1029,6 +1042,89 @@ def test_ratchet_allows_the_list_to_shrink(base_repo: Path) -> None:
     """Shrinking is the point of the exercise, not something to warn about."""
     path = base_repo / "core-storage-api" / "tenant_scope_allowlist.json"
     assert gate.ratchet("HEAD", path, {}) == []
+
+
+def test_ratchet_reports_what_moved_without_netting_categories(
+    base_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One total cannot distinguish work, deletion, reclassification, and growth."""
+    path = base_repo / "core-storage-api" / "tenant_scope_allowlist.json"
+    _write_allowlist(
+        path,
+        {
+            "method:fixed": "id-addressed-write",
+            "route:DELETE /gone": "no-tenant-data",
+            "method:moved": "opaque-body-write",
+            "method:unchanged": "admin-unscoped",
+        },
+    )
+    _git(base_repo, "commit", "-qam", "record a mixed allowlist")
+
+    _write_allowlist(
+        path,
+        {
+            "method:added": "id-addressed-read",
+            "method:moved": "id-addressed-write",
+            "method:unchanged": "admin-unscoped",
+        },
+    )
+    live = (
+        _at("method:added")
+        | _at("method:fixed", verdict="REQUIRED")
+        | _at("method:moved")
+        | _at("method:unchanged")
+    )
+
+    errors = gate.ratchet("HEAD", path, live)
+    report = capsys.readouterr().out
+
+    assert any("allowlist grew" in error for error in errors), (
+        "reporting must not relax the ratchet"
+    )
+    assert "  added (1):\n      + method:added [id-addressed-read]" in report
+    assert "  removed — fixed (1):\n      - method:fixed [id-addressed-write]" in report
+    assert (
+        "  removed — gone (1):\n      - route:DELETE /gone [no-tenant-data]" in report
+    )
+    assert (
+        "  recategorised (1):\n"
+        "      ~ method:moved [opaque-body-write -> id-addressed-write]"
+    ) in report
+    assert "      admin-unscoped: 1 -> 1" in report
+    assert "      id-addressed-read: 0 -> 1" in report
+    assert "      id-addressed-write: 1 -> 1" in report
+    assert "      no-tenant-data: 1 -> 0" in report
+    assert "      opaque-body-write: 1 -> 0" in report
+    assert report.count("method:moved") == 1, "a category move is not also a removal"
+
+
+def test_report_uses_the_written_allowlist_and_surfaces_an_invalid_removal(
+    base_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Live code classifies a written removal; it does not invent the removal."""
+    path = base_repo / "core-storage-api" / "tenant_scope_allowlist.json"
+
+    assert (
+        gate.ratchet("HEAD", path, _at("method:already_here", verdict="REQUIRED")) == []
+    )
+    stale_report = capsys.readouterr().out
+    assert "  removed — fixed (0)" in stale_report
+    assert "      id-addressed-read: 1 -> 1" in stale_report
+
+    _write_allowlist(path, {})
+    live = _at("method:already_here")
+    assert gate.ratchet("HEAD", path, live) == []
+    removed_report = capsys.readouterr().out
+    assert (
+        "  removed — still unscoped (1):\n"
+        "      ! method:already_here [id-addressed-read]"
+    ) in removed_report
+    assert "  removed — fixed (0)" in removed_report
+    assert "  removed — gone (0)" in removed_report
+    assert any(
+        "not in the allowlist" in error
+        for error in gate.check(list(live.values()), [], {})
+    )
 
 
 def test_ratchet_fails_when_the_list_grows(base_repo: Path) -> None:
@@ -1163,10 +1259,13 @@ def test_path_existence_at_a_ref_is_decided_by_exit_code(base_repo: Path) -> Non
     assert not gate._path_in_ref("HEAD", "core-storage-api/never_existed.json")
 
 
-def test_ratchet_is_silent_before_the_allowlist_exists(base_repo: Path) -> None:
-    """The commit that introduces the file has no baseline to compare against."""
+def test_ratchet_explains_when_the_base_predates_the_allowlist(
+    base_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The introducing commit has no baseline, and says why no split follows."""
     missing = base_repo / "core-storage-api" / "not_yet.json"
     assert gate.ratchet("HEAD", missing, _at("method:anything")) == []
+    assert "no allowlist at base; nothing to compare" in capsys.readouterr().out
 
 
 def _seeded_allowlist() -> dict[str, dict[str, str]]:
