@@ -364,6 +364,22 @@ _MEMORY_UPDATABLE_FIELDS = _MEMORY_VALID_FIELDS - _MEMORY_IMMUTABLE_FIELDS
 # ``_MEMORY_UPDATABLE_FIELDS`` above follows.
 _ENTITY_UPDATABLE_FIELDS = frozenset({"canonical_name", "entity_type", "attributes", "name_embedding"})
 
+# Columns ``fleet_upsert_node``'s ON CONFLICT DO UPDATE must not rewrite. The
+# insert half of that statement still uses every key the caller sent; this is
+# only the branch that lands on a row that already exists.
+#
+#   id                    identity — the reported defect (#1121)
+#   tenant_id, node_name  the conflict key itself; rewriting either half would
+#                         move the row out from under the constraint the
+#                         statement just matched on
+#
+# Named rather than the inline ``k not in ("tenant_id", "node_name")`` tuple it
+# replaces, so it reads like its two siblings above and a reviewer can see what
+# the omission was. Column names, not model attribute names: the statement is
+# built against ``_table(FleetNode)``, so ``values`` is keyed by column (which
+# is why ``extra`` arrives as ``metadata``).
+_FLEET_NODE_IMMUTABLE_FIELDS = frozenset({"id", "tenant_id", "node_name"})
+
 # Columns the admin memory-list endpoint may sort by. Allowlisted so an
 # unexpected ``sort`` value falls back to created_at instead of raising
 # AttributeError (500) at ``getattr(Memory, sort)`` — the endpoint is callable
@@ -8916,7 +8932,7 @@ class PostgresService:
             stmt = pg_insert(_table(FleetNode)).values(**values)
             stmt = stmt.on_conflict_do_update(  # type: ignore[assignment]
                 constraint="uq_fleet_nodes_tenant_node",
-                set_={k: v for k, v in values.items() if k not in ("tenant_id", "node_name")},
+                set_={k: v for k, v in values.items() if k not in _FLEET_NODE_IMMUTABLE_FIELDS},
             ).returning(FleetNode.__table__.c.id)
             result = await session.execute(stmt)
             await session.flush()
