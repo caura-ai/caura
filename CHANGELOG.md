@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.39.0](https://github.com/caura-ai/caura/compare/backend-v2.38.1...backend-v2.39.0) (2026-08-31)
+
+
+### Features
+
+* **ratchet:** centralize fleet configuration ([#1172](https://github.com/caura-ai/caura/issues/1172)) ([627db00](https://github.com/caura-ai/caura/commit/627db009cd9145619d29d7aaa7e88dc97ec7c1a5))
+
+
+### Bug Fixes
+
+* **storage:** scope the report read to the caller's tenant ([#1178](https://github.com/caura-ai/caura/issues/1178)) ([1c35609](https://github.com/caura-ai/caura/commit/1c356090b7371ba93473f20a8465730a828727e0))
+
 ## [2.38.1](https://github.com/caura-ai/caura/compare/backend-v2.38.0...backend-v2.38.1) (2026-08-31)
 
 
