@@ -13,6 +13,7 @@ import { join } from "path";
 import { tmpdir } from "os";
 
 import { __DEPLOY_INTERNALS__ } from "./heartbeat.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
 import { PLUGIN_VERSION } from "./version.js";
 
 describe("deploy cooldown lifecycle", () => {
@@ -24,7 +25,7 @@ describe("deploy cooldown lifecycle", () => {
     // resolves from $HOME by default — point it at a clean tmp dir
     // for each test.
     tmpHome = mkdtempSync(join(tmpdir(), "caura-deploy-test-"));
-    mkdirSync(join(tmpHome, ".openclaw", "plugins", "memclaw"), {
+    mkdirSync(join(tmpHome, ".openclaw", "plugins", FROZEN_PLUGIN_ID), {
       recursive: true,
     });
     prevHome = process.env.HOME;
@@ -99,7 +100,7 @@ describe("deploy post-restart verification", () => {
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), "caura-deploy-test-"));
-    mkdirSync(join(tmpHome, ".openclaw", "plugins", "memclaw"), {
+    mkdirSync(join(tmpHome, ".openclaw", "plugins", FROZEN_PLUGIN_ID), {
       recursive: true,
     });
     prevHome = process.env.HOME;

@@ -13,12 +13,33 @@ import {
 } from "./educate.js";
 import { CAURA_TOOLS } from "./tools.js";
 import { MEMORY_TYPES, STATUSES } from "./tool-definitions.js";
+import {
+  FROZEN_PLUGIN_ID,
+  LEGACY_DISPLAY_NAME,
+} from "./legacy-contracts.test.js";
+
+const BACKUP_SUFFIX = `.${FROZEN_PLUGIN_ID}-bak`;
+
+function fencePattern(section: "tools" | "agents"): RegExp {
+  return new RegExp(`<!-- ${FROZEN_PLUGIN_ID}:${section} v=[a-f0-9]{8} -->`);
+}
+
+function closingFencePattern(section: "tools" | "agents"): RegExp {
+  return new RegExp(`<!-- /${FROZEN_PLUGIN_ID}:${section} -->`);
+}
+
+function staleHeartbeatParagraph(toolCount: number): string {
+  return `You have been connected to ${LEGACY_DISPLAY_NAME} — a shared persistent memory system. ` +
+    `You now have ${toolCount} tools for writing, searching, and managing memories. ` +
+    `Check skills/${FROZEN_PLUGIN_ID}/SKILL.md for full instructions. Key rules: always search before ` +
+    "starting work, always write findings after completing work, always include your agent_id.";
+}
 
 // Resolve the shared SKILL.md that ships with the plugin. Tests run from
 // `plugin/dist/educate.test.js`; the skill lives at
 // `plugin/skills/memclaw/SKILL.md`. // legacy-name-floor: shipped skill path
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SHARED_SKILL_PATH = join(__dirname, "..", "skills", "memclaw", "SKILL.md");
+const SHARED_SKILL_PATH = join(__dirname, "..", "skills", FROZEN_PLUGIN_ID, "SKILL.md");
 function readSharedSkill(): string {
   return readFileSync(SHARED_SKILL_PATH, "utf-8");
 }
@@ -452,10 +473,10 @@ describe("writeEducationFiles", () => {
 
       const tools = readFile(join(base, "workspace", "TOOLS.md"));
       const agents = readFile(join(base, "workspace", "AGENTS.md"));
-      assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/);
-      assert.match(tools, /<!-- \/memclaw:tools -->/);
-      assert.match(agents, /<!-- memclaw:agents v=[a-f0-9]{8} -->/);
-      assert.match(agents, /<!-- \/memclaw:agents -->/);
+      assert.match(tools, fencePattern("tools"));
+      assert.match(tools, closingFencePattern("tools"));
+      assert.match(agents, fencePattern("agents"));
+      assert.match(agents, closingFencePattern("agents"));
     });
 
     test("re-run on current-version fence is a no-op (toolsUpdated=0, file byte-identical)", () => {
@@ -485,9 +506,9 @@ describe("writeEducationFiles", () => {
       const userAfter =
         "\n\n## Notes\n\nMore user content below the Caura section.\n";
       const staleFenced =
-        "<!-- memclaw:tools v=deadbeef -->\n" +
-        "## MemClaw — Tools Available\n\nObsolete content from a previous version.\n" +
-        "<!-- /memclaw:tools -->\n";
+        `<!-- ${FROZEN_PLUGIN_ID}:tools v=deadbeef -->\n` +
+        `## ${LEGACY_DISPLAY_NAME} — Tools Available\n\nObsolete content from a previous version.\n` +
+        `<!-- /${FROZEN_PLUGIN_ID}:tools -->\n`;
       writeFileSync(
         join(wsDir, "TOOLS.md"),
         userBefore + staleFenced + userAfter,
@@ -502,10 +523,10 @@ describe("writeEducationFiles", () => {
       assert.ok(tools.endsWith(userAfter), "user content below the fence must be preserved verbatim");
       assert.ok(!tools.includes("v=deadbeef"), "stale version tag must be replaced");
       assert.ok(!tools.includes("Obsolete content"), "stale block content must be replaced");
-      assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/);
+      assert.match(tools, fencePattern("tools"));
     });
 
-    test("stale-version fence replace also writes a one-shot .memclaw-bak", () => {
+    test("stale-version fence replace also writes a one-shot backup", () => {
       // Pre-fix the case-2 (stale-version) replace had no backup, so a
       // user who hand-edited inside the fenced block would silently
       // lose those edits on plugin upgrade. Mirror the case-3 behaviour.
@@ -515,16 +536,16 @@ describe("writeEducationFiles", () => {
 
       const userBefore = "# Tools\n\nMy notes.\n\n";
       const handEditedFence =
-        "<!-- memclaw:tools v=deadbeef -->\n" +
-        "## MemClaw — Tools Available\n\n" +
+        `<!-- ${FROZEN_PLUGIN_ID}:tools v=deadbeef -->\n` +
+        `## ${LEGACY_DISPLAY_NAME} — Tools Available\n\n` +
         "OLD CONTENT plus IMPORTANT user note that I added myself.\n" +
-        "<!-- /memclaw:tools -->\n";
+        `<!-- /${FROZEN_PLUGIN_ID}:tools -->\n`;
       const original = userBefore + handEditedFence;
       writeFileSync(join(wsDir, "TOOLS.md"), original, "utf-8");
 
       writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
 
-      const bakPath = join(wsDir, "TOOLS.md.memclaw-bak");
+      const bakPath = join(wsDir, `TOOLS.md${BACKUP_SUFFIX}`);
       assert.ok(
         existsSync(bakPath),
         "stale-version replace must write a backup so hand-edits inside the fence are recoverable",
@@ -541,7 +562,7 @@ describe("writeEducationFiles", () => {
     test("legacy v0.98.5 heading variant is detected via prefix match", () => {
       // Wet-test on openclaw-test-ran (CAURA-333) revealed the plugin
       // had emitted an older heading form on 0.98.5:
-      //   "## MemClaw — Long-Term Agent Memory (auto-added by plugin)"
+      //   the historical long-term-memory heading
       // for TOOLS.md, and a different form for AGENTS.md. Pre-fix the
       // legacy splice was exact-match on the 1.x heading text, so 20
       // workspaces ended up with legacy + new fence side-by-side.
@@ -553,7 +574,7 @@ describe("writeEducationFiles", () => {
       const userBefore = "# TOOLS.md - Local Notes\n\nMy notes here.\n";
       const legacy_v0_98 =
         "\n---\n\n" +
-        "## MemClaw — Long-Term Agent Memory (auto-added by plugin)\n\n" +
+        `## ${LEGACY_DISPLAY_NAME} — Long-Term Agent Memory (auto-added by plugin)\n\n` +
         "13 tools:\n" +
         "| `caura_write_bulk` | Store multiple memories at once |\n" +
         "| `caura_search` | Semantic search, returns raw results |\n";
@@ -565,9 +586,9 @@ describe("writeEducationFiles", () => {
       const tools = readFile(join(wsDir, "TOOLS.md"));
       assert.ok(!tools.includes("caura_write_bulk"), "stale 0.98.5 tool name must be replaced");
       assert.ok(!tools.includes("Long-Term Agent Memory"), "stale 0.98.5 heading must be gone");
-      assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/);
+      assert.match(tools, fencePattern("tools"));
       assert.ok(tools.startsWith(userBefore), "user content above legacy block preserved");
-      assert.ok(existsSync(join(wsDir, "TOOLS.md.memclaw-bak")), "v0.98.5 splice must write backup");
+      assert.ok(existsSync(join(wsDir, `TOOLS.md${BACKUP_SUFFIX}`)), "v0.98.5 splice must write backup");
     });
 
     test("legacy v0.98.5 AGENTS.md heading variant is detected via prefix match", () => {
@@ -578,7 +599,7 @@ describe("writeEducationFiles", () => {
       const userBefore = "# AGENTS.md\n\n## Identity\n\nI am Claude.\n";
       const legacy_v0_98 =
         "\n---\n\n" +
-        "## Memory V2 (auto-added by MemClaw plugin — replaces any earlier memory section above)\n\n" +
+        `## Memory V2 (auto-added by ${LEGACY_DISPLAY_NAME} plugin — replaces any earlier memory section above)\n\n` +
         "**Layer 1:** Per-turn write-back — `caura_write` after every meaningful outcome\n" +
         "- Update > Create — prefer `caura_update` over duplicates\n";
       writeFileSync(join(wsDir, "AGENTS.md"), userBefore + legacy_v0_98, "utf-8");
@@ -587,14 +608,14 @@ describe("writeEducationFiles", () => {
 
       assert.equal(result.agentsUpdated, 1);
       const agents = readFile(join(wsDir, "AGENTS.md"));
-      assert.ok(!agents.includes("auto-added by MemClaw plugin"), "stale 0.98.5 heading must be gone");
+      assert.ok(!agents.includes(`auto-added by ${LEGACY_DISPLAY_NAME} plugin`), "stale 0.98.5 heading must be gone");
       assert.ok(!agents.includes("caura_update"), "stale 0.98.5 body must be replaced");
-      assert.match(agents, /<!-- memclaw:agents v=[a-f0-9]{8} -->/);
+      assert.match(agents, fencePattern("agents"));
       assert.ok(agents.startsWith(userBefore), "user content above legacy block preserved");
     });
 
     test("user heading starting with the same prefix but no plugin tool content is left alone", () => {
-      // Defensive: a user happens to write `## MemClaw — my own notes`
+      // Defensive: a user happens to write a similarly prefixed heading
       // with no `memclaw_*` references in the body. The content-shape // legacy-name-floor: historical tool prefix
       // check rejects the splice. We append a fresh fenced block at
       // EOF instead of replacing the user's heading.
@@ -604,7 +625,7 @@ describe("writeEducationFiles", () => {
 
       const userContent =
         "# Tools\n\n" +
-        "## MemClaw — my own notes\n\n" +
+        `## ${LEGACY_DISPLAY_NAME} — my own notes\n\n` +
         "Just my own notes about Claude/MemClaw deployment, no tools listed.\n"; // legacy-name-ok: accepted old-name user prose must not be mistaken for a plugin-owned block
       writeFileSync(join(wsDir, "TOOLS.md"), userContent, "utf-8");
 
@@ -612,9 +633,9 @@ describe("writeEducationFiles", () => {
 
       assert.equal(result.toolsUpdated, 1, "should append fenced block since legacy splice was skipped");
       const tools = readFile(join(wsDir, "TOOLS.md"));
-      assert.ok(tools.includes("## MemClaw — my own notes"), "user heading must be preserved");
+      assert.ok(tools.includes(`## ${LEGACY_DISPLAY_NAME} — my own notes`), "user heading must be preserved");
       assert.ok(tools.includes("Just my own notes"), "user content under that heading must be preserved");
-      assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/, "fresh fence appended");
+      assert.match(tools, fencePattern("tools"), "fresh fence appended");
     });
 
     test("CRLF line endings: legacy heading is still detected and spliced", () => {
@@ -629,7 +650,7 @@ describe("writeEducationFiles", () => {
 
       const userBefore = "# Tools\r\n\r\n";
       const legacy =
-        "---\r\n\r\n## MemClaw — Tools Available\r\n\r\n" +
+        `---\r\n\r\n## ${LEGACY_DISPLAY_NAME} — Tools Available\r\n\r\n` +
         "Obsolete CRLF body with caura_write_bulk reference.\r\n";
       writeFileSync(join(wsDir, "TOOLS.md"), userBefore + legacy, "utf-8");
 
@@ -639,19 +660,19 @@ describe("writeEducationFiles", () => {
       const tools = readFile(join(wsDir, "TOOLS.md"));
       assert.ok(!tools.includes("caura_write_bulk"), "stale CRLF content must be replaced");
       assert.ok(tools.startsWith(userBefore), "user content above legacy block preserved (with original CRLF)");
-      assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/);
+      assert.match(tools, fencePattern("tools"));
     });
 
-    test("legacy pre-fence section is migrated; one-shot .memclaw-bak is written", () => {
+    test("legacy pre-fence section is migrated; one-shot backup is written", () => {
       const base = tmpBase();
       const wsDir = join(base, "workspace");
       mkdirSync(wsDir, { recursive: true });
 
       // A v1.x-shaped TOOLS.md: user content, then the unfenced legacy
-      // MemClaw section (preceded by `---` rule), then more user content.
+      // Legacy plugin section (preceded by `---` rule), then more user content.
       const userBefore = "# Tools notes\n\nMy tools notes.\n";
       const legacy =
-        "\n---\n\n## MemClaw — Tools Available\n\n" +
+        `\n---\n\n## ${LEGACY_DISPLAY_NAME} — Tools Available\n\n` +
         "Obsolete 13-tool listing including caura_write_bulk and caura_search.\n";
       const userAfter = "\n## Other\n\nMy other section.\n";
       const original = userBefore + legacy + userAfter;
@@ -663,13 +684,13 @@ describe("writeEducationFiles", () => {
       const tools = readFile(join(wsDir, "TOOLS.md"));
       assert.ok(!tools.includes("caura_write_bulk"), "legacy stale tool name must be gone");
       assert.ok(!tools.includes("caura_search"), "legacy stale tool name must be gone");
-      assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/);
+      assert.match(tools, fencePattern("tools"));
       assert.ok(tools.startsWith(userBefore), "content above the legacy block must be preserved");
       assert.ok(tools.includes("## Other"), "content below the legacy block must be preserved");
 
       // Backup written exactly once with the pre-splice content.
-      const bakPath = join(wsDir, "TOOLS.md.memclaw-bak");
-      assert.ok(existsSync(bakPath), "expected one-shot .memclaw-bak after legacy splice");
+      const bakPath = join(wsDir, `TOOLS.md${BACKUP_SUFFIX}`);
+      assert.ok(existsSync(bakPath), "expected one-shot backup after legacy splice");
       assert.equal(readFile(bakPath), original);
     });
 
@@ -708,14 +729,14 @@ describe("writeEducationFiles", () => {
       mkdirSync(wsDir, { recursive: true });
 
       const original =
-        // Body must include a `memclaw_` token so the content-shape
+        // Body must include a recognized tool token so the content-shape
         // check in findLegacyRange treats this as our block (and not
         // a coincidental user heading with the same prefix).
-        "user\n\n---\n\n## MemClaw — Tools Available\n\nold body referencing caura_write_bulk.\n";
+        `user\n\n---\n\n## ${LEGACY_DISPLAY_NAME} — Tools Available\n\nold body referencing caura_write_bulk.\n`;
       writeFileSync(join(wsDir, "TOOLS.md"), original, "utf-8");
 
       writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
-      const bakPath = join(wsDir, "TOOLS.md.memclaw-bak");
+      const bakPath = join(wsDir, `TOOLS.md${BACKUP_SUFFIX}`);
       const bak1 = readFile(bakPath);
 
       // Hand-edit the live TOOLS.md and re-run — backup must NOT change.
@@ -761,7 +782,7 @@ describe("writeEducationFiles", () => {
       // close markers). The version tag remains unchanged.
       const toolsPath = join(wsDir, "TOOLS.md");
       const canonical = readFile(toolsPath);
-      const closeIdx = canonical.indexOf("<!-- /memclaw:tools -->");
+      const closeIdx = canonical.indexOf(`<!-- /${FROZEN_PLUGIN_ID}:tools -->`);
       assert.ok(closeIdx > 0, "expected close marker in canonical output");
       const handEdit = "\nIMPORTANT user note inside the fence — do not lose me.\n";
       const handEdited =
@@ -777,7 +798,7 @@ describe("writeEducationFiles", () => {
       );
 
       // Backup MUST exist and MUST contain the user's hand-edit.
-      const bakPath = toolsPath + ".memclaw-bak";
+      const bakPath = toolsPath + BACKUP_SUFFIX;
       assert.ok(
         existsSync(bakPath),
         "force=true with matching version MUST still write a backup so hand-edits inside the fence are recoverable",
@@ -796,13 +817,13 @@ describe("writeEducationFiles", () => {
 
     test("unmatched fence opener (user-authored) is treated as no-fence and appended", () => {
       // If a user happens to have something that looks like our opener
-      // (e.g. they hand-added `<!-- memclaw:tools -->` for a comment) but
+      // (e.g. they hand-added a similarly shaped fence comment) but
       // never closed it, we must not eat their content. Treat it as no
       // fence and append at EOF — same as a fresh install.
       const base = tmpBase();
       const wsDir = join(base, "workspace");
       mkdirSync(wsDir, { recursive: true });
-      const userContent = "<!-- memclaw:tools v=garbage -->\nuser note, unclosed\n";
+      const userContent = `<!-- ${FROZEN_PLUGIN_ID}:tools v=garbage -->\nuser note, unclosed\n`;
       writeFileSync(join(wsDir, "TOOLS.md"), userContent, "utf-8");
 
       const result = writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
@@ -810,7 +831,7 @@ describe("writeEducationFiles", () => {
       assert.equal(result.toolsUpdated, 1);
       const tools = readFile(join(wsDir, "TOOLS.md"));
       assert.ok(tools.startsWith(userContent), "user's unclosed-opener content must be preserved at the top");
-      assert.match(tools, /<!-- \/memclaw:tools -->\n?$/);
+      assert.match(tools, new RegExp(`<!-- /${FROZEN_PLUGIN_ID}:tools -->\\n?$`));
     });
 
     test("AGENTS.md follows the same fence semantics", () => {
@@ -821,10 +842,10 @@ describe("writeEducationFiles", () => {
       mkdirSync(wsDir, { recursive: true });
 
       const userBefore = "# Agents.md\n\n## Routing\n\nDo this.\n";
-      // Body must include a `memclaw_` token so the content-shape
+      // Body must include a recognized tool token so the content-shape
       // check in findLegacyRange treats this as our block.
       const legacy =
-        "\n---\n\n## Memory V2 — MemClaw Protocol (mandatory)\n\nObsolete agent rules using caura_write.\n";
+        `\n---\n\n## Memory V2 — ${LEGACY_DISPLAY_NAME} Protocol (mandatory)\n\nObsolete agent rules using caura_write.\n`;
       writeFileSync(join(wsDir, "AGENTS.md"), userBefore + legacy, "utf-8");
 
       const result = writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
@@ -832,9 +853,9 @@ describe("writeEducationFiles", () => {
       assert.equal(result.agentsUpdated, 1);
       const agents = readFile(join(wsDir, "AGENTS.md"));
       assert.ok(!agents.includes("Obsolete agent rules"), "legacy AGENTS.md content must be replaced");
-      assert.match(agents, /<!-- memclaw:agents v=[a-f0-9]{8} -->/);
+      assert.match(agents, fencePattern("agents"));
       assert.ok(agents.startsWith(userBefore), "user content above the legacy block must be preserved");
-      assert.ok(existsSync(join(wsDir, "AGENTS.md.memclaw-bak")));
+      assert.ok(existsSync(join(wsDir, `AGENTS.md${BACKUP_SUFFIX}`)));
     });
   });
 });
@@ -850,11 +871,7 @@ describe("writeEducationFiles", () => {
 describe("cleanupStaleHeartbeatEducation (unit)", () => {
   test("removes a paragraph appended with leading separator", () => {
     const userContent = "# Heartbeat\n\n## Cron tasks\n- Task 1\n- Task 2";
-    const stale =
-      "\n\n---\n\nYou have been connected to MemClaw — a shared persistent memory system. " +
-      "You now have 9 tools for writing, searching, and managing memories. " +
-      "Check skills/memclaw/SKILL.md for full instructions. Key rules: always search before " +
-      "starting work, always write findings after completing work, always include your agent_id.\n";
+    const stale = `\n\n---\n\n${staleHeartbeatParagraph(9)}\n`;
 
     const result = cleanupStaleHeartbeatEducation(userContent + stale);
 
@@ -868,11 +885,7 @@ describe("cleanupStaleHeartbeatEducation (unit)", () => {
 
   test("removes a paragraph that is the entire file (first-install case)", () => {
     // educateAgents writes only `<prompt>\n` when HEARTBEAT.md was empty.
-    const onlyParagraph =
-      "You have been connected to MemClaw — a shared persistent memory system. " +
-      "You now have 10 tools for writing, searching, and managing memories. " +
-      "Check skills/memclaw/SKILL.md for full instructions. Key rules: always search before " +
-      "starting work, always write findings after completing work, always include your agent_id.\n";
+    const onlyParagraph = `${staleHeartbeatParagraph(10)}\n`;
 
     const result = cleanupStaleHeartbeatEducation(onlyParagraph);
 
@@ -884,11 +897,7 @@ describe("cleanupStaleHeartbeatEducation (unit)", () => {
     // The stale paragraph hard-codes the tool count at write time.
     // Cleanup must work whether the count was 9, 10, 13, etc.
     for (const n of [7, 9, 10, 13, 99]) {
-      const para =
-        "You have been connected to MemClaw — a shared persistent memory system. " +
-        `You now have ${n} tools for writing, searching, and managing memories. ` +
-        "Check skills/memclaw/SKILL.md for full instructions. Key rules: always search before " +
-        "starting work, always write findings after completing work, always include your agent_id.\n";
+      const para = `${staleHeartbeatParagraph(n)}\n`;
       const result = cleanupStaleHeartbeatEducation(para);
       assert.equal(result.cleaned, true, `failed to clean paragraph with N=${n}`);
       assert.equal(result.content, "");
@@ -908,11 +917,10 @@ describe("cleanupStaleHeartbeatEducation (unit)", () => {
     assert.equal(result.content, "");
   });
 
-  test("does NOT match a coincidental mention of MemClaw", () => {
-    // A user-authored note that mentions MemClaw but isn't our exact
+  test("does NOT match a coincidental mention of the legacy brand", () => {
+    // A user-authored note that mentions the legacy brand but isn't our exact
     // paragraph must NOT be touched.
-    const content =
-      "# Heartbeat\n\n- Note: MemClaw is the persistent memory backend.\n";
+    const content = `# Heartbeat\n\n- Note: ${LEGACY_DISPLAY_NAME} is the persistent memory backend.\n`;
     const result = cleanupStaleHeartbeatEducation(content);
     assert.equal(result.cleaned, false);
     assert.equal(result.content, content);
@@ -929,11 +937,7 @@ describe("cleanupStaleHeartbeatEducation (unit)", () => {
       "# HEARTBEAT.md\n\n" +
       "# Keep this file empty (or with only comments) to skip heartbeat API calls.\n\n" +
       "# Add tasks below when you want the agent to check something periodically.";
-    const para = (n: number) =>
-      "You have been connected to MemClaw — a shared persistent memory system. " +
-      `You now have ${n} tools for writing, searching, and managing memories. ` +
-      "Check skills/memclaw/SKILL.md for full instructions. Key rules: always search before " +
-      "starting work, always write findings after completing work, always include your agent_id.";
+    const para = staleHeartbeatParagraph;
     const content =
       userContent +
       "\n\n---\n\n" + para(13) + "\n" +
@@ -954,11 +958,7 @@ describe("cleanupStaleHeartbeatEducation (unit)", () => {
   });
 
   test("strips three accumulated paragraphs (no upper bound on cleanup count)", () => {
-    const para = (n: number) =>
-      "You have been connected to MemClaw — a shared persistent memory system. " +
-      `You now have ${n} tools for writing, searching, and managing memories. ` +
-      "Check skills/memclaw/SKILL.md for full instructions. Key rules: always search before " +
-      "starting work, always write findings after completing work, always include your agent_id.";
+    const para = staleHeartbeatParagraph;
     const content =
       "user note\n\n---\n\n" + para(7) + "\n" +
       "\n---\n\n" + para(13) + "\n" +
@@ -992,11 +992,7 @@ describe("writeEducationFiles → HEARTBEAT.md cleanup (integration)", () => {
 
     const userContent =
       "# Heartbeat tasks\n\n1. Run nightly report\n2. Sync skills\n";
-    const stale =
-      "\n\n---\n\nYou have been connected to MemClaw — a shared persistent memory system. " +
-      "You now have 9 tools for writing, searching, and managing memories. " +
-      "Check skills/memclaw/SKILL.md for full instructions. Key rules: always search before " +
-      "starting work, always write findings after completing work, always include your agent_id.\n";
+    const stale = `\n\n---\n\n${staleHeartbeatParagraph(9)}\n`;
     writeFileSync(join(wsDir, "HEARTBEAT.md"), userContent + stale, "utf-8");
 
     writeEducationFiles(buildToolsMd(), buildAgentsMd(), undefined, base);
@@ -1010,7 +1006,7 @@ describe("writeEducationFiles → HEARTBEAT.md cleanup (integration)", () => {
     const wsDir = join(base, "workspace");
     mkdirSync(wsDir, { recursive: true });
 
-    const userContent = "# My heartbeat\n\nNo MemClaw paragraph here.\n";
+    const userContent = "# My heartbeat\n\nNo stale education paragraph here.\n";
     const hbPath = join(wsDir, "HEARTBEAT.md");
     writeFileSync(hbPath, userContent, "utf-8");
     const mtimeBefore = statSync(hbPath).mtimeMs;
@@ -1050,11 +1046,7 @@ describe("writeEducationFiles → HEARTBEAT.md cleanup (integration)", () => {
     const wsDir = join(base, "workspace");
     mkdirSync(wsDir, { recursive: true });
 
-    const onlyParagraph =
-      "You have been connected to MemClaw — a shared persistent memory system. " +
-      "You now have 9 tools for writing, searching, and managing memories. " +
-      "Check skills/memclaw/SKILL.md for full instructions. Key rules: always search before " +
-      "starting work, always write findings after completing work, always include your agent_id.\n";
+    const onlyParagraph = `${staleHeartbeatParagraph(9)}\n`;
     const hbPath = join(wsDir, "HEARTBEAT.md");
     writeFileSync(hbPath, onlyParagraph, "utf-8");
 
@@ -1102,7 +1094,10 @@ describe("shared plugin-root SKILL.md", () => {
   test("has OpenClaw-required frontmatter keys (name, description)", () => {
     const skill = readSharedSkill();
     assert.ok(skill.startsWith("---\n"), "missing YAML frontmatter delimiter");
-    assert.ok(/\nname:\s*memclaw\b/.test(skill), "missing/wrong name: memclaw");
+    assert.ok(
+      new RegExp(`\\nname:\\s*${FROZEN_PLUGIN_ID}\\b`).test(skill),
+      `missing/wrong name: ${FROZEN_PLUGIN_ID}`,
+    );
     assert.ok(/\ndescription:\s*\S/.test(skill), "missing description");
   });
 
@@ -1117,7 +1112,7 @@ describe("shared plugin-root SKILL.md", () => {
   test("gates on the plugin-enabled config path via requires.config", () => {
     const skill = readSharedSkill();
     assert.ok(
-      skill.includes("plugins.entries.memclaw.enabled"),
+      skill.includes(`plugins.entries.${FROZEN_PLUGIN_ID}.enabled`),
       "shared skill should be gated on plugin-enabled config path",
     );
     // metadata must be a single-line JSON object per OpenClaw's parser
@@ -1263,11 +1258,11 @@ describe("buildToolsMd", () => {
     const tools = buildToolsMd();
     const flat = tools.replace(/\s+/g, " ");
     assert.ok(
-      !flat.includes("skills/memclaw/SKILL.md"),
+      !flat.includes(`skills/${FROZEN_PLUGIN_ID}/SKILL.md`),
       "TOOLS.md must NOT reference the skill by filesystem path",
     );
     assert.ok(
-      /\*\*memclaw\*\* skill/i.test(flat),
+      new RegExp(`\\*\\*${FROZEN_PLUGIN_ID}\\*\\* skill`, "i").test(flat),
       "TOOLS.md must point readers at the bundled skill by name",
     );
   });
@@ -1458,12 +1453,12 @@ describe("buildAgentsMd", () => {
     // source template.
     const flat = agents.replace(/\s+/g, " ");
     assert.ok(
-      !flat.includes("skills/memclaw/SKILL.md"),
+      !flat.includes(`skills/${FROZEN_PLUGIN_ID}/SKILL.md`),
       "AGENTS.md must NOT reference the skill by filesystem path " +
         "(triggers a doomed `search` tool call on cron agents — CAURA-000)",
     );
     assert.ok(
-      /\*\*memclaw\*\* skill/i.test(flat),
+      new RegExp(`\\*\\*${FROZEN_PLUGIN_ID}\\*\\* skill`, "i").test(flat),
       "AGENTS.md must reference the bundled skill by name",
     );
     assert.ok(
