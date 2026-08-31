@@ -15,6 +15,7 @@ import {
   PLUGIN_ID,
 } from "./config.js";
 import { getPluginDir } from "./paths.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
 
 describe("PLUGIN_ID", () => {
   // The id lives in two files that are read by different consumers:
@@ -33,6 +34,11 @@ describe("PLUGIN_ID", () => {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     assert.equal(
       PLUGIN_ID,
+      FROZEN_PLUGIN_ID,
+      "the plugin id is an existing-install compatibility contract",
+    );
+    assert.equal(
+      FROZEN_PLUGIN_ID,
       manifest.id,
       `config.ts PLUGIN_ID ("${PLUGIN_ID}") and openclaw.plugin.json id ` +
         `("${manifest.id}") must be identical — OpenClaw reads the manifest, ` +
@@ -47,10 +53,10 @@ describe("PLUGIN_ID", () => {
 function happyConfig(): Record<string, unknown> {
   return {
     plugins: {
-      allow: ["memclaw"],
-      entries: { memclaw: { enabled: true } },
+      allow: [FROZEN_PLUGIN_ID],
+      entries: { [FROZEN_PLUGIN_ID]: { enabled: true } },
       load: { paths: [getPluginDir()] },
-      slots: { memory: "memclaw", contextEngine: "memclaw" },
+      slots: { memory: FROZEN_PLUGIN_ID, contextEngine: FROZEN_PLUGIN_ID },
     },
     tools: { alsoAllow: [] },
   };
@@ -96,7 +102,7 @@ describe("isCauraFullyConfigured", () => {
 
   test("false when the plugin is disabled", () => {
     const c = happyConfig();
-    (c as any).plugins.entries.memclaw.enabled = false;
+    (c as any).plugins.entries[FROZEN_PLUGIN_ID].enabled = false;
     assert.equal(isCauraFullyConfigured(c), false);
   });
 
@@ -233,7 +239,7 @@ describe("isCauraAllowed — permissive when allow is missing or empty (CAURA-00
 
   test("true when plugins.allow is non-empty AND includes the plugin id", () => {
     const c: any = {
-      plugins: { allow: ["memclaw", "browser"], entries: {}, load: {}, slots: {} },
+      plugins: { allow: [FROZEN_PLUGIN_ID, "browser"], entries: {}, load: {}, slots: {} },
     };
     assert.equal(isCauraAllowed(c), true);
   });
@@ -357,7 +363,7 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
       const written = ctx.written as any;
       const allow: string[] = written?.plugins?.allow ?? [];
       assert.ok(
-        allow.includes("memclaw"),
+        allow.includes(FROZEN_PLUGIN_ID),
         `expected the plugin id to be added; got: ${JSON.stringify(allow)}`,
       );
       assert.ok(allow.includes("browser"), "must preserve existing entries");
@@ -370,7 +376,7 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
   test("does NOT add the plugin id twice when already in a non-empty allowlist", () => {
     const ctx = _autoFixWithConfig({
       plugins: {
-        allow: ["browser", "memclaw", "filesystem"],
+        allow: ["browser", FROZEN_PLUGIN_ID, "filesystem"],
         entries: {},
         load: { paths: [] },
         slots: {},
@@ -381,7 +387,7 @@ describe("autoFixAllowlist — plugins.allow non-creation (CAURA-000)", () => {
       const written = ctx.written as any;
       const allow: string[] = written?.plugins?.allow ?? [];
       assert.equal(
-        allow.filter((p) => p === "memclaw").length,
+        allow.filter((p) => p === FROZEN_PLUGIN_ID).length,
         1,
         `the plugin id must appear exactly once; got: ${JSON.stringify(allow)}`,
       );

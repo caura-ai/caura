@@ -16,7 +16,11 @@ def _row():
 
 def _ctx(caller_agent_id):
     return PipelineContext(
-        data={"caller_agent_id": caller_agent_id, "filtered_rows": [_row(), _row()]}
+        data={
+            "caller_agent_id": caller_agent_id,
+            "filtered_rows": [_row(), _row()],
+            "tenant_id": "test-tenant-track-recalls-agentless",
+        }
     )
 
 

@@ -1,7 +1,7 @@
 """Concurrency tests for the query-embedding cache stampede guard (P4).
 
-Wet-tested on memclaw.dev before the fix: 5 parallel recalls with a novel
-query produced a 3-second tail spread (5.67s → 8.70s) — each request
+Wet-tested in the development deployment before the fix: 5 parallel recalls
+with a novel query produced a 3-second tail spread (5.67s → 8.70s) — each request
 independently issued its own ``get_query_embedding`` round-trip and
 serialized on the embedding provider's HTTP client pool.
 

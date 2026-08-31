@@ -1,6 +1,6 @@
 """Blank text must never reach an embedding backend.
 
-Regression cover for 2026-08-18 17:00-18:59Z. ``prod-memclaw-tei`` returned
+Regression cover for 2026-08-18 17:00-18:59Z. The production embedder returned
 274 x ``413 Input validation error: `inputs` cannot be empty`` in one week,
 272 of them inside that window, because nothing checked the text before
 sending it. Three separate faults compounded:

@@ -1,6 +1,6 @@
 """F5 — storage_client retries transient ConnectTimeout / 5xx on idempotent calls.
 
-Closes the silent-extraction symptom on memclaw.dev (root cause:
+Closes the silent-extraction symptom in the development deployment (root cause:
 ``httpx.ConnectTimeout`` when ``core-api`` reaches ``storage-api``
 during ``upsert_entity`` — 31% failure rate over 7 days of staging
 traffic per Cloud Run logs). The outer ``except Exception`` in
@@ -84,7 +84,7 @@ async def _make_client():
 
 
 async def test_get_retries_on_connect_timeout_then_succeeds() -> None:
-    """The exact failure mode observed on memclaw.dev: ConnectTimeout on
+    """The exact failure mode observed in development: ConnectTimeout on
     one attempt, then storage-api responds normally on the retry."""
     client, _write, read = await _make_client()
     read.get = AsyncMock(

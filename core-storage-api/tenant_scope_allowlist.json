@@ -52,13 +52,6 @@
       "category": "cross-tenant-by-design"
     },
     {
-      "id": "method:dedup_review_decide",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1087."
-    },
-    {
       "id": "method:dedup_review_enqueue",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -73,25 +66,11 @@
       "note": "Verified: data['tenant_id'] is stored on Entity and scopes the conflict-winner lookup."
     },
     {
-      "id": "method:entity_add_entity_link",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "No tenant is carried; bare memory_id and entity_id values mutate the tenantless join table. Tracked in #1124."
-    },
-    {
       "id": "method:entity_bulk_upsert",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
       "category": "opaque-body-write",
       "note": "Verified: every item carries tenant_id, which scopes updates, inserts, race recovery, and winner lookups."
-    },
-    {
-      "id": "method:entity_bulk_upsert_links",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "No tenant is carried; each item has only memory_id, entity_id, and role for the tenantless join table. Tracked in #1124."
     },
     {
       "id": "method:entity_count_memories_per_entity",
@@ -187,13 +166,6 @@
       "note": "Verified: every item carries tenant_id; the method rejects mixed-tenant batches and scopes conflict recovery to it."
     },
     {
-      "id": "method:memory_add_entity_links",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Join table has no tenant column; rows are tenant-scoped only via the ids. Tracked in #1085."
-    },
-    {
       "id": "method:memory_admin_list",
       "verdict": "OPTIONAL",
       "evidence": "tenant_id is defaulted; omitting it drops the scope",
@@ -236,13 +208,6 @@
       "evidence": "no binding tenant parameter",
       "category": "id-addressed-read",
       "note": "Join table has no tenant column; rows are tenant-scoped only via the ids."
-    },
-    {
-      "id": "method:memory_increment_recall",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1088."
     },
     {
       "id": "method:memory_list_null_embedding_rows",
@@ -475,13 +440,6 @@
       "category": "no-tenant-data"
     },
     {
-      "id": "route:PATCH /api/v1/storage/memories/{memory_id}/entities",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1085."
-    },
-    {
       "id": "route:PATCH /api/v1/storage/reports/{report_id}",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
@@ -533,20 +491,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "id-addressed-read"
-    },
-    {
-      "id": "route:POST /api/v1/storage/entities/links",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "No tenant is carried; the body supplies only bare memory/entity ids and role. Tracked in #1124."
-    },
-    {
-      "id": "route:POST /api/v1/storage/entities/links/bulk",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "No tenant is carried; every item supplies only bare memory/entity ids and role. Tracked in #1124."
     },
     {
       "id": "route:POST /api/v1/storage/entities/memory-ids-by-entity-ids",
@@ -657,24 +601,10 @@
       "note": "Verified: body tenant_id is assigned directly to the DedupReview row by dedup_review_enqueue."
     },
     {
-      "id": "route:POST /api/v1/storage/memories/dedup-reviews/{review_id}/decision",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1087."
-    },
-    {
       "id": "route:POST /api/v1/storage/memories/entity-links",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "id-addressed-read"
-    },
-    {
-      "id": "route:POST /api/v1/storage/memories/increment-recall",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1088."
     },
     {
       "id": "route:POST /api/v1/storage/reports",

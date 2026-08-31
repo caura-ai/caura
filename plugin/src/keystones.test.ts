@@ -35,13 +35,14 @@ interface MockCall {
 
 let originalFetch: typeof fetch;
 let calls: MockCall[];
+const KEYSTONES_ROUTE = "/memclaw/keystones"; // legacy-name-ok: live compatibility route
 
 // ``apiCall`` resolves a per-agent key via ``resolveAgentKey`` when an
 // ``agent_id`` is supplied — that's an extra HTTP request alongside the
 // main one. The cache-count assertions need to ignore those, so we
 // filter ``calls`` to just the keystones endpoint when counting.
 function keystoneCalls(): MockCall[] {
-  return calls.filter((c) => c.url.includes("/memclaw/keystones"));
+  return calls.filter((c) => c.url.includes(KEYSTONES_ROUTE));
 }
 
 function installFetch(body: unknown, status = 200): void {
@@ -51,7 +52,7 @@ function installFetch(body: unknown, status = 200): void {
     // resolution) return a benign 404 so the keystones path is the one
     // the test observes.
     const url = String(input);
-    if (!url.includes("/memclaw/keystones")) {
+    if (!url.includes(KEYSTONES_ROUTE)) {
       return new Response("{}", { status: 404 });
     }
     return new Response(JSON.stringify(body), {

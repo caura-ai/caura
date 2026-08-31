@@ -20,6 +20,7 @@ import pytest
 
 from core_worker.backfill import run_embedding_backfill
 from core_worker.clients.storage_client import NullEmbeddingRow
+from tests._legacy_contracts import frozen_topic
 
 
 def _row() -> NullEmbeddingRow:
@@ -456,7 +457,7 @@ def test_embed_backfill_topic_string() -> None:
 
     assert (
         Topics.Lifecycle.EMBED_BACKFILL_REQUESTED
-        == "memclaw.lifecycle.embed-backfill-requested"
+        == frozen_topic("lifecycle.embed-backfill-requested")
     )
 
 

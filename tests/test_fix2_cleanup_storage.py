@@ -34,6 +34,7 @@ from sqlalchemy import text
 from common.models import Memory
 from common.models.recall_log import RecallCandidate, RecallEvent  # noqa: F401 — registers tables
 from core_storage_api.services.postgres_service import get_session
+from tests.conftest import new_tenant_id
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -41,7 +42,7 @@ _PREFIX = "/api/v1/storage"
 
 
 def _t() -> str:
-    return f"test-tenant-fix2-cleanup-{uuid4().hex[:8]}"
+    return new_tenant_id()
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +151,7 @@ async def test_increment_recall_bumps_count(storage_http):
 
     resp = await storage_http.post(
         f"{_PREFIX}/memories/increment-recall",
-        json={"memory_ids": [m1, m2]},
+        json={"tenant_id": tenant, "memory_ids": [m1, m2]},
     )
     assert resp.status_code == 200
     assert resp.json() == {"updated": 2}
@@ -168,30 +169,72 @@ async def test_increment_recall_stale_id_not_counted(storage_http):
     m1 = await _seed_memory(tenant_id=tenant)
     resp = await storage_http.post(
         f"{_PREFIX}/memories/increment-recall",
-        json={"memory_ids": [m1, str(uuid4())]},
+        json={"tenant_id": tenant, "memory_ids": [m1, str(uuid4())]},
     )
     assert resp.status_code == 200
     assert resp.json() == {"updated": 1}
 
 
 async def test_increment_recall_empty_list_noop(storage_http):
+    tenant = _t()
     resp = await storage_http.post(
         f"{_PREFIX}/memories/increment-recall",
-        json={"memory_ids": []},
+        json={"tenant_id": tenant, "memory_ids": []},
     )
     assert resp.status_code == 200
     assert resp.json() == {"updated": 0}
 
 
 async def test_increment_recall_missing_field_422(storage_http):
-    resp = await storage_http.post(f"{_PREFIX}/memories/increment-recall", json={})
+    resp = await storage_http.post(
+        f"{_PREFIX}/memories/increment-recall",
+        json={"tenant_id": _t()},
+    )
     assert resp.status_code == 422
+
+
+async def test_increment_recall_missing_tenant_422s_without_updating(storage_http):
+    victim = await _seed_memory(tenant_id=new_tenant_id())
+
+    resp = await storage_http.post(
+        f"{_PREFIX}/memories/increment-recall",
+        json={"memory_ids": [victim]},
+    )
+
+    assert resp.status_code == 422
+    assert await _recall_count(victim) == 0
+
+
+async def test_increment_recall_only_updates_callers_tenant(storage_http):
+    caller_tenant = new_tenant_id()
+    owned = await _seed_memory(tenant_id=caller_tenant)
+    foreign = await _seed_memory(tenant_id=new_tenant_id())
+
+    resp = await storage_http.post(
+        f"{_PREFIX}/memories/increment-recall",
+        json={"tenant_id": caller_tenant, "memory_ids": [owned, foreign]},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"updated": 1}
+    assert await _recall_count(owned) == 1
+    assert await _last_recalled_at(owned) is not None
+    assert await _recall_count(foreign) == 0
+    assert await _last_recalled_at(foreign) is None
 
 
 async def test_increment_recall_non_list_422(storage_http):
     resp = await storage_http.post(
         f"{_PREFIX}/memories/increment-recall",
-        json={"memory_ids": "not-a-list"},
+        json={"tenant_id": _t(), "memory_ids": "not-a-list"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_increment_recall_non_object_body_422(storage_http):
+    resp = await storage_http.post(
+        f"{_PREFIX}/memories/increment-recall",
+        json=[],
     )
     assert resp.status_code == 422
 
@@ -199,7 +242,7 @@ async def test_increment_recall_non_list_422(storage_http):
 async def test_increment_recall_invalid_uuid_422(storage_http):
     resp = await storage_http.post(
         f"{_PREFIX}/memories/increment-recall",
-        json={"memory_ids": ["not-a-uuid"]},
+        json={"tenant_id": _t(), "memory_ids": ["not-a-uuid"]},
     )
     assert resp.status_code == 422
 

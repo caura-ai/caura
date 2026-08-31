@@ -18,6 +18,7 @@ from pathlib import Path
 
 from core_api.routes import fleet as fleet_mod
 from core_api.routes import plugin as plugin_mod
+from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -285,7 +286,7 @@ def test_plugin_manifest_version_matches_package_json():
 
 def test_install_script_claims_both_slots():
     """The install script's inline setup.js MUST set both ``slots.memory``
-    AND ``slots.contextEngine`` to ``"memclaw"``.
+    AND ``slots.contextEngine`` to the existing plugin identifier.
 
     Pre-fix the script only set ``slots.memory``. OpenClaw resolves the
     active ContextEngine from ``plugins.slots.contextEngine`` (see
@@ -301,12 +302,11 @@ def test_install_script_claims_both_slots():
     script so we can't regress to the half-claimed state.
     """
     src = Path(plugin_mod.__file__).read_text(encoding="utf-8")
-    assert "config.plugins.slots.memory = 'memclaw'" in src, (
-        "Install script must claim plugins.slots.memory for memclaw."
+    assert f"config.plugins.slots.memory = '{FROZEN_PLUGIN_SLUG}'" in src, (
+        "Install script must claim plugins.slots.memory for the existing plugin."
     )
-    assert "config.plugins.slots.contextEngine = 'memclaw'" in src, (
-        "Install script must ALSO claim plugins.slots.contextEngine for memclaw — "
+    assert f"config.plugins.slots.contextEngine = '{FROZEN_PLUGIN_SLUG}'" in src, (
+        "Install script must ALSO claim plugins.slots.contextEngine — "
         "without it, OpenClaw falls back to the legacy context engine and our "
         "assemble() never runs, silently disabling keystone injection."
     )
-

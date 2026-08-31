@@ -15,6 +15,7 @@ import { createToolFromSpec } from "./tool-definitions.js";
 import { TOOL_SPECS, TOOL_SPECS_BY_NAME, getSpec } from "./tool-specs.js";
 import { buildToolsMd } from "./educate.js";
 import { cauraPromptSectionText } from "./prompt-section.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
 
 describe("tool-specs loader", () => {
   test("loads a non-empty ordered spec list from tools.json", () => {
@@ -230,7 +231,7 @@ describe("drift checks across tool surface artefacts", () => {
       import.meta.dirname,
       "..",
       "skills",
-      "memclaw",
+      FROZEN_PLUGIN_ID,
       "SKILL.md",
     );
     const skill = readFileSync(skillPath, "utf-8");
@@ -250,7 +251,7 @@ describe("drift checks across tool surface artefacts", () => {
       import.meta.dirname,
       "..",
       "skills",
-      "memclaw",
+      FROZEN_PLUGIN_ID,
       "SKILL.md",
     );
     const skill = readFileSync(skillPath, "utf-8");
@@ -321,11 +322,11 @@ describe("drift checks across tool surface artefacts", () => {
       // burning ~3 min and failing the turn.
       const flat = tools.replace(/\s+/g, " ");
       assert.ok(
-        !flat.includes("skills/memclaw/SKILL.md"),
+        !flat.includes(`skills/${FROZEN_PLUGIN_ID}/SKILL.md`),
         "must NOT reference the skill by filesystem path (CAURA-000)",
       );
       assert.ok(
-        /\*\*memclaw\*\* skill/i.test(flat),
+        new RegExp(`\\*\\*${FROZEN_PLUGIN_ID}\\*\\* skill`, "i").test(flat),
         "must reference the **memclaw** skill by name", // legacy-name-floor: OpenClaw skill slug
       );
       assert.ok(

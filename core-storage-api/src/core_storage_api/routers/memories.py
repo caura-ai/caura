@@ -1116,12 +1116,28 @@ async def list_dedup_reviews(
 @router.post("/dedup-reviews/{review_id}/decision")
 async def decide_dedup_review(review_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required and must be a non-empty string",
+        )
     status = body.get("status")
-    decided_by = body.get("decided_by")
     if not isinstance(status, str):
         raise HTTPException(status_code=400, detail="status (string) required")
+    if "decided_by" in body:
+        raise HTTPException(
+            status_code=422,
+            detail="'decided_by' cannot be supplied at the storage boundary",
+        )
     try:
-        review = await _svc.dedup_review_decide(review_id, status, decided_by=decided_by)
+        review = await _svc.dedup_review_decide(
+            review_id,
+            tenant_id=tenant_id,
+            status=status,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if review is None:
@@ -1509,14 +1525,21 @@ async def redistribute(request: Request) -> dict:
 async def increment_recall(request: Request) -> dict:
     """Bump ``recall_count`` + ``last_recalled_at`` for many memories by id.
 
-    Exposes the existing ``PostgresService.memory_increment_recall`` (a by-id
-    UPDATE; no tenant scope — matches its prior in-process semantics from
-    core-api's ``track_recalls`` hook). Body: ``{"memory_ids": [str,...]}`` →
-    ``{"updated": int}``. Fail-closed 422 if ``memory_ids`` is missing/not a
-    list; a malformed UUID 422s (mirrors the evolve/entities validation
-    pattern) rather than 500ing inside the service.
+    ``tenant_id`` binds the by-id UPDATE to the caller's tenant. Body:
+    ``{"tenant_id": str, "memory_ids": [str,...]}`` → ``{"updated": int}``.
+    Fail-closed 422 if either field is missing or invalid; a malformed UUID
+    422s (mirrors the evolve/entities validation pattern) rather than 500ing
+    inside the service.
     """
     body: dict = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    tenant_id = body.get("tenant_id")
+    if not isinstance(tenant_id, str) or not tenant_id:
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_id' is required and must be a non-empty string",
+        )
     raw_ids = body.get("memory_ids")
     if not isinstance(raw_ids, list):
         raise HTTPException(status_code=422, detail="'memory_ids' must be a list")
@@ -1526,7 +1549,7 @@ async def increment_recall(request: Request) -> dict:
         memory_ids = [UUID(str(mid)) for mid in raw_ids]
     except (ValueError, AttributeError) as exc:
         raise HTTPException(status_code=422, detail=f"invalid UUID in memory_ids: {exc}") from exc
-    updated = await _svc.memory_increment_recall(memory_ids)
+    updated = await _svc.memory_increment_recall(memory_ids, tenant_id=tenant_id)
     return {"updated": updated}
 
 
@@ -1827,6 +1850,12 @@ async def update_embedding(memory_id: UUID, request: Request) -> dict:
 @router.patch("/{memory_id}/entities")
 async def update_memory_entities(memory_id: UUID, request: Request) -> dict:
     body: dict = await request.json()
+    # Tenant guard, same shape as ``PATCH /memories/{memory_id}/embedding``
+    # above. This route validated the shape of ``entity_links`` carefully and
+    # read no tenant at all, so a caller who knew a memory UUID could hang
+    # entities off another tenant's row — and name another tenant's entities
+    # while doing it. Both endpoints of the link are scoped in the service.
+    tenant_id = _require(body, "tenant_id")
     entity_links = body.get("entity_links", [])
     if not isinstance(entity_links, list):
         raise HTTPException(status_code=422, detail="'entity_links' must be a list")
@@ -1836,7 +1865,13 @@ async def update_memory_entities(memory_id: UUID, request: Request) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if any(not isinstance(lnk["role"], str) or not lnk["role"] for lnk in links):
         raise HTTPException(status_code=422, detail="Each entity link must have a non-empty string 'role'")
-    await _svc.memory_add_entity_links(memory_id, links)
+    linked = await _svc.memory_add_entity_links(memory_id, tenant_id, links)
+    if not linked:
+        # One 404 for a memory that isn't there, a memory that isn't yours, and
+        # an entity that isn't yours. The detail names only the memory because
+        # saying which of the three it was would answer as an existence oracle
+        # for both id spaces — see the service docstring.
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
     return {"ok": True}
 
 

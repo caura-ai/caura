@@ -93,7 +93,7 @@ async def test_list_returns_pending_only_by_default(sc):
         }
     )
     # Mark one as decided.
-    await sc.decide_dedup_review(decided["id"], "dismissed", decided_by="reviewer-1")
+    await sc.decide_dedup_review(decided["id"], "dismissed", tenant_id=tenant)
 
     rows = await sc.list_dedup_reviews({"tenant_id": tenant})
     ids = {r["id"] for r in rows}
@@ -102,9 +102,9 @@ async def test_list_returns_pending_only_by_default(sc):
 
 
 @pytest.mark.integration
-async def test_decide_sets_status_and_decided_fields(sc):
+async def test_decide_sets_status_and_timestamp(sc):
     """``decide_dedup_review`` transitions ``pending`` → one of the
-    terminal statuses and records who decided and when."""
+    terminal statuses and records when it was decided."""
     tenant = f"test-tenant-a1-18-decide-{uuid4().hex[:8]}"
     cand_id = str(uuid4())
     review = await sc.enqueue_dedup_review(
@@ -123,10 +123,10 @@ async def test_decide_sets_status_and_decided_fields(sc):
         }
     )
     updated = await sc.decide_dedup_review(
-        review["id"], "override_not_duplicate", decided_by="reviewer-7"
+        review["id"], "override_not_duplicate", tenant_id=tenant
     )
     assert updated["status"] == "override_not_duplicate"
-    assert updated["decided_by"] == "reviewer-7"
+    assert updated["decided_by"] is None
     assert updated["decided_at"] is not None
 
 
@@ -154,7 +154,7 @@ async def test_decide_rejects_unknown_status(sc):
         }
     )
     with pytest.raises(httpx.HTTPStatusError) as ei:
-        await sc.decide_dedup_review(review["id"], "rofl", decided_by="r")
+        await sc.decide_dedup_review(review["id"], "rofl", tenant_id=tenant)
     assert ei.value.response.status_code == 400
 
 

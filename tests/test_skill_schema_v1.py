@@ -751,7 +751,7 @@ class TestMigrationChain:
         assert chain.get("028") == "027", "028 must follow 027"
         # 029: agent activity digest (cached per-agent summaries, CAURA-222)
         assert chain.get("029") == "028", "029 must follow 028"
-        # 030: register the memclaw-insighter service agent for existing tenants
+        # 030: register the insights service agent for existing tenants
         assert chain.get("030") == "029", "030 must follow 029"
         # 031: broker-write agent ownership column (owner_install_uuid)
         assert chain.get("031") == "030", "031 must follow 030"

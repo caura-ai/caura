@@ -23,6 +23,7 @@ from httpx import ASGITransport, AsyncClient
 
 from core_api import auth as auth_mod
 from core_api.routes import skills_inbox as si
+from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
 pytestmark = pytest.mark.unit
 
@@ -36,7 +37,7 @@ async def _path4_ctx(monkeypatch, headers):
     """Resolve get_auth_context down Path 4 (gateway header trust)."""
     monkeypatch.setattr(auth_mod.settings, "gateway_shared_secret", None)
     monkeypatch.setattr(auth_mod.settings, "is_standalone", False)
-    monkeypatch.setattr(auth_mod.settings, "memclaw_api_key", None)
+    monkeypatch.setattr(auth_mod.settings, LEGACY_API_KEY_FIELD, None)
     monkeypatch.setattr(auth_mod, "get_admin_key", lambda: None)
 
     async def _noop(*a, **k):
@@ -77,7 +78,7 @@ async def test_api_key_path_ignores_org_role_header(monkeypatch):
     admin-only routes by self-asserting X-Org-Role."""
     monkeypatch.setattr(auth_mod.settings, "gateway_shared_secret", None)
     monkeypatch.setattr(auth_mod.settings, "is_standalone", False)
-    monkeypatch.setattr(auth_mod.settings, "memclaw_api_key", "sekrit")
+    monkeypatch.setattr(auth_mod.settings, LEGACY_API_KEY_FIELD, "sekrit")
     monkeypatch.setattr(auth_mod, "get_admin_key", lambda: None)
 
     async def _noop(*a, **k):
@@ -103,7 +104,7 @@ def inbox_app(monkeypatch):
     down Path 4, with the route's service seams stubbed."""
     monkeypatch.setattr(auth_mod.settings, "gateway_shared_secret", None)
     monkeypatch.setattr(auth_mod.settings, "is_standalone", False)
-    monkeypatch.setattr(auth_mod.settings, "memclaw_api_key", None)
+    monkeypatch.setattr(auth_mod.settings, LEGACY_API_KEY_FIELD, None)
     monkeypatch.setattr(auth_mod, "get_admin_key", lambda: None)
 
     async def _noop(*a, **k):

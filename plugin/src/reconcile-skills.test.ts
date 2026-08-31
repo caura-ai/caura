@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
 
 // Set env BEFORE importing reconcile-skills.js — module reads from
 // process.env at import time via env.ts.
@@ -40,7 +41,7 @@ process.env.HOME = tmpHome;
 
 const { reconcileSkills, PROTECTED_SKILLS, resolveSkillTargets, OWNED_MARKER } = await import("./reconcile-skills.js");
 
-const SKILLS_ROOT = join(tmpHome, ".openclaw", "plugins", "memclaw", "skills");
+const SKILLS_ROOT = join(tmpHome, ".openclaw", "plugins", FROZEN_PLUGIN_ID, "skills");
 
 let originalFetch: typeof fetch;
 type MockCatalogEntry = {
@@ -114,28 +115,28 @@ describe("reconcileSkills", () => {
   });
 
   test("invariant 1: bundled protected skill is never deleted (empty catalog)", async () => {
-    plantOnDisk("memclaw", "# bundled onboarding skill — should survive\n");
+    plantOnDisk(FROZEN_PLUGIN_ID, "# bundled onboarding skill — should survive\n");
     plantOnDisk("foo", "# orphan from a previous unshared skill\n");
     mockCatalog = []; // empty catalog
 
     const summary = await reconcileSkills();
 
-    assert.deepEqual(listSkillDirs(), ["memclaw"]); // foo gone, memclaw stays
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID]); // foo gone, bundled skill stays
     assert.deepEqual(summary.removed, ["foo"]);
-    assert.deepEqual(summary.protected, ["memclaw"]);
+    assert.deepEqual(summary.protected, [FROZEN_PLUGIN_ID]);
     // No catalog-active skills → nothing installed (the bundled skill
     // is protected, not "installed" from the catalog).
     assert.deepEqual(summary.installed, []);
     // Bundled content must be untouched
-    assert.match(readSkill("memclaw"), /should survive/);
+    assert.match(readSkill(FROZEN_PLUGIN_ID), /should survive/);
   });
 
-  test("PROTECTED_SKILLS is exported and contains memclaw", () => {
-    assert.ok(PROTECTED_SKILLS.has("memclaw"));
+  test("PROTECTED_SKILLS is exported and contains the plugin id", () => {
+    assert.ok(PROTECTED_SKILLS.has(FROZEN_PLUGIN_ID));
   });
 
   test("invariant 2: cold start pulls every catalog skill", async () => {
-    plantOnDisk("memclaw"); // only the bundled skill
+    plantOnDisk(FROZEN_PLUGIN_ID); // only the bundled skill
     mockCatalog = [
       { doc_id: "git-rebase-safety", data: { name: "git-rebase-safety", description: "rebase steps",   content: "# rebase safely\n" } },
       { doc_id: "deploy-runbook",    data: { name: "deploy-runbook",    description: "deploy steps",   content: "# deploy steps\n" } },
@@ -145,7 +146,7 @@ describe("reconcileSkills", () => {
     const summary = await reconcileSkills();
 
     assert.deepEqual(listSkillDirs(), [
-      "deploy-runbook", "git-rebase-safety", "incident-triage", "memclaw",
+      "deploy-runbook", "git-rebase-safety", "incident-triage", FROZEN_PLUGIN_ID,
     ]);
     assert.deepEqual(summary.added.sort(), ["deploy-runbook", "git-rebase-safety", "incident-triage"]);
     assert.deepEqual(summary.removed, []);
@@ -160,7 +161,7 @@ describe("reconcileSkills", () => {
   });
 
   test("invariant 3: convergence — adds B, removes C, in one tick", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     // Plant skill-a with the EXACT content the reconciler would write,
     // so the no-op-on-match path stays quiet for it.
     plantOnDisk("skill-a", withSynthFrontmatter("skill-a", "alpha", "# A from catalog\n"));
@@ -172,13 +173,13 @@ describe("reconcileSkills", () => {
 
     const summary = await reconcileSkills();
 
-    assert.deepEqual(listSkillDirs(), ["memclaw", "skill-a", "skill-b"]);
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID, "skill-a", "skill-b"]);
     assert.deepEqual(summary.added, ["skill-b"]);
     assert.deepEqual(summary.removed, ["skill-c"]);
   });
 
   test("invariant 4: re-running with no changes is a no-op", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
       { doc_id: "skill-a", data: { name: "skill-a", description: "alpha", content: "# A\n" } },
     ];
@@ -198,7 +199,7 @@ describe("reconcileSkills", () => {
   });
 
   test("invariant 5: unsafe slug from catalog is skipped, never lands on disk", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
       { doc_id: "../etc/passwd", data: { name: "x", description: "exploit",     content: "exploit\n" } },
       { doc_id: "Capitalized",   data: { name: "x", description: "uppercase",   content: "rejected\n" } },
@@ -207,7 +208,7 @@ describe("reconcileSkills", () => {
 
     const summary = await reconcileSkills();
 
-    assert.deepEqual(listSkillDirs(), ["memclaw", "valid-slug"]);
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID, "valid-slug"]);
     assert.deepEqual(summary.added, ["valid-slug"]);
     assert.equal(summary.skipped.length, 2);
     // No traversal artefact created
@@ -215,7 +216,7 @@ describe("reconcileSkills", () => {
   });
 
   test("catalog returns missing content/description → row skipped, others applied", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
       { doc_id: "no-content",     data: { name: "x", description: "ok" } as MockCatalogEntry["data"] },
       { doc_id: "no-description", data: { name: "x",                       content: "# body\n" } as MockCatalogEntry["data"] },
@@ -224,13 +225,13 @@ describe("reconcileSkills", () => {
 
     const summary = await reconcileSkills();
 
-    assert.deepEqual(listSkillDirs(), ["good", "memclaw"]);
+    assert.deepEqual(listSkillDirs(), ["good", FROZEN_PLUGIN_ID]);
     assert.deepEqual(summary.added, ["good"]);
     assert.equal(summary.skipped.length, 2);
   });
 
   test("frontmatter synthesis: plain markdown gets name+description prepended for OpenClaw discovery", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
       {
         doc_id: "git-rebase-safety",
@@ -255,7 +256,7 @@ describe("reconcileSkills", () => {
   });
 
   test("frontmatter passthrough: skill content that already starts with --- is left untouched", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     const authorContent =
       "---\nname: my-skill\ndescription: hand-authored\nuser-invocable: true\n---\n\n# Body\n";
     mockCatalog = [
@@ -276,7 +277,7 @@ describe("reconcileSkills", () => {
   });
 
   test("catalog query failure → fail open: existing skills preserved", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantOnDisk("skill-a", "# from previous tick\n");
     // Replace fetch with a thrower
     globalThis.fetch = (async () => {
@@ -286,14 +287,14 @@ describe("reconcileSkills", () => {
     const summary = await reconcileSkills();
 
     // Disk untouched
-    assert.deepEqual(listSkillDirs(), ["memclaw", "skill-a"]);
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID, "skill-a"]);
     assert.equal(summary.catalogCount, 0);
     assert.deepEqual(summary.added, []);
     assert.deepEqual(summary.removed, []);
   });
 
   test("content drift on disk → reconciler overwrites with catalog version", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantOnDisk("skill-a", "# stale local edits\n");
     mockCatalog = [
       { doc_id: "skill-a", data: { name: "skill-a", description: "alpha", content: "# canonical from catalog\n" } },
@@ -306,7 +307,7 @@ describe("reconcileSkills", () => {
 
   test("de-activation: a skill withheld by the server (active→rejected/quarantined) is removed from disk next tick", async () => {
     // Tick 1: skill is active → server returns it → lands on disk.
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
       { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "deploy steps", content: "# deploy\n" } },
     ];
@@ -324,28 +325,28 @@ describe("reconcileSkills", () => {
     // The heartbeat now reports an empty installed set — the operator
     // sees the skill is no longer live on this node.
     assert.deepEqual(second.installed, []);
-    assert.deepEqual(listSkillDirs(), ["memclaw"]); // gone; bundled survives
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID]); // gone; bundled survives
   });
 
   test("server fail-closed (503) → reconciler fails safe: disk preserved, nothing pushed", async () => {
     // The install surface raises 503 during a settings outage (fail
     // closed). apiCall throws on non-2xx, so the reconciler catches it
     // and leaves disk untouched — no non-active skill can be pushed.
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantOnDisk("skill-a", "# from a healthy prior tick\n");
     globalThis.fetch = (async () =>
       new Response("skill lifecycle gate unavailable", { status: 503 })) as typeof fetch;
 
     const summary = await reconcileSkills();
 
-    assert.deepEqual(listSkillDirs(), ["memclaw", "skill-a"]); // untouched
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID, "skill-a"]); // untouched
     assert.equal(summary.catalogCount, 0);
     assert.deepEqual(summary.added, []);
     assert.deepEqual(summary.removed, []);
   });
 
   test("installed reflects CONFIRMED disk, not desired intent: a failed write is excluded", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     // Plant a FILE where the reconciler wants a directory, so
     // mkdirSync(skills/bad-skill) throws and its write fails — without
     // mocking fs. ``good-skill`` writes cleanly.
@@ -499,7 +500,7 @@ describe("reconcileSkills — configured targets", () => {
   };
 
   test("additive: writes a catalog skill into the dir, stamps the ownership marker", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     useAdditive();
     mockCatalog = [
       { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
@@ -513,7 +514,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("additive: a foreign (unowned) skill not in the catalog is NEVER removed", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantForeign("client-skill");
     useAdditive();
     mockCatalog = []; // empty catalog — owned dir would prune, additive must not touch foreign
@@ -526,7 +527,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("additive: collision — catalog slug occupied by a foreign skill is skipped, not clobbered", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantForeign("deploy-runbook", "# CLIENT version — keep me\n");
     useAdditive();
     mockCatalog = [
@@ -545,7 +546,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("additive: a plugin-owned skill dropped from the catalog IS removed", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantOwned("old-skill"); // previously written by this plugin (has marker)
     plantForeign("client-skill"); // foreign neighbour — must survive
     useAdditive();
@@ -559,7 +560,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("additive: an owned skill still in the catalog is updated in place", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantOwned("deploy-runbook", "# stale owned\n");
     useAdditive();
     mockCatalog = [
@@ -574,7 +575,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("additive: a skill whose marker was deleted is treated as foreign (collision, not clobbered)", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantOwned("deploy-runbook", "# was owned, marker now gone\n");
     rmSync(ext("deploy-runbook", OWNED_MARKER), { force: true }); // marker wiped → no longer recognisable as ours
     useAdditive();
@@ -593,7 +594,8 @@ describe("reconcileSkills — configured targets", () => {
   test("additive: a FOREIGN dir whose name matches a protected slug is ignored, not reported protected", async () => {
     // No protected skill in the default owned dir (resetSkillsDir cleared it), so any
     // protected slug in summary.protected could only come from the additive dir.
-    plantForeign("memclaw", "# client's own thing named memclaw\n"); // foreign, no marker
+    const foreignContent = `# client's own thing named ${FROZEN_PLUGIN_ID}\n`;
+    plantForeign(FROZEN_PLUGIN_ID, foreignContent); // foreign, no marker
     useAdditive();
     mockCatalog = []; // nothing active
 
@@ -601,25 +603,25 @@ describe("reconcileSkills — configured targets", () => {
 
     // Ownership gates first: the foreign dir is left untouched AND is not
     // misreported as a Caura-protected skill.
-    assert.equal(readFileSync(ext("memclaw", "SKILL.md"), "utf-8"), "# client's own thing named memclaw\n");
-    assert.ok(!summary.removed.includes("memclaw"), "foreign protected-name dir not removed");
-    assert.ok(!summary.protected.includes("memclaw"), "foreign dir not reported as protected");
+    assert.equal(readFileSync(ext(FROZEN_PLUGIN_ID, "SKILL.md"), "utf-8"), foreignContent);
+    assert.ok(!summary.removed.includes(FROZEN_PLUGIN_ID), "foreign protected-name dir not removed");
+    assert.ok(!summary.protected.includes(FROZEN_PLUGIN_ID), "foreign dir not reported as protected");
   });
 
   test("additive: an OWNED dir matching a protected slug survives (reported protected)", async () => {
-    plantOwned("memclaw", "# memclaw we wrote\n"); // owned (marker present)
+    plantOwned(FROZEN_PLUGIN_ID, "# content we wrote\n"); // owned (marker present)
     useAdditive();
     mockCatalog = []; // not in catalog
 
     const summary = await reconcileSkills();
 
-    assert.ok(existsSync(ext("memclaw", "SKILL.md")), "owned protected dir survives");
-    assert.ok(!summary.removed.includes("memclaw"), "owned protected dir not removed");
-    assert.ok(summary.protected.includes("memclaw"), "owned protected dir reported in protected");
+    assert.ok(existsSync(ext(FROZEN_PLUGIN_ID, "SKILL.md")), "owned protected dir survives");
+    assert.ok(!summary.removed.includes(FROZEN_PLUGIN_ID), "owned protected dir not removed");
+    assert.ok(summary.protected.includes(FROZEN_PLUGIN_ID), "owned protected dir reported in protected");
   });
 
   test("an extra owned target is reconciled alongside the default", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     process.env.CAURA_SKILL_TARGETS = JSON.stringify([{ dir: EXTRA_OWNED, mode: "owned" }]);
     mockCatalog = [
       { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
@@ -633,7 +635,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("per-target: default single target yields one entry mirroring the aggregate", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
       { doc_id: "deploy-runbook", data: { name: "deploy-runbook", description: "d", content: "# deploy\n" } },
     ];
@@ -650,7 +652,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("per-target: owned + additive each report their own slice; aggregate dedups", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     plantForeign("deploy-runbook", "# CLIENT version — keep\n"); // collides in the additive dir
     useAdditive();
     mockCatalog = [
@@ -682,7 +684,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("register: an additive target with register:true is added to skills.load.extraDirs", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     writeOpenClawJson({ tools: {} }); // vanilla config, no skills block yet
     process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { dir: EXTERNAL, mode: "additive", register: true },
@@ -701,7 +703,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("register: omitted/false leaves openclaw.json untouched", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     writeOpenClawJson({ skills: { load: { extraDirs: ["/pre/existing"] } } });
     useAdditive(); // no register flag
     mockCatalog = [
@@ -715,7 +717,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("register: a write failure is NOT reported as registered", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     // No openclaw.json written → ensureExtraSkillDirs fails closed.
     if (existsSync(OPENCLAW_JSON)) rmSync(OPENCLAW_JSON, { force: true });
     process.env.CAURA_SKILL_TARGETS = JSON.stringify([
@@ -733,7 +735,7 @@ describe("reconcileSkills — configured targets", () => {
   });
 
   test("register: idempotent — re-running does not duplicate the entry", async () => {
-    plantOnDisk("memclaw");
+    plantOnDisk(FROZEN_PLUGIN_ID);
     writeOpenClawJson({ skills: { load: { extraDirs: [EXTERNAL] } } }); // already present
     process.env.CAURA_SKILL_TARGETS = JSON.stringify([
       { dir: EXTERNAL, mode: "additive", register: true },

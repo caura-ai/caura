@@ -791,12 +791,12 @@ class CoreStorageClient:
             **{k: v for k, v in params.items() if v is not None},
         )
 
-    async def decide_dedup_review(self, review_id, status: str, *, decided_by: str | None = None) -> dict:
+    async def decide_dedup_review(self, review_id, status: str, *, tenant_id: str) -> dict:
         """Record a terminal decision (confirmed_duplicate /
         override_not_duplicate / dismissed) on a review row."""
         return await self._post(  # type: ignore[return-value]
             f"/memories/dedup-reviews/{review_id}/decision",
-            {"status": status, "decided_by": decided_by},
+            {"status": status, "tenant_id": tenant_id},
             read=False,
         )
 
@@ -966,11 +966,15 @@ class CoreStorageClient:
     async def update_memory_entities(
         self,
         memory_id: str,
+        tenant_id: str,
         entity_links: list[dict],
     ) -> dict | None:
+        # Same contract as ``update_memory`` above, for the same reason: the
+        # memory is addressed by bare UUID, so the tenant has to travel with it.
+        # Storage scopes the memory AND every named entity to it.
         return await self._patch(
             f"/memories/{memory_id}/entities",
-            {"entity_links": entity_links},
+            {"tenant_id": tenant_id, "entity_links": entity_links},
         )
 
     async def get_entity_links_for_memories(
@@ -1266,13 +1270,17 @@ class CoreStorageClient:
     # datetimes, so callers stringify UUIDs + ISO-format datetimes first.
     # =====================================================================
 
-    async def increment_recall(self, memory_ids: list[str]) -> int:
+    async def increment_recall(self, memory_ids: list[str], *, tenant_id: str) -> int:
         """Bump ``recall_count`` + ``last_recalled_at`` for memories by id.
 
         ``memory_ids`` must already be stringified (the storage endpoint
-        re-parses each as a UUID). Returns the rows-updated count.
+        re-parses each as a UUID). ``tenant_id`` binds the update to the
+        caller's tenant. Returns the rows-updated count.
         """
-        result = await self._post("/memories/increment-recall", {"memory_ids": memory_ids})
+        result = await self._post(
+            "/memories/increment-recall",
+            {"tenant_id": tenant_id, "memory_ids": memory_ids},
+        )
         return result.get("updated", 0)  # type: ignore[union-attr]
 
     async def log_recall(self, event: dict, candidates: list[dict]) -> str:
@@ -1466,19 +1474,26 @@ class CoreStorageClient:
             entity_id=entity_id,
         )
 
-    async def create_entity_link(self, data: dict) -> dict:
-        return await self._post("/entities/links", data)  # type: ignore[return-value]
+    async def create_entity_link(self, tenant_id: str, data: dict) -> dict:
+        # The link is addressed by two bare UUIDs, so the tenant has to travel
+        # with them: storage scopes both ends to it. The explicit arg wins over
+        # any ``tenant_id`` in ``data``.
+        return await self._post("/entities/links", {**data, "tenant_id": tenant_id})  # type: ignore[return-value]
 
-    async def bulk_upsert_entity_links(self, items: list[dict]) -> list[dict]:
+    async def bulk_upsert_entity_links(self, tenant_id: str, items: list[dict]) -> list[dict]:
         """Idempotently create many memory→entity links in one round-trip.
 
         Per-item: ``{"input_idx", "memory_id", "entity_id", "role"}``.
         Response aligned to input with ``{"input_idx", "memory_id",
         "entity_id", "role", "created": bool}``. ``created=False`` means
         the link already existed (its prior role preserved).
+
+        ``tenant_id`` binds every item on both ends. An item naming a memory or
+        entity outside it comes back as ``error="fk_violation"`` — the same
+        answer as an endpoint that does not exist, deliberately.
         """
         return await self._post(  # type: ignore[return-value]
-            "/entities/links/bulk", {"items": items}
+            "/entities/links/bulk", {"tenant_id": tenant_id, "items": items}
         )
 
     async def get_memory_ids_by_entity_ids(

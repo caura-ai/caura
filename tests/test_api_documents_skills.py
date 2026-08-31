@@ -1,10 +1,9 @@
 """Skills-collection invariants on POST /api/v1/documents.
 
-Phase B of the skills-as-documents migration replaced the dedicated
-`memclaw_share_skill` / `memclaw_unshare_skill` MCP tools (and their
-`/skills/*` REST routes) with a single rule on the generic document
-upsert path: when ``collection == "skills"``, the server enforces a
-filesystem-safe slug and indexes a text field automatically.
+Phase B of the skills-as-documents migration replaced the dedicated legacy
+share/unshare MCP tools (and their `/skills/*` REST routes) with a single rule
+on the generic document upsert path: when ``collection == "skills"``, the
+server enforces a filesystem-safe slug and indexes a text field automatically.
 
 As of the `feat/doc-mandate-summary` change the indexed text is taken
 from ``data["summary"]`` (preferred) with a back-compat fallback to

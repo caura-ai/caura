@@ -1,9 +1,7 @@
 """Invariants for the direct-MCP SKILL.md adapter.
 
-The adapter at ``static/skills/memclaw/SKILL.md`` is served by
-``/api/v1/skill/memclaw`` and installed into ``~/.claude/skills/memclaw/``
-(Claude Code) or ``~/.agents/skills/memclaw/`` (Codex) by the
-``/api/v1/install-skill`` bash installer.
+The static adapter is served by the default skill route and installed into
+the default Claude Code or Codex skill directory by the install-skill script.
 
 It is *intentionally* maintained independently of the OpenClaw plugin's
 SKILL.md. These tests pin the invariants specific to the direct-MCP
@@ -21,8 +19,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-ADAPTER_PATH = REPO_ROOT / "static" / "skills" / "memclaw" / "SKILL.md"
+ADAPTER_PATH = REPO_ROOT / "static" / "skills" / FROZEN_PLUGIN_SLUG / "SKILL.md"
 
 # Every tool the canonical adapter documents (direct-MCP exposes all 12,
 # including keystones_set — which the OpenClaw plugin variant withholds).
@@ -53,10 +53,10 @@ def test_file_exists_at_expected_path() -> None:
 def test_has_minimal_frontmatter() -> None:
     skill = _read_adapter()
     assert skill.startswith("---\n"), "missing YAML frontmatter delimiter"
-    assert "\nname: memclaw\n" in skill, "missing/wrong 'name: memclaw'"
+    assert f"\nname: {FROZEN_PLUGIN_SLUG}\n" in skill, "missing/wrong skill name"
     assert "\ndescription:" in skill, "missing description field"
     assert "\nuser-invocable: false\n" in skill, (
-        "adapter should set user-invocable: false to suppress /memclaw slash command"
+        "adapter should set user-invocable: false to suppress its slash command"
     )
 
 
@@ -64,7 +64,7 @@ def test_has_no_openclaw_config_gate() -> None:
     """The plugin-enabled config gate is OpenClaw-specific; direct-MCP users
     don't have OpenClaw so the gate is meaningless and confusing."""
     skill = _read_adapter()
-    assert "plugins.entries.memclaw.enabled" not in skill, (
+    assert f"plugins.entries.{FROZEN_PLUGIN_SLUG}.enabled" not in skill, (
         "adapter must not carry the OpenClaw plugin-enabled config gate"
     )
     # Frontmatter must not declare an openclaw metadata block. We check the
@@ -137,10 +137,10 @@ def test_footer_references_direct_mcp_install_targets() -> None:
     after install. Without this, a user who finds the file on disk has no
     context for what it is or how to replace it."""
     skill = _read_adapter()
-    assert "~/.claude/skills/memclaw" in skill, (
+    assert f"~/.claude/skills/{FROZEN_PLUGIN_SLUG}" in skill, (
         "footer should mention the Claude Code install path"
     )
-    assert "~/.agents/skills/memclaw" in skill, (
+    assert f"~/.agents/skills/{FROZEN_PLUGIN_SLUG}" in skill, (
         "footer should mention the Codex install path"
     )
 

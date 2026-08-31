@@ -1,9 +1,9 @@
 """CAURA-000 — configurable inline embed+enrich timeout.
 
-The 504 "Memory write timed out (embedding/enrichment)" was firing on
-memclaw.dev under load because the gather in ParallelEmbedEnrich had a
-hardcoded 20s ceiling, which is too tight once embedding moved off the
-hot path (CAURA-594) and enrichment LLM became the sole occupant.
+The 504 "Memory write timed out (embedding/enrichment)" was firing under load
+in the development deployment because the gather in ParallelEmbedEnrich had a
+hardcoded 20s ceiling, which is too tight once embedding moved off the hot path
+(CAURA-594) and enrichment LLM became the sole occupant.
 
 Verifies:
   - ``settings.enrichment_inline_timeout_seconds`` is the value passed
