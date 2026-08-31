@@ -52,13 +52,6 @@
       "category": "cross-tenant-by-design"
     },
     {
-      "id": "method:dedup_review_decide",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1087."
-    },
-    {
       "id": "method:dedup_review_enqueue",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -613,13 +606,6 @@
       "evidence": "no binding tenant read from the request",
       "category": "opaque-body-write",
       "note": "Verified: body tenant_id is assigned directly to the DedupReview row by dedup_review_enqueue."
-    },
-    {
-      "id": "route:POST /api/v1/storage/memories/dedup-reviews/{review_id}/decision",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1087."
     },
     {
       "id": "route:POST /api/v1/storage/memories/entity-links",
