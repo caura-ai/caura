@@ -142,8 +142,9 @@ def test_the_id_addressed_backlog_is_split_by_blast_radius() -> None:
     """Reads and writes by bare UUID are not the same finding and are not filed as one.
 
     The flat category let "another tenant's row can be DELETED by UUID" sit in
-    the same count as "another tenant's row can be READ by UUID". The split is
-    the forcing function: the mutating half is what gets fixed first.
+    the same count as "another tenant's row can be READ by UUID". The split was
+    the forcing function: the mutating half got fixed first, and as of #1082 the
+    write half is empty. The read half is still the backlog.
     """
     listed = json.loads(ALLOWLIST.read_text())["exceptions"]
     used = {e["category"] for e in listed}
@@ -151,8 +152,26 @@ def test_the_id_addressed_backlog_is_split_by_blast_radius() -> None:
     assert {"id-addressed-write", "id-addressed-read"} <= set(gate.CATEGORIES)
     assert gate.DESTRUCTIVE_CATEGORIES <= gate.BACKLOG_CATEGORIES
 
-    writes = [e for e in listed if e["category"] == "id-addressed-write"]
-    assert writes, "an empty write backlog means the split silently collapsed"
+    # There is deliberately no assertion that the write list is non-empty. It
+    # used to read ``assert writes, "an empty write backlog means the split
+    # silently collapsed"``, which held while the backlog was being worked
+    # through and became false the moment it was cleared: the census fails on
+    # the success case. Do not restore it — it would go red on green.
+    #
+    # Every route to an empty write list OTHER than the work being done is
+    # already covered, and each by a check that does not expire:
+    #
+    #   the category dropped altogether  -> the CATEGORIES assertion above
+    #   an entry carrying a bogus one    -> test_every_allowlist_entry_claims_
+    #                                       a_known_category, which also names
+    #                                       the offending entry
+    #   an entry relabelled as milder    -> ratchet's relabel guard, pinned by
+    #                                       test_ratchet_fails_when_a_mutating_
+    #                                       path_is_relabelled_as_a_read
+    #   an entry quietly appended        -> the allowlist ratchet
+    #
+    # which leaves deletion as the only way to reach zero, and deletion is what
+    # fixing one looks like.
 
 
 def test_a_multi_line_error_survives_as_one_annotation() -> None:
