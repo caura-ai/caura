@@ -2798,8 +2798,15 @@ class CoreStorageClient:
         """
         return await self._get(f"/reports/{report_id}", read=read)
 
-    async def update_report(self, report_id: str, data: dict) -> dict | None:
-        return await self._patch(f"/reports/{report_id}", data)
+    async def update_report(self, report_id: str, data: dict, *, tenant_id: str) -> dict | None:
+        """Finalize a report. ``tenant_id`` scopes the UPDATE and is required.
+
+        Keyword-only and outside ``data`` so every caller is checked statically
+        rather than at the 422: a report id alone used to be enough to finalize
+        any tenant's report. It is merged last so a stray ``tenant_id`` left in
+        ``data`` cannot override the one the caller passed deliberately.
+        """
+        return await self._patch(f"/reports/{report_id}", {**data, "tenant_id": tenant_id})
 
     async def find_running_report(
         self,

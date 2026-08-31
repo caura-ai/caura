@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
+from core_storage_api.routers._validation import _require
 from core_storage_api.schemas import AGENT_DIGEST_FIELDS, REPORT_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import PostgresService
 
@@ -137,11 +138,20 @@ async def get_report(report_id: UUID) -> dict:
 
 @router.patch("/{report_id}")
 async def update_report(report_id: UUID, request: Request) -> dict:
+    """Finalize a report. Body: ``{tenant_id, status, completed_at, duration_ms, …}``.
+
+    ``tenant_id`` is the report's owning tenant and scopes the UPDATE. It is
+    required rather than optional: without it this took a bare primary key, so
+    anyone who could reach the port and knew a UUID could finalize another
+    tenant's report and substitute its entire contents.
+    """
     body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
     from datetime import datetime
 
-    await _svc.report_update_completed(
+    updated = await _svc.report_update_completed(
         report_id,
+        tenant_id=tenant_id,
         status=body["status"],
         completed_at=datetime.fromisoformat(body["completed_at"])
         if isinstance(body.get("completed_at"), str)
@@ -154,4 +164,6 @@ async def update_report(report_id: UUID, request: Request) -> dict:
         issues=body.get("issues", []),
         crystallization=body.get("crystallization", {}),
     )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Report not found")
     return {"ok": True}

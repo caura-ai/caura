@@ -236,13 +236,6 @@
       "category": "id-addressed-read"
     },
     {
-      "id": "method:report_update_completed",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1082."
-    },
-    {
       "id": "method:tenant_usage_increment",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -431,13 +424,6 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "no-tenant-data"
-    },
-    {
-      "id": "route:PATCH /api/v1/storage/reports/{report_id}",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "id-addressed-write",
-      "note": "Tracked in #1082."
     },
     {
       "id": "route:POST /api/v1/storage/agents",

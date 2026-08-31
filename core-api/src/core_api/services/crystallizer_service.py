@@ -210,6 +210,7 @@ async def start_crystallization(
                     "completed_at": datetime.now(UTC).isoformat(),
                     "summary": {"error": "could not queue the crystallization run"},
                 },
+                tenant_id=tenant_id,
             )
         except BaseException:
             # Same best-effort rule as the run's own guard: this must not replace
@@ -467,6 +468,7 @@ async def _execute_crystallization(
                 "issues": issues,
                 "crystallization": crystallization,
             },
+            tenant_id=tenant_id,
         )
 
         logger.info(
@@ -492,6 +494,7 @@ async def _execute_crystallization(
                     "completed_at": datetime.now(UTC).isoformat(),
                     "duration_ms": int((time.monotonic() - t0) * 1000),
                 },
+                tenant_id=tenant_id,
             )
         except BaseException:
             # ``BaseException``, matching the outer handler, and for the same

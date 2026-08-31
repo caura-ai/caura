@@ -10154,6 +10154,7 @@ class PostgresService:
         self,
         report_id: UUID,
         *,
+        tenant_id: str,
         status: str,
         completed_at: datetime,
         duration_ms: int,
@@ -10163,11 +10164,24 @@ class PostgresService:
         usage_data: dict,
         issues: list,
         crystallization: dict,
-    ) -> None:
+    ) -> bool:
+        """Finalize one report. ``False`` when no row matches both id and tenant.
+
+        ``tenant_id`` is part of the predicate, so a report belonging to another
+        tenant is indistinguishable from one that does not exist — the caller
+        turns both into the same 404 rather than confirming the id is real.
+
+        The SET clause is assembled from the keyword arguments above, so no
+        caller-supplied key reaches it and neither ``id`` nor ``tenant_id`` is
+        writable through this path.
+        """
         async with get_session() as session:
-            await session.execute(
+            result = await session.execute(
                 sql_update(CrystallizationReport)
-                .where(CrystallizationReport.id == report_id)
+                .where(
+                    CrystallizationReport.id == report_id,
+                    CrystallizationReport.tenant_id == tenant_id,
+                )
                 .values(
                     status=status,
                     completed_at=completed_at,
@@ -10180,6 +10194,7 @@ class PostgresService:
                     crystallization=crystallization,
                 )
             )
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def report_list_by_tenant(
         self,
