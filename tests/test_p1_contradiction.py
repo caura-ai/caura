@@ -568,6 +568,12 @@ class TestContradictionIntegration:
             "core_api.services.contradiction_detector.settings"
         ) as mock_settings:
             mock_settings.entity_extraction_provider = "fake"
+            # C2 — the judge now consults ``contradiction_provider`` first.
+            # This patch replaces the whole settings object, so every field the
+            # judge reads must be declared: an undeclared attribute comes back
+            # as a truthy MagicMock and would be used as a provider name.
+            mock_settings.contradiction_provider = ""
+            mock_settings.contradiction_model = ""
             contradictions = await detect_contradictions(new, emb)
 
         # The fake heuristic should detect negation + overlap
@@ -588,6 +594,12 @@ class TestContradictionIntegration:
             "core_api.services.contradiction_detector.settings"
         ) as mock_settings:
             mock_settings.entity_extraction_provider = "fake"
+            # C2 — the judge now consults ``contradiction_provider`` first.
+            # This patch replaces the whole settings object, so every field the
+            # judge reads must be declared: an undeclared attribute comes back
+            # as a truthy MagicMock and would be used as a provider name.
+            mock_settings.contradiction_provider = ""
+            mock_settings.contradiction_model = ""
             contradictions = await detect_contradictions(new, emb)
 
         assert len(contradictions) == 0

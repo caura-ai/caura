@@ -124,6 +124,14 @@ class Settings(BaseSettings):
     # None (the default) sends no parameter at all — REQUIRED for
     # non-reasoning models, which reject the parameter outright.
     contradiction_reasoning_effort: str | None = None
+    # C2 — the contradiction judge historically read the ENTITY-EXTRACTION
+    # provider/model config, so an operator who moved entity extraction to a
+    # cheaper or different model silently moved the contradiction judge with
+    # it, and could not tune the two independently. These override the
+    # entity-extraction values for contradiction judging only; empty keeps
+    # the historical behaviour exactly.
+    contradiction_provider: str = ""
+    contradiction_model: str = ""
     # Default for the ``search.entity_retrieval`` org setting: query-time entity
     # lookup + graph search. A tenant override wins; this is the fleet-wide
     # fallback so an operator can disable entity/graph reads on a whole box
