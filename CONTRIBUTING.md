@@ -64,6 +64,26 @@ This starts PostgreSQL + pgvector, Redis, and the core API with hot reload.
 pytest tests/ -v
 ```
 
+`core-storage-api` has a second suite that needs a **separate database**:
+
+```bash
+createdb memclaw_storage && psql -d memclaw_storage -c 'CREATE EXTENSION IF NOT EXISTS vector'  # legacy-name-floor: the database ci.yml already provisions; a pasteable command naming anything else is wrong
+pytest core-storage-api/tests/ -v
+```
+
+Two databases, because the suites provision incompatibly and cannot share one:
+`tests/` builds its schema with `Base.metadata.create_all`, while
+`core-storage-api/tests/` runs the real Alembic chain. Run them against one
+database and nothing fails loudly — `create_all` leaves tables with no
+`alembic_version`, so the Alembic side stamps head and skips every migration,
+and any migration-only table (one with no ORM model, e.g. `tenant_suppression`)
+is missing from a database whose stamp claims it is current. Run them the other
+way round and the migrated schema is the one that gets polluted.
+
+Each suite defaults to its own database, so no environment variable is needed;
+`DATABASE_URL` (storage suite) and `TEST_DATABASE_URL` (root suite) override
+them. CI provisions and passes both explicitly.
+
 See `README.md` for more deployment options and environment variable details.
 
 ## Workflow

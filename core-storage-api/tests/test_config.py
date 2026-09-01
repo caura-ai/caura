@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import pytest
 
-from core_storage_api.config import LOCAL_DATABASE_URL, Settings
+from core_storage_api.config import LOCAL_DATABASE_URL, Settings, settings
 
 ALLOYDB_NAMES = (
     "ALLOYDB_HOST",
@@ -123,6 +125,34 @@ def test_unconfigured_database_keeps_the_local_default(monkeypatch: pytest.Monke
     _clear_database_env(monkeypatch)
 
     assert Settings(_env_file=None).database_url.get_secret_value() == LOCAL_DATABASE_URL
+
+
+def test_this_suite_does_not_share_the_root_suites_database() -> None:
+    """This suite must never resolve to the database ``tests/`` provisions.
+
+    The two provision incompatibly — ``Base.metadata.create_all`` there, the
+    real Alembic chain here — and sharing one database fails silently rather
+    than loudly: ``create_all`` leaves tables with no ``alembic_version``, so
+    ``init_database()`` stamps head and skips every migration, and a
+    migration-only table like ``tenant_suppression`` is absent from a database
+    whose stamp claims head. Nothing raises; the suite just runs against a
+    schema that is quietly short.
+
+    Asserted against the running configuration rather than against a literal,
+    so it holds however the database was selected — CI's explicit
+    ``DATABASE_URL``, a developer's export, or this suite's own conftest
+    default. The root suite's name is duplicated from ``tests/conftest.py``
+    because a conftest is not importable as a module from another suite; it is
+    the one value here that must be kept in step by hand.
+    """
+    root_suite_database = "memclaw"  # legacy-name-ok: mirrors tests/conftest.py TEST_DB_URL
+
+    configured = urlsplit(settings.database_url.get_secret_value()).path.lstrip("/")
+
+    assert configured != root_suite_database, (
+        f"the storage suite is pointed at {configured!r}, the database tests/ provisions with "
+        "create_all; give it one of its own (see CONTRIBUTING.md)"
+    )
 
 
 def test_storage_secret_loads_from_file_and_stays_out_of_serialization(

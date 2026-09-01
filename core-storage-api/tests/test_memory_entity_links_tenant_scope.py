@@ -39,10 +39,11 @@ def _tenant() -> str:
     ``_setup_schema`` teardown cleans with ``tenant_id LIKE 'test-tenant-%'``
     (and reaches this table through the ``memories`` subquery), so a tenant
     minted with any other prefix is never reclaimed — which is how #858 left
-    9,186 rows behind. Locally this suite's default ``DATABASE_URL`` points at
-    the same database that sweep runs against, so the prefix is what gets these
-    rows collected; in CI the storage suite is given a database of its own and
-    nothing sweeps either way.
+    9,186 rows behind. This suite now defaults to a database of its own, in CI
+    and locally alike, so that sweep no longer reaches these rows either way and
+    the prefix is a convention this module keeps rather than a live guard. Point
+    ``DATABASE_URL`` back at the root suite's database and the prefix is load-
+    bearing again — which is the reason to keep minting it.
 
     Local to this module rather than ``tests.conftest.new_tenant_id``, which is
     the root suite's fixture file and not importable from this one. Same prefix

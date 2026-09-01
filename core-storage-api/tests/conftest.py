@@ -11,9 +11,26 @@ import uuid
 
 # Set test environment BEFORE any app imports touch Settings
 os.environ.setdefault("TESTING", "1")
+# A database of this suite's OWN, not the one ``tests/`` uses. The two suites
+# provision incompatibly: ``tests/conftest.py`` calls
+# ``Base.metadata.create_all``, this one runs the real Alembic chain via
+# ``init_database()``. Sharing one database does not fail loudly — it
+# under-provisions silently. ``create_all`` going first leaves tables with no
+# ``alembic_version``, so ``init_database()`` stamps head and skips every
+# migration, and each migration-only table (``tenant_suppression``, which has
+# no ORM model) is simply absent from a database whose stamp claims head.
+#
+# CI passes DATABASE_URL explicitly and provisions the same name itself
+# (.github/workflows/ci.yml, "Create the storage-suite database"), so this
+# ``setdefault`` is a no-op there. It exists so a local run is isolated by
+# default rather than by remembering to export the variable — the isolation
+# was real in CI and absent everywhere else.
+#
+# Create it once, alongside the database ``tests/`` uses:
+#     createdb memclaw_storage && psql -d memclaw_storage -c 'CREATE EXTENSION IF NOT EXISTS vector'  # legacy-name-floor: the database ci.yml already provisions; a pasteable command naming anything else is wrong
 os.environ.setdefault(
     "DATABASE_URL",
-    "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw",  # legacy-name-ok: local test DB
+    "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw_storage",  # legacy-name-ok: local test DB
 )
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("CORE_STORAGE_SHARED_SECRET", "test-storage-secret")
