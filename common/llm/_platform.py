@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
 from common.embedding import (
     get_platform_embedding,
@@ -40,6 +41,41 @@ from common.provider_names import ProviderName
 logger = logging.getLogger(__name__)
 
 _platform_llm: LLMProvider | None = None
+# Handle for the background client warm-up (see _start_warmup_thread).
+# Module-level so tests can join it for deterministic assertions.
+_warmup_thread: threading.Thread | None = None
+
+
+def _start_warmup_thread(provider: LLMProvider) -> None:
+    """Kick off the provider's client warm-up on a daemon thread.
+
+    Never raises: a warm-up failure is logged and the provider falls
+    back to building its client lazily on first call (the pre-warm-up
+    behavior). Daemon so a hung credential fetch can never block
+    process shutdown.
+    """
+    global _warmup_thread
+
+    # Duck-typed: ``warm_up`` is provider-specific (not part of the
+    # ``LLMProvider`` Protocol) — providers without one need no warming.
+    warm_up = getattr(provider, "warm_up", None)
+    if warm_up is None:
+        return
+
+    def _warm() -> None:
+        try:
+            warm_up()
+        except Exception:
+            logger.warning(
+                "Platform Vertex client warm-up failed; the client "
+                "will be built lazily on first call instead",
+                exc_info=True,
+            )
+
+    _warmup_thread = threading.Thread(
+        target=_warm, name="platform-llm-client-warmup", daemon=True
+    )
+    _warmup_thread.start()
 _platform_init_errors: list[str] = []
 
 __all__ = [
@@ -86,6 +122,27 @@ def init_platform_providers() -> None:
                     project_id,
                     resolved_location,
                 )
+                # Warm the genai client in the BACKGROUND at startup
+                # instead of letting the first request pay for it: the
+                # lazy build (SDK import + ADC discovery + HTTP pool)
+                # measured ~13s per cold instance on staging
+                # (2026-09-01) — enough to trip recall's 15s
+                # per-attempt cap once per instance.
+                #
+                # A daemon thread rather than an inline (or awaited
+                # to_thread) call, deliberately: this function runs
+                # inside the services' async lifespans, so an inline
+                # build would block the event loop, and awaiting it
+                # would add the full ~13s to readiness — i.e. to every
+                # Cloud Run scale-up cold start. The thread does
+                # neither. The race is safe: a request that lands
+                # before warm-up completes blocks on the provider's
+                # ``_client_lock`` inside its own to_thread worker —
+                # the pre-warm-up first-call behavior, at worst once.
+                # Non-fatal by design: environments without ADC
+                # (tests, misconfigured installs) log a warning and
+                # fall back to the lazy build on first call.
+                _start_warmup_thread(_platform_llm)
             except Exception:
                 logger.exception("Failed to initialize platform Vertex LLM provider")
                 _platform_init_errors.append("vertex-llm")

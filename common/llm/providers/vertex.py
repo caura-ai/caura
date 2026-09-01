@@ -102,6 +102,19 @@ class VertexLLMProvider:
     def model(self) -> str:
         return self._model
 
+    def warm_up(self) -> None:
+        """Build the genai client now instead of on the first completion.
+
+        Called from ``init_platform_providers`` at lifespan startup — on
+        a background thread, so the one-time client cost (SDK import +
+        ADC discovery + HTTP pool, ~13s measured on a cold Cloud Run
+        instance) never lands inside a latency-capped request, never
+        blocks the event loop, and never delays readiness. Safe to skip:
+        any failure leaves the provider intact and the client is built
+        lazily on first call.
+        """
+        self._get_client()
+
     def _get_client(self):
         # Double-checked locking: the unlocked read keeps the steady
         # state lock-free; the locked re-check makes concurrent first

@@ -263,6 +263,80 @@ class TestInitPlatformProviders:
 
         monkeypatch.setattr(cfg, "settings", cfg.Settings())
 
+    @staticmethod
+    def _join_warmup():
+        """Wait for the background warm-up thread (deterministic asserts)."""
+        import common.llm._platform as plat
+
+        assert plat._warmup_thread is not None, "warm-up thread never started"
+        plat._warmup_thread.join(timeout=10)
+        assert not plat._warmup_thread.is_alive(), "warm-up thread hung"
+
+    def test_init_vertex_warms_client_eagerly(self, monkeypatch):
+        # The one-time client build (~13s on a cold Cloud Run instance)
+        # must be kicked off here, at startup, on a BACKGROUND thread —
+        # not inside the first latency-capped request (staging
+        # 2026-09-01: first-call builds tripped recall's 15s cap once
+        # per instance) and not inline (init runs inside the services'
+        # async lifespans; an inline build would block the event loop
+        # and an awaited one would add ~13s to every cold start).
+        monkeypatch.setenv("PLATFORM_LLM_PROVIDER", "vertex")
+        monkeypatch.setenv("PLATFORM_LLM_GCP_PROJECT_ID", "test-proj")
+        monkeypatch.setenv("PLATFORM_LLM_GCP_LOCATION", "us-central1")
+        monkeypatch.setenv("PLATFORM_LLM_MODEL", "gemini-2.5-flash-lite")
+        self._reinit_settings(monkeypatch)
+
+        calls = []
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+
+        import google.genai as genai_mod
+
+        monkeypatch.setattr(genai_mod, "Client", _FakeClient)
+
+        from core_api.providers._platform import (
+            get_platform_llm,
+            init_platform_providers,
+        )
+
+        init_platform_providers()
+        self._join_warmup()
+        assert len(calls) == 1  # built by startup warm-up, not deferred
+        assert isinstance(get_platform_llm()._client, _FakeClient)
+
+    def test_init_vertex_warmup_failure_is_nonfatal(self, monkeypatch):
+        # No ADC (tests, misconfigured installs): the warm-up may fail,
+        # but the provider must survive with a lazy retry on first call
+        # — and the failure must NOT count as a vertex-llm init error.
+        monkeypatch.setenv("PLATFORM_LLM_PROVIDER", "vertex")
+        monkeypatch.setenv("PLATFORM_LLM_GCP_PROJECT_ID", "test-proj")
+        monkeypatch.setenv("PLATFORM_LLM_GCP_LOCATION", "us-central1")
+        monkeypatch.setenv("PLATFORM_LLM_MODEL", "gemini-2.5-flash-lite")
+        self._reinit_settings(monkeypatch)
+
+        class _ExplodingClient:
+            def __init__(self, **kwargs):
+                raise RuntimeError("no ADC here")
+
+        import google.genai as genai_mod
+
+        monkeypatch.setattr(genai_mod, "Client", _ExplodingClient)
+
+        from core_api.providers._platform import (
+            get_platform_init_errors,
+            get_platform_llm,
+            init_platform_providers,
+        )
+
+        init_platform_providers()
+        self._join_warmup()
+        llm = get_platform_llm()
+        assert llm is not None  # provider survived the failed warm-up
+        assert llm._client is None  # will retry lazily on first call
+        assert "vertex-llm" not in get_platform_init_errors()
+
 
 # ---------------------------------------------------------------------------
 # Group 2: LLM tier resolution
