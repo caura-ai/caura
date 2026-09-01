@@ -100,6 +100,14 @@ DEFAULT_SETTINGS: dict = {
     },
     "search": {
         "recall_boost": None,
+        # Whether a caller-ASSERTED identity (SearchRequest.caller_agent_id from
+        # a tenant-scoped key) may move recall_count, and so ranking. Off by
+        # default, and deliberately a tenant switch rather than a per-request
+        # one: the effect is tenant-wide — recall_boost defaults to True — so
+        # one integration adopting the field would otherwise reshuffle results
+        # for every other caller in the tenant that never asked. An
+        # AUTHENTICATED agent identity is unaffected and bumps as it always has.
+        "recall_for_asserted_identity": None,
         "graph_retrieval": None,
         # Master switch for query-time entity/graph retrieval. ``False`` blocks
         # BOTH read entry points: the ``ENTITY_LOOKUP`` short-circuit in
@@ -572,6 +580,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "security_audit.alert_critical_findings_min": int,
     "security_audit.alert_score_drop_delta": (int, float),
     "search.recall_boost": bool,
+    "search.recall_for_asserted_identity": bool,
     "search.graph_retrieval": bool,
     "search.entity_retrieval": bool,
     "crystallizer.auto_crystallize": bool,
@@ -895,6 +904,15 @@ class ResolvedConfig:
     def recall_boost(self) -> bool:
         val = self._ts.get("search", {}).get("recall_boost")
         return val if val is not None else True
+
+    @property
+    def recall_for_asserted_identity(self) -> bool:
+        # Defaults FALSE, unlike its neighbours here. Every other search knob
+        # defaults on because it improves results for everyone; this one changes
+        # whose recalls shape ranking, which is a decision a tenant makes rather
+        # than one inherited from a client adopting a request field.
+        val = self._ts.get("search", {}).get("recall_for_asserted_identity")
+        return val if val is not None else False
 
     @property
     def graph_expand(self) -> bool:

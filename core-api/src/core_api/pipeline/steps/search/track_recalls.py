@@ -46,10 +46,12 @@ class TrackRecalls:
         # that hit the endpoint with no agent — is not an agent using memory;
         # counting it inflates ``recall_count`` (and thus ``recall_boost``) with
         # non-agent noise and can pin a single memory under a repeating probe.
-        # ``caller_agent_id`` is the authenticated identity (``filter_agent_id``
-        # or ``auth.agent_id``), so genuine agent recalls — including cross-agent
-        # ones that omit ``filter_agent_id`` — still count. Results are returned
-        # unchanged either way; only the counter bump is skipped. (Gap A26.)
+        # ``caller_agent_id`` is the caller's effective identity — the
+        # authenticated agent, else one asserted via ``caller_agent_id``, else
+        # the legacy derivation from ``filter_agent_id`` — so genuine agent
+        # recalls, including cross-agent ones that omit ``filter_agent_id``,
+        # still count. Results are returned unchanged either way; only the
+        # counter bump is skipped. (Gap A26.)
         #
         # ``recall_tracked`` is set on every path below so the surfaces can
         # report what this search actually did rather than re-deriving the
@@ -58,6 +60,17 @@ class TrackRecalls:
         # and the "no rows" case below is invisible from the caller's inputs.
         ctx.data["recall_tracked"] = False
         if not ctx.data.get("caller_agent_id"):
+            return None
+        # #1197 — an identity the caller ASSERTED (a tenant-scoped key naming an
+        # agent via ``caller_agent_id``) does not move the counter unless the
+        # tenant opted in, because moving it reshuffles ranking for every other
+        # caller in that tenant, not just the one that sent the field.
+        #
+        # The route resolves this to a single boolean; the step does not know
+        # (or need to know) whether the identity was asserted or authenticated.
+        # Defaults True on the ``.get``, so every caller that never passes it —
+        # MCP recall, the internal search paths — behaves exactly as before.
+        if not ctx.data.get("allow_recall_bump", True):
             return None
         # D12 — a diagnostic call is inspection, not use: the caller is asking
         # "why does ranking look like this", and letting that bump

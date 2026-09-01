@@ -4502,7 +4502,13 @@ async def search_memories(
     source: str = "search",
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
+    allow_recall_bump: bool = True,
 ) -> list[MemoryOut]:
+    # ``allow_recall_bump`` defaults True so every existing caller — MCP
+    # ``caura_recall``, the internal search paths — keeps bumping exactly as
+    # before. Only ``POST /search`` passes False, and only for an identity the
+    # caller asserted rather than authenticated (#1197).
+    #
     # Diagnostic mode requires the pipeline path for score introspection
     if _USE_PIPELINE_SEARCH or diagnostic:
         return await _search_memories_pipeline(
@@ -4511,6 +4517,7 @@ async def search_memories(
             fleet_ids=fleet_ids,
             filter_agent_id=filter_agent_id,
             caller_agent_id=caller_agent_id,
+            allow_recall_bump=allow_recall_bump,
             memory_type_filter=memory_type_filter,
             status_filter=status_filter,
             valid_at=valid_at,
@@ -4551,9 +4558,10 @@ async def search_memories(
         tenant_config=tenant_config,
         search_profile=search_profile,
         min_similarity=min_similarity,
+        allow_recall_bump=allow_recall_bump,
     )
     if recall_ctx is not None:
-        recall_ctx["recall_tracked"] = bool(legacy_results)
+        recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
     return legacy_results
 
 
@@ -4563,6 +4571,7 @@ async def _search_memories_pipeline(
     fleet_ids: list[str] | None = None,
     filter_agent_id: str | None = None,
     caller_agent_id: str | None = None,
+    allow_recall_bump: bool = True,
     memory_type_filter: str | None = None,
     status_filter: str | None = None,
     valid_at: datetime | None = None,
@@ -4590,6 +4599,7 @@ async def _search_memories_pipeline(
             "fleet_ids": fleet_ids,
             "filter_agent_id": filter_agent_id,
             "caller_agent_id": caller_agent_id,
+            "allow_recall_bump": allow_recall_bump,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
             "valid_at": valid_at,
@@ -4677,6 +4687,7 @@ async def _search_memories_legacy(
     tenant_config=None,
     search_profile: dict | None = None,
     min_similarity: float | None = None,
+    allow_recall_bump: bool = True,
 ) -> list[MemoryOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
@@ -4827,8 +4838,14 @@ async def _search_memories_legacy(
             )
         )
 
-    # Increment recall_count and update last_recalled_at for returned memories
-    if memory_ids:
+    # Increment recall_count and update last_recalled_at for returned memories.
+    #
+    # This path bumps unconditionally — it does not apply the A26 agentless rule
+    # or the D12 diagnostic rule the pipeline step does, which is one of the
+    # reasons it is deprecated. ``allow_recall_bump`` is honoured here anyway:
+    # the flag exists so an identity a caller merely ASSERTED cannot move
+    # ranking, and a rollback lever is not a reason for that to stop being true.
+    if memory_ids and allow_recall_bump:
         try:
             await get_storage_client().increment_recall(
                 [str(m) for m in memory_ids],

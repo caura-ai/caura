@@ -1574,6 +1574,18 @@
       },
       "SearchRequest": {
         "properties": {
+          "caller_agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Assert the agent identity this search runs as, WITHOUT filtering results to that agent's own memories (use filter_agent_id for that). Determines which scope_agent memories are visible and whose trust/fleet level the read is gated against. Ignored when the credential already carries an agent identity, which wins. An agent-scoped credential may only name itself.",
+            "title": "Caller Agent Id"
+          },
           "diagnostic": {
             "default": false,
             "title": "Diagnostic",
