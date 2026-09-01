@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.39.2](https://github.com/caura-ai/caura/compare/backend-v2.39.1...backend-v2.39.2) (2026-09-01)
+
+
+### Dependencies
+
+* **actions:** bump the actions group with 2 updates ([#1135](https://github.com/caura-ai/caura/issues/1135)) ([47ec5ca](https://github.com/caura-ai/caura/commit/47ec5ca2fdc84a87c4e9aba3e2528ee83697b130))
+* update mcp requirement from &lt;2,&gt;=1.28.1 to &gt;=2.1.1,&lt;3 ([#1134](https://github.com/caura-ai/caura/issues/1134)) ([9f9f25b](https://github.com/caura-ai/caura/commit/9f9f25be00c98442b881eb04418efe43bab171d1))
+* update pydantic-settings requirement from &lt;3,&gt;=2.0 to &gt;=2.15.0,&lt;3 ([#1133](https://github.com/caura-ai/caura/issues/1133)) ([453a566](https://github.com/caura-ai/caura/commit/453a566b3810b79a309cbb38e0eb42f5fb264631))
+
 ## [2.39.1](https://github.com/caura-ai/caura/compare/backend-v2.39.0...backend-v2.39.1) (2026-09-01)
 
 
