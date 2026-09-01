@@ -248,6 +248,28 @@ def recall_operation() -> OperationType:
     return "recall" if settings.meter_recall_as_recall else "search"
 
 
+def meters_mcp_bulk_write() -> bool:
+    """Whether the MCP batch write bills the write counter (caura-ai/caura#1220).
+
+    ``caura_write(items=[...])`` reaches ``create_memories_bulk`` with no
+    metering call of any kind, while REST's ``POST /memories/bulk`` charges one
+    unit per item. Same tenant, same N memories, different bill.
+
+    Gated for the same reason as ``recall_operation`` above, and more sharply:
+    that one bills the wrong counter, this one bills nothing. Turning it on
+    starts charging for writes that have been free, so it is a billing decision
+    rather than a deploy side effect — see the setting's comment for why the
+    first refusal a tenant sees will come from REST.
+
+    ``charges_write_quota("bulk_create")`` is still consulted at the call site.
+    This flag is the deploy-time gate; that table remains the policy record, so
+    a future change to it reaches this path like any other.
+    """
+    from core_api.config import settings
+
+    return settings.meter_mcp_bulk_writes
+
+
 async def check_and_increment(
     tenant_id: str,
     operation: OperationType,

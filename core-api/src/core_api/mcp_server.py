@@ -95,7 +95,9 @@ from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
 from core_api.services.usage_service import (
     MutatingOp,
+    bulk_check_and_increment,
     charges_write_quota,
+    meters_mcp_bulk_write,
     plan_limit_gated,
     recall_operation,
 )
@@ -427,7 +429,8 @@ def _observe_plan_limit(op: MutatingOp, tenant_id: str) -> None:
     READ SILENCE CAREFULLY. Three different things produce no log, and only one
     of them is "nothing would be refused": the gateway may not stamp the header
     on this route at all (above), or the tenant may never have been marked over
-    plan because the MCP batch path records no usage to compute that from
+    plan because the MCP batch path records no usage to compute that from —
+    which stays true while ``meters_mcp_bulk_write()`` is off, its default
     (caura-ai/caura#1220). Rule those out before reading a quiet log as a
     green light to enforce.
 
@@ -1211,19 +1214,25 @@ async def caura_write(
             # path where an over-plan tenant can add the most rows per call, so
             # leaving it out would have made the numbers read low in exactly
             # the direction that matters.
-            #
-            # NOTE while you are here: this path charges NO write quota at all
-            # — no ``check_and_increment``, no ``bulk_check_and_increment``,
-            # while REST's ``POST /memories/bulk`` charges one per item
-            # (caura-ai/caura#1220). Filed rather than fixed here: that one
-            # changes billing, this one only changes logging.
-            #
-            # It also bounds what the line below can tell you. The counters
-            # that never move here are the same counters ``x-org-read-only`` is
-            # computed from, so a batch-heavy tenant may never be marked over
-            # plan at all — meaning silence from this observation is not by
-            # itself evidence that nothing would be refused.
             _observe_plan_limit("bulk_create", tenant_id)
+            # One unit per item, mirroring REST's ``POST /memories/bulk``, which
+            # charges ``len(body.items)`` before the write. Before this the path
+            # charged nothing at all (caura-ai/caura#1220).
+            #
+            # Ordering is copied from REST deliberately rather than reasoned out
+            # afresh: the charge lands BEFORE the write, so a batch that fails
+            # partway still costs what it attempted. Two conventions for the
+            # same operation across two surfaces is the drift this whole area
+            # keeps producing.
+            #
+            # ``meters_mcp_bulk_write()`` is off by default. It is a billing
+            # switch, not a correctness one — see its docstring. While it is
+            # off, the caveat on ``_observe_plan_limit`` still stands: the
+            # counters this would move are the ones over-plan mode is computed
+            # from, so a quiet observation log is not evidence that nothing
+            # would be refused.
+            if charges_write_quota("bulk_create") and meters_mcp_bulk_write():
+                await bulk_check_and_increment(tenant_id, len(bulk_items))
             bulk_data = BulkMemoryCreate(
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,
