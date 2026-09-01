@@ -48,6 +48,22 @@ class MergeEnrichmentFields:
         # skip), so this flag needs no worker-side finalisation.
         memory_type_agent_set = memory_type is not None
 
+        # Same question for ``weight``, and it matters more than it looks.
+        # ``weight`` is 15% of the base rank score (``SIMILARITY_BLEND`` is
+        # 0.85), so when the caller omits it and the enrichment LLM picks one,
+        # identical content can rank differently run to run — two throwaway
+        # ``fact`` memories written seconds apart were observed getting 0.30
+        # and 0.50. Nothing in the response said which values were chosen by a
+        # model, so a team chasing non-reproducible ranking had no way to tell
+        # an LLM guess from a deliberate number.
+        #
+        # Three-valued rather than a boolean, because "not the caller" hides
+        # the distinction that matters for reproducibility: ``default`` is
+        # deterministic (``DEFAULT_MEMORY_WEIGHT``, used when enrichment is off
+        # or failed) while ``llm`` is not. Captured BEFORE the merge below,
+        # like ``memory_type_agent_set``.
+        weight_source = "caller" if weight is not None else "default"
+
         # CAURA-701: caller-supplied deprecated types (currently ``semantic``)
         # bypass the enrichment-LLM demotion in ``_validate_enrichment`` because
         # a non-``None`` ``data.memory_type`` short-circuits the fill-gaps branch
@@ -61,8 +77,9 @@ class MergeEnrichmentFields:
             # LLM fills gaps; agent-provided values always win
             if memory_type is None:
                 memory_type = enrichment.memory_type
-            if weight is None:
+            if weight is None and enrichment.weight is not None:
                 weight = enrichment.weight
+                weight_source = "llm"
             title = enrichment.title or None
             if enrichment.summary:
                 set_system_value(metadata, "summary", enrichment.summary, caller_keys=caller_keys)
@@ -107,6 +124,7 @@ class MergeEnrichmentFields:
             set_system_value(metadata, "enrichment_pending", True, caller_keys=caller_keys)
 
         set_system_value(metadata, "memory_type_agent_set", memory_type_agent_set, caller_keys=caller_keys)
+        set_system_value(metadata, "weight_source", weight_source, caller_keys=caller_keys)
 
         ctx.data["memory_fields"] = {
             "memory_type": memory_type,

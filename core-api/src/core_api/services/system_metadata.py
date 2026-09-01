@@ -45,6 +45,7 @@ PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
         "enrichment_pending",
         "embedding_pending",
         "memory_type_agent_set",
+        "weight_source",
         "pii_flagged_by",
     }
 )

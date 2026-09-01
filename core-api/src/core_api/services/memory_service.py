@@ -1988,12 +1988,18 @@ async def create_memories_bulk(
         # honour an existing value; otherwise the type is agent-set iff the item
         # carried one.
         metadata.setdefault("memory_type_agent_set", item.memory_type is not None)
+        # Provenance of ``weight``, same three values as the single-write path
+        # (MergeEnrichmentFields). Bulk items go through this merge rather than
+        # the pipeline, so the flag has to be set here too or a bulk write would
+        # report nothing while a single write reports a source.
+        weight_source = "caller" if weight is not None else "default"
 
         if enrichment:
             if memory_type is None:
                 memory_type = enrichment.memory_type
-            if weight is None:
+            if weight is None and enrichment.weight is not None:
                 weight = enrichment.weight
+                weight_source = "llm"
             title = enrichment.title or None
             if enrichment.summary:
                 metadata["summary"] = enrichment.summary
@@ -2010,6 +2016,8 @@ async def create_memories_bulk(
                 if enrichment.pii_types:
                     metadata["pii_types"] = enrichment.pii_types
             metadata["business_relevance"] = enrichment.business_relevance
+
+        metadata["weight_source"] = weight_source
 
         if memory_type is None:
             memory_type = DEFAULT_MEMORY_TYPE
