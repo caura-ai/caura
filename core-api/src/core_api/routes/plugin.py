@@ -733,9 +733,17 @@ def _generate_skill_install_script(
 
     ``api_key`` — when non-empty, embedded into the script and forwarded
     as ``-H "X-API-Key: ..."`` on the internal curl calls. Required for
-    edge-auth-gated deploys (memclaw.net's nginx rejects unauthenticated
-    requests on every path). Empty when the deploy is standalone / lets
-    the skill file be fetched without a key.
+    edge-auth-gated deploys, where the edge rejects unauthenticated
+    requests on **every** path — the skill file included, which is why the
+    installer needs a key to fetch what is otherwise a static document.
+    Empty when the deploy is standalone / lets the skill file be fetched
+    without a key.
+
+    This used to name one host as the example of an edge-auth-gated deploy.
+    It no longer distinguishes anything: the hosted deploy answers ``401``
+    on ``/api/v1/skill/<skill>`` under either of its names, so the gate is a
+    property of the deployment rather than of a domain. Naming the condition
+    is what a caller can act on; naming a host was only ever a proxy for it.
     """
     safe_api_url = shlex.quote(api_url)
     safe_api_key = shlex.quote(api_key)
