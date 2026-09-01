@@ -252,14 +252,15 @@ TRACKED_CATEGORIES = DESTRUCTIVE_CATEGORIES | frozenset({"grant-in-lieu-of-tenan
 # sentences nobody reads, and ``legacy_name_ratchet.py`` already learned this
 # the expensive way: it carries two markers instead of one specifically because
 # "a reviewer facing eleven undifferentiated entries stops reading". At 150 the
-# argument is not close. Six categories get argued over once, properly, and then
-# each entry's claim is a single word a reviewer can check against the code.
+# argument is not close. Eight categories get argued over once, properly, and
+# then each entry's claim is a single word a reviewer can check against the code.
 #
 # These are not equally benign, and the point of separating them is that they
-# are not. Four describe paths that are correct as they stand. Two describe a
-# backlog: ID_ADDRESSED is the shape both advisories had, and BLIND_SPOT is this
-# gate failing to see a guard that is really there. Those two are what the
-# ratchet exists to drive down.
+# are not. Four describe paths that are correct as they stand. Four are a
+# backlog, and ``BACKLOG_CATEGORIES`` above is the authority on which: the
+# ``id-addressed-*`` pair is the shape both advisories had, BLIND_SPOT is this
+# gate failing to see a guard that is really there, and GRANT_IN_LIEU is a
+# caller naming its own scope. Those four are what the ratchet drives down.
 # ---------------------------------------------------------------------------
 CATEGORIES: dict[str, str] = {
     "no-tenant-data": (
@@ -275,8 +276,20 @@ CATEGORIES: dict[str, str] = {
     "opaque-body-write": (
         "An insert/upsert whose tenant travels as a field inside the payload "
         "dict rather than as a parameter, so no signature can carry it. The "
-        "binding is real but lives in the row being written; the route above is "
-        "responsible for having validated it."
+        "binding is real but lives in the row being written, which settles "
+        "which tenant OWNS the new row. WHAT IT DOES NOT SETTLE is whether "
+        "that tenant is the right one. Since #1066 the only credential this "
+        "service accepts is a shared secret carrying no tenant identity: it "
+        "authenticates THAT a caller is internal, never WHICH tenant it "
+        "speaks for. A foreign ``tenant_id`` in the body is written "
+        "faithfully and nothing here can tell. The accepted control is that "
+        "the caller was correct — say that plainly rather than deferring to "
+        "an unnamed route. (This replaces ``the route above is responsible "
+        "for having validated it``, which named no route and, for a caller "
+        "reaching this service directly, referred to nothing.) A write that "
+        "ALSO references other rows by bare id raises a separate question "
+        "this category does not answer: that id needs its own tenant check, "
+        "as ``POST /fleet/commands`` and ``POST /memories/conflicts`` do."
     ),
     "admin-unscoped": (
         "A deliberate operator-facing path that runs across tenants, reached "
@@ -306,14 +319,26 @@ CATEGORIES: dict[str, str] = {
         "Addressed by a primary key the caller is assumed to already hold, with "
         "no tenant predicate, and it only reads. THIS IS THE BACKLOG. It is the "
         "shape of GHSA-wgvw-28pq-jc36 — knowing a UUID is not the same as being "
-        "entitled to the row behind it — and every entry here is one an attacker "
-        "who can reach storage directly can use. Shrink; never add."
+        "entitled to the row behind it — and every entry here is one that any "
+        "caller reaching this service can use against any tenant. Until #1066 "
+        "that meant anyone who could reach the port; it now means any holder of "
+        "the shared secret. That is a narrower set, not a smaller consequence: "
+        "the secret says nothing about which tenant its holder speaks for, so "
+        "the reach of a single entry is unchanged. Shrink; never add."
     ),
     "blind-spot": (
         "The path IS scoped, but by an idiom the AST pass cannot read — an "
         "inline ``if not isinstance(...): raise`` rather than the shared "
         "``_require`` guard. The entry records that a human checked it. Prefer "
-        "rewriting the guard to use ``_require`` and deleting the entry."
+        "rewriting the guard to use ``_require`` and deleting the entry. "
+        "THIS IS A BACKLOG CATEGORY, and filing here counts against the "
+        "backlog exactly as the ``id-addressed-*`` pair does — it is not a "
+        "tidier home for a path that is merely awkward to read. In "
+        "particular, a ``_require`` this pass misses because it sits one "
+        "frame down in a HELPER does not belong here: the pass reads each "
+        "handler's own AST, so hoisting that call into the handler scores the "
+        "route REQUIRED and the entry deletes outright rather than moving "
+        "(#1199, which did that for six ``insights/*`` routes)."
     ),
 }
 
