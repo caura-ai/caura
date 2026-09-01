@@ -35,6 +35,9 @@ SCRIPT = Path(
 # Assembled rather than written out, so this file does not itself carry the
 # literal the gate scans for and need exempting.
 LEGACY = "mem" + "claw"
+_RELEASE_CONTEXT_ENV = frozenset(
+    {"GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_HEAD_REF"}
+)
 
 _DEFAULT_CONFIG: dict[str, object] = {
     "default_base": "HEAD",
@@ -86,13 +89,14 @@ def _run(
 ) -> subprocess.CompletedProcess:
     """Run the script; ``env`` entries are merged over the inherited environment.
 
-    ``GITHUB_HEAD_REF`` is stripped from the inherited environment first. The
-    suite itself runs under Actions on pull_request builds, where that variable
-    names whatever branch the PR happens to be — including release-please's own,
-    which is exactly when its CHANGELOG exemption tests would otherwise flip.
-    Branch context is simulated explicitly via ``env``, never inherited.
+    GitHub's release-context variables are stripped from the inherited
+    environment first. The suite itself runs under Actions on pull_request
+    builds, where those variables describe the PR under test — including
+    release-please's own, which is exactly when its CHANGELOG exemption tests
+    would otherwise flip. Release context is simulated explicitly via ``env``,
+    never inherited.
     """
-    merged = {k: v for k, v in os.environ.items() if k != "GITHUB_HEAD_REF"}
+    merged = {k: v for k, v in os.environ.items() if k not in _RELEASE_CONTEXT_ENV}
     merged.update(env or {})
     command = [sys.executable, str(SCRIPT)]
     if base is not None:
@@ -1641,7 +1645,8 @@ def test_passing_gate_survives_an_unexpected_change_summary_failure(
         raise ValueError("broken matcher")
 
     monkeypatch.chdir(repo)
-    monkeypatch.setenv("GITHUB_HEAD_REF", "release-please--branches--main")
+    for key, value in _release_env(repo).items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--base", "HEAD"])
     monkeypatch.setitem(main.__globals__, "_change_summary", cannot_summarize)
 
@@ -1700,7 +1705,7 @@ def test_multi_commit_summary_avoids_full_tree_replay(
             _stage(repo, "clean.py", f"VALUE = {i}\n")
             _git(repo, "commit", "-qm", f"unrelated edit {i}")
     trace = repo / "git-trace.log"
-    env = {k: v for k, v in os.environ.items() if k != "GITHUB_HEAD_REF"}
+    env = {k: v for k, v in os.environ.items() if k not in _RELEASE_CONTEXT_ENV}
     env["GIT_TRACE"] = str(trace)
 
     result = subprocess.run(
@@ -2001,25 +2006,55 @@ def test_an_untouched_exemption_is_not_reported(repo: Path) -> None:
     assert "exempt line(s) removed" not in result.stdout
 
 
-# ── release-please's own branches: generated CHANGELOGs are exempt ───────────
+# ── authenticated release-please pull requests: CHANGELOGs are exempt ───────
 #
 # release-please regenerates per-package CHANGELOGs by quoting merged PR titles
 # verbatim, so a title that legitimately carried the old brand (history — rule 2
 # says never edit it) resurfaces as a line the tally cannot tell from fresh
 # minting. The exemption is gated on GITHUB_HEAD_REF naming the bot's own
-# branch, and scoped to CHANGELOG files — nothing else on that branch, and no
-# CHANGELOG anywhere else, is excused.
+# branch, its immutable GitHub author id and a same-repository head. It remains
+# scoped to CHANGELOG files — nothing else on that branch, and no CHANGELOG in
+# an unauthenticated pull request, is excused.
 
-_RELEASE_ENV = {"GITHUB_HEAD_REF": "release-please--branches--main"}
+_RELEASE_PLEASE_AUTHOR_ID = 265395343
 
 
-def test_a_changelog_passes_on_a_release_please_branch(repo: Path) -> None:
+def _release_env(
+    repo: Path,
+    *,
+    author_id: object = _RELEASE_PLEASE_AUTHOR_ID,
+    head_repo_id: object = 1,
+    base_repo_id: object = 1,
+    head_ref: str = "release-please--branches--main",
+    event_name: str = "pull_request",
+) -> dict[str, str]:
+    """A pull-request event with independently selectable trust signals."""
+    event_path = repo / ".git" / "github-event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "user": {"id": author_id},
+                    "head": {"repo": {"id": head_repo_id}},
+                    "base": {"repo": {"id": base_repo_id}},
+                }
+            }
+        )
+    )
+    return {
+        "GITHUB_EVENT_NAME": event_name,
+        "GITHUB_EVENT_PATH": str(event_path),
+        "GITHUB_HEAD_REF": head_ref,
+    }
+
+
+def test_a_changelog_passes_on_an_authenticated_release_please_pr(repo: Path) -> None:
     _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
 
-    result = _run(repo, env=_RELEASE_ENV)
+    result = _run(repo, env=_release_env(repo))
 
     assert result.returncode == 0, result.stdout
-    assert "1 generated CHANGELOG file(s) exempt on this" in result.stdout
+    assert "1 CHANGELOG file(s) exempt on this" in result.stdout
     assert "CHANGELOG.md" in result.stdout
 
 
@@ -2027,7 +2062,7 @@ def test_a_release_changelog_addition_is_not_hidden_from_the_net(repo: Path) -> 
     _stage(repo, "existing.py", 'URL = "https://caura.ai"\n')
     _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
 
-    result = _run(repo, env=_RELEASE_ENV)
+    result = _run(repo, env=_release_env(repo))
 
     assert result.returncode == 0
     assert (
@@ -2042,7 +2077,80 @@ def test_the_same_changelog_fails_off_the_bot_branch(repo: Path) -> None:
     absent — still answers to the gate."""
     _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
 
-    result = _run(repo)
+    result = _run(repo, env=_release_env(repo, head_ref="human-change"))
+
+    assert result.returncode == 1
+    assert "CHANGELOG.md" in result.stdout
+
+
+def test_the_branch_name_does_not_authenticate_an_untrusted_author(repo: Path) -> None:
+    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
+
+    result = _run(repo, env=_release_env(repo, author_id=12345))
+
+    assert result.returncode == 1
+    assert "CHANGELOG.md" in result.stdout
+
+
+def test_the_release_bot_does_not_authenticate_a_fork_branch(repo: Path) -> None:
+    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
+
+    result = _run(repo, env=_release_env(repo, head_repo_id=2))
+
+    assert result.returncode == 1
+    assert "CHANGELOG.md" in result.stdout
+
+
+def test_the_exemption_is_pull_request_only(repo: Path) -> None:
+    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
+
+    result = _run(repo, env=_release_env(repo, event_name="pull_request_target"))
+
+    assert result.returncode == 1
+    assert "CHANGELOG.md" in result.stdout
+
+
+def test_the_exemption_requires_github_event_context(repo: Path) -> None:
+    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
+
+    result = _run(
+        repo,
+        env={
+            "GITHUB_EVENT_NAME": "pull_request",
+            "GITHUB_HEAD_REF": "release-please--branches--main",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "CHANGELOG.md" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("author_id", "head_repo_id", "base_repo_id"),
+    [
+        pytest.param(float(_RELEASE_PLEASE_AUTHOR_ID), 1, 1, id="author-float"),
+        pytest.param(_RELEASE_PLEASE_AUTHOR_ID, 1.0, 1, id="head-repository-float"),
+        pytest.param(_RELEASE_PLEASE_AUTHOR_ID, 1, 1.0, id="base-repository-float"),
+        pytest.param(_RELEASE_PLEASE_AUTHOR_ID, True, True, id="repository-booleans"),
+    ],
+)
+def test_malformed_event_identity_values_fail_closed(
+    repo: Path,
+    author_id: object,
+    head_repo_id: object,
+    base_repo_id: object,
+) -> None:
+    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
+
+    result = _run(
+        repo,
+        env=_release_env(
+            repo,
+            author_id=author_id,
+            head_repo_id=head_repo_id,
+            base_repo_id=base_repo_id,
+        ),
+    )
 
     assert result.returncode == 1
     assert "CHANGELOG.md" in result.stdout
@@ -2054,7 +2162,7 @@ def test_the_exemption_is_path_scoped_to_changelogs(repo: Path) -> None:
     _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
     _stage(repo, "new.py", f'KEY = "{LEGACY}-new-service"\n')
 
-    result = _run(repo, env=_RELEASE_ENV)
+    result = _run(repo, env=_release_env(repo))
 
     assert result.returncode == 1
     offenders = result.stdout.split("adds the legacy name in", 1)[1]
@@ -2066,7 +2174,7 @@ def test_release_please_changelogs_can_be_disabled(repo: Path) -> None:
     _write_config(repo, release_please_changelogs=False)
     _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
 
-    result = _run(repo, env=_RELEASE_ENV)
+    result = _run(repo, env=_release_env(repo))
 
     assert result.returncode == 1
     assert "CHANGELOG.md" in result.stdout

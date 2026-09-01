@@ -186,7 +186,7 @@ log fields — found 2026-06-11, months late. That file carries `identical` poli
 **When you change a vendored file here, open the enterprise pull request in the same
 sitting.** A `manual` policy makes the mirror your responsibility, not the gate's.
 
-### The release-please branch exemption remains repo-specific
+### The release-please pull-request exemption remains repo-specific
 
 The canonical engine contains the release-please handling; the
 `release_please_changelogs` configuration field decides whether it is active in
@@ -195,6 +195,13 @@ audit found live release automation only in `caura` and `caura-enterprise`.
 `openclaw-fleet-tester` nevertheless retains `true` through the mechanical port
 as an explicitly documented known-dead flag; removing it is a separate behavior
 change. Recheck those three signals before changing any repository's value.
+
+A matching branch name is selection, not authentication: a contributor chooses
+the source branch of a pull request. The exemption additionally requires the
+GitHub event payload to identify the immutable Caura deploy-bot author id and a
+head repository identical to the base repository. Missing or malformed event
+context fails closed, so local runs and other trigger types retain full
+coverage.
 
 ### The lifecycle probes share a contract, not an implementation
 
