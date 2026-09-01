@@ -4,10 +4,10 @@
 against this repo's top-level-imports rule. That is deliberate, and it is
 load-bearing rather than stylistic:
 
-* ``google-cloud-aiplatform`` is an EXTRA for core-worker
-  (``vertex = [...]``), and only a hard dependency for core-api.
-* ``google-genai`` does not appear in core-worker's ``pyproject.toml`` at
-  ALL — not required, not optional. core-worker never has it.
+* ``google-genai`` (which now backs BOTH providers — vertex.py in ADC
+  mode, gemini.py in API-key mode) is an EXTRA for core-worker
+  (``vertex = [...]``), and only a hard dependency for core-api. An
+  OSS / on-prem core-worker built without the extra has neither.
 
 So hoisting either import to module scope makes that provider module
 unimportable in core-worker, and ``common/llm/_platform.py`` imports
@@ -33,8 +33,8 @@ CASES = [
     pytest.param(
         "common.llm.providers.vertex",
         "VertexLLMProvider",
-        ("vertexai", "google.cloud.aiplatform"),
-        id="vertex-without-aiplatform",
+        ("google.genai",),
+        id="vertex-without-genai",
     ),
     pytest.param(
         "common.llm.providers.gemini",

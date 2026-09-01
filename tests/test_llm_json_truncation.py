@@ -112,67 +112,117 @@ class TestRaiseIfTruncated:
 # ---------------------------------------------------------------------------
 
 
-class _FakeGenerativeModel:
-    """Captures the GenerationConfig and returns a canned response."""
-
-    last_config = None
-    canned_response = None
-
-    def __init__(self, model_name):
-        self.model_name = model_name
-
-    def generate_content(self, prompt, generation_config=None):
-        type(self).last_config = generation_config
-        return type(self).canned_response
-
-
-@pytest.fixture()
-def _patched_vertex(monkeypatch):
-    import vertexai.generative_models as gm
-
-    monkeypatch.setattr(gm, "GenerativeModel", _FakeGenerativeModel)
-    # aiplatform.init does network-free client setup, but stub it anyway
-    # so tests never touch ADC.
-    from google.cloud import aiplatform
-
-    monkeypatch.setattr(aiplatform, "init", lambda **kw: None)
-    _FakeGenerativeModel.last_config = None
-    _FakeGenerativeModel.canned_response = None
-    return _FakeGenerativeModel
-
-
 class TestVertexCompleteJson:
-    def _provider(self):
-        return VertexLLMProvider(
-            project_id="test-proj", location="us-central1", model="gemini-2.5-flash-lite"
+    def _provider(self, location="us-central1"):
+        p = VertexLLMProvider(
+            project_id="test-proj", location=location, model="gemini-2.5-flash-lite"
+        )
+        # Inject the fake client the same way the Gemini tests do —
+        # the provider builds its real google-genai client lazily, so
+        # tests never touch ADC.
+        p._client = SimpleNamespace(models=_FakeGenaiModels())
+        return p
+
+    @pytest.mark.asyncio
+    async def test_happy_path_parses_and_caps_output(self):
+        p = self._provider()
+        p._client.models.canned_response = _response(json.dumps({"ok": True}))
+        result = await p.complete_json("prompt")
+        assert result == {"ok": True}
+        assert (
+            p._client.models.last_config.max_output_tokens
+            == LLM_JSON_MAX_OUTPUT_TOKENS
         )
 
     @pytest.mark.asyncio
-    async def test_happy_path_parses_and_caps_output(self, _patched_vertex):
-        _patched_vertex.canned_response = _response(json.dumps({"ok": True}))
-        result = await self._provider().complete_json("prompt")
-        assert result == {"ok": True}
-        cfg = _patched_vertex.last_config
-        # vertexai's GenerationConfig keeps kwargs on a private raw config;
-        # to_dict() is the stable public view across SDK versions.
-        cfg_dict = cfg.to_dict() if hasattr(cfg, "to_dict") else vars(cfg)
-        assert int(cfg_dict.get("max_output_tokens", 0)) == LLM_JSON_MAX_OUTPUT_TOKENS
-
-    @pytest.mark.asyncio
-    async def test_truncated_response_raises_clear_error(self, _patched_vertex):
-        _patched_vertex.canned_response = _response(
+    async def test_truncated_response_raises_clear_error(self):
+        p = self._provider()
+        p._client.models.canned_response = _response(
             '{"entities": [{"name": "tru', _FinishReason.MAX_TOKENS
         )
         with pytest.raises(ValueError, match="truncated at max_output_tokens"):
-            await self._provider().complete_json("prompt")
+            await p.complete_json("prompt")
 
     @pytest.mark.asyncio
-    async def test_untruncated_bad_json_still_json_error(self, _patched_vertex):
+    async def test_untruncated_bad_json_still_json_error(self):
         # A genuine parse failure (finish_reason=STOP) must keep raising
         # JSONDecodeError — the truncation guard must not swallow it.
-        _patched_vertex.canned_response = _response("not-json")
+        p = self._provider()
+        p._client.models.canned_response = _response("not-json")
         with pytest.raises(json.JSONDecodeError):
-            await self._provider().complete_json("prompt")
+            await p.complete_json("prompt")
+
+    def test_multi_region_location_pins_bare_host(self, monkeypatch):
+        # ``us``/``eu`` are served from the bare aiplatform host; the SDK's
+        # own endpoint logic builds ``us-aiplatform.googleapis.com``, which
+        # the API rejects as an invalid hostname. The provider must pin
+        # base_url for multi-regions and must NOT for global/regional.
+        captured = {}
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        import google.genai as genai_mod
+
+        monkeypatch.setattr(genai_mod, "Client", _FakeClient)
+        p = VertexLLMProvider(project_id="p", location="us", model="m")
+        p._get_client()
+        assert captured["vertexai"] is True and captured["location"] == "us"
+        assert captured["http_options"].base_url == "https://aiplatform.googleapis.com/"
+
+        captured.clear()
+        p2 = VertexLLMProvider(project_id="p", location="global", model="m")
+        p2._get_client()
+        assert "http_options" not in captured
+
+    def test_client_is_lazy_and_cached(self, monkeypatch):
+        calls = []
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+
+        import google.genai as genai_mod
+
+        monkeypatch.setattr(genai_mod, "Client", _FakeClient)
+        p = VertexLLMProvider(project_id="p", location="global", model="m")
+        assert calls == []  # construction must not build the client
+        p._get_client()
+        p._get_client()
+        assert len(calls) == 1  # built once, reused
+
+    def test_concurrent_first_calls_build_one_client(self, monkeypatch):
+        # ``complete_*`` run in asyncio.to_thread workers, so first calls
+        # can race ``_get_client`` from several threads on the shared
+        # platform singleton. The lock must collapse that to exactly one
+        # client build.
+        import threading as _threading
+        import time as _time
+
+        calls = []
+        start = _threading.Barrier(8)
+
+        class _SlowFakeClient:
+            def __init__(self, **kwargs):
+                _time.sleep(0.05)  # widen the race window
+                calls.append(kwargs)
+
+        import google.genai as genai_mod
+
+        monkeypatch.setattr(genai_mod, "Client", _SlowFakeClient)
+        p = VertexLLMProvider(project_id="p", location="global", model="m")
+
+        def _worker():
+            start.wait()
+            p._get_client()
+
+        threads = [_threading.Thread(target=_worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
