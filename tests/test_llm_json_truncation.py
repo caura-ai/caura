@@ -85,7 +85,10 @@ class TestRaiseIfTruncated:
         resp = SimpleNamespace(choices=[SimpleNamespace(finish_reason="length")])
         with pytest.raises(ValueError, match="truncated at max_output_tokens"):
             raise_if_truncated(
-                resp, provider="OpenAI-compatible", model="gpt-5.4-nano", max_tokens=8192
+                resp,
+                provider="OpenAI-compatible",
+                model="gpt-5.4-nano",
+                max_tokens=8192,
             )
 
     def test_openai_choices_stop_does_not_raise(self):
@@ -130,8 +133,7 @@ class TestVertexCompleteJson:
         result = await p.complete_json("prompt")
         assert result == {"ok": True}
         assert (
-            p._client.models.last_config.max_output_tokens
-            == LLM_JSON_MAX_OUTPUT_TOKENS
+            p._client.models.last_config.max_output_tokens == LLM_JSON_MAX_OUTPUT_TOKENS
         )
 
     @pytest.mark.asyncio

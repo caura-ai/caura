@@ -7,7 +7,8 @@ import uuid
 
 import pytest
 
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 pytestmark = pytest.mark.asyncio
 
@@ -54,13 +55,17 @@ async def test_write_via_api_is_searchable(client):
     content = f"The capacitor runs at 1.21 gigawatts for testing [{tag}]"
 
     # Write
-    write_resp = await client.post("/api/v1/memories", json={
-        "tenant_id": tenant_id,
-        "agent_id": f"test-agent-{tag}",
-        "fleet_id": f"test-fleet-{tag}",
-        "memory_type": "fact",
-        "content": content,
-    }, headers=headers)
+    write_resp = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": f"test-agent-{tag}",
+            "fleet_id": f"test-fleet-{tag}",
+            "memory_type": "fact",
+            "content": content,
+        },
+        headers=headers,
+    )
     assert write_resp.status_code == 201, write_resp.text
     memory_id = write_resp.json()["id"]
 
@@ -81,19 +86,27 @@ async def test_recall_via_api(client):
     tenant_id, headers = get_test_auth()
     tag = _uid()
 
-    await client.post("/api/v1/memories", json={
-        "tenant_id": tenant_id,
-        "agent_id": f"recall-agent-{tag}",
-        "fleet_id": f"recall-fleet-{tag}",
-        "memory_type": "episode",
-        "content": f"User discussed {tag} deployment strategy at length",
-    }, headers=headers)
+    await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": f"recall-agent-{tag}",
+            "fleet_id": f"recall-fleet-{tag}",
+            "memory_type": "episode",
+            "content": f"User discussed {tag} deployment strategy at length",
+        },
+        headers=headers,
+    )
 
-    recall_resp = await client.post("/api/v1/recall", json={
-        "tenant_id": tenant_id,
-        "query": tag,
-        "agent_id": f"recall-agent-{tag}",
-    }, headers=headers)
+    recall_resp = await client.post(
+        "/api/v1/recall",
+        json={
+            "tenant_id": tenant_id,
+            "query": tag,
+            "agent_id": f"recall-agent-{tag}",
+        },
+        headers=headers,
+    )
     assert recall_resp.status_code == 200, recall_resp.text
     data = recall_resp.json()
     # Recall returns either a dict with "memories"/"summary" or a list
@@ -108,17 +121,25 @@ async def test_entity_lookup(client):
     tenant_id, headers = get_test_auth()
     tag = _uid()
 
-    await client.post("/api/v1/memories", json={
-        "tenant_id": tenant_id,
-        "agent_id": f"entity-agent-{tag}",
-        "fleet_id": f"entity-fleet-{tag}",
-        "memory_type": "fact",
-        "content": f"Alice met Bob at the Caura headquarters in Tel Aviv [{tag}]",
-    }, headers=headers)
+    await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": f"entity-agent-{tag}",
+            "fleet_id": f"entity-fleet-{tag}",
+            "memory_type": "fact",
+            "content": f"Alice met Bob at the Caura headquarters in Tel Aviv [{tag}]",
+        },
+        headers=headers,
+    )
 
-    ent_resp = await client.get("/api/v1/entities", params={
-        "tenant_id": tenant_id,
-    }, headers=headers)
+    ent_resp = await client.get(
+        "/api/v1/entities",
+        params={
+            "tenant_id": tenant_id,
+        },
+        headers=headers,
+    )
     assert ent_resp.status_code == 200, ent_resp.text
     # With a fake/test embedding provider, entities may or may not be extracted.
     # The key assertion is that the endpoint works and returns a list.
@@ -133,13 +154,17 @@ async def test_status_update(client):
     tenant_id, headers = get_test_auth()
     tag = _uid()
 
-    write_resp = await client.post("/api/v1/memories", json={
-        "tenant_id": tenant_id,
-        "agent_id": f"status-agent-{tag}",
-        "fleet_id": f"status-fleet-{tag}",
-        "memory_type": "decision",
-        "content": f"Decided to archive old deployment configs [{tag}]",
-    }, headers=headers)
+    write_resp = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": f"status-agent-{tag}",
+            "fleet_id": f"status-fleet-{tag}",
+            "memory_type": "decision",
+            "content": f"Decided to archive old deployment configs [{tag}]",
+        },
+        headers=headers,
+    )
     assert write_resp.status_code == 201, write_resp.text
     memory_id = write_resp.json()["id"]
 

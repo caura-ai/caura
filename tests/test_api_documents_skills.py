@@ -19,8 +19,8 @@ These tests lock the new contract:
 
 import pytest
 
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Slug validation gate

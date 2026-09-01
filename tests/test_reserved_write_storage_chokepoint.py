@@ -65,7 +65,10 @@ async def test_bare_main_rejected_at_create_memories_bulk(policy, client_no_post
         await client_no_post.create_memories(
             [
                 {"agent_id": "brandclaw", "content": "ok"},
-                {"agent_id": "main", "content": "firehose"},  # one bad item blocks the batch
+                {
+                    "agent_id": "main",
+                    "content": "firehose",
+                },  # one bad item blocks the batch
             ]
         )
 

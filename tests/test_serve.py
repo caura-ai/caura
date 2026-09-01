@@ -61,7 +61,9 @@ def test_main_configures_logging_from_settings_and_disables_uvicorn_log_config(
     )
 
     # Logging configured from the settings object's fields; empty log_file -> None.
-    configure.assert_called_once_with("production", "INFO", json_logs=True, log_file=None)
+    configure.assert_called_once_with(
+        "production", "INFO", json_logs=True, log_file=None
+    )
 
     # Server started with uvicorn's own logging config disabled.
     run.assert_called_once()

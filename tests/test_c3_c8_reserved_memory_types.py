@@ -23,7 +23,7 @@ the user-visible behaviour.
 from __future__ import annotations
 
 import inspect
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -61,7 +61,7 @@ class _OutStub:
     def __init__(self, mid: str = "m-1"):
         self.mid = mid
 
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": self.mid, "status": "created"}
 
 
@@ -86,7 +86,7 @@ def _make_memory_out(
         source_uri=None,
         run_id=None,
         metadata=None,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         expires_at=None,
     )
 
@@ -388,7 +388,7 @@ async def test_mcp_batch_accepts_when_all_items_allowed(mcp_env):
 
 async def test_constant_shape():
     """The reserved set is exactly the three documented types."""
-    assert SERVER_RESERVED_MEMORY_TYPES == frozenset({"outcome", "rule", "insight"})
+    assert frozenset({"outcome", "rule", "insight"}) == SERVER_RESERVED_MEMORY_TYPES
     # frozenset is the right shape — immutable, hashable, set-semantics
     # for membership tests. If anyone ever swaps it to a tuple/list this
     # fails loudly (membership checks change cost class).

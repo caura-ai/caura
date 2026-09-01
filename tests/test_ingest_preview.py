@@ -55,7 +55,9 @@ def fake_tenant_config(monkeypatch):
         return []
 
     monkeypatch.setattr(ingest_service, "resolve_config", _fake)
-    monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _fake_no_cache)
+    monkeypatch.setattr(
+        ingest_service, "_find_prior_ingest_by_doc_hash", _fake_no_cache
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +70,9 @@ def fake_tenant_config(monkeypatch):
 async def test_source_uri_stamped_text_input(fake_chunker, fake_tenant_config):
     """When the caller passes ``content`` (not url), every returned fact carries
     ``source_uri='text-input'``."""
-    req = IngestRequest(tenant_id="t1", content="A meaningful sentence about distributed systems.")
+    req = IngestRequest(
+        tenant_id="t1", content="A meaningful sentence about distributed systems."
+    )
     fake_chunker.return_facts = [
         {"content": "Fact A", "suggested_type": "fact"},
         {"content": "Fact B", "suggested_type": "decision"},
@@ -99,7 +103,9 @@ async def test_source_uri_stamped_url(fake_chunker, fake_tenant_config, monkeypa
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_source_uri_request_override_beats_default(fake_chunker, fake_tenant_config):
+async def test_source_uri_request_override_beats_default(
+    fake_chunker, fake_tenant_config
+):
     """When the caller passes ``request.source_uri`` (used by /ingest/file to
     thread ``upload:<filename>`` through), every fact's source_uri reflects
     that override instead of the generic ``text-input`` marker."""
@@ -117,7 +123,9 @@ async def test_source_uri_request_override_beats_default(fake_chunker, fake_tena
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_existing_source_uri_in_fact_not_overwritten(fake_chunker, fake_tenant_config):
+async def test_existing_source_uri_in_fact_not_overwritten(
+    fake_chunker, fake_tenant_config
+):
     """``setdefault`` shouldn't clobber a source_uri the chunker explicitly set
     (defensive — current chunker doesn't, but the contract should hold)."""
     fake_chunker.return_facts = [
@@ -140,7 +148,9 @@ async def test_existing_source_uri_in_fact_not_overwritten(fake_chunker, fake_te
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_content_length_under_cap_no_truncated_flag(fake_chunker, fake_tenant_config):
+async def test_content_length_under_cap_no_truncated_flag(
+    fake_chunker, fake_tenant_config
+):
     """Input well under cap → content_length = len(input), no truncated flag."""
     text = "A" * 5_000
     req = IngestRequest(tenant_id="t1", content=text)
@@ -153,7 +163,9 @@ async def test_content_length_under_cap_no_truncated_flag(fake_chunker, fake_ten
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_large_content_now_fans_out_to_multiple_sections(fake_chunker, fake_tenant_config):
+async def test_large_content_now_fans_out_to_multiple_sections(
+    fake_chunker, fake_tenant_config
+):
     """PR #7: the 50k-char truncate is gone. Large content goes through the
     block chunker which fans out to multiple per-section LLM calls. The
     response reports the full content_length and the section count."""
@@ -168,7 +180,9 @@ async def test_large_content_now_fans_out_to_multiple_sections(fake_chunker, fak
     resp = await ingest_service.ingest_preview(request=req)
 
     assert resp["content_length"] == len(full_text)
-    assert "truncated" not in resp, "post-PR#7 there's no truncate; response should not have the flag"
+    assert "truncated" not in resp, (
+        "post-PR#7 there's no truncate; response should not have the flag"
+    )
     assert resp.get("sections", 0) >= 2, "chunker should fan out an 80k-char doc"
     # _chunk_content called once per section
     assert len(fake_chunker.calls) == resp["sections"]
@@ -199,7 +213,9 @@ async def test_short_circuit_skips_llm(fake_chunker, fake_tenant_config, content
     assert resp["chunk_ms"] == 0
     assert resp["skipped_reason"] == "content_too_short"
     # The LLM (fake_chunker) was NEVER called
-    assert fake_chunker.calls == [], f"_chunk_content was called for short-circuited input {content!r}"
+    assert fake_chunker.calls == [], (
+        f"_chunk_content was called for short-circuited input {content!r}"
+    )
 
 
 @pytest.mark.unit
@@ -216,7 +232,9 @@ async def test_short_circuit_threshold_boundary(fake_chunker, fake_tenant_config
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_whitespace_only_still_short_circuits_regardless_of_size(fake_chunker, fake_tenant_config):
+async def test_whitespace_only_still_short_circuits_regardless_of_size(
+    fake_chunker, fake_tenant_config
+):
     """Even a huge whitespace-only blob should hit the short-circuit, not the
     chunker. (Pre-PR#7 this test asserted truncated=True; post-PR#7 the response
     is just the plain skipped_reason since we no longer truncate.)"""
@@ -266,7 +284,9 @@ def test_meta_fact_regex_drops_self_referential():
         "The content of the agreement was disputed in court.",
     ]
     for body in keep_these:
-        assert not ingest_service._META_FACT_RE.search(body), f"Should NOT match: {body!r}"
+        assert not ingest_service._META_FACT_RE.search(body), (
+            f"Should NOT match: {body!r}"
+        )
 
 
 @pytest.mark.unit

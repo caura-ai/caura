@@ -15,7 +15,6 @@ import pytest
 
 from core_api.config import bridge_credentials_to_environ
 
-
 # Bridge mutates ``os.environ`` directly (not via monkeypatch.setenv),
 # so its writes leak across tests. Snapshot the credential-shaped keys
 # before each test and restore on teardown so other test files (e.g.
@@ -96,8 +95,9 @@ class TestBridgeCredentialsToEnviron:
     def test_bridges_platform_llm_key_via_secretstr(self, monkeypatch):
         """``settings.platform_llm_api_key`` is a ``SecretStr`` —
         bridge calls ``get_secret_value()``."""
-        import core_api.config as cfg
         from pydantic import SecretStr
+
+        import core_api.config as cfg
 
         monkeypatch.delenv("PLATFORM_LLM_API_KEY", raising=False)
         monkeypatch.setattr(

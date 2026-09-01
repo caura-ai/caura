@@ -96,9 +96,7 @@ async def test_drain_awaits_in_flight_tasks() -> None:
         order.append("handler")
 
     bus.subscribe(Topics.Memory.EMBEDDED, slow_handler)
-    await bus.publish(
-        Topics.Memory.EMBEDDED, Event(event_type=Topics.Memory.EMBEDDED)
-    )
+    await bus.publish(Topics.Memory.EMBEDDED, Event(event_type=Topics.Memory.EMBEDDED))
     order.append("pre-drain")
     await bus.drain()
     order.append("post-drain")
@@ -125,10 +123,14 @@ async def test_drain_raises_on_circular_publish_chain() -> None:
     bus = InProcessEventBus()
 
     async def handler_a(_e: Event) -> None:
-        await bus.publish(Topics.Memory.EMBEDDED, Event(event_type=Topics.Memory.EMBEDDED))
+        await bus.publish(
+            Topics.Memory.EMBEDDED, Event(event_type=Topics.Memory.EMBEDDED)
+        )
 
     async def handler_b(_e: Event) -> None:
-        await bus.publish(Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED))
+        await bus.publish(
+            Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED)
+        )
 
     bus.subscribe(Topics.Memory.ENRICHED, handler_a)
     bus.subscribe(Topics.Memory.EMBEDDED, handler_b)
@@ -162,10 +164,14 @@ async def test_stop_swallows_circular_chain_runtime_error() -> None:
     bus = InProcessEventBus()
 
     async def cycle_a(_e: Event) -> None:
-        await bus.publish(Topics.Memory.EMBEDDED, Event(event_type=Topics.Memory.EMBEDDED))
+        await bus.publish(
+            Topics.Memory.EMBEDDED, Event(event_type=Topics.Memory.EMBEDDED)
+        )
 
     async def cycle_b(_e: Event) -> None:
-        await bus.publish(Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED))
+        await bus.publish(
+            Topics.Memory.ENRICHED, Event(event_type=Topics.Memory.ENRICHED)
+        )
 
     bus.subscribe(Topics.Memory.ENRICHED, cycle_a)
     bus.subscribe(Topics.Memory.EMBEDDED, cycle_b)

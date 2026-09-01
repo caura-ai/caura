@@ -11,6 +11,7 @@ take.
 """
 
 import pytest
+
 from core_storage_api.services.postgres_service import PostgresService
 
 pytestmark = pytest.mark.unit

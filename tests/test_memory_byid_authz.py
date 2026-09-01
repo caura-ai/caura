@@ -20,10 +20,8 @@ import pytest
 
 from core_api.services import agent_service
 from core_api.services.agent_service import authorize_memory_access
-
 from tests._mcp_test_helpers import stub_storage_client
-from tests.conftest import parse_envelope  # noqa: F401  (re-exported MCP helper)
-
+from tests.conftest import parse_envelope
 
 # ---------------------------------------------------------------------------
 # Unit: authorize_memory_access matrix (no DB; lookup_agent is mocked)
@@ -40,7 +38,11 @@ def patch_lookup(monkeypatch):
         async def fake_lookup(tenant_id, agent_id):
             if not exists:
                 return None
-            return {"agent_id": agent_id, "fleet_id": fleet_id, "trust_level": trust_level}
+            return {
+                "agent_id": agent_id,
+                "fleet_id": fleet_id,
+                "trust_level": trust_level,
+            }
 
         monkeypatch.setattr(agent_service, "lookup_agent", fake_lookup)
 
@@ -48,7 +50,8 @@ def patch_lookup(monkeypatch):
 
 
 async def _call(caller, visibility, owner, fleet, *, write=False):
-    return await authorize_memory_access("tenant-x",
+    return await authorize_memory_access(
+        "tenant-x",
         caller,
         visibility=visibility,
         owner_agent_id=owner,
@@ -161,16 +164,22 @@ async def _mcp_read(mcp_env, monkeypatch, *, caller, row):
 
 
 @pytest.mark.unit
-async def test_mcp_read_cross_fleet_low_trust_denied(mcp_env, monkeypatch, patch_lookup):
+async def test_mcp_read_cross_fleet_low_trust_denied(
+    mcp_env, monkeypatch, patch_lookup
+):
     patch_lookup(fleet_id="fleet-beta", trust_level=1)
-    row = _fake_read_row(visibility="scope_team", agent_id="alice", fleet_id="fleet-alpha")
+    row = _fake_read_row(
+        visibility="scope_team", agent_id="alice", fleet_id="fleet-alpha"
+    )
     env = parse_envelope(await _mcp_read(mcp_env, monkeypatch, caller="bob", row=row))
     assert env["error"]["code"] == "NOT_FOUND"
 
 
 @pytest.mark.unit
 async def test_mcp_read_scope_agent_non_author_denied(mcp_env, monkeypatch):
-    row = _fake_read_row(visibility="scope_agent", agent_id="alice", fleet_id="fleet-alpha")
+    row = _fake_read_row(
+        visibility="scope_agent", agent_id="alice", fleet_id="fleet-alpha"
+    )
     env = parse_envelope(await _mcp_read(mcp_env, monkeypatch, caller="bob", row=row))
     assert env["error"]["code"] == "NOT_FOUND"
 
@@ -178,7 +187,9 @@ async def test_mcp_read_scope_agent_non_author_denied(mcp_env, monkeypatch):
 @pytest.mark.unit
 async def test_mcp_read_same_fleet_allowed(mcp_env, monkeypatch, patch_lookup):
     patch_lookup(fleet_id="fleet-alpha", trust_level=1)
-    row = _fake_read_row(visibility="scope_team", agent_id="alice", fleet_id="fleet-alpha")
+    row = _fake_read_row(
+        visibility="scope_team", agent_id="alice", fleet_id="fleet-alpha"
+    )
     env = parse_envelope(await _mcp_read(mcp_env, monkeypatch, caller="bob", row=row))
     assert "error" not in env
     assert env["content"] == "cross-fleet secret"
@@ -218,7 +229,17 @@ def as_agent(monkeypatch):
     _app.dependency_overrides.pop(_gac, None)
 
 
-async def _write(client, headers, tenant_id, *, agent_id, fleet_id, visibility, content=None, write_mode=None):
+async def _write(
+    client,
+    headers,
+    tenant_id,
+    *,
+    agent_id,
+    fleet_id,
+    visibility,
+    content=None,
+    write_mode=None,
+):
     body = {
         "tenant_id": tenant_id,
         "content": content or f"row {uuid.uuid4().hex[:8]}",
@@ -239,12 +260,19 @@ async def _write(client, headers, tenant_id, *, agent_id, fleet_id, visibility, 
 
 
 @pytest.mark.integration
-async def test_rest_get_cross_fleet_denied_then_allowed_by_trust(client, as_agent, patch_lookup):
+async def test_rest_get_cross_fleet_denied_then_allowed_by_trust(
+    client, as_agent, patch_lookup
+):
     from tests.conftest import get_test_auth
 
     tenant_id, headers = get_test_auth()
     mid = await _write(
-        client, headers, tenant_id, agent_id="alice", fleet_id="fleet-alpha", visibility="scope_team"
+        client,
+        headers,
+        tenant_id,
+        agent_id="alice",
+        fleet_id="fleet-alpha",
+        visibility="scope_team",
     )
 
     as_agent(tenant_id, "bob")
@@ -263,7 +291,12 @@ async def test_rest_get_scope_agent_non_author_denied(client, as_agent):
 
     tenant_id, headers = get_test_auth()
     mid = await _write(
-        client, headers, tenant_id, agent_id="alice", fleet_id="fleet-alpha", visibility="scope_agent"
+        client,
+        headers,
+        tenant_id,
+        agent_id="alice",
+        fleet_id="fleet-alpha",
+        visibility="scope_agent",
     )
 
     as_agent(tenant_id, "bob")
@@ -282,9 +315,16 @@ async def test_rest_get_dashboard_no_agent_keeps_full_access(client):
 
     tenant_id, headers = get_test_auth()
     mid = await _write(
-        client, headers, tenant_id, agent_id="alice", fleet_id="fleet-alpha", visibility="scope_agent"
+        client,
+        headers,
+        tenant_id,
+        agent_id="alice",
+        fleet_id="fleet-alpha",
+        visibility="scope_agent",
     )
-    resp = await client.get(f"/api/v1/memories/{mid}?tenant_id={tenant_id}", headers=headers)
+    resp = await client.get(
+        f"/api/v1/memories/{mid}?tenant_id={tenant_id}", headers=headers
+    )
     assert resp.status_code == 200, resp.text
 
 
@@ -302,7 +342,12 @@ async def test_rest_list_uses_authenticated_identity_not_param(client, as_agent)
 
     tenant_id, headers = get_test_auth()
     priv = await _write(
-        client, headers, tenant_id, agent_id="alice", fleet_id="fleet-alpha", visibility="scope_agent"
+        client,
+        headers,
+        tenant_id,
+        agent_id="alice",
+        fleet_id="fleet-alpha",
+        visibility="scope_agent",
     )
 
     # Bob (authenticated agent) tries to harvest alice's private rows by passing
@@ -330,13 +375,20 @@ async def test_rest_search_scope_agent_uses_authenticated_identity(client, as_ag
     marker = f"PRIVATEMARKER{uuid.uuid4().hex[:10]}"
     content = f"alice private note {marker}"
     priv = await _write(
-        client, headers, tenant_id, agent_id="alice", fleet_id="fleet-alpha",
-        visibility="scope_agent", content=content,
+        client,
+        headers,
+        tenant_id,
+        agent_id="alice",
+        fleet_id="fleet-alpha",
+        visibility="scope_agent",
+        content=content,
         write_mode="strong",  # synchronous embedding ⇒ the row is searchable immediately (de-flakes)
     )
 
     async def _search(query):
-        r = await client.post("/api/v1/search", json={"tenant_id": tenant_id, "query": query, "top_k": 20})
+        r = await client.post(
+            "/api/v1/search", json={"tenant_id": tenant_id, "query": query, "top_k": 20}
+        )
         assert r.status_code == 200, r.text
         return [m["id"] for m in r.json()["items"]]
 
@@ -347,10 +399,14 @@ async def test_rest_search_scope_agent_uses_authenticated_identity(client, as_ag
     # vector-rank ordering over the shared test corpus. (A marker-only query
     # ranked the row out of top_k and flaked: "author cannot see own row".)
     as_agent(tenant_id, "bob")
-    assert priv not in await _search(content), "scope_agent row leaked to another agent in search"
+    assert priv not in await _search(content), (
+        "scope_agent row leaked to another agent in search"
+    )
 
     as_agent(tenant_id, "alice")
-    assert priv in await _search(content), "author cannot see own scope_agent row in search"
+    assert priv in await _search(content), (
+        "author cannot see own scope_agent row in search"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +415,9 @@ async def test_rest_search_scope_agent_uses_authenticated_identity(client, as_ag
 
 
 @pytest.mark.integration
-async def test_rest_delete_all_blocked_for_low_trust_agent(client, as_agent, patch_lookup):
+async def test_rest_delete_all_blocked_for_low_trust_agent(
+    client, as_agent, patch_lookup
+):
     """A trust-1 agent key must not be able to wipe the tenant via DELETE /memories."""
     from tests.conftest import get_test_auth
 
@@ -371,12 +429,16 @@ async def test_rest_delete_all_blocked_for_low_trust_agent(client, as_agent, pat
 
     # Admin-trust (>=3) agent is allowed (scoped to a non-existent fleet → deletes 0).
     patch_lookup(fleet_id="fleet-beta", trust_level=3)
-    r = await client.delete(f"/api/v1/memories?tenant_id={tenant_id}&fleet_id=nonexistent-{uuid.uuid4().hex[:6]}")
+    r = await client.delete(
+        f"/api/v1/memories?tenant_id={tenant_id}&fleet_id=nonexistent-{uuid.uuid4().hex[:6]}"
+    )
     assert r.status_code == 204, r.text
 
 
 @pytest.mark.integration
-async def test_rest_bulk_delete_by_ids_blocked_for_low_trust_agent(client, as_agent, patch_lookup):
+async def test_rest_bulk_delete_by_ids_blocked_for_low_trust_agent(
+    client, as_agent, patch_lookup
+):
     from tests.conftest import get_test_auth
 
     tenant_id, _ = get_test_auth()

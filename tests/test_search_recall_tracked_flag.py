@@ -206,7 +206,7 @@ class _MemoryStub:
     def __init__(self, mid: str):
         self.mid = mid
 
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": self.mid}
 
 
@@ -216,7 +216,7 @@ class _FakeConfig:
     entity_retrieval = True
 
 
-async def _fake_resolve_config(tenant_id):  # noqa: ARG001
+async def _fake_resolve_config(tenant_id):
     return _FakeConfig()
 
 
@@ -228,7 +228,7 @@ def _wire(monkeypatch):
 def _search_writing(tracked: bool):
     """Stand in for ``search_memories``, filling ``recall_ctx`` as the pipeline does."""
 
-    async def _search(*args, recall_ctx=None, **kwargs):  # noqa: ARG001
+    async def _search(*args, recall_ctx=None, **kwargs):
         if recall_ctx is not None:
             recall_ctx["recall_tracked"] = tracked
         return [_MemoryStub("m-1")]

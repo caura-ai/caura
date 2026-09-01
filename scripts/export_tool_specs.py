@@ -8,12 +8,12 @@ Run from the caura repo root:
 CI check: `tests/test_tools_export_in_sync.py` runs this and diffs the
 output against the committed `plugin/tools.json`. Drift fails the PR.
 """
+
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
-
 
 OUTPUT = Path("plugin/tools.json")
 

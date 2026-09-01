@@ -12,7 +12,6 @@ import pytest
 from core_api.routes import fleet as fleet_mod
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 
-
 # ---------------------------------------------------------------------------
 # _semver_lt
 # ---------------------------------------------------------------------------
@@ -160,7 +159,9 @@ class _FakeStorage:
             return await self.in_flight_fn(node_id=node_id, since=since)
         return False
 
-    async def fleet_deploy_attempt_count(self, *, node_id, tenant_id, target_version, since):
+    async def fleet_deploy_attempt_count(
+        self, *, node_id, tenant_id, target_version, since
+    ):
         self.seen_tenants.append(tenant_id)
         if self.count_fn is not None:
             return await self.count_fn(
@@ -189,7 +190,8 @@ async def test_maybe_queue_auto_upgrade_skips_for_known_broken(monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.0"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -207,7 +209,8 @@ async def test_maybe_queue_auto_upgrade_skips_when_current(monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.4.0"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -225,7 +228,8 @@ async def test_maybe_queue_auto_upgrade_skips_when_newer(monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.5.0-dev"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -247,7 +251,8 @@ async def test_maybe_queue_auto_upgrade_skips_when_blocked(monkeypatch):
     from datetime import UTC, datetime
 
     near_future_ms = int(datetime.now(UTC).timestamp() * 1000) + 3600_000
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5", deploy_blocked_until=near_future_ms),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -276,7 +281,8 @@ async def test_maybe_queue_auto_upgrade_ignores_absurd_block_cap(monkeypatch):
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
     absurd_future_ms = 99999999999999  # year 5138
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5", deploy_blocked_until=absurd_future_ms),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -296,7 +302,8 @@ async def test_maybe_queue_auto_upgrade_skips_when_disabled(monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _disabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -314,7 +321,8 @@ async def test_maybe_queue_auto_upgrade_skips_when_already_pending(monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage(pending=[{"command": "deploy", "payload": {}}])
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -349,7 +357,8 @@ async def test_maybe_queue_auto_upgrade_skips_pre_manifest_aware(
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body(stale_version),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -374,7 +383,8 @@ async def test_maybe_queue_auto_upgrade_allowed_at_or_above_floor(monkeypatch):
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.6.0"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -475,7 +485,8 @@ async def test_maybe_queue_auto_upgrade_queues_deploy_for_old_version(monkeypatc
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -502,7 +513,8 @@ async def test_maybe_queue_auto_upgrade_skips_when_plugin_version_missing(monkey
 
     monkeypatch.setattr(fleet_mod, "_auto_upgrade_enabled_for_tenant", _enabled)
     sc = _FakeStorage()
-    await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=fleet_mod.HeartbeatIn(tenant_id="tenant-1", node_name="node-a"),
         pending_commands=sc.pending_commands,
         node_id="node-uuid-1",
@@ -646,7 +658,8 @@ async def test_maybe_queue_auto_upgrade_skips_when_acked_deploy_in_flight(monkey
 
     sc = _FakeStorage()
     sc.in_flight_fn = _has_in_flight
-    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -675,7 +688,8 @@ async def test_maybe_queue_auto_upgrade_queues_when_no_in_flight(monkeypatch):
 
     sc = _FakeStorage()
     sc.in_flight_fn = _no_in_flight
-    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -704,7 +718,8 @@ async def test_maybe_queue_auto_upgrade_fails_open_on_repo_error(monkeypatch):
 
     sc = _FakeStorage()
     sc.in_flight_fn = _throws
-    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -739,7 +754,8 @@ async def test_maybe_queue_auto_upgrade_skips_pending_before_querying_repo(monke
 
     sc = _FakeStorage(pending=[{"id": "x", "command": "deploy"}])
     sc.in_flight_fn = _has_in_flight
-    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -757,11 +773,11 @@ def test_deploy_in_flight_window_is_sensible():
     Too long → manual recovery needed for genuinely-abandoned acks."""
     from datetime import timedelta
 
-    assert fleet_mod.DEPLOY_IN_FLIGHT_WINDOW >= timedelta(minutes=2), (
+    assert timedelta(minutes=2) <= fleet_mod.DEPLOY_IN_FLIGHT_WINDOW, (
         "window must exceed typical deploy wall-clock (build ~30s + "
         "restart ~10s + re-init ~5s + safety margin)"
     )
-    assert fleet_mod.DEPLOY_IN_FLIGHT_WINDOW <= timedelta(minutes=30), (
+    assert timedelta(minutes=30) >= fleet_mod.DEPLOY_IN_FLIGHT_WINDOW, (
         "window must be short enough that genuinely-abandoned acks "
         "auto-recover without operator intervention"
     )
@@ -808,7 +824,8 @@ async def test_attempt_budget_skips_when_exhausted(monkeypatch):
 
     sc = _FakeStorage()
     sc.count_fn = _count
-    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -833,7 +850,8 @@ async def test_attempt_budget_allows_under_cap(monkeypatch):
 
     sc = _FakeStorage()
     sc.count_fn = _count
-    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -855,7 +873,8 @@ async def test_attempt_budget_fresh_target_gets_fresh_budget(monkeypatch):
 
     sc = _FakeStorage()
     sc.count_fn = _count
-    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -876,7 +895,8 @@ async def test_attempt_budget_fails_open_on_repo_error(monkeypatch):
 
     sc = _FakeStorage()
     sc.count_fn = _boom
-    queued = await fleet_mod._maybe_queue_auto_upgrade(        sc=sc,
+    queued = await fleet_mod._maybe_queue_auto_upgrade(
+        sc=sc,
         body=_body("2.3.5"),
         pending_commands=sc.pending_commands,
         node_id="00000000-0000-0000-0000-000000000001",
@@ -892,8 +912,8 @@ def test_attempt_budget_constants_are_sensible():
     small enough to brake a wedge quickly."""
     from datetime import timedelta
 
-    assert fleet_mod.AUTO_UPGRADE_ATTEMPT_WINDOW >= timedelta(hours=1)
-    assert fleet_mod.AUTO_UPGRADE_ATTEMPT_WINDOW <= timedelta(days=2)
+    assert timedelta(hours=1) <= fleet_mod.AUTO_UPGRADE_ATTEMPT_WINDOW
+    assert timedelta(days=2) >= fleet_mod.AUTO_UPGRADE_ATTEMPT_WINDOW
     assert fleet_mod.AUTO_UPGRADE_MAX_ATTEMPTS >= 2, (
         "must allow at least one retry beyond the single healthy attempt"
     )

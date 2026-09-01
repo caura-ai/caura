@@ -38,7 +38,10 @@ def _enrichment(**over):
         ts_valid_end=None,
         # The REAL model, not a stub: if AtomicFact grows a required field
         # this test starts failing instead of passing vacuously.
-        atomic_facts=[AtomicFact(content="alpha fact"), AtomicFact(content="beta fact")],
+        atomic_facts=[
+            AtomicFact(content="alpha fact"),
+            AtomicFact(content="beta fact"),
+        ],
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -95,7 +98,9 @@ async def _run_fanout(embed_stub):
         patch.object(memory_service, "get_storage_client", lambda: sc),
         patch.object(memory_service, "track_task", MagicMock()),
         patch.object(memory_service, "tracked_task", new=_stub_tracked_task),
-        patch.object(memory_service, "_schedule_embed_or_reembed", new=_capture_schedule),
+        patch.object(
+            memory_service, "_schedule_embed_or_reembed", new=_capture_schedule
+        ),
         patch.object(memory_service, "get_embedding", new=embed_stub),
         patch(
             "core_api.services.memory_enrichment.enrich_memory",
@@ -161,7 +166,9 @@ async def test_unembedded_child_is_flagged_embedding_pending(embed_stub) -> None
     # True, so without this the assertion below passes vacuously on exactly
     # the broken code it exists to catch — the pre-fix path wrote no children
     # at all.
-    assert len(children) == 2, f"expected 2 child writes to inspect; got {len(children)}"
+    assert len(children) == 2, (
+        f"expected 2 child writes to inspect; got {len(children)}"
+    )
     assert all(c["metadata_"].get("embedding_pending") is True for c in children), (
         f"unembedded children must carry embedding_pending=True; got "
         f"{[c['metadata_'] for c in children]!r}"
@@ -271,4 +278,6 @@ async def test_successful_embed_attaches_vector_and_schedules_nothing() -> None:
     assert all("embedding_pending" not in c["metadata_"] for c in children), (
         "an embedded child must not be flagged pending"
     )
-    assert scheduled == [], f"no re-embed should be scheduled for embedded rows; got {scheduled!r}"
+    assert scheduled == [], (
+        f"no re-embed should be scheduled for embedded rows; got {scheduled!r}"
+    )

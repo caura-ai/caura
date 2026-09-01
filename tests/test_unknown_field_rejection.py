@@ -25,8 +25,8 @@ Three things are pinned here, and the third matters as much as the first two:
 
 import pytest
 
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -257,7 +257,7 @@ def test_a_misspelled_flipped_family_is_refused() -> None:
     assert source != original
 
     with pytest.raises(ValueError, match="match no topic family"):
-        exec(  # noqa: S102 — executing our own module source, with one literal edited
+        exec(
             compile(source, topics_mod.__file__, "exec"),
             {"__name__": "_topics_under_test"},
         )
@@ -491,7 +491,9 @@ async def test_dual_subscribe_flag_reads_anything_but_an_explicit_yes_as_off(
 
     # The factory fails fast at boot when the Pub/Sub SDK is absent; it is not
     # installed in the OSS test env and is irrelevant to reading a flag.
-    monkeypatch.setattr(PubSubEventBus, "_ensure_pubsub_sdk", staticmethod(lambda: None))
+    monkeypatch.setattr(
+        PubSubEventBus, "_ensure_pubsub_sdk", staticmethod(lambda: None)
+    )
 
     try:
         bus = get_event_bus()

@@ -21,7 +21,6 @@ from core_api.constants import (
     OPENROUTER_DEFAULT_MODEL,
 )
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -198,7 +197,10 @@ class TestFallbackChain:
         memory ``conflicted`` on the boolean alone — so the old test was pinning the
         mechanism. See ``_skip_contradiction_pairwise`` for what that costs.
         """
-        from core_api.services.contradiction_detector import _CONF_FALLBACK, _llm_contradiction_check
+        from core_api.services.contradiction_detector import (
+            _CONF_FALLBACK,
+            _llm_contradiction_check,
+        )
 
         config = MagicMock()
         config.entity_extraction_provider = "openai"

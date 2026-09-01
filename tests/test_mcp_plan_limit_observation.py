@@ -26,7 +26,7 @@ pytestmark = pytest.mark.unit
 class _OutStub:
     """Minimal stand-in for what ``create_memory`` returns (see test_mcp_write)."""
 
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": "m-over-plan", "status": "created"}
 
 

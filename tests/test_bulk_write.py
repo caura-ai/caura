@@ -10,12 +10,12 @@ Unit tests validate:
 """
 
 import hashlib
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
+from common.embedding import fake_embedding
 from core_api.constants import (
     BULK_MAX_ITEMS,
     DEFAULT_MEMORY_WEIGHT,
@@ -29,15 +29,16 @@ from core_api.schemas import (
     BulkMemoryResponse,
     MemoryCreate,
 )
-from common.embedding import fake_embedding
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _content_hash(tenant_id: str, fleet_id: str | None, content: str) -> str:
-    return hashlib.sha256(f"{tenant_id}:{fleet_id or ''}:{content}".encode()).hexdigest()
+    return hashlib.sha256(
+        f"{tenant_id}:{fleet_id or ''}:{content}".encode()
+    ).hexdigest()
 
 
 def _make_bulk_request(
@@ -61,9 +62,9 @@ def _make_bulk_request(
 # Unit tests: Schema validation
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestBulkSchemaValidation:
-
     def test_accepts_valid_request(self):
         req = _make_bulk_request(3)
         assert len(req.items) == 3
@@ -170,9 +171,9 @@ class TestBulkSchemaValidation:
 # Unit tests: Batch embedding
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestBatchEmbedding:
-
     @pytest.mark.asyncio
     async def test_fake_batch_embedding(self):
         from common.embedding import get_embeddings_batch
@@ -211,12 +212,14 @@ class TestBatchEmbedding:
 # Unit tests: Bulk response model
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestBulkResponseModel:
-
     def test_all_created(self):
         resp = BulkMemoryResponse(
-            created=3, duplicates=0, errors=0,
+            created=3,
+            duplicates=0,
+            errors=0,
             results=[
                 BulkItemResult(index=0, status="created", id=uuid4()),
                 BulkItemResult(index=1, status="created", id=uuid4()),
@@ -229,10 +232,14 @@ class TestBulkResponseModel:
 
     def test_mixed_results(self):
         resp = BulkMemoryResponse(
-            created=1, duplicates=2, errors=1,
+            created=1,
+            duplicates=2,
+            errors=1,
             results=[
                 BulkItemResult(index=0, status="created", id=uuid4()),
-                BulkItemResult(index=1, status="duplicate_content", duplicate_of=uuid4()),
+                BulkItemResult(
+                    index=1, status="duplicate_content", duplicate_of=uuid4()
+                ),
                 BulkItemResult(index=2, status="duplicate_attempt", id=uuid4()),
                 BulkItemResult(index=3, status="error", error="something broke"),
             ],
@@ -250,9 +257,9 @@ class TestBulkResponseModel:
 # Unit tests: Content hash dedup
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestBulkContentHashDedup:
-
     def test_intra_batch_duplicate_detected(self):
         """Two items with identical content should be caught as intra-batch dup."""
         contents = ["same content", "unique content", "same content"]
@@ -279,9 +286,9 @@ class TestBulkContentHashDedup:
 # Unit tests: Bulk usage service
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestBulkUsageCheck:
-
     @pytest.mark.asyncio
     async def test_bulk_check_always_allowed_in_oss(self):
         """bulk_check_and_increment always returns allowed in OSS mode (no limits)."""
@@ -315,9 +322,9 @@ class TestBulkUsageCheck:
 # Unit tests: Enrichment application logic
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestBulkEnrichmentApplication:
-
     def test_agent_values_win_over_enrichment(self):
         """When agent provides memory_type and weight, enrichment should not override."""
         item = BulkMemoryItem(content="test", memory_type="decision", weight=0.9)
@@ -336,9 +343,9 @@ class TestBulkEnrichmentApplication:
 # Unit tests: Constants
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestBulkConstants:
-
     def test_max_items_is_100(self):
         assert BULK_MAX_ITEMS == 100
 

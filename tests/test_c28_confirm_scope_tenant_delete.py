@@ -35,7 +35,9 @@ def _tenant() -> tuple[str, dict]:
 
 async def test_unbounded_delete_is_refused_without_confirmation(client) -> None:
     tenant_id, headers = _tenant()
-    resp = await client.delete(f"/api/v1/memories?tenant_id={tenant_id}", headers=headers)
+    resp = await client.delete(
+        f"/api/v1/memories?tenant_id={tenant_id}", headers=headers
+    )
     assert resp.status_code == 400, resp.text
     detail = resp.json()["detail"]
     # The message has to name the parameter and the way out, or the caller's
@@ -70,7 +72,9 @@ async def test_a_wrong_confirmation_value_is_not_a_confirmation(client) -> None:
         "status=active",
     ],
 )
-async def test_any_narrowing_filter_keeps_the_old_behaviour(client, narrowing: str) -> None:
+async def test_any_narrowing_filter_keeps_the_old_behaviour(
+    client, narrowing: str
+) -> None:
     """Each filter is checked on its own: one missing from the guard's list
     would silently reclassify a narrowed delete as a tenant wipe."""
     tenant_id, headers = _tenant()
@@ -118,9 +122,13 @@ async def test_a_refused_call_deletes_nothing(client) -> None:
     assert written.status_code == 201, written.text
     memory_id = written.json()["id"]
 
-    refused = await client.delete(f"/api/v1/memories?tenant_id={tenant_id}", headers=headers)
+    refused = await client.delete(
+        f"/api/v1/memories?tenant_id={tenant_id}", headers=headers
+    )
     assert refused.status_code == 400, refused.text
 
-    after = await client.get(f"/api/v1/memories/{memory_id}?tenant_id={tenant_id}", headers=headers)
+    after = await client.get(
+        f"/api/v1/memories/{memory_id}?tenant_id={tenant_id}", headers=headers
+    )
     assert after.status_code == 200, "the refused delete removed the row anyway"
     assert after.json()["status"] != "deleted"

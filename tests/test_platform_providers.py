@@ -77,11 +77,11 @@ class TestInitPlatformProviders:
         monkeypatch.setenv("PLATFORM_EMBEDDING_MODEL", "text-embedding-3-small")
         self._reinit_settings(monkeypatch)
 
+        from common.embedding.providers.openai import OpenAIEmbeddingProvider
         from core_api.providers._platform import (
             get_platform_embedding,
             init_platform_providers,
         )
-        from common.embedding.providers.openai import OpenAIEmbeddingProvider
 
         init_platform_providers()
         emb = get_platform_embedding()
@@ -475,8 +475,7 @@ class TestEmbeddingTierResolution:
         """No tenant key → platform singleton."""
         self._setup_platform_embedding(monkeypatch)
 
-        from common.embedding import get_platform_embedding
-        from common.embedding import get_embedding_provider
+        from common.embedding import get_embedding_provider, get_platform_embedding
 
         provider = get_embedding_provider(
             "openai", _FakeTenantConfig(openai_api_key="")
@@ -487,8 +486,7 @@ class TestEmbeddingTierResolution:
         """No tenant key, no platform → FakeEmbeddingProvider."""
         self._ensure_no_platform(monkeypatch)
 
-        from common.embedding import get_embedding_provider
-        from common.embedding import FakeEmbeddingProvider
+        from common.embedding import FakeEmbeddingProvider, get_embedding_provider
 
         provider = get_embedding_provider(
             "openai", _FakeTenantConfig(openai_api_key="")

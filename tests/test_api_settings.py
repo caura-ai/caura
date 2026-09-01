@@ -1,6 +1,7 @@
 """E2E tenant settings CRUD tests through HTTP API — real DB, no mocks."""
 
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 
 async def _get_settings(client, tenant_id: str, headers: dict) -> dict:

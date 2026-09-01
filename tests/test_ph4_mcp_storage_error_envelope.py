@@ -23,7 +23,9 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 def _storage_err(status: int = 503) -> httpx.HTTPStatusError:
     req = httpx.Request("POST", "http://storage/x")
-    return httpx.HTTPStatusError("storage down", request=req, response=httpx.Response(status, request=req))
+    return httpx.HTTPStatusError(
+        "storage down", request=req, response=httpx.Response(status, request=req)
+    )
 
 
 async def test_list_surfaces_storage_error_as_envelope(mcp_env, monkeypatch):
@@ -36,7 +38,9 @@ async def test_list_surfaces_storage_error_as_envelope(mcp_env, monkeypatch):
 
 async def test_recall_surfaces_storage_error_as_envelope(mcp_env, monkeypatch):
     """A storage 5xx from sc.get_agent → error envelope, not a raw raise."""
-    monkeypatch.setattr(mcp_server, "resolve_config", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        mcp_server, "resolve_config", AsyncMock(return_value=MagicMock())
+    )
     sc = stub_storage_client(monkeypatch, get_agent=None)
     sc.get_agent.side_effect = _storage_err()
     out = await mcp_server.caura_recall(query="anything")

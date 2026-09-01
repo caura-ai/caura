@@ -119,7 +119,9 @@ def test_parse_markdown_fenced_code_preserved():
 
 @pytest.mark.unit
 def test_parse_markdown_table():
-    text = "| col A | col B |\n|-------|-------|\n| row 1 | val 1 |\n| row 2 | val 2 |\n"
+    text = (
+        "| col A | col B |\n|-------|-------|\n| row 1 | val 1 |\n| row 2 | val 2 |\n"
+    )
     blocks = parse_markdown(text)
     tables = [b for b in blocks if b.type == "table"]
     assert len(tables) == 1
@@ -136,7 +138,10 @@ def test_parse_markdown_table():
 def test_chunk_blocks_packs_small_blocks_into_one_section():
     """Three small paragraphs all under the soft cap → one Section."""
     blocks = [
-        Block(type="paragraph", text=f"This is paragraph number {i} with sufficient text.") for i in range(3)
+        Block(
+            type="paragraph", text=f"This is paragraph number {i} with sufficient text."
+        )
+        for i in range(3)
     ]
     sections = chunk_blocks(blocks)
     assert len(sections) == 1
@@ -191,7 +196,9 @@ def test_chunk_blocks_breadcrumb_pops_correctly_when_depth_decreases():
         Block(type="paragraph", text="under B"),
     ]
     sections = chunk_blocks(blocks)
-    assert sections[-1].breadcrumb == "B", "A1 should NOT carry forward to section under B"
+    assert sections[-1].breadcrumb == "B", (
+        "A1 should NOT carry forward to section under B"
+    )
 
 
 @pytest.mark.unit
@@ -199,7 +206,12 @@ def test_chunk_blocks_oversized_paragraph_split_by_sentences():
     """A single paragraph above the hard cap gets sentence-split via pysbd."""
     # Build a paragraph with many sentences such that the total exceeds hard_tokens.
     # Use a smaller hard cap to force the split path with reasonable test input.
-    sentences = " ".join([f"Sentence number {i} contains some meaningful content here." for i in range(200)])
+    sentences = " ".join(
+        [
+            f"Sentence number {i} contains some meaningful content here."
+            for i in range(200)
+        ]
+    )
     blocks = [Block(type="paragraph", text=sentences)]
     sections = chunk_blocks(blocks, soft_tokens=200, hard_tokens=300)
     # Multiple sections — proves it sub-split
@@ -218,7 +230,9 @@ def test_chunk_blocks_oversized_code_block_emitted_atomic():
     ]
     sections = chunk_blocks(blocks, soft_tokens=200, hard_tokens=300)
     # The code stands as its own section, intact
-    code_section = next((s for s in sections if "line 0" in s.text and "line 499" in s.text), None)
+    code_section = next(
+        (s for s in sections if "line 0" in s.text and "line 499" in s.text), None
+    )
     assert code_section is not None
     assert code_section.block_types == ["code"]
 

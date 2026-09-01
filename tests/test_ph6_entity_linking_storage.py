@@ -95,7 +95,9 @@ async def _seed_memory(
     return str(mem_id)
 
 
-async def _seed_link(*, memory_id: str, entity_id: str, role: str = "mentioned") -> None:
+async def _seed_link(
+    *, memory_id: str, entity_id: str, role: str = "mentioned"
+) -> None:
     async with get_session() as session:
         session.add(
             MemoryEntityLink(
@@ -135,7 +137,8 @@ async def _entity_exists(entity_id: str) -> bool:
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT 1 FROM entities WHERE id = CAST(:id AS uuid)"), {"id": entity_id}
+                text("SELECT 1 FROM entities WHERE id = CAST(:id AS uuid)"),
+                {"id": entity_id},
             )
         ).fetchone()
     return row is not None
@@ -156,7 +159,9 @@ async def _link_entity_ids(memory_id: str) -> set[str]:
     async with get_session() as session:
         rows = (
             await session.execute(
-                text("SELECT entity_id FROM memory_entity_links WHERE memory_id = CAST(:id AS uuid)"),
+                text(
+                    "SELECT entity_id FROM memory_entity_links WHERE memory_id = CAST(:id AS uuid)"
+                ),
                 {"id": memory_id},
             )
         ).all()
@@ -167,7 +172,8 @@ async def _relation_weight(rel_id: str) -> float:
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT weight FROM relations WHERE id = CAST(:id AS uuid)"), {"id": rel_id}
+                text("SELECT weight FROM relations WHERE id = CAST(:id AS uuid)"),
+                {"id": rel_id},
             )
         ).fetchone()
     return float(row.weight)
@@ -177,7 +183,8 @@ async def _count_relations(tenant_id: str) -> int:
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT COUNT(*) FROM relations WHERE tenant_id = :t"), {"t": tenant_id}
+                text("SELECT COUNT(*) FROM relations WHERE tenant_id = :t"),
+                {"t": tenant_id},
             )
         ).fetchone()
     return int(row[0])
@@ -193,8 +200,12 @@ async def test_resolve_merges_duplicate_pair(sc):
     emb = fake_embedding("acme")
     # Identical embeddings (sim=1.0) but distinct names so the unique index
     # is not tripped. Canonical pick = longest name → "Acme Corporation".
-    canonical = await _seed_entity(tenant_id=tenant, canonical_name="Acme Corporation", name_embedding=emb)
-    dupe = await _seed_entity(tenant_id=tenant, canonical_name="Acme", name_embedding=emb)
+    canonical = await _seed_entity(
+        tenant_id=tenant, canonical_name="Acme Corporation", name_embedding=emb
+    )
+    dupe = await _seed_entity(
+        tenant_id=tenant, canonical_name="Acme", name_embedding=emb
+    )
 
     # A memory linked to the DUPE should be re-pointed to the canonical.
     mem = await _seed_memory(tenant_id=tenant, content="about acme")
@@ -227,9 +238,17 @@ async def test_resolve_merges_duplicate_pair(sc):
 async def test_resolve_repoints_relations_and_preserves_higher_weight(sc):
     tenant = _t()
     emb = fake_embedding("globex")
-    canonical = await _seed_entity(tenant_id=tenant, canonical_name="Globex Incorporated", name_embedding=emb)
-    dupe = await _seed_entity(tenant_id=tenant, canonical_name="Globex", name_embedding=emb)
-    other = await _seed_entity(tenant_id=tenant, canonical_name="Initech", name_embedding=fake_embedding("initech"))
+    canonical = await _seed_entity(
+        tenant_id=tenant, canonical_name="Globex Incorporated", name_embedding=emb
+    )
+    dupe = await _seed_entity(
+        tenant_id=tenant, canonical_name="Globex", name_embedding=emb
+    )
+    other = await _seed_entity(
+        tenant_id=tenant,
+        canonical_name="Initech",
+        name_embedding=fake_embedding("initech"),
+    )
 
     # canonical -> other (weight 0.3) and dupe -> other (weight 0.9): after the
     # merge the conflicting dupe out-relation is dropped and the survivor keeps
@@ -237,10 +256,16 @@ async def test_resolve_repoints_relations_and_preserves_higher_weight(sc):
     rel_canonical = await _seed_relation(
         tenant_id=tenant, from_entity_id=canonical, to_entity_id=other, weight=0.3
     )
-    await _seed_relation(tenant_id=tenant, from_entity_id=dupe, to_entity_id=other, weight=0.9)
+    await _seed_relation(
+        tenant_id=tenant, from_entity_id=dupe, to_entity_id=other, weight=0.9
+    )
 
     resp = await sc.resolve_entities(
-        tenant_id=tenant, fleet_id=None, batch_size=100, threshold=0.85, candidate_limit=3
+        tenant_id=tenant,
+        fleet_id=None,
+        batch_size=100,
+        threshold=0.85,
+        candidate_limit=3,
     )
     assert resp["merge_count"] == 1
     assert await _entity_exists(dupe) is False
@@ -250,9 +275,15 @@ async def test_resolve_repoints_relations_and_preserves_higher_weight(sc):
 
 async def test_resolve_no_pairs_returns_zero(sc):
     tenant = _t()
-    await _seed_entity(tenant_id=tenant, canonical_name="Solo", name_embedding=fake_embedding("solo"))
+    await _seed_entity(
+        tenant_id=tenant, canonical_name="Solo", name_embedding=fake_embedding("solo")
+    )
     resp = await sc.resolve_entities(
-        tenant_id=tenant, fleet_id=None, batch_size=100, threshold=0.85, candidate_limit=3
+        tenant_id=tenant,
+        fleet_id=None,
+        batch_size=100,
+        threshold=0.85,
+        candidate_limit=3,
     )
     assert resp["skipped"] is True
     assert resp["merge_count"] == 0
@@ -282,8 +313,15 @@ async def test_discover_targeted_creates_link(sc):
     # Entity name appears in the memory content (text-verify passes), and the
     # memory embedding matches the entity name embedding (lateral match).
     emb = fake_embedding("alice")
-    ent = await _seed_entity(tenant_id=tenant, canonical_name="Alice", entity_type="person", name_embedding=emb)
-    mem = await _seed_memory(tenant_id=tenant, content="Alice loves coffee", embedding=emb)
+    ent = await _seed_entity(
+        tenant_id=tenant,
+        canonical_name="Alice",
+        entity_type="person",
+        name_embedding=emb,
+    )
+    mem = await _seed_memory(
+        tenant_id=tenant, content="Alice loves coffee", embedding=emb
+    )
 
     resp = await sc.discover_cross_links(
         tenant_id=tenant,
@@ -300,8 +338,12 @@ async def test_discover_targeted_creates_link(sc):
 async def test_discover_batch_creates_link(sc):
     tenant = _t()
     emb = fake_embedding("bob")
-    ent = await _seed_entity(tenant_id=tenant, canonical_name="Bob", entity_type="person", name_embedding=emb)
-    mem = await _seed_memory(tenant_id=tenant, content="Bob plays guitar", embedding=emb)
+    ent = await _seed_entity(
+        tenant_id=tenant, canonical_name="Bob", entity_type="person", name_embedding=emb
+    )
+    mem = await _seed_memory(
+        tenant_id=tenant, content="Bob plays guitar", embedding=emb
+    )
 
     # Batch mode (no target_memory_ids): picks under-connected memories.
     resp = await sc.discover_cross_links(
@@ -321,8 +363,15 @@ async def test_discover_text_verify_rejects_absent_name(sc):
     # Entity embedding matches the memory embedding, but the entity name does
     # NOT appear in the content → text-verify drops it.
     emb = fake_embedding("carol")
-    await _seed_entity(tenant_id=tenant, canonical_name="Carol", entity_type="person", name_embedding=emb)
-    mem = await _seed_memory(tenant_id=tenant, content="someone plays guitar", embedding=emb)
+    await _seed_entity(
+        tenant_id=tenant,
+        canonical_name="Carol",
+        entity_type="person",
+        name_embedding=emb,
+    )
+    mem = await _seed_memory(
+        tenant_id=tenant, content="someone plays guitar", embedding=emb
+    )
 
     resp = await sc.discover_cross_links(
         tenant_id=tenant,
@@ -356,8 +405,12 @@ async def test_discover_no_candidates_returns_zero(sc):
 
 async def test_infer_creates_relation_from_cooccurrence(sc):
     tenant = _t()
-    e1 = await _seed_entity(tenant_id=tenant, canonical_name="X", name_embedding=fake_embedding("x"))
-    e2 = await _seed_entity(tenant_id=tenant, canonical_name="Y", name_embedding=fake_embedding("y"))
+    e1 = await _seed_entity(
+        tenant_id=tenant, canonical_name="X", name_embedding=fake_embedding("x")
+    )
+    e2 = await _seed_entity(
+        tenant_id=tenant, canonical_name="Y", name_embedding=fake_embedding("y")
+    )
     # Two memories each linking BOTH entities → cooccur=2 (>= min 2).
     for i in range(2):
         m = await _seed_memory(tenant_id=tenant, content=f"m{i}")
@@ -379,13 +432,21 @@ async def test_infer_creates_relation_from_cooccurrence(sc):
 
 async def test_infer_reinforces_existing_relation_clamped(sc):
     tenant = _t()
-    e1 = await _seed_entity(tenant_id=tenant, canonical_name="P", name_embedding=fake_embedding("p"))
-    e2 = await _seed_entity(tenant_id=tenant, canonical_name="Q", name_embedding=fake_embedding("q"))
+    e1 = await _seed_entity(
+        tenant_id=tenant, canonical_name="P", name_embedding=fake_embedding("p")
+    )
+    e2 = await _seed_entity(
+        tenant_id=tenant, canonical_name="Q", name_embedding=fake_embedding("q")
+    )
     # Pre-existing related_to relation; co-occurrence will reinforce it.
     # Natural key orders from<to, so seed from = min(e1,e2).
     lo, hi = sorted([e1, e2])
     rel = await _seed_relation(
-        tenant_id=tenant, from_entity_id=lo, to_entity_id=hi, relation_type="related_to", weight=0.95
+        tenant_id=tenant,
+        from_entity_id=lo,
+        to_entity_id=hi,
+        relation_type="related_to",
+        weight=0.95,
     )
     for i in range(3):
         m = await _seed_memory(tenant_id=tenant, content=f"m{i}")
@@ -408,8 +469,12 @@ async def test_infer_reinforces_existing_relation_clamped(sc):
 
 async def test_infer_no_cooccurrence_returns_zero(sc):
     tenant = _t()
-    e1 = await _seed_entity(tenant_id=tenant, canonical_name="A", name_embedding=fake_embedding("a"))
-    e2 = await _seed_entity(tenant_id=tenant, canonical_name="B", name_embedding=fake_embedding("b"))
+    e1 = await _seed_entity(
+        tenant_id=tenant, canonical_name="A", name_embedding=fake_embedding("a")
+    )
+    e2 = await _seed_entity(
+        tenant_id=tenant, canonical_name="B", name_embedding=fake_embedding("b")
+    )
     # Only one shared memory → cooccur=1 < min 2.
     m = await _seed_memory(tenant_id=tenant, content="m")
     await _seed_link(memory_id=m, entity_id=e1)
@@ -433,11 +498,21 @@ async def test_infer_no_cooccurrence_returns_zero(sc):
 
 async def test_list_null_embeddings_returns_only_null_rows(sc):
     tenant = _t()
-    null_a = await _seed_entity(tenant_id=tenant, canonical_name="NeedsEmbed A", name_embedding=None)
-    null_b = await _seed_entity(tenant_id=tenant, canonical_name="NeedsEmbed B", name_embedding=None)
-    await _seed_entity(tenant_id=tenant, canonical_name="HasEmbed", name_embedding=fake_embedding("has"))
+    null_a = await _seed_entity(
+        tenant_id=tenant, canonical_name="NeedsEmbed A", name_embedding=None
+    )
+    null_b = await _seed_entity(
+        tenant_id=tenant, canonical_name="NeedsEmbed B", name_embedding=None
+    )
+    await _seed_entity(
+        tenant_id=tenant,
+        canonical_name="HasEmbed",
+        name_embedding=fake_embedding("has"),
+    )
 
-    rows = await sc.list_null_embedding_entities(tenant_id=tenant, fleet_id=None, batch_size=100)
+    rows = await sc.list_null_embedding_entities(
+        tenant_id=tenant, fleet_id=None, batch_size=100
+    )
     ids = {r["id"] for r in rows}
     assert ids == {null_a, null_b}
     names = {r["canonical_name"] for r in rows}
@@ -446,7 +521,9 @@ async def test_list_null_embeddings_returns_only_null_rows(sc):
 
 async def test_set_embeddings_writes_back(sc):
     tenant = _t()
-    eid = await _seed_entity(tenant_id=tenant, canonical_name="ToEmbed", name_embedding=None)
+    eid = await _seed_entity(
+        tenant_id=tenant, canonical_name="ToEmbed", name_embedding=None
+    )
     emb = fake_embedding("toembed")
 
     count = await sc.set_entity_embeddings(
@@ -454,17 +531,25 @@ async def test_set_embeddings_writes_back(sc):
     )
     assert count == 1
     # The row no longer appears in the NULL-embedding list.
-    rows = await sc.list_null_embedding_entities(tenant_id=tenant, fleet_id=None, batch_size=100)
+    rows = await sc.list_null_embedding_entities(
+        tenant_id=tenant, fleet_id=None, batch_size=100
+    )
     assert eid not in {r["id"] for r in rows}
 
 
 async def test_set_embeddings_tenant_isolation(sc):
     t_a, t_b = _t(), _t()
-    eid = await _seed_entity(tenant_id=t_a, canonical_name="A-only", name_embedding=None)
+    eid = await _seed_entity(
+        tenant_id=t_a, canonical_name="A-only", name_embedding=None
+    )
     # Tenant B cannot write tenant A's embedding (count reports attempted len,
     # but the tenant-scoped WHERE matches nothing → row stays NULL).
-    await sc.set_entity_embeddings(tenant_id=t_b, updates=[{"id": eid, "embedding": fake_embedding("x")}])
-    rows = await sc.list_null_embedding_entities(tenant_id=t_a, fleet_id=None, batch_size=100)
+    await sc.set_entity_embeddings(
+        tenant_id=t_b, updates=[{"id": eid, "embedding": fake_embedding("x")}]
+    )
+    rows = await sc.list_null_embedding_entities(
+        tenant_id=t_a, fleet_id=None, batch_size=100
+    )
     assert eid in {r["id"] for r in rows}
 
 
@@ -486,7 +571,12 @@ async def test_resolve_missing_tenant_422(storage_http):
 async def test_resolve_non_numeric_threshold_422(storage_http):
     resp = await storage_http.post(
         f"{_PREFIX}/resolve",
-        json={"tenant_id": "t", "batch_size": 100, "threshold": "high", "candidate_limit": 3},
+        json={
+            "tenant_id": "t",
+            "batch_size": 100,
+            "threshold": "high",
+            "candidate_limit": 3,
+        },
     )
     assert resp.status_code == 422
 
@@ -516,7 +606,12 @@ async def test_discover_invalid_target_memory_id_422(storage_http):
 async def test_infer_missing_tenant_422(storage_http):
     resp = await storage_http.post(
         f"{_PREFIX}/infer-relations",
-        json={"batch_size": 500, "min_cooccurrence": 2, "reinforce_delta": 0.1, "max_relation_weight": 1.0},
+        json={
+            "batch_size": 500,
+            "min_cooccurrence": 2,
+            "reinforce_delta": 0.1,
+            "max_relation_weight": 1.0,
+        },
     )
     assert resp.status_code == 422
 
@@ -572,7 +667,10 @@ async def test_set_embeddings_missing_embedding_422(storage_http):
     # the router fail-closes to 422.
     resp = await storage_http.post(
         f"{_PREFIX}/set-embeddings",
-        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001"}]},
+        json={
+            "tenant_id": "t",
+            "updates": [{"id": "00000000-0000-0000-0000-000000000001"}],
+        },
     )
     assert resp.status_code == 422
 
@@ -580,7 +678,12 @@ async def test_set_embeddings_missing_embedding_422(storage_http):
 async def test_set_embeddings_non_list_embedding_422(storage_http):
     resp = await storage_http.post(
         f"{_PREFIX}/set-embeddings",
-        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": "nope"}]},
+        json={
+            "tenant_id": "t",
+            "updates": [
+                {"id": "00000000-0000-0000-0000-000000000001", "embedding": "nope"}
+            ],
+        },
     )
     assert resp.status_code == 422
 
@@ -590,7 +693,15 @@ async def test_set_embeddings_non_numeric_embedding_422(storage_http):
     # the pgvector codec — the router must reject it as 422.
     resp = await storage_http.post(
         f"{_PREFIX}/set-embeddings",
-        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": ["a"] * VECTOR_DIM}]},
+        json={
+            "tenant_id": "t",
+            "updates": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "embedding": ["a"] * VECTOR_DIM,
+                }
+            ],
+        },
     )
     assert resp.status_code == 422
 
@@ -600,7 +711,15 @@ async def test_set_embeddings_bool_embedding_422(storage_http):
     # pass the numeric check and either 500 or silently store 0|1. Must 422.
     resp = await storage_http.post(
         f"{_PREFIX}/set-embeddings",
-        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": [True] * VECTOR_DIM}]},
+        json={
+            "tenant_id": "t",
+            "updates": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "embedding": [True] * VECTOR_DIM,
+                }
+            ],
+        },
     )
     assert resp.status_code == 422
 
@@ -610,7 +729,12 @@ async def test_set_embeddings_empty_embedding_422(storage_http):
     # the DB layer; the router 422s it.
     resp = await storage_http.post(
         f"{_PREFIX}/set-embeddings",
-        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": []}]},
+        json={
+            "tenant_id": "t",
+            "updates": [
+                {"id": "00000000-0000-0000-0000-000000000001", "embedding": []}
+            ],
+        },
     )
     assert resp.status_code == 422
 
@@ -620,6 +744,14 @@ async def test_set_embeddings_wrong_dimension_embedding_422(storage_http):
     # the router 422s it.
     resp = await storage_http.post(
         f"{_PREFIX}/set-embeddings",
-        json={"tenant_id": "t", "updates": [{"id": "00000000-0000-0000-0000-000000000001", "embedding": [0.1, 0.2, 0.3]}]},
+        json={
+            "tenant_id": "t",
+            "updates": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "embedding": [0.1, 0.2, 0.3],
+                }
+            ],
+        },
     )
     assert resp.status_code == 422

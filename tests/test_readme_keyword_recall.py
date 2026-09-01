@@ -6,13 +6,13 @@ import hashlib
 import uuid
 
 import pytest
+from sqlalchemy import text
+
+from common.embedding import fake_embedding
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import MIN_SEARCH_SIMILARITY, SEARCH_OVERFETCH_FACTOR
 from core_api.services import memory_service
 from core_storage_api.services.postgres_service import get_session
-from sqlalchemy import text
-
-from common.embedding import fake_embedding
 from tests.conftest import get_test_auth
 
 

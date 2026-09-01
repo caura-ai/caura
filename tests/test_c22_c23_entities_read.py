@@ -36,7 +36,9 @@ async def test_storage_client_sends_filters():
         return []
 
     sc._get_list = fake_get_list  # type: ignore[method-assign]
-    await sc.list_entities("t1", fleet_id="f1", entity_type="person", search="astra", limit=7)
+    await sc.list_entities(
+        "t1", fleet_id="f1", entity_type="person", search="astra", limit=7
+    )
     assert seen["path"] == "/entities"
     assert seen["params"] == {
         "tenant_id": "t1",

@@ -36,7 +36,9 @@ from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
-_EMBED_PATH = "core_api.pipeline.steps.search.parallel_embed_entity_boost._get_or_cache_embedding"
+_EMBED_PATH = (
+    "core_api.pipeline.steps.search.parallel_embed_entity_boost._get_or_cache_embedding"
+)
 _BOOST_PATH = "core_api.pipeline.steps.search.parallel_embed_entity_boost._entity_boost_via_storage"
 _CLASSIFY_SC_PATH = "core_api.pipeline.steps.search.classify_query.get_storage_client"
 
@@ -61,7 +63,7 @@ def _boost_ctx(extra: dict | None = None) -> PipelineContext:
 
 def _classify_ctx() -> PipelineContext:
     return PipelineContext(
-                data={
+        data={
             "query": "What is Comet 0002's launch_date?",
             "tenant_id": "t1",
             "fleet_ids": ["fleet-1"],

@@ -10,8 +10,12 @@ from tests.conftest import get_test_auth, uid
 
 
 async def _write_memory(
-    client, tenant_id: str, headers: dict, content: str,
-    agent_id: str = "test-agent", fleet_id: str = "test-fleet",
+    client,
+    tenant_id: str,
+    headers: dict,
+    content: str,
+    agent_id: str = "test-agent",
+    fleet_id: str = "test-fleet",
 ) -> dict:
     resp = await client.post(
         "/api/v1/memories",
@@ -113,7 +117,9 @@ async def test_own_tenant_memory_access_ok(client):
     # tenant accumulates memories and a freshly-written one can fall outside the
     # default list page — making a bare ``len >= 1`` presence check flaky.
     tenant_id, headers = get_test_auth(f"self-org-{uid()}")
-    written = await _write_memory(client, tenant_id, headers, f"My data for tenant isolation test [{uid()}]")
+    written = await _write_memory(
+        client, tenant_id, headers, f"My data for tenant isolation test [{uid()}]"
+    )
 
     resp = await client.get(
         f"/api/v1/memories?tenant_id={tenant_id}",
@@ -121,7 +127,9 @@ async def test_own_tenant_memory_access_ok(client):
     )
     assert resp.status_code == 200
     data = resp.json()
-    items = data.get("items", data) if isinstance(data, dict) and "items" in data else data
+    items = (
+        data.get("items", data) if isinstance(data, dict) and "items" in data else data
+    )
     # The just-written memory is readable (robust to ambient rows) ...
     assert any(m["id"] == written["id"] for m in items)
     # ... and the tenant-scoped list never leaks another tenant's rows.
@@ -141,7 +149,10 @@ async def test_entity_cross_tenant_not_found(client):
 
     # Write a memory with entity to create the entity in tenant A
     import uuid
-    await _write_memory(client, tenant_a, headers_a, f"Alice is a developer [{uuid.uuid4().hex[:8]}]")
+
+    await _write_memory(
+        client, tenant_a, headers_a, f"Alice is a developer [{uuid.uuid4().hex[:8]}]"
+    )
 
     # List entities for tenant A
     ent_resp = await client.get(
@@ -327,4 +338,5 @@ async def test_error_response_no_error_type_in_test(client):
     # We can't easily trigger a real 500, so just verify the handler is registered
     # by checking the app's exception_handlers
     from core_api.app import app
+
     assert Exception in app.exception_handlers

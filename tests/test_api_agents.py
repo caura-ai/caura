@@ -1,20 +1,21 @@
 """E2E agent trust-level management tests through HTTP API — real DB, no mocks."""
 
-import uuid
-
-import pytest
-
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-async def _write_memory(client, tenant_id: str, headers: dict, content: str,
-                        agent_id: str = "test-agent",
-                        fleet_id: str | None = None) -> dict:
+async def _write_memory(
+    client,
+    tenant_id: str,
+    headers: dict,
+    content: str,
+    agent_id: str = "test-agent",
+    fleet_id: str | None = None,
+) -> dict:
     """Write a single memory (which auto-creates the agent)."""
     body = {
         "tenant_id": tenant_id,
@@ -53,9 +54,14 @@ async def test_agent_created_on_memory_write(client):
     tag = _uid()
     agent_name = f"agent-{tag}"
 
-    await _write_memory(client, tenant_id, headers,
-                        f"Some fact about agents for testing [{tag}]",
-                        agent_id=agent_name, fleet_id=f"fleet-{tag}")
+    await _write_memory(
+        client,
+        tenant_id,
+        headers,
+        f"Some fact about agents for testing [{tag}]",
+        agent_id=agent_name,
+        fleet_id=f"fleet-{tag}",
+    )
 
     agents = await _get_agents(client, tenant_id, headers)
     matching = [a for a in agents if a["agent_id"] == agent_name]
@@ -69,9 +75,14 @@ async def test_update_agent_trust_level(client):
     tag = _uid()
     agent_name = f"agent-{tag}"
 
-    await _write_memory(client, tenant_id, headers,
-                        f"A fact about trust levels for testing [{tag}]",
-                        agent_id=agent_name, fleet_id=f"fleet-{tag}")
+    await _write_memory(
+        client,
+        tenant_id,
+        headers,
+        f"A fact about trust levels for testing [{tag}]",
+        agent_id=agent_name,
+        fleet_id=f"fleet-{tag}",
+    )
 
     # Update trust level to 3 via the canonical /trust route.
     resp = await client.patch(
@@ -94,9 +105,14 @@ async def test_multiple_agents_per_tenant(client):
 
     names = [f"agent-{tag}-{i}" for i in range(3)]
     for name in names:
-        await _write_memory(client, tenant_id, headers,
-                            f"Memory from {name} [{tag}]",
-                            agent_id=name, fleet_id=f"fleet-{tag}")
+        await _write_memory(
+            client,
+            tenant_id,
+            headers,
+            f"Memory from {name} [{tag}]",
+            agent_id=name,
+            fleet_id=f"fleet-{tag}",
+        )
 
     agents = await _get_agents(client, tenant_id, headers)
     agent_ids = {a["agent_id"] for a in agents}
@@ -111,9 +127,14 @@ async def test_agent_fleet_association(client):
     agent_name = f"agent-{tag}"
     fleet_id = f"fleet-{tag}"
 
-    await _write_memory(client, tenant_id, headers,
-                        f"Fleet memory [{tag}]",
-                        agent_id=agent_name, fleet_id=fleet_id)
+    await _write_memory(
+        client,
+        tenant_id,
+        headers,
+        f"Fleet memory [{tag}]",
+        agent_id=agent_name,
+        fleet_id=fleet_id,
+    )
 
     agents = await _get_agents(client, tenant_id, headers)
     matching = [a for a in agents if a["agent_id"] == agent_name]
@@ -129,12 +150,22 @@ async def test_agent_isolation(client):
     agent_a = f"agent-a-{tag}"
     agent_b = f"agent-b-{tag}"
 
-    await _write_memory(client, tenant_id, headers,
-                        f"A's memory [{tag}]",
-                        agent_id=agent_a, fleet_id=f"fleet-a-{tag}")
-    await _write_memory(client, tenant_id, headers,
-                        f"B's memory [{tag}]",
-                        agent_id=agent_b, fleet_id=f"fleet-b-{tag}")
+    await _write_memory(
+        client,
+        tenant_id,
+        headers,
+        f"A's memory [{tag}]",
+        agent_id=agent_a,
+        fleet_id=f"fleet-a-{tag}",
+    )
+    await _write_memory(
+        client,
+        tenant_id,
+        headers,
+        f"B's memory [{tag}]",
+        agent_id=agent_b,
+        fleet_id=f"fleet-b-{tag}",
+    )
 
     agents = await _get_agents(client, tenant_id, headers)
     agent_ids = {a["agent_id"] for a in agents}

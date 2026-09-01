@@ -15,6 +15,7 @@ rubric — which WOULD make the bare check unsafe — fails loudly.
 """
 
 import pytest
+
 from core_api.services.contradiction_detector import (
     _CONF_CLEAN,
     _CONF_FALLBACK,

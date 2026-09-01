@@ -7,10 +7,10 @@ import pytest
 
 from core_api.constants import SIMILARITY_BLEND
 
-
 # ---------------------------------------------------------------------------
 # Pure math — replicate the SQL base_score in Python
 # ---------------------------------------------------------------------------
+
 
 def compute_base_score(similarity: float, weight: float) -> float:
     """Python equivalent of: SIMILARITY_BLEND * similarity + (1 - SIMILARITY_BLEND) * weight."""
@@ -38,9 +38,9 @@ def compute_full_score(
 # Unit tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestScoringBlend:
-
     def test_similarity_blend_constant_valid(self):
         """SIMILARITY_BLEND must be between 0.5 and 1.0 (similarity-dominant)."""
         assert 0.5 <= SIMILARITY_BLEND <= 1.0
@@ -90,7 +90,9 @@ class TestScoringBlend:
         """Max relevance, min weight → score should still be high."""
         score = compute_base_score(similarity=1.0, weight=0.0)
         assert score == pytest.approx(SIMILARITY_BLEND)
-        assert score > 0.5, "Max-similarity memory must score above 0.5 even with zero weight"
+        assert score > 0.5, (
+            "Max-similarity memory must score above 0.5 even with zero weight"
+        )
 
     # -- Ranking scenarios --
 
@@ -131,7 +133,9 @@ class TestScoringBlend:
     def test_all_modifiers_compound(self):
         """All modifiers multiply together on the base_score."""
         base = compute_base_score(0.8, 0.6)
-        full = compute_full_score(0.8, 0.6, freshness=0.9, entity_boost=1.2, recall_boost=1.1)
+        full = compute_full_score(
+            0.8, 0.6, freshness=0.9, entity_boost=1.2, recall_boost=1.1
+        )
         expected = base * 0.9 * 1.2 * 1.1
         assert full == pytest.approx(expected, abs=0.001)
 
@@ -140,9 +144,24 @@ class TestScoringBlend:
     def test_realistic_ranking_scenario(self):
         """A realistic set of 5 memories ranked correctly."""
         memories = [
-            {"sim": 0.95, "w": 0.3, "fresh": 1.0, "label": "highly relevant, low weight"},
-            {"sim": 0.60, "w": 0.9, "fresh": 1.0, "label": "moderate relevance, high weight"},
-            {"sim": 0.92, "w": 0.8, "fresh": 1.0, "label": "very relevant, high weight"},
+            {
+                "sim": 0.95,
+                "w": 0.3,
+                "fresh": 1.0,
+                "label": "highly relevant, low weight",
+            },
+            {
+                "sim": 0.60,
+                "w": 0.9,
+                "fresh": 1.0,
+                "label": "moderate relevance, high weight",
+            },
+            {
+                "sim": 0.92,
+                "w": 0.8,
+                "fresh": 1.0,
+                "label": "very relevant, high weight",
+            },
             {"sim": 0.85, "w": 0.5, "fresh": 0.5, "label": "relevant but stale"},
             {"sim": 0.40, "w": 1.0, "fresh": 1.0, "label": "low relevance, max weight"},
         ]

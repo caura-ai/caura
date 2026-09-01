@@ -52,7 +52,7 @@ def _memory_row(status="active"):
 
 
 def _async_return(value):
-    async def _inner(*args, **kwargs):  # noqa: ARG001
+    async def _inner(*args, **kwargs):
         return value
 
     return _inner
@@ -169,12 +169,14 @@ async def test_every_manage_success_op_parses_as_json(mcp_env, monkeypatch):
     ]
 
     class _Out:
-        def model_dump(self, mode="python"):  # noqa: ARG002
+        def model_dump(self, mode="python"):
             return {"id": VALID_UID, "content": "new text"}
 
     mcp_env["service"]("update_memory").return_value = _Out()
     outs.append(
-        await mcp_server.caura_manage(op="update", memory_id=VALID_UID, content="new text")
+        await mcp_server.caura_manage(
+            op="update", memory_id=VALID_UID, content="new text"
+        )
     )
     mcp_env["service"]("soft_delete_memory").return_value = None
     outs.append(await mcp_server.caura_manage(op="delete", memory_id=VALID_UID))

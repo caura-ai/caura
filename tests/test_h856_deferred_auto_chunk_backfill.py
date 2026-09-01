@@ -152,7 +152,11 @@ async def _run_auto_chunk(
         return MagicMock()
 
     with (
-        patch.object(memory_service.settings, "deployment_mode", "deferred" if deferred else "inline"),
+        patch.object(
+            memory_service.settings,
+            "deployment_mode",
+            "deferred" if deferred else "inline",
+        ),
         patch.object(memory_service, "get_storage_client", lambda: sc),
         patch.object(memory_service, "track_task", MagicMock()),
         patch.object(memory_service, "tracked_task", _tracked_task),
@@ -215,7 +219,9 @@ async def test_the_embed_backfill_carries_the_parents_own_content_hash() -> None
     with — this branch computes its own rather than reading ``ctx``."""
     seen: dict = {}
 
-    with patch.object(memory_service, "_schedule_embed_or_reembed", new=_recorder(seen)):
+    with patch.object(
+        memory_service, "_schedule_embed_or_reembed", new=_recorder(seen)
+    ):
         run = await _run_auto_chunk(deferred=True)
 
     memory_id, content, _tenant = seen["args"]
@@ -232,7 +238,9 @@ async def test_the_enrich_backfill_requests_governance_remediation() -> None:
     signal" branch, where it enforces nothing. So the answer is True."""
     seen: dict = {}
 
-    with patch.object(memory_service, "_schedule_enrich_or_inline", new=_recorder(seen)):
+    with patch.object(
+        memory_service, "_schedule_enrich_or_inline", new=_recorder(seen)
+    ):
         run = await _run_auto_chunk(deferred=True)
 
     assert seen["run_governance_remediation"] is True

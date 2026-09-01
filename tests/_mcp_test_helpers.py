@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-
 _LATENCY_SUFFIX_RE = re.compile(r"\n\n_latency_ms:\s*\d+\s*$")
 
 

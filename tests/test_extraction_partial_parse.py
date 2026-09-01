@@ -240,7 +240,7 @@ async def test_total_loss_falls_back_rather_than_returning_empty() -> None:
         "an all-dropped payload must reach the fallback, not return empty; "
         f"got {graph!r}"
     )
-    assert any("anna bergstrom" == e.canonical_name for e in graph.entities), (
+    assert any(e.canonical_name == "anna bergstrom" for e in graph.entities), (
         f"expected the regex fallback's extraction; got {[e.canonical_name for e in graph.entities]!r}"
     )
 

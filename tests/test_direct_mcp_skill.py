@@ -153,19 +153,19 @@ def test_contains_canonical_content_invariants() -> None:
     skill = _read_adapter()
     must_contain = [
         # The loop + write discipline
-        "most-binding-first",          # orient ordering
+        "most-binding-first",  # orient ordering
         "## 3 · How and when to write a memory",
         # Grounded accuracy facts (must not regress)
-        "home fleet",                  # fleet_id resolves home fleet on omit (post-#465)
-        "private by default",          # evolve failure -> private rule by default
+        "home fleet",  # fleet_id resolves home fleet on omit (post-#465)
+        "private by default",  # evolve failure -> private rule by default
         # Two-stores hybrid pattern
-        "Cross-store discovery",       # pointer-memory workaround
-        "op=list_collections",         # enumerate collections
-        "op=search",                   # semantic search over docs
-        'data["summary"]',             # opt-in semantic indexing on write
-        "scalar exact-match only",     # caura_doc where-filter gotcha
+        "Cross-store discovery",  # pointer-memory workaround
+        "op=list_collections",  # enumerate collections
+        "op=search",  # semantic search over docs
+        'data["summary"]',  # opt-in semantic indexing on write
+        "scalar exact-match only",  # caura_doc where-filter gotcha
         # Trust self-awareness
-        "trust 1",                     # auto-register tier
+        "trust 1",  # auto-register tier
         # Reflective ingest (Interviewer) — realtime writes stay mandatory
         "Some memories may be written for you",
         "Interviewer is periodic and reflective",

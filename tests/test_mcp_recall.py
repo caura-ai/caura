@@ -35,7 +35,7 @@ class _MemoryStub:
         self.mid = mid
         self.score = score
 
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": self.mid, "score": self.score}
 
 
@@ -185,7 +185,7 @@ async def test_recall_brief_skipped_when_include_brief_false(mcp_env, monkeypatc
     mcp_env["service"]("search_memories").return_value = [_MemoryStub("m-1")]
     calls: list = []
 
-    async def _spy(*args, **kwargs):  # noqa: ARG001
+    async def _spy(*args, **kwargs):
         calls.append(1)
         return {"summary": "should not run"}
 
@@ -209,16 +209,16 @@ class _FakeConfig:
     entity_retrieval = True
 
 
-async def _fake_resolve_config(tenant_id):  # noqa: ARG001
+async def _fake_resolve_config(tenant_id):
     return _FakeConfig()
 
 
-async def _async_none(*args, **kwargs):  # noqa: ARG001
+async def _async_none(*args, **kwargs):
     return None
 
 
 def _fake_async_return(value):
-    async def _fn(*args, **kwargs):  # noqa: ARG001
+    async def _fn(*args, **kwargs):
         return value
 
     return _fn

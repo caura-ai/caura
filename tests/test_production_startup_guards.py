@@ -15,8 +15,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from core_api.app import _validate_startup_settings
 from pydantic import SecretStr
+
+from core_api.app import _validate_startup_settings
 from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
 
@@ -67,9 +68,7 @@ def test_production_requires_a_perimeter():
 def test_empty_strings_count_as_unset():
     """`""` is the shape a missing env var actually takes in a container."""
     with pytest.raises(RuntimeError, match="GATEWAY_SHARED_SECRET"):
-        _validate_startup_settings(
-            _prod(gateway_shared_secret="", compat_api_key="")
-        )
+        _validate_startup_settings(_prod(gateway_shared_secret="", compat_api_key=""))
 
 
 def test_api_key_alone_is_an_acceptable_perimeter():

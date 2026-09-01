@@ -35,7 +35,6 @@ import pytest
 
 from core_api.services.dedup_identifier_filter import _content_is_identifier_bearing
 
-
 pytestmark = pytest.mark.unit
 
 

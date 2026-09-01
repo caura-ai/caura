@@ -69,8 +69,8 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
+from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -592,6 +592,7 @@ async def test_kill_switch_disabled_skips_retraction():
     the judge MUST NOT be invoked and Path A's verdict stands. Ops
     escape valve for misbehaving tenants."""
     from types import SimpleNamespace
+
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
@@ -641,6 +642,7 @@ async def test_kill_switch_enabled_default_allows_retraction():
     (the default), retraction proceeds as normal. Sanity test that the
     kill-switch only gates when explicitly off."""
     from types import SimpleNamespace
+
     from core_api.services.contradiction_detector import (
         detect_contradictions_by_entities_async,
     )
@@ -688,7 +690,6 @@ async def test_retraction_context_fetch_failure_logs_exc_type(caplog):
     failure mode un-diagnosable. Mirrors the analogous
     detection-path test in
     ``test_caura_131_entity_aware_path_c_detection.py``."""
-    import asyncio
     import logging
     from unittest.mock import patch as _patch
 
@@ -705,7 +706,7 @@ async def test_retraction_context_fetch_failure_logs_exc_type(caplog):
     # storage failures and returns ``[]``; patching it is the only
     # way to exercise the outer ``except Exception`` where the
     # CAURA-134 WARNING + symmetric INFO logs live.
-    fetch_ctx = AsyncMock(side_effect=asyncio.TimeoutError())
+    fetch_ctx = AsyncMock(side_effect=TimeoutError())
 
     judge = AsyncMock(return_value=(False, 0.95))
 

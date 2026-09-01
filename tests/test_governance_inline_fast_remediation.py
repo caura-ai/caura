@@ -133,7 +133,9 @@ async def _run_inline(
         patch.object(memory_service, "get_storage_client", lambda: storage),
         patch.object(memory_service, "track_task", MagicMock()),
         patch.object(
-            memory_service, "publish_memory_enrich_request", AsyncMock(return_value=None)
+            memory_service,
+            "publish_memory_enrich_request",
+            AsyncMock(return_value=None),
         ),
         patch(
             "core_api.services.memory_enrichment.enrich_memory",

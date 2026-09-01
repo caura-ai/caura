@@ -13,16 +13,16 @@ Integration tests verify:
 """
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+
 from core_api.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
 )
-
 from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 # ---------------------------------------------------------------------------
@@ -414,7 +414,7 @@ class TestAsyncEntryPoint:
 
         deleted_memory = {
             "id": str(uuid4()),
-            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "deleted_at": datetime.now(UTC).isoformat(),
         }
 
         mock_sc = AsyncMock()
@@ -482,9 +482,8 @@ class TestContradictionIntegration:
         fleet_id=None,
     ):
         """Insert a memory with fake embedding via storage client."""
-        from core_api.clients.storage_client import get_storage_client
-
         from common.embedding import fake_embedding
+        from core_api.clients.storage_client import get_storage_client
 
         ch = hashlib.sha256(f"{tenant_id}:{fleet_id}:{content}".encode()).hexdigest()
         emb = fake_embedding(content)
@@ -550,9 +549,8 @@ class TestContradictionIntegration:
 
     async def test_semantic_contradiction_with_fake_llm(self, tenant_id):
         """Semantic conflict using fake LLM heuristic."""
-        from core_api.services.contradiction_detector import detect_contradictions
-
         from common.embedding import fake_embedding
+        from core_api.services.contradiction_detector import detect_contradictions
 
         old = await self._insert_memory(
             tenant_id,
@@ -582,9 +580,8 @@ class TestContradictionIntegration:
 
     async def test_no_false_positive_on_different_topics(self, tenant_id):
         """Different topics should not trigger contradiction."""
-        from core_api.services.contradiction_detector import detect_contradictions
-
         from common.embedding import fake_embedding
+        from core_api.services.contradiction_detector import detect_contradictions
 
         await self._insert_memory(tenant_id, "Python is a programming language")
         new = await self._insert_memory(tenant_id, "The weather is sunny today")

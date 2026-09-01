@@ -32,7 +32,6 @@ from tests.test_api_interview import (
     _payload,
 )
 
-
 # ── helpers ──
 
 
@@ -85,12 +84,16 @@ async def _drain_inflight() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def _interviewer_memories(client, tenant_id: str, agent_id: str, headers: dict) -> list[dict]:
+async def _interviewer_memories(
+    client, tenant_id: str, agent_id: str, headers: dict
+) -> list[dict]:
     listing = await client.get(
         f"/api/v1/memories?tenant_id={tenant_id}&agent_id={agent_id}", headers=headers
     )
     assert listing.status_code == 200
-    rows = listing.json()["items"] if isinstance(listing.json(), dict) else listing.json()
+    rows = (
+        listing.json()["items"] if isinstance(listing.json(), dict) else listing.json()
+    )
     return [r for r in rows if (r.get("metadata") or {}).get("source") == "interviewer"]
 
 
@@ -149,7 +152,9 @@ async def test_async_submit_accepts_with_watermark_and_masked_job(
 # ── (b) processor writes memories and marks the job done ──
 
 
-async def test_processing_writes_typed_memories_and_marks_done(client, canned_llm, async_submit):
+async def test_processing_writes_typed_memories_and_marks_done(
+    client, canned_llm, async_submit
+):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
@@ -200,7 +205,9 @@ async def test_resubmit_same_window_is_idempotent(client, canned_llm, async_subm
     # racing the assertion): the deterministic doc id resolves to the same
     # job, and a "done" job is NOT flipped back to pending (#667
     # no-downgrade ladder) — the window was already synthesized.
-    doc_id2 = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id2 = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
     assert doc_id2 == doc_id
     assert (await _job_doc(tenant_id, doc_id))["data"]["status"] == "done"
     assert await process_interview_job(tenant_id, doc_id) is None  # done → no-op
@@ -221,15 +228,23 @@ async def test_enqueue_over_processing_job_does_not_downgrade(client, canned_llm
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
 
     # Simulate a concurrent processor owning the job.
     started_at = datetime.now(UTC).isoformat()
     await _overwrite_job_data(
-        tenant_id, doc_id, status="processing", attempts=1, processing_started_at=started_at
+        tenant_id,
+        doc_id,
+        status="processing",
+        attempts=1,
+        processing_started_at=started_at,
     )
 
-    doc_id2 = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id2 = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
     assert doc_id2 == doc_id
     after = (await _job_doc(tenant_id, doc_id))["data"]
     assert after["status"] == "processing"
@@ -242,20 +257,27 @@ async def test_duplicate_enqueue_preserves_attempts(client, monkeypatch):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
 
     async def _always_boom(prompt, config, events):
         raise RuntimeError("llm down")
 
     monkeypatch.setattr(interview_service, "_interview_chunk", _always_boom)
-    assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_transient"}
+    assert await process_interview_job(tenant_id, doc_id) == {
+        "status": "failed_transient"
+    }
     doc = await _job_doc(tenant_id, doc_id)
     assert doc["data"]["status"] == "pending"
     assert doc["data"]["attempts"] == 1
 
     # A plugin resubmit of the same failing window must NOT reset the
     # retry budget (it would cycle past interview_job_max_attempts forever).
-    assert await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id)) == doc_id
+    assert (
+        await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+        == doc_id
+    )
     doc = await _job_doc(tenant_id, doc_id)
     assert doc["data"]["status"] == "pending"
     assert doc["data"]["attempts"] == 1
@@ -273,7 +295,9 @@ async def test_enqueue_prior_read_failure_raises_and_leaves_done_job_untouched(
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
     result = await process_interview_job(tenant_id, doc_id)
     assert result is not None and result["status"] == "committed"
     before = (await _job_doc(tenant_id, doc_id))["data"]
@@ -356,11 +380,15 @@ async def test_first_submit_prior_read_failure_500s_without_advancing_watermark(
 # ── (d) failure → pending w/ attempts; exhaustion → failed_permanent ──
 
 
-async def test_failed_synthesis_returns_to_pending_then_retry_succeeds(client, monkeypatch):
+async def test_failed_synthesis_returns_to_pending_then_retry_succeeds(
+    client, monkeypatch
+):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
 
     boom = {"on": True}
 
@@ -371,7 +399,9 @@ async def test_failed_synthesis_returns_to_pending_then_retry_succeeds(client, m
 
     monkeypatch.setattr(interview_service, "_interview_chunk", _flaky_chunk)
 
-    assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_transient"}  # never raises
+    assert await process_interview_job(tenant_id, doc_id) == {
+        "status": "failed_transient"
+    }  # never raises
     doc = await _job_doc(tenant_id, doc_id)
     assert doc["data"]["status"] == "pending"
     assert doc["data"]["attempts"] == 1
@@ -389,7 +419,9 @@ async def test_job_attempts_exhaustion_parks_as_failed_permanent(client, monkeyp
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
 
     async def _always_boom(prompt, config, events):
         raise RuntimeError("llm down")
@@ -397,18 +429,24 @@ async def test_job_attempts_exhaustion_parks_as_failed_permanent(client, monkeyp
     monkeypatch.setattr(interview_service, "_interview_chunk", _always_boom)
     max_attempts = interview_route.app_settings.interview_job_max_attempts
     for expected_attempts in range(1, max_attempts + 1):
-        assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_transient"}
+        assert await process_interview_job(tenant_id, doc_id) == {
+            "status": "failed_transient"
+        }
         doc = await _job_doc(tenant_id, doc_id)
         assert doc["data"]["status"] == "pending"
         assert doc["data"]["attempts"] == expected_attempts
 
     # attempts == max → the next run parks the job instead of retrying,
     # returning the sentinel so the sweep can count it as jobs_parked.
-    assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_permanent"}
+    assert await process_interview_job(tenant_id, doc_id) == {
+        "status": "failed_permanent"
+    }
     assert (await _job_doc(tenant_id, doc_id))["data"]["status"] == "failed_permanent"
 
 
-async def test_concurrent_processors_increment_attempts_from_fresh_base(client, monkeypatch):
+async def test_concurrent_processors_increment_attempts_from_fresh_base(
+    client, monkeypatch
+):
     """Two racing processors both read a stale ``attempts=N`` snapshot; the
     processing-transition write must increment from the FRESH stored value
     (N → N+1 → N+2), not both write the stale N+1 — undercounting would let
@@ -418,7 +456,9 @@ async def test_concurrent_processors_increment_attempts_from_fresh_base(client, 
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
 
     async def _always_boom(prompt, config, events):
         raise RuntimeError("llm down")
@@ -442,16 +482,23 @@ async def test_concurrent_processors_increment_attempts_from_fresh_base(client, 
 
     async def _spy_upsert(payload):
         data = payload.get("data") or {}
-        if payload.get("collection") == JOBS_COLLECTION and data.get("status") == "processing":
+        if (
+            payload.get("collection") == JOBS_COLLECTION
+            and data.get("status") == "processing"
+        ):
             processing_attempts.append(data.get("attempts"))
         return await real_upsert(payload)
 
     monkeypatch.setattr(sc, "get_document", _stale_once_get)
     monkeypatch.setattr(sc, "upsert_document", _spy_upsert)
 
-    assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_transient"}  # attempts 0 → 1
+    assert await process_interview_job(tenant_id, doc_id) == {
+        "status": "failed_transient"
+    }  # attempts 0 → 1
     stale["armed"] = True  # second run reads the pre-increment snapshot
-    assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_transient"}
+    assert await process_interview_job(tenant_id, doc_id) == {
+        "status": "failed_transient"
+    }
     # Strictly 1 → 2 — the stale-snapshot run must NOT re-write 1.
     assert processing_attempts == [1, 2]
 
@@ -463,7 +510,9 @@ async def test_pending_reset_retry_survives_one_write_failure(client, monkeypatc
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
 
     async def _boom_chunk(prompt, config, events):
         raise RuntimeError("llm down")
@@ -486,7 +535,9 @@ async def test_pending_reset_retry_survives_one_write_failure(client, monkeypatc
 
     monkeypatch.setattr(sc, "upsert_document", _flaky_upsert)
 
-    assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_transient"}  # never raises
+    assert await process_interview_job(tenant_id, doc_id) == {
+        "status": "failed_transient"
+    }  # never raises
     assert blips["remaining"] == 0  # the first reset write did raise
     doc = await _job_doc(tenant_id, doc_id)
     assert doc["data"]["status"] == "pending"
@@ -501,7 +552,9 @@ async def test_pending_reset_does_not_overwrite_concurrent_done(client, monkeypa
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
     completed_at = datetime.now(UTC).isoformat()
 
     async def _concurrent_done_then_boom(prompt, config, events):
@@ -517,8 +570,12 @@ async def test_pending_reset_does_not_overwrite_concurrent_done(client, monkeypa
         )
         raise RuntimeError("llm down")
 
-    monkeypatch.setattr(interview_service, "_interview_chunk", _concurrent_done_then_boom)
-    assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_transient"}  # never raises
+    monkeypatch.setattr(
+        interview_service, "_interview_chunk", _concurrent_done_then_boom
+    )
+    assert await process_interview_job(tenant_id, doc_id) == {
+        "status": "failed_transient"
+    }  # never raises
     after = (await _job_doc(tenant_id, doc_id))["data"]
     assert after["status"] == "done"  # the reset backed off
     assert after["attempts"] == 7  # the winner's count survives untouched
@@ -537,7 +594,9 @@ async def test_pending_reset_guard_uses_the_merge_base_fetch(client, monkeypatch
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
     completed_at = datetime.now(UTC).isoformat()
 
     failed = {"synthesis": False}
@@ -577,7 +636,9 @@ async def test_pending_reset_guard_uses_the_merge_base_fetch(client, monkeypatch
         return await real_get(tenant, collection, did, **kw)
 
     monkeypatch.setattr(sc, "get_document", _inject_done_get)
-    assert await process_interview_job(tenant_id, doc_id) == {"status": "failed_transient"}  # never raises
+    assert await process_interview_job(tenant_id, doc_id) == {
+        "status": "failed_transient"
+    }  # never raises
     monkeypatch.setattr(sc, "get_document", real_get)
 
     after = (await _job_doc(tenant_id, doc_id))["data"]
@@ -589,7 +650,9 @@ async def test_pending_reset_guard_uses_the_merge_base_fetch(client, monkeypatch
     assert post_failure_fetches["count"] == 1
 
 
-async def test_direct_processor_skips_processing_unless_stale_and_allowed(client, canned_llm):
+async def test_direct_processor_skips_processing_unless_stale_and_allowed(
+    client, canned_llm
+):
     """A "processing" doc is owned by the run that wrote it: a direct
     process_interview_job call skips it, flag or not, while it is FRESH;
     only allow_stale_processing=True on a STALE doc (the sweep's reclaim
@@ -597,16 +660,25 @@ async def test_direct_processor_skips_processing_unless_stale_and_allowed(client
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
     fresh_started = datetime.now(UTC).isoformat()
     await _overwrite_job_data(
-        tenant_id, doc_id, status="processing", attempts=1, processing_started_at=fresh_started
+        tenant_id,
+        doc_id,
+        status="processing",
+        attempts=1,
+        processing_started_at=fresh_started,
     )
 
     # Fresh + no flag: owned by the fire-and-forget task → skip.
     assert await process_interview_job(tenant_id, doc_id) is None
     # Fresh + flag: the flag alone can't reclaim a live run → still skip.
-    assert await process_interview_job(tenant_id, doc_id, allow_stale_processing=True) is None
+    assert (
+        await process_interview_job(tenant_id, doc_id, allow_stale_processing=True)
+        is None
+    )
     after = (await _job_doc(tenant_id, doc_id))["data"]
     assert after["status"] == "processing"
     assert after["processing_started_at"] == fresh_started
@@ -628,7 +700,9 @@ async def test_done_job_is_a_noop_for_the_processor(client, canned_llm):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-    doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+    doc_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, node_id, agent_id)
+    )
 
     first = await process_interview_job(tenant_id, doc_id)
     assert first is not None and first["status"] == "committed"
@@ -639,7 +713,9 @@ async def test_done_job_is_a_noop_for_the_processor(client, canned_llm):
 # ── scheduler sweep drains pending jobs ──
 
 
-async def test_schedule_sweep_processes_pending_jobs(client, canned_llm, async_submit, monkeypatch):
+async def test_schedule_sweep_processes_pending_jobs(
+    client, canned_llm, async_submit, monkeypatch
+):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
     node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
@@ -660,7 +736,9 @@ async def test_schedule_sweep_processes_pending_jobs(client, canned_llm, async_s
     doc_id = interview_job_doc_id(node_id, 0, 10)
     assert (await _job_doc(tenant_id, doc_id))["data"]["status"] == "pending"
 
-    run = await client.post("/api/v1/admin/interview/schedule/run", headers=get_admin_headers())
+    run = await client.post(
+        "/api/v1/admin/interview/schedule/run", headers=get_admin_headers()
+    )
     assert run.status_code == 200, run.text
     summary = run.json()
     assert summary["jobs_processed"] >= 1
@@ -679,7 +757,9 @@ async def test_sweep_recovers_stale_processing_but_not_fresh(client, canned_llm)
     now = datetime.now(UTC)
 
     stale_node, stale_agent = f"node-{uid()}", f"agent-{uid()}"
-    stale_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, stale_node, stale_agent))
+    stale_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, stale_node, stale_agent)
+    )
     await _overwrite_job_data(
         tenant_id,
         stale_id,
@@ -689,10 +769,16 @@ async def test_sweep_recovers_stale_processing_but_not_fresh(client, canned_llm)
     )
 
     fresh_node, fresh_agent = f"node-{uid()}", f"agent-{uid()}"
-    fresh_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, fresh_node, fresh_agent))
+    fresh_id = await enqueue_interview_job(
+        **_enqueue_kwargs(tenant_id, fresh_node, fresh_agent)
+    )
     fresh_started = now.isoformat()
     await _overwrite_job_data(
-        tenant_id, fresh_id, status="processing", attempts=1, processing_started_at=fresh_started
+        tenant_id,
+        fresh_id,
+        status="processing",
+        attempts=1,
+        processing_started_at=fresh_started,
     )
 
     await process_pending_interview_jobs()
@@ -700,15 +786,21 @@ async def test_sweep_recovers_stale_processing_but_not_fresh(client, canned_llm)
     stale_after = (await _job_doc(tenant_id, stale_id))["data"]
     assert stale_after["status"] == "done"
     assert stale_after["attempts"] == 2  # the recovery run counted
-    assert len(await _interviewer_memories(client, tenant_id, stale_agent, headers)) == 3
+    assert (
+        len(await _interviewer_memories(client, tenant_id, stale_agent, headers)) == 3
+    )
 
     fresh_after = (await _job_doc(tenant_id, fresh_id))["data"]
     assert fresh_after["status"] == "processing"
     assert fresh_after["processing_started_at"] == fresh_started
-    assert len(await _interviewer_memories(client, tenant_id, fresh_agent, headers)) == 0
+    assert (
+        len(await _interviewer_memories(client, tenant_id, fresh_agent, headers)) == 0
+    )
 
 
-async def test_sweep_bounded_concurrency_completes_all_jobs(client, canned_llm, monkeypatch):
+async def test_sweep_bounded_concurrency_completes_all_jobs(
+    client, canned_llm, monkeypatch
+):
     """Fix 2 (#667 round 6): a sweep over MORE jobs than the fan-out bound
     (7 pending jobs across 2 tenants > INTERVIEW_SWEEP_CONCURRENCY=5)
     completes every job with the same summary semantics as the old
@@ -722,7 +814,9 @@ async def test_sweep_bounded_concurrency_completes_all_jobs(client, canned_llm, 
     for tenant_id, count in ((tenant_a, 4), (tenant_b, 3)):
         for _ in range(count):
             node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
-            doc_id = await enqueue_interview_job(**_enqueue_kwargs(tenant_id, node_id, agent_id))
+            doc_id = await enqueue_interview_job(
+                **_enqueue_kwargs(tenant_id, node_id, agent_id)
+            )
             seeded.append((tenant_id, doc_id))
     assert len(seeded) == 7 > interview_service.INTERVIEW_SWEEP_CONCURRENCY
 

@@ -1,7 +1,7 @@
 """E2E crystallizer (memory analysis) tests through HTTP API."""
 
-from tests.conftest import get_test_auth, get_admin_headers, uid as _uid
-
+from tests.conftest import get_admin_headers, get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -341,10 +341,14 @@ async def test_get_report_admin_without_a_tenant_is_a_400():
         try:
             await get_report(report_id=uuid4(), tenant_id=None, auth=admin)
         except HTTPException as e:
-            assert e.status_code == 400, f"admin with no tenant must be a 400; got {e.status_code}"
+            assert e.status_code == 400, (
+                f"admin with no tenant must be a 400; got {e.status_code}"
+            )
             assert e.detail["code"] == "TENANT_REQUIRED"
         else:
-            raise AssertionError("Expected HTTPException(400) for an admin key naming no tenant")
+            raise AssertionError(
+                "Expected HTTPException(400) for an admin key naming no tenant"
+            )
 
     sc_mock.get_report.assert_not_awaited()
 

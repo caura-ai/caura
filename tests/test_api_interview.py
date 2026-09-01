@@ -12,7 +12,6 @@ import pytest
 import core_api.services.interview_service as interview_service
 from tests.conftest import get_test_auth, new_tenant_id, uid
 
-
 # ── helpers ──
 
 

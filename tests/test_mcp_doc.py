@@ -16,7 +16,7 @@ ORM-row / tuple shapes.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -34,7 +34,7 @@ def _doc(doc_id: str = "acme", collection: str = "customers", **extra) -> dict:
         "doc_id": doc_id,
         "tenant_id": "test-tenant",
         "data": {"plan": "business"},
-        "updated_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(UTC),
     }
     doc.update(extra)
     return doc
@@ -285,7 +285,7 @@ async def test_doc_write_no_summary_stores_unindexed(mcp_env, monkeypatch):
     embedding — the "I don't need semantic search" path stays open."""
     called = {"hit": False}
 
-    async def should_not_embed(text, **_kwargs):  # noqa: ARG001
+    async def should_not_embed(text, **_kwargs):
         called["hit"] = True
         return [0.0] * VECTOR_DIM
 
@@ -581,7 +581,7 @@ def _skill_doc(doc_id: str, status: str, tenant_id: str = "test-tenant") -> dict
         "doc_id": doc_id,
         "tenant_id": tenant_id,
         "data": {"slug": doc_id, "status": status, "summary": "a skill"},
-        "updated_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(UTC),
     }
 
 
@@ -1334,7 +1334,7 @@ async def test_doc_write_skips_mint_for_skills_collection(
 
 
 def _async_return(value):
-    async def _fn(*args, **kwargs):  # noqa: ARG001
+    async def _fn(*args, **kwargs):
         return value
 
     return _fn

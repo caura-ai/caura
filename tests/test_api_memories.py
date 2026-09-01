@@ -1,7 +1,7 @@
 """E2E memory CRUD tests through HTTP API."""
 
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Helpers

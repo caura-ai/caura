@@ -17,15 +17,15 @@ from __future__ import annotations
 import asyncio
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
-from core_api.config import Settings, settings as _settings_singleton
+from core_api.config import Settings
+from core_api.config import settings as _settings_singleton
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.write.parallel_embed_enrich import ParallelEmbedEnrich
 from core_api.schemas import MemoryCreate
-
 
 TENANT_ID = f"test-inline-timeout-{uuid.uuid4().hex[:8]}"
 
@@ -47,7 +47,7 @@ def _ctx(*, enrichment: bool = True) -> PipelineContext:
         enrichment_provider="fake" if enrichment else "none",
     )
     return PipelineContext(
-                data={"input": _input(), "content_hash": "f" * 64},
+        data={"input": _input(), "content_hash": "f" * 64},
         tenant_config=tenant_config,
     )
 

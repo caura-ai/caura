@@ -455,7 +455,11 @@ async def test_bulk_reembed_preserves_batching() -> None:
 
     sc = MagicMock()
     sc.get_memory = AsyncMock(
-        side_effect=lambda mid, tenant_id, **_kw: {"id": mid, "deleted_at": None, "fleet_id": "f"}
+        side_effect=lambda mid, tenant_id, **_kw: {
+            "id": mid,
+            "deleted_at": None,
+            "fleet_id": "f",
+        }
     )
     sc.update_embedding = AsyncMock()
 
@@ -1040,7 +1044,7 @@ async def test_shim_publishes_event_when_flag_off() -> None:
     published: list[tuple[str, object]] = []
 
     class _FakeBus:
-        async def publish(self, topic, event):  # noqa: ANN001 — duck-typed
+        async def publish(self, topic, event):
             published.append((topic, event))
 
     fake_bus = _FakeBus()

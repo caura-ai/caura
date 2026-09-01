@@ -49,7 +49,9 @@ import httpx
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _env_compat import env_required as _env  # noqa: E402  (path shim above must run first)
+from _env_compat import (
+    env_required as _env,
+)
 
 
 def _detected(target_id: str, resp: dict) -> bool:

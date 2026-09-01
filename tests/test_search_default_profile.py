@@ -20,7 +20,6 @@ from core_api.services.organization_settings import (
     _validate_default_search_profile,
 )
 
-
 # ── ResolvedConfig.default_search_profile ──
 
 
@@ -211,7 +210,9 @@ def test_fts_rank_scale_floor_is_one_not_zero():
     """
     with pytest.raises(ValueError, match="fts_rank_scale"):
         _validate_default_search_profile(_profile(fts_rank_scale=0.5))
-    _validate_default_search_profile(_profile(fts_rank_scale=1.0))  # the revert, allowed
+    _validate_default_search_profile(
+        _profile(fts_rank_scale=1.0)
+    )  # the revert, allowed
 
 
 def test_fts_rank_scale_ceiling_matches_what_was_measured():
@@ -240,7 +241,9 @@ def test_search_profile_update_is_derived_from_the_knob_table():
     for name, field in SearchProfileUpdate.model_fields.items():
         lo = next((m.ge for m in field.metadata if hasattr(m, "ge")), None)
         hi = next((m.le for m in field.metadata if hasattr(m, "le")), None)
-        assert (lo, hi) == SEARCH_KNOBS[name].bounds, f"{name}: {(lo, hi)} != {SEARCH_KNOBS[name].bounds}"
+        assert (lo, hi) == SEARCH_KNOBS[name].bounds, (
+            f"{name}: {(lo, hi)} != {SEARCH_KNOBS[name].bounds}"
+        )
 
 
 def test_caura_tune_signature_matches_the_knob_table():
@@ -282,7 +285,9 @@ def test_caura_tune_signature_matches_the_knob_table():
             f"caura_tune documents {name} as {desc!r} but the knob table says {(lo, hi)}"
         )
         checked += 1
-    assert checked >= 6, f"only {checked} descriptions parsed as ranges — the format changed"
+    assert checked >= 6, (
+        f"only {checked} descriptions parsed as ranges — the format changed"
+    )
 
 
 def test_the_three_ab_knobs_are_not_agent_tunable():

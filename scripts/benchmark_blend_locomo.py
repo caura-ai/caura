@@ -62,8 +62,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Production values rather than hand-mirrored literals: the constant's own comment
 # says to re-derive it if the tsvector weighting changes, and a copied default here
 # would make that instruction silently unenforceable.
-from core_api.constants import FTS_RANK_SCALE, FTS_WEIGHT  # noqa: E402
-from _locomo_bench import (  # noqa: E402  (path shim above must run first)
+from _locomo_bench import (
     CATEGORIES,
     embed,
     load_locomo,
@@ -73,6 +72,7 @@ from _locomo_bench import (  # noqa: E402  (path shim above must run first)
     recall,
     unit,
 )
+from core_api.constants import FTS_RANK_SCALE, FTS_WEIGHT
 
 DEFAULT_PG_DSN = "postgresql://memclaw:changeme@localhost:5433/memclaw"  # legacy-name-ok: existing local benchmark database defaults
 

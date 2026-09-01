@@ -6,6 +6,7 @@ provider/model config directly.
 """
 
 import pytest
+
 from core_api.config import settings
 from core_api.services.contradiction_detector import _judge_model_attr, _judge_provider
 

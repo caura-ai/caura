@@ -4,7 +4,7 @@ Unit tests validate the decay math.
 Integration tests verify recall_count + last_recalled_at update correctly.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,7 +13,6 @@ from core_api.constants import (
     RECALL_BOOST_SCALE,
     RECALL_DECAY_WINDOW_DAYS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Pure math — replicate the SQL recall boost in Python
@@ -27,7 +26,7 @@ def compute_recall_boost(
     now: datetime | None = None,
 ) -> float:
     """Python equivalent of the SQL recall boost expression."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     anchor = last_recalled_at or created_at or now
     days_since = (now - anchor).total_seconds() / 86400.0
     recency_factor = max(0.0, 1.0 - days_since / RECALL_DECAY_WINDOW_DAYS)
@@ -44,7 +43,7 @@ def compute_recall_boost(
 @pytest.mark.unit
 class TestRecallBoostDecay:
     def _now(self):
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     # -- Core feedback loop fix --
 
@@ -202,9 +201,10 @@ class TestRecallBoostPersistence:
 
     async def _create_memory(self, db, tenant_id, content, agent_id="test-agent"):
         """Insert a memory with fake embedding for search."""
+        import hashlib
+
         from common.embedding import fake_embedding
         from common.models.memory import Memory
-        import hashlib
 
         ch = hashlib.sha256(f"{tenant_id}:None:{content}".encode()).hexdigest()
         emb = fake_embedding(content)
@@ -228,7 +228,8 @@ class TestRecallBoostPersistence:
         assert mem.last_recalled_at is None
 
         # Simulate what search_memories does after returning results
-        from sqlalchemy import update, func
+        from sqlalchemy import func, update
+
         from common.models.memory import Memory
 
         await db.execute(

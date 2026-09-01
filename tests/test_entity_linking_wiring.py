@@ -15,7 +15,6 @@ from core_api.services.entity_extraction_worker import (
     process_entity_extraction,
 )
 
-
 # ── Helpers ───────────────────────────────────────────────────────────
 
 

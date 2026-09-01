@@ -147,11 +147,11 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
             if srv:
                 server_write_times.append(int(srv))
         else:
-            print(f"    Write {i+1} failed: {r.status_code} {r.text[:100]}")
+            print(f"    Write {i + 1} failed: {r.status_code} {r.text[:100]}")
 
         # Progress
         if (i + 1) % 5 == 0 or i == runs - 1:
-            print(f"    {i+1}/{runs} done — last: {ms}ms")
+            print(f"    {i + 1}/{runs} done — last: {ms}ms")
 
     print()
 
@@ -174,10 +174,10 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
             if srv:
                 server_search_times.append(int(srv))
         else:
-            print(f"    Search {i+1} failed: {r.status_code}")
+            print(f"    Search {i + 1} failed: {r.status_code}")
 
         if (i + 1) % 5 == 0 or i == runs - 1:
-            print(f"    {i+1}/{runs} done — last: {ms}ms")
+            print(f"    {i + 1}/{runs} done — last: {ms}ms")
 
     print()
 
@@ -193,10 +193,10 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
         recall_times.append(ms)
 
         if r.status_code != 200:
-            print(f"    Recall {i+1} failed: {r.status_code}")
+            print(f"    Recall {i + 1} failed: {r.status_code}")
 
         if (i + 1) % 5 == 0 or i == runs - 1:
-            print(f"    {i+1}/{runs} done — last: {ms}ms")
+            print(f"    {i + 1}/{runs} done — last: {ms}ms")
 
     print()
 
@@ -213,7 +213,9 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
     print(f"  Memories: {len(memory_ids)} written")
     print()
 
-    def report_section(name: str, times: list[float], server_times: list[float] | None = None):
+    def report_section(
+        name: str, times: list[float], server_times: list[float] | None = None
+    ):
         if not times:
             print(f"  {name}: no data")
             return
@@ -225,7 +227,9 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
         print(f"    P90:     {percentile(times, 90):>7.0f} ms")
         print(f"    P95:     {percentile(times, 95):>7.0f} ms")
         print(f"    P99:     {percentile(times, 99):>7.0f} ms")
-        print(f"    Stdev:   {statistics.stdev(times):>7.0f} ms" if len(times) > 1 else "")
+        print(
+            f"    Stdev:   {statistics.stdev(times):>7.0f} ms" if len(times) > 1 else ""
+        )
         if server_times:
             print(f"  {name} (server-side)")
             print(f"    Mean:    {statistics.mean(server_times):>7.0f} ms")
@@ -240,18 +244,33 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
     print("  " + "-" * 60)
     print(f"  {'Tool':<25} {'Mean':>8} {'P50':>8} {'P95':>8} {'P99':>8}")
     print("  " + "-" * 60)
-    for name, times in [("caura_write", write_times), ("caura_recall", search_times), ("caura_recall+brief", recall_times)]:
+    for name, times in [
+        ("caura_write", write_times),
+        ("caura_recall", search_times),
+        ("caura_recall+brief", recall_times),
+    ]:
         if times:
-            print(f"  {name:<25} {statistics.mean(times):>7.0f}ms {statistics.median(times):>7.0f}ms {percentile(times, 95):>7.0f}ms {percentile(times, 99):>7.0f}ms")
+            print(
+                f"  {name:<25} {statistics.mean(times):>7.0f}ms {statistics.median(times):>7.0f}ms {percentile(times, 95):>7.0f}ms {percentile(times, 99):>7.0f}ms"
+            )
     print("  " + "-" * 60)
     print()
 
 
 def main():
     parser = argparse.ArgumentParser(description="Caura latency benchmark")
-    parser.add_argument("--url", default=DEFAULT_URL, help=f"API base URL (default: {DEFAULT_URL})")
-    parser.add_argument("--api-key", default=None, help="API key (admin or tenant-scoped)")
-    parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help=f"Number of runs per tool (default: {DEFAULT_RUNS})")
+    parser.add_argument(
+        "--url", default=DEFAULT_URL, help=f"API base URL (default: {DEFAULT_URL})"
+    )
+    parser.add_argument(
+        "--api-key", default=None, help="API key (admin or tenant-scoped)"
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=DEFAULT_RUNS,
+        help=f"Number of runs per tool (default: {DEFAULT_RUNS})",
+    )
     parser.add_argument("--fleet-id", default=None, help="Optional fleet ID")
     args = parser.parse_args()
 

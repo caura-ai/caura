@@ -88,8 +88,7 @@ class TestLifecycleTopics:
             == "caura.lifecycle.entity-link-requested"
         )
         assert (
-            Topics.Lifecycle.INSIGHTS_REQUESTED
-            == "caura.lifecycle.insights-requested"
+            Topics.Lifecycle.INSIGHTS_REQUESTED == "caura.lifecycle.insights-requested"
         )
 
     def test_topic_strenum_format(self):

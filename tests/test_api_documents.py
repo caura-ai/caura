@@ -1,17 +1,16 @@
 """E2E document store tests through HTTP API."""
 
-import pytest
-
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-async def _upsert_doc(client, tenant_id, headers, collection, doc_id, data,
-                      fleet_id=None) -> dict:
+async def _upsert_doc(
+    client, tenant_id, headers, collection, doc_id, data, fleet_id=None
+) -> dict:
     """Helper: upsert a document and return response JSON."""
     resp = await client.post(
         "/api/v1/documents",
@@ -41,7 +40,11 @@ async def test_create_document(client):
     doc_id = f"doc-{tag}"
 
     data = await _upsert_doc(
-        client, tenant_id, headers, collection, doc_id,
+        client,
+        tenant_id,
+        headers,
+        collection,
+        doc_id,
         {"title": "Hello", "body": "World"},
     )
     assert "id" in data
@@ -58,10 +61,10 @@ async def test_upsert_replaces_data(client):
     collection = f"cfg-{tag}"
     doc_id = f"setting-{tag}"
 
-    first = await _upsert_doc(client, tenant_id, headers, collection, doc_id,
-                              {"v": 1})
-    second = await _upsert_doc(client, tenant_id, headers, collection, doc_id,
-                               {"v": 2, "extra": True})
+    first = await _upsert_doc(client, tenant_id, headers, collection, doc_id, {"v": 1})
+    second = await _upsert_doc(
+        client, tenant_id, headers, collection, doc_id, {"v": 2, "extra": True}
+    )
 
     assert first["id"] == second["id"], "Same row should be updated"
     assert second["data"]["v"] == 2
@@ -80,8 +83,9 @@ async def test_get_document_by_id(client):
     collection = f"items-{tag}"
     doc_id = f"item-{tag}"
 
-    await _upsert_doc(client, tenant_id, headers, collection, doc_id,
-                      {"name": "widget"})
+    await _upsert_doc(
+        client, tenant_id, headers, collection, doc_id, {"name": "widget"}
+    )
 
     resp = await client.get(
         f"/api/v1/documents/{doc_id}?tenant_id={tenant_id}&collection={collection}",
@@ -115,8 +119,9 @@ async def test_list_documents(client):
     collection = f"list-col-{tag}"
 
     for i in range(3):
-        await _upsert_doc(client, tenant_id, headers, collection,
-                          f"d-{tag}-{i}", {"i": i})
+        await _upsert_doc(
+            client, tenant_id, headers, collection, f"d-{tag}-{i}", {"i": i}
+        )
 
     resp = await client.get(
         f"/api/v1/documents?tenant_id={tenant_id}&collection={collection}",
@@ -133,10 +138,12 @@ async def test_list_documents_with_fleet_filter(client):
     tag = _uid()
     collection = f"fleet-col-{tag}"
 
-    await _upsert_doc(client, tenant_id, headers, collection, f"a-{tag}",
-                      {"x": 1}, fleet_id="fleet-a")
-    await _upsert_doc(client, tenant_id, headers, collection, f"b-{tag}",
-                      {"x": 2}, fleet_id="fleet-b")
+    await _upsert_doc(
+        client, tenant_id, headers, collection, f"a-{tag}", {"x": 1}, fleet_id="fleet-a"
+    )
+    await _upsert_doc(
+        client, tenant_id, headers, collection, f"b-{tag}", {"x": 2}, fleet_id="fleet-b"
+    )
 
     resp = await client.get(
         f"/api/v1/documents?tenant_id={tenant_id}&collection={collection}&fleet_id=fleet-a",
@@ -160,8 +167,7 @@ async def test_delete_document(client):
     collection = f"del-col-{tag}"
     doc_id = f"del-{tag}"
 
-    await _upsert_doc(client, tenant_id, headers, collection, doc_id,
-                      {"tmp": True})
+    await _upsert_doc(client, tenant_id, headers, collection, doc_id, {"tmp": True})
 
     resp = await client.delete(
         f"/api/v1/documents/{doc_id}?tenant_id={tenant_id}&collection={collection}",
@@ -198,12 +204,30 @@ async def test_query_documents_with_filter(client):
     tag = _uid()
     collection = f"query-col-{tag}"
 
-    await _upsert_doc(client, tenant_id, headers, collection, f"q1-{tag}",
-                      {"status": "active", "priority": 1})
-    await _upsert_doc(client, tenant_id, headers, collection, f"q2-{tag}",
-                      {"status": "archived", "priority": 2})
-    await _upsert_doc(client, tenant_id, headers, collection, f"q3-{tag}",
-                      {"status": "active", "priority": 3})
+    await _upsert_doc(
+        client,
+        tenant_id,
+        headers,
+        collection,
+        f"q1-{tag}",
+        {"status": "active", "priority": 1},
+    )
+    await _upsert_doc(
+        client,
+        tenant_id,
+        headers,
+        collection,
+        f"q2-{tag}",
+        {"status": "archived", "priority": 2},
+    )
+    await _upsert_doc(
+        client,
+        tenant_id,
+        headers,
+        collection,
+        f"q3-{tag}",
+        {"status": "active", "priority": 3},
+    )
 
     resp = await client.post(
         "/api/v1/documents/query",
@@ -231,8 +255,9 @@ async def test_tenant_isolation(client):
     tag = _uid()
     collection = f"iso-col-{tag}"
 
-    await _upsert_doc(client, tenant_a, headers_a, collection, f"secret-{tag}",
-                      {"secret": True})
+    await _upsert_doc(
+        client, tenant_a, headers_a, collection, f"secret-{tag}", {"secret": True}
+    )
 
     # List as same tenant -- should see it
     resp = await client.get(

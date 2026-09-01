@@ -11,7 +11,6 @@ import pytest
 from core_api.constants import CHUNKING_THRESHOLD_CHARS, MAX_CONTENT_LENGTH
 from core_api.services.organization_settings import DEFAULT_SETTINGS, ResolvedConfig
 
-
 # ---------------------------------------------------------------------------
 # Unit tests
 # ---------------------------------------------------------------------------

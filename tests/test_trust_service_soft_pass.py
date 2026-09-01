@@ -33,7 +33,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
 def _patch_lookup(monkeypatch, return_value):
-    async def _fake_lookup(tenant_id, agent_id):  # noqa: ARG001
+    async def _fake_lookup(tenant_id, agent_id):
         return return_value
 
     # require_trust does ``from core_api.services.agent_service import lookup_agent``
@@ -51,7 +51,8 @@ def _patch_lookup(monkeypatch, return_value):
 async def test_missing_row_passes_when_default_meets_min_level(monkeypatch):
     """``min_level=1`` and no Agent row → pass with not_found=True."""
     _patch_lookup(monkeypatch, None)
-    trust, not_found, terr = await trust_service.require_trust(tenant_id="t1", agent_id="ghost", min_level=1
+    trust, not_found, terr = await trust_service.require_trust(
+        tenant_id="t1", agent_id="ghost", min_level=1
     )
     assert terr is None
     assert not_found is True
@@ -67,7 +68,8 @@ async def test_missing_row_fails_when_default_below_min_level(monkeypatch):
     standard ``write one memory first`` path.
     """
     _patch_lookup(monkeypatch, None)
-    trust, not_found, terr = await trust_service.require_trust(tenant_id="t1", agent_id="ghost", min_level=2
+    trust, not_found, terr = await trust_service.require_trust(
+        tenant_id="t1", agent_id="ghost", min_level=2
     )
     assert terr is not None
     assert "not registered" in terr
@@ -81,7 +83,8 @@ async def test_missing_row_fails_when_default_below_min_level(monkeypatch):
 async def test_missing_row_admin_min_level_fails(monkeypatch):
     """``min_level=3`` (admin) and no Agent row → fail. Same message shape."""
     _patch_lookup(monkeypatch, None)
-    _, not_found, terr = await trust_service.require_trust(tenant_id="t1", agent_id="ghost", min_level=3
+    _, not_found, terr = await trust_service.require_trust(
+        tenant_id="t1", agent_id="ghost", min_level=3
     )
     assert terr is not None
     assert "not registered" in terr
@@ -96,7 +99,8 @@ async def test_missing_row_admin_min_level_fails(monkeypatch):
 
 async def test_known_agent_passes_at_meeting_trust(monkeypatch):
     _patch_lookup(monkeypatch, {"trust_level": 2})
-    trust, not_found, terr = await trust_service.require_trust(tenant_id="t1", agent_id="alice", min_level=2
+    trust, not_found, terr = await trust_service.require_trust(
+        tenant_id="t1", agent_id="alice", min_level=2
     )
     assert terr is None
     assert not_found is False
@@ -105,7 +109,8 @@ async def test_known_agent_passes_at_meeting_trust(monkeypatch):
 
 async def test_known_agent_fails_below_trust(monkeypatch):
     _patch_lookup(monkeypatch, {"trust_level": 1})
-    trust, not_found, terr = await trust_service.require_trust(tenant_id="t1", agent_id="alice", min_level=2
+    trust, not_found, terr = await trust_service.require_trust(
+        tenant_id="t1", agent_id="alice", min_level=2
     )
     assert terr is not None
     assert "trust_level=1" in terr
@@ -119,7 +124,8 @@ async def test_zero_trust_known_agent_blocked_at_min_1(monkeypatch):
     blocked even at min_level=1 — the soft-pass only applies when the
     row is missing entirely."""
     _patch_lookup(monkeypatch, {"trust_level": 0})
-    _, not_found, terr = await trust_service.require_trust(tenant_id="t1", agent_id="alice", min_level=1
+    _, not_found, terr = await trust_service.require_trust(
+        tenant_id="t1", agent_id="alice", min_level=1
     )
     assert terr is not None
     assert "trust_level=0" in terr

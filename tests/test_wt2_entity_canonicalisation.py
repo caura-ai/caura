@@ -59,7 +59,9 @@ def _config(**overrides):
     return cfg
 
 
-def _entity(name: str, entity_type: str = "technology", role: str = "subject") -> MagicMock:
+def _entity(
+    name: str, entity_type: str = "technology", role: str = "subject"
+) -> MagicMock:
     e = MagicMock()
     e.canonical_name = name
     e.entity_type = entity_type
@@ -83,7 +85,9 @@ def _build_sc_mock(
     sc.bulk_resolve_entities = AsyncMock(return_value=resolve_returns)
     sc.bulk_upsert_entities = AsyncMock(return_value=upsert_returns)
     sc.bulk_upsert_entity_links = AsyncMock(
-        return_value=[{"input_idx": i, "created": True} for i in range(len(upsert_returns))]
+        return_value=[
+            {"input_idx": i, "created": True} for i in range(len(upsert_returns))
+        ]
     )
     return sc
 
@@ -211,8 +215,20 @@ async def test_two_names_resolving_to_same_entity_write_one_link(
     shared = str(uuid4())
     sc = _build_sc_mock(
         resolve_returns=[
-            {"entity_id": shared, "canonical_name": "postgres", "attributes": {}, "matched_by": "similarity", "similarity": 0.97},
-            {"entity_id": shared, "canonical_name": "postgres", "attributes": {}, "matched_by": "similarity", "similarity": 0.95},
+            {
+                "entity_id": shared,
+                "canonical_name": "postgres",
+                "attributes": {},
+                "matched_by": "similarity",
+                "similarity": 0.97,
+            },
+            {
+                "entity_id": shared,
+                "canonical_name": "postgres",
+                "attributes": {},
+                "matched_by": "similarity",
+                "similarity": 0.95,
+            },
         ],
         upsert_returns=[
             {"input_idx": 0, "entity_id": shared, "action": "updated"},
@@ -246,7 +262,9 @@ def _t() -> str:
     return f"test-tenant-wt2-{uuid4().hex[:8]}"
 
 
-async def _create_entity(sc, tenant_id: str, name: str, *, entity_type: str = "technology") -> dict:
+async def _create_entity(
+    sc, tenant_id: str, name: str, *, entity_type: str = "technology"
+) -> dict:
     return await sc.create_entity(
         {
             "tenant_id": tenant_id,
@@ -360,7 +378,9 @@ async def test_bulk_resolve_no_substring_or_extra_word_merge(sc):
         results = await sc.bulk_resolve_entities(
             tenant_id=tid, items=[_resolve_item(incoming)], threshold=0.85
         )
-        assert results[0] is None, f"'{incoming}' must not merge into 'data analytics service'"
+        assert results[0] is None, (
+            f"'{incoming}' must not merge into 'data analytics service'"
+        )
 
 
 @pytest.mark.integration
@@ -420,10 +440,14 @@ async def test_wet_test_replay_one_subject_one_entity_no_duplicate_links(
     mock_embed.return_value = None  # deterministic phases only (no similarity)
 
     mem1 = await _write_memory(
-        sc, tid, "We decided to use PostgreSQL 16 instead of MySQL for the new analytics service."
+        sc,
+        tid,
+        "We decided to use PostgreSQL 16 instead of MySQL for the new analytics service.",
     )
     mem3 = await _write_memory(
-        sc, tid, "We migrated the analytics service from PostgreSQL 16 to MySQL after all."
+        sc,
+        tid,
+        "We migrated the analytics service from PostgreSQL 16 to MySQL after all.",
     )
 
     # Memory 1 extraction.
@@ -469,6 +493,8 @@ async def test_wet_test_replay_one_subject_one_entity_no_duplicate_links(
 
     # Both memories linked to the ONE subject entity — once each.
     result = await sc.get_entity_with_linked_memories(subject["id"], tid)
-    linked_ids = [entry.get("memory", entry)["id"] for entry in result["linked_memories"]]
+    linked_ids = [
+        entry.get("memory", entry)["id"] for entry in result["linked_memories"]
+    ]
     assert sorted(linked_ids) == sorted([mem1["id"], mem3["id"]])
     assert len(linked_ids) == len(set(linked_ids)), "duplicate link rows"

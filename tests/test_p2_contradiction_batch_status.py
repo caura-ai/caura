@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+
 from core_api.constants import VECTOR_DIM
 from core_api.services.contradiction_detector import _detect
 

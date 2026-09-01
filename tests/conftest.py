@@ -8,7 +8,7 @@ or the defaults below.
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 # Set test-friendly defaults before any backend imports read settings.
 # These can be overridden by the caller via environment variables.
@@ -135,20 +135,20 @@ def new_tenant_id() -> str:
 
 def _import_all_models():
     """Import all OSS models so SQLAlchemy metadata is populated."""
-    import common.models.memory  # noqa: F401
-    import common.models.entity  # noqa: F401
-    import common.models.agent  # noqa: F401
-    import common.models.agent_activity_digest  # noqa: F401
-    import common.models.audit  # noqa: F401
-    import common.models.analysis_report  # noqa: F401
-    import common.models.fleet  # noqa: F401
-    import common.models.document  # noqa: F401
-    import common.models.background_task  # noqa: F401
-    import common.models.dedup_review  # noqa: F401
-    import common.models.organization_settings  # noqa: F401
+    import common.models.agent
+    import common.models.agent_activity_digest
+    import common.models.analysis_report
+    import common.models.audit
+    import common.models.background_task
+    import common.models.capability_usage
+    import common.models.dedup_review
+    import common.models.document
+    import common.models.entity
+    import common.models.fleet
+    import common.models.memory
+    import common.models.organization_settings
+    import common.models.recall_log
     import common.models.skill_factory  # noqa: F401
-    import common.models.capability_usage  # noqa: F401
-    import common.models.recall_log  # noqa: F401
 
 
 @pytest.fixture(scope="session")
@@ -285,10 +285,11 @@ async def _patch_storage_client(_engine, _setup_schema):
     global _storage_asgi_http, _storage_sc, _storage_app
     import httpx
     from httpx import ASGITransport
-    from core_storage_api.app import create_app as create_storage_app
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
     import core_api.clients.storage_client as sc_mod
     import core_storage_api.services.postgres_service as pg_svc
-    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from core_storage_api.app import create_app as create_storage_app
 
     # Point core-storage-api at the test engine. Reader and writer
     # share the same engine in tests (no replica spun up); prod gets
@@ -436,7 +437,8 @@ async def _setup_app_db(_setup_schema):
 @pytest.fixture
 async def client(_setup_app_db):
     """Async HTTP client for testing FastAPI endpoints."""
-    from httpx import AsyncClient, ASGITransport
+    from httpx import ASGITransport, AsyncClient
+
     from core_api.app import app
 
     transport = ASGITransport(app=app)
@@ -451,7 +453,7 @@ async def client(_setup_app_db):
 
 def make_dt(days_ago: float = 0, hours_ago: float = 0) -> datetime:
     """Create a timezone-aware datetime relative to now."""
-    return datetime.now(timezone.utc) - timedelta(days=days_ago, hours=hours_ago)
+    return datetime.now(UTC) - timedelta(days=days_ago, hours=hours_ago)
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +463,11 @@ def make_dt(days_ago: float = 0, hours_ago: float = 0) -> datetime:
 
 # Re-export MCP-handler unit-test helpers so the `mcp_env` fixture is
 # discoverable from any test file in this directory.
-from tests._mcp_test_helpers import mcp_env, parse_envelope, strip_latency  # noqa: E402,F401
+from tests._mcp_test_helpers import (  # noqa: F401
+    mcp_env,
+    parse_envelope,
+    strip_latency,
+)
 
 
 @pytest.fixture(autouse=True)

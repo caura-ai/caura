@@ -30,7 +30,6 @@ from core_api.constants import (
 )
 from core_api.tools import get_spec
 
-
 # ---------------------------------------------------------------------------
 # Unit tests
 # ---------------------------------------------------------------------------
@@ -113,8 +112,9 @@ class TestVisibilityInSchemas:
             assert mc.visibility == v
 
     def test_memory_create_rejects_invalid_visibility(self):
-        from core_api.schemas import MemoryCreate
         from pydantic import ValidationError
+
+        from core_api.schemas import MemoryCreate
 
         with pytest.raises(ValidationError):
             MemoryCreate(
@@ -190,7 +190,12 @@ class TestToolDescriptions:
         # `caura_recall` advertises cross-fleet filtering via its parameter
         # list rather than prose.
         spec = get_spec("caura_recall")
-        param_names = {p["name"] for p in __import__("core_api.tools", fromlist=["extract_param_descriptors"]).extract_param_descriptors(spec.handler)}
+        param_names = {
+            p["name"]
+            for p in __import__(
+                "core_api.tools", fromlist=["extract_param_descriptors"]
+            ).extract_param_descriptors(spec.handler)
+        }
         assert "fleet_ids" in param_names
 
 
@@ -219,17 +224,19 @@ class TestVisibilityFiltering:
     ):
         from common.embedding import fake_embedding
 
-        mem = await sc.create_memory({
-            "tenant_id": tenant_id,
-            "fleet_id": fleet_id,
-            "agent_id": agent_id,
-            "memory_type": "fact",
-            "content": content,
-            "embedding": fake_embedding(content),
-            "weight": 0.5,
-            "status": "active",
-            "visibility": visibility,
-        })
+        mem = await sc.create_memory(
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "memory_type": "fact",
+                "content": content,
+                "embedding": fake_embedding(content),
+                "weight": 0.5,
+                "status": "active",
+                "visibility": visibility,
+            }
+        )
         return mem
 
     async def test_private_invisible_to_other_agents(
@@ -249,7 +256,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="Secret plan",
             fleet_ids=[fleet_id],
             caller_agent_id="agent-B",
@@ -274,7 +282,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="private note about the project",
             fleet_ids=[fleet_id],
             caller_agent_id="agent-A",
@@ -299,7 +308,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="Fleet-wide status update",
             fleet_ids=[fleet_id],
         )
@@ -322,7 +332,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="Fleet-A confidential data point",
             fleet_ids=["fleet-B"],
         )
@@ -345,7 +356,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="Company-wide policy announcement",
             fleet_ids=["fleet-B"],
         )
@@ -368,7 +380,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="Org-level insight shared across all fleets",
         )
         contents = [r.content for r in results]
@@ -398,7 +411,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="Multi-fleet memory",
             fleet_ids=["fleet-A", "fleet-B"],
         )
@@ -430,7 +444,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="fleet memory for test",
             fleet_ids=["fleet-A"],
         )
@@ -446,8 +461,8 @@ class TestVisibilityFiltering:
         agent_id,
     ):
         """Memory inserted without explicit visibility should default to scope_team."""
-        from common.models.memory import Memory
         from common.embedding import fake_embedding
+        from common.models.memory import Memory
 
         mem = Memory(
             tenant_id=tenant_id,
@@ -497,7 +512,8 @@ class TestVisibilityFiltering:
         )
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="Admin test memory",
             fleet_ids=[fleet_id],
         )
@@ -519,8 +535,8 @@ class TestBackwardCompatibility:
         agent_id,
     ):
         """Memories inserted without visibility column should default to scope_team."""
-        from common.models.memory import Memory
         from common.embedding import fake_embedding
+        from common.models.memory import Memory
 
         mem = Memory(
             tenant_id=tenant_id,
@@ -547,22 +563,25 @@ class TestBackwardCompatibility:
         """Standard search (no caller_agent_id, no fleet_ids) works as before."""
         from common.embedding import fake_embedding
 
-        await sc.create_memory({
-            "tenant_id": tenant_id,
-            "fleet_id": fleet_id,
-            "agent_id": agent_id,
-            "memory_type": "fact",
-            "content": "Backward compat search test memory",
-            "embedding": fake_embedding("Backward compat search test memory"),
-            "weight": 0.5,
-            "status": "active",
-            "visibility": "scope_team",
-        })
+        await sc.create_memory(
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "memory_type": "fact",
+                "content": "Backward compat search test memory",
+                "embedding": fake_embedding("Backward compat search test memory"),
+                "weight": 0.5,
+                "status": "active",
+                "visibility": "scope_team",
+            }
+        )
 
         from core_api.services.memory_service import search_memories
 
         # Standard search — no new params
-        results = await search_memories(tenant_id=tenant_id,
+        results = await search_memories(
+            tenant_id=tenant_id,
             query="Backward compat search test",
             fleet_ids=[fleet_id],
         )
@@ -585,17 +604,19 @@ class TestDedupWithVisibility:
     ):
         from common.embedding import fake_embedding
 
-        mem = await sc.create_memory({
-            "tenant_id": tenant_id,
-            "fleet_id": fleet_id,
-            "agent_id": agent_id,
-            "memory_type": "fact",
-            "content": content,
-            "embedding": fake_embedding(content),
-            "weight": 0.5,
-            "status": "active",
-            "visibility": visibility,
-        })
+        mem = await sc.create_memory(
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "agent_id": agent_id,
+                "memory_type": "fact",
+                "content": content,
+                "embedding": fake_embedding(content),
+                "weight": 0.5,
+                "status": "active",
+                "visibility": visibility,
+            }
+        )
         return mem
 
     async def test_dedup_within_same_visibility(
@@ -606,8 +627,9 @@ class TestDedupWithVisibility:
     ):
         """Two identical fleet memories in the same fleet should trigger dedup (409)."""
         from fastapi import HTTPException
-        from core_api.services.memory_service import create_memory
+
         from core_api.schemas import MemoryCreate
+        from core_api.services.memory_service import create_memory
 
         mc1 = MemoryCreate(
             tenant_id=tenant_id,
@@ -640,8 +662,8 @@ class TestDedupWithVisibility:
         agent_id,
     ):
         """A tenant memory and a fleet memory with same content should NOT dedup."""
-        from core_api.services.memory_service import create_memory
         from core_api.schemas import MemoryCreate
+        from core_api.services.memory_service import create_memory
 
         mc1 = MemoryCreate(
             tenant_id=tenant_id,

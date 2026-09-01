@@ -16,11 +16,11 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from core_api import consumer
-from core_api.services.organization_settings import ResolvedConfig
 
 from common.events.base import Event
 from common.events.topics import Topics
+from core_api import consumer
+from core_api.services.organization_settings import ResolvedConfig
 
 pytestmark = pytest.mark.asyncio
 
@@ -122,7 +122,9 @@ async def test_keep_private_updates_visibility_and_still_runs_detection(
 
     await consumer.handle_memory_enriched(_event(mid))
 
-    sc.update_memory.assert_awaited_once_with(str(mid), "tenant-gov", {"visibility": "scope_agent"})
+    sc.update_memory.assert_awaited_once_with(
+        str(mid), "tenant-gov", {"visibility": "scope_agent"}
+    )
     detect.assert_awaited_once()  # not dropped → detection proceeds on the kept row
 
 

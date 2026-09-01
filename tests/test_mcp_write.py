@@ -30,7 +30,7 @@ class _OutStub:
     def __init__(self, mid: str = "m-1"):
         self.mid = mid
 
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": self.mid, "status": "created"}
 
 

@@ -8,7 +8,6 @@ Unit tests validate:
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Unit tests
 # ---------------------------------------------------------------------------
@@ -179,6 +178,7 @@ class TestEnrichmentPromptVocabularySync:
 
     def test_pattern_matches_every_memory_type(self):
         import re
+
         from common.enrichment.constants import MEMORY_TYPES
         from core_api.constants import MEMORY_TYPES_PATTERN
 

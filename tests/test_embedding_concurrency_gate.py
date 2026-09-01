@@ -83,7 +83,9 @@ class TestEmbeddingConcurrencyGate:
             in_flight -= 1
             return [0.1]
 
-        await asyncio.gather(*(svc.call_embedding_gated(fake_call, background=False) for _ in range(30)))
+        await asyncio.gather(
+            *(svc.call_embedding_gated(fake_call, background=False) for _ in range(30))
+        )
 
         assert peak <= 3, f"gate leaked: {peak} concurrent calls with cap 3"
         assert in_flight == 0, "slot not released"
@@ -177,7 +179,9 @@ class TestQueryEmbeddingReservation:
         # ``total`` of them: enough to hold every shared slot if nothing
         # stopped background from doing so.
         bg_tasks = [
-            asyncio.create_task(svc.call_embedding_gated(background_call, background=True))
+            asyncio.create_task(
+                svc.call_embedding_gated(background_call, background=True)
+            )
             for _ in range(total)
         ]
         # Wait until the background budget is genuinely occupied and parked.
@@ -237,15 +241,14 @@ class TestQueryEmbeddingReservation:
             return [0.0]
 
         await asyncio.gather(
-            *(
-                svc.call_embedding_gated(call, background=bool(i % 2))
-                for i in range(60)
-            )
+            *(svc.call_embedding_gated(call, background=bool(i % 2)) for i in range(60))
         )
         assert peak <= 4, f"total peaked at {peak}, shared cap is 4"
 
     @pytest.mark.asyncio
-    async def test_background_slot_released_when_shared_gate_times_out(self, reset_gate):
+    async def test_background_slot_released_when_shared_gate_times_out(
+        self, reset_gate
+    ):
         """A background waiter that gives up must not leak its slot.
 
         Background takes the background slot first, then the shared one. If
@@ -302,7 +305,9 @@ class TestQueryEmbeddingReservation:
             return [0.1]
 
         bg_tasks = [
-            asyncio.create_task(svc.call_embedding_gated(background_call, background=True))
+            asyncio.create_task(
+                svc.call_embedding_gated(background_call, background=True)
+            )
             for _ in range(total)
         ]
         for _ in range(total - reserved):

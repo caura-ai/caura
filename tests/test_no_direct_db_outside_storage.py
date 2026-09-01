@@ -17,7 +17,12 @@ import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-_FORBIDDEN_NAMES = {"create_async_engine", "create_engine", "async_sessionmaker", "sessionmaker"}
+_FORBIDDEN_NAMES = {
+    "create_async_engine",
+    "create_engine",
+    "async_sessionmaker",
+    "sessionmaker",
+}
 _FORBIDDEN_ATTRS = {"connect", "create_pool"}
 _FORBIDDEN_MODULES = {"asyncpg", "psycopg", "psycopg2"}
 

@@ -356,9 +356,7 @@ async def test_delete_fleet_rule_rejected_at_trust_1(mcp_env, monkeypatch):
     assert trust_calls == [1], f"expected single [1] DB call, got {trust_calls}"
 
 
-async def test_set_aborts_when_stored_scope_changes_between_reads(
-    mcp_env, monkeypatch
-):
+async def test_set_aborts_when_stored_scope_changes_between_reads(mcp_env, monkeypatch):
     """TOCTOU narrowing on upsert: if a concurrent upsert promotes the
     stored row's scope between the gate read and the recheck immediately
     before the write, the handler must return a CONFLICT envelope and
@@ -505,7 +503,9 @@ async def test_escalation_guard_survives_the_self_scope_clarification():
     )
 
 
-async def test_set_agent_scope_without_agent_id_still_needs_trust_2(mcp_env, monkeypatch):
+async def test_set_agent_scope_without_agent_id_still_needs_trust_2(
+    mcp_env, monkeypatch
+):
     """The reported behaviour, pinned as intentional: ``scope=agent``
     with ``agent_id`` OMITTED is refused for a trust-1 caller. The rule
     names no target, so the self-author tier does not apply."""
@@ -533,7 +533,9 @@ async def test_set_agent_scope_without_agent_id_still_needs_trust_2(mcp_env, mon
     sc.upsert_keystone.assert_not_awaited()
 
 
-async def test_set_agent_scope_without_agent_id_error_names_the_remedy(mcp_env, monkeypatch):
+async def test_set_agent_scope_without_agent_id_error_names_the_remedy(
+    mcp_env, monkeypatch
+):
     """The refusal must say WHY trust 2 was required, or it reads as the
     trust matrix contradicting the docs. The pinned prefix is preserved;
     the hint is appended."""
@@ -636,7 +638,10 @@ async def test_hint_is_blind_to_stored_rule_state(mcp_env, monkeypatch):
         _stub_storage_client(
             monkeypatch,
             get_document=stored,
-            upsert_keystone={"id": "11111111-1111-4111-8111-111111111111", "doc_id": "r"},
+            upsert_keystone={
+                "id": "11111111-1111-4111-8111-111111111111",
+                "doc_id": "r",
+            },
         )
         out = await mcp_server.caura_keystones_set(
             op="set",
@@ -684,5 +689,9 @@ async def test_hint_does_not_promise_a_retry_it_cannot_guarantee(mcp_env, monkey
     # The disclaimer is what keeps this message honest in this case.
     assert "independently require trust >= 2" in message, message
     # No imperative promising the retry works.
-    for imperative in ("Pass agent_id=", "Set agent_id=", "to author a rule for yourself"):
+    for imperative in (
+        "Pass agent_id=",
+        "Set agent_id=",
+        "to author a rule for yourself",
+    ):
         assert imperative not in message, (imperative, message)

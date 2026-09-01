@@ -8,7 +8,6 @@ import pytest
 
 from core_api.constants import ENTITY_STOPWORDS, ENTITY_TOKEN_MIN_LENGTH
 
-
 # ---------------------------------------------------------------------------
 # Unit tests: stopword filtering
 # ---------------------------------------------------------------------------
@@ -110,8 +109,10 @@ class TestEntityFTSMatching:
     """Verify PostgreSQL full-text search on the entities table."""
 
     async def _create_entity(self, db, tenant_id, name, entity_type="concept"):
+        from sqlalchemy import select
+        from sqlalchemy import text as sql_text
+
         from common.models.entity import Entity
-        from sqlalchemy import select, text as sql_text
 
         # Return existing entity if it already exists (unique index)
         existing = (
@@ -144,6 +145,7 @@ class TestEntityFTSMatching:
 
     async def _match_entities(self, db, tenant_id, query_tokens):
         from sqlalchemy import func, select
+
         from common.models.entity import Entity
 
         entity_ts_query = func.plainto_tsquery("english", " ".join(query_tokens))

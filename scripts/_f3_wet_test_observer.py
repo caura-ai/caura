@@ -14,10 +14,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import uuid
 import sys
 import time
 import urllib.request
+import uuid
 
 CONTAINER_CORE_API = "caura-enterprise-core-api-1"
 CONTAINER_POSTGRES = "caura-enterprise-postgres-1"

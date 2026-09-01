@@ -55,8 +55,12 @@ class TestTypeDecayBenchmark:
         per_call_ns = elapsed_ns / self.ITERATIONS
         per_call_us = per_call_ns / 1000
 
-        assert per_call_us < 5.0, f"Type-based freshness too slow: {per_call_us:.2f}μs/call"
-        print(f"\n  Type-based freshness: {per_call_us:.3f}μs/call ({self.ITERATIONS} iterations)")
+        assert per_call_us < 5.0, (
+            f"Type-based freshness too slow: {per_call_us:.2f}μs/call"
+        )
+        print(
+            f"\n  Type-based freshness: {per_call_us:.3f}μs/call ({self.ITERATIONS} iterations)"
+        )
 
     def test_flat_freshness_latency(self):
         """Baseline: flat freshness for comparison."""
@@ -71,7 +75,9 @@ class TestTypeDecayBenchmark:
         per_call_ns = elapsed_ns / self.ITERATIONS
         per_call_us = per_call_ns / 1000
 
-        print(f"\n  Flat freshness: {per_call_us:.3f}μs/call ({self.ITERATIONS} iterations)")
+        print(
+            f"\n  Flat freshness: {per_call_us:.3f}μs/call ({self.ITERATIONS} iterations)"
+        )
 
     def test_typed_vs_flat_overhead(self):
         """Type-based should be <2x overhead vs flat."""
@@ -93,7 +99,9 @@ class TestTypeDecayBenchmark:
 
         ratio = typed_ns / flat_ns if flat_ns > 0 else 1.0
         print(f"\n  Typed/flat ratio: {ratio:.2f}x")
-        assert ratio < 3.0, f"Typed freshness is {ratio:.2f}x slower than flat — too much overhead"
+        assert ratio < 3.0, (
+            f"Typed freshness is {ratio:.2f}x slower than flat — too much overhead"
+        )
 
 
 @pytest.mark.benchmark
@@ -122,14 +130,20 @@ class TestClusterBuildingBenchmark:
         elapsed_ns = time.perf_counter_ns() - t0
         elapsed_us = elapsed_ns / 1000
 
-        print(f"\n  Union-find 1000 pairs → {len(clusters)} clusters: {elapsed_us:.1f}μs")
-        assert elapsed_us < 50_000, f"Cluster building too slow: {elapsed_us:.0f}μs (target: <50ms)"
+        print(
+            f"\n  Union-find 1000 pairs → {len(clusters)} clusters: {elapsed_us:.1f}μs"
+        )
+        assert elapsed_us < 50_000, (
+            f"Cluster building too slow: {elapsed_us:.0f}μs (target: <50ms)"
+        )
 
     def test_cluster_50_pairs_regression(self):
         """Verify no regression at old cap of 50 pairs."""
         from core_api.services.crystallizer_service import _build_clusters
 
-        pairs = [{"id1": str(uuid.uuid4()), "id2": str(uuid.uuid4())} for _ in range(50)]
+        pairs = [
+            {"id1": str(uuid.uuid4()), "id2": str(uuid.uuid4())} for _ in range(50)
+        ]
 
         t0 = time.perf_counter_ns()
         _build_clusters(pairs)
@@ -153,5 +167,7 @@ class TestPairNormalizationBenchmark:
         elapsed_us = (time.perf_counter_ns() - t0) / 1000
 
         per_pair_us = elapsed_us / 10_000
-        print(f"\n  Pair normalization: {per_pair_us:.3f}μs/pair ({elapsed_us:.0f}μs total for 10K)")
+        print(
+            f"\n  Pair normalization: {per_pair_us:.3f}μs/pair ({elapsed_us:.0f}μs total for 10K)"
+        )
         assert per_pair_us < 5.0

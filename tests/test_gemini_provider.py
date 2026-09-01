@@ -11,7 +11,6 @@ from core_api.providers._registry import get_llm_provider
 from core_api.providers.fake_provider import FakeLLMProvider
 from core_api.providers.gemini_provider import GeminiLLMProvider
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

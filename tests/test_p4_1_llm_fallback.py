@@ -24,7 +24,6 @@ from core_api.constants import (
 )
 from tests._scoped_module import scoped
 
-
 # ---------------------------------------------------------------------------
 # Unit tests: constants
 # ---------------------------------------------------------------------------

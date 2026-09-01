@@ -123,10 +123,10 @@ async def test_mcp_transition_is_allowed_at_the_plan_limit(mcp_env, monkeypatch)
         update_memory_status=None,
     )
 
-    async def _allow(*args, **kwargs):  # noqa: ARG001
+    async def _allow(*args, **kwargs):
         return True
 
-    async def _noop(*args, **kwargs):  # noqa: ARG001
+    async def _noop(*args, **kwargs):
         return None
 
     monkeypatch.setattr(mcp_server, "authorize_memory_access", _allow)
@@ -239,7 +239,9 @@ async def test_making_transition_cost_budget_takes_effect_on_rest(client, monkey
     memory_id = await _write_memory(client, tenant_id)
 
     monkeypatch.setattr(
-        usage_service, "PLAN_LIMIT_GATED_OPS", usage_service.PLAN_LIMIT_GATED_OPS | {"transition"}
+        usage_service,
+        "PLAN_LIMIT_GATED_OPS",
+        usage_service.PLAN_LIMIT_GATED_OPS | {"transition"},
     )
 
     from core_api.app import app
@@ -249,7 +251,10 @@ async def test_making_transition_cost_budget_takes_effect_on_rest(client, monkey
     async def _dep():
         set_current_tenant(tenant_id)
         return AuthContext(
-            tenant_id=tenant_id, agent_id=None, readable_tenant_ids=[tenant_id], is_read_only=True
+            tenant_id=tenant_id,
+            agent_id=None,
+            readable_tenant_ids=[tenant_id],
+            is_read_only=True,
         )
 
     app.dependency_overrides[get_auth_context] = _dep
@@ -279,10 +284,10 @@ async def test_making_transition_cost_budget_takes_effect_on_mcp(mcp_env, monkey
         update_memory_status=None,
     )
 
-    async def _allow(*args, **kwargs):  # noqa: ARG001
+    async def _allow(*args, **kwargs):
         return True
 
-    async def _noop(*args, **kwargs):  # noqa: ARG001
+    async def _noop(*args, **kwargs):
         return None
 
     monkeypatch.setattr(mcp_server, "authorize_memory_access", _allow)
@@ -290,7 +295,7 @@ async def test_making_transition_cost_budget_takes_effect_on_mcp(mcp_env, monkey
 
     charged: list[tuple] = []
 
-    async def _spy(tenant_id, operation, *a, **kw):  # noqa: ARG001
+    async def _spy(tenant_id, operation, *a, **kw):
         charged.append((tenant_id, operation))
 
     monkeypatch.setattr(mcp_server, "check_and_increment", _spy)

@@ -26,7 +26,9 @@ pytestmark = pytest.mark.unit
 
 
 def test_normalize_lowercases_and_collapses_whitespace():
-    assert normalize_entity_name("  New   Analytics\tService ") == "new analytics service"
+    assert (
+        normalize_entity_name("  New   Analytics\tService ") == "new analytics service"
+    )
 
 
 def test_normalize_touches_nothing_else():

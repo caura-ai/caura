@@ -21,10 +21,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-
-from common import duplicate_memory
 from fastapi import HTTPException
 
+from common import duplicate_memory
 from core_api.clients.storage_client import (
     DuplicateMemoryError,
     _storage_detail,
@@ -52,7 +51,9 @@ def _response(status: int, body) -> httpx.Response:
 def test_the_winning_row_id_is_carried_through() -> None:
     """An agent told "duplicate" without being told WHICH row cannot use the row
     it should have got. The id is the useful half of the message."""
-    detail = _storage_detail(_response(409, {"detail": f"Duplicate memory exists: {WINNER}"}))
+    detail = _storage_detail(
+        _response(409, {"detail": f"Duplicate memory exists: {WINNER}"})
+    )
 
     assert WINNER in detail
 
@@ -95,7 +96,9 @@ async def _client_create(status: int, body) -> None:
 
     client = CoreStorageClient()
     err = httpx.HTTPStatusError(
-        "upstream", request=_response(status, body).request, response=_response(status, body)
+        "upstream",
+        request=_response(status, body).request,
+        response=_response(status, body),
     )
     with patch.object(CoreStorageClient, "_post", new=AsyncMock(side_effect=err)):
         await client.create_memory({"agent_id": "a", "tenant_id": "t"})
@@ -183,7 +186,9 @@ async def test_the_helper_passes_a_successful_write_straight_through() -> None:
     sc.create_memory = AsyncMock(return_value={"id": WINNER})
 
     with patch.object(memory_service, "get_storage_client", lambda: sc):
-        assert await memory_service._create_memory_or_409({"tenant_id": "t"}) == {"id": WINNER}
+        assert await memory_service._create_memory_or_409({"tenant_id": "t"}) == {
+            "id": WINNER
+        }
 
 
 @pytest.mark.asyncio
@@ -309,7 +314,10 @@ async def test_the_fanout_treats_a_duplicate_as_recorded_and_keeps_going() -> No
         retrieval_hint="",
         ts_valid_start=None,
         ts_valid_end=None,
-        atomic_facts=[AtomicFact(content="alpha fact"), AtomicFact(content="beta fact")],
+        atomic_facts=[
+            AtomicFact(content="alpha fact"),
+            AtomicFact(content="beta fact"),
+        ],
     )
 
     def _stub_tracked_task(coro, *_a, **_k):
@@ -373,7 +381,9 @@ async def test_a_refused_child_batch_does_not_strand_the_committed_parent() -> N
     caught: list[str] = []
 
     async def _refuse(_payloads):
-        raise DuplicateMemoryError("bulk insert rejected: an item's content already exists")
+        raise DuplicateMemoryError(
+            "bulk insert rejected: an item's content already exists"
+        )
 
     sc = MagicMock()
     sc.create_memories = AsyncMock(side_effect=_refuse)
@@ -435,12 +445,16 @@ async def test_the_bulk_client_translates_a_409_the_same_way() -> None:
     """
     from core_api.clients.storage_client import CoreStorageClient
 
-    resp = _response(409, {"detail": "bulk insert rejected: an item's content already exists"})
+    resp = _response(
+        409, {"detail": "bulk insert rejected: an item's content already exists"}
+    )
     err = httpx.HTTPStatusError("upstream", request=resp.request, response=resp)
 
     with patch.object(CoreStorageClient, "_post", new=AsyncMock(side_effect=err)):
         with pytest.raises(DuplicateMemoryError) as caught:
-            await CoreStorageClient().create_memories([{"agent_id": "a", "tenant_id": "t"}])
+            await CoreStorageClient().create_memories(
+                [{"agent_id": "a", "tenant_id": "t"}]
+            )
 
     assert "already exists" in str(caught.value)
 
@@ -454,4 +468,6 @@ async def test_the_bulk_client_still_propagates_other_statuses() -> None:
 
     with patch.object(CoreStorageClient, "_post", new=AsyncMock(side_effect=err)):
         with pytest.raises(httpx.HTTPStatusError):
-            await CoreStorageClient().create_memories([{"agent_id": "a", "tenant_id": "t"}])
+            await CoreStorageClient().create_memories(
+                [{"agent_id": "a", "tenant_id": "t"}]
+            )

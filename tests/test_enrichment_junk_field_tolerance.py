@@ -47,7 +47,9 @@ def test_junk_summary_does_not_discard_the_enrichment(junk) -> None:
     """The other nine fields must survive a bad ``summary``."""
     result = _validate_enrichment(_raw(summary=junk), llm_ms=12)
 
-    assert result.summary == "", f"a junk summary must normalise to empty; got {result.summary!r}"
+    assert result.summary == "", (
+        f"a junk summary must normalise to empty; got {result.summary!r}"
+    )
     # The point of the fix: everything else is still the LLM's work, not
     # fake_enrich's.
     assert result.title == "Anna ships Helios"
@@ -89,7 +91,9 @@ def test_junk_title_is_not_persisted_as_its_repr(junk) -> None:
     ],
 )
 def test_pii_types_junk_is_normalised_not_fatal(raw_value, expected) -> None:
-    result = _validate_enrichment(_raw(pii_types=raw_value, contains_pii=True), llm_ms=1)
+    result = _validate_enrichment(
+        _raw(pii_types=raw_value, contains_pii=True), llm_ms=1
+    )
 
     assert result.pii_types == expected, (
         f"pii_types={raw_value!r} should normalise to {expected!r}; got {result.pii_types!r}"
@@ -103,7 +107,8 @@ def test_pii_types_junk_is_normalised_not_fatal(raw_value, expected) -> None:
 def test_clean_payload_is_untouched() -> None:
     """Control: tolerance must not alter a well-formed enrichment."""
     result = _validate_enrichment(
-        _raw(summary="A real summary.", pii_types=["email"], contains_pii=True), llm_ms=7
+        _raw(summary="A real summary.", pii_types=["email"], contains_pii=True),
+        llm_ms=7,
     )
 
     assert result.summary == "A real summary."
@@ -111,6 +116,7 @@ def test_clean_payload_is_untouched() -> None:
     assert result.contains_pii is True
     assert result.title == "Anna ships Helios"
     assert result.tags == ["migration"]
+
 
 # The non-dict shape guard (CAURA-651) is already covered, with a stronger
 # message assertion, by

@@ -10,26 +10,24 @@ scoring blend, entity matching — end-to-end via the service layer.
 import hashlib
 import math
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text, update
 
-from core_storage_api.services.postgres_service import get_session
-
+from common.embedding import fake_embedding
+from common.models.memory import Memory
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     CANDIDATE_POOL_SIZE,
-    FTS_RANK_SCALE,
     FRESHNESS_DECAY_DAYS,
+    FTS_RANK_SCALE,
     MIN_SEARCH_SIMILARITY,
     SCORE_FORMULA,
     SEARCH_OVERFETCH_FACTOR,
     SQL_SCORING_PARAM_KEYS,
 )
-from common.models.memory import Memory
-from common.embedding import fake_embedding
-
+from core_storage_api.services.postgres_service import get_session
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -89,7 +87,9 @@ async def _insert_memory(
         # Override created_at if provided (server_default set it on create).
         if created_at:
             await session.execute(
-                update(Memory).where(Memory.id == mem["id"]).values(created_at=created_at)
+                update(Memory)
+                .where(Memory.id == mem["id"])
+                .values(created_at=created_at)
             )
 
     return mem
@@ -98,12 +98,14 @@ async def _insert_memory(
 async def _insert_entity(tenant_id, name, entity_type="concept", fleet_id=None):
     """Insert an entity via storage client with search_vector populated."""
     sc = get_storage_client()
-    entity = await sc.create_entity({
-        "tenant_id": tenant_id,
-        "fleet_id": fleet_id,
-        "entity_type": entity_type,
-        "canonical_name": name,
-    })
+    entity = await sc.create_entity(
+        {
+            "tenant_id": tenant_id,
+            "fleet_id": fleet_id,
+            "entity_type": entity_type,
+            "canonical_name": name,
+        }
+    )
     # Populate search_vector for FTS scoring, committed via the storage write
     # session so the storage-routed search path sees it.
     async with get_session() as session:
@@ -119,11 +121,14 @@ async def _insert_entity(tenant_id, name, entity_type="concept", fleet_id=None):
 
 async def _link_memory_entity(tenant_id, memory_id, entity_id, role="mentioned"):
     sc = get_storage_client()
-    await sc.create_entity_link(tenant_id, {
-        "memory_id": str(memory_id),
-        "entity_id": str(entity_id),
-        "role": role,
-    })
+    await sc.create_entity_link(
+        tenant_id,
+        {
+            "memory_id": str(memory_id),
+            "entity_id": str(entity_id),
+            "role": role,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +142,7 @@ class TestSearchPipelineEndToEnd:
 
     async def test_basic_search_returns_results(self, tenant_id):
         """Baseline: search returns stored memories sorted by relevance."""
-        await _insert_memory(tenant_id, "Python is a programming language", weight=0.7
-        )
+        await _insert_memory(tenant_id, "Python is a programming language", weight=0.7)
         await _insert_memory(tenant_id, "The weather is sunny today", weight=0.7)
 
         from core_api.services.memory_service import search_memories
@@ -150,16 +154,18 @@ class TestSearchPipelineEndToEnd:
 
     async def test_freshness_prefers_recent_events(self, tenant_id):
         """P0-2: memory about recent event ranks higher than old memory about same topic."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Old memory, no temporal fields — will decay normally
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "deployment system update completed successfully last quarter",
             weight=0.7,
             created_at=now - timedelta(days=FRESHNESS_DECAY_DAYS + 10),
         )
         # New memory with recent ts_valid_start
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "deployment system update critical patch applied today",
             weight=0.7,
             created_at=now - timedelta(days=80),
@@ -175,14 +181,16 @@ class TestSearchPipelineEndToEnd:
 
     async def test_expired_memory_ranked_lower(self, tenant_id):
         """P0-2: expired memory (ts_valid_end in past) gets freshness floor."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "Sprint deadline is next Friday for the analytics dashboard",
             weight=0.7,
             ts_valid_end=now - timedelta(days=1),  # expired yesterday
         )
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "Sprint deadline is this Friday for the analytics dashboard",
             weight=0.7,
             ts_valid_end=now + timedelta(days=5),  # still valid
@@ -197,17 +205,19 @@ class TestSearchPipelineEndToEnd:
 
     async def test_recall_boost_decays_over_time(self, tenant_id):
         """P0-3: frequently recalled but stale memory doesn't dominate."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Memory A: recalled 50 times but 45 days ago (stale)
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "Architecture decision for microservices migration",
             weight=0.5,
             recall_count=50,
             last_recalled_at=now - timedelta(days=45),
         )
         # Memory B: recalled 2 times but just now (fresh)
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "Architecture decision for database sharding approach",
             weight=0.5,
             recall_count=2,
@@ -224,11 +234,13 @@ class TestSearchPipelineEndToEnd:
     async def test_similarity_beats_weight(self, tenant_id):
         """P0-4: highly similar + low weight ranks above moderately similar + high weight."""
         # Use very different content to get clearly different similarity scores
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "kafka consumer lag monitoring alert threshold configuration",
             weight=0.3,  # low weight
         )
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "general operational procedures for infrastructure management overview",
             weight=0.95,  # high weight
         )
@@ -246,14 +258,16 @@ class TestSearchPipelineEndToEnd:
         entity = await _insert_entity(tenant_id, "kafka cluster")
 
         # Create memory linked to entity
-        mem = await _insert_memory(            tenant_id,
+        mem = await _insert_memory(
+            tenant_id,
             "kafka cluster status healthy all nodes running",
             weight=0.7,
         )
         await _link_memory_entity(tenant_id, mem["id"], entity["id"])
 
         # Create unrelated memory
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "weather forecast shows clear skies for tomorrow",
             weight=0.7,
         )
@@ -266,10 +280,11 @@ class TestSearchPipelineEndToEnd:
 
     async def test_search_with_all_fixes_combined(self, tenant_id):
         """Smoke test: all four P0 fixes working together."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Memory 1: old, high weight, lots of stale recalls
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "redis cache performance tuning guide from last quarter",
             weight=0.95,
             recall_count=100,
@@ -278,7 +293,8 @@ class TestSearchPipelineEndToEnd:
         )
         # Memory 2: fresh, moderate weight, few recent recalls, entity-linked
         entity = await _insert_entity(tenant_id, "redis")
-        mem2 = await _insert_memory(            tenant_id,
+        mem2 = await _insert_memory(
+            tenant_id,
             "redis cache performance dropped to 40% after latest deployment",
             weight=0.6,
             recall_count=3,
@@ -337,7 +353,7 @@ class TestSearchPipelineEndToEnd:
                 "visibility": "scope_team",
             }
             if deleted:
-                payload["deleted_at"] = datetime.now(timezone.utc).isoformat()
+                payload["deleted_at"] = datetime.now(UTC).isoformat()
             # search_vector comes from the trigger (title-inclusive since 034).
             return await sc.create_memory(payload)
 
@@ -375,7 +391,8 @@ class TestConflictedExactMatchSurfaces:
     async def test_conflicted_exact_match_is_surfaced(self, tenant_id):
         # Distinctive token "zylqx" appears only in the conflicted gold, so the
         # query FTS-matches the gold and nothing else.
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "Division zylqx quarterly revenue is forty two million",
             weight=0.7,
             status="conflicted",
@@ -389,8 +406,7 @@ class TestConflictedExactMatchSurfaces:
 
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id, "zylqx quarterly revenue", top_k=10
-        )
+        results = await search_memories(tenant_id, "zylqx quarterly revenue", top_k=10)
         assert any("zylqx" in r.content for r in results), (
             "conflicted exact-match gold was excluded from results"
         )
@@ -398,12 +414,14 @@ class TestConflictedExactMatchSurfaces:
     async def test_conflicted_non_match_still_excluded(self, tenant_id):
         # A conflicted row that does NOT lexically match the query stays hidden
         # (carve-out is scoped to exact matches, not all conflicted rows).
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "Division qqqqq headcount is two hundred",
             weight=0.7,
             status="conflicted",
         )
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "Division wwwww quarterly revenue is five million",
             weight=0.7,
             status="confirmed",
@@ -419,7 +437,8 @@ class TestConflictedExactMatchSurfaces:
     async def test_outdated_exact_match_still_excluded(self, tenant_id):
         # ``outdated`` is a definitive retraction — it stays excluded even on an
         # exact lexical match (only ``conflicted`` gets the carve-out).
-        await _insert_memory(            tenant_id,
+        await _insert_memory(
+            tenant_id,
             "Project vortex status is cancelled",
             weight=0.7,
             status="outdated",
@@ -438,7 +457,9 @@ class TestConflictedExactMatchSurfaces:
 # ---------------------------------------------------------------------------
 
 
-async def _insert_memory_with_embedding(tenant_id, content, *, embedding, fleet_id=None, weight=0.5):
+async def _insert_memory_with_embedding(
+    tenant_id, content, *, embedding, fleet_id=None, weight=0.5
+):
     """Insert a row with a caller-chosen embedding (``None`` for FTS-only).
 
     Separate from ``_insert_memory``, which always derives the embedding from
@@ -464,7 +485,9 @@ async def _insert_memory_with_embedding(tenant_id, content, *, embedding, fleet_
 
 
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
-async def test_fts_only_row_survives_a_saturated_candidate_window(tenant_id, monkeypatch, use_pipeline):
+async def test_fts_only_row_survives_a_saturated_candidate_window(
+    tenant_id, monkeypatch, use_pipeline
+):
     """An FTS-matching row with no embedding must not be cut by the candidate window.
 
     The scored search fetches ``top_k * SEARCH_OVERFETCH_FACTOR`` candidates
@@ -582,7 +605,9 @@ async def test_fts_rank_scale_lifts_a_lexical_match_onto_the_cosine_scale():
 @pytest.mark.integration
 async def test_fts_rank_scale_of_one_reproduces_the_pre_687_formula():
     """1.0 is the documented revert, so it must be exact, not merely close."""
-    raw, scaled = await _rank_and_score("another memory mentioning zqxjvbn", "zqxjvbn", 1.0)
+    raw, scaled = await _rank_and_score(
+        "another memory mentioning zqxjvbn", "zqxjvbn", 1.0
+    )
     assert scaled == pytest.approx(raw / (1.0 + raw), abs=1e-12)
 
 
@@ -623,7 +648,14 @@ def _spy_on_scored_search(monkeypatch) -> list[tuple[dict, list]]:
 
 
 async def _scored_search_call(
-    monkeypatch, tenant_id, use_pipeline, *, search_profile=None, boost=None, top_k=3, tenant_config=None
+    monkeypatch,
+    tenant_id,
+    use_pipeline,
+    *,
+    search_profile=None,
+    boost=None,
+    top_k=3,
+    tenant_config=None,
 ):
     """Run one search; return the kwargs ``memory_scored_search`` received.
 
@@ -672,7 +704,9 @@ async def _scored_search_call(
 @pytest.mark.integration
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
 @pytest.mark.parametrize(
-    "via", [None, "agent_profile", "tenant_default"], ids=["defaults", "agent", "tenant_default"]
+    "via",
+    [None, "agent_profile", "tenant_default"],
+    ids=["defaults", "agent", "tenant_default"],
 )
 async def test_scoring_knobs_reach_the_sql_on_both_search_paths(
     tenant_id, monkeypatch, use_pipeline, via
@@ -705,7 +739,9 @@ async def test_scoring_knobs_reach_the_sql_on_both_search_paths(
     tuned = {key: t for key, _, t in _SQL_SCORING_KEYS}
     profile = tuned if via == "agent_profile" else None
     tenant_config = (
-        ResolvedConfig({"search": {"default_profile": tuned}}) if via == "tenant_default" else None
+        ResolvedConfig({"search": {"default_profile": tuned}})
+        if via == "tenant_default"
+        else None
     )
     expected = tuned if via else {key: const for key, const, _ in _SQL_SCORING_KEYS}
 
@@ -749,7 +785,9 @@ async def test_entity_boost_inputs_reach_the_sql_on_both_search_paths(
     )
 
     path = "pipeline" if use_pipeline else "legacy"
-    assert call.get("boosted_memory_ids"), f"the {path} path delivered no boosted_memory_ids"
+    assert call.get("boosted_memory_ids"), (
+        f"the {path} path delivered no boosted_memory_ids"
+    )
     assert call.get("memory_boost_factor"), (
         f"the {path} path delivered boosted_memory_ids but no memory_boost_factor, so the SQL's "
         f"`if boosted_memory_ids and memory_boost_factor` guard skips the entity boost entirely"
@@ -763,7 +801,9 @@ async def test_entity_boost_inputs_reach_the_sql_on_both_search_paths(
 
 @pytest.mark.integration
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
-async def test_overfetched_top_k_is_what_storage_receives(tenant_id, monkeypatch, use_pipeline):
+async def test_overfetched_top_k_is_what_storage_receives(
+    tenant_id, monkeypatch, use_pipeline
+):
     """The overfetched limit must reach storage, and nothing may shadow it.
 
     Storage takes the candidate-window LIMIT from the ``top_k`` request
@@ -776,7 +816,9 @@ async def test_overfetched_top_k_is_what_storage_receives(tenant_id, monkeypatch
     shadowing key is the thing to pin.
     """
     caller_top_k = 3
-    call = await _scored_search_call(monkeypatch, tenant_id, use_pipeline, top_k=caller_top_k)
+    call = await _scored_search_call(
+        monkeypatch, tenant_id, use_pipeline, top_k=caller_top_k
+    )
 
     path = "pipeline" if use_pipeline else "legacy"
     assert call.get("top_k") == caller_top_k * SEARCH_OVERFETCH_FACTOR, (
@@ -791,7 +833,9 @@ async def test_overfetched_top_k_is_what_storage_receives(tenant_id, monkeypatch
 
 @pytest.mark.integration
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
-async def test_candidate_window_is_actually_overfetched_in_sql(monkeypatch, use_pipeline):
+async def test_candidate_window_is_actually_overfetched_in_sql(
+    monkeypatch, use_pipeline
+):
     """Storage must return a full overfetched window, not the caller's top_k.
 
     The delivery test above pins the payload; this pins the SQL. It counts the
@@ -821,7 +865,9 @@ async def test_candidate_window_is_actually_overfetched_in_sql(monkeypatch, use_
         )
 
     calls = _spy_on_scored_search(monkeypatch)
-    await memory_service.search_memories(tenant_id=isolated, query=token, top_k=caller_top_k)
+    await memory_service.search_memories(
+        tenant_id=isolated, query=token, top_k=caller_top_k
+    )
 
     path = "pipeline" if use_pipeline else "legacy"
     assert calls, f"the {path} path never reached memory_scored_search"
@@ -833,7 +879,9 @@ async def test_candidate_window_is_actually_overfetched_in_sql(monkeypatch, use_
     )
 
 
-def _embedding_at_cosine(target: float, query_embedding: list[float], seed: str) -> list[float]:
+def _embedding_at_cosine(
+    target: float, query_embedding: list[float], seed: str
+) -> list[float]:
     """A unit vector at exactly ``target`` cosine to ``query_embedding``.
 
     Gram-Schmidt against the query gives an orthonormal basis {q, r_orth}, so
@@ -903,7 +951,9 @@ async def test_post_filter_does_not_starve_the_result_set(monkeypatch, use_pipel
         )
         qualifying.add(str(mem["id"]))
 
-    results = await memory_service.search_memories(tenant_id=isolated, query=token, top_k=top_k)
+    results = await memory_service.search_memories(
+        tenant_id=isolated, query=token, top_k=top_k
+    )
 
     path = "pipeline" if use_pipeline else "legacy"
     assert len(results) == top_k, (
@@ -918,7 +968,9 @@ async def test_post_filter_does_not_starve_the_result_set(monkeypatch, use_pipel
 
 @pytest.mark.integration
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
-async def test_only_sql_scoring_keys_cross_the_wire(tenant_id, monkeypatch, use_pipeline):
+async def test_only_sql_scoring_keys_cross_the_wire(
+    tenant_id, monkeypatch, use_pipeline
+):
     """Both paths must deliver EXACTLY the declared key set — no more, no less.
 
     The per-key tests above pin that specific knobs arrive. This pins the set,
@@ -992,7 +1044,11 @@ def test_sql_flags_match_how_storage_reads_each_knob():
     # these keys in prose as well as reading them, and a regex over raw text
     # scores a comment as a read — it picked up ``top_k`` from the note saying
     # #725 stopped reading it. ``ast.unparse`` drops comments.
-    code = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(PostgresService.memory_scored_search))))
+    code = ast.unparse(
+        ast.parse(
+            textwrap.dedent(inspect.getsource(PostgresService.memory_scored_search))
+        )
+    )
     read = set(re.findall(r"""sp(?:\[|\.get\()['"](\w+)['"]""", code))
     indexed = set(re.findall(r"""sp\[['"](\w+)['"]\]""", code))
 
@@ -1021,20 +1077,22 @@ def test_sql_flags_match_how_storage_reads_each_knob():
 async def _insert_titled(tenant_id, title, content):
     """Insert with a title, letting 001/034's trigger build the vector."""
     sc = get_storage_client()
-    return await sc.create_memory({
-        "tenant_id": tenant_id,
-        "fleet_id": None,
-        "agent_id": "test-agent",
-        "memory_type": "fact",
-        "title": title,
-        "content": content,
-        "weight": 0.5,
-        "embedding": fake_embedding(content),
-        "content_hash": _hash(tenant_id, None, content),
-        "status": "active",
-        "recall_count": 0,
-        "visibility": "scope_team",
-    })
+    return await sc.create_memory(
+        {
+            "tenant_id": tenant_id,
+            "fleet_id": None,
+            "agent_id": "test-agent",
+            "memory_type": "fact",
+            "title": title,
+            "content": content,
+            "weight": 0.5,
+            "embedding": fake_embedding(content),
+            "content_hash": _hash(tenant_id, None, content),
+            "status": "active",
+            "recall_count": 0,
+            "visibility": "scope_team",
+        }
+    )
 
 
 async def _stored_rank(memory_id, query) -> float:
@@ -1093,12 +1151,18 @@ async def test_a_title_match_scores_the_same_as_a_content_match():
     t_token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
     c_token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
 
-    in_title = await _insert_titled(isolated, title=f"heading {t_token} here", content="plain body")
-    in_content = await _insert_titled(isolated, title="plain heading", content=f"body {c_token} here")
+    in_title = await _insert_titled(
+        isolated, title=f"heading {t_token} here", content="plain body"
+    )
+    in_content = await _insert_titled(
+        isolated, title="plain heading", content=f"body {c_token} here"
+    )
 
     assert await _stored_rank(in_title["id"], t_token) == pytest.approx(
         await _stored_rank(in_content["id"], c_token)
-    ), "a title match and a content match must rank identically — 034 sets no field preference"
+    ), (
+        "a title match and a content match must rank identically — 034 sets no field preference"
+    )
 
 
 @pytest.mark.integration
@@ -1113,13 +1177,17 @@ async def test_content_only_scoring_is_untouched_by_034():
     """
     content = "a memory that mentions zqxjvbn exactly once"
 
-    raw, scored = await _rank_and_score(content, "zqxjvbn", FTS_RANK_SCALE, title="an unrelated heading")
+    raw, scored = await _rank_and_score(
+        content, "zqxjvbn", FTS_RANK_SCALE, title="an unrelated heading"
+    )
 
     assert raw == pytest.approx(0.1, abs=1e-6), (
         f"a modal single-term content match should stay at the weight-D rank 0.1, got {raw} — "
         f"a weighting change would rescale it and invalidate FTS_RANK_SCALE={FTS_RANK_SCALE}"
     )
-    assert scored == pytest.approx(0.375, abs=0.001), f"expected the unchanged 0.375, got {scored}"
+    assert scored == pytest.approx(0.375, abs=0.001), (
+        f"expected the unchanged 0.375, got {scored}"
+    )
 
 
 @pytest.mark.integration
@@ -1133,7 +1201,9 @@ async def test_editing_only_the_title_reindexes_the_row():
     """
     isolated = f"test-tenant-retitle-{uuid.uuid4().hex[:8]}"
     token = f"zqxjvbn{uuid.uuid4().hex[:10]}"
-    mem = await _insert_titled(isolated, title="placeholder", content="body about irrigation")
+    mem = await _insert_titled(
+        isolated, title="placeholder", content="body about irrigation"
+    )
 
     async with get_session() as session:
         await session.execute(

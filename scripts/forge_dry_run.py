@@ -36,7 +36,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 # Imported at top so the fake-LLM fallback (when ``common.llm`` is
 # absent) can stamp ``schema_version`` correctly without re-importing
@@ -318,7 +318,7 @@ async def _run(args: argparse.Namespace) -> int:
         run_forge_distill,
     )
 
-    window_end = datetime.now(timezone.utc)
+    window_end = datetime.now(UTC)
     window_start = window_end - timedelta(days=args.window_days)
 
     # Audit handle for this tick — surfaced on every candidate's
@@ -420,7 +420,7 @@ def main() -> int:
         return asyncio.run(_run(args))
     except KeyboardInterrupt:
         return 130
-    except Exception as exc:  # noqa: BLE001 — top-level CLI handler
+    except Exception as exc:
         logger.error("forge_dry_run failed: %s", exc, exc_info=True)
         return 1
 

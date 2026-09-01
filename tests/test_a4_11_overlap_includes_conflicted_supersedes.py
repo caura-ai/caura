@@ -29,8 +29,8 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import AGENT_ID, FLEET_ID, TENANT_ID, uid as _uid
-
+from tests.conftest import AGENT_ID, FLEET_ID, TENANT_ID
+from tests.conftest import uid as _uid
 
 pytestmark = pytest.mark.asyncio
 

@@ -46,8 +46,12 @@ def tight_caps(monkeypatch):
         monkeypatch.setattr(settings, "per_tenant_write_concurrency", write)
         monkeypatch.setattr(settings, "per_tenant_search_concurrency", search)
         monkeypatch.setattr(settings, "per_tenant_embed_concurrency", embed)
-        monkeypatch.setattr(settings, "per_tenant_storage_write_concurrency", storage_write)
-        monkeypatch.setattr(settings, "per_tenant_storage_search_concurrency", storage_search)
+        monkeypatch.setattr(
+            settings, "per_tenant_storage_write_concurrency", storage_write
+        )
+        monkeypatch.setattr(
+            settings, "per_tenant_storage_search_concurrency", storage_search
+        )
         per_tenant_concurrency._reset_for_tests()
 
     return _set

@@ -136,7 +136,10 @@ class TestValidatorSanitization:
         )
         out = _validate_enrichment(raw, llm_ms=0)
         assert len(out.atomic_facts) == 2
-        assert [f.content for f in out.atomic_facts] == ["has content", "another valid one"]
+        assert [f.content for f in out.atomic_facts] == [
+            "has content",
+            "another valid one",
+        ]
 
     def test_invalid_suggested_type_falls_back_to_fact(self):
         raw = _raw(
@@ -152,7 +155,11 @@ class TestValidatorSanitization:
         raw = _raw(
             atomic_facts=[
                 {"content": "no hint", "suggested_type": "fact"},
-                {"content": "has hint", "suggested_type": "fact", "retrieval_hint": "x"},
+                {
+                    "content": "has hint",
+                    "suggested_type": "fact",
+                    "retrieval_hint": "x",
+                },
             ],
         )
         out = _validate_enrichment(raw, llm_ms=0)

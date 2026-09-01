@@ -97,7 +97,7 @@ async def test_report_internal_group_durable_filter(client):
     # weekly extras: value_highlights (top durable) + spotlight (top contributor)
     assert len(body["value_highlights"]) == 3, body["value_highlights"]
     assert all(
-        "episode" != h["type"] and h["agent_id"] != "main"
+        h["type"] != "episode" and h["agent_id"] != "main"
         for h in body["value_highlights"]
     )
     assert body["spotlight"]["agent_id"] == a1, body["spotlight"]

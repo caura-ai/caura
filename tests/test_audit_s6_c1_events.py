@@ -53,7 +53,9 @@ def _search_ctx(tenant_id: str, readable: list[str] | None):
     return PipelineContext(data=data)
 
 
-async def _run_scored_search(monkeypatch, tenant_id: str, readable: list[str] | None) -> dict:
+async def _run_scored_search(
+    monkeypatch, tenant_id: str, readable: list[str] | None
+) -> dict:
     from core_api.pipeline.steps.search import execute_scored_search as mod
 
     sc = MagicMock()
@@ -100,7 +102,12 @@ def test_all_providers_accept_structured_output_kwargs():
     from common.llm.providers.openai import OpenAILLMProvider
     from common.llm.providers.vertex import VertexLLMProvider
 
-    for provider_cls in (FakeLLMProvider, GeminiLLMProvider, OpenAILLMProvider, VertexLLMProvider):
+    for provider_cls in (
+        FakeLLMProvider,
+        GeminiLLMProvider,
+        OpenAILLMProvider,
+        VertexLLMProvider,
+    ):
         params = inspect.signature(provider_cls.complete_json).parameters
         assert "seed" in params, f"{provider_cls.__name__}.complete_json lacks seed"
         assert "response_schema" in params, (

@@ -22,8 +22,8 @@ from __future__ import annotations
 
 import inspect
 import json
-from contextlib import contextmanager
 import typing
+from contextlib import contextmanager
 
 import pytest
 
@@ -34,8 +34,16 @@ pytestmark = pytest.mark.unit
 
 # Tools whose signature exposes agent_id to the client.
 AGENT_ID_TOOLS = [
-    "caura_recall", "caura_write", "caura_manage", "caura_tune", "caura_doc",
-    "caura_list", "caura_stats", "caura_insights", "caura_evolve", "caura_keystones",
+    "caura_recall",
+    "caura_write",
+    "caura_manage",
+    "caura_tune",
+    "caura_doc",
+    "caura_list",
+    "caura_stats",
+    "caura_insights",
+    "caura_evolve",
+    "caura_keystones",
 ]
 
 
@@ -47,7 +55,9 @@ def _agent_id_field(tool_name: str):
 
 
 def _default(tool_name: str):
-    return inspect.signature(getattr(mcp_server, tool_name)).parameters["agent_id"].default
+    return (
+        inspect.signature(getattr(mcp_server, tool_name)).parameters["agent_id"].default
+    )
 
 
 @pytest.mark.parametrize("tool", AGENT_ID_TOOLS)

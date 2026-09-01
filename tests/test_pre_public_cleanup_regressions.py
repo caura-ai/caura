@@ -11,7 +11,8 @@ import os
 
 import pytest
 
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 
 def _needs_real_provider() -> bool:
@@ -28,8 +29,16 @@ def _needs_real_provider() -> bool:
     )
 
 
-async def _write(client, tenant_id, headers, content, *, agent_id=None, fleet_id=None,
-                 memory_type="fact"):
+async def _write(
+    client,
+    tenant_id,
+    headers,
+    content,
+    *,
+    agent_id=None,
+    fleet_id=None,
+    memory_type="fact",
+):
     tag = _uid()
     agent_id = agent_id or f"regr-{tag}"
     fleet_id = fleet_id or f"regr-fleet-{tag}"
@@ -83,9 +92,12 @@ async def test_recall_increments_recall_count(client):
     fleet_id = f"recall-fleet-{tag}"
 
     mem = await _write(
-        client, tenant_id, headers,
+        client,
+        tenant_id,
+        headers,
         "The capital of France is Paris.",
-        agent_id=agent_id, fleet_id=fleet_id,
+        agent_id=agent_id,
+        fleet_id=fleet_id,
     )
     memory_id = mem["id"]
     assert mem["recall_count"] == 0
@@ -108,7 +120,9 @@ async def test_recall_increments_recall_count(client):
         # a short semantic query, so the hook has nothing to fire on. That's
         # fine — the hook's contract is "increment on hits" and there's no
         # regression to guard against without a hit. Skip in that case.
-        pytest.skip("recall returned zero memories — fake embedding can't match; hook untestable")
+        pytest.skip(
+            "recall returned zero memories — fake embedding can't match; hook untestable"
+        )
 
     after = await client.get(
         f"/api/v1/memories/{memory_id}?tenant_id={tenant_id}",
@@ -135,8 +149,12 @@ async def test_list_memories_honors_offset(client):
 
     for i in range(4):
         await _write(
-            client, tenant_id, headers, f"offset-probe-{i}",
-            agent_id=agent_id, fleet_id=fleet_id,
+            client,
+            tenant_id,
+            headers,
+            f"offset-probe-{i}",
+            agent_id=agent_id,
+            fleet_id=fleet_id,
         )
 
     first = await client.get(
@@ -173,7 +191,12 @@ async def test_agents_get_tune_symmetric_with_patch(client):
     fleet_id = f"tune-fleet-{tag}"
 
     await _write(
-        client, tenant_id, headers, "seed", agent_id=agent_id, fleet_id=fleet_id,
+        client,
+        tenant_id,
+        headers,
+        "seed",
+        agent_id=agent_id,
+        fleet_id=fleet_id,
     )
 
     get_resp = await client.get(
@@ -201,9 +224,12 @@ async def test_insights_rerun_supersedes_prior(client):
 
     for i in range(3):
         await _write(
-            client, tenant_id, headers,
-            f"The {['red','green','blue'][i]} team ships on Fridays.",
-            agent_id=agent_id, fleet_id=fleet_id,
+            client,
+            tenant_id,
+            headers,
+            f"The {['red', 'green', 'blue'][i]} team ships on Fridays.",
+            agent_id=agent_id,
+            fleet_id=fleet_id,
         )
 
     body = {
@@ -334,6 +360,4 @@ async def test_openapi_docs_lock(client):
     assert "scope_agent" in get_doc, (
         "GET /memories docstring lost scope_agent visibility note"
     )
-    assert "offset" in get_doc, (
-        "GET /memories docstring lost offset pagination note"
-    )
+    assert "offset" in get_doc, "GET /memories docstring lost offset pagination note"

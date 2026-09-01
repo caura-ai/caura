@@ -30,12 +30,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-import httpx
 import pytest
 from sqlalchemy import text
 
 from core_storage_api.services.postgres_service import (
-    PostgresService,
     get_session,
 )
 
@@ -149,7 +147,11 @@ async def _seed_doc(sc, tenant, doc_id, *, status, fleet_id=None):
         "tenant_id": tenant,
         "collection": "skills",
         "doc_id": doc_id,
-        "data": {"status": status, "source": "forge", "created_at": "2026-05-01T00:00:00+00:00"},
+        "data": {
+            "status": status,
+            "source": "forge",
+            "created_at": "2026-05-01T00:00:00+00:00",
+        },
     }
     if fleet_id is not None:
         payload["fleet_id"] = fleet_id
@@ -172,7 +174,9 @@ async def test_update_status_cas_hit(sc):
     assert result["doc_id"] == "forge/skill-1"
 
     # The status flipped and ``staged_at`` was stamped.
-    doc = await sc.get_document(tenant_id=tenant, collection="skills", doc_id="forge/skill-1", read=False)
+    doc = await sc.get_document(
+        tenant_id=tenant, collection="skills", doc_id="forge/skill-1", read=False
+    )
     assert doc["data"]["status"] == "staged"
     assert "staged_at" in doc["data"]
 
@@ -193,7 +197,9 @@ async def test_update_status_cas_miss_returns_none(sc):
     )
     assert result is None
     # Status unchanged.
-    doc = await sc.get_document(tenant_id=tenant, collection="skills", doc_id="forge/skill-2", read=False)
+    doc = await sc.get_document(
+        tenant_id=tenant, collection="skills", doc_id="forge/skill-2", read=False
+    )
     assert doc["data"]["status"] == "staged"
 
 
@@ -210,14 +216,21 @@ async def test_update_status_tenant_isolation(sc):
         expected_status="candidate",
     )
     assert result is None
-    doc = await sc.get_document(tenant_id=t_a, collection="skills", doc_id="forge/shared", read=False)
+    doc = await sc.get_document(
+        tenant_id=t_a, collection="skills", doc_id="forge/shared", read=False
+    )
     assert doc["data"]["status"] == "candidate", "tenant A's doc untouched"
 
 
 async def test_update_status_missing_tenant_422(storage_http):
     resp = await storage_http.post(
         "/api/v1/storage/documents/update-status",
-        json={"collection": "skills", "doc_id": "x", "new_status": "staged", "expected_status": "candidate"},
+        json={
+            "collection": "skills",
+            "doc_id": "x",
+            "new_status": "staged",
+            "expected_status": "candidate",
+        },
     )
     assert resp.status_code == 422
 
@@ -293,9 +306,13 @@ async def test_fingerprint_fleet_predicate(sc):
         cooloff_days=30,
     )
     # Same fleet → poisoned.
-    assert await sc.forge_is_fingerprint_poisoned(tenant_id=tenant, fleet_id="fleet-A", cluster_fingerprint=fp)
+    assert await sc.forge_is_fingerprint_poisoned(
+        tenant_id=tenant, fleet_id="fleet-A", cluster_fingerprint=fp
+    )
     # Tenant-wide scan (fleet_id=None) → poisoned (the :fleet_id IS NULL arm).
-    assert await sc.forge_is_fingerprint_poisoned(tenant_id=tenant, fleet_id=None, cluster_fingerprint=fp)
+    assert await sc.forge_is_fingerprint_poisoned(
+        tenant_id=tenant, fleet_id=None, cluster_fingerprint=fp
+    )
     # Different fleet → NOT poisoned.
     assert not await sc.forge_is_fingerprint_poisoned(
         tenant_id=tenant, fleet_id="fleet-B", cluster_fingerprint=fp
@@ -306,10 +323,18 @@ async def test_fingerprint_tenant_isolation(sc):
     t_a, t_b = _t(), _t()
     fp = f"fp:v1:{uuid4().hex}"
     await sc.forge_write_rejected_fingerprint(
-        tenant_id=t_a, fleet_id=None, cluster_fingerprint=fp, rejected_by_agent="h", cooloff_days=30
+        tenant_id=t_a,
+        fleet_id=None,
+        cluster_fingerprint=fp,
+        rejected_by_agent="h",
+        cooloff_days=30,
     )
-    assert await sc.forge_is_fingerprint_poisoned(tenant_id=t_a, fleet_id=None, cluster_fingerprint=fp)
-    assert not await sc.forge_is_fingerprint_poisoned(tenant_id=t_b, fleet_id=None, cluster_fingerprint=fp)
+    assert await sc.forge_is_fingerprint_poisoned(
+        tenant_id=t_a, fleet_id=None, cluster_fingerprint=fp
+    )
+    assert not await sc.forge_is_fingerprint_poisoned(
+        tenant_id=t_b, fleet_id=None, cluster_fingerprint=fp
+    )
 
 
 # ===========================================================================
@@ -317,7 +342,9 @@ async def test_fingerprint_tenant_isolation(sc):
 # ===========================================================================
 
 
-def _trace(run_id: str, agent_id: str, *, label: str = "success", fleet_id=None) -> dict:
+def _trace(
+    run_id: str, agent_id: str, *, label: str = "success", fleet_id=None
+) -> dict:
     now = datetime.now(UTC)
     return {
         "fleet_id": fleet_id,
@@ -375,10 +402,18 @@ async def test_session_traces_on_conflict_refreshes(sc):
     # Re-upserting the same (tenant, run_id, agent_id) updates in place
     # (one row), refreshing outcome_label — idempotent forge re-runs.
     tenant = _t()
-    await sc.upsert_session_traces(tenant_id=tenant, traces=[_trace("run-x", "agent-1", label="unknown")])
-    await sc.upsert_session_traces(tenant_id=tenant, traces=[_trace("run-x", "agent-1", label="success")])
-    assert await _count_traces(tenant, "run-x", "agent-1") == 1, "ON CONFLICT collapses to one row"
-    assert await _trace_label(tenant, "run-x", "agent-1") == "success", "label refreshed"
+    await sc.upsert_session_traces(
+        tenant_id=tenant, traces=[_trace("run-x", "agent-1", label="unknown")]
+    )
+    await sc.upsert_session_traces(
+        tenant_id=tenant, traces=[_trace("run-x", "agent-1", label="success")]
+    )
+    assert await _count_traces(tenant, "run-x", "agent-1") == 1, (
+        "ON CONFLICT collapses to one row"
+    )
+    assert await _trace_label(tenant, "run-x", "agent-1") == "success", (
+        "label refreshed"
+    )
 
 
 async def test_session_traces_tenant_forced(sc):
@@ -407,12 +442,32 @@ async def test_session_memories_in_window(sc):
     tenant = _t()
     now = datetime.now(UTC)
     # In-window, run-scoped → returned.
-    await _seed_memory(tenant_id=tenant, run_id="run-A", agent_id="a1", created_at=now - timedelta(hours=2))
-    await _seed_memory(tenant_id=tenant, run_id="run-A", agent_id="a1", created_at=now - timedelta(hours=1))
+    await _seed_memory(
+        tenant_id=tenant,
+        run_id="run-A",
+        agent_id="a1",
+        created_at=now - timedelta(hours=2),
+    )
+    await _seed_memory(
+        tenant_id=tenant,
+        run_id="run-A",
+        agent_id="a1",
+        created_at=now - timedelta(hours=1),
+    )
     # No run_id → SKIPPED.
-    await _seed_memory(tenant_id=tenant, run_id=None, agent_id="a1", created_at=now - timedelta(hours=1))
+    await _seed_memory(
+        tenant_id=tenant,
+        run_id=None,
+        agent_id="a1",
+        created_at=now - timedelta(hours=1),
+    )
     # Out of window → excluded.
-    await _seed_memory(tenant_id=tenant, run_id="run-B", agent_id="a1", created_at=now - timedelta(days=40))
+    await _seed_memory(
+        tenant_id=tenant,
+        run_id="run-B",
+        agent_id="a1",
+        created_at=now - timedelta(days=40),
+    )
 
     rows = await sc.session_memories_in_window(
         tenant_id=tenant,
@@ -431,7 +486,10 @@ async def test_session_memories_window_tenant_isolation(sc):
     await _seed_memory(tenant_id=t_a, run_id="run-A", created_at=now)
     await _seed_memory(tenant_id=t_b, run_id="run-B", created_at=now)
     rows = await sc.session_memories_in_window(
-        tenant_id=t_a, fleet_id=None, window_start=now - timedelta(days=1), window_end=now + timedelta(minutes=1)
+        tenant_id=t_a,
+        fleet_id=None,
+        window_start=now - timedelta(days=1),
+        window_end=now + timedelta(minutes=1),
     )
     assert {r["run_id"] for r in rows} == {"run-A"}
 
@@ -449,7 +507,9 @@ async def test_entity_links_batch(sc):
     pairs = {(r["memory_id"], r["entity_id"]) for r in rows}
     assert pairs == {(m1, e1), (m1, e2), (m2, e1)}
     # Wrong tenant sees nothing — the join scopes links to the owning tenant.
-    assert await sc.session_trace_entity_links(tenant_id=_t(), memory_ids=[m1, m2]) == []
+    assert (
+        await sc.session_trace_entity_links(tenant_id=_t(), memory_ids=[m1, m2]) == []
+    )
 
 
 async def test_entity_links_batch_empty(sc):
@@ -465,7 +525,9 @@ async def test_forge_memory_content_by_ids(sc):
     by_id = {r["id"]: r["content"] for r in rows}
     assert by_id == {m1: "hello", m2: "world"}
     # Wrong tenant sees nothing.
-    assert await sc.forge_memory_content_by_ids(tenant_id=_t(), memory_ids=[m1, m2]) == []
+    assert (
+        await sc.forge_memory_content_by_ids(tenant_id=_t(), memory_ids=[m1, m2]) == []
+    )
 
 
 async def test_outcome_contradiction_signals(sc):
@@ -473,11 +535,18 @@ async def test_outcome_contradiction_signals(sc):
     now = datetime.now(UTC)
     # outdated within window → returned.
     await _seed_memory(
-        tenant_id=tenant, run_id="run-A", status="outdated",
+        tenant_id=tenant,
+        run_id="run-A",
+        status="outdated",
         created_at=now - timedelta(hours=2),
     )
     # active → excluded.
-    await _seed_memory(tenant_id=tenant, run_id="run-B", status="active", created_at=now - timedelta(hours=2))
+    await _seed_memory(
+        tenant_id=tenant,
+        run_id="run-B",
+        status="active",
+        created_at=now - timedelta(hours=2),
+    )
     rows = await sc.outcome_contradiction_signals(
         tenant_id=tenant,
         fleet_id=None,
@@ -493,12 +562,17 @@ async def test_outcome_supersession_signals(sc):
     tenant = _t()
     now = datetime.now(UTC)
     old = await _seed_memory(
-        tenant_id=tenant, run_id="run-old", agent_id="a-old",
+        tenant_id=tenant,
+        run_id="run-old",
+        agent_id="a-old",
         created_at=now - timedelta(days=5),
     )
     new = await _seed_memory(
-        tenant_id=tenant, run_id="run-new", agent_id="a-new",
-        created_at=now - timedelta(hours=1), supersedes_id=old,
+        tenant_id=tenant,
+        run_id="run-new",
+        agent_id="a-new",
+        created_at=now - timedelta(hours=1),
+        supersedes_id=old,
     )
     rows = await sc.outcome_supersession_signals(
         tenant_id=tenant,
@@ -517,10 +591,16 @@ async def test_outcome_cross_agent_reuse_signals(sc):
     tenant = _t()
     now = datetime.now(UTC)
     await _seed_memory(
-        tenant_id=tenant, run_id="run-hot", recall_count=8, created_at=now - timedelta(hours=2)
+        tenant_id=tenant,
+        run_id="run-hot",
+        recall_count=8,
+        created_at=now - timedelta(hours=2),
     )
     await _seed_memory(
-        tenant_id=tenant, run_id="run-cold", recall_count=2, created_at=now - timedelta(hours=2)
+        tenant_id=tenant,
+        run_id="run-cold",
+        recall_count=2,
+        created_at=now - timedelta(hours=2),
     )
     rows = await sc.outcome_cross_agent_reuse_signals(
         tenant_id=tenant,
@@ -539,11 +619,17 @@ async def test_outcome_terminal_memory_signals(sc):
     # Two memories in the same session — the DISTINCT ON returns only the
     # LATEST per (run_id, agent_id).
     await _seed_memory(
-        tenant_id=tenant, run_id="run-A", agent_id="a1", content="first step",
+        tenant_id=tenant,
+        run_id="run-A",
+        agent_id="a1",
+        content="first step",
         created_at=now - timedelta(hours=2),
     )
     await _seed_memory(
-        tenant_id=tenant, run_id="run-A", agent_id="a1", content="Shipped to prod",
+        tenant_id=tenant,
+        run_id="run-A",
+        agent_id="a1",
+        content="Shipped to prod",
         created_at=now - timedelta(minutes=5),
     )
     rows = await sc.outcome_terminal_memory_signals(
@@ -559,7 +645,10 @@ async def test_outcome_terminal_memory_signals(sc):
 async def test_outcome_signals_missing_tenant_422(storage_http):
     resp = await storage_http.post(
         "/api/v1/storage/outcome-signals/terminal-memory",
-        json={"window_start": "2026-05-01T00:00:00+00:00", "window_end": "2026-05-15T00:00:00+00:00"},
+        json={
+            "window_start": "2026-05-01T00:00:00+00:00",
+            "window_end": "2026-05-15T00:00:00+00:00",
+        },
     )
     assert resp.status_code == 422
 
@@ -567,7 +656,11 @@ async def test_outcome_signals_missing_tenant_422(storage_http):
 async def test_outcome_signals_bad_window_422(storage_http):
     resp = await storage_http.post(
         "/api/v1/storage/outcome-signals/terminal-memory",
-        json={"tenant_id": "t", "window_start": "tomorrow", "window_end": "2026-05-15T00:00:00+00:00"},
+        json={
+            "tenant_id": "t",
+            "window_start": "tomorrow",
+            "window_end": "2026-05-15T00:00:00+00:00",
+        },
     )
     assert resp.status_code == 422
 

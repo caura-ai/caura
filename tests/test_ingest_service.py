@@ -419,7 +419,7 @@ class TestFetchUrlText:
             "core_api.services.ingest_service._check_hostname_safe", lambda url: None
         )
         # Japanese characters in UTF-8, no charset in Content-Type
-        body = "<html><body>こんにちは世界</body></html>".encode("utf-8")
+        body = "<html><body>こんにちは世界</body></html>".encode()
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -536,7 +536,7 @@ class TestDecodeTextBody:
         assert decode_text_body(body, "text/plain") == "line1\nline2"
 
     def test_utf8_decode_with_fallback(self) -> None:
-        body = "héllo wörld".encode("utf-8")
+        body = "héllo wörld".encode()
         assert "héllo wörld" in decode_text_body(body, "text/plain")
 
 
@@ -559,6 +559,8 @@ async def test_extract_with_kreuzberg_501_when_extra_absent(monkeypatch) -> None
     must fail clearly with 501 — not a NameError/500 — and point at the extra."""
     monkeypatch.setattr(ingest_service, "kreuzberg", None)
     with pytest.raises(HTTPException) as exc:
-        await ingest_service._extract_with_kreuzberg(b"%PDF-1.4 fake", "application/pdf")
+        await ingest_service._extract_with_kreuzberg(
+            b"%PDF-1.4 fake", "application/pdf"
+        )
     assert exc.value.status_code == 501
     assert "ingest" in exc.value.detail.lower()

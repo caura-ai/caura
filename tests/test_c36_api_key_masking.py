@@ -20,6 +20,7 @@ Contract under test:
 from unittest.mock import AsyncMock
 
 import pytest
+
 from core_api.services import organization_settings as os_svc
 
 pytestmark = pytest.mark.unit

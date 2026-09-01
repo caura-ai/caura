@@ -452,7 +452,7 @@ async def test_bulk_upsert_links_creates_all_new(sc):
                 "entity_id": e2["id"],
                 "role": "object",
             },
-        ]
+        ],
     )
 
     assert len(results) == 2
@@ -478,7 +478,7 @@ async def test_bulk_upsert_links_is_idempotent_on_pk_collision(sc):
                 "entity_id": e["id"],
                 "role": "subject",
             },
-        ]
+        ],
     )
     assert first[0]["created"] is True
 
@@ -491,7 +491,7 @@ async def test_bulk_upsert_links_is_idempotent_on_pk_collision(sc):
                 "entity_id": e["id"],
                 "role": "object",
             },
-        ]
+        ],
     )
     assert second[0]["created"] is False
     # Prior role wins.
@@ -533,7 +533,7 @@ async def test_bulk_upsert_links_fk_violation_isolated_per_item(sc):
                 "role": "object",
             },
             {"input_idx": 2, "memory_id": m["id"], "entity_id": e["id"], "role": "alt"},
-        ]
+        ],
     )
     assert len(results) == 3
     # Item 0 succeeded
@@ -573,7 +573,7 @@ async def test_bulk_upsert_links_duplicate_input_pair_keeps_both_slots(sc):
                 "entity_id": e["id"],
                 "role": "object",
             },
-        ]
+        ],
     )
     assert len(results) == 2
     assert results[0]["input_idx"] == 0
@@ -792,7 +792,7 @@ async def test_bulk_upsert_links_input_idx_out_of_range_rejected_422(sc):
                     "entity_id": e["id"],
                     "role": "subject",
                 },
-            ]
+            ],
         )
     assert exc.value.response.status_code == 422
     assert "input_idx" in exc.value.response.text
@@ -823,7 +823,7 @@ async def test_bulk_upsert_links_input_idx_duplicate_rejected_422(sc):
                     "entity_id": e["id"],
                     "role": "object",
                 },
-            ]
+            ],
         )
     assert exc.value.response.status_code == 422
     assert "duplicate" in exc.value.response.text
@@ -958,7 +958,7 @@ async def test_bulk_upsert_links_missing_required_field_returns_422(sc):
                     "entity_id": e["id"],
                     # role intentionally absent
                 },
-            ]
+            ],
         )
     assert exc.value.response.status_code == 422
     assert "role" in exc.value.response.text
@@ -1067,7 +1067,7 @@ async def test_bulk_upsert_links_non_uuid_memory_id_returns_422(sc):
                     "entity_id": e["id"],
                     "role": "subject",
                 },
-            ]
+            ],
         )
     assert exc.value.response.status_code == 422
     assert "memory_id" in exc.value.response.text
@@ -1089,7 +1089,7 @@ async def test_bulk_upsert_links_non_uuid_entity_id_returns_422(sc):
                     "entity_id": "not-a-uuid",  # malformed
                     "role": "subject",
                 },
-            ]
+            ],
         )
     assert exc.value.response.status_code == 422
     assert "entity_id" in exc.value.response.text

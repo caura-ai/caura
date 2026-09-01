@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+from datetime import UTC
 from uuid import uuid4
 
 import pytest
@@ -21,8 +22,8 @@ from core_api import mcp_server
 from tests._mcp_test_helpers import (
     as_text,
     parse_envelope,
-    stub_storage_client,
     strip_latency,
+    stub_storage_client,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -36,10 +37,10 @@ def _memory_dict(status="active", agent_id="alice", content="hello"):
     returns a plain dict, not an ORM row). ``caura_manage`` reads it via
     ``.get(...)`` so all the fields the read/transition shaping touches are
     present as dict keys."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     mid = uuid4()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     return {
         "id": str(mid),
         "agent_id": agent_id,
@@ -150,7 +151,7 @@ async def test_manage_update_happy_path(mcp_env):
     upd = mcp_env["service"]("update_memory")
 
     class _Out:
-        def model_dump(self, mode="python"):  # noqa: ARG002
+        def model_dump(self, mode="python"):
             return {"id": VALID_UID, "content": "new text"}
 
     upd.return_value = _Out()
@@ -193,7 +194,7 @@ async def test_manage_auth_failure_shortcircuits(monkeypatch):
 
 
 def _async_return(value):
-    async def _fn(*args, **kwargs):  # noqa: ARG001
+    async def _fn(*args, **kwargs):
         return value
 
     return _fn

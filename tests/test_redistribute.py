@@ -18,13 +18,13 @@ Auth tests verify:
 - Target agent restricted → 403
 """
 
+from datetime import UTC
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
 from core_api.schemas import RedistributeRequest, RedistributeResponse
-
 
 # ---------------------------------------------------------------------------
 # Unit tests
@@ -67,7 +67,11 @@ class TestRedistributeSchemas:
 
     def test_response_model_fields(self):
         resp = RedistributeResponse(
-            moved=10, promoted=2, skipped=1, errors=[], redistribute_ms=42,
+            moved=10,
+            promoted=2,
+            skipped=1,
+            errors=[],
+            redistribute_ms=42,
         )
         assert resp.moved == 10
         assert resp.promoted == 2
@@ -86,10 +90,14 @@ class TestRedistributeEndpoint:
 
     @staticmethod
     async def _insert_memory(
-        db, tenant_id: str, agent_id: str, content: str,
-        visibility: str = "scope_team", deleted: bool = False,
+        db,
+        tenant_id: str,
+        agent_id: str,
+        content: str,
+        visibility: str = "scope_team",
+        deleted: bool = False,
     ):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from common.models.memory import Memory
 
@@ -102,7 +110,7 @@ class TestRedistributeEndpoint:
             weight=0.5,
             status="active",
             visibility=visibility,
-            deleted_at=datetime.now(timezone.utc) if deleted else None,
+            deleted_at=datetime.now(UTC) if deleted else None,
         )
         db.add(mem)
         await db.flush()
@@ -132,9 +140,7 @@ class TestRedistributeEndpoint:
         m3 = await self._insert_memory(db, tenant_id, "old-agent", "Memory C")
         await db.commit()
 
-
         # Call the logic directly (skip HTTP layer)
-
 
         # Direct DB approach: simulate what the endpoint does
         memories = [m1, m2, m3]
@@ -156,7 +162,11 @@ class TestRedistributeEndpoint:
     async def test_scope_agent_auto_promoted(self, db, tenant_id):
         """scope_agent memories should be promoted to scope_team on move."""
         mem = await self._insert_memory(
-            db, tenant_id, "old-agent", "Private note", visibility="scope_agent",
+            db,
+            tenant_id,
+            "old-agent",
+            "Private note",
+            visibility="scope_agent",
         )
         await db.commit()
 
@@ -175,7 +185,11 @@ class TestRedistributeEndpoint:
     async def test_scope_team_unchanged(self, db, tenant_id):
         """scope_team visibility should not change on move."""
         mem = await self._insert_memory(
-            db, tenant_id, "old-agent", "Team note", visibility="scope_team",
+            db,
+            tenant_id,
+            "old-agent",
+            "Team note",
+            visibility="scope_team",
         )
         await db.commit()
 
@@ -189,7 +203,11 @@ class TestRedistributeEndpoint:
     async def test_scope_org_unchanged(self, db, tenant_id):
         """scope_org visibility should not change on move."""
         mem = await self._insert_memory(
-            db, tenant_id, "old-agent", "Org policy", visibility="scope_org",
+            db,
+            tenant_id,
+            "old-agent",
+            "Org policy",
+            visibility="scope_org",
         )
         await db.commit()
 
@@ -215,7 +233,11 @@ class TestRedistributeEndpoint:
     async def test_deleted_memories_ignored(self, db, tenant_id):
         """Soft-deleted memories should not be moved."""
         mem = await self._insert_memory(
-            db, tenant_id, "old-agent", "Deleted note", deleted=True,
+            db,
+            tenant_id,
+            "old-agent",
+            "Deleted note",
+            deleted=True,
         )
         await db.commit()
 

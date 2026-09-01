@@ -29,7 +29,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
 
 class _OutStub:
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": "batch-1", "status": "created"}
 
 
@@ -41,7 +41,9 @@ def bulk_meter(monkeypatch):
     return meter
 
 
-async def test_batch_write_is_not_billed_while_the_flag_is_off(mcp_env, bulk_meter, monkeypatch):
+async def test_batch_write_is_not_billed_while_the_flag_is_off(
+    mcp_env, bulk_meter, monkeypatch
+):
     """The shipped default. Pins it deliberately rather than by omission."""
     monkeypatch.setattr(settings, "meter_mcp_bulk_writes", False)
     mcp_env["service"]("create_memories_bulk").return_value = _OutStub()
@@ -52,7 +54,9 @@ async def test_batch_write_is_not_billed_while_the_flag_is_off(mcp_env, bulk_met
     bulk_meter.assert_not_awaited()
 
 
-async def test_batch_write_bills_one_unit_per_item_when_enabled(mcp_env, bulk_meter, monkeypatch):
+async def test_batch_write_bills_one_unit_per_item_when_enabled(
+    mcp_env, bulk_meter, monkeypatch
+):
     """The fix: N items cost N, matching REST's POST /memories/bulk."""
     monkeypatch.setattr(settings, "meter_mcp_bulk_writes", True)
     mcp_env["service"]("create_memories_bulk").return_value = _OutStub()

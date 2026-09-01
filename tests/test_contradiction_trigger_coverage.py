@@ -18,6 +18,7 @@ import pathlib
 import re
 
 import pytest
+
 from core_api.services.contradiction import Trigger
 
 pytestmark = pytest.mark.unit

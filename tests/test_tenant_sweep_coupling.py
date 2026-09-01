@@ -37,8 +37,14 @@ def test_the_minted_prefix_is_the_one_the_sweep_deletes() -> None:
 def test_the_tenant_id_fixture_mints_a_sweepable_id() -> None:
     """The fixture and the plain function are two doors to the same decision;
     a test taking the fixture must not get a tenant the sweep cannot see."""
-    fn = conftest.tenant_id.__wrapped__ if hasattr(conftest.tenant_id, "__wrapped__") else None
-    assert fn is not None, "tenant_id is expected to be a pytest fixture wrapping a function"
+    fn = (
+        conftest.tenant_id.__wrapped__
+        if hasattr(conftest.tenant_id, "__wrapped__")
+        else None
+    )
+    assert fn is not None, (
+        "tenant_id is expected to be a pytest fixture wrapping a function"
+    )
     assert fn().startswith(conftest.SWEEP_TENANT_PREFIX)
 
 
@@ -58,7 +64,9 @@ def test_the_sweep_has_no_hardcoded_prefix_left() -> None:
     docstrings = {
         id(node.body[0].value)
         for node in ast.walk(tree)
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        )
         and node.body
         and isinstance(node.body[0], ast.Expr)
         and isinstance(node.body[0].value, ast.Constant)

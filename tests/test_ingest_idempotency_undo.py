@@ -143,6 +143,8 @@ async def test_cache_miss_runs_llm_normally(monkeypatch, fake_tenant_config):
         "t1", "Mercury orbits the Sun every 88 days."
     )
     assert len(resp["facts"]) == 1
+
+
 @pytest.mark.asyncio
 async def test_commit_stamps_doc_hash_in_metadata_when_echoed(monkeypatch):
     """When the caller sends doc_hash back to commit, every written memory's
@@ -157,8 +159,9 @@ async def test_commit_stamps_doc_hash_in_metadata_when_echoed(monkeypatch):
         )
 
     async def _fake_bulk(data, *, bulk_attempt_id):
-        from core_api.schemas import BulkItemResult, BulkMemoryResponse
         import uuid as _uuid
+
+        from core_api.schemas import BulkItemResult, BulkMemoryResponse
 
         for item in data.items:
             writes.append(item)
@@ -216,8 +219,9 @@ async def test_commit_does_not_stamp_doc_hash_when_omitted(monkeypatch):
         )
 
     async def _fake_bulk(data, *, bulk_attempt_id):
-        from core_api.schemas import BulkItemResult, BulkMemoryResponse
         import uuid as _uuid
+
+        from core_api.schemas import BulkItemResult, BulkMemoryResponse
 
         for item in data.items:
             writes.append(item)
@@ -274,8 +278,9 @@ async def test_commit_stamps_salience_when_present_on_ingestfact(monkeypatch):
         )
 
     async def _fake_bulk(data, *, bulk_attempt_id):
-        from core_api.schemas import BulkItemResult, BulkMemoryResponse
         import uuid as _uuid
+
+        from core_api.schemas import BulkItemResult, BulkMemoryResponse
 
         for item in data.items:
             writes.append(item)

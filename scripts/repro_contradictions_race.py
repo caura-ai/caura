@@ -65,7 +65,9 @@ import httpx
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _env_compat import env_required as _env  # noqa: E402  (path shim above must run first)
+from _env_compat import (
+    env_required as _env,
+)
 
 _STEMS = (
     "Lumenwave",
@@ -288,8 +290,8 @@ def main() -> int:
             f"{t['detect_after_ms']:.0f}" if t["detect_after_ms"] is not None else "—"
         )
         print(
-            f"  {t['gap_ms']:>7}  {str(t['detected']):>9}  {after:>10}  "
-            f"{str(t['status_a']):>11}  {str(t['status_b']):>11}  "
+            f"  {t['gap_ms']:>7}  {t['detected']!s:>9}  {after:>10}  "
+            f"{t['status_a']!s:>11}  {t['status_b']!s:>11}  "
             f"{t['entity_links_a']}/{t['entity_links_b']:<8}  "
             f"{t['contra_path'] or '—'}"
         )

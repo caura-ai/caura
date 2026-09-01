@@ -463,7 +463,10 @@ async def test_expand_per_fleet_parallel_merges_correctly():
     sc = AsyncMock()
     sc.expand_graph = AsyncMock(
         side_effect=[
-            {str(eid_a): {"hop": 0, "weight": 1.0}, str(eid_b): {"hop": 2, "weight": 0.5}},
+            {
+                str(eid_a): {"hop": 0, "weight": 1.0},
+                str(eid_b): {"hop": 2, "weight": 0.5},
+            },
             {
                 str(eid_a): {"hop": 1, "weight": 0.8},
                 str(eid_b): {"hop": 1, "weight": 0.9},

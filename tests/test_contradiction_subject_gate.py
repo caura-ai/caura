@@ -19,7 +19,7 @@ The fix has two parts, both covered here:
      cross-subject false positive from reaching the caller.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -28,7 +28,6 @@ from core_api.services.contradiction_detector import (
     _llm_contradiction_check,
     _parse_contradiction_response,
 )
-
 
 # ---------------------------------------------------------------------------
 # Parser hard-gate — pure function, no LLM
@@ -40,54 +39,84 @@ class TestParseContradictionResponse:
     """The parser must enforce ``same_subject AND contradicts`` semantics."""
 
     def test_same_subject_and_contradicts_returns_true(self):
-        assert _parse_contradiction_response({
-            "subject_a": "Alice",
-            "subject_b": "Alice",
-            "same_subject": True,
-            "contradicts": True,
-            "reason": "Alice's stated city changed from Tel Aviv to Haifa.",
-        }) is True
+        assert (
+            _parse_contradiction_response(
+                {
+                    "subject_a": "Alice",
+                    "subject_b": "Alice",
+                    "same_subject": True,
+                    "contradicts": True,
+                    "reason": "Alice's stated city changed from Tel Aviv to Haifa.",
+                }
+            )
+            is True
+        )
 
     def test_same_subject_no_contradiction_returns_false(self):
-        assert _parse_contradiction_response({
-            "subject_a": "Alice",
-            "subject_b": "Alice",
-            "same_subject": True,
-            "contradicts": False,
-            "reason": "Same subject, complementary facts.",
-        }) is False
+        assert (
+            _parse_contradiction_response(
+                {
+                    "subject_a": "Alice",
+                    "subject_b": "Alice",
+                    "same_subject": True,
+                    "contradicts": False,
+                    "reason": "Same subject, complementary facts.",
+                }
+            )
+            is False
+        )
 
     def test_different_subjects_no_contradiction_returns_false(self):
-        assert _parse_contradiction_response({
-            "subject_a": "Sarah Johnson",
-            "subject_b": "David Patel",
-            "same_subject": False,
-            "contradicts": False,
-            "reason": "Different people; preferences about different subjects.",
-        }) is False
+        assert (
+            _parse_contradiction_response(
+                {
+                    "subject_a": "Sarah Johnson",
+                    "subject_b": "David Patel",
+                    "same_subject": False,
+                    "contradicts": False,
+                    "reason": "Different people; preferences about different subjects.",
+                }
+            )
+            is False
+        )
 
     def test_hard_gate_blocks_inconsistent_combination(self):
         """The Sarah/David failure mode: model emits contradicts=true even
         though same_subject=false. The parser MUST override to False."""
-        assert _parse_contradiction_response({
-            "subject_a": "Sarah Johnson",
-            "subject_b": "David Patel",
-            "same_subject": False,
-            "contradicts": True,  # model misbehavior
-            "reason": "opposite preferences (wrong — different subjects)",
-        }) is False
+        assert (
+            _parse_contradiction_response(
+                {
+                    "subject_a": "Sarah Johnson",
+                    "subject_b": "David Patel",
+                    "same_subject": False,
+                    "contradicts": True,  # model misbehavior
+                    "reason": "opposite preferences (wrong — different subjects)",
+                }
+            )
+            is False
+        )
 
     def test_missing_same_subject_treated_as_false(self):
         """Conservative default: missing key -> not a contradiction."""
-        assert _parse_contradiction_response({
-            "contradicts": True,
-            "reason": "no same_subject field",
-        }) is False
+        assert (
+            _parse_contradiction_response(
+                {
+                    "contradicts": True,
+                    "reason": "no same_subject field",
+                }
+            )
+            is False
+        )
 
     def test_missing_contradicts_treated_as_false(self):
-        assert _parse_contradiction_response({
-            "same_subject": True,
-        }) is False
+        assert (
+            _parse_contradiction_response(
+                {
+                    "same_subject": True,
+                }
+            )
+            is False
+        )
 
     def test_empty_dict_returns_false(self):
         assert _parse_contradiction_response({}) is False
@@ -104,28 +133,43 @@ class TestParseContradictionResponse:
         Python; the parser must use an identity check against True to avoid
         silently letting cross-subject false positives through."""
         # Both fields as the string "false" — must read as False.
-        assert _parse_contradiction_response({
-            "subject_a": "X",
-            "subject_b": "Y",
-            "same_subject": "false",
-            "contradicts": "false",
-            "reason": "model emitted strings instead of booleans",
-        }) is False
+        assert (
+            _parse_contradiction_response(
+                {
+                    "subject_a": "X",
+                    "subject_b": "Y",
+                    "same_subject": "false",
+                    "contradicts": "false",
+                    "reason": "model emitted strings instead of booleans",
+                }
+            )
+            is False
+        )
         # The dangerous shape: model says same_subject=false (string) but
         # also contradicts=true (string). Without identity check this would
         # have been read as same_subject=True AND contradicts=True -> True.
-        assert _parse_contradiction_response({
-            "subject_a": "Sarah",
-            "subject_b": "David",
-            "same_subject": "false",
-            "contradicts": "true",
-            "reason": "would have leaked through bool() coercion",
-        }) is False
+        assert (
+            _parse_contradiction_response(
+                {
+                    "subject_a": "Sarah",
+                    "subject_b": "David",
+                    "same_subject": "false",
+                    "contradicts": "true",
+                    "reason": "would have leaked through bool() coercion",
+                }
+            )
+            is False
+        )
         # Non-True truthy values must also not pass.
-        assert _parse_contradiction_response({
-            "same_subject": 1,
-            "contradicts": 1,
-        }) is False
+        assert (
+            _parse_contradiction_response(
+                {
+                    "same_subject": 1,
+                    "contradicts": 1,
+                }
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -176,12 +220,12 @@ class TestPromptContent:
         the looser NLI-style 'different time periods are not contradictions'
         framing that misfired in the Gemini wet test."""
         text = CONTRADICTION_PROMPT.lower()
-        assert (
-            "non-overlapping" in text or "historically true" in text
-        ), "temporal rule must carve out genuinely historical periods only"
-        assert (
-            "speculate" in text or "future" in text
-        ), "temporal rule must forbid future-state speculation that dissolves conflicts"
+        assert "non-overlapping" in text or "historically true" in text, (
+            "temporal rule must carve out genuinely historical periods only"
+        )
+        assert "speculate" in text or "future" in text, (
+            "temporal rule must forbid future-state speculation that dissolves conflicts"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -235,44 +279,52 @@ class TestLlmContradictionCheckEndToEnd:
         """Documented failure pair #1. Even if the model emits the
         inconsistent ``contradicts=true`` for a clearly cross-subject pair,
         the parser blocks it."""
-        result = await _run_check_with_payload({
-            "subject_a": "Sarah Johnson",
-            "subject_b": "David Patel",
-            "same_subject": False,
-            "contradicts": True,
-            "reason": "model misbehavior — opposite predicates, different people",
-        })
+        result = await _run_check_with_payload(
+            {
+                "subject_a": "Sarah Johnson",
+                "subject_b": "David Patel",
+                "same_subject": False,
+                "contradicts": True,
+                "reason": "model misbehavior — opposite predicates, different people",
+            }
+        )
         assert result is False
 
     async def test_daniel_cohen_vs_daniel_levi_blocked(self):
         """Documented failure pair #2. Shared first name, different people."""
-        result = await _run_check_with_payload({
-            "subject_a": "Daniel Cohen",
-            "subject_b": "Daniel Levi",
-            "same_subject": False,
-            "contradicts": True,
-            "reason": "model misbehavior — shared first name, different individuals",
-        })
+        result = await _run_check_with_payload(
+            {
+                "subject_a": "Daniel Cohen",
+                "subject_b": "Daniel Levi",
+                "same_subject": False,
+                "contradicts": True,
+                "reason": "model misbehavior — shared first name, different individuals",
+            }
+        )
         assert result is False
 
     async def test_genuine_same_subject_contradiction_still_fires(self):
         """Regression guard the other way: a real same-subject update must
         still be flagged as a contradiction."""
-        result = await _run_check_with_payload({
-            "subject_a": "Alice",
-            "subject_b": "Alice",
-            "same_subject": True,
-            "contradicts": True,
-            "reason": "Alice moved from Tel Aviv to Haifa.",
-        })
+        result = await _run_check_with_payload(
+            {
+                "subject_a": "Alice",
+                "subject_b": "Alice",
+                "same_subject": True,
+                "contradicts": True,
+                "reason": "Alice moved from Tel Aviv to Haifa.",
+            }
+        )
         assert result is True
 
     async def test_same_subject_complementary_not_contradiction(self):
-        result = await _run_check_with_payload({
-            "subject_a": "Alice",
-            "subject_b": "Alice",
-            "same_subject": True,
-            "contradicts": False,
-            "reason": "Both facts about Alice; complementary.",
-        })
+        result = await _run_check_with_payload(
+            {
+                "subject_a": "Alice",
+                "subject_b": "Alice",
+                "same_subject": True,
+                "contradicts": False,
+                "reason": "Both facts about Alice; complementary.",
+            }
+        )
         assert result is False

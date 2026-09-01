@@ -36,7 +36,10 @@ import httpx
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _env_compat import env_any as _env_any, env_required as _env  # noqa: E402  (path shim above must run first)
+from _env_compat import (
+    env_any as _env_any,
+)
+from _env_compat import env_required as _env
 
 
 def _ts() -> str:

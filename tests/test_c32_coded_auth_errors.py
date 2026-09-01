@@ -32,7 +32,9 @@ def _refusal(fn) -> tuple[int, dict]:
 
 def test_two_different_403s_are_distinguishable() -> None:
     """The whole point. Same status, same shape, different machine-readable code."""
-    _, read_only = _refusal(AuthContext(tenant_id="t", capabilities=set()).enforce_read_only)
+    _, read_only = _refusal(
+        AuthContext(tenant_id="t", capabilities=set()).enforce_read_only
+    )
     _, over_limit = _refusal(
         AuthContext(tenant_id="t", is_read_only=True).enforce_usage_limits
     )
@@ -53,7 +55,9 @@ def test_the_read_only_refusal_cannot_teach_the_false_general_rule() -> None:
     The remediation has to say the limit is a property of the CREDENTIAL, or the
     reader is entitled to the wrong inference.
     """
-    _, detail = _refusal(AuthContext(tenant_id="t", capabilities=set()).enforce_read_only)
+    _, detail = _refusal(
+        AuthContext(tenant_id="t", capabilities=set()).enforce_read_only
+    )
     assert detail["code"] == errors.AUTH_READ_ONLY_KEY
     remediation = detail["details"]["remediation"].lower()
     assert "credential" in remediation
@@ -110,7 +114,11 @@ async def _true() -> bool:
 def test_every_auth_code_is_unique() -> None:
     """Two reasons sharing a code is the bug this whole item is about,
     reintroduced one level down."""
-    codes = [v for k, v in vars(errors).items() if k.startswith("AUTH_") and isinstance(v, str)]
+    codes = [
+        v
+        for k, v in vars(errors).items()
+        if k.startswith("AUTH_") and isinstance(v, str)
+    ]
     assert len(codes) == len(set(codes)), sorted(codes)
     assert all(c.isupper() for c in codes), codes
 

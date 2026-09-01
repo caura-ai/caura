@@ -1,21 +1,24 @@
 """E2E fleet management tests through HTTP API — real DB, no mocks."""
 
-import uuid
-
-import pytest
-
-from tests.conftest import get_test_auth, uid as _uid
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-async def _heartbeat(client, tenant_id: str, headers: dict, node_name: str,
-                     fleet_id: str, agents: list | None = None,
-                     version: str = "1.0.0", platform: str = "linux") -> dict:
+async def _heartbeat(
+    client,
+    tenant_id: str,
+    headers: dict,
+    node_name: str,
+    fleet_id: str,
+    agents: list | None = None,
+    version: str = "1.0.0",
+    platform: str = "linux",
+) -> dict:
     """Send a heartbeat and return the response JSON."""
     resp = await client.post(
         "/api/v1/fleet/heartbeat",
@@ -72,8 +75,12 @@ async def test_heartbeat_updates_existing_node(client):
     tag = _uid()
     fid = f"fleet-{tag}"
 
-    await _heartbeat(client, tenant_id, headers, f"node-beta-{tag}", fid, version="1.0.0")
-    await _heartbeat(client, tenant_id, headers, f"node-beta-{tag}", fid, version="2.0.0")
+    await _heartbeat(
+        client, tenant_id, headers, f"node-beta-{tag}", fid, version="1.0.0"
+    )
+    await _heartbeat(
+        client, tenant_id, headers, f"node-beta-{tag}", fid, version="2.0.0"
+    )
 
     nodes = await _get_nodes(client, tenant_id, headers)
     beta_nodes = [n for n in nodes if n["node_name"] == f"node-beta-{tag}"]

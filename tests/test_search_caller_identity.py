@@ -47,7 +47,9 @@ def as_auth(monkeypatch):
     _app.dependency_overrides.pop(_gac, None)
 
 
-async def _seed(client, tenant: str, agent: str, visibility: str = "scope_team") -> None:
+async def _seed(
+    client, tenant: str, agent: str, visibility: str = "scope_team"
+) -> None:
     resp = await client.post(
         "/api/v1/memories",
         json={
@@ -157,7 +159,9 @@ async def test_an_agent_credential_may_not_assert_a_peer_identity(client, as_aut
 # --- ranking stays put unless the tenant says otherwise ----------------------
 
 
-async def test_an_asserted_identity_does_not_move_recall_count_by_default(client, as_auth):
+async def test_an_asserted_identity_does_not_move_recall_count_by_default(
+    client, as_auth
+):
     """The reason this is not just a one-line field.
 
     recall_boost defaults to True, so a bump reshuffles results for every
@@ -173,7 +177,9 @@ async def test_an_asserted_identity_does_not_move_recall_count_by_default(client
     assert data["recall_tracked"] is False
 
 
-async def test_a_tenant_can_opt_in_to_tracking_asserted_recalls(client, as_auth, monkeypatch):
+async def test_a_tenant_can_opt_in_to_tracking_asserted_recalls(
+    client, as_auth, monkeypatch
+):
     """...and the capability #1197 asked for is still reachable."""
     from core_api.services.organization_settings import ResolvedConfig
 

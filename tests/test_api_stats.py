@@ -1,9 +1,7 @@
 """E2E public stats endpoint tests through HTTP API."""
 
-import pytest
-
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # GET /api/stats — public counters

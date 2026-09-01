@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from core_api.schemas import MemoryCreate, STMWriteResponse
-
 
 # ---------------------------------------------------------------------------
 # STM pipeline (write_mode="stm")
@@ -23,12 +23,12 @@ class TestSTMWritePipeline:
     @pytest.mark.asyncio
     async def test_stm_pipeline_notes(self):
         """STM pipeline routes scope_agent to notes."""
-        from core_api.pipeline.compositions.write import build_stm_write_pipeline
-        from core_api.pipeline.context import PipelineContext
         import time
 
         # Reset singleton so we get a fresh InMemorySTM
         import core_api.services.stm_service as svc
+        from core_api.pipeline.compositions.write import build_stm_write_pipeline
+        from core_api.pipeline.context import PipelineContext
 
         svc._stm_instance = None
 
@@ -40,7 +40,7 @@ class TestSTMWritePipeline:
             write_mode="stm",
         )
         ctx = PipelineContext(
-                        data={"input": data, "t0": time.perf_counter()},
+            data={"input": data, "t0": time.perf_counter()},
         )
         pipeline = build_stm_write_pipeline()
         result = await pipeline.run(ctx)
@@ -57,11 +57,11 @@ class TestSTMWritePipeline:
     @pytest.mark.asyncio
     async def test_stm_pipeline_bulletin(self):
         """STM pipeline routes scope_team to bulletin."""
-        from core_api.pipeline.compositions.write import build_stm_write_pipeline
-        from core_api.pipeline.context import PipelineContext
         import time
 
         import core_api.services.stm_service as svc
+        from core_api.pipeline.compositions.write import build_stm_write_pipeline
+        from core_api.pipeline.context import PipelineContext
 
         svc._stm_instance = None
 
@@ -74,7 +74,7 @@ class TestSTMWritePipeline:
             write_mode="stm",
         )
         ctx = PipelineContext(
-                        data={"input": data, "t0": time.perf_counter()},
+            data={"input": data, "t0": time.perf_counter()},
         )
         pipeline = build_stm_write_pipeline()
         result = await pipeline.run(ctx)
@@ -86,11 +86,11 @@ class TestSTMWritePipeline:
     @pytest.mark.asyncio
     async def test_stm_pipeline_no_db(self):
         """STM pipeline works with db=None."""
-        from core_api.pipeline.compositions.write import build_stm_write_pipeline
-        from core_api.pipeline.context import PipelineContext
         import time
 
         import core_api.services.stm_service as svc
+        from core_api.pipeline.compositions.write import build_stm_write_pipeline
+        from core_api.pipeline.context import PipelineContext
 
         svc._stm_instance = None
 
@@ -101,7 +101,7 @@ class TestSTMWritePipeline:
             write_mode="stm",
         )
         ctx = PipelineContext(
-                        data={"input": data, "t0": time.perf_counter()},
+            data={"input": data, "t0": time.perf_counter()},
         )
         pipeline = build_stm_write_pipeline()
         result = await pipeline.run(ctx)
@@ -111,12 +111,13 @@ class TestSTMWritePipeline:
     @pytest.mark.asyncio
     async def test_stm_rejects_short_content(self):
         """STM pipeline still enforces minimum content length."""
-        from core_api.pipeline.compositions.write import build_stm_write_pipeline
-        from core_api.pipeline.context import PipelineContext
-        from fastapi import HTTPException
         import time
 
+        from fastapi import HTTPException
+
         import core_api.services.stm_service as svc
+        from core_api.pipeline.compositions.write import build_stm_write_pipeline
+        from core_api.pipeline.context import PipelineContext
 
         svc._stm_instance = None
 
@@ -127,7 +128,7 @@ class TestSTMWritePipeline:
             write_mode="stm",
         )
         ctx = PipelineContext(
-                        data={"input": data, "t0": time.perf_counter()},
+            data={"input": data, "t0": time.perf_counter()},
         )
         pipeline = build_stm_write_pipeline()
         with pytest.raises(HTTPException) as exc_info:
@@ -187,10 +188,11 @@ class TestSTMService:
     @pytest.mark.asyncio
     async def test_write_then_read_notes(self):
         """Write via pipeline, then read via service."""
+        import time
+
+        import core_api.services.stm_service as svc
         from core_api.pipeline.compositions.write import build_stm_write_pipeline
         from core_api.pipeline.context import PipelineContext
-        import time
-        import core_api.services.stm_service as svc
 
         svc._stm_instance = None
 
@@ -202,7 +204,7 @@ class TestSTMService:
             write_mode="stm",
         )
         ctx = PipelineContext(
-                        data={"input": data, "t0": time.perf_counter()},
+            data={"input": data, "t0": time.perf_counter()},
         )
         await build_stm_write_pipeline().run(ctx)
 
@@ -225,8 +227,8 @@ class TestSTMService:
     @pytest.mark.asyncio
     async def test_visibility_routing_scope_agent(self):
         """scope_agent routes to notes."""
-        from core_api.pipeline.steps.write.resolve_stm_target import ResolveSTMTarget
         from core_api.pipeline.context import PipelineContext
+        from core_api.pipeline.steps.write.resolve_stm_target import ResolveSTMTarget
 
         data = MemoryCreate(
             tenant_id="t1",
@@ -242,8 +244,8 @@ class TestSTMService:
     @pytest.mark.asyncio
     async def test_visibility_routing_scope_team(self):
         """scope_team routes to bulletin."""
-        from core_api.pipeline.steps.write.resolve_stm_target import ResolveSTMTarget
         from core_api.pipeline.context import PipelineContext
+        from core_api.pipeline.steps.write.resolve_stm_target import ResolveSTMTarget
 
         data = MemoryCreate(
             tenant_id="t1",
@@ -261,8 +263,8 @@ class TestSTMService:
     @pytest.mark.asyncio
     async def test_visibility_routing_scope_org(self):
         """scope_org also routes to bulletin."""
-        from core_api.pipeline.steps.write.resolve_stm_target import ResolveSTMTarget
         from core_api.pipeline.context import PipelineContext
+        from core_api.pipeline.steps.write.resolve_stm_target import ResolveSTMTarget
 
         data = MemoryCreate(
             tenant_id="t1",
@@ -287,9 +289,9 @@ class TestInjectSTMContext:
 
     @pytest.mark.asyncio
     async def test_injects_notes_into_results(self):
-        from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
-        from core_api.pipeline.context import PipelineContext
         import core_api.services.stm_service as svc
+        from core_api.pipeline.context import PipelineContext
+        from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
 
         svc._stm_instance = None
 
@@ -308,7 +310,7 @@ class TestInjectSTMContext:
         )
 
         ctx = PipelineContext(
-                        data={
+            data={
                 "tenant_id": "t1",
                 "caller_agent_id": "agent-1",
                 "fleet_ids": None,
@@ -331,12 +333,12 @@ class TestInjectSTMContext:
 
     @pytest.mark.asyncio
     async def test_skips_when_disabled(self):
-        from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
         from core_api.pipeline.context import PipelineContext
         from core_api.pipeline.step import StepOutcome
+        from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
 
         ctx = PipelineContext(
-                        data={"tenant_id": "t1", "results": []},
+            data={"tenant_id": "t1", "results": []},
         )
 
         with patch("core_api.config.settings") as mock_settings:
@@ -350,12 +352,13 @@ class TestInjectSTMContext:
     @pytest.mark.asyncio
     async def test_stm_entries_prepended_before_ltm(self):
         """STM entries appear before existing LTM results."""
-        from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
-        from core_api.pipeline.context import PipelineContext
-        from core_api.schemas import MemoryOut
-        from datetime import datetime, timezone
+        from datetime import datetime
         from uuid import uuid4
+
         import core_api.services.stm_service as svc
+        from core_api.pipeline.context import PipelineContext
+        from core_api.pipeline.steps.search.inject_stm_context import InjectSTMContext
+        from core_api.schemas import MemoryOut
 
         svc._stm_instance = None
 
@@ -383,12 +386,12 @@ class TestInjectSTMContext:
             source_uri=None,
             run_id=None,
             metadata=None,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
             expires_at=None,
         )
 
         ctx = PipelineContext(
-                        data={
+            data={
                 "tenant_id": "t1",
                 "caller_agent_id": "agent-1",
                 "fleet_ids": None,

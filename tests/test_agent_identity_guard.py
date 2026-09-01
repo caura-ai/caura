@@ -67,7 +67,7 @@ def test_reject_raises_domain_error_with_actionable_guidance(policy):
     # The message must tell the agent where its identity comes from.
     assert "CAURA_AGENT_ID" in detail
     assert "install.json" in detail
-    assert 'main-<install_id>' in detail
+    assert "main-<install_id>" in detail
 
 
 @pytest.mark.parametrize("value", ["allow", "warn"])

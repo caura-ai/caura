@@ -26,15 +26,17 @@ import contextlib
 
 import pytest
 
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-async def _write(client, tenant_id, headers, *, content, agent_id, fleet_id, weight=None):
+async def _write(
+    client, tenant_id, headers, *, content, agent_id, fleet_id, weight=None
+):
     body = {
         "tenant_id": tenant_id,
         "content": content,
@@ -119,8 +121,22 @@ async def test_written_by_selects_the_author_not_the_caller(client, sc):
     alice, bob = f"alice-{tag}", f"bob-{tag}"
     fleet = f"wb-fleet-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"by alice [{tag}]", agent_id=alice, fleet_id=fleet)
-    await _write(client, tenant_id, headers, content=f"by bob [{tag}]", agent_id=bob, fleet_id=fleet)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"by alice [{tag}]",
+        agent_id=alice,
+        fleet_id=fleet,
+    )
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"by bob [{tag}]",
+        agent_id=bob,
+        fleet_id=fleet,
+    )
     await _set_trust(sc, tenant_id, alice, fleet, 2)
 
     resp = await client.get(
@@ -143,8 +159,13 @@ async def test_weight_bounds_filter_the_result_set(client, sc):
 
     for weight, label in ((0.1, "low"), (0.5, "mid"), (0.9, "high")):
         await _write(
-            client, tenant_id, headers,
-            content=f"{label} weight [{tag}]", agent_id=agent, fleet_id=fleet, weight=weight,
+            client,
+            tenant_id,
+            headers,
+            content=f"{label} weight [{tag}]",
+            agent_id=agent,
+            fleet_id=fleet,
+            weight=weight,
         )
 
     resp = await client.get(
@@ -159,7 +180,9 @@ async def test_weight_bounds_outside_zero_to_one_are_rejected(client):
     """The documented range is 0-1; a value outside it is a 422, not a filter
     that silently matches everything."""
     tenant_id, headers = get_test_auth()
-    resp = await client.get(f"/api/v1/memories?tenant_id={tenant_id}&weight_min=1.5", headers=headers)
+    resp = await client.get(
+        f"/api/v1/memories?tenant_id={tenant_id}&weight_min=1.5", headers=headers
+    )
     assert resp.status_code == 422, resp.text
 
 
@@ -168,7 +191,8 @@ async def test_an_inverted_weight_range_is_rejected(client):
     which is the same silent-wrong-answer shape this whole file is about."""
     tenant_id, headers = get_test_auth()
     resp = await client.get(
-        f"/api/v1/memories?tenant_id={tenant_id}&weight_min=0.9&weight_max=0.1", headers=headers
+        f"/api/v1/memories?tenant_id={tenant_id}&weight_min=0.9&weight_max=0.1",
+        headers=headers,
     )
     assert resp.status_code == 422, resp.text
 
@@ -186,8 +210,22 @@ async def test_scope_all_drops_the_author_filter(client, sc):
     alice, bob = f"alice-{tag}", f"bob-{tag}"
     fleet = f"sa-fleet-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"by alice [{tag}]", agent_id=alice, fleet_id=fleet)
-    await _write(client, tenant_id, headers, content=f"by bob [{tag}]", agent_id=bob, fleet_id=fleet)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"by alice [{tag}]",
+        agent_id=alice,
+        fleet_id=fleet,
+    )
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"by bob [{tag}]",
+        agent_id=bob,
+        fleet_id=fleet,
+    )
     await _set_trust(sc, tenant_id, alice, fleet, 2)  # scope='all' needs trust >= 2
 
     resp = await client.get(
@@ -210,12 +248,30 @@ async def test_scope_agent_pins_the_author_filter_to_the_caller(client, sc):
     alice, bob = f"alice-{tag}", f"bob-{tag}"
     fleet = f"sag-fleet-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"by alice [{tag}]", agent_id=alice, fleet_id=fleet)
-    await _write(client, tenant_id, headers, content=f"by bob [{tag}]", agent_id=bob, fleet_id=fleet)
-    await _set_trust(sc, tenant_id, alice, fleet, 1)  # scope='agent' only needs trust >= 1
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"by alice [{tag}]",
+        agent_id=alice,
+        fleet_id=fleet,
+    )
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"by bob [{tag}]",
+        agent_id=bob,
+        fleet_id=fleet,
+    )
+    await _set_trust(
+        sc, tenant_id, alice, fleet, 1
+    )  # scope='agent' only needs trust >= 1
 
     with _as_agent(tenant_id, alice):
-        resp = await client.get(f"/api/v1/memories?tenant_id={tenant_id}&fleet_id={fleet}&scope=agent")
+        resp = await client.get(
+            f"/api/v1/memories?tenant_id={tenant_id}&fleet_id={fleet}&scope=agent"
+        )
     assert resp.status_code == 200, resp.text
     assert _contents(resp.json()) == {f"by alice [{tag}]"}
 
@@ -233,8 +289,22 @@ async def test_scope_fleet_without_a_fleet_id_pins_to_the_home_fleet(client, sc)
     alice, bob = f"alice-{tag}", f"bob-{tag}"
     home, other = f"home-{tag}", f"other-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"in home [{tag}]", agent_id=alice, fleet_id=home)
-    await _write(client, tenant_id, headers, content=f"in other [{tag}]", agent_id=bob, fleet_id=other)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"in home [{tag}]",
+        agent_id=alice,
+        fleet_id=home,
+    )
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"in other [{tag}]",
+        agent_id=bob,
+        fleet_id=other,
+    )
     await _set_trust(sc, tenant_id, alice, home, 1)
 
     with _as_agent(tenant_id, alice):
@@ -258,7 +328,14 @@ async def test_scope_all_requires_trust_2(client, sc):
     alice = f"alice-{tag}"
     fleet = f"t1-fleet-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"row [{tag}]", agent_id=alice, fleet_id=fleet)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"row [{tag}]",
+        agent_id=alice,
+        fleet_id=fleet,
+    )
     await _set_trust(sc, tenant_id, alice, fleet, 1)
 
     with _as_agent(tenant_id, alice):
@@ -276,11 +353,20 @@ async def test_scope_fleet_targeting_another_fleet_requires_trust_2(client, sc):
     alice = f"alice-{tag}"
     home, other = f"home-{tag}", f"other-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"row [{tag}]", agent_id=alice, fleet_id=home)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"row [{tag}]",
+        agent_id=alice,
+        fleet_id=home,
+    )
     await _set_trust(sc, tenant_id, alice, home, 1)
 
     with _as_agent(tenant_id, alice):
-        resp = await client.get(f"/api/v1/memories?tenant_id={tenant_id}&scope=fleet&fleet_id={other}")
+        resp = await client.get(
+            f"/api/v1/memories?tenant_id={tenant_id}&scope=fleet&fleet_id={other}"
+        )
     assert resp.status_code == 403, resp.text
 
 
@@ -318,11 +404,20 @@ async def test_scope_agent_still_cannot_name_another_fleet(client, sc):
     alice = f"alice-{tag}"
     home, other = f"home-{tag}", f"other-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"row [{tag}]", agent_id=alice, fleet_id=home)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"row [{tag}]",
+        agent_id=alice,
+        fleet_id=home,
+    )
     await _set_trust(sc, tenant_id, alice, home, 1)
 
     with _as_agent(tenant_id, alice):
-        resp = await client.get(f"/api/v1/memories?tenant_id={tenant_id}&scope=agent&fleet_id={other}")
+        resp = await client.get(
+            f"/api/v1/memories?tenant_id={tenant_id}&scope=agent&fleet_id={other}"
+        )
     assert resp.status_code == 403, resp.text
 
 
@@ -335,11 +430,20 @@ async def test_scope_agent_rejects_a_foreign_written_by(client, sc):
     alice, bob = f"alice-{tag}", f"bob-{tag}"
     fleet = f"fw-fleet-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"row [{tag}]", agent_id=alice, fleet_id=fleet)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"row [{tag}]",
+        agent_id=alice,
+        fleet_id=fleet,
+    )
     await _set_trust(sc, tenant_id, alice, fleet, 1)
 
     with _as_agent(tenant_id, alice):
-        resp = await client.get(f"/api/v1/memories?tenant_id={tenant_id}&scope=agent&written_by={bob}")
+        resp = await client.get(
+            f"/api/v1/memories?tenant_id={tenant_id}&scope=agent&written_by={bob}"
+        )
     assert resp.status_code == 400, resp.text
     assert "written_by" in resp.text
 
@@ -348,13 +452,17 @@ async def test_scope_agent_without_an_agent_identity_is_rejected(client):
     """``scope='agent'`` with no resolvable caller must not silently degrade to
     "no author filter" — that would widen the very read it asks to narrow."""
     tenant_id, headers = get_test_auth()
-    resp = await client.get(f"/api/v1/memories?tenant_id={tenant_id}&scope=agent", headers=headers)
+    resp = await client.get(
+        f"/api/v1/memories?tenant_id={tenant_id}&scope=agent", headers=headers
+    )
     assert resp.status_code == 400, resp.text
 
 
 async def test_invalid_scope_is_rejected(client):
     tenant_id, headers = get_test_auth()
-    resp = await client.get(f"/api/v1/memories?tenant_id={tenant_id}&scope=everything", headers=headers)
+    resp = await client.get(
+        f"/api/v1/memories?tenant_id={tenant_id}&scope=everything", headers=headers
+    )
     assert resp.status_code == 422, resp.text
 
 
@@ -388,11 +496,20 @@ async def test_stats_cross_fleet_aggregate_is_gated(client, sc):
     alice = f"alice-{tag}"
     home, other = f"home-{tag}", f"other-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"row [{tag}]", agent_id=alice, fleet_id=home)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"row [{tag}]",
+        agent_id=alice,
+        fleet_id=home,
+    )
     await _set_trust(sc, tenant_id, alice, home, 1)
 
     with _as_agent(tenant_id, alice):
-        resp = await client.get(f"/api/v1/memories/stats?tenant_id={tenant_id}&fleet_id={other}")
+        resp = await client.get(
+            f"/api/v1/memories/stats?tenant_id={tenant_id}&fleet_id={other}"
+        )
     assert resp.status_code == 403, resp.text
 
 
@@ -406,11 +523,20 @@ async def test_stats_rejects_a_peer_agent_id(client, sc):
     alice, bob = f"alice-{tag}", f"bob-{tag}"
     fleet = f"peer-fleet-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"row [{tag}]", agent_id=alice, fleet_id=fleet)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"row [{tag}]",
+        agent_id=alice,
+        fleet_id=fleet,
+    )
     await _set_trust(sc, tenant_id, alice, fleet, 1)
 
     with _as_agent(tenant_id, alice):
-        resp = await client.get(f"/api/v1/memories/stats?tenant_id={tenant_id}&agent_id={bob}")
+        resp = await client.get(
+            f"/api/v1/memories/stats?tenant_id={tenant_id}&agent_id={bob}"
+        )
     assert resp.status_code == 403, resp.text
 
 
@@ -422,11 +548,20 @@ async def test_stats_allows_naming_yourself(client, sc):
     alice = f"alice-{tag}"
     fleet = f"self-fleet-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"row [{tag}]", agent_id=alice, fleet_id=fleet)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"row [{tag}]",
+        agent_id=alice,
+        fleet_id=fleet,
+    )
     await _set_trust(sc, tenant_id, alice, fleet, 1)
 
     with _as_agent(tenant_id, alice):
-        resp = await client.get(f"/api/v1/memories/stats?tenant_id={tenant_id}&agent_id={alice}")
+        resp = await client.get(
+            f"/api/v1/memories/stats?tenant_id={tenant_id}&agent_id={alice}"
+        )
     assert resp.status_code == 200, resp.text
 
 
@@ -436,11 +571,20 @@ async def test_stats_scope_all_requires_trust_2(client, sc):
     alice = f"alice-{tag}"
     fleet = f"ss-fleet-{tag}"
 
-    await _write(client, tenant_id, headers, content=f"row [{tag}]", agent_id=alice, fleet_id=fleet)
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"row [{tag}]",
+        agent_id=alice,
+        fleet_id=fleet,
+    )
     await _set_trust(sc, tenant_id, alice, fleet, 1)
 
     with _as_agent(tenant_id, alice):
-        resp = await client.get(f"/api/v1/memories/stats?tenant_id={tenant_id}&scope=all")
+        resp = await client.get(
+            f"/api/v1/memories/stats?tenant_id={tenant_id}&scope=all"
+        )
     assert resp.status_code == 403, resp.text
 
 
@@ -448,7 +592,9 @@ async def test_stats_without_a_scope_is_unchanged(client):
     """The legacy shape — no ``scope``, no agent identity — must keep working
     exactly as before; the dashboard calls it that way."""
     tenant_id, headers = get_test_auth()
-    resp = await client.get(f"/api/v1/memories/stats?tenant_id={tenant_id}", headers=headers)
+    resp = await client.get(
+        f"/api/v1/memories/stats?tenant_id={tenant_id}", headers=headers
+    )
     assert resp.status_code == 200, resp.text
     assert "total" in resp.json()
 
@@ -474,13 +620,13 @@ _QUERY_PARAM_TOOLS = {
 }
 
 _BODY_DISPATCH_TOOLS = {
-    "caura_doc",      # POST /documents*, GET /documents/collections
-    "caura_evolve",   # POST /evolve/report
+    "caura_doc",  # POST /documents*, GET /documents/collections
+    "caura_evolve",  # POST /evolve/report
     "caura_insights",  # POST /insights/generate
-    "caura_manage",   # op-dispatched across several endpoints
-    "caura_recall",   # POST /search (+ /recall)
-    "caura_tune",     # PATCH /agents/{id}/tune
-    "caura_write",    # POST /memories, POST /memories/bulk
+    "caura_manage",  # op-dispatched across several endpoints
+    "caura_recall",  # POST /search (+ /recall)
+    "caura_tune",  # PATCH /agents/{id}/tune
+    "caura_write",  # POST /memories, POST /memories/bulk
 }
 
 # Advertised params that are deliberately NOT query params on the target route,
@@ -547,7 +693,9 @@ def test_the_not_query_params_excuse_list_cannot_hide_a_real_gap():
     for (tool, name), reason in _NOT_QUERY_PARAMS.items():
         assert reason, f"{tool}.{name} needs a reason"
         accepted = _accepted_query_params(spec, _QUERY_PARAM_TOOLS[tool])
-        assert name not in accepted, f"stale excuse: {tool}.{name} IS accepted by the route"
+        assert name not in accepted, (
+            f"stale excuse: {tool}.{name} IS accepted by the route"
+        )
 
 
 @pytest.mark.unit
@@ -557,5 +705,9 @@ def test_every_plugin_exposed_tool_is_classified():
     specs = _plugin_tool_specs()
     exposed = {name for name, spec in specs.items() if spec["plugin_exposed"]}
     classified = set(_QUERY_PARAM_TOOLS) | _BODY_DISPATCH_TOOLS
-    assert exposed - classified == set(), f"unclassified plugin tools: {sorted(exposed - classified)}"
-    assert classified - exposed == set(), f"classified but no longer exposed: {sorted(classified - exposed)}"
+    assert exposed - classified == set(), (
+        f"unclassified plugin tools: {sorted(exposed - classified)}"
+    )
+    assert classified - exposed == set(), (
+        f"classified but no longer exposed: {sorted(classified - exposed)}"
+    )

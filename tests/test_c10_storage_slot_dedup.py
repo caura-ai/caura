@@ -463,7 +463,7 @@ async def test_load_failure_does_not_mark_sentinel():
 
 async def test_execute_skips_when_plan_says_skip_regardless_of_sentinel():
     ctx = PipelineContext(
-                data={
+        data={
             "tenant_id": "t1",
             "search_params": dict(_DEFAULT_SEARCH_PARAMS_FULL),
             "retrieval_plan": RetrievalPlan(

@@ -65,7 +65,9 @@ def test_the_heuristic_really_would_have_flagged_this() -> None:
 
 @pytest.mark.asyncio
 async def test_pairwise_fallback_abstains() -> None:
-    verdict, confidence = await _llm_contradiction_check(_NEW, _OLD, tenant_config=_NoLLM())
+    verdict, confidence = await _llm_contradiction_check(
+        _NEW, _OLD, tenant_config=_NoLLM()
+    )
 
     assert verdict is False, (
         "with no LLM the fallback must abstain — a True marks the older memory "
@@ -85,11 +87,15 @@ async def test_batch_fallback_abstains_for_every_candidate() -> None:
 
     out = await _llm_contradiction_check_batch(_NEW, candidates, tenant_config=_NoLLM())
 
-    assert len(out) == len(candidates), "one entry per candidate, or _align mis-pairs them"
+    assert len(out) == len(candidates), (
+        "one entry per candidate, or _align mis-pairs them"
+    )
     # Both call sites feed each raw to _judge_contradiction, so pin what they
     # actually derive. This also catches the 0.90 shape: {"contradicts": False} is a
     # non-empty dict and scores _CONF_CLEAN, which reads as a confident clean verdict.
-    assert [_judge_contradiction(e) for e in out] == [(False, _CONF_FALLBACK)] * len(candidates)
+    assert [_judge_contradiction(e) for e in out] == [(False, _CONF_FALLBACK)] * len(
+        candidates
+    )
 
 
 @pytest.mark.asyncio
@@ -137,7 +143,10 @@ async def test_batch_abstains_on_a_real_provider_outage() -> None:
 @pytest.mark.asyncio
 async def test_entity_aware_pairwise_abstains() -> None:
     verdict, confidence = await _llm_entity_aware_contradiction_check(
-        _NEW, _OLD, [{"name": "helios migration"}], [{"name": "helios migration"}],
+        _NEW,
+        _OLD,
+        [{"name": "helios migration"}],
+        [{"name": "helios migration"}],
         _outage_config(),
     )
 

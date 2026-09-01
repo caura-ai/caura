@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+
 from core_api.services.contradiction.resolution import ACTIONS, resolve
 
 pytestmark = pytest.mark.unit

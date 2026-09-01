@@ -1,14 +1,13 @@
 """Unit tests for the pipeline runner — timing, skip, fail, short-circuit."""
 
-import pytest
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi import HTTPException
 
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.runner import Pipeline
 from core_api.pipeline.step import StepOutcome, StepResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers: minimal step implementations

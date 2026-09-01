@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+
 from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 pytestmark = pytest.mark.unit
@@ -401,7 +402,6 @@ async def test_fallback_to_base_judge_logs_timeouterror_explicitly(caplog):
     ``failed: . Falling through to base LLM judge.`` — un-diagnosable.
     The new log shape ALWAYS includes ``type(e).__name__`` so the
     failure mode is greppable."""
-    import asyncio
     import logging
 
     from core_api.services.contradiction_detector import (
@@ -419,7 +419,7 @@ async def test_fallback_to_base_judge_logs_timeouterror_explicitly(caplog):
     # the only way to exercise the outer ``except Exception`` path
     # where the CAURA-134 WARNING lives. ``asyncio.TimeoutError()``
     # has ``str(e) == ""`` — the bug class CAURA-134 fixes.
-    fetch_ctx = AsyncMock(side_effect=asyncio.TimeoutError())
+    fetch_ctx = AsyncMock(side_effect=TimeoutError())
 
     base_judge = AsyncMock(return_value=(False, 0.95))
     entity_aware_judge = AsyncMock(return_value=(False, 0.95))

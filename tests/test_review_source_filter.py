@@ -28,7 +28,9 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/claude_code_review.yml"
+WORKFLOW = (
+    Path(__file__).resolve().parents[1] / ".github/workflows/claude_code_review.yml"
+)
 
 # The `SRC_FILES=` assignment, then the single-quoted argument to `--jq` that
 # follows it. Anchored on the variable name because the same file runs several
@@ -77,7 +79,9 @@ class TestTheSharedTestFilesCountAsSource:
             "tests/_mcp_test_helpers.py",
         ],
     )
-    def test_a_shared_helper_alone_is_enough_to_trigger_a_review(self, path: str) -> None:
+    def test_a_shared_helper_alone_is_enough_to_trigger_a_review(
+        self, path: str
+    ) -> None:
         assert _counts_as_source(path) == 1, (
             f"{path} counts as zero source files, so a pull request touching only it "
             "skips review entirely — regardless of what REVIEW_PROMPT says"
@@ -112,7 +116,9 @@ class TestOrdinaryTestsAndDocsStillDoNot:
 
 class TestTheCountIsACount:
     def test_real_source_still_counts(self) -> None:
-        assert _counts_as_source("core-api/src/core_api/services/memory_service.py") == 1
+        assert (
+            _counts_as_source("core-api/src/core_api/services/memory_service.py") == 1
+        )
 
     def test_a_mixed_pull_request_counts_only_the_source(self) -> None:
         """The skip is `-eq 0`, so what matters is that the total is not zero —

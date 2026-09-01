@@ -97,7 +97,11 @@ INSTALL_HINT = 'uv pip install -e "core-storage-api/[dev]"'
 # without this the gate runs only under a PYTHONPATH somebody remembered to
 # set, and a gate that needs an incantation is one that gets invoked wrong and
 # skipped. Prepended so a checkout always wins over an installed copy.
-for _path in (REPO_ROOT, REPO_ROOT / "core-storage-api" / "src", REPO_ROOT / "core-api" / "src"):
+for _path in (
+    REPO_ROOT,
+    REPO_ROOT / "core-storage-api" / "src",
+    REPO_ROOT / "core-api" / "src",
+):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
@@ -439,7 +443,12 @@ def enumerate_methods() -> list[Entry]:
         if defaulted:
             names = ", ".join(sorted(p.name for p in defaulted))
             entries.append(
-                Entry("method", name, "OPTIONAL", f"{names} is defaulted; omitting it drops the scope")
+                Entry(
+                    "method",
+                    name,
+                    "OPTIONAL",
+                    f"{names} is defaulted; omitting it drops the scope",
+                )
             )
         else:
             entries.append(Entry("method", name, "REQUIRED", ""))
@@ -493,9 +502,13 @@ def _literal_keys(node: ast.expr | None) -> bool:
     key the caller sends, and that is the shape this check looks for.
     """
     if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-        return all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts)
+        return all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts
+        )
     if isinstance(node, ast.Dict):
-        return all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in node.keys)
+        return all(
+            isinstance(k, ast.Constant) and isinstance(k.value, str) for k in node.keys
+        )
     return False
 
 
@@ -514,7 +527,9 @@ def _walk_scope(node: ast.AST) -> Iterator[ast.AST]:
         yield from _walk_scope(child)
 
 
-def _enclosing_loops(fn: ast.FunctionDef | ast.AsyncFunctionDef, target: ast.AST) -> list[ast.AST]:
+def _enclosing_loops(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, target: ast.AST
+) -> list[ast.AST]:
     """The loops that actually contain ``target``, innermost first.
 
     Ancestry, not line numbers. Comparing ``node.lineno >= loop.lineno`` counts
@@ -587,7 +602,9 @@ def _key_is_bound_to_literal_names(
     return False
 
 
-def _local_assignments(fn: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[ast.expr]:
+def _local_assignments(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> list[ast.expr]:
     """Every value assigned to ``name`` in ``fn``'s own scope, in source order."""
     found: list[ast.expr] = []
     for node in _walk_scope(fn):
@@ -655,7 +672,9 @@ def _is_update_statement(
     return not (roots & INSERT_STATEMENT_ROOTS)
 
 
-def _all_literal_keys(fn: ast.FunctionDef | ast.AsyncFunctionDef, expr: ast.expr | None) -> bool:
+def _all_literal_keys(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, expr: ast.expr | None
+) -> bool:
     """Whether ``expr``'s keys are written out in the source on *every* path to it.
 
     A bare name is resolved through ``_local_assignments``, and all of them have
@@ -712,7 +731,11 @@ def _caller_keyed_update_sites(source: str) -> dict[str, str]:
     # site — the public method's own body is clean and the helper is invisible.
     # A private helper that qualifies is reported under its own name, which is
     # also where the guard belongs, since that is where the keys are applied.
-    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+    for fn in [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]:
         for node in ast.walk(fn):
             if not isinstance(node, ast.Call):
                 continue
@@ -724,7 +747,9 @@ def _caller_keyed_update_sites(source: str) -> dict[str, str]:
                 sites.setdefault(fn.name, "setattr over caller-supplied keys")
             for kw in node.keywords:
                 if kw.arg == "set_" and not _all_literal_keys(fn, kw.value):
-                    sites.setdefault(fn.name, "ON CONFLICT set_ from caller-supplied keys")
+                    sites.setdefault(
+                        fn.name, "ON CONFLICT set_ from caller-supplied keys"
+                    )
             if (
                 isinstance(node.func, ast.Attribute)
                 and node.func.attr == "values"
@@ -745,7 +770,9 @@ def _caller_keyed_update_sites(source: str) -> dict[str, str]:
                 # this list.
                 spread = [kw.value for kw in node.keywords if kw.arg is None]
                 if any(not _all_literal_keys(fn, v) for v in [*node.args, *spread]):
-                    sites.setdefault(fn.name, "UPDATE values(…) from caller-supplied keys")
+                    sites.setdefault(
+                        fn.name, "UPDATE values(…) from caller-supplied keys"
+                    )
     return sites
 
 
@@ -766,7 +793,11 @@ def _names_referenced(source: str) -> dict[str, set[str]]:
     """
     tree = ast.parse(source)
     out: dict[str, set[str]] = {}
-    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+    for fn in [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]:
         out[fn.name] = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | {
             n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)
         }
@@ -812,7 +843,11 @@ def _scan_assumption_findings(cls: type, tree: ast.Module) -> list[str]:
         )
 
     seen: dict[str, int] = {}
-    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+    for fn in [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]:
         seen[fn.name] = seen.get(fn.name, 0) + 1
     for name, count in sorted(seen.items()):
         if count > 1:
@@ -857,7 +892,6 @@ def _identity_writability_findings() -> list[str]:
     the methods are one class in one file, addressable by bare name.
     """
     import core_storage_api.services.postgres_service as service
-
     from common import models
 
     errors: list[str] = []
@@ -875,7 +909,9 @@ def _identity_writability_findings() -> list[str]:
             "IDENTITY_WRITE_GUARDS in scripts/tenant_scope_gate.py."
         )
 
-    for method, (model_name, const_name, admits) in sorted(IDENTITY_WRITE_GUARDS.items()):
+    for method, (model_name, const_name, admits) in sorted(
+        IDENTITY_WRITE_GUARDS.items()
+    ):
         if method not in sites:
             errors.append(
                 f"method:{method} is registered in IDENTITY_WRITE_GUARDS but no longer builds "
@@ -957,7 +993,12 @@ def enumerate_routes() -> list[Entry]:
             # cannot be read statically, so it does not get the benefit of the
             # doubt; it needs an explicit entry saying who checked it.
             entries.append(
-                Entry("route", key, "NONE", f"handler {lookup[0]}.{lookup[1]} is not statically classifiable")
+                Entry(
+                    "route",
+                    key,
+                    "NONE",
+                    f"handler {lookup[0]}.{lookup[1]} is not statically classifiable",
+                )
             )
             continue
         entries.append(Entry("route", key, verdict[0], verdict[1]))
@@ -1071,7 +1112,9 @@ def _classify_handler(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str
     # grant and genuinely optional. None is a binding scope, so this costs
     # nothing at present and stays correct-but-noisy if the style spreads.
     defaulted: set[str] = set()
-    for param, _default in zip(positional[len(positional) - len(args.defaults) :], args.defaults):
+    for param, _default in zip(
+        positional[len(positional) - len(args.defaults) :], args.defaults
+    ):
         defaulted.add(param.arg)
     for param, default in zip(args.kwonlyargs, args.kw_defaults):
         if default is not None:
@@ -1083,7 +1126,9 @@ def _classify_handler(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str
     # Parameters are request-derived by construction: FastAPI fills them from
     # the path or query string. Kept so a bare ``tenant_id`` in a guard test can
     # be told apart from a local that merely shares the name.
-    scope_params = {p.arg for p in positional + args.kwonlyargs if p.arg in BINDING_SCOPE}
+    scope_params = {
+        p.arg for p in positional + args.kwonlyargs if p.arg in BINDING_SCOPE
+    }
 
     for param in positional + args.kwonlyargs:
         if param.arg in BINDING_SCOPE:
@@ -1151,7 +1196,9 @@ def _classify_handler(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str
     bindings: list[tuple[int, str, str | None]] = []
     for target, bound in _assignments(node):
         if isinstance(target, ast.Name):
-            bindings.append((target.lineno, target.id, _tenant_key_read(bound, request_derived)))
+            bindings.append(
+                (target.lineno, target.id, _tenant_key_read(bound, request_derived))
+            )
     bindings.sort()
 
     # An inline ``if <tenant is missing/wrong>: raise`` is the same fail-closed
@@ -1173,7 +1220,9 @@ def _classify_handler(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str
         if not any(isinstance(stmt, ast.Raise) for stmt in sub.body):
             continue
         in_effect = _bindings_in_effect(bindings, sub.lineno)
-        for key in _keys_rejected_when_missing(sub.test, in_effect, scope_params, request_derived):
+        for key in _keys_rejected_when_missing(
+            sub.test, in_effect, scope_params, request_derived
+        ):
             required.add(key)
             optional.discard(key)
 
@@ -1236,7 +1285,10 @@ def _keys_rejected_when_missing(
     gone. Hence: recurse through ``or``, refuse ``and``.
     """
     if isinstance(test, ast.BoolOp):
-        parts = [_keys_rejected_when_missing(v, aliases, scope_params, request_derived) for v in test.values]
+        parts = [
+            _keys_rejected_when_missing(v, aliases, scope_params, request_derived)
+            for v in test.values
+        ]
         if isinstance(test.op, ast.Or):
             # True if any branch is, so one negative check on the tenant carries
             # the whole test.
@@ -1274,7 +1326,9 @@ def _keys_rejected_when_missing(
                 op=ast.And() if isinstance(inner.op, ast.Or) else ast.Or(),
                 values=[ast.UnaryOp(op=ast.Not(), operand=v) for v in inner.values],
             )
-            return _keys_rejected_when_missing(flipped, aliases, scope_params, request_derived)
+            return _keys_rejected_when_missing(
+                flipped, aliases, scope_params, request_derived
+            )
         # ``not tenant_id``, ``not isinstance(tenant_id, str)``, ``not body.get(...)``
         return _scope_keys_mentioned(inner, aliases, scope_params, request_derived)
 
@@ -1282,7 +1336,9 @@ def _keys_rejected_when_missing(
         operator, right = test.ops[0], test.comparators[0]
         # ``tenant_id is None`` / ``== None`` / ``== ""`` — true when absent.
         if isinstance(operator, (ast.Is, ast.Eq)) and _is_falsy_literal(right):
-            return _scope_keys_mentioned(test.left, aliases, scope_params, request_derived)
+            return _scope_keys_mentioned(
+                test.left, aliases, scope_params, request_derived
+            )
         # ``node.tenant_id != body.get("tenant_id")`` — the pair check that
         # closed GHSA-xw4x-jwf5-8m9h. Absent reads as None, which differs from
         # the row's real tenant, so the raise is reached. Only when the other
@@ -1331,7 +1387,11 @@ def _scope_keys_mentioned(
             elif sub.id in scope_params:
                 found.add(sub.id)
             continue
-        key = _tenant_key_read(sub, request_derived) if isinstance(sub, ast.expr) else None
+        key = (
+            _tenant_key_read(sub, request_derived)
+            if isinstance(sub, ast.expr)
+            else None
+        )
         if key:
             found.add(key)
     return found
@@ -1449,7 +1509,9 @@ def _category(row: dict[str, str]) -> str:
     return str(row.get("category") or "").strip() or "unclassified"
 
 
-def allowlisted_categories(entries: list[Entry], allowlist: dict[str, dict[str, str]]) -> list[str]:
+def allowlisted_categories(
+    entries: list[Entry], allowlist: dict[str, dict[str, str]]
+) -> list[str]:
     """The category each live exception currently claims, for the summary line."""
     return [_category(allowlist.get(e.ident, {})) for e in entries]
 
@@ -1519,7 +1581,9 @@ def check_category_doc(path: Path) -> list[str]:
         return []
     missing = sorted(set(CATEGORIES) - set(documented))
     extra = sorted(set(documented) - set(CATEGORIES))
-    reworded = sorted(k for k in set(documented) & set(CATEGORIES) if documented[k] != CATEGORIES[k])
+    reworded = sorted(
+        k for k in set(documented) & set(CATEGORIES) if documented[k] != CATEGORIES[k]
+    )
     drift = ", ".join(
         part
         for part in (
@@ -1555,7 +1619,10 @@ def render_allowlist(entries: list[Entry], previous: dict[str, dict[str, str]]) 
             "half is the one to clear first."
         ),
         "_categories": CATEGORIES,
-        "exceptions": [_row(e, previous.get(e.ident, {})) for e in sorted(exceptions(entries), key=lambda e: e.ident)],
+        "exceptions": [
+            _row(e, previous.get(e.ident, {}))
+            for e in sorted(exceptions(entries), key=lambda e: e.ident)
+        ],
     }
     return json.dumps(payload, indent=2) + "\n"
 
@@ -1584,7 +1651,9 @@ def _row(entry: Entry, prior: dict[str, str]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def check(entries: list[Entry], grants: list[Entry], allowlist: dict[str, dict[str, str]]) -> list[str]:
+def check(
+    entries: list[Entry], grants: list[Entry], allowlist: dict[str, dict[str, str]]
+) -> list[str]:
     errors: list[str] = []
     current = {e.ident: e for e in exceptions(entries)}
 
@@ -1836,7 +1905,9 @@ def ratchet(
     added = sorted(live_exception_ids - baseline_ids)
     if added:
         errors.append(
-            "the tenant-scope allowlist grew against " + base + ":\n"
+            "the tenant-scope allowlist grew against "
+            + base
+            + ":\n"
             + "".join(f"      + {ident}\n" for ident in added)
             + "    A new storage path without a binding tenant scope is the shape both\n"
             "    advisories had. Scope it rather than listing it. If it genuinely\n"
@@ -1863,7 +1934,9 @@ def ratchet(
             weakened.append(f"{ident}: {was} -> {now}")
     if weakened:
         errors.append(
-            "an allowlisted path lost tenant scope against " + base + ":\n"
+            "an allowlisted path lost tenant scope against "
+            + base
+            + ":\n"
             + "".join(f"      ~ {line}\n" for line in weakened)
             + "    Staying on the list is not permission to get worse: OPTIONAL still\n"
             "    scopes a caller that passes the tenant, NONE cannot be scoped at all."
@@ -1883,7 +1956,9 @@ def ratchet(
             relabelled.append(f"{ident}: {was} -> {now}")
     if relabelled:
         errors.append(
-            "an unscoped mutating path was relabelled as something milder against " + base + ":\n"
+            "an unscoped mutating path was relabelled as something milder against "
+            + base
+            + ":\n"
             + "".join(f"      ~ {line}\n" for line in relabelled)
             + "    A path leaves the mutating backlog by getting a tenant scope and\n"
             "    leaving the allowlist, not by being refiled. If the original\n"
@@ -2014,7 +2089,11 @@ def report_degraded(exc: ImportError, allowlist_path: Path) -> int:
     if errors:
         print()
         for err in errors:
-            print(f"::error::{_as_annotation(err)}" if _in_github_actions() else f"error: {err}")
+            print(
+                f"::error::{_as_annotation(err)}"
+                if _in_github_actions()
+                else f"error: {err}"
+            )
 
     # 2, not 0, and not 1. The run was INCOMPLETE, which is what 2 has always
     # meant here, and it stays 2 whether or not the import-free checks found
@@ -2046,7 +2125,11 @@ def main() -> int:
         # A malformed allowlist is the author's to fix, not a crash to read a
         # traceback out of — and it must not reach the ratchet, which would
         # otherwise compare against whichever duplicate won.
-        print(f"::error::{_as_annotation(str(exc))}" if _in_github_actions() else f"error: {exc}")
+        print(
+            f"::error::{_as_annotation(str(exc))}"
+            if _in_github_actions()
+            else f"error: {exc}"
+        )
         return 1
 
     if args.write:
@@ -2102,7 +2185,11 @@ def main() -> int:
     if errors:
         print()
         for err in errors:
-            print(f"::error::{_as_annotation(err)}" if _in_github_actions() else f"error: {err}")
+            print(
+                f"::error::{_as_annotation(err)}"
+                if _in_github_actions()
+                else f"error: {err}"
+            )
         return 1
     return 0
 

@@ -7,6 +7,7 @@ Fix a failure by running:
 
     PYTHONPATH=core-api/src:core-storage-api/src:. python scripts/export_tool_specs.py
 """
+
 from __future__ import annotations
 
 import json

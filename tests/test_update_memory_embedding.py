@@ -15,7 +15,8 @@ async-embed worker nor the nightly NULL-embedding sweep can ever find it.
 import pytest
 
 from core_api.clients.storage_client import get_storage_client
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 pytestmark = pytest.mark.asyncio
 

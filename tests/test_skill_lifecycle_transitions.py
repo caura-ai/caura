@@ -31,7 +31,6 @@ from core_api.services.skill_promoter import (
     rescan_before_apply,
 )
 
-
 # ── Helpers ────────────────────────────────────────────────────────
 
 
@@ -513,7 +512,9 @@ class TestPromoter:
             updates.append((t, c, d, s))
 
         fake_sc = AsyncMock()
-        fake_sc.query_documents = AsyncMock(return_value=[_doc_row("forge/test-skill", doc)])
+        fake_sc.query_documents = AsyncMock(
+            return_value=[_doc_row("forge/test-skill", doc)]
+        )
         with patch(
             "core_api.services.skill_promoter.get_storage_client",
             return_value=fake_sc,

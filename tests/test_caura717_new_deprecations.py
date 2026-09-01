@@ -131,6 +131,7 @@ def test_do_crystallize_guard_coerces_reserved_type_to_default() -> None:
     it to ``DEFAULT_MEMORY_TYPE`` — mirroring the prompt-vocabulary narrowing.
     Tests the module-level check that mirrors ``MEMORY_TYPES_WRITE`` membership."""
     from core_api.constants import MEMORY_TYPES_WRITE as _WRITE
+
     # Reserved types: not in MEMORY_TYPES_WRITE → get coerced by the guard.
     for reserved in ("outcome", "rule", "insight"):
         assert reserved not in _WRITE
@@ -162,8 +163,7 @@ async def test_bulk_write_demotes_new_deprecated_slug_to_default(slug: str) -> N
             BulkMemoryItem(
                 content=(
                     f"Historical row that the pre-V2.2 classifier would have "
-                    f"tagged as {slug}."
-                    + _PADDING
+                    f"tagged as {slug}." + _PADDING
                 ),
                 memory_type=slug,
             )

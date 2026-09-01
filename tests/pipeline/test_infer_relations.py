@@ -84,7 +84,9 @@ async def test_infer_zero_counts_still_success():
 async def test_infer_skipped_when_storage_signals_skip():
     # storage flags the no-co-occurrence case with ``skipped`` so the step
     # reproduces the source's StepOutcome.SKIPPED (vs SUCCESS for zero counts).
-    sc, p = _patch_sc({"skipped": True, "relations_created": 0, "relations_reinforced": 0})
+    sc, p = _patch_sc(
+        {"skipped": True, "relations_created": 0, "relations_reinforced": 0}
+    )
     with p:
         result = await InferRelations().execute(_ctx())
 

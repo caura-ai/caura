@@ -7,6 +7,7 @@ One benchmark-tuned instruction block fixes that; it ships flag-gated behind
 """
 
 import pytest
+
 from core_api.services import recall_service as rs
 from core_api.services.organization_settings import DEFAULT_SETTINGS, ResolvedConfig
 

@@ -20,8 +20,8 @@ mirroring of the body-side "mode without metadata patch" rule applies.
 
 import pytest
 
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 

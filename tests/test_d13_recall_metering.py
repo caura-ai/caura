@@ -65,8 +65,10 @@ def test_no_bare_search_literal_left_on_recall_sites():
     # the /recall endpoint body sits between its decorator and the next route;
     # anchor on the path literal only so decorator kwargs (e.g. C33's
     # ``responses=``) don't break the split
-    recall_section = recall_route.split('@router.post("/recall"')[1].split("@router.post")[0]
-    assert 'check_and_increment(body.tenant_id, recall_operation())' in recall_section
+    recall_section = recall_route.split('@router.post("/recall"')[1].split(
+        "@router.post"
+    )[0]
+    assert "check_and_increment(body.tenant_id, recall_operation())" in recall_section
     assert 'check_and_increment(body.tenant_id, "search")' not in recall_section
 
     mcp = (root / "mcp_server.py").read_text()

@@ -245,8 +245,7 @@ async def test_pii_mask_runs_in_every_write_mode(write_mode):
     tenant = _tenant()
     await _seed_governance(tenant, pii={"enabled": True, "action": "mask"})
     content = f"Contact john.doe@example.com for access.{_PADDING}"
-    result = await create_memory(_make_input(tenant, content, write_mode=write_mode)
-    )
+    result = await create_memory(_make_input(tenant, content, write_mode=write_mode))
     assert "john.doe@example.com" not in result.content
     rows = await _governance_audit_rows(tenant)
     mask = next((r for r in rows if r["action"] == "pii_mask"), None)
@@ -379,7 +378,8 @@ async def test_bulk_drop_rejects_only_the_pii_item():
     await _seed_governance(tenant, pii={"enabled": True, "action": "drop"})
     clean = f"Quarterly planning notes for the team.{_PADDING}"
     dirty = f"Customer card 4111 1111 1111 1111 is on file.{_PADDING}"
-    resp = await create_memories_bulk(_bulk(tenant, [clean, dirty]), bulk_attempt_id=uuid.uuid4().hex
+    resp = await create_memories_bulk(
+        _bulk(tenant, [clean, dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
     assert resp.results[0].status == "created"
     assert resp.results[1].status == "error"
@@ -393,7 +393,8 @@ async def test_bulk_mask_redacts_stored_item():
     tenant = _tenant()
     await _seed_governance(tenant, pii={"enabled": True, "action": "mask"})
     dirty = f"Reach me at jane.roe@example.com about the deal.{_PADDING}"
-    resp = await create_memories_bulk(_bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
+    resp = await create_memories_bulk(
+        _bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
     assert resp.results[0].status == "created"
     mem = await get_storage_client().get_memory(resp.results[0].id, tenant)
@@ -408,7 +409,8 @@ async def test_bulk_flag_marks_stored_metadata():
     tenant = _tenant()
     await _seed_governance(tenant, pii={"enabled": True, "action": "flag"})
     dirty = f"Ping jane.roe@example.com for the rollout plan.{_PADDING}"
-    resp = await create_memories_bulk(_bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
+    resp = await create_memories_bulk(
+        _bulk(tenant, [dirty]), bulk_attempt_id=uuid.uuid4().hex
     )
     assert resp.results[0].status == "created"
     mem = await get_storage_client().get_memory(resp.results[0].id, tenant)

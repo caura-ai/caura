@@ -73,7 +73,9 @@ def _ctx(source, cfg, returned_rows, raw_rows):
 async def test_skips_search_when_search_flag_off(monkeypatch):
     captured = _capture(monkeypatch)
     # recall_logging_enabled on, but the search flag is off → /search not logged.
-    ctx = _ctx("search", _cfg(recall=True, search=False), [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+    ctx = _ctx(
+        "search", _cfg(recall=True, search=False), [_row(0.6, 0.55)], [_row(0.6, 0.55)]
+    )
     await LogRecallEvent().execute(ctx)
     assert captured == []
 
@@ -81,7 +83,12 @@ async def test_skips_search_when_search_flag_off(monkeypatch):
 @pytest.mark.asyncio
 async def test_skips_mcp_when_recall_flag_off(monkeypatch):
     captured = _capture(monkeypatch)
-    ctx = _ctx("mcp_recall", _cfg(recall=False, search=True), [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+    ctx = _ctx(
+        "mcp_recall",
+        _cfg(recall=False, search=True),
+        [_row(0.6, 0.55)],
+        [_row(0.6, 0.55)],
+    )
     await LogRecallEvent().execute(ctx)
     assert captured == []
 
@@ -89,7 +96,9 @@ async def test_skips_mcp_when_recall_flag_off(monkeypatch):
 @pytest.mark.asyncio
 async def test_skips_unknown_source(monkeypatch):
     captured = _capture(monkeypatch)
-    ctx = _ctx("bulk", _cfg(recall=True, search=True), [_row(0.6, 0.55)], [_row(0.6, 0.55)])
+    ctx = _ctx(
+        "bulk", _cfg(recall=True, search=True), [_row(0.6, 0.55)], [_row(0.6, 0.55)]
+    )
     await LogRecallEvent().execute(ctx)
     assert captured == []
 
@@ -167,7 +176,15 @@ async def test_search_keeps_near_misses_when_sampled(monkeypatch):
     assert event["source"] == "search"
     # 2 returned + capped 5 near-misses = 7 (same cap as mcp_recall).
     assert len(candidates) == 7
-    assert [c["returned"] for c in candidates] == [True, True, False, False, False, False, False]
+    assert [c["returned"] for c in candidates] == [
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+    ]
 
 
 @pytest.mark.asyncio

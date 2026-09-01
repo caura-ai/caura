@@ -227,9 +227,7 @@ async def test_org_read_only_is_ignored_off_the_gateway_path(monkeypatch):
     """A direct caller must not be able to SET one either."""
     monkeypatch.setattr(settings, "gateway_shared_secret", None)
     monkeypatch.setattr(settings, "is_standalone", False)
-    await _call_middleware(
-        [(b"x-api-key", b"some-key"), (b"x-org-read-only", b"true")]
-    )
+    await _call_middleware([(b"x-api-key", b"some-key"), (b"x-org-read-only", b"true")])
     assert mcp_server._is_org_read_only() is False
 
 

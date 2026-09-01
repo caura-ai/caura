@@ -5,9 +5,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
+
 from core_api.auth import AuthContext
 from core_api.routes import lifecycle
-from fastapi import HTTPException
 
 pytestmark = pytest.mark.asyncio
 

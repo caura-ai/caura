@@ -14,7 +14,7 @@ Integration tests verify:
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -25,7 +25,6 @@ from core_api.constants import (
     CRYSTALLIZER_MAX_DEDUP_PAIRS,
     VECTOR_DIM,
 )
-
 
 # ---------------------------------------------------------------------------
 # Unit tests
@@ -237,14 +236,14 @@ class TestBatchANNIntegration:
             fleet_id,
             "Already checked A",
             base_emb,
-            last_dedup_checked_at=datetime.now(timezone.utc),
+            last_dedup_checked_at=datetime.now(UTC),
         )
         await self._insert_memory(
             tenant_id,
             fleet_id,
             "Already checked B",
             dup_emb,
-            last_dedup_checked_at=datetime.now(timezone.utc),
+            last_dedup_checked_at=datetime.now(UTC),
         )
 
         result = await _check_near_duplicates(tenant_id, fleet_id)

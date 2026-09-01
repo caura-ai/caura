@@ -24,7 +24,6 @@ from core_api.constants import (
 )
 from tests._scoped_module import scoped
 
-
 # ---------------------------------------------------------------------------
 # Unit tests: constants
 # ---------------------------------------------------------------------------
@@ -149,8 +148,7 @@ def _only_stats(service_mod):
     failing loudly if a test ever touches two backends without meaning to.
     """
     assert len(service_mod._stats_by_scope) == 1, (
-        f"expected exactly one backend scope, got "
-        f"{sorted(service_mod._stats_by_scope)}"
+        f"expected exactly one backend scope, got {sorted(service_mod._stats_by_scope)}"
     )
     return next(iter(service_mod._stats_by_scope.values()))
 
@@ -231,9 +229,9 @@ async def test_value_error_in_provider_construction_does_not_propagate(
     with caplog.at_level(logging.ERROR, logger="common.embedding._service"):
         await get_embedding("anything", background=False)
 
-    assert any(
-        "misconfiguration" in rec.getMessage() for rec in caplog.records
-    ), "expected an ERROR log naming the misconfig"
+    assert any("misconfiguration" in rec.getMessage() for rec in caplog.records), (
+        "expected an ERROR log naming the misconfig"
+    )
 
 
 @pytest.mark.unit
@@ -263,9 +261,7 @@ async def test_misconfiguration_error_logged_only_once_per_provider(
         for _ in range(5):
             assert await get_embedding("x", background=False) is None
 
-    matches = [
-        rec for rec in caplog.records if "misconfiguration" in rec.getMessage()
-    ]
+    matches = [rec for rec in caplog.records if "misconfiguration" in rec.getMessage()]
     assert len(matches) == 1, (
         f"expected exactly 1 ERROR across 5 calls; got {len(matches)} "
         f"({[r.getMessage() for r in matches]!r})"
@@ -377,9 +373,7 @@ async def test_bulk_failure_reports_even_while_single_embeds_succeed(
     )
 
     matches = [
-        rec
-        for rec in caplog.records
-        if "Bulk embedding failing" in rec.getMessage()
+        rec for rec in caplog.records if "Bulk embedding failing" in rec.getMessage()
     ]
     assert len(matches) == 1, (
         f"expected exactly one bulk-failure report, got {len(matches)}"
@@ -483,14 +477,10 @@ async def test_bulk_failure_report_is_rate_limited_not_per_call(
                 await get_embeddings_batch(["a"] * 50, background=False)
 
     matches = [
-        rec
-        for rec in caplog.records
-        if "Bulk embedding failing" in rec.getMessage()
+        rec for rec in caplog.records if "Bulk embedding failing" in rec.getMessage()
     ]
     # 13 consecutive failures, reports at streak 3 and streak 13.
-    assert len(matches) == 2, (
-        f"expected reports at streak 3 and 13, got {len(matches)}"
-    )
+    assert len(matches) == 2, f"expected reports at streak 3 and 13, got {len(matches)}"
 
 
 @pytest.mark.unit

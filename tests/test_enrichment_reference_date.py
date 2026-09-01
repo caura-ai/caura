@@ -6,7 +6,7 @@ key fix for temporal-reasoning accuracy: memories like "Met Sarah last week"
 get their dates resolved relative to the session date, not build-time.
 """
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,7 +20,7 @@ class TestEnrichmentReferenceDate:
         """When reference_datetime is given, the prompt should contain that date."""
         from core_api.services.memory_enrichment import ENRICHMENT_PROMPT
 
-        ref_dt = datetime(2023, 5, 20, tzinfo=timezone.utc)
+        ref_dt = datetime(2023, 5, 20, tzinfo=UTC)
         prompt = ENRICHMENT_PROMPT.format(
             content="Met Sarah last week", today=ref_dt.date().isoformat()
         )
@@ -41,7 +41,7 @@ class TestEnrichmentReferenceDate:
         """enrich_memory() with reference_datetime should format the prompt with that date."""
         from core_api.services.memory_enrichment import enrich_memory
 
-        ref_dt = datetime(2023, 5, 20, tzinfo=timezone.utc)
+        ref_dt = datetime(2023, 5, 20, tzinfo=UTC)
         captured_prompts = []
 
         async def fake_complete_json(prompt: str):

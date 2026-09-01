@@ -124,10 +124,22 @@ async def test_collections_per_collection_counts(sc):
 async def test_collections_fleet_scoping(sc):
     tenant = _t()
     await sc.upsert_document_xmax(
-        {"tenant_id": tenant, "fleet_id": "fleet-a", "collection": "c", "doc_id": "x", "data": {}}
+        {
+            "tenant_id": tenant,
+            "fleet_id": "fleet-a",
+            "collection": "c",
+            "doc_id": "x",
+            "data": {},
+        }
     )
     await sc.upsert_document_xmax(
-        {"tenant_id": tenant, "fleet_id": "fleet-b", "collection": "c", "doc_id": "y", "data": {}}
+        {
+            "tenant_id": tenant,
+            "fleet_id": "fleet-b",
+            "collection": "c",
+            "doc_id": "y",
+            "data": {},
+        }
     )
 
     scoped = await sc.list_document_collections(tenant_id=tenant, fleet_id="fleet-a")
@@ -158,7 +170,9 @@ async def test_collections_readable_tenant_ids_merges(sc):
 # ---------------------------------------------------------------------------
 
 
-async def _seed_doc(sc, tenant, collection, doc_id, text, *, status=None, fleet_id=None):
+async def _seed_doc(
+    sc, tenant, collection, doc_id, text, *, status=None, fleet_id=None
+):
     data: dict = {"summary": text}
     if status is not None:
         data["status"] = status
@@ -180,7 +194,11 @@ async def test_search_cosine_ordering(sc):
     await _seed_doc(sc, tenant, "c", "far", "zebra giraffe lion")
 
     pairs = await sc.search_documents_vector(
-        {"tenant_id": tenant, "query_embedding": fake_embedding("apple banana cherry"), "top_k": 5}
+        {
+            "tenant_id": tenant,
+            "query_embedding": fake_embedding("apple banana cherry"),
+            "top_k": 5,
+        }
     )
     assert [r["doc_id"] for r in pairs] == ["near", "far"], "closest vector first"
     assert pairs[0]["similarity"] >= pairs[1]["similarity"]
@@ -192,7 +210,11 @@ async def test_search_collection_none_spans_all(sc):
     await _seed_doc(sc, tenant, "beta", "b", "shared word two")
 
     spanning = await sc.search_documents_vector(
-        {"tenant_id": tenant, "query_embedding": fake_embedding("shared word"), "top_k": 5}
+        {
+            "tenant_id": tenant,
+            "query_embedding": fake_embedding("shared word"),
+            "top_k": 5,
+        }
     )
     assert {r["collection"] for r in spanning} == {"alpha", "beta"}
 
@@ -212,10 +234,19 @@ async def test_search_excludes_null_embedding(sc):
     await _seed_doc(sc, tenant, "c", "indexed", "findable text here")
     # No embedding → not indexed → invisible to search.
     await sc.upsert_document_xmax(
-        {"tenant_id": tenant, "collection": "c", "doc_id": "unindexed", "data": {"summary": "x"}}
+        {
+            "tenant_id": tenant,
+            "collection": "c",
+            "doc_id": "unindexed",
+            "data": {"summary": "x"},
+        }
     )
     pairs = await sc.search_documents_vector(
-        {"tenant_id": tenant, "query_embedding": fake_embedding("findable text here"), "top_k": 5}
+        {
+            "tenant_id": tenant,
+            "query_embedding": fake_embedding("findable text here"),
+            "top_k": 5,
+        }
     )
     assert [r["doc_id"] for r in pairs] == ["indexed"]
 
@@ -242,7 +273,11 @@ async def test_search_readable_tenant_ids_widens(sc):
     await _seed_doc(sc, t2, "c", "y", "common phrase here")
 
     narrow = await sc.search_documents_vector(
-        {"tenant_id": t1, "query_embedding": fake_embedding("common phrase here"), "top_k": 5}
+        {
+            "tenant_id": t1,
+            "query_embedding": fake_embedding("common phrase here"),
+            "top_k": 5,
+        }
     )
     assert {r["tenant_id"] for r in narrow} == {t1}
 
@@ -264,7 +299,11 @@ async def test_search_readable_tenant_ids_widens(sc):
 
 async def _make_node(svc: PostgresService, tenant: str) -> str:
     node_id = await svc.fleet_upsert_node(
-        values={"tenant_id": tenant, "node_name": f"node-{uuid4().hex[:8]}", "fleet_id": "fleet-a"}
+        values={
+            "tenant_id": tenant,
+            "node_name": f"node-{uuid4().hex[:8]}",
+            "fleet_id": "fleet-a",
+        }
     )
     return str(node_id)
 
@@ -299,7 +338,10 @@ async def test_fleet_in_flight_deploy(sc):
 
     # Pending within the window → in flight.
     await _add_deploy_command(svc, tenant, node_id, status="pending", created_at=now)
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is True
+    assert (
+        await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since)
+        is True
+    )
 
 
 async def test_fleet_in_flight_deploy_acked_counts(sc):
@@ -311,7 +353,10 @@ async def test_fleet_in_flight_deploy_acked_counts(sc):
 
     # Acked within the window also counts as in flight.
     await _add_deploy_command(svc, tenant, node_id, status="acked", created_at=now)
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is True
+    assert (
+        await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since)
+        is True
+    )
 
 
 async def test_fleet_in_flight_deploy_false_when_older_or_none(sc):
@@ -322,17 +367,26 @@ async def test_fleet_in_flight_deploy_false_when_older_or_none(sc):
     since = now - timedelta(minutes=10)
 
     # No commands at all → not in flight.
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is False
+    assert (
+        await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since)
+        is False
+    )
 
     # A pending deploy older than the window is abandoned → not in flight.
     await _add_deploy_command(
         svc, tenant, node_id, status="pending", created_at=now - timedelta(minutes=30)
     )
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is False
+    assert (
+        await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since)
+        is False
+    )
 
     # A done deploy (terminal) within the window is not in flight.
     await _add_deploy_command(svc, tenant, node_id, status="done", created_at=now)
-    assert await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since) is False
+    assert (
+        await sc.fleet_in_flight_deploy(node_id=node_id, tenant_id=tenant, since=since)
+        is False
+    )
 
 
 async def test_fleet_deploy_attempt_count_all_statuses_per_target(sc):
@@ -343,14 +397,27 @@ async def test_fleet_deploy_attempt_count_all_statuses_per_target(sc):
     since = now - timedelta(hours=24)
 
     # Three deploys for target 2.4.0 spanning ALL statuses, within window.
-    await _add_deploy_command(svc, tenant, node_id, status="pending", created_at=now, target_version="2.4.0")
-    await _add_deploy_command(svc, tenant, node_id, status="done", created_at=now, target_version="2.4.0")
-    await _add_deploy_command(svc, tenant, node_id, status="failed", created_at=now, target_version="2.4.0")
+    await _add_deploy_command(
+        svc, tenant, node_id, status="pending", created_at=now, target_version="2.4.0"
+    )
+    await _add_deploy_command(
+        svc, tenant, node_id, status="done", created_at=now, target_version="2.4.0"
+    )
+    await _add_deploy_command(
+        svc, tenant, node_id, status="failed", created_at=now, target_version="2.4.0"
+    )
     # A different target_version is excluded from this target's budget.
-    await _add_deploy_command(svc, tenant, node_id, status="done", created_at=now, target_version="2.5.0")
+    await _add_deploy_command(
+        svc, tenant, node_id, status="done", created_at=now, target_version="2.5.0"
+    )
     # An older one (outside the window) is excluded.
     await _add_deploy_command(
-        svc, tenant, node_id, status="done", created_at=now - timedelta(hours=48), target_version="2.4.0"
+        svc,
+        tenant,
+        node_id,
+        status="done",
+        created_at=now - timedelta(hours=48),
+        target_version="2.4.0",
     )
 
     count = await sc.fleet_deploy_attempt_count(

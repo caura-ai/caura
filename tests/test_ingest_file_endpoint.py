@@ -211,9 +211,7 @@ class TestIngestFileEndpoint:
         client, _ = _build_app(monkeypatch)
         resp = client.post(
             "/api/v1/ingest/file",
-            files={
-                "file": ("blob.bin", b"\x00" * 16, "application/octet-stream")
-            },
+            files={"file": ("blob.bin", b"\x00" * 16, "application/octet-stream")},
             data={"tenant_id": "t1"},
         )
         assert resp.status_code == 422

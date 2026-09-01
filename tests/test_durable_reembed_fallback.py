@@ -40,7 +40,9 @@ class TestDurableReembedFallback:
                 new_callable=PropertyMock,
                 return_value=False,
             ),
-            patch.object(memory_service, "publish_memory_embed_request", new=AsyncMock()) as publish,
+            patch.object(
+                memory_service, "publish_memory_embed_request", new=AsyncMock()
+            ) as publish,
             patch.object(memory_service, "_reembed_memory", new=AsyncMock()) as reembed,
         ):
             await memory_service._schedule_embed_or_reembed(
@@ -65,7 +67,9 @@ class TestDurableReembedFallback:
                 new_callable=PropertyMock,
                 return_value=True,
             ),
-            patch.object(memory_service, "publish_memory_embed_request", new=AsyncMock()) as publish,
+            patch.object(
+                memory_service, "publish_memory_embed_request", new=AsyncMock()
+            ) as publish,
             patch.object(memory_service, "_reembed_memory", new=AsyncMock()) as reembed,
         ):
             await memory_service._schedule_embed_or_reembed(
@@ -90,6 +94,8 @@ class TestDurableReembedFallback:
             ),
             patch.object(memory_service, "_reembed_memory", new=AsyncMock()) as reembed,
         ):
-            await memory_service._schedule_embed_or_reembed(uuid4(), "hello", "tenant-c")
+            await memory_service._schedule_embed_or_reembed(
+                uuid4(), "hello", "tenant-c"
+            )
 
         assert reembed.await_args.kwargs["is_failure_fallback"] is False

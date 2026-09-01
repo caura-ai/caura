@@ -30,8 +30,18 @@ from core_api.services.insights_service import _fake_insights
 pytestmark = [pytest.mark.unit]
 
 _MEMORIES = [
-    {"id": "m1", "content": "Helios shipped on the 3rd", "memory_type": "fact", "weight": 0.9},
-    {"id": "m2", "content": "Anna owns the rollback plan", "memory_type": "fact", "weight": 0.4},
+    {
+        "id": "m1",
+        "content": "Helios shipped on the 3rd",
+        "memory_type": "fact",
+        "weight": 0.9,
+    },
+    {
+        "id": "m2",
+        "content": "Anna owns the rollback plan",
+        "memory_type": "fact",
+        "weight": 0.4,
+    },
 ]
 
 

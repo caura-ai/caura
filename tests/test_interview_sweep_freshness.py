@@ -36,7 +36,9 @@ async def test_a_failed_job_sweep_is_distinguishable_from_an_idle_one(monkeypatc
     async def _boom(*a, **kw):
         raise RuntimeError("db://user:pw@internal-host/secret path=/etc/x")
 
-    monkeypatch.setattr(interview_service, "list_tenants_with_interviewer_enabled", _no_tenants)
+    monkeypatch.setattr(
+        interview_service, "list_tenants_with_interviewer_enabled", _no_tenants
+    )
     monkeypatch.setattr(interview_service, "process_pending_interview_jobs", _boom)
 
     summary = await interview_service.run_interview_schedule()
@@ -57,7 +59,9 @@ async def test_a_healthy_idle_sweep_reports_ok(monkeypatch):
     async def _no_tenants(*a, **kw):
         return []
 
-    monkeypatch.setattr(interview_service, "list_tenants_with_interviewer_enabled", _no_tenants)
+    monkeypatch.setattr(
+        interview_service, "list_tenants_with_interviewer_enabled", _no_tenants
+    )
 
     summary = await interview_service.run_interview_schedule()
 
@@ -70,7 +74,9 @@ async def test_a_healthy_idle_sweep_reports_ok(monkeypatch):
     "sweep",
     ["process_pending_interview_jobs", "run_interview_schedule"],
 )
-async def test_both_sweeps_read_the_enabled_tenant_list_from_the_writer(monkeypatch, sweep):
+async def test_both_sweeps_read_the_enabled_tenant_list_from_the_writer(
+    monkeypatch, sweep
+):
     """``read=False`` on the call that selects which tenants exist for this
     tick. A lagging replica here does not stale one field — it removes a
     tenant, and everything under it, from the sweep entirely, while the
@@ -85,7 +91,9 @@ async def test_both_sweeps_read_the_enabled_tenant_list_from_the_writer(monkeypa
         seen.append(read)
         return []
 
-    monkeypatch.setattr(interview_service, "list_tenants_with_interviewer_enabled", _spy)
+    monkeypatch.setattr(
+        interview_service, "list_tenants_with_interviewer_enabled", _spy
+    )
 
     await getattr(interview_service, sweep)()
 
@@ -130,14 +138,18 @@ class _FailForTenant:
         return []
 
 
-async def test_a_tenant_the_job_sweep_could_not_query_is_counted_not_swallowed(monkeypatch):
+async def test_a_tenant_the_job_sweep_could_not_query_is_counted_not_swallowed(
+    monkeypatch,
+):
     """A tenant whose pending-jobs query raises is skipped. Without a counter
     the summary is identical to that tenant having an empty queue."""
 
     async def _tenants(*a, **kw):
         return ["t-ok", "t-broken"]
 
-    monkeypatch.setattr(interview_service, "list_tenants_with_interviewer_enabled", _tenants)
+    monkeypatch.setattr(
+        interview_service, "list_tenants_with_interviewer_enabled", _tenants
+    )
     monkeypatch.setattr(
         interview_service, "get_storage_client", lambda: _FailForTenant("t-broken")
     )
@@ -152,7 +164,9 @@ async def test_a_tenant_the_job_sweep_could_not_query_is_counted_not_swallowed(m
     )
 
 
-async def test_a_tenant_the_schedule_could_not_scan_is_counted_not_swallowed(monkeypatch):
+async def test_a_tenant_the_schedule_could_not_scan_is_counted_not_swallowed(
+    monkeypatch,
+):
     """The scheduling half has the identical hole in its own tenant loop."""
 
     async def _tenants(*a, **kw):
@@ -163,10 +177,19 @@ async def test_a_tenant_the_schedule_could_not_scan_is_counted_not_swallowed(mon
 
     async def _no_jobs(*a, **kw):
         return dict.fromkeys(
-            ("jobs_processed", "jobs_done", "jobs_retried", "jobs_parked", "jobs_skipped"), 0
+            (
+                "jobs_processed",
+                "jobs_done",
+                "jobs_retried",
+                "jobs_parked",
+                "jobs_skipped",
+            ),
+            0,
         ) | {"tenants": 0, "tenants_failed": 0}
 
-    monkeypatch.setattr(interview_service, "list_tenants_with_interviewer_enabled", _tenants)
+    monkeypatch.setattr(
+        interview_service, "list_tenants_with_interviewer_enabled", _tenants
+    )
     monkeypatch.setattr(interview_service, "get_settings_for_display", _settings)
     monkeypatch.setattr(interview_service, "process_pending_interview_jobs", _no_jobs)
     monkeypatch.setattr(
@@ -199,8 +222,12 @@ async def test_the_schedule_surfaces_the_job_sweeps_partial_failures_too(monkeyp
             "jobs_skipped": 0,
         }
 
-    monkeypatch.setattr(interview_service, "list_tenants_with_interviewer_enabled", _tenants)
-    monkeypatch.setattr(interview_service, "process_pending_interview_jobs", _partly_failed_sweep)
+    monkeypatch.setattr(
+        interview_service, "list_tenants_with_interviewer_enabled", _tenants
+    )
+    monkeypatch.setattr(
+        interview_service, "process_pending_interview_jobs", _partly_failed_sweep
+    )
 
     summary = await interview_service.run_interview_schedule()
 
@@ -228,7 +255,14 @@ async def test_the_node_counters_add_up(monkeypatch):
 
     async def _no_jobs(*a, **kw):
         return dict.fromkeys(
-            ("jobs_processed", "jobs_done", "jobs_retried", "jobs_parked", "jobs_skipped"), 0
+            (
+                "jobs_processed",
+                "jobs_done",
+                "jobs_retried",
+                "jobs_parked",
+                "jobs_skipped",
+            ),
+            0,
         ) | {"tenants": 0, "tenants_failed": 0}
 
     # The watermark doc id is a hash of the node id, not the node id itself, so
@@ -244,7 +278,9 @@ async def test_the_node_counters_add_up(monkeypatch):
         async def create_command(self, _payload):
             return {}
 
-    monkeypatch.setattr(interview_service, "list_tenants_with_interviewer_enabled", _tenants)
+    monkeypatch.setattr(
+        interview_service, "list_tenants_with_interviewer_enabled", _tenants
+    )
     monkeypatch.setattr(interview_service, "get_settings_for_display", _settings)
     monkeypatch.setattr(interview_service, "process_pending_interview_jobs", _no_jobs)
     monkeypatch.setattr(
@@ -276,7 +312,9 @@ async def test_the_service_helper_forwards_read_to_the_storage_client(monkeypatc
 
     monkeypatch.setattr(tenants_service, "get_storage_client", lambda: _FakeClient())
 
-    assert await tenants_service.list_tenants_with_interviewer_enabled(read=False) == ["t1"]
+    assert await tenants_service.list_tenants_with_interviewer_enabled(read=False) == [
+        "t1"
+    ]
     assert seen["read"] is False
 
     assert await tenants_service.list_tenants_with_interviewer_enabled() == ["t1"]
