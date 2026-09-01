@@ -74,6 +74,20 @@ async def whoami(request: Request) -> dict:
             "readable_tenant_ids": readable,
             "capabilities": capabilities or None,
             "auth_mode": request.headers.get("x-auth-mode") or None,
+            # Credential provenance the gateway already resolves (the same
+            # header ``auth.py`` and the MCP middleware read). Saves a caller
+            # guessing why an install-scoped key behaves differently from a
+            # plain agent key.
+            #
+            # Echo, like ``capabilities`` and ``auth_mode`` beside it — this
+            # endpoint reports what the gateway asserted about the caller and
+            # LOOKS NOTHING UP. That is what keeps it safe without a perimeter
+            # check: there is no auth dependency and no shared-secret
+            # verification here, so a field that resolved caller-supplied ids
+            # against storage would let anyone read another tenant's
+            # attributes. Keep additions to this handler echo-only until that
+            # check exists (issue: /whoami perimeter).
+            "key_kind": (request.headers.get("x-caura-credential-kind") or "").lower() or None,
         }
     if settings.is_standalone:
         from core_api.standalone import get_standalone_tenant_id
@@ -87,6 +101,7 @@ async def whoami(request: Request) -> dict:
             "readable_tenant_ids": [sid] if sid else [],
             "capabilities": None,
             "auth_mode": None,
+            "key_kind": None,
         }
     return {
         "tenant_id": None,
@@ -96,6 +111,7 @@ async def whoami(request: Request) -> dict:
         "readable_tenant_ids": [],
         "capabilities": None,
         "auth_mode": None,
+        "key_kind": None,
     }
 
 
