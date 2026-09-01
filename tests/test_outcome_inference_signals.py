@@ -666,13 +666,19 @@ class TestSignalRegistry:
 
     def test_each_module_documents_its_data_source(self):
         # Every signal module's docstring must reference its data
-        # source ("memories.", "track_recalls", "memory_recalls", or
+        # source ("memories.", "track_recalls", "recall_event", or
         # "external") so operators reading the code at 3 AM know
         # where to look. Catches accidentally undocumented stubs.
+        #
+        # ``recall_event`` is the real recall-log table (migration 027).
+        # ``memory_recalls`` stays accepted because it is still the name
+        # two docstrings use — but it was never built, so a module
+        # naming only it is pointing operators at nothing.
         for mod in self.ALL_MODULES:
             doc = (mod.__doc__ or "").lower()
             assert any(
                 token in doc
-                for token in ("memories.", "track_recalls", "memory_recalls", "external",
-                              "audit", "recall_count", "contradiction", "supersedes", "phase 2", "phase 5")
+                for token in ("memories.", "track_recalls", "recall_event", "memory_recalls",
+                              "external", "audit", "recall_count", "contradiction",
+                              "supersedes", "phase 2", "phase 5")
             ), f"{mod.__name__} docstring lacks data-source breadcrumb"
