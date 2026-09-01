@@ -14,7 +14,12 @@ alembic>=1.14,<2
 pydantic>=2.0,<3
 pydantic-settings>=2.15.0,<3
 google-cloud-aiplatform>=2.0.1,<3
-google-genai>=2.12.1
+# Floor matches core-api/pyproject.toml and core-worker's ``vertex``
+# extra so this local-dev install path resolves the same SDK range the
+# services do. (Not a feature floor: ``HttpOptions(base_url=...)``,
+# which VertexLLMProvider's multi-region handling uses, predates even
+# 1.74.0 — verified by constructing it there.)
+google-genai>=2.17.0
 # Used directly by core_api.clients.identity_token (Cloud Run ID-token
 # fetch) — explicit here instead of relying on google-cloud-aiplatform's
 # transitive pull, so a future GCP-SDK cleanup can't silently break it.

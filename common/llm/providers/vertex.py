@@ -1,34 +1,26 @@
-"""Vertex AI LLM provider.
+"""Vertex AI LLM provider (Gemini via Workload Identity / ADC).
 
-Wraps the Google Cloud Vertex AI SDK. Since the SDK is synchronous,
-all calls are wrapped in ``asyncio.to_thread()`` to avoid blocking
-the event loop.
+Wraps the ``google-genai`` SDK in Vertex mode (``vertexai=True``) —
+project/location auth via Application Default Credentials, no API key.
+Migrated off ``vertexai.generative_models`` (deprecated June 2025,
+removed June 2026): the legacy SDK only speaks the v1 API, where the
+Gemini 3.x catalog is not published, and its region allowlist predates
+the ``us``/``eu`` multi-regions the 3.x Flash-Lite models are served
+from — so it structurally cannot reach any Gemini 3 model.
 
-CAURA-333: ``VertexEmbeddingProvider`` was removed (broken — never passed
-``output_dimensionality`` to the SDK, so writes failed against pgvector's
-1024-dim column). Only the LLM-side provider remains.
+Multi-region endpoint quirk: ``us``/``eu`` are served from the bare
+``aiplatform.googleapis.com`` host (same as ``global``), but the SDK
+builds ``{location}-aiplatform.googleapis.com`` for any non-``global``
+location — and ``us-aiplatform.googleapis.com`` is rejected with
+``400 Invalid hostname``. ``_MULTI_REGION_LOCATIONS`` below pins the
+base URL for those locations (verified live 2026-08-30/31: both
+``gemini-3.5-flash-lite`` and ``gemini-3.1-flash-lite`` 200 on
+``locations/us`` via the bare host, 404 on ``global`` and on regional
+``us-central1``).
 
-⚠ THE SDK IMPORTS IN THIS MODULE ARE DEFERRED ON PURPOSE, against the
-repo's top-level-imports rule. Stated here because this file is cited as
-the precedent for the pattern (``gemini.py``: "same pattern as
-VertexLLMProvider with vertexai") and was the one copy that never said
-why — so it reads as an oversight and gets re-flagged.
-
-The reason is optional dependencies, not circular imports.
-``google-cloud-aiplatform`` is an EXTRA for core-worker
-(``vertex = [...]`` in its ``pyproject.toml``), and only a hard dependency
-for core-api. Hoisting these to module scope makes
-``common.llm.providers.vertex`` unimportable wherever the extra is absent
-— verified by blocking ``vertexai`` and ``google.cloud.aiplatform`` on the
-import path: the module still imports cleanly today and
-``VertexLLMProvider`` is still reachable, while a top-level import raises
-``ModuleNotFoundError``. Deferred, an install without Vertex fails only if
-it actually CALLS Vertex, which is what an optional provider should do.
-
-``_platform.py`` imports this module lazily too, inside a ``try``, for the
-same reason — and ``registry.py`` deliberately omits it from the top-level
-provider imports it does for fake/gemini/openai. All three are one
-decision; changing any of them alone breaks it.
+The SDK is synchronous, so all calls are wrapped in
+``asyncio.to_thread()`` to avoid blocking the event loop (same pattern
+as ``GeminiLLMProvider``).
 """
 
 from __future__ import annotations
@@ -36,13 +28,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
+from typing import Any
 
 from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
 
 logger = logging.getLogger(__name__)
+
+# Multi-region locations served from the bare aiplatform host. Regional
+# locations (us-central1, ...) and ``global`` resolve correctly via the
+# SDK's own endpoint logic and must NOT be overridden.
+_MULTI_REGION_LOCATIONS = frozenset({"us", "eu"})
+_BARE_VERTEX_BASE_URL = "https://aiplatform.googleapis.com/"
 
 
 # CAURA-651: Gemini (via Vertex) occasionally returns a JSON array at
@@ -67,11 +67,7 @@ class VertexResponseShapeError(ProviderResponseShapeError):
 
 
 class VertexLLMProvider:
-    """LLM provider using Vertex AI Generative Models (Gemini).
-
-    Matches the existing ``_vertex_enrich_sync`` and
-    ``_vertex_contradiction_check_sync`` patterns from the codebase.
-    """
+    """LLM provider using Vertex AI Gemini models via google-genai."""
 
     def __init__(
         self,
@@ -82,6 +78,21 @@ class VertexLLMProvider:
         self._project_id = project_id
         self._location = location
         self._model = model
+        # Built lazily on first call: constructing the provider must not
+        # require ADC (the platform singleton is instantiated at app
+        # startup and in tests, where credentials may be absent), and
+        # google.auth discovery belongs on the call path with the other
+        # network work. Tests inject a fake by assigning ``_client``.
+        # ``Any`` because the concrete ``genai.Client`` type cannot be
+        # imported at module scope (optional-SDK rule — see module
+        # docstring and test_optional_provider_sdks_stay_optional).
+        self._client: Any = None
+        # ``complete_*`` run in ``asyncio.to_thread`` workers, so
+        # concurrent first calls on a shared instance (the platform
+        # singleton) race ``_get_client`` from different threads —
+        # without the lock each would build (and authenticate) its own
+        # client and the losers' HTTP pools would linger until GC.
+        self._client_lock = threading.Lock()
 
     @property
     def provider_name(self) -> str:
@@ -91,25 +102,44 @@ class VertexLLMProvider:
     def model(self) -> str:
         return self._model
 
+    def _get_client(self):
+        # Double-checked locking: the unlocked read keeps the steady
+        # state lock-free; the locked re-check makes concurrent first
+        # calls build exactly one client.
+        if self._client is None:
+            with self._client_lock:
+                if self._client is None:
+                    # Imported lazily so `google-genai` remains an optional
+                    # runtime dependency (same pattern as GeminiLLMProvider).
+                    from google import genai
+                    from google.genai import types
+
+                    client_kwargs: dict = {
+                        "vertexai": True,
+                        "project": self._project_id,
+                        "location": self._location,
+                    }
+                    if self._location in _MULTI_REGION_LOCATIONS:
+                        client_kwargs["http_options"] = types.HttpOptions(
+                            base_url=_BARE_VERTEX_BASE_URL
+                        )
+                    self._client = genai.Client(**client_kwargs)
+        return self._client
+
     def _complete_json_sync(
         self,
         prompt: str,
         *,
         temperature: float = 0.0,
     ) -> dict:
-        """Synchronous JSON completion via Vertex AI GenerativeModel."""
-        # Lazy on purpose — see the module docstring. NOT an oversight
-        # against the top-level-imports rule.
-        from google.cloud import aiplatform
-        from vertexai.generative_models import GenerationConfig, GenerativeModel
-
-        aiplatform.init(project=self._project_id, location=self._location)
-        model = GenerativeModel(self._model)
+        """Synchronous JSON completion via google-genai (Vertex mode)."""
+        from google.genai import types
 
         t0 = time.perf_counter()
-        response = model.generate_content(
-            prompt,
-            generation_config=GenerationConfig(
+        response = self._get_client().models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=temperature,
                 # Runaway guard: without a ceiling, a looping generation
@@ -152,25 +182,26 @@ class VertexLLMProvider:
         temperature: float = 0.3,
         max_tokens: int = 1000,
     ) -> str:
-        """Synchronous text completion via Vertex AI GenerativeModel."""
-        # Lazy on purpose — see the module docstring.
-        from google.cloud import aiplatform
-        from vertexai.generative_models import GenerationConfig, GenerativeModel
-
-        aiplatform.init(project=self._project_id, location=self._location)
-        model = GenerativeModel(self._model)
+        """Synchronous text completion via google-genai (Vertex mode)."""
+        from google.genai import types
 
         t0 = time.perf_counter()
-        response = model.generate_content(
-            prompt,
-            generation_config=GenerationConfig(
+        response = self._get_client().models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
                 temperature=temperature,
                 max_output_tokens=max_tokens,
             ),
         )
         llm_ms = int((time.perf_counter() - t0) * 1000)
         logger.info("Vertex complete_text (%s) took %dms", self._model, llm_ms)
-        return response.text or ""
+        try:
+            return response.text or ""
+        except ValueError as exc:
+            raise ValueError(
+                f"Vertex model {self._model} returned no usable content (possible safety block): {exc}"
+            ) from exc
 
     async def complete_json(
         self,
@@ -184,9 +215,9 @@ class VertexLLMProvider:
         """Async wrapper around synchronous Vertex AI JSON completion.
 
         ``seed`` / ``response_schema`` / ``reasoning_effort`` are
-        accepted-and-ignored (OpenAI
-        structured-output kwargs) — see ``GeminiProvider.complete_json``
-        for why rejecting them silently broke entity extraction (C1).
+        accepted-and-ignored (OpenAI structured-output / reasoning
+        kwargs) — see ``GeminiProvider.complete_json`` for why rejecting
+        them silently broke entity extraction (C1).
         """
         return await asyncio.to_thread(
             self._complete_json_sync, prompt, temperature=temperature
