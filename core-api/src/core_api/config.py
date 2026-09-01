@@ -405,6 +405,22 @@ class Settings(BaseSettings):
     # for the first time, so enabling it is a deliberate billing decision,
     # not a deploy side effect. Off = the historical (miscounted) behavior.
     meter_recall_as_recall: bool = False
+    # Meter the MCP batch write (``caura_write(items=[...])``) against the
+    # write counter, one unit per item, as REST's ``POST /memories/bulk``
+    # already does. Off by default for the same reason as the D13 flag above,
+    # and the reason is stronger here: that path charges NOTHING today, so
+    # flipping this does not correct a miscount — it starts billing writes
+    # that have been free. Tenants that batch over MCP will consume quota they
+    # did not before, and some will cross their plan limit for the first time.
+    #
+    # Crossing it bites on REST FIRST. Over-plan mode is computed from these
+    # counters and stamped as ``x-org-read-only``, which core-api turns into a
+    # 403 on ~22 REST write routes — while the MCP surface only OBSERVES it
+    # (see ``_observe_plan_limit``). So enabling this can refuse a tenant's
+    # REST writes because of what it wrote over MCP. That is the intended end
+    # state, but it is not a deploy side effect. Off = the historical (unbilled)
+    # behavior. See caura-ai/caura#1220.
+    meter_mcp_bulk_writes: bool = False
     stm_backend: str = "memory"  # memory | redis
     stm_notes_ttl: int = 86400  # 24h
     stm_bulletin_ttl: int = 172800  # 48h
