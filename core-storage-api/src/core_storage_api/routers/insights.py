@@ -28,17 +28,25 @@ router = APIRouter(tags=["Insights"])
 _svc = PostgresService()
 
 
-def _scope_args(body: dict) -> tuple[str, str | None, str, str]:
-    """Pull the four scope params common to the 6 analytic reads.
+def _scope_args(body: dict) -> tuple[str | None, str, str]:
+    """Pull the three NON-BINDING scope params common to the 6 analytic reads.
 
-    ``tenant_id`` + ``agent_id`` + ``scope`` are required; ``fleet_id`` is
-    optional (but the underlying ``_scope_filters`` raises ValueError → 500 if
-    scope='fleet' arrives without it — the core-api request validators block
-    that combination before it reaches storage)."""
-    tenant_id = _require(body, "tenant_id")
+    ``tenant_id`` is deliberately not read here. It is the binding scope, and
+    the tenant-scope gate reads each route handler's OWN AST; a ``_require``
+    resolved one frame down inside a helper is invisible to it, so all six of
+    these routes sat on ``tenant_scope_allowlist.json`` describing a binding
+    that was there the whole time. Each handler now calls
+    ``_require(body, "tenant_id")`` itself, which puts the binding where the
+    gate and a reader both look for it. Keep it that way: folding it back in
+    here silently re-adds six allowlist entries.
+
+    ``agent_id`` + ``scope`` are required; ``fleet_id`` is optional (but the
+    underlying ``_scope_filters`` raises ValueError → 500 if scope='fleet'
+    arrives without it — the core-api request validators block that
+    combination before it reaches storage)."""
     agent_id = _require(body, "agent_id")
     scope = _require(body, "scope")
-    return tenant_id, body.get("fleet_id"), agent_id, scope
+    return body.get("fleet_id"), agent_id, scope
 
 
 def _max_memories(body: dict) -> int:
@@ -79,7 +87,8 @@ def _window_start(body: dict) -> datetime | None:
 @router.post("/insights/contradictions")
 async def insights_contradictions(request: Request) -> list[dict]:
     body: dict = await request.json()
-    tenant_id, fleet_id, agent_id, scope = _scope_args(body)
+    tenant_id = _require(body, "tenant_id")
+    fleet_id, agent_id, scope = _scope_args(body)
     return await _svc.insights_query_contradictions(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
@@ -92,7 +101,8 @@ async def insights_contradictions(request: Request) -> list[dict]:
 @router.post("/insights/failures")
 async def insights_failures(request: Request) -> list[dict]:
     body: dict = await request.json()
-    tenant_id, fleet_id, agent_id, scope = _scope_args(body)
+    tenant_id = _require(body, "tenant_id")
+    fleet_id, agent_id, scope = _scope_args(body)
     return await _svc.insights_query_failures(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
@@ -106,7 +116,8 @@ async def insights_failures(request: Request) -> list[dict]:
 @router.post("/insights/stale")
 async def insights_stale(request: Request) -> list[dict]:
     body: dict = await request.json()
-    tenant_id, fleet_id, agent_id, scope = _scope_args(body)
+    tenant_id = _require(body, "tenant_id")
+    fleet_id, agent_id, scope = _scope_args(body)
     # The two age thresholds are computed on the caller's clock (core-api) and
     # sent as ISO strings; bind as datetimes server-side.
     for key in ("thirty_days_ago", "fourteen_days_ago"):
@@ -132,7 +143,8 @@ async def insights_stale(request: Request) -> list[dict]:
 @router.post("/insights/divergence")
 async def insights_divergence(request: Request) -> list[dict]:
     body: dict = await request.json()
-    tenant_id, fleet_id, agent_id, scope = _scope_args(body)
+    tenant_id = _require(body, "tenant_id")
+    fleet_id, agent_id, scope = _scope_args(body)
     return await _svc.insights_query_divergence(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
@@ -145,7 +157,8 @@ async def insights_divergence(request: Request) -> list[dict]:
 @router.post("/insights/patterns")
 async def insights_patterns(request: Request) -> list[dict]:
     body: dict = await request.json()
-    tenant_id, fleet_id, agent_id, scope = _scope_args(body)
+    tenant_id = _require(body, "tenant_id")
+    fleet_id, agent_id, scope = _scope_args(body)
     return await _svc.insights_query_patterns(
         tenant_id=tenant_id,
         fleet_id=fleet_id,
@@ -166,7 +179,8 @@ async def insights_discover_sample(request: Request) -> list[dict]:
     the window. Absent → legacy newest-first, keeping older core-api
     callers working."""
     body: dict = await request.json()
-    tenant_id, fleet_id, agent_id, scope = _scope_args(body)
+    tenant_id = _require(body, "tenant_id")
+    fleet_id, agent_id, scope = _scope_args(body)
     sample_size = body.get("sample_size")
     if not isinstance(sample_size, int) or sample_size < 1:
         raise HTTPException(status_code=422, detail="sample_size (int >= 1) is required")
