@@ -105,13 +105,14 @@ OperationType = Literal["write", "search", "recall", "insights", "evolve"]
 # ``enforce_read_only()`` is NEITHER axis. That is the demo-mode gate, a
 # separate question, and it stays on the transition route.
 #
-# ``update`` is recorded as it BEHAVES, not as it arguably should: it charges
-# quota while skipping both ``enforce_usage_limits()`` and
-# ``enforce_read_only()``, which makes it the only mutating memory route gated
-# by neither (caura-ai/caura#1204 — the demo-mode half of that looks like an
-# oversight rather than a decision). Encoding it faithfully here keeps this
-# table a description of the system rather than an aspiration, so wiring a call
-# site through it cannot silently change behaviour.
+# ``update`` charges quota and is deliberately NOT plan-limit gated: an update
+# rewrites a row rather than adding one, so it does not grow the store, which
+# is the principle this table encodes. That omission is a decision, not the
+# oversight it once sat beside — ``update`` also skipped ``enforce_read_only()``
+# and so was gated by neither, which let a read-only credential rewrite any
+# memory in its tenant (caura-ai/caura#1204). That half is now closed: the route
+# calls ``enforce_read_only()`` like every other mutating memory route, which is
+# what makes the remaining omission legible as a choice.
 WRITE_QUOTA_OPS: frozenset[str] = frozenset({"create", "bulk_create", "update", "redistribute"})
 
 # Ops refused when the org is over its plan limit. A subset of the above minus

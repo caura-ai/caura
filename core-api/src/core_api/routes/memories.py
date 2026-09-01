@@ -1651,6 +1651,20 @@ async def update_memory_endpoint(
       request through this endpoint that removes one.
     """
     auth.enforce_tenant(tenant_id)
+    # The capability gate every other mutating memory route already applies.
+    # ``enforce_tenant`` above checks tenant binding and the admin bypass — it
+    # never looks at capabilities, so without this a credential minted
+    # read-only (capabilities={'read'}) could rewrite the content, title,
+    # metadata and weight of any memory in its tenant, while the DELETE
+    # sibling refused it. Same shape as the H-12/H-13/H-15 findings.
+    auth.enforce_read_only()
+    # Asked, not assumed, per the table added in #1196: ``update`` is not in
+    # ``PLAN_LIMIT_GATED_OPS`` (an update adds no row, so it does not grow the
+    # store), making this a no-op today. Written as a lookup rather than left
+    # absent because "free" expressed by omission is invisible in review — the
+    # missing gate above is exactly what that costs.
+    if plan_limit_gated("update"):
+        auth.enforce_usage_limits()
     # C3/C8: server-reserved types (outcome/rule/insight) are authored only by
     # internal flows — reject agent-supplied values on update too, mirroring the
     # create (POST /memories) and bulk-create handlers.

@@ -543,6 +543,87 @@ async def test_settings_still_refuses_the_demo_sandbox(client, as_auth):
 
 
 # ---------------------------------------------------------------------------
+# PATCH /memories/{id} — the capability gate its own neighbours already apply
+#
+# Same shape as H-12/H-13/H-15 above: a mutating route that skipped a gate its
+# neighbours apply. The 2026-08-14 pass swept /fleet/commands,
+# /agents/{id}/trust and /settings; it did not reach this one.
+#
+# Every other mutating memory route calls ``enforce_read_only`` — POST
+# /memories, POST /memories/bulk, DELETE /memories/{id}, POST
+# /memories/bulk-delete, PATCH /memories/{id}/status, POST
+# /memories/redistribute. The route that rewrites content, title, metadata and
+# weight is the only one that does not, so a credential minted read-only could
+# overwrite any memory in its tenant. ``enforce_tenant`` does not cover this:
+# it checks tenant binding and the admin bypass, never capabilities.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_memory(client, tenant: str) -> str:
+    """Create one memory as a write-capable caller and return its id."""
+    resp = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant,
+            "memory_type": "fact",
+            "content": f"original content {_uid()}",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def test_update_memory_rejects_a_read_only_credential(client, as_auth):
+    """A read-only credential must not rewrite a memory's content.
+
+    ``enforce_read_only`` is the gate for BOTH the demo sandbox and a
+    credential minted without the ``write`` capability. Its own error text
+    calls that "a property of the CREDENTIAL, not of the endpoint" — which
+    only holds if every write-shaped endpoint asks.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)
+    memory_id = await _seed_memory(client, tenant)
+
+    as_auth(tenant, capabilities=READ_ONLY)
+    resp = await client.patch(
+        f"/api/v1/memories/{memory_id}?tenant_id={tenant}",
+        json={"content": "rewritten by a read-only key"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_update_memory_refuses_the_demo_sandbox(client, as_auth):
+    """The demo half of the same gate — the sandbox is read-only end to end."""
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)
+    memory_id = await _seed_memory(client, tenant)
+
+    as_auth(tenant, is_demo=True)
+    resp = await client.patch(
+        f"/api/v1/memories/{memory_id}?tenant_id={tenant}",
+        json={"content": "rewritten from the demo sandbox"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_delete_memory_already_rejects_a_read_only_credential(client, as_auth):
+    """The neighbour that has always had the gate.
+
+    Kept alongside the two above so the asymmetry is visible in the suite
+    rather than only in review: removing a memory was refused while rewriting
+    its contents was not.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)
+    memory_id = await _seed_memory(client, tenant)
+
+    as_auth(tenant, capabilities=READ_ONLY)
+    resp = await client.delete(f"/api/v1/memories/{memory_id}?tenant_id={tenant}")
+    assert resp.status_code == 403, resp.text
+
+
+# ---------------------------------------------------------------------------
 # H-14 / H-16 — client-trusted identity on READ paths
 #
 # The 2026-06-11 pass fixed the identity precedence on WRITE paths (delete/update
