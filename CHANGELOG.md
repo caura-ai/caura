@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.44.0](https://github.com/caura-ai/caura/compare/backend-v2.43.0...backend-v2.44.0) (2026-09-01)
+
+
+### Features
+
+* **gate:** report the AST half without an installed tree ([#1224](https://github.com/caura-ai/caura/issues/1224)) ([07412b1](https://github.com/caura-ai/caura/commit/07412b10e515d1b2bd20bc27657834d118f0b22b))
+
 ## [2.43.0](https://github.com/caura-ai/caura/compare/backend-v2.42.2...backend-v2.43.0) (2026-09-01)
 
 
