@@ -16,6 +16,45 @@ FLEET_ID = "test-fleet"
 AGENT_ID = "test-agent"
 
 
+@pytest.fixture(autouse=True)
+def _search_dispatch_flag_must_be_restored():
+    """Fail any test in this module that leaks ``_USE_PIPELINE_SEARCH``.
+
+    This is the file that manipulates the flag — four places, one of which
+    forgot to put it back and left it ``False`` for the remainder of the pytest
+    session, silently moving every later test onto the DEPRECATED
+    ``_search_memories_legacy`` path while CI believed it was covering the
+    production pipeline. Nothing failed, because almost nothing asserts which
+    path served a search; the coverage simply stopped being what it claimed.
+
+    It repairs AND reports, and the reporting half is the point. A fixture that
+    only restored would make the next leak invisible in exactly the way the
+    first one was — the suite would stay green and the offending test would
+    never say anything. Restoring first means one leak cannot cascade; asserting
+    after means it still gets attributed to the test that caused it.
+
+    Autouse so it does not depend on being remembered, and module-scoped rather
+    than in the root conftest because this is the only module that touches the
+    flag — elsewhere it would guard against nothing.
+    """
+    from core_api.services import memory_service
+
+    original = memory_service._USE_PIPELINE_SEARCH
+    try:
+        yield
+    finally:
+        leaked = memory_service._USE_PIPELINE_SEARCH
+        # Repair before asserting, so a failure here costs one test rather than
+        # every test that follows it.
+        memory_service._USE_PIPELINE_SEARCH = original
+        assert leaked == original, (
+            f"this test left memory_service._USE_PIPELINE_SEARCH={leaked} "
+            f"(expected {original}). Use monkeypatch.setattr or try/finally — "
+            "leaking it puts the rest of the session on the deprecated legacy "
+            "search path."
+        )
+
+
 _SEED_CONTENTS = [
     "The quick brown fox jumped over the lazy dog on a sunny afternoon in the park near downtown.",
     "Alice prefers dark roast coffee every morning before her standup meeting at nine o'clock sharp.",
@@ -578,7 +617,6 @@ async def test_legacy_search_returns_results():
 @pytest.mark.asyncio
 async def test_search_pipeline_equivalence():
     """Pipeline and legacy paths produce equivalent results (order, scores to 4 decimals, entity links)."""
-    from core_api.services import memory_service
     from core_api.services.memory_service import (
         _search_memories_legacy,
         _search_memories_pipeline,
@@ -598,12 +636,15 @@ async def test_search_pipeline_equivalence():
         "recall_boost": False,
     }
 
-    memory_service._USE_PIPELINE_SEARCH = False
+    # NO ``_USE_PIPELINE_SEARCH`` juggling here. The two paths are called
+    # DIRECTLY, and the flag is read in exactly one place — ``search_memories``
+    # (``memory_service.py``), the dispatcher neither of these calls goes
+    # through. So setting it around them never selected anything; it only
+    # leaked. The three assignments this replaces left the global ``False`` for
+    # the remainder of the session, which silently moved every later test onto
+    # the deprecated legacy path.
     legacy_results = await _search_memories_legacy(**kwargs)
-
-    memory_service._USE_PIPELINE_SEARCH = True
     pipeline_results = await _search_memories_pipeline(**kwargs)
-    memory_service._USE_PIPELINE_SEARCH = False
 
     assert len(legacy_results) == len(pipeline_results), (
         f"Result count mismatch: legacy={len(legacy_results)}, pipeline={len(pipeline_results)}"
