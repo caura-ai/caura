@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.39.3](https://github.com/caura-ai/caura/compare/backend-v2.39.2...backend-v2.39.3) (2026-09-01)
+
+
+### Documentation
+
+* **plugin:** name the edge-auth condition, not a host ([#1185](https://github.com/caura-ai/caura/issues/1185)) ([8b05817](https://github.com/caura-ai/caura/commit/8b05817d3f2c7122644f8f07b64a5d97ec4702c7))
+
 ## [2.39.2](https://github.com/caura-ai/caura/compare/backend-v2.39.1...backend-v2.39.2) (2026-09-01)
 
 
