@@ -10,6 +10,29 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.45.0](https://github.com/caura-ai/caura/compare/backend-v2.44.0...backend-v2.45.0) (2026-09-01)
+
+
+### Features
+
+* **llm:** migrate VertexLLMProvider to google-genai, unlock Gemini 3.x ([#1209](https://github.com/caura-ai/caura/issues/1209)) ([47b9226](https://github.com/caura-ai/caura/commit/47b922614de5b5f69dedd1bd34f52c796c1921d9))
+* **mcp:** bill the batch write against the write counter, flag-gated ([#1225](https://github.com/caura-ai/caura/issues/1225)) ([779c480](https://github.com/caura-ai/caura/commit/779c48041c52163fd481edf5c77fd1910cbc9324))
+
+
+### Bug Fixes
+
+* **search:** stop withholding information the caller needs (A28, C6, D6) ([#1228](https://github.com/caura-ai/caura/issues/1228)) ([cd93712](https://github.com/caura-ai/caura/commit/cd937126ef556f63936a8d21aae569a321a1c78d))
+
+
+### Performance
+
+* **llm:** warm the Vertex genai client at startup, not in the first request ([#1230](https://github.com/caura-ai/caura/issues/1230)) ([cb4bbb5](https://github.com/caura-ai/caura/commit/cb4bbb5d78de82f5905d44a660c6f16408d52c50))
+
+
+### Documentation
+
+* **gate:** say what the tenant-scope categories actually assert ([#1229](https://github.com/caura-ai/caura/issues/1229)) ([7ab13d6](https://github.com/caura-ai/caura/commit/7ab13d60833a44f0a4ca12466fc8c878d216b3cd))
+
 ## [2.44.0](https://github.com/caura-ai/caura/compare/backend-v2.43.0...backend-v2.44.0) (2026-09-01)
 
 
