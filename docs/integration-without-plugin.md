@@ -299,6 +299,40 @@ for why the two differ.
   model — it was being discarded before, so the fix is to remove it or move it
   under `metadata`, not to retry.
 - **Streaming client hangs on initialize.** If hitting `/mcp` (no slash) caused a hang on older builds, append the trailing slash or upgrade — current builds serve both paths without redirect.
+- **`caura_insights` is cut off by your client's default tool timeout.** It is
+  LLM-backed and runs roughly 7–9 s — an order of magnitude slower than the
+  other tools — while many MCP clients default to a 5–10 s tool timeout. There
+  is no cheap/counts-only mode and no partial result, so a client that times out
+  loses the whole call. Raise the timeout for this tool to ~30 s. See
+  [Tool latency](#tool-latency) below.
+
+---
+
+## Tool latency
+
+Set your MCP client's tool timeout from the slowest tool you actually call, not
+from an average.
+
+| Tool | Observed | Notes |
+|---|---|---|
+| `caura_insights` | **6.8 s and 8.7 s** | LLM-backed synthesis. No `depth`/quick mode and no partial results — a timeout loses the entire call. |
+| `caura_write` (MCP) | 0.86 s | Inline enrichment on the default write mode. |
+| REST calls, warmed | 0.7–1.4 s | Storage-routed; no LLM on the request path. |
+
+A 30 s tool timeout covers all of these with margin. A 5–10 s default — common
+in MCP clients — will truncate `caura_insights` specifically.
+
+Two caveats on these numbers, so they are read for what they are. They come from
+**two runs** of the parity smoke against production on 2026-08-24, not from a
+sustained benchmark — treat them as an order of magnitude, not an SLA. And the
+first call of a session is unrepresentative: that run measured a 16 s first
+write, which later investigation did **not** explain (core-api holds a
+min-instance floor, so it was not a scale-from-zero cold start). Warm the
+connection before timing anything.
+
+`caura_recall` with `include_brief=true` adds a second LLM round-trip on top of
+the search; it is not in the table because this pass did not measure it
+separately. Time it yourself before choosing a timeout if you rely on it.
 
 ---
 
