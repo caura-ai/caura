@@ -194,12 +194,15 @@ def family(topic: str) -> str:
 # evidence the flip works; the end-to-end signal is the staging deploy's
 # control-plane check. Do not report a green gate as a working flip.
 #
-# ``memory`` is next and is ready on the same evidence — 16/16 twin durable
-# subscriptions, no ephemerals. Its one blocker is cleared: the declared
-# ``.created`` topic was removed rather than provisioned, because it existed in
-# neither environment, appeared in no events manifest, and had no publisher or
-# subscriber in either repo. Provisioning it would have created topics that
-# nothing emits to and nothing reads.
+# ``memory`` flipped 2026-09-01 — the fourth programme family and second
+# SHARED one. This set is authored here and manually mirrored into enterprise;
+# the copies are deliberately not generated or synced. Immediately before the
+# edit, the live remeasurement found 12/12 running deployables dual-on and
+# 16/16 active twin durables (8/environment) attached to their matching twin
+# topics, with no ephemerals. The gates still read configuration only: green is
+# necessary, not delivery proof. Its former blocker is cleared: the unused
+# ``.created`` declaration was removed rather than provisioned. The ``Memory``
+# enum members deliberately remain on the retired brand until contraction.
 #
 # ``pipeline`` must NOT enter this set while it has zero live topics in either
 # environment: publishing to a topic that does not exist is silent loss, so
@@ -208,7 +211,7 @@ def family(topic: str) -> str:
 # leak. ``audit`` LAST, unconditionally — those rows are hash-chained, and a
 # lost or reordered audit event is the one failure here that replay cannot
 # repair.
-FLIPPED_FAMILIES: frozenset[str] = frozenset({"lifecycle"})
+FLIPPED_FAMILIES: frozenset[str] = frozenset({"lifecycle", "memory"})
 
 
 def all_topics() -> tuple[str, ...]:

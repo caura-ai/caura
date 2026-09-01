@@ -88,10 +88,12 @@ class MemoryEnrichRequest(BaseModel):
     #      tools that ``json.dumps()`` the model) gets ``"***"``.
     # Wire-format keys still travel in the Pub/Sub message body — the
     # CAURA-595 design (Q1=C) accepts this in exchange for a
-    # stateless worker; the wire-level mitigation is IAM (minimum
-    # subscriber bindings on ``memclaw.memory.enrich-requested``, no
-    # wildcard read grants on the topic, no audit-log mining of
-    # payloads). PR-D's bootstrap script enforces those grants.
+    # stateless worker; the wire-level IAM includes a publisher binding
+    # on the target topic and a subscriber binding on the dedicated
+    # subscription. Enterprise Terraform derives matching twin resource
+    # bindings from the legacy mappings. The production worker also retains
+    # project-level Pub/Sub roles (tracked in caura-enterprise#1449), so the
+    # scoped bindings are not yet the sole enforcement boundary.
     openai_api_key: str | None = Field(default=None, repr=False)
     anthropic_api_key: str | None = Field(default=None, repr=False)
     openrouter_api_key: str | None = Field(default=None, repr=False)

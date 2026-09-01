@@ -311,10 +311,11 @@ async def test_publisher_only_bus_does_not_register_the_filter(
         PubSubEventBus, "_ensure_pubsub_sdk", staticmethod(lambda: object())
     )
 
-    # dual on because ``lifecycle`` is flipped: the construction guard refuses
-    # ``dual=False`` in this repo now. Irrelevant to what this asserts — a
-    # publisher-only bus has no pull loop either way — so it takes the setting
-    # the running services use rather than neutralising the guard.
+    # dual on because ``memory`` is flipped but not yet contracted: the
+    # construction guard refuses ``dual=False`` in this repo now. Irrelevant to
+    # what this asserts — a publisher-only bus has no pull loop either way — so
+    # it takes the setting the running services use rather than neutralising the
+    # guard.
     bus = PubSubEventBus(
         project_id="proj", subscription_prefix="test", dual_subscribe=True
     )
