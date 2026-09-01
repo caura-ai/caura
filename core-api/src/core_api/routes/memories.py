@@ -98,7 +98,9 @@ from core_api.services.tenants import list_active_tenant_ids
 from core_api.services.trust_service import parse_trust_error, require_trust
 from core_api.services.usage_service import (
     bulk_check_and_increment,
+    charges_write_quota,
     check_and_increment,
+    plan_limit_gated,
     recall_operation,
 )
 
@@ -1043,7 +1045,8 @@ async def write_memory(
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
     auth.enforce_read_only()
-    auth.enforce_usage_limits()
+    if plan_limit_gated("create"):
+        auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     _reject_reserved_memory_type(body.memory_type)
     # Resolve a missing agent_id. On the standalone single-tenant path there is
@@ -1127,7 +1130,8 @@ async def _write_memory_inner(
     usage = None
     if auth.tenant_id:  # skip enforcement + metering for admin
         await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
-        usage = await check_and_increment(body.tenant_id, "write")
+        if charges_write_quota("create"):
+            usage = await check_and_increment(body.tenant_id, "write")
     if usage:
         response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
         response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
@@ -1545,7 +1549,17 @@ async def update_memory_status(
 ):
     """Update memory status (e.g., active → confirmed)."""
     auth.enforce_read_only()
-    auth.enforce_usage_limits()
+    # Asked, not assumed. ``transition`` is not in ``PLAN_LIMIT_GATED_OPS``, so
+    # this is a no-op today — deliberately written as a lookup rather than as an
+    # absent call, because "free" expressed by omission is invisible in review
+    # and is how this route and MCP drifted: the same tenant at its cap was
+    # refused a transition over REST and allowed one over MCP. Flipping the
+    # table now changes behaviour here instead of doing nothing.
+    #
+    # ``enforce_read_only()`` above STAYS — that is the demo-mode gate, a
+    # different question from plan limits.
+    if plan_limit_gated("transition"):
+        auth.enforce_usage_limits()
     auth.enforce_tenant(tenant_id)
     from core_api.constants import MEMORY_STATUSES
 
@@ -1656,7 +1670,7 @@ async def update_memory_endpoint(
                 detail="metadata_mode is only valid when metadata is also provided",
             )
         body.metadata_mode = metadata_mode
-    if auth.tenant_id:  # skip usage metering for admin
+    if auth.tenant_id and charges_write_quota("update"):  # skip usage metering for admin
         await check_and_increment(tenant_id, "write")
     # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
     # the caller-supplied query param for trust/fleet enforcement.
