@@ -43,6 +43,19 @@ compat alias, a redirect, a test pinning the old wire format.
 reach, and cannot be correct without the literal: a pasteable command, an on-disk
 path, a served mirror path. Nothing is declared and the footprint does not grow.
 
+``legacy-name-deferred`` is deliberately not a third escape hatch. It records a
+rename that a decision document or issue postpones, while the line remains in the
+gated headline. Its mandatory ``(<doc path or issue URL>)`` keeps the claim
+falsifiable. A new line carrying it still fails exactly as the unmarked line
+would; adding it to an existing counted line changes no count.
+
+A permanent marker combined with ``legacy-name-deferred`` is a hard error. The
+alias/floor pair can both be true of one permanent line, which is why
+:func:`_kind` has a measured precedence rule. Permanent and deferred are
+mutually exclusive states: letting the permanent marker win silently would
+exempt the line and make the deferred annotation — and its headline count — a
+lie. There is no existing population, so failing the contradiction is free now.
+
 Why a second marker rather than a convention inside the reason text. Audited at
 full coverage across the seven repos: 622 markers — **340 aliases, 274 floor
 mentions**, and 8 on lines that should have been reworded rather than marked at
@@ -116,6 +129,7 @@ import sys
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple, overload
+from urllib.parse import urlsplit
 
 # The legacy brand. Matched case-insensitively, so every casing in the tree
 # counts — prose, identifiers and SCREAMING_SNAKE env names alike. This is the
@@ -128,6 +142,8 @@ LEGACY_NAME = "memclaw"  # legacy-name-ok: the pattern this gate searches for
 # decision rather than a formatting artifact.
 EXEMPT_MARKER = "legacy-name-ok"
 FLOOR_MARKER = "legacy-name-floor"
+DEFERRED_MARKER = "legacy-name-deferred"
+_DEFERRED_LABEL = "deferred line(s)"
 
 _CONFIG_PATH = "scripts/legacy_name_ratchet.json"
 _RELEASE_PLEASE_AUTHOR_ID = 265395343
@@ -247,6 +263,177 @@ EXEMPT_RE = re.compile(
     rf"(?<![\w-])(?P<marker>{'|'.join(re.escape(m) for m in _KINDS)})(?=[\s:]|$)",
     re.IGNORECASE,
 )
+
+# Deliberately outside :data:`_KINDS` and :data:`EXEMPT_RE`. The gate decides
+# exemption solely through :func:`_kind`, so putting the deferred marker in
+# either place would make postponed work disappear from the gated headline.
+# Reuse the permanent markers' two-sided token construction exactly: a near
+# miss must neither exempt nor be reported as a real deferral.
+DEFERRED_RE = re.compile(
+    rf"(?<![\w-])(?P<marker>{re.escape(DEFERRED_MARKER)})(?=[\s:]|$)",
+    re.IGNORECASE,
+)
+
+
+class _Deferred(NamedTuple):
+    """One deferred annotation resolved from a counted line.
+
+    ``canonical`` is the counted line with only this annotation removed. That
+    makes adding the marker to an existing counted line text-neutral without
+    making a newly written line disappear. ``frame`` retains the exact text on
+    either side of the annotation for the narrower floor-to-deferred transition.
+
+    An invalid marker is still returned: silently treating malformed syntax as
+    ordinary prose would leave the promised hard failure unenforced on a line
+    whose count did not change.
+    """
+
+    reference: str
+    canonical: str
+    frame: tuple[str, str]
+    error: str | None
+
+
+class _DeferredLine(NamedTuple):
+    """A validated deferred attribute attached to one counted line."""
+
+    canonical: str
+    reference: str
+    frame: tuple[str, str]
+
+
+class _DeferredProblem(NamedTuple):
+    path: str
+    lineno: str
+    text: str
+    message: str
+
+
+_COMMENT_PREFIXES = ("<!--", "//", "/*", "--", "#", ";")
+# ``--!>`` closes an HTML comment as surely as ``-->`` does, so both spellings
+# have to be recognised here. Nothing security-critical rests on it — a suffix
+# this does not recognise makes an annotation invalid or a frame not match,
+# which fails the gate rather than exempting anything — but recognising only one
+# spelling is simply wrong about the markup, and CodeQL's py/bad-tag-filter is
+# right to say so.
+_ANNOTATION_SUFFIX = r"(?:--!?>|\*/|[\"'`](?:\s*[,;)\]}])*|[)\]}]+(?:\s*[,;])?)"
+_DEFERRED_SUFFIX_RE = re.compile(rf"\s*{_ANNOTATION_SUFFIX}?\s*\Z")
+_TERMINAL_SUFFIX_RE = re.compile(rf"(?P<suffix>\s*{_ANNOTATION_SUFFIX}\s*)\Z")
+
+
+def _invalid_deferred(
+    text: str,
+    message: str,
+    *,
+    reference: str = "",
+) -> _Deferred:
+    return _Deferred(
+        reference,
+        text,
+        (text, ""),
+        message,
+    )
+
+
+def _comment_introducer(prefix: str) -> str | None:
+    """The comment delimiter this annotation hangs off, if it hangs off one."""
+    stripped = prefix.rstrip()
+    return next(
+        (c for c in _COMMENT_PREFIXES if stripped.endswith(c)),
+        None,
+    )
+
+
+def _annotation_frame(prefix: str, suffix: str) -> tuple[str, tuple[str, str]]:
+    """Canonical text and exact syntactic frame for one annotated line.
+
+    The single implementation both marker kinds resolve through, and it has to
+    stay single. :func:`_floor_transitions` pairs a floor line with its deferred
+    successor by comparing the frames the two resolvers produce, so a second
+    copy of this that drifted from the first would stop pairing legitimate
+    transitions — charging them as mints — and no test would name the
+    divergence, because each half would still be self-consistent.
+    """
+    canonical_prefix = prefix.rstrip()
+    comment_prefix = _comment_introducer(prefix)
+    if comment_prefix is not None:
+        canonical_prefix = canonical_prefix[: -len(comment_prefix)].rstrip()
+
+    # Comment delimiters belong to the annotation. String/expression closers do
+    # not: retain those so canonical text cannot match a differently shaped line.
+    canonical_suffix = "" if comment_prefix is not None else suffix
+    return f"{canonical_prefix}{canonical_suffix}", (prefix, suffix)
+
+
+def _annotation_canonical(
+    text: str, marker_start: int, reference_end: int
+) -> tuple[str, tuple[str, str]] | None:
+    """Remove one trailing annotation and retain its exact syntactic frame.
+
+    The marker grammar ends at the reference. Anything after it must be only a
+    block-comment closer or the punctuation that closes a surrounding string or
+    expression. Rejecting arbitrary suffix text is what makes the transition's
+    "only its marker changed" claim mechanically true.
+    """
+    if _DEFERRED_SUFFIX_RE.fullmatch(text[reference_end:]) is None:
+        return None
+    return _annotation_frame(text[:marker_start], text[reference_end:])
+
+
+def _deferred(text: str) -> _Deferred | None:
+    """Resolve the non-exempting deferred marker and its decision reference."""
+    matches = list(DEFERRED_RE.finditer(text))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        return _invalid_deferred(
+            text,
+            "the marker must appear exactly once on a line",
+        )
+
+    marker = matches[0]
+    tail = text[marker.end() :]
+    separator = re.match(r"\s*:\s*", tail)
+    if separator is None:
+        return _invalid_deferred(
+            text,
+            "use 'legacy-name-deferred: <reason> (<doc path or issue URL>)'",
+        )
+
+    payload_start = marker.end() + separator.end()
+    payload = text[payload_start:]
+    references = list(re.finditer(r"\((?P<reference>[^()\s]+)\)", payload))
+    if not references:
+        return _invalid_deferred(
+            text,
+            "a decision reference is required in parentheses",
+        )
+
+    reference_match = references[-1]
+    reason = payload[: reference_match.start()].strip()
+    reference = reference_match.group("reference")
+    reference_end = payload_start + reference_match.end()
+    if not reason:
+        return _invalid_deferred(
+            text,
+            "a reason is required before the decision reference",
+            reference=reference,
+        )
+
+    annotation = _annotation_canonical(text, marker.start(), reference_end)
+    if annotation is None:
+        return _invalid_deferred(
+            text,
+            "the decision reference must end the annotation",
+            reference=reference,
+        )
+    canonical, frame = annotation
+    return _Deferred(
+        reference,
+        canonical,
+        frame,
+        None,
+    )
 
 
 def _kind(text: str) -> str | None:
@@ -397,6 +584,104 @@ def _repo_path(value: object, field: str) -> str:
     return value
 
 
+_REGULAR_GIT_MODES = frozenset({"100644", "100755"})
+
+
+def _index_mode(path: str) -> str | None:
+    """Mode of one unconflicted index entry, or ``None`` when absent/unsafe."""
+    out = _git(["git", "ls-files", "--stage", "-z", "--", f":(top,literal){path}"])
+    records = [record for record in out.split("\0") if record]
+    if len(records) != 1:
+        return None
+    fields = records[0].partition("\t")[0].split()
+    if len(fields) != 3 or fields[2] != "0":
+        return None
+    return fields[0]
+
+
+def _tree_mode(tree: str, path: str) -> str | None:
+    """Git mode of ``path`` in ``tree``, without following symlinks."""
+    out = _git(["git", "ls-tree", "-z", tree, "--", f":(top,literal){path}"])
+    records = [record for record in out.split("\0") if record]
+    if len(records) != 1:
+        return None
+    fields = records[0].partition("\t")[0].split()
+    return fields[0] if len(fields) == 3 else None
+
+
+@functools.cache
+def _decision_reference_error(reference: str, tree: str | None) -> str | None:
+    """Return why a deferred decision reference cannot be opened, if anything.
+
+    Repository documents are verified in the exact tree being scanned. HTTPS
+    references are syntax-checked only: CI must not turn an issue tracker's
+    availability into the rename gate's availability.
+    """
+    # Any scheme at all means a URL was intended, so the answer has to be about
+    # the URL. Testing the literal ``https://`` instead sent ``HTTPS://...`` and
+    # ``http://...`` down the path branch, where they failed as a
+    # repository-relative path — naming a problem the author did not have.
+    # ``urlsplit`` normalises the scheme's case, so this covers every spelling.
+    parsed = urlsplit(reference)
+    if parsed.scheme:
+        # A bare domain locates nothing, so it cannot be opened to check the
+        # claim and is not a decision reference. A query-only URL does locate
+        # something; requiring a non-empty path rejected it for a reason the
+        # message did not give and the author did not have.
+        if parsed.scheme != "https" or not parsed.netloc:
+            return "decision issue URL must be an absolute HTTPS URL"
+        if not (parsed.path.strip("/") or parsed.query):
+            return (
+                "decision issue URL must name a specific issue or document, "
+                "not a bare domain"
+            )
+        return None
+
+    path_value = reference.split("#", 1)[0]
+    try:
+        path = _repo_path(path_value, "deferred decision reference")
+    except (TypeError, ValueError) as exc:
+        return str(exc)
+
+    if tree is None:
+        working_path = _repo_root() / path
+        if working_path.is_symlink():
+            return f"decision document must be a regular repository file: {path}"
+        if not working_path.is_file():
+            return f"decision document does not exist: {path}"
+        index_mode = _index_mode(path)
+        if index_mode is None:
+            return f"decision document is not tracked: {path}"
+        if index_mode not in _REGULAR_GIT_MODES:
+            return f"decision document must be a regular repository file: {path}"
+        staged = _git(
+            [
+                "git",
+                "diff",
+                "--cached",
+                "-M",
+                "--name-status",
+                "-z",
+                "--",
+                f":(top,literal){path}",
+            ]
+        )
+        if staged.startswith("D\0"):
+            return f"decision document is staged for deletion: {path}"
+        if _tree_mode("HEAD", path) in _REGULAR_GIT_MODES:
+            return None
+        if not staged:
+            return f"decision document is not committed or staged: {path}"
+        return None
+
+    mode = _tree_mode(tree, path)
+    if mode is None:
+        return f"decision document does not exist in {tree}: {path}"
+    if mode not in _REGULAR_GIT_MODES:
+        return f"decision document must be a regular file in {tree}: {path}"
+    return None
+
+
 def _base_ref(value: object, field: str) -> str:
     """Validate a ref before placing it in git's option-bearing argument area."""
     if not isinstance(value, str):
@@ -507,8 +792,8 @@ def _grep(
     pathspec: str | list[str] = ":/",
     *,
     exclusions: bool = True,
-) -> list[tuple[str, str, str, str | None]]:
-    """``(path, lineno, text, kind)`` for every matching line.
+) -> list[tuple[str, str, str, str | None, _Deferred | None]]:
+    """``(path, lineno, text, kind, deferred)`` for every matching line.
 
     ``kind`` is the marker literal exempting the line, or ``None`` for a line
     that carries none — see :func:`_kind`. A kind rather than a bool because the
@@ -540,7 +825,7 @@ def _grep(
 
     prefix = f"{tree}:" if tree is not None else ""
 
-    out: list[tuple[str, str, str, str | None]] = []
+    out: list[tuple[str, str, str, str | None, _Deferred | None]] = []
     # Records are newline-terminated (a matched line cannot contain one) and
     # their three fields are NUL-separated.
     for record in _git(args).split("\n"):
@@ -554,7 +839,7 @@ def _grep(
             if not path.startswith(prefix):
                 continue
             path = path[len(prefix) :]
-        out.append((path, lineno, text, _kind(text)))
+        out.append((path, lineno, text, _kind(text), _deferred(text.strip())))
     return out
 
 
@@ -717,6 +1002,8 @@ class Scan(NamedTuple):
     by_file: dict[str, Counter[str]]
     total: Counter[str]
     exempt_by_file: dict[str, Counter[str]]
+    deferred_by_file: dict[str, Counter[_DeferredLine]]
+    deferred_problems: tuple[_DeferredProblem, ...]
 
     def counts(self) -> Counter[str]:
         """Non-exempt lines per file — what the ratchet holds flat."""
@@ -727,6 +1014,16 @@ class Scan(NamedTuple):
         return Counter(
             {path: sum(c.values()) for path, c in self.exempt_by_file.items()}
         )
+
+    def deferred(self) -> Counter[str]:
+        """Valid deferred annotations per file, all inside the gated tally."""
+        return Counter(
+            {path: sum(c.values()) for path, c in self.deferred_by_file.items()}
+        )
+
+    def deferred_references(self) -> Counter[str]:
+        """Valid deferred annotations grouped by their decision reference."""
+        return _deferred_references(self.deferred_by_file)
 
 
 def scan(
@@ -744,14 +1041,58 @@ def scan(
     # so the kind is recoverable from the key. Splitting would be a second
     # definition of the same fact.
     exempt_by_file: dict[str, Counter[str]] = {}
-    for path, _, text, kind in _grep(tree, pathspec, exclusions=exclusions):
+    deferred_by_file: dict[str, Counter[_DeferredLine]] = {}
+    deferred_problems: list[_DeferredProblem] = []
+    for path, lineno, text, kind, deferred in _grep(
+        tree, pathspec, exclusions=exclusions
+    ):
         stripped = text.strip()
+        if deferred is not None:
+            if kind is not None:
+                deferred_problems.append(
+                    _DeferredProblem(
+                        path,
+                        lineno,
+                        stripped,
+                        f"{DEFERRED_MARKER} cannot be combined with {kind}; "
+                        "the permanent marker wins exemption, making the "
+                        "deferred annotation meaningless",
+                    )
+                )
+            elif deferred.error is not None:
+                deferred_problems.append(
+                    _DeferredProblem(path, lineno, stripped, deferred.error)
+                )
+            else:
+                reference_error = _decision_reference_error(deferred.reference, tree)
+                if reference_error is not None:
+                    deferred_problems.append(
+                        _DeferredProblem(path, lineno, stripped, reference_error)
+                    )
+                else:
+                    line = _DeferredLine(
+                        deferred.canonical,
+                        deferred.reference,
+                        deferred.frame,
+                    )
+                    deferred_by_file.setdefault(path, Counter())[line] += 1
         if kind is not None:
             exempt_by_file.setdefault(path, Counter())[stripped] += 1
             continue
-        by_file.setdefault(path, Counter())[stripped] += 1
-        total[stripped] += 1
-    return Scan(by_file, total, exempt_by_file)
+        counted = (
+            deferred.canonical
+            if deferred is not None and deferred.error is None
+            else stripped
+        )
+        by_file.setdefault(path, Counter())[counted] += 1
+        total[counted] += 1
+    return Scan(
+        by_file,
+        total,
+        exempt_by_file,
+        deferred_by_file,
+        tuple(deferred_problems),
+    )
 
 
 def _excluded_inventory() -> Counter[str]:
@@ -773,6 +1114,12 @@ def _marker_inventory(head: Scan, config: Config) -> Counter[str]:
             kind = _kind(text)
             if kind is not None:
                 inventory[kind] += count
+    for path, deferred_lines in head.deferred_by_file.items():
+        if path not in excluded:
+            inventory[DEFERRED_MARKER] += sum(deferred_lines.values())
+    inventory[DEFERRED_MARKER] += sum(
+        problem.path not in excluded for problem in head.deferred_problems
+    )
     return inventory
 
 
@@ -805,16 +1152,29 @@ def _updated_scan(before: Scan, tree: str, paths: list[str]) -> Scan:
 
     by_file = before.by_file.copy()
     exempt_by_file = before.exempt_by_file.copy()
+    deferred_by_file = before.deferred_by_file.copy()
+    deferred_problems = [
+        problem for problem in before.deferred_problems if problem.path not in paths
+    ]
     total = before.total.copy()
     for path in paths:
         total.subtract(by_file.pop(path, Counter()))
         exempt_by_file.pop(path, None)
+        deferred_by_file.pop(path, None)
 
     changed = scan(tree, [_literal(path) for path in paths])
     by_file.update(changed.by_file)
     exempt_by_file.update(changed.exempt_by_file)
+    deferred_by_file.update(changed.deferred_by_file)
+    deferred_problems.extend(changed.deferred_problems)
     total.update(changed.total)
-    return Scan(by_file, +total, exempt_by_file)
+    return Scan(
+        by_file,
+        +total,
+        exempt_by_file,
+        deferred_by_file,
+        tuple(deferred_problems),
+    )
 
 
 def _transition_paths(before: str, after: str | None = None) -> list[str]:
@@ -880,6 +1240,204 @@ def _transition_delta(
         for text, n in (lines - base.exempt_by_file.get(path, Counter())).items()
     }
     return lost, gained, gained_exempt
+
+
+class _FloorTransition(NamedTuple):
+    """One mechanically exact floor-to-deferred replacement."""
+
+    path: str
+    before: str
+    after: _DeferredLine
+    occurrences: int
+
+
+def _new_deferred(base: Scan, head: Scan) -> dict[str, Counter[_DeferredLine]]:
+    """Net-new deferred occurrences, ignoring metadata edits and moves."""
+    remaining = {path: lines.copy() for path, lines in head.deferred_by_file.items()}
+    base_pool: Counter[str] = Counter()
+
+    # Same-path predecessors get first claim. This keeps ordinary metadata edits
+    # local while still treating a cross-file relocation as an existing
+    # occurrence rather than a floor transition at its destination.
+    for path, base_lines in base.deferred_by_file.items():
+        local: Counter[str] = Counter()
+        for line, count in base_lines.items():
+            local[line.canonical] += count
+        for line, count in sorted(remaining.get(path, Counter()).items()):
+            consumed = min(count, local[line.canonical])
+            remaining[path][line] -= consumed
+            local[line.canonical] -= consumed
+        base_pool.update(local)
+
+    # A line whose OWN path held a floor marker in the exact same frame is that
+    # path's own transition, not the far end of somebody else's relocation. The
+    # pool claiming it first is what the comment above means to exclude: the
+    # relocation rule is about a line that ARRIVES somewhere new, and this line
+    # did not arrive, it changed marker in place. Letting the pool win reported
+    # the floor line as deleted and charged its successor as a mint — a red
+    # build on a change that minted nothing.
+    local_floor_frames = {
+        path: {
+            _permanent_annotation(text)[1]
+            for text in lines
+            if _kind(text) == FLOOR_MARKER
+        }
+        for path, lines in base.exempt_by_file.items()
+    }
+
+    for path in sorted(remaining):
+        own_floor: set[tuple[str, str]] = local_floor_frames.get(path, set())
+        for line, count in sorted(remaining[path].items()):
+            if line.frame in own_floor:
+                continue
+            consumed = min(count, base_pool[line.canonical])
+            remaining[path][line] -= consumed
+            base_pool[line.canonical] -= consumed
+
+    return {path: +lines for path, lines in remaining.items() if +lines}
+
+
+def _deferred_annotations(
+    base: Scan,
+    head: Scan,
+    gained_by_path: dict[str, Counter[_DeferredLine]],
+) -> tuple[dict[str, Counter[_DeferredLine]], dict[str, Counter[_DeferredLine]]]:
+    """Allocate new attributes to old counted lines, returning unspent ones."""
+    result: dict[str, Counter[_DeferredLine]] = {}
+    remaining = {path: lines.copy() for path, lines in gained_by_path.items()}
+    for path, gained in remaining.items():
+        already_deferred: Counter[str] = Counter()
+        for line, count in base.deferred_by_file.get(path, Counter()).items():
+            already_deferred[line.canonical] += count
+        base_plain = base.by_file.get(path, Counter()) - already_deferred
+        head_deferred: Counter[str] = Counter()
+        for line, count in head.deferred_by_file.get(path, Counter()).items():
+            head_deferred[line.canonical] += count
+        head_plain = head.by_file.get(path, Counter()) - head_deferred
+        available = base_plain - head_plain
+        for line, count in sorted(gained.items()):
+            matched = min(count, available[line.canonical])
+            if matched:
+                result.setdefault(path, Counter())[line] += matched
+                gained[line] -= matched
+                available[line.canonical] -= matched
+    return result, {path: +lines for path, lines in remaining.items() if +lines}
+
+
+def _permanent_annotation(text: str) -> tuple[str, tuple[str, str]]:
+    """Canonical content and syntax frame for one permanently marked line."""
+    match = EXEMPT_RE.search(text)
+    if match is None:
+        return text, (text, "")
+    prefix = text[: match.start()]
+    comment_prefix = _comment_introducer(prefix)
+
+    if comment_prefix == "<!--":
+        suffix_match = re.search(r"\s*--!?>\Z", text)
+    elif comment_prefix == "/*":
+        suffix_match = re.search(r"\s*\*/\Z", text)
+    elif comment_prefix is not None:
+        suffix_match = None
+    else:
+        suffix_match = _TERMINAL_SUFFIX_RE.search(text)
+    suffix = suffix_match.group() if suffix_match is not None else ""
+    return _annotation_frame(prefix, suffix)
+
+
+def _floor_transitions(
+    base: Scan,
+    head: Scan,
+    gained_by_path: dict[str, Counter[_DeferredLine]],
+) -> tuple[_FloorTransition, ...]:
+    """Pair only same-path lines whose floor annotation alone was replaced.
+
+    Existing permanent successors consume base floor occurrences first. A base
+    floor therefore cannot authorize a deferred duplicate while surviving as a
+    floor or alias. The remaining pair must preserve the exact prefix — including
+    comment introducer and whitespace — and the exact syntactic closer.
+    """
+    transitions: list[_FloorTransition] = []
+    for path, gained in gained_by_path.items():
+        candidates: dict[tuple[str, str], Counter[str]] = {}
+        canonical_by_frame: dict[tuple[str, str], str] = {}
+        for text, count in base.exempt_by_file.get(path, Counter()).items():
+            if _kind(text) != FLOOR_MARKER:
+                continue
+            canonical, frame = _permanent_annotation(text)
+            candidates.setdefault(frame, Counter())[text] += count
+            canonical_by_frame[frame] = canonical
+
+        # Consume exact-frame permanent survivors first. Only then use the
+        # conservative canonical fallback that prevents a restyled alias/floor
+        # from leaving the old floor available to authorize a deferred duplicate.
+        permanent_by_frame: Counter[tuple[str, str]] = Counter()
+        permanent_canonical: dict[tuple[str, str], str] = {}
+        for text, count in head.exempt_by_file.get(path, Counter()).items():
+            canonical, frame = _permanent_annotation(text)
+            permanent_by_frame[frame] += count
+            permanent_canonical[frame] = canonical
+        for frame in sorted(candidates):
+            available = permanent_by_frame[frame]
+            if not available:
+                continue
+            for text, count in sorted(candidates[frame].items()):
+                consumed = min(available, count)
+                candidates[frame][text] -= consumed
+                available -= consumed
+                if not available:
+                    break
+            permanent_by_frame[frame] = available
+
+        permanent: Counter[str] = Counter()
+        for frame, count in permanent_by_frame.items():
+            permanent[permanent_canonical[frame]] += count
+        for frame in sorted(candidates):
+            available = permanent[canonical_by_frame[frame]]
+            if not available:
+                continue
+            for text, count in sorted(candidates[frame].items()):
+                consumed = min(available, count)
+                candidates[frame][text] -= consumed
+                available -= consumed
+                if not available:
+                    break
+            permanent[canonical_by_frame[frame]] = available
+
+        for line, available in sorted(gained.items()):
+            if LEGACY_NAME.lower() not in line.canonical.lower():
+                continue
+            floor = candidates.get(line.frame, Counter())
+            for text, count in sorted(floor.items()):
+                if not available:
+                    break
+                matched = min(available, count)
+                if matched:
+                    transitions.append(_FloorTransition(path, text, line, matched))
+                    floor[text] -= matched
+                    available -= matched
+    return tuple(transitions)
+
+
+def _floor_excused(
+    transitions: tuple[_FloorTransition, ...],
+) -> dict[str, Counter[str]]:
+    result: dict[str, Counter[str]] = {}
+    for transition in transitions:
+        result.setdefault(transition.path, Counter())[transition.after.canonical] += (
+            transition.occurrences
+        )
+    return result
+
+
+def _floor_sources(
+    transitions: tuple[_FloorTransition, ...],
+) -> dict[str, Counter[str]]:
+    result: dict[str, Counter[str]] = {}
+    for transition in transitions:
+        result.setdefault(transition.path, Counter())[transition.before] += (
+            transition.occurrences
+        )
+    return result
 
 
 def _match_annotations(lost: _LineCounts, gained_exempt: _LineCounts) -> int:
@@ -1076,6 +1634,7 @@ def _minted(
     head_by_file: dict[str, Counter[str]],
     base_by_file: dict[str, Counter[str]],
     budget: Counter[str],
+    transition: Counter[str] | None = None,
 ) -> tuple[Counter[str], Counter[str]]:
     """``(minted, moved)`` for ``path``: text the repo did not have, and text it did.
 
@@ -1123,6 +1682,20 @@ def _minted(
     most a text comparison can honestly offer.
     """
     new_here = head_by_file.get(path, Counter()) - base_by_file.get(path, Counter())
+    if transition:
+        # An excused occurrence still SPENDS its unit of the shared budget. The
+        # repo really did gain that text — the transition is why it is not
+        # charged here, not evidence that the gain never happened. Dropping it
+        # from ``new_here`` without spending would leave the unit available to
+        # an unrelated file, where the next occurrence of the same text is
+        # charged as minted instead of recognised as a move: a red build on a
+        # change that minted nothing, in a file with no part in the transition.
+        for text, excused in transition.items():
+            spent = min(excused, new_here[text], budget[text])
+            if spent:
+                budget[text] -= spent
+        new_here.subtract(transition)
+        new_here = +new_here
 
     minted: Counter[str] = Counter()
     moved: Counter[str] = Counter()
@@ -1197,7 +1770,9 @@ def _truncated(paths: list[str]) -> str:
 
 
 def _report_removed_exemptions(
-    base_by_file: dict[str, Counter[str]], head_by_file: dict[str, Counter[str]]
+    base_by_file: dict[str, Counter[str]],
+    head_by_file: dict[str, Counter[str]],
+    ignored: dict[str, Counter[str]] | None = None,
 ) -> None:
     """Name every exempt line this change removed. Reports; never fails.
 
@@ -1260,7 +1835,9 @@ def _report_removed_exemptions(
     for path, counts in base_by_file.items():
         head_counts = head_by_file.get(path, Counter())
         for text, n_base in counts.items():
-            lost = n_base - head_counts[text]
+            lost = (
+                n_base - head_counts[text] - (ignored or {}).get(path, Counter())[text]
+            )
             if lost > 0:
                 drops.setdefault(text, Counter())[path] = lost
     if not drops:
@@ -1380,7 +1957,7 @@ def _report_new_exemptions(
     for path in sorted(paths):
         here = [
             (lineno, text.strip(), kind)
-            for _, lineno, text, kind in _grep(None, pathspec=_literal(path))
+            for _, lineno, text, kind, _ in _grep(None, pathspec=_literal(path))
             if kind is not None
         ]
         if not here:
@@ -1480,6 +2057,59 @@ def _report_new_exemptions(
     print()
 
 
+def _deferred_references(
+    lines: dict[str, Counter[_DeferredLine]],
+) -> Counter[str]:
+    references: Counter[str] = Counter()
+    for per_file in lines.values():
+        for line, count in per_file.items():
+            references[line.reference] += count
+    return references
+
+
+def _report_deferred_problems(problems: tuple[_DeferredProblem, ...]) -> None:
+    if not problems:
+        return
+    print(f"Invalid {DEFERRED_MARKER} marker(s):")
+    for problem in problems:
+        print(f"  {problem.path}:{problem.lineno}: {problem.message}")
+        print(f"      {problem.text[:100]}")
+    print(
+        "Deferred work stays in the gated count. Use "
+        f"'{DEFERRED_MARKER}: <reason> (<doc path or issue URL>)'; it cannot "
+        "be combined with a permanent marker."
+    )
+
+
+def _report_deferred_transitions(
+    annotations: dict[str, Counter[_DeferredLine]],
+    floor_transitions: tuple[_FloorTransition, ...],
+) -> None:
+    annotated = sum(sum(lines.values()) for lines in annotations.values())
+    if annotated:
+        print(
+            f"{annotated} existing counted line(s) annotated as deferred; "
+            "they remain counted."
+        )
+        for reference, count in sorted(_deferred_references(annotations).items()):
+            print(f"  {count} deferred by {reference}.")
+
+    floor = sum(transition.occurrences for transition in floor_transitions)
+    if floor:
+        print(
+            f"{floor} floor-to-deferred transition(s) excused. Each base line "
+            "carried a floor marker in the same file and its exact annotation "
+            "frame now carries deferred; the gated headline rises by this amount."
+        )
+        references: Counter[str] = Counter()
+        for transition in floor_transitions:
+            references[transition.after.reference] += transition.occurrences
+        for reference, count in sorted(references.items()):
+            print(f"  {count} deferred by {reference}.")
+    if annotated or floor:
+        print()
+
+
 def _present_display(head: Counter[str], mirrors: Counter[str]) -> str:
     """Human-only representation: JSON deliberately exposes no numeric column."""
     return (
@@ -1503,6 +2133,7 @@ def _report_payload(
     for audit and debugging.
     """
     head = head_scan.counts()
+    deferred = head_scan.deferred()
     no_sum = {
         "allowed": False,
         "error": "per-repository diagnostic may overlap authored content in other repositories",
@@ -1515,6 +2146,11 @@ def _report_payload(
             "lines": sum(head.values()),
             "files": len(head),
             "by_file": dict(sorted(head.items())),
+            "deferred": {
+                "lines": sum(deferred.values()),
+                "by_file": dict(sorted(deferred.items())),
+                "by_reference": dict(sorted(head_scan.deferred_references().items())),
+            },
         },
         "diagnostics": {
             "present": {
@@ -1529,9 +2165,23 @@ def _report_payload(
             },
         },
         "marker_inventory": {
-            "counts": {marker: markers[marker] for marker in _KINDS},
+            "counts": {
+                **{marker: markers[marker] for marker in _KINDS},
+                DEFERRED_MARKER: markers[DEFERRED_MARKER],
+            },
             "excluded_meta_paths": list(_config().marker_inventory_meta_paths),
             "system_paths_excluded": sorted(_MARKER_SYSTEM_PATHS),
+        },
+        "deferred_validation": {
+            "valid": not head_scan.deferred_problems,
+            "problems": [
+                {
+                    "path": problem.path,
+                    "line": int(problem.lineno),
+                    "message": problem.message,
+                }
+                for problem in head_scan.deferred_problems
+            ],
         },
         "scope": {
             "tracked_files_only": True,
@@ -1556,6 +2206,9 @@ def _print_inventory(
     for path, count in sorted(head.items(), key=lambda item: (-item[1], item[0])):
         print(f"  {count:>4}  {path}")
 
+    for reference, count in sorted(head_scan.deferred_references().items()):
+        print(f"Of which {count} deferred by {reference}.")
+
     if mirrors:
         print(
             f"Excluded from the count above: {sum(mirrors.values())} "
@@ -1573,10 +2226,12 @@ def _print_inventory(
     marker_summary = ", ".join(
         f"{markers[marker]} {_KINDS[marker].label}" for marker in _KINDS
     )
+    marker_summary += f", {markers[DEFERRED_MARKER]} {_DEFERRED_LABEL}"
     print(
         f"Marker inventory: {marker_summary}. Excludes gate code/tests and "
         f"{len(_config().marker_inventory_meta_paths)} declared meta path(s)."
     )
+    _report_deferred_problems(head_scan.deferred_problems)
     print(f"Scope: tracked files only; {untracked} untracked file(s) omitted.")
 
 
@@ -1648,6 +2303,17 @@ def main() -> int:
         return 2
 
     base = base_scan.counts()
+    new_deferred = _new_deferred(base_scan, head_scan)
+    deferred_annotations, unallocated_deferred = _deferred_annotations(
+        base_scan, head_scan, new_deferred
+    )
+    floor_transitions = _floor_transitions(base_scan, head_scan, unallocated_deferred)
+    deferred_annotation_count = sum(
+        sum(lines.values()) for lines in deferred_annotations.values()
+    )
+    floor_transition_count = sum(
+        transition.occurrences for transition in floor_transitions
+    )
 
     if args.report:
         assert payload is not None
@@ -1673,6 +2339,10 @@ def main() -> int:
             "removed": report_summary.removed,
             "moved": report_summary.moved,
             "net": report_summary.net,
+            "deferred": {
+                "annotated": deferred_annotation_count,
+                "floor_to_deferred": floor_transition_count,
+            },
         }
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1684,7 +2354,26 @@ def main() -> int:
                 f"{report_summary.moved} {_move_label(report_summary.moved)} "
                 f"({report_summary.net:+d} net)."
             )
+            if deferred_annotation_count or floor_transition_count:
+                print(
+                    "Deferred transitions: "
+                    f"{deferred_annotation_count} existing counted annotation(s), "
+                    f"{floor_transition_count} floor-to-deferred excusal(s)."
+                )
         return 0
+
+    # Printed here rather than returning the moment a bad marker is found, so one
+    # run surfaces every violation. A malformed marker and a genuinely minted line
+    # are independent failures, and failing on the first hid the second entirely:
+    # the author fixed the marker, pushed, and only then learned about the mint.
+    # Both still fail — no exit path below can reach 0 while a problem stands.
+    #
+    # Before the empty-tree check and not after it, because a line carrying a
+    # permanent marker AND a deferred one is exempt, so it is absent from both
+    # counted sets. In a tree whose only branded line is that one, both sets are
+    # empty and the check below would answer a contradictory marker with a note
+    # about a broken pathspec.
+    _report_deferred_problems(head_scan.deferred_problems)
 
     if not head and not base:
         # A pathspec that matches nothing exits 1 with an empty stderr, exactly
@@ -1692,16 +2381,22 @@ def main() -> int:
         # the gate passes every PR from then on, silently, for the rest of the
         # programme. Both trees empty is either that or a finished migration,
         # and both want a human.
-        print(
-            f"Found no '{LEGACY_NAME}' lines in either tree.\n"
-            "Either the pattern or the pathspec is broken — in which case this gate has\n"
-            "been passing without checking anything — or the migration is complete and\n"
-            "this gate should be deleted along with the last of the old names."
-        )
+        #
+        # Unless a marker report above already named the precise problem, in
+        # which case this would talk the reader out of the accurate diagnosis
+        # they have just been given.
+        if not head_scan.deferred_problems:
+            print(
+                f"Found no '{LEGACY_NAME}' lines in either tree.\n"
+                "Either the pattern or the pathspec is broken — in which case this gate has\n"
+                "been passing without checking anything — or the migration is complete and\n"
+                "this gate should be deleted along with the last of the old names."
+            )
         return 1
 
     head_by_file, base_by_file = head_scan.by_file, base_scan.by_file
     budget = _mint_budget(head_scan.total, base_scan.total)
+    floor_excused = _floor_excused(floor_transitions)
 
     grown = {}
     excused: dict[str, Counter[str]] = {}
@@ -1726,14 +2421,25 @@ def main() -> int:
         # text — so the new name is never surfaced and the gate reports "No new
         # lines." Comparing the text is what catches it; the count was only ever
         # a cheap proxy for "worth looking at", and it is the wrong one.
-        minted, moved = _minted(path, head_by_file, base_by_file, budget)
+        minted, moved = _minted(
+            path,
+            head_by_file,
+            base_by_file,
+            budget,
+            floor_excused.get(path),
+        )
         if moved:
             excused[path] = moved
         if minted:
             grown[path] = (before, n, minted)
 
     _report_new_exemptions(base_scan.exempt(), head_scan.exempt(), base_ref)
-    _report_removed_exemptions(base_scan.exempt_by_file, head_scan.exempt_by_file)
+    _report_removed_exemptions(
+        base_scan.exempt_by_file,
+        head_scan.exempt_by_file,
+        _floor_sources(floor_transitions),
+    )
+    _report_deferred_transitions(deferred_annotations, floor_transitions)
     _report_excused_moves(excused, base_by_file, head_by_file)
 
     if exempt_changelogs:
@@ -1745,6 +2451,16 @@ def main() -> int:
             print(f"  {path}")
 
     if not grown:
+        # An invalid marker fails on its own, with nothing minted anywhere. Said
+        # separately from the mint report because every summary below this point
+        # opens with "no new lines" or "gate passes", and printing either one
+        # under a failing exit code would contradict the marker report above.
+        if head_scan.deferred_problems:
+            print(
+                "No new lines fail the gate; the invalid "
+                f"{DEFERRED_MARKER} marker(s) above do."
+            )
+            return 1
         try:
             gate_summary = _change_summary(
                 base_ref,
@@ -1807,15 +2523,20 @@ def main() -> int:
         # holding the text, which in a file that already had one is a line
         # nobody touched.
         added = _added_lines(base_ref, path)
-        candidates = [
-            (lineno, text.strip())
-            for _, lineno, text, kind in _grep(None, pathspec=_literal(path))
-            if kind is None and text.strip() in minted
-        ]
+        candidates = []
+        for _, lineno, text, kind, deferred in _grep(None, pathspec=_literal(path)):
+            stripped = text.strip()
+            counted = (
+                deferred.canonical
+                if deferred is not None and deferred.error is None
+                else stripped
+            )
+            if kind is None and counted in minted:
+                candidates.append((lineno, stripped, counted))
         shown = (
             candidates
             if added is None
-            else [(n, t) for n, t in candidates if int(n) in added]
+            else [(n, raw, key) for n, raw, key in candidates if int(n) in added]
         )
         # Falling back to every occurrence rather than to silence: if the diff
         # could not be read, too many lines is a nuisance and none is a dead end.
@@ -1826,7 +2547,7 @@ def main() -> int:
         # and an empty intersection means the two disagree. Naming every
         # occurrence keeps a real offender on screen.
         shown = shown or candidates
-        for lineno, stripped in shown:
+        for lineno, stripped, _ in shown:
             print(f"      {lineno}: {stripped[:110]}")
 
         # When a change adds several identical lines and only some are minted,
@@ -1834,7 +2555,7 @@ def main() -> int:
         # apart — that is what identical means. Naming one would be a guess
         # dressed as a finding, so all are printed and the split is stated.
         for text, new in sorted(minted.items()):
-            here = sum(1 for _, t in shown if t == text)
+            here = sum(1 for _, _, key in shown if key == text)
             if here > new:
                 print(
                     f"      ^ {here} added lines share this text; {new} new, "
@@ -1855,7 +2576,11 @@ def main() -> int:
         f"mirror path — append '{FLOOR_MARKER}: <reason>' instead. Identical exemption,\n"
         "different claim: nothing is declared there, so it is counted apart and the\n"
         "aliases stay readable. Check the claim before you make it — if rewording the\n"
-        "line would leave it correct, reword it rather than marking it."
+        "line would leave it correct, reword it rather than marking it.\n\n"
+        "If the rename is deliberately postponed rather than permanent, append\n"
+        f"'{DEFERRED_MARKER}: <reason> (<doc path or issue URL>)'. This marker stays\n"
+        "inside the gated count: it annotates deferred work and does not make this build green.\n"
+        "The reference is mandatory, and combining deferred with either permanent marker fails."
     )
     return 1
 
