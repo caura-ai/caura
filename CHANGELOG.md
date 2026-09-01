@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.42.1](https://github.com/caura-ai/caura/compare/backend-v2.42.0...backend-v2.42.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **contradiction:** decouple the judge's provider from entity extraction (C2, A32) ([#1149](https://github.com/caura-ai/caura/issues/1149)) ([272c701](https://github.com/caura-ai/caura/commit/272c70102ba834c3c086b8c076367ed647732a59))
+* **storage:** scope the conflict record's memory refs to the owning tenant ([#1215](https://github.com/caura-ai/caura/issues/1215)) ([2fd2816](https://github.com/caura-ai/caura/commit/2fd2816ecd5d5331ec26222a15d9abc0dabb87d5))
+
 ## [2.42.0](https://github.com/caura-ai/caura/compare/backend-v2.41.1...backend-v2.42.0) (2026-09-01)
 
 
