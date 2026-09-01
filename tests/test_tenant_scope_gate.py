@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -1971,3 +1972,162 @@ def test_a_qualified_reference_counts_as_mentioning_the_name() -> None:
 
     assert "Entity" in referenced["m"]
     assert "_ENTITY_UPDATABLE_FIELDS" in referenced["m"]
+
+
+# ── running without an installed tree ────────────────────────────────────────
+#
+# The gate used to exit 2 having printed two lines when core-storage-api was not
+# importable, which is why its numbers reached almost none of the rebranding
+# revisions while the ratchet's reached twelve. These cases hold the line on
+# both halves of the fix: the AST findings DO come out, and nothing about the
+# run can be mistaken for a pass or allowed to rewrite the allowlist.
+
+
+def _degraded(*args: str) -> subprocess.CompletedProcess:
+    """The script on a bare interpreter — no site-packages, so no imports work.
+
+    ``-S`` rather than ``-I``: ``-I`` only drops the USER site directory, so
+    inside a venv (which is how CI runs) every dependency is still importable
+    and the degraded path would never be reached. ``-S`` adds no site directory
+    at all, which is the same position as a fresh clone.
+    """
+    return subprocess.run(
+        [sys.executable, "-S", str(SCRIPT), *args],
+        check=False,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_a_bare_interpreter_reports_the_ast_findings() -> None:
+    """The whole point: findings, not a bare refusal."""
+    result = _degraded()
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "DEGRADED RUN" in result.stdout
+    # A count of handlers and a count of scoped ones — the numbers that were
+    # unpublishable before. Asserted as "a number appeared", not as a literal,
+    # so the case does not need editing every time a route lands.
+    assert re.search(r"\d+ route handlers classified", result.stdout), result.stdout
+    assert "requiring a binding tenant" in result.stdout
+
+
+def test_a_bare_interpreter_names_a_real_unscoped_handler() -> None:
+    """Findings, not just totals.
+
+    ``memories.bulk_get`` is the handler behind GHSA-wgvw-28pq-jc36's exploit
+    primitive, and ``admin_list`` is one the AST pass reads as OPTIONAL. If the
+    report only printed counts it would be a statistic, not an instrument.
+    """
+    result = _degraded()
+
+    assert "memories.py" in result.stdout
+    assert "admin_list" in result.stdout
+
+
+def test_a_bare_interpreter_says_what_it_skipped() -> None:
+    """Whatever it skips, it must say it skipped — every item, not "some checks".
+
+    Asserted against the script's own list rather than a copy of it, so adding
+    an import-dependent check without naming it here fails.
+    """
+    result = _degraded()
+
+    assert "SKIPPED" in result.stdout
+    for what, _why in gate.SKIPPED_WITHOUT_IMPORTS:
+        assert what in result.stdout, what
+    assert "service-method signatures" in result.stdout
+
+
+def test_a_bare_interpreter_does_not_claim_to_be_a_gate() -> None:
+    """Exit 2 and the words. A green-looking partial run is worse than a refusal.
+
+    Exit code AND text, because either alone is insufficient: a human reads the
+    text and a CI step reads the code, and this run must be unusable as a pass
+    to both.
+    """
+    result = _degraded()
+
+    assert result.returncode == 2
+    assert "REPORT, not a gate" in result.stdout
+
+
+def test_a_bare_interpreter_refuses_to_reseed_the_allowlist() -> None:
+    """``--write`` from a partial enumeration would DELETE reviewed entries.
+
+    ``render_allowlist`` writes the entries it was given, so seeding it from an
+    enumeration missing all 186 service methods would drop every method entry
+    and every category on them — silently, and with a green-looking "wrote"
+    line. This is the one failure in the degraded path that damages the
+    repository rather than merely under-reporting.
+    """
+    before = ALLOWLIST.read_bytes()
+
+    result = _degraded("--write")
+
+    assert result.returncode == 2
+    assert "refused in a degraded run" in result.stdout
+    assert "wrote" not in result.stdout
+    assert ALLOWLIST.read_bytes() == before
+
+
+def test_a_bare_interpreter_refuses_to_ratchet() -> None:
+    """``--base`` compares allowlists; a partial entry set makes the answer wrong.
+
+    Every method entry would read as "removed", which the ratchet reports as
+    progress — the direction it exists to distinguish from regression.
+    """
+    result = _degraded("--base", "origin/main")
+
+    assert result.returncode == 2
+    assert "refused in a degraded run" in result.stdout
+    assert "Allowlist comparison against" not in result.stdout
+
+
+def test_the_import_free_checks_actually_run_when_degraded(tmp_path: Path) -> None:
+    """The report is not only prose: two real checks run and can fail.
+
+    Driven through ``report_degraded`` with a deliberately broken allowlist,
+    since the committed one is (and must stay) valid.
+    """
+    broken = tmp_path / "tenant_scope_allowlist.json"
+    broken.write_text(
+        json.dumps(
+            {
+                "_categories": gate.CATEGORIES,
+                "exceptions": [
+                    {"id": "route:GET /x", "category": "no-tenant-data"},
+                    {"id": "route:GET /x", "category": "admin-unscoped"},
+                ],
+            }
+        )
+    )
+
+    code = gate.report_degraded(ImportError("No module named 'pgvector'"), broken)
+
+    assert code == 2
+
+
+def test_a_degraded_run_still_passes_its_own_integrity_checks() -> None:
+    """And on the committed allowlist, those checks report clean.
+
+    Paired with the case above so "the checks ran" is not satisfied by a check
+    that fails either way.
+    """
+    result = _degraded()
+
+    assert "no duplicate ids" in result.stdout
+    assert "matches CATEGORIES" in result.stdout
+
+
+def test_an_installed_tree_is_unaffected() -> None:
+    """The full run is the gate, and this change must not have touched it.
+
+    Verified against the real environment rather than a mock: if the tests can
+    import the service, so can the script, and it must take the full path.
+    """
+    result = _run()
+
+    assert "DEGRADED" not in result.stdout
+    assert "service methods" in result.stdout

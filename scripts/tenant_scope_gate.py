@@ -89,6 +89,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ALLOWLIST_PATH = REPO_ROOT / "core-storage-api" / "tenant_scope_allowlist.json"
 ROUTERS_DIR = REPO_ROOT / "core-storage-api" / "src" / "core_storage_api" / "routers"
 
+INSTALL_HINT = 'uv pip install -e "core-storage-api/[dev]"'
+
 # Resolve imports from the repo layout rather than from the caller's
 # environment. ``common`` is a plain directory at the repo root and is on no
 # installed path even in CI, where the services are installed editable — so
@@ -1870,6 +1872,130 @@ def ratchet(
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Running without an installed tree
+#
+# The gate needed a full dev environment to say anything at all: no ``pgvector``
+# and it exited 2 having printed one line. That is not a small inconvenience.
+# The rebranding series published the ratchet's numbers in twelve revisions and
+# this gate's in almost none, and an instrument that only runs in a full dev
+# environment is an instrument that goes unread.
+#
+# The two halves are not equally dependent, and measuring which is which is the
+# whole of this. ``_classify_handlers`` parses ``routers/*.py`` with ``ast`` and
+# imports nothing: 187 handlers classified on a bare interpreter. The service
+# methods, the widening grants and the identity-writability check all reach for
+# ``PostgresService`` through ``inspect``, which means importing
+# ``core_storage_api`` and everything under it. So does the ROUTE LIST, which
+# comes from the live app on purpose — a router registered in a loop is still
+# counted, and the walk is cross-checked against ``app.openapi()``.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO. It does not reconstruct route paths from
+# decorators to replace the live walk. That would be a second enumeration of
+# the same surface, weaker than the one it stands in for, and its failure mode
+# is a route it did not find — a false negative, the one direction this gate
+# must never be wrong in. Without paths there are no ``route:<VERB> <path>``
+# idents, so the degraded run cannot join the allowlist and CANNOT enforce it.
+#
+# Which is why this is a REPORT and not a gate, says so in those words, and
+# still exits 2. A version that ran everywhere by checking less and exited 0
+# would be worse than one that refuses: it would read as a pass.
+# ---------------------------------------------------------------------------
+
+# Named in the skip notice, so what is missing is a list a reader can check
+# rather than "some checks". Each is a check the full run performs and this one
+# cannot, with the reason it cannot.
+SKIPPED_WITHOUT_IMPORTS: tuple[tuple[str, str], ...] = (
+    ("service-method signatures", "inspect.signature on PostgresService"),
+    ("widening-grant findings", "inspect.signature on PostgresService"),
+    ("identity-writability findings", "SQLAlchemy model column types"),
+    ("the live route list and its OpenAPI cross-check", "core_storage_api.app"),
+    ("the allowlist comparison", "needs route idents, which need the route list"),
+    ("the --base ratchet", "needs the full entry set"),
+)
+
+
+def report_degraded(exc: ImportError, allowlist_path: Path) -> int:
+    """Print everything decidable without imports, then refuse to call it a pass.
+
+    Ordered diagnosis-first: what could not be imported, then what DID run,
+    then — last, where it is read rather than scrolled past — the itemised list
+    of what did not. The skip notice is the part that keeps this honest, so it
+    is not a footnote.
+    """
+    print("tenant-scope gate: DEGRADED RUN — a REPORT, not a gate.")
+    print(f"  cannot import core-storage-api ({exc}).")
+    print(f"  Install it for a full run: {INSTALL_HINT}")
+    print()
+
+    handlers = _classify_handlers()
+    counts: dict[str, int] = {}
+    for verdict, _ in handlers.values():
+        counts[verdict] = counts.get(verdict, 0) + 1
+    print(
+        f"AST pass over {ROUTERS_DIR.relative_to(REPO_ROOT)}: "
+        f"{len(handlers)} route handlers classified, "
+        f"{counts.get('REQUIRED', 0)} requiring a binding tenant."
+    )
+
+    # Grouped by module. 33 undifferentiated lines is the wall this file's own
+    # CATEGORIES comment argues against, and the module is the axis a reader
+    # navigates by — it is the file they would open.
+    flagged: dict[str, list[str]] = {}
+    for (module, function), (verdict, detail) in sorted(handlers.items()):
+        if verdict == "REQUIRED":
+            continue
+        flagged.setdefault(module, []).append(f"{function}  [{verdict}] {detail}")
+    if flagged:
+        total = sum(len(v) for v in flagged.values())
+        print(
+            f"  {total} handler(s) the AST pass reads as taking no binding tenant. "
+            "Whether each is a known exception is exactly what this run cannot "
+            "tell you — see the skip notice."
+        )
+        for module in sorted(flagged):
+            print(f"    {module}.py")
+            for line in flagged[module]:
+                print(f"      {line}")
+    print()
+
+    # Two real checks that need no imports. Reported as pass/fail rather than
+    # folded into the skip list, because they genuinely ran.
+    errors: list[str] = []
+    try:
+        allowlist = load_allowlist(allowlist_path)
+    except AllowlistError as exc_allow:
+        errors.append(str(exc_allow))
+    else:
+        print(
+            f"Allowlist integrity: {allowlist_path.name} parses, "
+            f"{len(allowlist)} entries, no duplicate ids."
+        )
+    errors.extend(check_category_doc(allowlist_path))
+    if not errors:
+        print(f"Category documentation: {allowlist_path.name} matches CATEGORIES.")
+    print()
+
+    print("SKIPPED — these checks did not run, and this report does not cover them:")
+    for what, why in SKIPPED_WITHOUT_IMPORTS:
+        print(f"  - {what} ({why})")
+    print()
+    print(
+        "--write and --base are refused in a degraded run: reseeding the "
+        "allowlist or ratcheting it from a partial enumeration would delete "
+        "entries whose paths were never enumerated."
+    )
+
+    if errors:
+        print()
+        for err in errors:
+            print(f"::error::{_as_annotation(err)}" if _in_github_actions() else f"error: {err}")
+
+    # 2, not 0, and not 1. The run was INCOMPLETE, which is what 2 has always
+    # meant here, and it stays 2 whether or not the import-free checks found
+    # something: nothing that reads an exit code should be able to mistake this
+    # for a full green gate.
+    return 2
 
 
 def main() -> int:
@@ -1883,9 +2009,10 @@ def main() -> int:
         routes = enumerate_routes()
         grants = _widening_grant_findings()
     except ImportError as exc:
-        print(f"error: cannot import core-storage-api ({exc}).", file=sys.stderr)
-        print("Install it first: uv pip install -e core-storage-api/[dev]", file=sys.stderr)
-        return 2
+        # Report what the AST pass can decide instead of exiting having printed
+        # nothing — see the section header above for what that is and what it
+        # is not. Still exit 2, and never reach --write or --base from here.
+        return report_degraded(exc, ALLOWLIST_PATH)
 
     entries = methods + routes
     try:
