@@ -296,12 +296,22 @@ async def detect_contradictions_async(
         concluded = True
         n_conflicts = len(contradictions) if contradictions else 0
 
-        if contradictions:
-            logger.info(
-                "Async contradiction detection found %d conflict(s) for memory %s",
-                len(contradictions),
-                memory_id,
-            )
+        # D3 — log EVERY concluded run, not only the ones that found something.
+        # Before this, a run that found nothing was indistinguishable in the logs
+        # from a run that never happened (lock contention, an early return, a
+        # crashed worker), so "did detection run for this memory?" was
+        # unanswerable — and the answer matters most exactly when a contradiction
+        # was expected and none appeared.
+        logger.info(
+            "Async contradiction detection completed for memory %s: %d conflict(s)",
+            memory_id,
+            n_conflicts,
+            extra={
+                "path": "contradiction-detection",
+                "memory_id": str(memory_id),
+                "conflicts_found": n_conflicts,
+            },
+        )
 
     except Exception:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
@@ -412,6 +422,15 @@ async def _detect(
             # excludes same-value rows. Otherwise two writes of the
             # same fact trigger a false conflict on themselves.
             object_value=object_value,
+            # A54 — scope by the writer's visibility tier, exactly as the
+            # semantic path does below. Without it the RDF path could select
+            # another agent's ``scope_agent`` row as a candidate and then mark
+            # it outdated/conflicted: a status write into a row this writer
+            # cannot read. ``agent_id`` pins the owner for the agent-private
+            # tier, where the visibility value alone says only "private to SOME
+            # agent" and so still matches a different agent's private rows.
+            visibility=new_memory.get("visibility", "scope_team"),
+            agent_id=new_memory.get("agent_id"),
         )
         # CAURA-125 — state-corruption guard. When ``rdf_conflicts``
         # mixes older and newer candidates relative to ``new_memory``,
@@ -564,6 +583,10 @@ async def _detect(
                 # scope_org/scope_agent writes from being marked as superseding
                 # scope_team memories (cross-scope chain pollution).
                 "visibility": new_memory.get("visibility", "scope_team"),
+                # A54 — pins the OWNER for the scope_agent tier. The tier alone
+                # matches any agent's private rows, so without this a writer can
+                # mark another agent's private memory conflicted.
+                "agent_id": new_memory.get("agent_id"),
             }
         )
         # CAURA-132 diag — Path A semantic invocation + candidate count.
@@ -2254,6 +2277,10 @@ async def detect_contradictions_by_entities_async(
                 "fleet_id": fleet_id,
                 # Same visibility scoping as the semantic path above.
                 "visibility": new_memory.get("visibility", "scope_team"),
+                # A54 — pins the OWNER for the scope_agent tier. The tier alone
+                # matches any agent's private rows, so without this a writer can
+                # mark another agent's private memory conflicted.
+                "agent_id": new_memory.get("agent_id"),
             }
         )
         n_candidates = len(candidates) if candidates else 0

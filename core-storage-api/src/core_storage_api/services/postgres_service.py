@@ -2606,6 +2606,7 @@ class PostgresService:
         visibility: str = "scope_team",
         limit: int = CONTRADICTION_CANDIDATE_MAX,
         include_supersedes: bool = False,
+        agent_id: str | None = None,
     ) -> list[Memory]:
         """Find active memories sharing entities with the given memory by entity name.
 
@@ -2686,6 +2687,13 @@ class PostgresService:
                     Memory.deleted_at.is_(None),
                     status_filter,
                     Memory.visibility == visibility,
+                    # A54 — ``scope_agent`` means "private to SOME agent", not
+                    # "private to THIS agent": the tier predicate alone still
+                    # matches a DIFFERENT agent's private rows, which
+                    # contradiction then marks outdated/conflicted — a status
+                    # write into a row the writer cannot read. Wet-proven, not
+                    # theoretical. Pin the owner for that tier.
+                    *([Memory.agent_id == agent_id] if visibility == "scope_agent" and agent_id else []),
                     *([Memory.fleet_id == fleet_id] if fleet_id else []),
                 )
                 .group_by(Memory.id)
@@ -2704,6 +2712,8 @@ class PostgresService:
         object_value: str,
         memory_id: UUID,
         fleet_id: str | None = None,
+        visibility: str | None = None,
+        agent_id: str | None = None,
     ) -> list[Memory]:
         async with get_session() as session:
             stmt = select(Memory).where(
@@ -2719,6 +2729,20 @@ class PostgresService:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             else:
                 stmt = stmt.where(Memory.fleet_id.is_(None))
+            # A54 — scope candidates to the writer's visibility tier, mirroring
+            # ``memory_find_similar_candidates``. Without this the RDF path could
+            # select another agent's ``scope_agent`` row as a conflict candidate
+            # and then mark it outdated/conflicted — a write into a row the
+            # writer cannot even read, and an inference channel about its
+            # contents. Optional so a storage instance running ahead of core-api
+            # keeps working; core-api always sends it.
+            if visibility:
+                stmt = stmt.where(Memory.visibility == visibility)
+                # ``visibility == 'scope_agent'`` alone does NOT isolate agents:
+                # it only says "private to SOME agent", so two different agents'
+                # private rows still match each other. Pin the owner too.
+                if visibility == "scope_agent" and agent_id:
+                    stmt = stmt.where(Memory.agent_id == agent_id)
 
             result = await session.execute(stmt)
             return list(result.scalars().all())
@@ -2732,6 +2756,7 @@ class PostgresService:
         visibility: str = "scope_team",
         threshold: float = CONTRADICTION_SIMILARITY_THRESHOLD,
         limit: int = CONTRADICTION_CANDIDATE_MAX,
+        agent_id: str | None = None,
     ) -> list[Memory]:
         async with get_session() as session:
             distance = Memory.embedding.cosine_distance(embedding)
@@ -2757,6 +2782,13 @@ class PostgresService:
                 stmt = stmt.where(Memory.fleet_id.is_(None))
 
             stmt = stmt.where(Memory.visibility == visibility)
+            # A54 — ``scope_agent`` means "private to SOME agent", not "private
+            # to THIS agent": the tier predicate alone still matches a DIFFERENT
+            # agent's private rows, which contradiction then marks
+            # outdated/conflicted — a status write into a row the writer cannot
+            # read. Wet-proven, not theoretical. Pin the owner for that tier.
+            if visibility == "scope_agent" and agent_id:
+                stmt = stmt.where(Memory.agent_id == agent_id)
 
             result = await session.execute(stmt)
             return [row.Memory for row in result.all()]
