@@ -1683,17 +1683,11 @@ def _minted(
     """
     new_here = head_by_file.get(path, Counter()) - base_by_file.get(path, Counter())
     if transition:
-        # An excused occurrence still SPENDS its unit of the shared budget. The
-        # repo really did gain that text — the transition is why it is not
-        # charged here, not evidence that the gain never happened. Dropping it
-        # from ``new_here`` without spending would leave the unit available to
-        # an unrelated file, where the next occurrence of the same text is
-        # charged as minted instead of recognised as a move: a red build on a
-        # change that minted nothing, in a file with no part in the transition.
-        for text, excused in transition.items():
-            spent = min(excused, new_here[text], budget[text])
-            if spent:
-                budget[text] -= spent
+        # Only the local tally is adjusted here. The excused occurrence is kept
+        # out of the shared budget by :func:`_mint_budget`'s caller instead,
+        # before any file is visited — spending it here would work only when the
+        # transitioned file happens to sort before the file that would otherwise
+        # claim the same text, which is a coin toss on filenames.
         new_here.subtract(transition)
         new_here = +new_here
 
@@ -2395,8 +2389,23 @@ def main() -> int:
         return 1
 
     head_by_file, base_by_file = head_scan.by_file, base_scan.by_file
-    budget = _mint_budget(head_scan.total, base_scan.total)
     floor_excused = _floor_excused(floor_transitions)
+    # A floor-to-deferred transition raises the repo-wide count of its text: the
+    # base occurrence was exempt and uncounted, the deferred one is counted. That
+    # gain is sanctioned, so it must not also become budget for charging some
+    # other file — an unrelated legitimate move of the same text would be
+    # reported as minted, in a file with no part in the transition.
+    #
+    # Neutralised HERE, once, before any file is visited, rather than spent as
+    # each transitioned file is reached: the loop below runs in sorted path
+    # order, so spending it late works only when the transitioned file happens
+    # to sort before the file that would otherwise claim the text. That is a
+    # coin toss on filenames, and it passes a test whose files happen to sort
+    # the lucky way while the bug is still there for every other pair.
+    excused_total: Counter[str] = Counter()
+    for counts in floor_excused.values():
+        excused_total.update(counts)
+    budget = _mint_budget(head_scan.total, base_scan.total + excused_total)
 
     grown = {}
     excused: dict[str, Counter[str]] = {}

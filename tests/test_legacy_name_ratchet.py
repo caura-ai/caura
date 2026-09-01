@@ -3307,37 +3307,49 @@ def test_the_engine_stays_formatter_stable() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("transitioned", "destination"),
+    [("a_transition.py", "z_move.py"), ("z_transition.py", "a_move.py")],
+    ids=["transition-sorts-first", "transition-sorts-last"],
+)
 def test_a_floor_transition_survives_a_same_text_relocation_elsewhere(
-    repo: Path,
+    repo: Path, transitioned: str, destination: str
 ) -> None:
-    """Two independent bugs met here, and the second was hidden by the first.
+    """Three bugs met here, each hidden by the one before it.
 
     The change is: one file's floor marker becomes deferred in place, while a
     byte-identical deferred line is deleted from a second file and re-added to a
     third. Nothing is minted — the repo gains exactly the one occurrence the
     transition sanctions, and the other is a move.
 
-    The relocation rule used to claim the transitioned line first, because the
-    identical text existed in the base tree; the transition then went
-    unrecognised, its floor line was reported as deleted, and its successor was
-    charged as a mint. Fixing that exposed the second bug: the excused
-    occurrence was dropped from the file's tally without spending its unit of
-    the shared repo-wide budget, so the unit stayed available and the genuine
-    move at the far end was charged instead. Either one alone fails this.
+    First, the relocation rule claimed the transitioned line, because the
+    identical text existed in the base tree; the transition went unrecognised,
+    its floor line was reported as deleted, and its successor was charged as a
+    mint. Fixing that exposed the second: the sanctioned gain still counted
+    towards the shared repo-wide mint budget, so that unit was spent charging
+    the genuine move at the far end.
+
+    **Both orderings, and that is the point.** The first attempt at the second
+    fix spent the budget as each transitioned file was reached. The files are
+    visited in sorted path order, so it worked whenever the transitioned file
+    sorted before the file that would otherwise claim the text, and not
+    otherwise — and the single test written for it happened to use the lucky
+    names. The budget is now made transition-neutral once, before any file is
+    visited; these two cases are what tell the difference.
     """
     _write_decision(repo)
     body = f'URL = "https://{LEGACY}.net"'
     floor = f"{body}  # legacy-name-floor: frozen path\n"
     deferred = f"{body}  # {_deferred()}\n"
 
-    (repo / "a.py").write_text(floor)
-    (repo / "c.py").write_text(deferred)
+    (repo / transitioned).write_text(floor)
+    (repo / "source.py").write_text(deferred)
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "a floor line, and the same text deferred elsewhere")
 
-    _stage(repo, "a.py", deferred)  # floor -> deferred, in place
-    _stage(repo, "c.py", "PLACEHOLDER = 1\n")  # the other copy leaves here
-    _stage(repo, "b.py", deferred)  # ...and arrives here: a move
+    _stage(repo, transitioned, deferred)  # floor -> deferred, in place
+    _stage(repo, "source.py", "PLACEHOLDER = 1\n")  # the other copy leaves here
+    _stage(repo, destination, deferred)  # ...and arrives here: a move
 
     result = _run(repo)
 
