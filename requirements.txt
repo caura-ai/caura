@@ -43,7 +43,7 @@ aiosqlite>=0.22.1,<1
 redis[hiredis]>=8.1.0,<9
 
 # Rate limiting — backed by Redis when REDIS_URL is set, in-memory otherwise
-slowapi>=0.1.9,<1.0
+slowapi>=0.1.10,<1.0
 
 # Error tracking (optional — set SENTRY_DSN to enable)
 sentry-sdk[fastapi]>=2.68.1,<3
