@@ -829,6 +829,11 @@ async def caura_recall(
         # the var empty; ``search_memories`` falls back to the home tenant only.
         # C31/D12 — diagnostic trace context, filled by the pipeline when requested.
         diagnostic_ctx: dict = {}
+        # Same field REST /search reports. Emitted on both surfaces so adding
+        # it does not itself become a parity gap: MCP always carries an agent
+        # identity, but ``diagnostic=true`` and an empty result set still make
+        # this False here.
+        recall_ctx: dict = {}
         results = await search_memories(
             tenant_id=tenant_id,
             query=query,
@@ -849,6 +854,7 @@ async def caura_recall(
             diagnostic=diagnostic,
             diagnostic_ctx=diagnostic_ctx if diagnostic else None,
             min_similarity=min_similarity,
+            recall_ctx=recall_ctx,
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.
@@ -880,6 +886,9 @@ async def caura_recall(
         # Reports only that the REQUESTED top_k was lowered. A full page at an
         # uncapped ``top_k`` is still not proof of exhaustion; that would need a
         # total, which this surface does not compute.
+        #
+        # ``recall_tracked`` is the same field REST /search reports — see the
+        # ``recall_ctx`` note above.
         payload: dict = {
             "results": _rows,
             "items": _rows,
@@ -887,6 +896,7 @@ async def caura_recall(
             "truncated": top_k > capped_top_k,
             "requested_top_k": top_k,
             "effective_top_k": capped_top_k,
+            "recall_tracked": bool(recall_ctx.get("recall_tracked")),
         }
         if diagnostic:
             counts = diagnostic_ctx.get("counts", {}) or {}

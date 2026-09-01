@@ -4493,6 +4493,7 @@ async def search_memories(
     readable_tenant_ids: list[str] | None = None,
     source: str = "search",
     min_similarity: float | None = None,
+    recall_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     # Diagnostic mode requires the pipeline path for score introspection
     if _USE_PIPELINE_SEARCH or diagnostic:
@@ -4516,9 +4517,17 @@ async def search_memories(
             readable_tenant_ids=readable_tenant_ids,
             source=source,
             min_similarity=min_similarity,
+            recall_ctx=recall_ctx,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
-    return await _search_memories_legacy(
+    # The legacy path bumps recall_count unconditionally (no caller-agent gate,
+    # no diagnostic gate) — see the ``increment_recall`` call at the end of
+    # ``_search_memories_legacy``. Reporting the pipeline's policy here would
+    # be a lie for whoever flips ``_USE_PIPELINE_SEARCH`` back during a hotfix,
+    # which is the divergence trap this file already warns about in
+    # ``_search_memories_legacy``'s BlankQuery handler. So report what this
+    # path does: it bumps whenever it returned rows.
+    legacy_results = await _search_memories_legacy(
         tenant_id,
         query,
         fleet_ids=fleet_ids,
@@ -4535,6 +4544,9 @@ async def search_memories(
         search_profile=search_profile,
         min_similarity=min_similarity,
     )
+    if recall_ctx is not None:
+        recall_ctx["recall_tracked"] = bool(legacy_results)
+    return legacy_results
 
 
 async def _search_memories_pipeline(
@@ -4557,6 +4569,7 @@ async def _search_memories_pipeline(
     readable_tenant_ids: list[str] | None = None,
     source: str = "search",
     min_similarity: float | None = None,
+    recall_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -4618,6 +4631,15 @@ async def _search_memories_pipeline(
         diagnostic_ctx["counts"] = ctx.data.get("diagnostic_counts", {})
         sp_applied = ctx.data.get("search_params") or {}
         diagnostic_ctx["min_similarity_applied"] = sp_applied.get("min_similarity")
+
+    if recall_ctx is not None:
+        # Written by TrackRecalls on every path it takes. Defaulting to False
+        # when the key is absent keeps the honest failure direction: a caller
+        # told "not tracked" investigates and finds a working counter, whereas
+        # a caller wrongly told "tracked" goes on believing a permanently
+        # pinned counter is fine — the exact silent-zero this field exists to
+        # end.
+        recall_ctx["recall_tracked"] = bool(ctx.data.get("recall_tracked"))
 
     return ctx.data["results"]
 

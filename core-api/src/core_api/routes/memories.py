@@ -1747,6 +1747,9 @@ async def _search_inner(
     # the typed ``SearchResponse.diagnostic`` block below. Results themselves
     # are unchanged by diagnostic mode, and no recall_count is bumped.
     diagnostic_ctx: dict = {}
+    # Filled by TrackRecalls (via search_memories) with whether this search
+    # dispatched a recall_count bump — reported to the caller below.
+    recall_ctx: dict = {}
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -1774,6 +1777,7 @@ async def _search_inner(
             diagnostic=body.diagnostic,
             diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
             min_similarity=body.min_similarity,
+            recall_ctx=recall_ctx,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -1795,11 +1799,13 @@ async def _search_inner(
                     "error": not success,
                 },
             )
+    recall_tracked = bool(recall_ctx.get("recall_tracked"))
     if not body.diagnostic:
-        return SearchResponse(items=results)
+        return SearchResponse(items=results, recall_tracked=recall_tracked)
     counts = diagnostic_ctx.get("counts", {}) or {}
     return SearchResponse(
         items=results,
+        recall_tracked=recall_tracked,
         diagnostic=SearchDiagnostic(
             retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
             top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),

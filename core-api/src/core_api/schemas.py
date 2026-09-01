@@ -580,6 +580,26 @@ class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
     items: list[MemoryOut]
+    # Whether this search dispatched a ``recall_count`` bump for the rows it
+    # returned. False means the returned memories were NOT reinforced, and the
+    # three reasons are all invisible from the request alone: the caller
+    # presented no agent identity (a tenant-scoped key with no
+    # ``filter_agent_id`` — the counter is then pinned at 0 for that caller
+    # forever, and ``recall_boost`` never engages), the call set
+    # ``diagnostic=true``, or the search matched nothing. Before this field the
+    # first case was a permanent, silent behaviour that a client could only
+    # discover by watching a counter never move.
+    recall_tracked: bool = Field(
+        default=False,
+        description=(
+            "Whether this search bumped recall_count for the memories it "
+            "returned. False means they were not reinforced: the caller "
+            "presented no agent identity (a tenant-scoped key that did not set "
+            "filter_agent_id — recall_count stays 0 for that caller and "
+            "recall_boost never engages), the call set diagnostic=true, or "
+            "nothing matched."
+        ),
+    )
     # D12 — present only when the request set ``diagnostic=true``.
     diagnostic: SearchDiagnostic | None = None
 

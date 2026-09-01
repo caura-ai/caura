@@ -50,6 +50,13 @@ class TrackRecalls:
         # or ``auth.agent_id``), so genuine agent recalls — including cross-agent
         # ones that omit ``filter_agent_id`` — still count. Results are returned
         # unchanged either way; only the counter bump is skipped. (Gap A26.)
+        #
+        # ``recall_tracked`` is set on every path below so the surfaces can
+        # report what this search actually did rather than re-deriving the
+        # policy at the route. A re-derived predicate would already be wrong:
+        # the legacy ``_search_memories_legacy`` path bumps unconditionally,
+        # and the "no rows" case below is invisible from the caller's inputs.
+        ctx.data["recall_tracked"] = False
         if not ctx.data.get("caller_agent_id"):
             return None
         # D12 — a diagnostic call is inspection, not use: the caller is asking
@@ -67,4 +74,8 @@ class TrackRecalls:
                     tenant_id=ctx.data["tenant_id"],
                 )
             )
+            # Dispatched, not completed — the bump is fire-and-forget, so this
+            # reports "this search asked for a bump", which is the fact a
+            # caller needs to tell a pinned-at-zero counter from a working one.
+            ctx.data["recall_tracked"] = True
         return None
