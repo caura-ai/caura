@@ -17,8 +17,9 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-from core_api.services.doc_indexing import resolve_doc_memory
 from fastapi import Response
+
+from core_api.services.doc_indexing import resolve_doc_memory
 
 pytestmark = [pytest.mark.unit]
 

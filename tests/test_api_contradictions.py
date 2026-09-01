@@ -14,7 +14,8 @@ endpoint's response shape:
   ``contradictions`` list with the right ``direction``.
 """
 
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 
 async def _write_memory(

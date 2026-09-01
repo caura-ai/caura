@@ -20,7 +20,10 @@ async def test_security_headers_on_api_routes(client):
     """Non-MCP routes should have all security headers."""
     resp = await client.get("/api/v1/health")
     assert resp.status_code == 200
-    assert resp.headers["strict-transport-security"] == "max-age=63072000; includeSubDomains; preload"
+    assert (
+        resp.headers["strict-transport-security"]
+        == "max-age=63072000; includeSubDomains; preload"
+    )
     assert resp.headers["x-content-type-options"] == "nosniff"
     assert resp.headers["x-frame-options"] == "DENY"
     assert resp.headers["referrer-policy"] == "strict-origin-when-cross-origin"
@@ -59,16 +62,21 @@ async def test_mcp_auth_middleware_bearer_extraction(client):
     ``test_mcp_mount_exists`` below.)
     """
     import uuid
+
     tenant_id, headers = get_test_auth()
     uid = uuid.uuid4().hex[:8]
 
-    resp1 = await client.post("/api/v1/memories", json={
-        "tenant_id": tenant_id,
-        "agent_id": f"bearer-test-{uid}",
-        "fleet_id": f"bearer-fleet-{uid}",
-        "memory_type": "fact",
-        "content": f"baseline write [{uid}]",
-    }, headers=headers)
+    resp1 = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": f"bearer-test-{uid}",
+            "fleet_id": f"bearer-fleet-{uid}",
+            "memory_type": "fact",
+            "content": f"baseline write [{uid}]",
+        },
+        headers=headers,
+    )
     assert resp1.status_code == 201
 
 
@@ -93,6 +101,8 @@ def test_mcp_mount_exists():
     from core_api.app import app
 
     mounts = [r for r in app.router.routes if isinstance(r, Mount) and r.path == "/mcp"]
-    bare_routes = [r for r in app.router.routes if isinstance(r, Route) and r.path == "/mcp"]
+    bare_routes = [
+        r for r in app.router.routes if isinstance(r, Route) and r.path == "/mcp"
+    ]
     assert mounts, "MCP mount missing at /mcp"
     assert bare_routes, "Bare-/mcp Route missing — Stage-1 redirect would recur"

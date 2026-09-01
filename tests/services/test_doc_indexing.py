@@ -13,7 +13,6 @@ from core_api.services.doc_indexing import (
     resolve_embed_source,
 )
 
-
 # ---------------------------------------------------------------------------
 # Non-skills collections: summary optional
 # ---------------------------------------------------------------------------

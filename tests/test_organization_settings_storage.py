@@ -134,7 +134,8 @@ async def test_get_display_empty_returns_schema_with_nulls():
 
 async def test_update_persists_overrides():
     tid = _tid()
-    await update_settings(tid,
+    await update_settings(
+        tid,
         {"enrichment": {"provider": "vertex", "model": "gemini-2.0-flash"}},
     )
 
@@ -146,8 +147,7 @@ async def test_update_persists_overrides():
 async def test_update_merges_nested_keys():
     """Partial update of one nested key doesn't wipe sibling keys in the same block."""
     tid = _tid()
-    await update_settings(tid, {"enrichment": {"provider": "openai", "model": "gpt-4"}}
-    )
+    await update_settings(tid, {"enrichment": {"provider": "openai", "model": "gpt-4"}})
     invalidate_cache(tid)
     await update_settings(tid, {"enrichment": {"provider": "vertex"}})
 
@@ -170,7 +170,8 @@ async def test_update_partial_preserves_other_features():
 
 async def test_audit_row_written_on_change(db):
     tid = _tid()
-    await update_settings(tid,
+    await update_settings(
+        tid,
         {"enrichment": {"provider": "vertex"}},
         changed_by="user-123",
     )

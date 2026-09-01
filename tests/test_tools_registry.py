@@ -182,7 +182,7 @@ def test_query_param_scope_tools_do_not_claim_a_default():
     for name in ("caura_list", "caura_stats"):
         description = REGISTRY[name].description
         assert "(default)" not in description, (
-            f"{name}: description calls a scope value \"(default)\", but an "
+            f'{name}: description calls a scope value "(default)", but an '
             "omitted scope is not scope='agent' on the REST/plugin path. "
             "State the ladder per value and name the per-surface default."
         )

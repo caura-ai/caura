@@ -55,7 +55,7 @@ class _Sentinel(Exception):
 class _OutStub:
     """Minimal stand-in for the object returned by create_memory (MCP path)."""
 
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": "m-1", "status": "created"}
 
 

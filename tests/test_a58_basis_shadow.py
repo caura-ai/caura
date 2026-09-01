@@ -13,6 +13,7 @@ The contract under test:
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
 from core_api.services.contradiction import basis_invalidation as bi
 
 pytestmark = pytest.mark.unit

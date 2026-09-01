@@ -16,7 +16,6 @@ from core_api.services.memory_enrichment import (
     _validate_enrichment,
 )
 
-
 # ---------------------------------------------------------------------------
 # Validator: retrieval_hint handling
 # ---------------------------------------------------------------------------

@@ -30,7 +30,6 @@ from core_api.services.forge.forge_service import ForgeConfig, ForgeRunResult
 from core_api.services.lifecycle_audit import resolve_publisher_kwargs
 from core_api.services.skill_promoter import PromoterRunResult
 
-
 # ── Tenant discovery filter ───────────────────────────────────────
 
 
@@ -474,7 +473,12 @@ class TestInjectedCallableArity:
             candidate_doc_ids=[],
         )
         fake_promote_result = PromoterRunResult(
-            tenant_id="t1", fleet_id=None, scanned=0, promoted=0, held=0, auto_approved=0
+            tenant_id="t1",
+            fleet_id=None,
+            scanned=0,
+            promoted=0,
+            held=0,
+            auto_approved=0,
         )
 
         with (
@@ -590,7 +594,9 @@ class TestTickVerdict:
             patch(P + "_wire_llm_fn", new=AsyncMock(return_value=AsyncMock())),
             patch(P + "_make_candidate_writer", return_value=AsyncMock()),
             patch(P + "_make_status_checker", return_value=AsyncMock()),
-            patch(P + "run_forge_distill", new=AsyncMock(return_value=forge_result)) as run_forge,
+            patch(
+                P + "run_forge_distill", new=AsyncMock(return_value=forge_result)
+            ) as run_forge,
             patch(
                 P + "promote_pending_candidates",
                 new=AsyncMock(return_value=promote_result),
@@ -618,7 +624,8 @@ class TestTickVerdict:
 
         with pytest.raises(PermanentOpError) as exc:
             await self._tick(
-                self._forge_result(candidates_skipped_internal_error=2), self._NO_PROMOTIONS
+                self._forge_result(candidates_skipped_internal_error=2),
+                self._NO_PROMOTIONS,
             )
 
         # The message has to name the counter and the scope, or the failure row's
@@ -635,7 +642,8 @@ class TestTickVerdict:
 
         with pytest.raises(PermanentOpError):
             await self._tick(
-                self._forge_result(candidates_skipped_internal_error=1), self._NO_PROMOTIONS
+                self._forge_result(candidates_skipped_internal_error=1),
+                self._NO_PROMOTIONS,
             )
 
     @pytest.mark.asyncio
@@ -643,7 +651,9 @@ class TestTickVerdict:
         """One malformed cluster among successes is routine. Failing the tick over
         it would discard real work from the audit row and page someone nightly."""
         stats = await self._tick(
-            self._forge_result(candidates_written=1, candidates_skipped_internal_error=1),
+            self._forge_result(
+                candidates_written=1, candidates_skipped_internal_error=1
+            ),
             self._NO_PROMOTIONS,
         )
         assert stats["candidates_written"] == 1
@@ -653,7 +663,9 @@ class TestTickVerdict:
     async def test_a_genuinely_quiet_tick_still_succeeds(self):
         """Nothing to mine is not a failure — otherwise every idle tenant would
         fail its tick nightly and the signal would be worthless."""
-        stats = await self._tick(self._forge_result(clusters_eligible=0), self._NO_PROMOTIONS)
+        stats = await self._tick(
+            self._forge_result(clusters_eligible=0), self._NO_PROMOTIONS
+        )
         assert stats["candidates_written"] == 0
         assert stats["skipped_internal_error"] == 0
 

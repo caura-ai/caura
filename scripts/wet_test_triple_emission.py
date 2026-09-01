@@ -73,7 +73,9 @@ def _hdr(s: str) -> str:
 
 
 class WetTest:
-    def __init__(self, base_url: str, api_key: str | None, tenant: str, *, verbose: bool):
+    def __init__(
+        self, base_url: str, api_key: str | None, tenant: str, *, verbose: bool
+    ):
         self.api = base_url.rstrip("/") + "/api/v1"
         # In standalone mode (OSS dev default), the auth context locks
         # tenant_id to "default" and rejects mismatches with 403. We
@@ -245,9 +247,17 @@ class WetTest:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--url", default=DEFAULT_URL, help=f"core-api base URL (default {DEFAULT_URL})")
-    ap.add_argument("--api-key", default=None, help="X-API-Key (only if core-api requires it)")
-    ap.add_argument("--tenant", default="default", help="tenant_id (standalone OSS locks this to 'default')")
+    ap.add_argument(
+        "--url", default=DEFAULT_URL, help=f"core-api base URL (default {DEFAULT_URL})"
+    )
+    ap.add_argument(
+        "--api-key", default=None, help="X-API-Key (only if core-api requires it)"
+    )
+    ap.add_argument(
+        "--tenant",
+        default="default",
+        help="tenant_id (standalone OSS locks this to 'default')",
+    )
     ap.add_argument("--verbose", "-v", action="store_true", help="print full responses")
     args = ap.parse_args()
 

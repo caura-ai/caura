@@ -29,7 +29,10 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from core_api.services.crystallizer_service import _run_crystallization, run_crystallization
+from core_api.services.crystallizer_service import (
+    _run_crystallization,
+    run_crystallization,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -86,18 +89,29 @@ async def test_a_duplicate_fact_is_counted_and_the_run_continues(detail) -> None
     sc = _storage_mock(memories)
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
-        patch("core_api.services.organization_settings.resolve_config", _stub_resolve_config),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            _stub_resolve_config,
+        ),
         patch(
             "core_api.services.crystallizer_service._crystallize_cluster",
-            AsyncMock(return_value=[{"content": "crystallized", "memory_type": "fact", "weight": 0.8}]),
+            AsyncMock(
+                return_value=[
+                    {"content": "crystallized", "memory_type": "fact", "weight": 0.8}
+                ]
+            ),
         ),
         patch(
             "core_api.services.memory_service.create_memory",
             AsyncMock(side_effect=HTTPException(status_code=409, detail=detail)),
         ),
     ):
-        result = await _run_crystallization(tenant_id="t1", fleet_id=None, hygiene=hygiene)
+        result = await _run_crystallization(
+            tenant_id="t1", fleet_id=None, hygiene=hygiene
+        )
 
     assert result["duplicate_facts"] == 1, (
         "a 409 was not counted, so a run that crystallized nothing is "
@@ -115,18 +129,29 @@ async def test_a_non_409_rejection_is_counted_separately() -> None:
     sc = _storage_mock(memories)
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
-        patch("core_api.services.organization_settings.resolve_config", _stub_resolve_config),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            _stub_resolve_config,
+        ),
         patch(
             "core_api.services.crystallizer_service._crystallize_cluster",
-            AsyncMock(return_value=[{"content": "crystallized", "memory_type": "fact", "weight": 0.8}]),
+            AsyncMock(
+                return_value=[
+                    {"content": "crystallized", "memory_type": "fact", "weight": 0.8}
+                ]
+            ),
         ),
         patch(
             "core_api.services.memory_service.create_memory",
             AsyncMock(side_effect=HTTPException(status_code=422, detail="too short")),
         ),
     ):
-        result = await _run_crystallization(tenant_id="t1", fleet_id=None, hygiene=hygiene)
+        result = await _run_crystallization(
+            tenant_id="t1", fleet_id=None, hygiene=hygiene
+        )
 
     assert result["failed_facts"] == 1
     assert result["duplicate_facts"] == 0
@@ -151,15 +176,25 @@ async def test_a_duplicate_does_not_stop_the_facts_after_it() -> None:
         return type("_MemOut", (), {"id": uuid4()})()
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
-        patch("core_api.services.organization_settings.resolve_config", _stub_resolve_config),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            _stub_resolve_config,
+        ),
         patch(
             "core_api.services.crystallizer_service._crystallize_cluster",
             AsyncMock(return_value=facts),
         ),
-        patch("core_api.services.memory_service.create_memory", AsyncMock(side_effect=_create)),
+        patch(
+            "core_api.services.memory_service.create_memory",
+            AsyncMock(side_effect=_create),
+        ),
     ):
-        result = await _run_crystallization(tenant_id="t1", fleet_id=None, hygiene=hygiene)
+        result = await _run_crystallization(
+            tenant_id="t1", fleet_id=None, hygiene=hygiene
+        )
 
     assert calls == ["first", "second"], f"the 409 aborted the cluster: {calls}"
     assert result["duplicate_facts"] == 1
@@ -187,8 +222,13 @@ def _driving(sc: AsyncMock):
     the tests honest about what the guard is and is not responsible for.
     """
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
-        patch("core_api.services.organization_settings.resolve_config", _stub_resolve_config),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            _stub_resolve_config,
+        ),
         patch(
             "core_api.services.crystallizer_service._compute_health",
             AsyncMock(return_value={}),
@@ -209,7 +249,9 @@ def _driving(sc: AsyncMock):
 
 
 @pytest.mark.asyncio
-async def test_an_exception_marks_the_report_failed_instead_of_leaving_it_running() -> None:
+async def test_an_exception_marks_the_report_failed_instead_of_leaving_it_running() -> (
+    None
+):
     """The wedge itself. Anything escaping between ``create_report`` and
     ``update_report`` used to leave the row 'running' forever, and every later run
     short-circuited on it — so crystallization stayed off for the tenant.
@@ -363,12 +405,18 @@ async def test_a_clean_run_still_completes_normally() -> None:
         # non-awaited stub value reaches ``_generate_issues`` and TypeErrors on a
         # comparison. That is a mock artefact, not the behaviour under test —
         # this test is about the guard leaving the happy path alone.
-        patch("core_api.services.crystallizer_service._generate_issues", MagicMock(return_value=[])),
+        patch(
+            "core_api.services.crystallizer_service._generate_issues",
+            MagicMock(return_value=[]),
+        ),
     ):
         await run_crystallization(tenant_id="t1", fleet_id=None, auto_crystallize=False)
 
     assert sc.update_report.await_count == 1
-    assert sc.update_report.await_args_list[0].args[1]["status"] in {"completed", "failed"}
+    assert sc.update_report.await_args_list[0].args[1]["status"] in {
+        "completed",
+        "failed",
+    }
     # 'failed' is legitimate here — the hygiene checks run against an AsyncMock
     # storage client, so they may all report errors. What matters is that the row
     # reached a TERMINAL status rather than staying 'running'.
@@ -416,7 +464,9 @@ async def test_start_publishes_instead_of_running_inline() -> None:
     execute = AsyncMock()
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(
             crystallizer_service, "publish_crystallize_on_demand_request", new=publish
         ),
@@ -448,7 +498,9 @@ async def test_the_reserved_report_is_executed_not_re_reserved() -> None:
     execute = AsyncMock()
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(crystallizer_service, "_execute_crystallization", new=execute),
     ):
         await crystallizer_service.execute_reserved_report(
@@ -474,7 +526,9 @@ async def test_start_does_not_schedule_a_second_run_when_one_is_in_flight() -> N
     execute = AsyncMock()
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(crystallizer_service, "_execute_crystallization", new=execute),
     ):
         returned = await crystallizer_service.start_crystallization("t1", None)
@@ -497,7 +551,9 @@ async def test_the_inline_entry_point_still_awaits() -> None:
     execute = AsyncMock()
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(crystallizer_service, "_execute_crystallization", new=execute),
     ):
         await crystallizer_service.run_crystallization("t1", None)
@@ -529,7 +585,9 @@ async def test_a_redelivered_message_does_not_rerun_a_finished_report(status) ->
     execute = AsyncMock()
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(crystallizer_service, "_execute_crystallization", new=execute),
     ):
         await crystallizer_service.execute_reserved_report(
@@ -551,7 +609,9 @@ async def test_a_still_running_report_is_executed() -> None:
     execute = AsyncMock()
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(crystallizer_service, "_execute_crystallization", new=execute),
     ):
         await crystallizer_service.execute_reserved_report(
@@ -573,7 +633,9 @@ async def test_a_vanished_report_is_dropped_not_recreated() -> None:
     execute = AsyncMock()
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(crystallizer_service, "_execute_crystallization", new=execute),
     ):
         await crystallizer_service.execute_reserved_report(
@@ -621,8 +683,9 @@ async def test_a_malformed_payload_is_dropped_not_redelivered_forever() -> None:
         )
     )
 
-    adapter.crystallize_reserved_report.assert_not_awaited(), (
-        "a malformed payload reached the adapter instead of being dropped"
+    (
+        adapter.crystallize_reserved_report.assert_not_awaited(),
+        ("a malformed payload reached the adapter instead of being dropped"),
     )
 
 
@@ -637,7 +700,10 @@ async def test_the_report_shape_is_the_same_whether_auto_curate_ran() -> None:
 
     with (
         _driving(sc),
-        patch("core_api.services.crystallizer_service._generate_issues", MagicMock(return_value=[])),
+        patch(
+            "core_api.services.crystallizer_service._generate_issues",
+            MagicMock(return_value=[]),
+        ),
     ):
         await run_crystallization(tenant_id="t1", fleet_id=None, auto_crystallize=False)
 
@@ -670,7 +736,9 @@ async def test_a_publish_failure_fails_the_reserved_report() -> None:
     boom = RuntimeError("pubsub unreachable")
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(
             crystallizer_service,
             "publish_crystallize_on_demand_request",
@@ -701,7 +769,9 @@ async def test_a_publish_failure_is_not_masked_by_the_marking_write() -> None:
     boom = RuntimeError("pubsub unreachable")
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(
             crystallizer_service,
             "publish_crystallize_on_demand_request",
@@ -729,7 +799,9 @@ async def test_the_idempotency_check_reads_the_writer_not_the_replica() -> None:
     sc.get_report = AsyncMock(return_value={"id": report_id, "status": "running"})
 
     with (
-        patch("core_api.services.crystallizer_service.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
         patch.object(crystallizer_service, "_execute_crystallization", new=AsyncMock()),
     ):
         await crystallizer_service.execute_reserved_report(

@@ -21,7 +21,8 @@ import pytest
 from sqlalchemy import text
 
 from core_storage_api.services.postgres_service import get_session
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 
 async def _seed_memory(
@@ -788,8 +789,9 @@ class TestScopeFilters:
     @pytest.mark.asyncio
     async def test_fleet_scope_requires_fleet_id(self):
         """generate_insights validates fleet_id presence at the public entry point."""
-        from core_api.services.insights_service import generate_insights
         from fastapi import HTTPException
+
+        from core_api.services.insights_service import generate_insights
 
         with pytest.raises(HTTPException) as exc_info:
             await generate_insights(
@@ -818,8 +820,9 @@ class TestFocusValidation:
 
     @pytest.mark.asyncio
     async def test_invalid_focus_raises(self):
-        from core_api.services.insights_service import generate_insights
         from fastapi import HTTPException
+
+        from core_api.services.insights_service import generate_insights
 
         with pytest.raises(HTTPException) as exc_info:
             await generate_insights("t1", focus="invalid", scope="agent")
@@ -827,8 +830,9 @@ class TestFocusValidation:
 
     @pytest.mark.asyncio
     async def test_invalid_scope_raises(self):
-        from core_api.services.insights_service import generate_insights
         from fastapi import HTTPException
+
+        from core_api.services.insights_service import generate_insights
 
         with pytest.raises(HTTPException) as exc_info:
             await generate_insights("t1", focus="patterns", scope="invalid")
@@ -1221,6 +1225,7 @@ class TestSupersedeOrdering:
     async def test_priors_restored_when_all_findings_fail(self, monkeypatch):
         """If every create_memory raises, priors must be restored to active."""
         from fastapi import HTTPException
+
         from core_api.services import insights_service
 
         tag = _uid()

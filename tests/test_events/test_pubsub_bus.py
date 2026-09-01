@@ -385,14 +385,14 @@ async def test_stop_allows_clean_restart(bus: PubSubEventBus) -> None:
     # the one we got before stop().
     new_executor = bus._get_publish_executor()
     assert new_executor is not original_executor
-    assert not new_executor._shutdown  # noqa: SLF001 — internal check
+    assert not new_executor._shutdown
 
 
 async def test_publish_uses_bounded_executor(bus: PubSubEventBus) -> None:
     # Reach into the lazy-init to confirm we don't fall back on asyncio's
     # default executor (which is effectively unbounded).
     ex = bus._get_publish_executor()
-    assert ex._max_workers == 32  # noqa: SLF001 — internal state check
+    assert ex._max_workers == 32
 
 
 async def test_subscribe_after_start_raises(bus: PubSubEventBus) -> None:

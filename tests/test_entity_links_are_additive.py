@@ -27,11 +27,11 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
-from core_storage_api.services.postgres_service import get_read_session
 from sqlalchemy import select, text
 
 from common.embedding import fake_embedding
 from common.models.audit import AuditLog
+from core_storage_api.services.postgres_service import get_read_session
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -86,7 +86,9 @@ async def _links(memory_id: UUID) -> dict[str, str]:
     async with get_read_session() as session:
         rows = (
             await session.execute(
-                text("SELECT entity_id, role FROM memory_entity_links WHERE memory_id = :mid"),
+                text(
+                    "SELECT entity_id, role FROM memory_entity_links WHERE memory_id = :mid"
+                ),
                 {"mid": memory_id},
             )
         ).all()
@@ -132,7 +134,9 @@ class TestEntityLinksAreAdditive:
         await _patch_links(memory_id, tenant, [{"entity_id": a, "role": "subject"}])
         await _patch_links(memory_id, tenant, [{"entity_id": a, "role": "object"}])
 
-        assert await _links(memory_id) == {a: "subject"}, "the original role must survive a re-send"
+        assert await _links(memory_id) == {a: "subject"}, (
+            "the original role must survive a re-send"
+        )
 
     async def test_the_audit_record_says_add_not_replace(self, sc) -> None:
         """The trail must describe what happened to the row.
@@ -153,7 +157,9 @@ class TestEntityLinksAreAdditive:
                 (
                     await session.execute(
                         select(AuditLog)
-                        .where(AuditLog.tenant_id == tenant, AuditLog.action == "update")
+                        .where(
+                            AuditLog.tenant_id == tenant, AuditLog.action == "update"
+                        )
                         .order_by(AuditLog.created_at)
                     )
                 )
@@ -164,9 +170,13 @@ class TestEntityLinksAreAdditive:
         entry = (rows[-1].detail or {}).get("changes", {}).get("entity_links")
         assert entry is not None, "the PATCH must be recorded in the audit trail"
 
-        assert entry.get("mode") == "add", f"audit must state the additive mode, got {entry!r}"
+        assert entry.get("mode") == "add", (
+            f"audit must state the additive mode, got {entry!r}"
+        )
         # The specific regression: the row still holds B, so nothing was replaced.
         assert "replaced" not in str(entry), (
             f"audit claims a removal that never happens on this path: {entry!r}"
         )
-        assert b in await _links(memory_id), "guard: B is still linked, so 'replaced' would be false"
+        assert b in await _links(memory_id), (
+            "guard: B is still linked, so 'replaced' would be false"
+        )

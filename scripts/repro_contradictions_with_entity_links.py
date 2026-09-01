@@ -31,8 +31,9 @@ import httpx
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _env_compat import env_default as _env  # noqa: E402  (path shim above must run first)
-
+from _env_compat import (
+    env_default as _env,
+)
 
 BASE = _env("CAURA_API_URL", "http://localhost:8000").rstrip("/")
 TENANT = _env("CAURA_TENANT_ID", "default")  # standalone default

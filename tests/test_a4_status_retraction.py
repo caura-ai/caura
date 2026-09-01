@@ -42,8 +42,8 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import TENANT_ID, FLEET_ID, AGENT_ID, uid as _uid
-
+from tests.conftest import AGENT_ID, FLEET_ID, TENANT_ID
+from tests.conftest import uid as _uid
 
 # ---------------------------------------------------------------------------
 # Helpers — write two memories A and B, manually establish a Path-A-style

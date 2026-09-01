@@ -15,11 +15,9 @@ import json
 import re
 from pathlib import Path
 
-
 from core_api.routes import fleet as fleet_mod
 from core_api.routes import plugin as plugin_mod
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_SRC = REPO_ROOT / "plugin" / "src"
@@ -53,7 +51,7 @@ def _bash_fallback_src_files(src: str) -> set[str]:
     """Extract the hardcoded ``SRC_FILES="..."`` fallback list from the install script."""
     match = re.search(r'SRC_FILES="([^"]+)"', src)
     assert match, (
-        "Could not find the hardcoded ``SRC_FILES=\"…\"`` fallback in plugin.py. "
+        'Could not find the hardcoded ``SRC_FILES="…"`` fallback in plugin.py. '
         "The install script must keep a fallback list so installs still succeed "
         "when /api/plugin-manifest is unreachable or python3 is missing."
     )
@@ -170,7 +168,10 @@ async def test_plugin_manifest_endpoint_shape_and_contents(client):
     # round trip. Must mirror ``fleet.MIN_AUTO_DEPLOY_PLUGIN_VERSION``
     # exactly — drift would defeat the whole point of surfacing it here.
     assert "min_auto_deploy_plugin_version" in data
-    assert data["min_auto_deploy_plugin_version"] == fleet_mod.MIN_AUTO_DEPLOY_PLUGIN_VERSION
+    assert (
+        data["min_auto_deploy_plugin_version"]
+        == fleet_mod.MIN_AUTO_DEPLOY_PLUGIN_VERSION
+    )
     assert isinstance(data["min_auto_deploy_plugin_version"], str)
 
     # The src_files list MUST equal the in-process list — that's the
@@ -275,9 +276,12 @@ def test_plugin_manifest_version_matches_package_json():
     to read.
     """
 
-
-    pkg = json.loads((REPO_ROOT / "plugin" / "package.json").read_text(encoding="utf-8"))
-    mfst = json.loads((REPO_ROOT / "plugin" / "openclaw.plugin.json").read_text(encoding="utf-8"))
+    pkg = json.loads(
+        (REPO_ROOT / "plugin" / "package.json").read_text(encoding="utf-8")
+    )
+    mfst = json.loads(
+        (REPO_ROOT / "plugin" / "openclaw.plugin.json").read_text(encoding="utf-8")
+    )
     assert pkg["version"] == mfst["version"], (
         f"version drift — package.json={pkg['version']!r}, "
         f"openclaw.plugin.json={mfst['version']!r}. Bump both in lockstep."

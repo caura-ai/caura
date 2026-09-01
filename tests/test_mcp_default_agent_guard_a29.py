@@ -157,9 +157,7 @@ async def test_read_explicit_agent_on_gateway_bypasses_guard(mcp_env):
     token = mcp_server._via_gateway_var.set(True)
     try:
         try:
-            out = await mcp_server.caura_recall(
-                query="anything", agent_id="real-agent"
-            )
+            out = await mcp_server.caura_recall(query="anything", agent_id="real-agent")
         except Exception:
             # Past the guard, crashed downstream — guard did not fire.
             return

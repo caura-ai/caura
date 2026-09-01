@@ -140,7 +140,8 @@ async def test_pipeline_overhead_bounded_relative_to_legacy(db):
     try:
         # ── Warmup (prime imports, caches, connections) ──
         memory_service._USE_PIPELINE_WRITE = False
-        await create_memory(MemoryCreate(
+        await create_memory(
+            MemoryCreate(
                 tenant_id=LEGACY_TENANT,
                 fleet_id=FLEET_ID,
                 agent_id=AGENT_ID,
@@ -150,7 +151,8 @@ async def test_pipeline_overhead_bounded_relative_to_legacy(db):
             ),
         )
         memory_service._USE_PIPELINE_WRITE = True
-        await create_memory(MemoryCreate(
+        await create_memory(
+            MemoryCreate(
                 tenant_id=PIPELINE_TENANT,
                 fleet_id=FLEET_ID,
                 agent_id=AGENT_ID,

@@ -125,7 +125,9 @@ def provision():
     # A registered trust-1 agent with NO home fleet (seed omits fleet_id).
     ids["wt-fl"] = seed("wt-fl", None)
     s, t, f = set_trust("wt-fl", 1)
-    print(f"  {'wt-fl':14s} seed={str(ids['wt-fl'])[:12]}  trust={t} fleet={f!r} (fleet-less)")
+    print(
+        f"  {'wt-fl':14s} seed={str(ids['wt-fl'])[:12]}  trust={t} fleet={f!r} (fleet-less)"
+    )
     return ids
 
 
@@ -133,7 +135,12 @@ def build_grid(ids):
     """(label, tool, args, min_trust) — run across the fleeted wt-t1/2/3 agents."""
     return [
         ("recall own-fleet", "caura_recall", {"query": "seed", "fleet_ids": [OWN]}, 1),
-        ("recall cross-fleet", "caura_recall", {"query": "seed", "fleet_ids": [OTHER]}, 2),
+        (
+            "recall cross-fleet",
+            "caura_recall",
+            {"query": "seed", "fleet_ids": [OTHER]},
+            2,
+        ),
         ("list own-fleet", "caura_list", {"scope": "fleet", "fleet_id": OWN}, 1),
         ("list cross-fleet", "caura_list", {"scope": "fleet", "fleet_id": OTHER}, 2),
         ("list no-fleet(pin)", "caura_list", {"scope": "fleet"}, 1),
@@ -164,7 +171,9 @@ def run_grid(ids):
             good = (status == "OK") if want_ok else (status in ("DENIED", "ERROR"))
             all_ok = all_ok and good
             cells.append(status if good else f"{status}!BAD")
-        print(f"{label:22s} {cells[0]:12s} {cells[1]:12s} {cells[2]:12s} >= T{min_trust}")
+        print(
+            f"{label:22s} {cells[0]:12s} {cells[1]:12s} {cells[2]:12s} >= T{min_trust}"
+        )
     return all_ok
 
 
@@ -175,7 +184,11 @@ def run_fleetless():
     tests = [
         ("list scope=fleet, no fleet_id", "caura_list", {"scope": "fleet"}),
         ("stats scope=fleet, no fleet_id", "caura_stats", {"scope": "fleet"}),
-        ("list scope=fleet, foreign fleet_id", "caura_list", {"scope": "fleet", "fleet_id": OWN}),
+        (
+            "list scope=fleet, foreign fleet_id",
+            "caura_list",
+            {"scope": "fleet", "fleet_id": OWN},
+        ),
     ]
     all_ok = True
     for label, tool, args in tests:
@@ -198,4 +211,11 @@ if __name__ == "__main__":
     ok1 = run_grid(ids)
     ok2 = run_fleetless()
     ok3 = run_read_liveness(ids)
-    print("\n" + ("ALL EXPECTATIONS MET" if (ok1 and ok2 and ok3) else "MISMATCHES FOUND (see !BAD)"))
+    print(
+        "\n"
+        + (
+            "ALL EXPECTATIONS MET"
+            if (ok1 and ok2 and ok3)
+            else "MISMATCHES FOUND (see !BAD)"
+        )
+    )

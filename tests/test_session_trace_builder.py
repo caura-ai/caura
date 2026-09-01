@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -38,7 +38,6 @@ from core_api.services.session_trace import (
     summarize_evidence,
 )
 
-
 # ── Helpers ────────────────────────────────────────────────────────
 
 
@@ -57,7 +56,7 @@ def _ev(
         weight=DEFAULT_SIGNAL_WEIGHTS[kind] if weight is None else weight,
         memory_ids=(memory_id,),
         details={"run_id": run_id, "agent_id": agent_id, "memory_id": memory_id},
-        observed_at=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        observed_at=datetime(2026, 5, 10, tzinfo=UTC),
     )
 
 
@@ -100,7 +99,9 @@ class _FakeStorageClient:
         self.entity_link_calls: list[list[str]] = []
         self.upsert_calls: list[list[dict]] = []
 
-    async def session_memories_in_window(self, *, tenant_id, fleet_id, window_start, window_end):
+    async def session_memories_in_window(
+        self, *, tenant_id, fleet_id, window_start, window_end
+    ):
         return [
             {
                 "memory_id": m.memory_id,
@@ -147,10 +148,16 @@ class TestFoldOutcomeLabel:
 
     def test_single_strong_success_labels_success(self):
         # Terminal-memory alone (weight 0.9) crosses min_total_weight (0.5).
-        assert fold_outcome_label([_ev(SignalKind.TERMINAL_MEMORY, Polarity.SUCCESS)]) == "success"
+        assert (
+            fold_outcome_label([_ev(SignalKind.TERMINAL_MEMORY, Polarity.SUCCESS)])
+            == "success"
+        )
 
     def test_single_strong_failure_labels_failure(self):
-        assert fold_outcome_label([_ev(SignalKind.TERMINAL_MEMORY, Polarity.FAILURE)]) == "failure"
+        assert (
+            fold_outcome_label([_ev(SignalKind.TERMINAL_MEMORY, Polarity.FAILURE)])
+            == "failure"
+        )
 
     def test_single_weak_signal_below_threshold_unknown(self):
         # Cross-agent-reuse alone (weight 0.3) is below the 0.5 floor.
@@ -161,15 +168,18 @@ class TestFoldOutcomeLabel:
 
     def test_neutral_evidence_does_not_vote(self):
         # A pile of NEUTRAL (cross-agent-reuse) doesn't tip the scale.
-        evs = [_ev(SignalKind.CROSS_AGENT_REUSE, Polarity.NEUTRAL, weight=0.3) for _ in range(10)]
+        evs = [
+            _ev(SignalKind.CROSS_AGENT_REUSE, Polarity.NEUTRAL, weight=0.3)
+            for _ in range(10)
+        ]
         assert fold_outcome_label(evs) == "unknown"
 
     def test_failure_outweighs_success_labels_failure(self):
         # 1 supersession (0.7 failure) vs 1 terminal-memory (0.9 success):
         # success wins.
         evs = [
-            _ev(SignalKind.SUPERSESSION, Polarity.FAILURE),       # 0.7
-            _ev(SignalKind.TERMINAL_MEMORY, Polarity.SUCCESS),    # 0.9
+            _ev(SignalKind.SUPERSESSION, Polarity.FAILURE),  # 0.7
+            _ev(SignalKind.TERMINAL_MEMORY, Polarity.SUCCESS),  # 0.9
         ]
         assert fold_outcome_label(evs) == "success"
 
@@ -258,8 +268,8 @@ class TestBuildSessionTracesOrchestration:
             out = await build_session_traces(
                 tenant_id="t1",
                 fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
         assert out == []
@@ -267,29 +277,34 @@ class TestBuildSessionTracesOrchestration:
     @pytest.mark.asyncio
     async def test_groups_memories_by_run_and_agent(self):
         mem = [
-            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
-            _MemRow("m2", "run-A", "sasha", None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
-            _MemRow("m3", "run-B", "mira",  None, datetime(2026, 5, 7, tzinfo=timezone.utc)),
+            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=UTC)),
+            _MemRow("m2", "run-A", "sasha", None, datetime(2026, 5, 6, tzinfo=UTC)),
+            _MemRow("m3", "run-B", "mira", None, datetime(2026, 5, 7, tzinfo=UTC)),
         ]
         _fake, ctx = _patch_storage_for_build(memory_rows=mem)
         with ctx:
             out = await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
         # Two distinct (run_id, agent_id) groups → two traces.
         assert len(out) == 2
         traces_by_key = {(r.run_id, r.agent_id): r for r in out}
         assert traces_by_key[("run-A", "sasha")].memory_ids == ["m1", "m2"]
-        assert traces_by_key[("run-A", "sasha")].started_at == datetime(2026, 5, 5, tzinfo=timezone.utc)
-        assert traces_by_key[("run-A", "sasha")].ended_at == datetime(2026, 5, 6, tzinfo=timezone.utc)
+        assert traces_by_key[("run-A", "sasha")].started_at == datetime(
+            2026, 5, 5, tzinfo=UTC
+        )
+        assert traces_by_key[("run-A", "sasha")].ended_at == datetime(
+            2026, 5, 6, tzinfo=UTC
+        )
         assert traces_by_key[("run-B", "mira")].memory_ids == ["m3"]
 
     @pytest.mark.asyncio
     async def test_runs_all_six_extractors_concurrently(self):
-        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
+        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=UTC))]
         _fake, ctx = _patch_storage_for_build(memory_rows=mem)
 
         # Patch every extractor to return [] but capture invocation count.
@@ -299,6 +314,7 @@ class TestBuildSessionTracesOrchestration:
             async def fake_extract(*_args, **_kwargs):
                 call_counts[name] += 1
                 return []
+
             return fake_extract
 
         patches = [ctx]
@@ -310,9 +326,10 @@ class TestBuildSessionTracesOrchestration:
             p.start()
         try:
             await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
         finally:
@@ -325,21 +342,35 @@ class TestBuildSessionTracesOrchestration:
     @pytest.mark.asyncio
     async def test_evidence_partitions_to_correct_trace(self):
         mem = [
-            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
-            _MemRow("m2", "run-B", "mira",  None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
+            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=UTC)),
+            _MemRow("m2", "run-B", "mira", None, datetime(2026, 5, 6, tzinfo=UTC)),
         ]
         _fake, ctx = _patch_storage_for_build(memory_rows=mem)
 
         # Stub all extractors except terminal_memory to return [].
         # terminal_memory returns one success for run-A/sasha only.
         from core_api.services.outcome_inference import (
-            contradictions, cross_agent_reuse, external_hooks,
-            repeat_recall, supersessions, terminal_memory,
+            contradictions,
+            cross_agent_reuse,
+            external_hooks,
+            repeat_recall,
+            supersessions,
+            terminal_memory,
         )
+
         async def succ_for_a(_q):
-            return [_ev(SignalKind.TERMINAL_MEMORY, Polarity.SUCCESS,
-                        run_id="run-A", agent_id="sasha", memory_id="m1")]
-        async def noop(*_a, **_k): return []
+            return [
+                _ev(
+                    SignalKind.TERMINAL_MEMORY,
+                    Polarity.SUCCESS,
+                    run_id="run-A",
+                    agent_id="sasha",
+                    memory_id="m1",
+                )
+            ]
+
+        async def noop(*_a, **_k):
+            return []
 
         with (
             ctx,
@@ -351,9 +382,10 @@ class TestBuildSessionTracesOrchestration:
             patch.object(external_hooks, "extract", new=noop),
         ):
             out = await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
 
@@ -366,18 +398,34 @@ class TestBuildSessionTracesOrchestration:
 
     @pytest.mark.asyncio
     async def test_one_extractor_exception_does_not_abort_build(self):
-        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
+        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=UTC))]
         _fake, ctx = _patch_storage_for_build(memory_rows=mem)
 
         from core_api.services.outcome_inference import (
-            contradictions, cross_agent_reuse, external_hooks,
-            repeat_recall, supersessions, terminal_memory,
+            contradictions,
+            cross_agent_reuse,
+            external_hooks,
+            repeat_recall,
+            supersessions,
+            terminal_memory,
         )
-        async def boom(*_a, **_k): raise RuntimeError("simulated extractor crash")
+
+        async def boom(*_a, **_k):
+            raise RuntimeError("simulated extractor crash")
+
         async def succ_for_a(_q):
-            return [_ev(SignalKind.TERMINAL_MEMORY, Polarity.SUCCESS,
-                        run_id="r1", agent_id="a1", memory_id="m1")]
-        async def noop(*_a, **_k): return []
+            return [
+                _ev(
+                    SignalKind.TERMINAL_MEMORY,
+                    Polarity.SUCCESS,
+                    run_id="r1",
+                    agent_id="a1",
+                    memory_id="m1",
+                )
+            ]
+
+        async def noop(*_a, **_k):
+            return []
 
         with (
             ctx,
@@ -389,9 +437,10 @@ class TestBuildSessionTracesOrchestration:
             patch.object(external_hooks, "extract", new=noop),
         ):
             out = await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
 
@@ -402,13 +451,14 @@ class TestBuildSessionTracesOrchestration:
 
     @pytest.mark.asyncio
     async def test_persist_false_skips_insert(self):
-        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
+        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=UTC))]
         fake, ctx = _patch_storage_for_build(memory_rows=mem)
         with ctx:
             await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
         # persist=False → no upsert call to storage.
@@ -417,15 +467,16 @@ class TestBuildSessionTracesOrchestration:
     @pytest.mark.asyncio
     async def test_persist_true_upserts_all_traces_in_one_batch(self):
         mem = [
-            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
-            _MemRow("m2", "run-B", "mira",  None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
+            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=UTC)),
+            _MemRow("m2", "run-B", "mira", None, datetime(2026, 5, 6, tzinfo=UTC)),
         ]
         fake, ctx = _patch_storage_for_build(memory_rows=mem)
         with ctx:
             await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=True,
             )
         # One upsert call carrying BOTH traces in a single batch (the
@@ -435,7 +486,7 @@ class TestBuildSessionTracesOrchestration:
 
     @pytest.mark.asyncio
     async def test_entity_ids_resolved_via_link_table(self):
-        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
+        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=UTC))]
         # 3 link rows for the same memory; builder dedupes + sorts.
         ents = [
             _EntityRow("m1", "e-2"),
@@ -445,9 +496,10 @@ class TestBuildSessionTracesOrchestration:
         _fake, ctx = _patch_storage_for_build(memory_rows=mem, entity_rows=ents)
         with ctx:
             out = await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
         # Entity ids sorted (deterministic input for fingerprint later).
@@ -460,16 +512,16 @@ class TestBuildSessionTracesOrchestration:
         ``CAST(:memory_ids AS uuid[])`` SQL now lives storage-side and is
         pinned by the Ph5a storage integration test.)"""
         mem = [
-            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
-            _MemRow("m2", "run-B", "mira",  None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
+            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=UTC)),
+            _MemRow("m2", "run-B", "mira", None, datetime(2026, 5, 6, tzinfo=UTC)),
         ]
         fake, ctx = _patch_storage_for_build(memory_rows=mem)
         with ctx:
             await build_session_traces(
                 tenant_id="t1",
                 fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
         assert len(fake.entity_link_calls) == 1
@@ -485,9 +537,9 @@ class TestBuildSessionTracesOrchestration:
         per-trace loop — a 100-trace tick was 100+ extra round-trips.
         """
         mem = [
-            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
-            _MemRow("m2", "run-B", "mira",  None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
-            _MemRow("m3", "run-C", "kai",   None, datetime(2026, 5, 7, tzinfo=timezone.utc)),
+            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=UTC)),
+            _MemRow("m2", "run-B", "mira", None, datetime(2026, 5, 6, tzinfo=UTC)),
+            _MemRow("m3", "run-C", "kai", None, datetime(2026, 5, 7, tzinfo=UTC)),
         ]
         ents = [
             _EntityRow("m1", "e-1"),
@@ -497,9 +549,10 @@ class TestBuildSessionTracesOrchestration:
         fake, ctx = _patch_storage_for_build(memory_rows=mem, entity_rows=ents)
         with ctx:
             await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
         # Exactly ONE entity-links call, not one per trace.
@@ -517,9 +570,10 @@ class TestBuildSessionTracesOrchestration:
         at WARNING so the regression surfaces in operator logs
         rather than disappearing silently."""
         import logging
+
         import core_api.services.session_trace as svc
 
-        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=timezone.utc))]
+        mem = [_MemRow("m1", "r1", "a1", None, datetime(2026, 5, 5, tzinfo=UTC))]
         _fake, ctx = _patch_storage_for_build(memory_rows=mem)
 
         # Patch one extractor to return evidence with EMPTY details —
@@ -561,8 +615,8 @@ class TestBuildSessionTracesOrchestration:
             out = await build_session_traces(
                 tenant_id="t1",
                 fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
 
@@ -573,7 +627,9 @@ class TestBuildSessionTracesOrchestration:
         assert any(
             "dropping" in record.message and "terminal_memory" in record.message
             for record in caplog.records
-        ), f"expected a 'dropping terminal_memory' warning; got {[r.message for r in caplog.records]}"
+        ), (
+            f"expected a 'dropping terminal_memory' warning; got {[r.message for r in caplog.records]}"
+        )
 
     @pytest.mark.asyncio
     async def test_entity_partitioning_to_correct_trace(self):
@@ -581,9 +637,9 @@ class TestBuildSessionTracesOrchestration:
         the builder must partition them back so each trace only
         sees ITS members' entities — no cross-pollination."""
         mem = [
-            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=timezone.utc)),
-            _MemRow("m2", "run-A", "sasha", None, datetime(2026, 5, 5, 1, tzinfo=timezone.utc)),
-            _MemRow("m3", "run-B", "mira",  None, datetime(2026, 5, 6, tzinfo=timezone.utc)),
+            _MemRow("m1", "run-A", "sasha", None, datetime(2026, 5, 5, tzinfo=UTC)),
+            _MemRow("m2", "run-A", "sasha", None, datetime(2026, 5, 5, 1, tzinfo=UTC)),
+            _MemRow("m3", "run-B", "mira", None, datetime(2026, 5, 6, tzinfo=UTC)),
         ]
         ents = [
             _EntityRow("m1", "e-A1"),
@@ -593,9 +649,10 @@ class TestBuildSessionTracesOrchestration:
         _fake, ctx = _patch_storage_for_build(memory_rows=mem, entity_rows=ents)
         with ctx:
             out = await build_session_traces(
-                tenant_id="t1", fleet_id=None,
-                window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-                window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+                tenant_id="t1",
+                fleet_id=None,
+                window_start=datetime(2026, 5, 1, tzinfo=UTC),
+                window_end=datetime(2026, 5, 15, tzinfo=UTC),
                 persist=False,
             )
         by_key = {(r.run_id, r.agent_id): r for r in out}
@@ -620,8 +677,8 @@ class TestSessionTraceRow:
             memory_ids=["m1", "m2"],
             entity_ids=["e1"],
             signals_summary={"terminal_memory": {"firings": []}},
-            started_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            ended_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            started_at=datetime(2026, 5, 1, tzinfo=UTC),
+            ended_at=datetime(2026, 5, 2, tzinfo=UTC),
             goal_phrase=None,
         )
         bind = row.as_bind()

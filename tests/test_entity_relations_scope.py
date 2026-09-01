@@ -114,7 +114,11 @@ def patch_lookup(monkeypatch):
             calls["n"] += 1
             if not exists:
                 return None
-            return {"agent_id": agent_id, "fleet_id": fleet_id, "trust_level": trust_level}
+            return {
+                "agent_id": agent_id,
+                "fleet_id": fleet_id,
+                "trust_level": trust_level,
+            }
 
         monkeypatch.setattr(agent_service, "lookup_agent", fake)
         return calls
@@ -187,7 +191,9 @@ async def test_relations_unfiltered_for_tenant_credential(fake_storage):
 async def test_agent_row_resolved_once(fake_storage, patch_lookup):
     """N scope_team memories + relations must cost exactly ONE agent lookup."""
     ids = [str(uuid.uuid4()) for _ in range(5)]
-    linked = [_mem(i, f"author-{n}", "scope_team", "fleet-alpha") for n, i in enumerate(ids)]
+    linked = [
+        _mem(i, f"author-{n}", "scope_team", "fleet-alpha") for n, i in enumerate(ids)
+    ]
     relations = [_rel(i) for i in ids]
     fake_storage(linked, relations)
     calls = patch_lookup(fleet_id="fleet-alpha", trust_level=1)

@@ -18,10 +18,10 @@ from core_api.constants import (
     TYPE_DECAY_DAYS,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helper: compute freshness without DB (pure math)
 # ---------------------------------------------------------------------------
+
 
 def compute_freshness(
     age_days: float,
@@ -45,6 +45,7 @@ def compute_freshness(
 # Unit tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestTypeDecayConstants:
     """Verify TYPE_DECAY_DAYS configuration."""
@@ -52,11 +53,15 @@ class TestTypeDecayConstants:
     def test_all_memory_types_covered(self):
         """Every known memory type should have a decay value."""
         for mt in MEMORY_TYPES:
-            assert mt in TYPE_DECAY_DAYS, f"Memory type '{mt}' missing from TYPE_DECAY_DAYS"
+            assert mt in TYPE_DECAY_DAYS, (
+                f"Memory type '{mt}' missing from TYPE_DECAY_DAYS"
+            )
 
     def test_values_are_positive_integers(self):
         for mt, days in TYPE_DECAY_DAYS.items():
-            assert isinstance(days, int), f"{mt}: decay days should be int, got {type(days)}"
+            assert isinstance(days, int), (
+                f"{mt}: decay days should be int, got {type(days)}"
+            )
             assert days > 0, f"{mt}: decay days should be positive"
 
     def test_preference_decays_slowest(self):
@@ -93,7 +98,9 @@ class TestTypeDecayFreshness:
     def test_task_at_30_days(self):
         """Task (30-day window): at 30 days should hit floor."""
         f = compute_freshness(30, "task")
-        assert f == FRESHNESS_FLOOR, f"Task at 30d should be {FRESHNESS_FLOOR}, got {f:.4f}"
+        assert f == FRESHNESS_FLOOR, (
+            f"Task at 30d should be {FRESHNESS_FLOOR}, got {f:.4f}"
+        )
 
     def test_task_at_45_days(self):
         """Task past its window: should be at floor."""
@@ -155,12 +162,16 @@ class TestValidityWindowOverride:
 
     def test_expired_window_forces_floor(self):
         """Even a 365-day preference hits floor if validity window is expired."""
-        f = compute_freshness(1, "preference", has_valid_end=True, valid_end_expired=True)
+        f = compute_freshness(
+            1, "preference", has_valid_end=True, valid_end_expired=True
+        )
         assert f == FRESHNESS_FLOOR
 
     def test_active_window_forces_full(self):
         """Even a 14-day cancellation stays fresh if validity window is still active."""
-        f = compute_freshness(100, "cancellation", has_valid_end=True, valid_end_expired=False)
+        f = compute_freshness(
+            100, "cancellation", has_valid_end=True, valid_end_expired=False
+        )
         assert f == 1.0
 
 

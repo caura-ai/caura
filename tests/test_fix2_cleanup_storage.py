@@ -32,7 +32,10 @@ import pytest
 from sqlalchemy import text
 
 from common.models import Memory
-from common.models.recall_log import RecallCandidate, RecallEvent  # noqa: F401 — registers tables
+from common.models.recall_log import (  # noqa: F401 — registers tables
+    RecallCandidate,
+    RecallEvent,
+)
 from core_storage_api.services.postgres_service import get_session
 from tests.conftest import new_tenant_id
 
@@ -95,7 +98,9 @@ async def _last_recalled_at(memory_id: str):
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT last_recalled_at FROM memories WHERE id = CAST(:id AS uuid)"),
+                text(
+                    "SELECT last_recalled_at FROM memories WHERE id = CAST(:id AS uuid)"
+                ),
                 {"id": memory_id},
             )
         ).fetchone()
@@ -106,21 +111,30 @@ async def _recall_event_row(event_id: str) -> dict | None:
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT tenant_id, source, query_text, result_count FROM recall_event "
-                     "WHERE id = CAST(:id AS uuid)"),
+                text(
+                    "SELECT tenant_id, source, query_text, result_count FROM recall_event "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
                 {"id": event_id},
             )
         ).fetchone()
     if row is None:
         return None
-    return {"tenant_id": row[0], "source": row[1], "query_text": row[2], "result_count": row[3]}
+    return {
+        "tenant_id": row[0],
+        "source": row[1],
+        "query_text": row[2],
+        "result_count": row[3],
+    }
 
 
 async def _recall_candidate_count(event_id: str) -> int:
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT COUNT(*) FROM recall_candidate WHERE recall_event_id = CAST(:id AS uuid)"),
+                text(
+                    "SELECT COUNT(*) FROM recall_candidate WHERE recall_event_id = CAST(:id AS uuid)"
+                ),
                 {"id": event_id},
             )
         ).fetchone()
@@ -319,7 +333,9 @@ async def test_recall_log_no_candidates_ok(storage_http):
 
 
 async def test_recall_log_missing_event_422(storage_http):
-    resp = await storage_http.post(f"{_PREFIX}/memories/recall-log", json={"candidates": []})
+    resp = await storage_http.post(
+        f"{_PREFIX}/memories/recall-log", json={"candidates": []}
+    )
     assert resp.status_code == 422
 
 
@@ -342,7 +358,10 @@ async def test_recall_log_missing_source_422(storage_http):
 async def test_recall_log_non_list_candidates_422(storage_http):
     resp = await storage_http.post(
         f"{_PREFIX}/memories/recall-log",
-        json={"event": {"tenant_id": "t", "source": "mcp_recall"}, "candidates": "nope"},
+        json={
+            "event": {"tenant_id": "t", "source": "mcp_recall"},
+            "candidates": "nope",
+        },
     )
     assert resp.status_code == 422
 
@@ -519,11 +538,15 @@ async def test_prior_ingest_null_run_id_returns_single_newest(storage_http):
     tenant = _t()
     doc_hash = f"hash-{uuid4().hex}"
     await _seed_memory(
-        tenant_id=tenant, content="anon old", run_id=None,
+        tenant_id=tenant,
+        content="anon old",
+        run_id=None,
         metadata_={"doc_hash": doc_hash, "source": "ingest"},
     )
     new = await _seed_memory(
-        tenant_id=tenant, content="anon new", run_id=None,
+        tenant_id=tenant,
+        content="anon new",
+        run_id=None,
         metadata_={"doc_hash": doc_hash, "source": "ingest"},
     )
     resp = await storage_http.post(

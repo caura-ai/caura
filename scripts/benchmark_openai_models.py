@@ -35,21 +35,21 @@ VECTOR_DIM = 768  # Caura's configured dimension
 # (model_id, input_price_per_1M, output_price_per_1M)
 MODELS: list[tuple[str, float, float]] = [
     # GPT-5.4 series
-    ("gpt-5.4",        2.50,  15.00),
-    ("gpt-5.4-mini",   0.75,   4.50),
-    ("gpt-5.4-nano",   0.20,   1.25),
+    ("gpt-5.4", 2.50, 15.00),
+    ("gpt-5.4-mini", 0.75, 4.50),
+    ("gpt-5.4-nano", 0.20, 1.25),
     # GPT-5
-    ("gpt-5",          1.25,  10.00),
+    ("gpt-5", 1.25, 10.00),
     # GPT-4.1 series
-    ("gpt-4.1",        2.00,   8.00),
-    ("gpt-4.1-mini",   0.40,   1.60),
-    ("gpt-4.1-nano",   0.10,   0.40),
+    ("gpt-4.1", 2.00, 8.00),
+    ("gpt-4.1-mini", 0.40, 1.60),
+    ("gpt-4.1-nano", 0.10, 0.40),
     # GPT-4o series
-    ("gpt-4o",         2.50,  10.00),
-    ("gpt-4o-mini",    0.15,   0.60),
+    ("gpt-4o", 2.50, 10.00),
+    ("gpt-4o-mini", 0.15, 0.60),
     # Reasoning models
-    ("o3-mini",        1.10,   4.40),
-    ("o4-mini",        1.10,   4.40),
+    ("o3-mini", 1.10, 4.40),
+    ("o4-mini", 1.10, 4.40),
 ]
 
 # ── Test prompts (same ones Caura actually sends) ────────────────────────────
@@ -131,8 +131,18 @@ TEST_SAMPLES = [
 ]
 
 VALID_MEMORY_TYPES = {
-    "fact", "episode", "decision", "preference", "task", "semantic",
-    "intention", "plan", "commitment", "action", "outcome", "cancellation",
+    "fact",
+    "episode",
+    "decision",
+    "preference",
+    "task",
+    "semantic",
+    "intention",
+    "plan",
+    "commitment",
+    "action",
+    "outcome",
+    "cancellation",
 }
 VALID_STATUSES = {"active", "pending", "confirmed"}
 
@@ -170,7 +180,9 @@ class ModelSummary:
     latencies: list[float] = field(default_factory=list)
 
 
-def calc_cost(input_tokens: int, output_tokens: int, input_price: float, output_price: float) -> float:
+def calc_cost(
+    input_tokens: int, output_tokens: int, input_price: float, output_price: float
+) -> float:
     return (input_tokens * input_price + output_tokens * output_price) / 1_000_000
 
 
@@ -214,7 +226,9 @@ def validate_extraction(raw) -> bool:
     return True
 
 
-async def run_enrichment(client: openai.AsyncOpenAI, model_id: str, content: str, is_reasoning: bool) -> RunResult:
+async def run_enrichment(
+    client: openai.AsyncOpenAI, model_id: str, content: str, is_reasoning: bool
+) -> RunResult:
     """Run a single enrichment call."""
     result = RunResult(model=model_id, task="enrichment", sample="")
     prompt = ENRICHMENT_PROMPT.format(content=content, today=date.today().isoformat())
@@ -259,7 +273,9 @@ async def run_enrichment(client: openai.AsyncOpenAI, model_id: str, content: str
     return result
 
 
-async def run_extraction(client: openai.AsyncOpenAI, model_id: str, content: str, is_reasoning: bool) -> RunResult:
+async def run_extraction(
+    client: openai.AsyncOpenAI, model_id: str, content: str, is_reasoning: bool
+) -> RunResult:
     """Run a single entity extraction call."""
     result = RunResult(model=model_id, task="extraction", sample="")
     prompt = ENTITY_EXTRACTION_PROMPT.format(content=content)
@@ -303,18 +319,28 @@ async def run_extraction(client: openai.AsyncOpenAI, model_id: str, content: str
 
 
 def is_reasoning_model(model_id: str) -> bool:
-    return model_id.startswith("o1") or model_id.startswith("o3") or model_id.startswith("o4")
+    return (
+        model_id.startswith("o1")
+        or model_id.startswith("o3")
+        or model_id.startswith("o4")
+    )
 
 
-async def benchmark(models: list[tuple[str, float, float]], rounds: int, samples: list[dict]) -> list[ModelSummary]:
+async def benchmark(
+    models: list[tuple[str, float, float]], rounds: int, samples: list[dict]
+) -> list[ModelSummary]:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         # Try .env
-        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        env_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+        )
         if os.path.exists(env_path):
             for line in open(env_path):
                 if line.strip().startswith("OPENAI_API_KEY="):
-                    api_key = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    api_key = (
+                        line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    )
                     break
     if not api_key:
         print("ERROR: OPENAI_API_KEY not set. Export it or add to .env")
@@ -328,13 +354,15 @@ async def benchmark(models: list[tuple[str, float, float]], rounds: int, samples
     completed = 0
 
     for model_id, in_price, out_price in models:
-        summary = ModelSummary(model=model_id, input_price=in_price, output_price=out_price)
+        summary = ModelSummary(
+            model=model_id, input_price=in_price, output_price=out_price
+        )
         summaries[model_id] = summary
         reasoning = is_reasoning_model(model_id)
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  Model: {model_id}  (${in_price} in / ${out_price} out per 1M)")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         for rnd in range(rounds):
             for sample in samples:
@@ -342,10 +370,15 @@ async def benchmark(models: list[tuple[str, float, float]], rounds: int, samples
                 content = sample["content"]
 
                 # Run enrichment and extraction sequentially per model to avoid rate limits
-                for task_fn, task_name in [(run_enrichment, "enrichment"), (run_extraction, "extraction")]:
+                for task_fn, task_name in [
+                    (run_enrichment, "enrichment"),
+                    (run_extraction, "extraction"),
+                ]:
                     result = await task_fn(client, model_id, content, reasoning)
                     result.sample = label
-                    result.cost_usd = calc_cost(result.input_tokens, result.output_tokens, in_price, out_price)
+                    result.cost_usd = calc_cost(
+                        result.input_tokens, result.output_tokens, in_price, out_price
+                    )
 
                     summary.runs += 1
                     if result.error:
@@ -357,18 +390,24 @@ async def benchmark(models: list[tuple[str, float, float]], rounds: int, samples
                         summary.total_output_tokens += result.output_tokens
                         summary.total_cost_usd += result.cost_usd
                         if result.valid_schema:
-                            status = f"OK  {result.latency_ms:>5}ms  ${result.cost_usd:.6f}"
+                            status = (
+                                f"OK  {result.latency_ms:>5}ms  ${result.cost_usd:.6f}"
+                            )
                         else:
                             status = f"BAD SCHEMA  {result.latency_ms:>5}ms"
 
                     completed += 1
-                    print(f"  [{completed:>3}/{total_calls}] r{rnd+1} {task_name:<11} {label:<20} {status}")
+                    print(
+                        f"  [{completed:>3}/{total_calls}] r{rnd + 1} {task_name:<11} {label:<20} {status}"
+                    )
 
                     all_results.append(result)
 
                     # If model not found, skip remaining samples
                     if result.error == "model_not_found":
-                        print(f"  >>> Model {model_id} not found, skipping remaining tests")
+                        print(
+                            f"  >>> Model {model_id} not found, skipping remaining tests"
+                        )
                         # Mark remaining as errors
                         remaining = (len(samples) * 2 * rounds) - summary.runs
                         summary.errors += remaining
@@ -376,9 +415,15 @@ async def benchmark(models: list[tuple[str, float, float]], rounds: int, samples
                         completed += remaining
                         break
 
-                if any(r.error == "model_not_found" for r in all_results if r.model == model_id):
+                if any(
+                    r.error == "model_not_found"
+                    for r in all_results
+                    if r.model == model_id
+                ):
                     break
-            if any(r.error == "model_not_found" for r in all_results if r.model == model_id):
+            if any(
+                r.error == "model_not_found" for r in all_results if r.model == model_id
+            ):
                 break
 
         # Compute summary stats
@@ -391,7 +436,9 @@ async def benchmark(models: list[tuple[str, float, float]], rounds: int, samples
 
         successful = [r for r in all_results if r.model == model_id and not r.error]
         if successful:
-            summary.schema_accuracy = sum(1 for r in successful if r.valid_schema) / len(successful)
+            summary.schema_accuracy = sum(
+                1 for r in successful if r.valid_schema
+            ) / len(successful)
             summary.avg_cost_per_call = summary.total_cost_usd / len(successful)
 
     return list(summaries.values())
@@ -410,8 +457,10 @@ def print_report(summaries: list[ModelSummary]):
     valid.sort(key=lambda s: s.avg_cost_per_call)
 
     # Header
-    print(f"\n{'Model':<18} {'Avg ms':>8} {'P50 ms':>8} {'Min ms':>8} {'Max ms':>8} "
-          f"{'Avg $/call':>12} {'Total $':>10} {'Schema %':>10} {'Errors':>8} {'Runs':>6}")
+    print(
+        f"\n{'Model':<18} {'Avg ms':>8} {'P50 ms':>8} {'Min ms':>8} {'Max ms':>8} "
+        f"{'Avg $/call':>12} {'Total $':>10} {'Schema %':>10} {'Errors':>8} {'Runs':>6}"
+    )
     print("-" * 120)
 
     for s in valid:
@@ -431,12 +480,16 @@ def print_report(summaries: list[ModelSummary]):
     print(f"\n{'─' * 120}")
     print("  COST PROJECTION (per 10,000 enrichment calls)")
     print(f"{'─' * 120}")
-    print(f"{'Model':<18} {'$/10K calls':>14} {'$/100K calls':>14} {'$/1M calls':>14} {'Avg tokens/call':>16}")
+    print(
+        f"{'Model':<18} {'$/10K calls':>14} {'$/100K calls':>14} {'$/1M calls':>14} {'Avg tokens/call':>16}"
+    )
     print("-" * 80)
 
     for s in valid:
         if s.avg_cost_per_call > 0:
-            avg_tokens = (s.total_input_tokens + s.total_output_tokens) / max(len(s.latencies), 1)
+            avg_tokens = (s.total_input_tokens + s.total_output_tokens) / max(
+                len(s.latencies), 1
+            )
             print(
                 f"{s.model:<18} ${s.avg_cost_per_call * 10_000:>13.2f} "
                 f"${s.avg_cost_per_call * 100_000:>13.2f} "
@@ -455,54 +508,73 @@ def print_report(summaries: list[ModelSummary]):
         if good:
             cheapest = min(good, key=lambda s: s.avg_cost_per_call)
             fastest = min(good, key=lambda s: s.avg_latency_ms)
-            print(f"  Cheapest (>=90% accuracy): {cheapest.model} at ${cheapest.avg_cost_per_call:.6f}/call, {cheapest.avg_latency_ms:.0f}ms avg")
-            print(f"  Fastest  (>=90% accuracy): {fastest.model} at {fastest.avg_latency_ms:.0f}ms avg, ${fastest.avg_cost_per_call:.6f}/call")
+            print(
+                f"  Cheapest (>=90% accuracy): {cheapest.model} at ${cheapest.avg_cost_per_call:.6f}/call, {cheapest.avg_latency_ms:.0f}ms avg"
+            )
+            print(
+                f"  Fastest  (>=90% accuracy): {fastest.model} at {fastest.avg_latency_ms:.0f}ms avg, ${fastest.avg_cost_per_call:.6f}/call"
+            )
 
             # Best value = lowest (cost * latency) product
             best = min(good, key=lambda s: s.avg_cost_per_call * s.avg_latency_ms)
-            print(f"  Best value (cost*speed):   {best.model} at ${best.avg_cost_per_call:.6f}/call, {best.avg_latency_ms:.0f}ms avg")
+            print(
+                f"  Best value (cost*speed):   {best.model} at ${best.avg_cost_per_call:.6f}/call, {best.avg_latency_ms:.0f}ms avg"
+            )
         else:
-            print("  No model achieved >= 90% schema accuracy. Review outputs manually.")
+            print(
+                "  No model achieved >= 90% schema accuracy. Review outputs manually."
+            )
 
     # Current fallback comparison
-    print(f"\n  Current fallback model: gpt-4o-mini")
+    print("\n  Current fallback model: gpt-4o-mini")
     current = next((s for s in valid if s.model == "gpt-4o-mini"), None)
     if current:
-        print(f"    -> ${current.avg_cost_per_call:.6f}/call, {current.avg_latency_ms:.0f}ms avg, {current.schema_accuracy*100:.0f}% accuracy")
+        print(
+            f"    -> ${current.avg_cost_per_call:.6f}/call, {current.avg_latency_ms:.0f}ms avg, {current.schema_accuracy * 100:.0f}% accuracy"
+        )
 
 
 # ── Embedding benchmark ───────────────────────────────────────────────────────
 
 EMBEDDING_SAMPLES = [
     {"label": "short", "text": "The deployment uses GitHub Actions."},
-    {"label": "medium", "text": (
-        "After evaluating PostgreSQL, MongoDB, and DynamoDB for the new analytics service, "
-        "the team decided to go with managed Postgres. Key factors: native pgvector support "
-        "for embeddings, ScaNN indexing for fast ANN search, and compatibility with existing "
-        "Alembic migrations."
-    )},
-    {"label": "long", "text": (
-        "Production outage on 2026-03-15 at 14:32 UTC. Root cause: connection pool exhaustion "
-        "in the search service due to a missing timeout on Postgres queries. 47 minutes MTTR. "
-        "Affected 12% of API requests. Hotfix deployed by Sarah Chen. Post-mortem scheduled "
-        "for Monday. Action items: add circuit breaker to connection pool, set query timeout "
-        "to 5s, add monitoring alert for connection count > 80% capacity, update runbook with "
-        "connection pool troubleshooting steps. The incident was escalated to the SRE team at "
-        "14:45 UTC and the VP of Engineering was notified at 15:00 UTC."
-    )},
+    {
+        "label": "medium",
+        "text": (
+            "After evaluating PostgreSQL, MongoDB, and DynamoDB for the new analytics service, "
+            "the team decided to go with managed Postgres. Key factors: native pgvector support "
+            "for embeddings, ScaNN indexing for fast ANN search, and compatibility with existing "
+            "Alembic migrations."
+        ),
+    },
+    {
+        "label": "long",
+        "text": (
+            "Production outage on 2026-03-15 at 14:32 UTC. Root cause: connection pool exhaustion "
+            "in the search service due to a missing timeout on Postgres queries. 47 minutes MTTR. "
+            "Affected 12% of API requests. Hotfix deployed by Sarah Chen. Post-mortem scheduled "
+            "for Monday. Action items: add circuit breaker to connection pool, set query timeout "
+            "to 5s, add monitoring alert for connection count > 80% capacity, update runbook with "
+            "connection pool troubleshooting steps. The incident was escalated to the SRE team at "
+            "14:45 UTC and the VP of Engineering was notified at 15:00 UTC."
+        ),
+    },
     # Batch of 10 texts for batch throughput test
-    {"label": "batch_10", "texts": [
-        "The API uses FastAPI with async handlers.",
-        "the database is deployed in me-west1 region.",
-        "Memory dedup uses content_hash with SHA-256.",
-        "Entity extraction runs via Gemini 2.5 Flash Lite.",
-        "The search endpoint blends vector similarity with keyword FTS.",
-        "Tenant isolation is enforced via API key scoping.",
-        "Agent trust levels range from 0 (restricted) to 3 (admin).",
-        "The crystallizer merges near-duplicate memories into atomic facts.",
-        "Alembic manages database migrations for the schema.",
-        "The OpenClaw plugin exposes caura_write, caura_recall, caura_entity_get.",
-    ]},
+    {
+        "label": "batch_10",
+        "texts": [
+            "The API uses FastAPI with async handlers.",
+            "the database is deployed in me-west1 region.",
+            "Memory dedup uses content_hash with SHA-256.",
+            "Entity extraction runs via Gemini 2.5 Flash Lite.",
+            "The search endpoint blends vector similarity with keyword FTS.",
+            "Tenant isolation is enforced via API key scoping.",
+            "Agent trust levels range from 0 (restricted) to 3 (admin).",
+            "The crystallizer merges near-duplicate memories into atomic facts.",
+            "Alembic manages database migrations for the schema.",
+            "The OpenClaw plugin exposes caura_write, caura_recall, caura_entity_get.",
+        ],
+    },
 ]
 
 # Semantic similarity test pairs: (query, positive_match, negative_match)
@@ -567,11 +639,15 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 async def benchmark_embeddings(rounds: int) -> list[EmbeddingSummary]:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+        env_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+        )
         if os.path.exists(env_path):
             for line in open(env_path):
                 if line.strip().startswith("OPENAI_API_KEY="):
-                    api_key = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    api_key = (
+                        line.strip().split("=", 1)[1].strip().strip('"').strip("'")
+                    )
                     break
     if not api_key:
         print("ERROR: OPENAI_API_KEY not set")
@@ -583,9 +659,9 @@ async def benchmark_embeddings(rounds: int) -> list[EmbeddingSummary]:
     for model_id, price, max_dim in EMBEDDING_MODELS:
         summary = EmbeddingSummary(model=model_id, price_per_1m=price)
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  Embedding: {model_id}  (${price}/1M tokens, dim={VECTOR_DIM})")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         for rnd in range(rounds):
             # Single text embeddings
@@ -609,11 +685,13 @@ async def benchmark_embeddings(rounds: int) -> list[EmbeddingSummary]:
                     summary.latencies.append(ms)
                     summary.total_tokens += tokens
                     summary.total_cost_usd += cost
-                    print(f"  r{rnd+1} single  {label:<10} OK  {ms:>5}ms  {tokens:>4} tok  dim={dims}  ${cost:.8f}")
+                    print(
+                        f"  r{rnd + 1} single  {label:<10} OK  {ms:>5}ms  {tokens:>4} tok  dim={dims}  ${cost:.8f}"
+                    )
                 except Exception as e:
                     summary.runs += 1
                     summary.errors += 1
-                    print(f"  r{rnd+1} single  {label:<10} ERR: {e}")
+                    print(f"  r{rnd + 1} single  {label:<10} ERR: {e}")
 
             # Batch embedding
             for sample in EMBEDDING_SAMPLES:
@@ -638,14 +716,16 @@ async def benchmark_embeddings(rounds: int) -> list[EmbeddingSummary]:
                     summary.total_cost_usd += cost
                     summary.batch_latency_ms += ms
                     summary.batch_tokens += tokens
-                    print(f"  r{rnd+1} batch   {label:<10} OK  {ms:>5}ms  {tokens:>4} tok  {len(texts)} items  ${cost:.8f}")
+                    print(
+                        f"  r{rnd + 1} batch   {label:<10} OK  {ms:>5}ms  {tokens:>4} tok  {len(texts)} items  ${cost:.8f}"
+                    )
                 except Exception as e:
                     summary.runs += 1
                     summary.errors += 1
-                    print(f"  r{rnd+1} batch   {label:<10} ERR: {e}")
+                    print(f"  r{rnd + 1} batch   {label:<10} ERR: {e}")
 
         # Semantic similarity quality test (run once, not per round)
-        print(f"\n  Similarity quality test:")
+        print("\n  Similarity quality test:")
         for query, positive, negative in SIMILARITY_PAIRS:
             try:
                 resp = await client.embeddings.create(
@@ -653,7 +733,9 @@ async def benchmark_embeddings(rounds: int) -> list[EmbeddingSummary]:
                     input=[query, positive, negative],
                     dimensions=VECTOR_DIM,
                 )
-                vecs = [item.embedding for item in sorted(resp.data, key=lambda x: x.index)]
+                vecs = [
+                    item.embedding for item in sorted(resp.data, key=lambda x: x.index)
+                ]
                 sim_pos = cosine_similarity(vecs[0], vecs[1])
                 sim_neg = cosine_similarity(vecs[0], vecs[2])
                 correct = sim_pos > sim_neg
@@ -661,10 +743,12 @@ async def benchmark_embeddings(rounds: int) -> list[EmbeddingSummary]:
                 if correct:
                     summary.similarity_correct += 1
                 mark = "PASS" if correct else "FAIL"
-                print(f"    {mark}  pos={sim_pos:.4f}  neg={sim_neg:.4f}  gap={sim_pos-sim_neg:+.4f}  q=\"{query[:50]}\"")
+                print(
+                    f'    {mark}  pos={sim_pos:.4f}  neg={sim_neg:.4f}  gap={sim_pos - sim_neg:+.4f}  q="{query[:50]}"'
+                )
             except Exception as e:
                 summary.similarity_total += 1
-                print(f"    ERR   q=\"{query[:50]}\"  {e}")
+                print(f'    ERR   q="{query[:50]}"  {e}')
 
         # Compute stats
         if summary.latencies:
@@ -687,12 +771,18 @@ def print_embedding_report(summaries: list[EmbeddingSummary]):
     print("  EMBEDDING BENCHMARK RESULTS")
     print("=" * 100)
 
-    print(f"\n{'Model':<28} {'$/1M tok':>10} {'Avg ms':>8} {'Min ms':>8} {'Max ms':>8} "
-          f"{'Total tok':>10} {'Total $':>12} {'Sim %':>8}")
+    print(
+        f"\n{'Model':<28} {'$/1M tok':>10} {'Avg ms':>8} {'Min ms':>8} {'Max ms':>8} "
+        f"{'Total tok':>10} {'Total $':>12} {'Sim %':>8}"
+    )
     print("-" * 100)
 
     for s in summaries:
-        sim_pct = (s.similarity_correct / s.similarity_total * 100) if s.similarity_total else 0
+        sim_pct = (
+            (s.similarity_correct / s.similarity_total * 100)
+            if s.similarity_total
+            else 0
+        )
         print(
             f"{s.model:<28} ${s.price_per_1m:>8.3f} {s.avg_latency_ms:>8.0f} "
             f"{s.min_latency_ms:>8.0f} {s.max_latency_ms:>8.0f} "
@@ -704,7 +794,9 @@ def print_embedding_report(summaries: list[EmbeddingSummary]):
     print(f"\n{'─' * 100}")
     print("  EMBEDDING COST PROJECTION")
     print(f"{'─' * 100}")
-    print(f"{'Model':<28} {'$/10K embeds':>14} {'$/100K embeds':>14} {'$/1M embeds':>14}")
+    print(
+        f"{'Model':<28} {'$/10K embeds':>14} {'$/100K embeds':>14} {'$/1M embeds':>14}"
+    )
     print("-" * 75)
     for s in summaries:
         if s.avg_cost_per_call > 0:
@@ -723,22 +815,36 @@ def print_embedding_report(summaries: list[EmbeddingSummary]):
         sim_s = s.similarity_correct / max(s.similarity_total, 1)
         sim_l = l.similarity_correct / max(l.similarity_total, 1)
         if sim_l > sim_s:
-            print(f"  {l.model} has better similarity accuracy ({sim_l*100:.0f}% vs {sim_s*100:.0f}%)")
+            print(
+                f"  {l.model} has better similarity accuracy ({sim_l * 100:.0f}% vs {sim_s * 100:.0f}%)"
+            )
         elif sim_s > sim_l:
-            print(f"  {s.model} has equal or better similarity accuracy ({sim_s*100:.0f}% vs {sim_l*100:.0f}%)")
+            print(
+                f"  {s.model} has equal or better similarity accuracy ({sim_s * 100:.0f}% vs {sim_l * 100:.0f}%)"
+            )
         else:
-            print(f"  Both models have equal similarity accuracy ({sim_s*100:.0f}%)")
+            print(f"  Both models have equal similarity accuracy ({sim_s * 100:.0f}%)")
 
     print(f"\n  Current model: text-embedding-3-small (${EMBEDDING_MODELS[0][1]}/1M)")
     print(f"  Caura vector dimension: {VECTOR_DIM}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark OpenAI LLMs + Embeddings for Caura")
-    parser.add_argument("--rounds", type=int, default=1, help="Number of rounds per model (default: 1)")
-    parser.add_argument("--models", nargs="*", help="Specific LLM model IDs to test (default: all)")
-    parser.add_argument("--embeddings-only", action="store_true", help="Only run embedding benchmark")
-    parser.add_argument("--llm-only", action="store_true", help="Only run LLM benchmark")
+    parser = argparse.ArgumentParser(
+        description="Benchmark OpenAI LLMs + Embeddings for Caura"
+    )
+    parser.add_argument(
+        "--rounds", type=int, default=1, help="Number of rounds per model (default: 1)"
+    )
+    parser.add_argument(
+        "--models", nargs="*", help="Specific LLM model IDs to test (default: all)"
+    )
+    parser.add_argument(
+        "--embeddings-only", action="store_true", help="Only run embedding benchmark"
+    )
+    parser.add_argument(
+        "--llm-only", action="store_true", help="Only run LLM benchmark"
+    )
     args = parser.parse_args()
 
     run_llm = not args.embeddings_only
@@ -754,13 +860,19 @@ def main():
                 if name in model_lookup:
                     models.append(model_lookup[name])
                 else:
-                    print(f"WARNING: Unknown model '{name}', add pricing to MODELS dict. Skipping.")
+                    print(
+                        f"WARNING: Unknown model '{name}', add pricing to MODELS dict. Skipping."
+                    )
 
         if models:
-            print(f"Caura OpenAI LLM Benchmark")
-            print(f"Models: {len(models)} | Samples: {len(TEST_SAMPLES)} | Rounds: {args.rounds}")
-            print(f"Tasks per sample: 2 (enrichment + entity extraction)")
-            print(f"Total API calls: {len(models) * len(TEST_SAMPLES) * 2 * args.rounds}")
+            print("Caura OpenAI LLM Benchmark")
+            print(
+                f"Models: {len(models)} | Samples: {len(TEST_SAMPLES)} | Rounds: {args.rounds}"
+            )
+            print("Tasks per sample: 2 (enrichment + entity extraction)")
+            print(
+                f"Total API calls: {len(models) * len(TEST_SAMPLES) * 2 * args.rounds}"
+            )
 
             summaries = asyncio.run(benchmark(models, args.rounds, TEST_SAMPLES))
             print_report(summaries)
@@ -768,7 +880,7 @@ def main():
     # Embedding benchmark
     if run_emb:
         print(f"\n\n{'#' * 100}")
-        print(f"  EMBEDDING BENCHMARK")
+        print("  EMBEDDING BENCHMARK")
         print(f"{'#' * 100}")
         print(f"Models: {len(EMBEDDING_MODELS)} | Rounds: {args.rounds}")
 

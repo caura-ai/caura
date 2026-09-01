@@ -12,7 +12,6 @@ the migration module and patching ``op.get_bind`` + the env via
 
 from __future__ import annotations
 
-import importlib
 import sys
 from unittest.mock import MagicMock
 

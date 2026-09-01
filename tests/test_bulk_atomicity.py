@@ -223,7 +223,10 @@ async def test_bad_weight_and_status_in_mixed_batch_return_207(client):
         "items": [
             {"content": f"valid one {uid()}"},
             {"content": f"bad weight {uid()}", "weight": 1.5},  # > 1.0
-            {"content": f"bad status {uid()}", "status": "nonsense"},  # not a lifecycle status
+            {
+                "content": f"bad status {uid()}",
+                "status": "nonsense",
+            },  # not a lifecycle status
             {"content": f"valid two {uid()}"},
         ],
     }

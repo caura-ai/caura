@@ -63,7 +63,9 @@ def test_a_missing_key_is_null_not_year_one() -> None:
 
     out = _dict_to_out(row)
 
-    assert out.created_at is None, f"expected null, not a sentinel date; got {out.created_at!r}"
+    assert out.created_at is None, (
+        f"expected null, not a sentinel date; got {out.created_at!r}"
+    )
 
 
 def test_the_null_case_is_logged_with_identifiers_only(caplog) -> None:
@@ -75,7 +77,11 @@ def test_the_null_case_is_logged_with_identifiers_only(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="core_api.routes.documents"):
         _dict_to_out(_row(created_at=None, data={"secret": "shh"}))
 
-    lines = [r.getMessage() for r in caplog.records if "document_timestamp_null" in r.getMessage()]
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "document_timestamp_null" in r.getMessage()
+    ]
     assert len(lines) == 1, f"expected one warning; got {lines}"
     assert "11111111-1111-1111-1111-111111111111" in lines[0]
     assert "secret" not in lines[0] and "shh" not in lines[0], (
@@ -91,4 +97,6 @@ def test_a_normal_row_is_untouched_and_silent(caplog) -> None:
         out = _dict_to_out(_row())
 
     assert out.created_at is not None and out.updated_at is not None
-    assert not [r for r in caplog.records if "document_timestamp_null" in r.getMessage()]
+    assert not [
+        r for r in caplog.records if "document_timestamp_null" in r.getMessage()
+    ]

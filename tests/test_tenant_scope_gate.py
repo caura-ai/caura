@@ -75,7 +75,9 @@ def test_every_allowlist_entry_claims_a_known_category() -> None:
     regeneration adds a row and nobody fills the category in.
     """
     entries = json.loads(ALLOWLIST.read_text())["exceptions"]
-    unclassified = [e["id"] for e in entries if e.get("category") not in gate.CATEGORIES]
+    unclassified = [
+        e["id"] for e in entries if e.get("category") not in gate.CATEGORIES
+    ]
     assert not unclassified, f"entries with no valid category: {unclassified}"
 
 
@@ -88,7 +90,9 @@ def test_the_file_documents_every_category_its_entries_claim() -> None:
     """
     doc = json.loads(ALLOWLIST.read_text())
     used = {e["category"] for e in doc["exceptions"]}
-    assert used - set(doc["_categories"]) == set(), "entries claim categories the file never explains"
+    assert used - set(doc["_categories"]) == set(), (
+        "entries claim categories the file never explains"
+    )
 
 
 def test_category_doc_drift_is_caught(tmp_path: Path) -> None:
@@ -114,7 +118,12 @@ def test_category_doc_drift_is_caught(tmp_path: Path) -> None:
     write({**documented, "invented-offline": "added to the JSON but not the script"})
     assert "unknown invented-offline" in "".join(gate.check_category_doc(path))
 
-    write({**documented, "id-addressed-read": "a description edited in the JSON, not the script"})
+    write(
+        {
+            **documented,
+            "id-addressed-read": "a description edited in the JSON, not the script",
+        }
+    )
     assert "reworded id-addressed-read" in "".join(gate.check_category_doc(path))
 
 
@@ -138,7 +147,10 @@ def test_a_plural_tenant_list_is_not_a_binding_scope() -> None:
 
     listed = {e["id"]: e for e in json.loads(ALLOWLIST.read_text())["exceptions"]}
     assert listed["method:tenant_usage_query"]["category"] == "grant-in-lieu-of-tenant"
-    assert listed["route:POST /api/v1/storage/tenant-usage/query"]["category"] == "grant-in-lieu-of-tenant"
+    assert (
+        listed["route:POST /api/v1/storage/tenant-usage/query"]["category"]
+        == "grant-in-lieu-of-tenant"
+    )
 
 
 def test_the_id_addressed_backlog_is_split_by_blast_radius() -> None:
@@ -151,7 +163,9 @@ def test_the_id_addressed_backlog_is_split_by_blast_radius() -> None:
     """
     listed = json.loads(ALLOWLIST.read_text())["exceptions"]
     used = {e["category"] for e in listed}
-    assert "id-addressed" not in used, "the flat category was retired; reclassify the entry"
+    assert "id-addressed" not in used, (
+        "the flat category was retired; reclassify the entry"
+    )
     assert {"id-addressed-write", "id-addressed-read"} <= set(gate.CATEGORIES)
     assert gate.DESTRUCTIVE_CATEGORIES <= gate.BACKLOG_CATEGORIES
 
@@ -184,7 +198,9 @@ def test_a_multi_line_error_survives_as_one_annotation() -> None:
     it below. Emitted raw, GitHub keeps the first line as the annotation and
     spills the rest into the log, dropping exactly the actionable half.
     """
-    encoded = gate._as_annotation("the allowlist grew:\n      + method:x\n    Scope it.")
+    encoded = gate._as_annotation(
+        "the allowlist grew:\n      + method:x\n    Scope it."
+    )
     assert "\n" not in encoded
     assert encoded.count("%0A") == 2
     assert "method:x" in encoded
@@ -196,11 +212,17 @@ def test_annotation_encoding_does_not_eat_its_own_escapes() -> None:
     assert encoded == "100%25 of routes%0Asecond line"
 
 
-def test_every_gate_error_is_emitted_as_a_single_line(capsys: pytest.CaptureFixture) -> None:
+def test_every_gate_error_is_emitted_as_a_single_line(
+    capsys: pytest.CaptureFixture,
+) -> None:
     """End-to-end: nothing reaches a workflow command with a raw newline in it."""
-    entry = gate.Entry("method", "brand_new_unscoped", "NONE", "no binding tenant parameter")
+    entry = gate.Entry(
+        "method", "brand_new_unscoped", "NONE", "no binding tenant parameter"
+    )
     errors = gate.check([entry], [], {})
-    assert errors and any("\n" in e for e in errors), "expected a multi-line error to test"
+    assert errors and any("\n" in e for e in errors), (
+        "expected a multi-line error to test"
+    )
 
     for err in errors:
         line = f"::error::{gate._as_annotation(err)}"
@@ -220,7 +242,11 @@ def test_duplicate_allowlist_ids_are_rejected(tmp_path: Path) -> None:
         json.dumps(
             {
                 "exceptions": [
-                    {"id": "method:x", "verdict": "NONE", "category": "id-addressed-write"},
+                    {
+                        "id": "method:x",
+                        "verdict": "NONE",
+                        "category": "id-addressed-write",
+                    },
                     {"id": "method:x", "verdict": "NONE", "category": "no-tenant-data"},
                 ]
             }
@@ -241,7 +267,9 @@ def test_every_owned_entry_carries_a_tracked_issue() -> None:
     listed = json.loads(ALLOWLIST.read_text())["exceptions"]
     owned = [e for e in listed if e["category"] in gate.TRACKED_CATEGORIES]
     assert owned, "expected a non-empty owned backlog"
-    untracked = [e["id"] for e in owned if not gate.ISSUE_REF.search(e.get("note") or "")]
+    untracked = [
+        e["id"] for e in owned if not gate.ISSUE_REF.search(e.get("note") or "")
+    ]
     assert not untracked, f"owned entries with no tracked issue: {untracked}"
 
 
@@ -271,7 +299,9 @@ _TRACKED = ("id-addressed-write", "grant-in-lieu-of-tenant")
 @pytest.mark.parametrize("category", _TRACKED)
 def test_an_owned_entry_without_an_issue_is_rejected(category: str) -> None:
     """And the gate enforces it rather than trusting the file to stay right."""
-    entry = gate.Entry("method", "some_unscoped_path", "NONE", "no binding tenant parameter")
+    entry = gate.Entry(
+        "method", "some_unscoped_path", "NONE", "no binding tenant parameter"
+    )
     listed = {
         "method:some_unscoped_path": {
             "id": "method:some_unscoped_path",
@@ -281,7 +311,9 @@ def test_an_owned_entry_without_an_issue_is_rejected(category: str) -> None:
         }
     }
     errors = gate.check([entry], [], listed)
-    assert any("no tracked issue" in e for e in errors), f"{category} was not required to name one"
+    assert any("no tracked issue" in e for e in errors), (
+        f"{category} was not required to name one"
+    )
 
     listed["method:some_unscoped_path"]["note"] = "Tracked in #1234."
     assert gate.check([entry], [], listed) == []
@@ -295,9 +327,14 @@ def test_the_committed_allowlist_has_no_duplicates() -> None:
 
 def test_allowlist_holds_only_paths_that_still_exist() -> None:
     """No stale rows: every entry corresponds to something the gate enumerated."""
-    live = {e.ident for e in gate.exceptions(gate.enumerate_methods() + gate.enumerate_routes())}
+    live = {
+        e.ident
+        for e in gate.exceptions(gate.enumerate_methods() + gate.enumerate_routes())
+    }
     listed = {e["id"] for e in json.loads(ALLOWLIST.read_text())["exceptions"]}
-    assert listed - live == set(), f"allowlisted but no longer unscoped: {sorted(listed - live)}"
+    assert listed - live == set(), (
+        f"allowlisted but no longer unscoped: {sorted(listed - live)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -307,12 +344,16 @@ def test_allowlist_holds_only_paths_that_still_exist() -> None:
 
 def test_a_new_unscoped_method_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """The GHSA-wgvw shape: an id-addressed read with no tenant parameter."""
-    extra = gate.Entry("method", "memory_get_everything_by_id", "NONE", "no binding tenant parameter")
+    extra = gate.Entry(
+        "method", "memory_get_everything_by_id", "NONE", "no binding tenant parameter"
+    )
     errors = gate.check([extra], [], _seeded_allowlist())
     assert any("memory_get_everything_by_id" in e for e in errors)
 
 
-def test_an_unscoped_method_added_to_the_real_class_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_unscoped_method_added_to_the_real_class_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """End to end over the real class: enumerate, classify, then fail.
 
     The cases around this one feed synthetic entries straight to ``check``,
@@ -327,7 +368,10 @@ def test_an_unscoped_method_added_to_the_real_class_fails(monkeypatch: pytest.Mo
         """An id-addressed read with no tenant predicate."""
 
     monkeypatch.setattr(
-        PostgresService, "memory_get_everything_by_id", memory_get_everything_by_id, raising=False
+        PostgresService,
+        "memory_get_everything_by_id",
+        memory_get_everything_by_id,
+        raising=False,
     )
 
     entries = _live_entries()
@@ -339,7 +383,9 @@ def test_an_unscoped_method_added_to_the_real_class_fails(monkeypatch: pytest.Mo
     assert any("memory_get_everything_by_id" in e for e in errors)
 
 
-def test_a_scoped_method_added_to_the_real_class_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_scoped_method_added_to_the_real_class_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The other direction: a properly scoped addition needs no allowlist line.
 
     Without this, a gate that simply failed on every new method would pass every
@@ -350,7 +396,9 @@ def test_a_scoped_method_added_to_the_real_class_passes(monkeypatch: pytest.Monk
     async def memory_get_scoped(self, *, memory_id: str, tenant_id: str) -> None:  # type: ignore[no-untyped-def]
         """An id-addressed read that binds the tenant."""
 
-    monkeypatch.setattr(PostgresService, "memory_get_scoped", memory_get_scoped, raising=False)
+    monkeypatch.setattr(
+        PostgresService, "memory_get_scoped", memory_get_scoped, raising=False
+    )
 
     entries = _live_entries()
     injected = [e for e in entries if e.key == "memory_get_scoped"]
@@ -359,14 +407,20 @@ def test_a_scoped_method_added_to_the_real_class_passes(monkeypatch: pytest.Monk
 
 
 def test_a_new_unscoped_route_fails() -> None:
-    extra = gate.Entry("route", "GET /api/v1/storage/leak/{row_id}", "NONE", "no binding tenant read")
+    extra = gate.Entry(
+        "route", "GET /api/v1/storage/leak/{row_id}", "NONE", "no binding tenant read"
+    )
     errors = gate.check([extra], [], _seeded_allowlist())
     assert any("leak/{row_id}" in e for e in errors)
 
 
 def test_an_allowlisted_entry_with_no_category_fails() -> None:
     entry = gate.Entry("method", "some_method", "NONE", "no binding tenant parameter")
-    errors = gate.check([entry], [], {"method:some_method": {"id": "method:some_method", "category": ""}})
+    errors = gate.check(
+        [entry],
+        [],
+        {"method:some_method": {"id": "method:some_method", "category": ""}},
+    )
     assert any("no category" in e for e in errors)
 
 
@@ -374,7 +428,14 @@ def test_an_allowlisted_entry_with_an_invented_category_fails() -> None:
     """The closed set is the thing that keeps the list readable at ~120 rows."""
     entry = gate.Entry("method", "some_method", "NONE", "no binding tenant parameter")
     errors = gate.check(
-        [entry], [], {"method:some_method": {"id": "method:some_method", "category": "its-fine-honest"}}
+        [entry],
+        [],
+        {
+            "method:some_method": {
+                "id": "method:some_method",
+                "category": "its-fine-honest",
+            }
+        },
     )
     assert any("unknown category" in e for e in errors)
 
@@ -385,7 +446,9 @@ def test_a_stale_allowlist_entry_fails() -> None:
     Without this the list only ever grows in practice: nobody removes a row
     when they fix the path it describes, and the count stops meaning anything.
     """
-    errors = gate.check([], [], {"method:long_since_fixed": {"category": "id-addressed-read"}})
+    errors = gate.check(
+        [], [], {"method:long_since_fixed": {"category": "id-addressed-read"}}
+    )
     assert any("no longer needs to be" in e for e in errors)
 
 
@@ -397,21 +460,35 @@ def test_an_allowlisted_entry_that_lost_scope_fails() -> None:
     — which is all the first version of this gate did — reports green while a
     path already granted an exception quietly stops being scopeable.
     """
-    entry = gate.Entry("method", "memory_admin_list", "NONE", "no binding tenant parameter")
+    entry = gate.Entry(
+        "method", "memory_admin_list", "NONE", "no binding tenant parameter"
+    )
     errors = gate.check(
         [entry],
         [],
-        {"method:memory_admin_list": {"verdict": "OPTIONAL", "category": "admin-unscoped"}},
+        {
+            "method:memory_admin_list": {
+                "verdict": "OPTIONAL",
+                "category": "admin-unscoped",
+            }
+        },
     )
     assert any("recorded as OPTIONAL and is now NONE" in e for e in errors)
 
 
 def test_an_unchanged_verdict_is_quiet() -> None:
-    entry = gate.Entry("method", "memory_admin_list", "OPTIONAL", "tenant_id is defaulted")
+    entry = gate.Entry(
+        "method", "memory_admin_list", "OPTIONAL", "tenant_id is defaulted"
+    )
     errors = gate.check(
         [entry],
         [],
-        {"method:memory_admin_list": {"verdict": "OPTIONAL", "category": "admin-unscoped"}},
+        {
+            "method:memory_admin_list": {
+                "verdict": "OPTIONAL",
+                "category": "admin-unscoped",
+            }
+        },
     )
     assert errors == []
 
@@ -423,7 +500,12 @@ def test_a_widening_grant_without_a_binding_scope_fails() -> None:
     branch narrows to one tenant. A twelfth without that pairing would make
     omitting the grant an unscoped read, which is the direction that matters.
     """
-    grant = gate.Entry("grant", "memory_search_everywhere", "NONE", "takes readable_tenant_ids with no binding tenant")
+    grant = gate.Entry(
+        "grant",
+        "memory_search_everywhere",
+        "NONE",
+        "takes readable_tenant_ids with no binding tenant",
+    )
     errors = gate.check([], [grant], {})
     assert any("widening grant" in e for e in errors)
 
@@ -453,7 +535,12 @@ def test_every_fail_closed_guard_exists_and_raises() -> None:
     import ast as _ast
 
     source = (
-        REPO_ROOT / "core-storage-api" / "src" / "core_storage_api" / "routers" / "_validation.py"
+        REPO_ROOT
+        / "core-storage-api"
+        / "src"
+        / "core_storage_api"
+        / "routers"
+        / "_validation.py"
     ).read_text()
     defined = {
         n.name: n
@@ -461,7 +548,9 @@ def test_every_fail_closed_guard_exists_and_raises() -> None:
         if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
     }
     for name in gate.FAIL_CLOSED_GUARDS:
-        assert name in defined, f"{name} is trusted as a guard but is not defined in _validation.py"
+        assert name in defined, (
+            f"{name} is trusted as a guard but is not defined in _validation.py"
+        )
         assert any(isinstance(s, _ast.Raise) for s in _ast.walk(defined[name])), (
             f"{name} is trusted as a fail-closed guard but never raises"
         )
@@ -484,7 +573,9 @@ def test_a_lookalike_helper_is_not_trusted_as_a_guard() -> None:
 
 
 def test_subscript_is_required() -> None:
-    verdict, _ = _classify("async def h(request):\n    body = await request.json()\n    t = body['tenant_id']\n")
+    verdict, _ = _classify(
+        "async def h(request):\n    body = await request.json()\n    t = body['tenant_id']\n"
+    )
     assert verdict == "REQUIRED"
 
 
@@ -839,18 +930,24 @@ def test_a_tenant_read_through_a_nested_body_object_counts() -> None:
 
 
 def test_no_tenant_read_at_all_is_none() -> None:
-    verdict, _ = _classify("async def h(request):\n    body = await request.json()\n    return body['ids']\n")
+    verdict, _ = _classify(
+        "async def h(request):\n    body = await request.json()\n    return body['ids']\n"
+    )
     assert verdict == "NONE"
 
 
 def test_a_defaulted_query_parameter_is_optional() -> None:
     """``GET /memories/{memory_id}``'s shape — the scope is a defaulted arg."""
-    verdict, _ = _classify("async def h(memory_id, tenant_id = None):\n    return memory_id\n")
+    verdict, _ = _classify(
+        "async def h(memory_id, tenant_id = None):\n    return memory_id\n"
+    )
     assert verdict == "OPTIONAL"
 
 
 def test_an_undefaulted_parameter_is_required() -> None:
-    verdict, _ = _classify("async def h(tenant_id, fleet_id = None):\n    return tenant_id\n")
+    verdict, _ = _classify(
+        "async def h(tenant_id, fleet_id = None):\n    return tenant_id\n"
+    )
     assert verdict == "REQUIRED"
 
 
@@ -910,12 +1007,15 @@ def test_every_public_service_method_is_enumerated() -> None:
 
     tree = _ast.parse(Path(module.__file__).read_text())
     class_body = next(
-        n.body for n in tree.body if isinstance(n, _ast.ClassDef) and n.name == "PostgresService"
+        n.body
+        for n in tree.body
+        if isinstance(n, _ast.ClassDef) and n.name == "PostgresService"
     )
     expected = {
         n.name
         for n in class_body
-        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and not n.name.startswith("_")
+        if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+        and not n.name.startswith("_")
     }
     assert {e.key for e in gate.enumerate_methods()} == expected
 
@@ -933,7 +1033,9 @@ def test_a_classmethod_is_enumerated(monkeypatch: pytest.MonkeyPatch) -> None:
     def cm_unscoped_read(cls, memory_id: str) -> None:  # type: ignore[no-untyped-def]
         """An id-addressed read with no tenant predicate."""
 
-    monkeypatch.setattr(PostgresService, "cm_unscoped_read", cm_unscoped_read, raising=False)
+    monkeypatch.setattr(
+        PostgresService, "cm_unscoped_read", cm_unscoped_read, raising=False
+    )
 
     injected = [e for e in gate.enumerate_methods() if e.key == "cm_unscoped_read"]
     assert injected, "a @classmethod on PostgresService was not enumerated"
@@ -947,7 +1049,9 @@ def test_a_staticmethod_is_enumerated(monkeypatch: pytest.MonkeyPatch) -> None:
     def sm_unscoped_read(memory_id: str) -> None:  # type: ignore[no-untyped-def]
         """An id-addressed read with no tenant predicate."""
 
-    monkeypatch.setattr(PostgresService, "sm_unscoped_read", sm_unscoped_read, raising=False)
+    monkeypatch.setattr(
+        PostgresService, "sm_unscoped_read", sm_unscoped_read, raising=False
+    )
 
     injected = [e for e in gate.enumerate_methods() if e.key == "sm_unscoped_read"]
     assert injected and injected[0].verdict == "NONE"
@@ -1130,7 +1234,9 @@ def test_report_uses_the_written_allowlist_and_surfaces_an_invalid_removal(
 
 def test_ratchet_fails_when_the_list_grows(base_repo: Path) -> None:
     path = base_repo / "core-storage-api" / "tenant_scope_allowlist.json"
-    errors = gate.ratchet("HEAD", path, _at("method:already_here") | _at("method:newly_unscoped"))
+    errors = gate.ratchet(
+        "HEAD", path, _at("method:already_here") | _at("method:newly_unscoped")
+    )
     assert len(errors) == 1
     assert "method:newly_unscoped" in errors[0]
     assert "method:already_here" not in errors[0]
@@ -1148,7 +1254,15 @@ def test_ratchet_fails_when_an_entry_weakens(base_repo: Path) -> None:
     path = base_repo / "core-storage-api" / "tenant_scope_allowlist.json"
     path.write_text(
         json.dumps(
-            {"exceptions": [{"id": "method:already_here", "verdict": "OPTIONAL", "category": "id-addressed-read"}]}
+            {
+                "exceptions": [
+                    {
+                        "id": "method:already_here",
+                        "verdict": "OPTIONAL",
+                        "category": "id-addressed-read",
+                    }
+                ]
+            }
         )
     )
     _git(base_repo, "commit", "-qam", "record as OPTIONAL")
@@ -1158,7 +1272,9 @@ def test_ratchet_fails_when_an_entry_weakens(base_repo: Path) -> None:
     assert "OPTIONAL -> NONE" in errors[0]
 
 
-def test_ratchet_fails_when_a_mutating_path_is_relabelled_as_a_read(base_repo: Path) -> None:
+def test_ratchet_fails_when_a_mutating_path_is_relabelled_as_a_read(
+    base_repo: Path,
+) -> None:
     """The hole the read/write split would otherwise open.
 
     Splitting the backlog by blast radius makes "how many unscoped paths mutate
@@ -1169,14 +1285,30 @@ def test_ratchet_fails_when_a_mutating_path_is_relabelled_as_a_read(base_repo: P
     path = base_repo / "core-storage-api" / "tenant_scope_allowlist.json"
     path.write_text(
         json.dumps(
-            {"exceptions": [{"id": "method:already_here", "verdict": "NONE", "category": "id-addressed-write"}]}
+            {
+                "exceptions": [
+                    {
+                        "id": "method:already_here",
+                        "verdict": "NONE",
+                        "category": "id-addressed-write",
+                    }
+                ]
+            }
         )
     )
     _git(base_repo, "commit", "-qam", "record as mutating")
 
     path.write_text(
         json.dumps(
-            {"exceptions": [{"id": "method:already_here", "verdict": "NONE", "category": "id-addressed-read"}]}
+            {
+                "exceptions": [
+                    {
+                        "id": "method:already_here",
+                        "verdict": "NONE",
+                        "category": "id-addressed-read",
+                    }
+                ]
+            }
         )
     )
     errors = gate.ratchet("HEAD", path, _at("method:already_here"))
@@ -1184,12 +1316,22 @@ def test_ratchet_fails_when_a_mutating_path_is_relabelled_as_a_read(base_repo: P
     assert "id-addressed-write -> id-addressed-read" in errors[0]
 
 
-def test_ratchet_allows_a_mutating_path_to_leave_the_list_entirely(base_repo: Path) -> None:
+def test_ratchet_allows_a_mutating_path_to_leave_the_list_entirely(
+    base_repo: Path,
+) -> None:
     """The legitimate exit: it got a tenant scope, so it is no longer an exception."""
     path = base_repo / "core-storage-api" / "tenant_scope_allowlist.json"
     path.write_text(
         json.dumps(
-            {"exceptions": [{"id": "method:already_here", "verdict": "NONE", "category": "id-addressed-write"}]}
+            {
+                "exceptions": [
+                    {
+                        "id": "method:already_here",
+                        "verdict": "NONE",
+                        "category": "id-addressed-write",
+                    }
+                ]
+            }
         )
     )
     _git(base_repo, "commit", "-qam", "record as mutating")
@@ -1198,7 +1340,9 @@ def test_ratchet_allows_a_mutating_path_to_leave_the_list_entirely(base_repo: Pa
     assert gate.ratchet("HEAD", path, {}) == []
 
 
-def test_a_duplicate_in_the_ratchet_base_is_an_error_not_a_pass(base_repo: Path) -> None:
+def test_a_duplicate_in_the_ratchet_base_is_an_error_not_a_pass(
+    base_repo: Path,
+) -> None:
     """A duplicate in the BASE decides what every comparison is made against.
 
     The working copy is protected by this check running on each PR, but that
@@ -1209,8 +1353,16 @@ def test_a_duplicate_in_the_ratchet_base_is_an_error_not_a_pass(base_repo: Path)
         json.dumps(
             {
                 "exceptions": [
-                    {"id": "method:already_here", "verdict": "NONE", "category": "id-addressed-write"},
-                    {"id": "method:already_here", "verdict": "NONE", "category": "no-tenant-data"},
+                    {
+                        "id": "method:already_here",
+                        "verdict": "NONE",
+                        "category": "id-addressed-write",
+                    },
+                    {
+                        "id": "method:already_here",
+                        "verdict": "NONE",
+                        "category": "no-tenant-data",
+                    },
                 ]
             }
         )
@@ -1218,7 +1370,15 @@ def test_a_duplicate_in_the_ratchet_base_is_an_error_not_a_pass(base_repo: Path)
     _git(base_repo, "commit", "-qam", "a bad merge doubled a row")
     path.write_text(
         json.dumps(
-            {"exceptions": [{"id": "method:already_here", "verdict": "NONE", "category": "id-addressed-write"}]}
+            {
+                "exceptions": [
+                    {
+                        "id": "method:already_here",
+                        "verdict": "NONE",
+                        "category": "id-addressed-write",
+                    }
+                ]
+            }
         )
     )
 
@@ -1229,11 +1389,13 @@ def test_a_duplicate_in_the_ratchet_base_is_an_error_not_a_pass(base_repo: Path)
 def test_ratchet_allows_an_entry_to_strengthen(base_repo: Path) -> None:
     """Getting better is not a regression."""
     path = base_repo / "core-storage-api" / "tenant_scope_allowlist.json"
-    assert gate.ratchet("HEAD", path, _at("method:already_here", verdict="OPTIONAL")) == []
+    assert (
+        gate.ratchet("HEAD", path, _at("method:already_here", verdict="OPTIONAL")) == []
+    )
 
 
 def test_ratchet_fails_loudly_on_an_unresolvable_base(base_repo: Path) -> None:
-    """"Nobody looked" must not be reported as "nothing grew".
+    """ "Nobody looked" must not be reported as "nothing grew".
 
     ``git show <bad-ref>:<path>`` fails exactly the way ``git show
     <good-ref>:<missing-path>`` does. Treating both as "this commit introduces
@@ -1626,7 +1788,9 @@ def test_a_later_literal_reassignment_does_not_hide_a_caller_keyed_values() -> N
     )
 
 
-def test_a_later_literal_reassignment_does_not_hide_a_caller_keyed_conflict_set() -> None:
+def test_a_later_literal_reassignment_does_not_hide_a_caller_keyed_conflict_set() -> (
+    None
+):
     """Same hole on the ``set_=`` half — both call sites resolved the same way."""
     assert "m" in _sites(
         """
@@ -1785,7 +1949,9 @@ def test_the_registry_covers_exactly_the_methods_that_need_it() -> None:
     reads as coverage that is not there.
     """
     source = Path(gate.inspect.getfile(_service())).read_text()
-    assert set(gate._caller_keyed_update_sites(source)) == set(gate.IDENTITY_WRITE_GUARDS)
+    assert set(gate._caller_keyed_update_sites(source)) == set(
+        gate.IDENTITY_WRITE_GUARDS
+    )
 
 
 def test_no_registered_guard_admits_an_identity_column() -> None:
@@ -1820,7 +1986,9 @@ def test_a_guard_that_admits_the_primary_key_is_reported() -> None:
     service = _service()
     original = service._FLEET_NODE_IMMUTABLE_FIELDS
     try:
-        service._FLEET_NODE_IMMUTABLE_FIELDS = frozenset({"tenant_id", "node_name"})  # id dropped
+        service._FLEET_NODE_IMMUTABLE_FIELDS = frozenset(
+            {"tenant_id", "node_name"}
+        )  # id dropped
         findings = gate._identity_writability_findings()
     finally:
         service._FLEET_NODE_IMMUTABLE_FIELDS = original
@@ -1896,7 +2064,10 @@ def _service():
 
 def test_the_live_service_still_satisfies_the_scan_assumptions() -> None:
     """The tripwires are silent on the tree as it stands, or they are just noise."""
-    assert gate._scan_assumption_findings(_service().PostgresService, gate._service_tree()) == []
+    assert (
+        gate._scan_assumption_findings(_service().PostgresService, gate._service_tree())
+        == []
+    )
 
 
 def test_a_base_class_on_the_service_is_reported() -> None:

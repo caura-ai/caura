@@ -4,17 +4,16 @@ Unit tests validate the freshness logic using pure math (no DB).
 Integration tests verify the SQL expressions produce correct values.
 """
 
-import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from core_api.constants import FRESHNESS_DECAY_DAYS, FRESHNESS_FLOOR
 
-
 # ---------------------------------------------------------------------------
 # Pure math helpers — replicate the SQL logic in Python for unit testing
 # ---------------------------------------------------------------------------
+
 
 def compute_freshness(
     created_at: datetime,
@@ -26,7 +25,7 @@ def compute_freshness(
 
     anchor = GREATEST(created_at, COALESCE(ts_valid_start, created_at))
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
 
     # Expired: validity window passed → floor
     if ts_valid_end is not None and ts_valid_end < now:
@@ -49,11 +48,11 @@ def compute_freshness(
 # Unit tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.unit
 class TestFreshnessDecay:
-
     def _now(self):
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     # -- Anchor date tests --
 
@@ -117,7 +116,9 @@ class TestFreshnessDecay:
         """ts_valid_end = now (still in the future by a tiny margin)."""
         now = self._now()
         valid_end = now + timedelta(seconds=1)
-        f = compute_freshness(created_at=now - timedelta(days=100), ts_valid_end=valid_end, now=now)
+        f = compute_freshness(
+            created_at=now - timedelta(days=100), ts_valid_end=valid_end, now=now
+        )
         assert f == 1.0
 
     # -- Decay curve shape tests --
@@ -167,4 +168,6 @@ class TestFreshnessDecay:
         created = now - timedelta(days=91)
         valid_start = now - timedelta(days=3)
         f = compute_freshness(created_at=created, ts_valid_start=valid_start, now=now)
-        assert f > 0.95, f"Expected >0.95, got {f} — ts_valid_start should pull anchor forward"
+        assert f > 0.95, (
+            f"Expected >0.95, got {f} — ts_valid_start should pull anchor forward"
+        )

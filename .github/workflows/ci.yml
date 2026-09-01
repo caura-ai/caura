@@ -193,6 +193,35 @@ jobs:
         # rather than common/'s 88, so the format check below is safe to gate.
         run: uv run ruff check core-worker/src/ core-worker/tests/
 
+      - name: Run Ruff linter (scripts)
+        # scripts/ was linted by NOTHING here, the same gap #684 closed for
+        # common/ and #1000 closed for TYPES in this very tree (mypy
+        # --config-file scripts/mypy.ini scripts/, further down this file). Lint
+        # was the half left open: no ruff scope covered scripts/, so the only
+        # gate was the pre-commit hook, which runs per CHANGED FILE. A ruff bump
+        # then plants findings in files nobody is touching, and they surface as
+        # a blocked commit for whoever edits one next, for unrelated reasons —
+        # what happened on enterprise #981, worked around with --no-verify.
+        #
+        # scripts/ruff.toml pins the rule set, byte-for-byte the select/ignore
+        # lists of caura-enterprise/scripts/ruff.toml so a script moving between
+        # the repos is not linted differently.
+        #
+        # DO NOT add ``--config scripts/ruff.toml``: per-file-ignores are
+        # relative to the config's own directory under discovery and to the CWD
+        # under ``--config``, so naming it makes every one inert and the step
+        # fails on exactly the findings they exempt. That is #685, in full, and
+        # this file already carries the warning under the common/ step.
+        run: uv run ruff check scripts/
+
+      - name: Run Ruff linter (root tests)
+        # 392 files, the largest tree in the repo that no ruff scope covered.
+        # tests/ruff.toml carries common/ruff.toml's rule set — NOT scripts/',
+        # whose S/BLE/EXE/FURB/PLW additions are worth their noise in a tree
+        # that shells out to gcloud and are mostly noise in test code. Same
+        # ``--config`` warning as above.
+        run: uv run ruff check tests/
+
       - name: Run Ruff formatter check (core-api)
         run: uv run ruff format --check core-api/src/
 
@@ -207,6 +236,26 @@ jobs:
 
       - name: Run Ruff formatter check (core-worker)
         run: uv run ruff format --check core-worker/src/ core-worker/tests/
+
+      - name: Run Ruff formatter check (scripts)
+        # Both trees are format-clean as of this commit: 13 of 31 files here and
+        # 179 of 392 under tests/ were reformatted in the same change, because
+        # ``ruff format`` has no per-file suppression — only ``exclude``, and a
+        # 179-entry exclude list is worse than the reformat it avoids.
+        #
+        # line-length is 88 in both configs, MEASURED as the minimum-churn value
+        # rather than assumed: at 110 the reformat would touch 29 files here and
+        # 297 under tests/, because these files were written by ``ruff format``
+        # at its default width and a wider limit tells it to JOIN lines that are
+        # correctly wrapped today.
+        #
+        # legacy_name_ratchet.py and do_not_touch_sentinel.py are byte-identical
+        # fleet-wide and were NOT reformatted — they were already clean at 88,
+        # which is part of why 88 is the right pin. They are still checked here.
+        run: uv run ruff format --check scripts/
+
+      - name: Run Ruff formatter check (root tests)
+        run: uv run ruff format --check tests/
 
       - name: Run Ruff formatter check (vendored common/ files at ruff defaults)
         # This list mirrors the policy=identical entries of caura-enterprise's

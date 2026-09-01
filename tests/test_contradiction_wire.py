@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+
 from core_api.constants import VECTOR_DIM
 from core_api.services.contradiction_detector import _detect
-
 from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 pytestmark = pytest.mark.unit

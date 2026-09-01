@@ -24,7 +24,9 @@ from core_api.schemas import BulkMemoryCreate, BulkMemoryItem
 from core_api.services.memory_service import create_memories_bulk
 
 # Long enough to clear CheckContentLength's minimum-length quality gate.
-_PADDING = " This memory carries enough surrounding context to pass the content-length gate."
+_PADDING = (
+    " This memory carries enough surrounding context to pass the content-length gate."
+)
 
 
 def _item(content: str, **kw) -> BulkMemoryItem:
@@ -44,7 +46,9 @@ def _request(*items: BulkMemoryItem) -> BulkMemoryCreate:
 
 async def _write(*items: BulkMemoryItem):
     """Write a batch, assert every item was created, return the result rows."""
-    resp = await create_memories_bulk(_request(*items), bulk_attempt_id=uuid.uuid4().hex)
+    resp = await create_memories_bulk(
+        _request(*items), bulk_attempt_id=uuid.uuid4().hex
+    )
     assert [r.status for r in resp.results] == ["created"] * len(items), resp.results
     return resp.results
 
@@ -79,8 +83,12 @@ def deferring_deployment(monkeypatch):
 
 
 @pytest.mark.integration
-async def test_strong_item_embeds_inline_when_deployment_defers(_engine, deferring_deployment):
-    rows = await _write(_item("Strong write embeds on the request path.", write_mode="strong"))
+async def test_strong_item_embeds_inline_when_deployment_defers(
+    _engine, deferring_deployment
+):
+    rows = await _write(
+        _item("Strong write embeds on the request path.", write_mode="strong")
+    )
 
     assert await _embedded(_engine, rows[0].id), (
         "write_mode='strong' must embed inline even when the deployment defers — "
@@ -131,13 +139,17 @@ async def test_unknown_write_mode_behaves_as_fast(_engine, deferring_deployment)
 async def test_inline_deployment_embeds_everything_regardless(_engine):
     """On a deployment that embeds inline, ``write_mode`` changes nothing."""
     assert settings.inline_embedding, "local default is expected to embed inline"
-    rows = await _write(_item("No opt-in here."), _item("Opted in.", write_mode="strong"))
+    rows = await _write(
+        _item("No opt-in here."), _item("Opted in.", write_mode="strong")
+    )
 
     assert [await _embedded(_engine, r.id) for r in rows] == [True, True]
 
 
 @pytest.mark.integration
-async def test_strong_embed_failure_does_not_fail_the_batch(_engine, deferring_deployment):
+async def test_strong_embed_failure_does_not_fail_the_batch(
+    _engine, deferring_deployment
+):
     """A failed opt-in embed falls back to the backfill instead of 5xx-ing.
 
     These rows were going to defer anyway, so one item's opportunistic inline
@@ -289,9 +301,7 @@ def test_startup_rejects_a_margin_that_pre_empts_the_gate(monkeypatch):
     # Just past the headroom: budget - margin lands exactly ON the gate,
     # which the validator rejects (it requires strictly greater).
     margin = BULK_STRONG_EMBED_TIMEOUT_SECONDS - EMBEDDING_GATE_TIMEOUT_SECONDS
-    monkeypatch.setattr(
-        "common.embedding.constants.EMBEDDING_BUDGET_MARGIN_S", margin
-    )
+    monkeypatch.setattr("common.embedding.constants.EMBEDDING_BUDGET_MARGIN_S", margin)
     with pytest.raises(ValueError, match="EMBEDDING_BUDGET_MARGIN_S"):
         config_mod.Settings()
 

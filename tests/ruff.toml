@@ -1,0 +1,271 @@
+# Ruff contract for the repo-root tests/ tree — pinned deliberately.
+#
+# WHY THIS FILE EXISTS: the same reason as scripts/ruff.toml, and the same
+# reason as common/ruff.toml before it. This tree appeared in NO ruff scope in
+# ci.yml and the repo has no root [tool.ruff], so `ruff check tests/` had no
+# ancestor config and ran at ruff's BUILT-IN defaults — a rule set that is
+# "whatever the installed ruff version ships", and one that expanded from 59 to
+# 413 rules across the 0.16 bump (OSS #684). With CI not looking, the only gate
+# was the pre-commit hook running per CHANGED FILE, so findings accumulated in
+# files nobody was touching and surfaced as a blocked commit for whoever edited
+# one next, for reasons unrelated to their change.
+#
+# It is the largest tree in the repo that was ungated: 392 files against
+# scripts/' 31.
+#
+# WHY THIS RULE SET: common/ruff.toml's select and ignore lists verbatim — the
+# same list every service src/ carries. NOT scripts/ruff.toml's, which adds
+# S/BLE/EXE/FURB/PLW: the bandit family in particular is worth its noise in a
+# tree that shells out to gcloud, and is mostly noise in test code (S101 alone
+# fires on every assert). A test tree and a scripts tree are different jobs.
+#
+# The per-file-ignores below are NOT this file inventing an exemption. Every
+# service pyproject.toml already grants its own tests exactly
+# ``["ARG", "S101", "F841"]``, and this tree is those services' integration
+# tests; linting it more strictly than core-storage-api/tests/ would mean the
+# same fixture idiom is a finding in one directory and clean in another.
+#
+# ``line-length`` is 88, ruff's default, matching common/ and scripts/. MEASURED,
+# not assumed: at 88, 179 of 392 files want reformatting; at 110 it is 297 and at
+# 200 it is 320. These files were written by ``ruff format`` at its default
+# width, so a wider limit does not accommodate the long lines — it instructs the
+# formatter to JOIN lines that are correctly wrapped today. 88 is the
+# minimum-churn value.
+#
+# E501 is ignored, as everywhere in this estate, so line-length governs
+# ``ruff format`` only and never fails ``ruff check``.
+line-length = 88
+target-version = "py312"
+exclude = [
+    ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".venv", "__pycache__", "build", "dist",
+]
+
+[lint]
+select = [
+    "E", "W", "F", "I", "B", "C4", "UP", "ARG",
+    "SIM", "TCH", "PTH", "RUF", "ASYNC",
+]
+ignore = [
+    "E501", "TC001", "TC002", "TC003", "ARG001", "ARG002",
+    "B008", "B904", "RUF022", "PTH123", "SIM117", "RUF012", "RUF009",
+]
+fixable = ["ALL"]
+
+[lint.per-file-ignores]
+# The exemption every service already grants its own tests, for the reasons they
+# already give: unused fixture arguments (ARG), asserts (S101 — inert here,
+# since S is not selected, and kept for parity with the service lists), and
+# bindings kept for readability in arrange blocks (F841).
+"**/*.py" = ["ARG", "S101", "F841"]
+
+
+# ---------------------------------------------------------------------------
+# BACKLOG — a ratchet, not a category. Shrink; never add.
+#
+# 127 findings in 59 files, listed BY NAME with the codes each one
+# still trips and how many times. That shape is deliberate and it is the whole
+# design: a file becomes exempt only by someone adding it here in a reviewed
+# diff, never by being born in the right directory. scripts/mypy.ini reached
+# the same conclusion for types in this same tree — its #983 review rejected a
+# module-level ``ignore_errors``, and #998 tore out two globs covering 105
+# modules to gate the 19 that actually failed. A glob here would silently
+# swallow every future script.
+#
+# The gate is landing WITHOUT this backlog cleared, deliberately: landing a gate
+# together with its backlog is how gates get reverted. What matters is that
+# every file NOT listed here is gated as of this commit, and so is every file
+# added after it.
+#
+# The mechanical half is already gone rather than exempted — 523 findings
+# fixed by ``ruff check --fix`` in this same commit (import order, the
+# ``datetime.UTC`` alias, unused imports, f-strings without placeholders). What
+# is left needs a human: mostly unused unpacked bindings (RUF059, 29), ``dict()`` calls that
+# could be literals (C408, 14) and ambiguous-unicode findings in test
+# fixtures (RUF002/003, 15) — plus B017 blind ``pytest.raises(Exception)`` in
+# 5 tests, which weakens what those tests actually assert.
+#
+# Delete an entry once its file is clean.
+# ---------------------------------------------------------------------------
+# 4: SIM105x4
+"conftest.py" = ["SIM105"]
+# 3: RUF059x3
+"pipeline/test_entity_linking.py" = ["RUF059"]
+# 3: RUF059x3
+"pipeline/test_infer_relations.py" = ["RUF059"]
+# 3: B905, RUF001, RUF002
+"pipeline/test_pipeline_latency.py" = ["B905", "RUF001", "RUF002"]
+# 1: B905
+"pipeline/test_search_pipeline.py" = ["B905"]
+# 1: C416
+"test_a10_evolve_rule_skipped_reason.py" = ["C416"]
+# 1: SIM105
+"test_a13_fleet_less_visible_to_fleet_scoped_search.py" = ["SIM105"]
+# 1: C416
+"test_a15_evolve_weight_adjustment_skipped_reason.py" = ["C416"]
+# 1: RUF003
+"test_a21_detect_near_duplicate.py" = ["RUF003"]
+# 1: RUF002
+"test_a4_14_back_channel_idempotency.py" = ["RUF002"]
+# 1: RUF043
+"test_a4_status_retraction.py" = ["RUF043"]
+# 4: ASYNC109x4
+"test_a58_basis_shadow.py" = ["ASYNC109"]
+# 2: E741, RUF015
+"test_api_plugin.py" = ["E741", "RUF015"]
+# 2: C408x2
+"test_atomic_fact_unembedded_persist.py" = ["C408"]
+# 1: C408
+"test_audit_chain.py" = ["C408"]
+# 3: B017x3
+"test_bulk_write.py" = ["B017"]
+# 1: B017
+"test_capability_usage.py" = ["B017"]
+# 1: C408
+"test_child_dedup_minting_paths.py" = ["C408"]
+# 4: B017, RUF002, RUF005x2
+"test_cluster_fingerprint.py" = ["B017", "RUF002", "RUF005"]
+# 2: B905, RUF002
+"test_contradiction_batch.py" = ["B905", "RUF002"]
+# 1: RUF005
+"test_contradiction_non_conflict_reason_gate.py" = ["RUF005"]
+# 2: RUF059x2
+"test_contradiction_providers.py" = ["RUF059"]
+# 2: E402x2
+"test_do_not_touch_sentinel.py" = ["E402"]
+# 1: RUF002
+"test_docs_tool_latency_claims.py" = ["RUF002"]
+# 1: C408
+"test_duplicate_insert_conflict_409.py" = ["C408"]
+# 1: RUF002
+"test_e4_sparse_verdict_schema.py" = ["RUF002"]
+# 2: C408x2
+"test_embedding_registry_eviction.py" = ["C408"]
+# 1: B007
+"test_emit_memory_triple.py" = ["B007"]
+# 2: C408x2
+"test_enrich_agent_provided_fields.py" = ["C408"]
+# 1: ASYNC109
+"test_enrichment_inline_timeout.py" = ["ASYNC109"]
+# 1: RUF034
+"test_events/test_pubsub_bus.py" = ["RUF034"]
+# 1: RUF003
+"test_fleet_heartbeat_auto_upgrade.py" = ["RUF003"]
+# 2: C408, RUF043
+"test_forge_cron_tick.py" = ["C408", "RUF043"]
+# 15: C408x2, E741, RUF001, RUF059x11
+"test_forge_distill.py" = ["C408", "E741", "RUF001", "RUF059"]
+# 1: RUF002
+"test_forge_eval_harness.py" = ["RUF002"]
+# 1: C408
+"test_governance_bulk_inline_remediation.py" = ["C408"]
+# 3: RUF043x3
+"test_governance_config.py" = ["RUF043"]
+# 1: C408
+"test_governance_inline_fast_remediation.py" = ["C408"]
+# 1: SIM105
+"test_h808_governed_fanout.py" = ["SIM105"]
+# 1: RUF059
+"test_idempotency.py" = ["RUF059"]
+# 2: RUF002, RUF003
+"test_ingest_commit.py" = ["RUF002", "RUF003"]
+# 1: RUF059
+"test_insights_service.py" = ["RUF059"]
+# 1: RUF059
+"test_lifecycle_handlers.py" = ["RUF059"]
+# 2: ASYNC109x2
+"test_llm_retry_budget.py" = ["ASYNC109"]
+# 1: RUF059
+"test_mcp_list.py" = ["RUF059"]
+# 1: RUF003
+"test_mcp_token_budget.py" = ["RUF003"]
+# 3: SIM105x3
+"test_mcp_write_scope_gate.py" = ["SIM105"]
+# 7: ASYNC251x7
+"test_observability.py" = ["ASYNC251"]
+# 1: RUF013
+"test_p1_entity_extraction_bulk.py" = ["RUF013"]
+# 2: B905x2
+"test_p2_semantic_dedup.py" = ["B905"]
+# 8: PTH103x2, PTH111x4, PTH120x2
+"test_provider_protocols.py" = ["PTH103", "PTH111", "PTH120"]
+# 1: ASYNC109
+"test_query_embedding_stampede_guard.py" = ["ASYNC109"]
+# 2: E402x2
+"test_readme_quickstart.py" = ["E402"]
+# 2: RUF043x2
+"test_search_default_profile.py" = ["RUF043"]
+# 1: RUF002
+"test_skill_lifecycle_transitions.py" = ["RUF002"]
+# 3: C416, RUF003, SIM118
+"test_skill_schema_v1.py" = ["C416", "RUF003", "SIM118"]
+# 1: RUF003
+"test_storage_client_retry.py" = ["RUF003"]
+# 6: RUF059x6
+"test_storage_client_routing.py" = ["RUF059"]
+# 1: E402
+"test_tenant_scope_gate.py" = ["E402"]
+
+[lint.isort]
+known-first-party = [
+    "core_api", "core_storage_api", "core_operations", "core_worker", "common",
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+# EXCLUDED FROM ``ruff format`` ONLY. Every file below is still fully
+# lint-checked by the ``[lint]`` section above; only the formatter is held off.
+#
+# THE RULE, and it is one rule rather than 9 judgements: the formatter may not
+# touch a file that carries a line-level ``legacy-name-ok`` or
+# ``legacy-name-floor`` marker. ``legacy_name_ratchet.py`` greps LINE BY LINE — a
+# marker exempts the line it sits on and nothing else. When ``ruff format`` wraps
+# a marked statement past 88 columns, the legacy name goes to one line and the
+# trailing comment to another, so the name lands on an UNMARKED line. The ratchet
+# then reports the marker deleted and the name newly minted, and fails.
+#
+# MEASURED on this change before these exclusions existed: 11 markers displaced
+# across 6 files, ratchet exit 1, reporting 11 exemptions removed and the legacy
+# name "added" in 6 files that nobody had semantically touched.
+#
+# Re-attaching each comment to its name's line does NOT converge. Ruff's
+# preferred layout for three of those sites puts the trailing comment on a line
+# that does not hold the name at all — the ``1,`` of a ``replace()`` call, the
+# blank-string argument of a ``setenv()``, the right-hand side of a comparison —
+# so every reformat displaces it again. Verified by doing it and re-running both
+# gates.
+#
+# Two things this buys beyond a green build. The pre-commit ruff-format hook
+# reads this list too, so it can no longer displace a marker on someone's
+# unrelated commit — a live trap, not a hypothetical, since that hook is what
+# formats these files today. And ``legacy_name_ratchet.py`` and
+# ``do_not_touch_sentinel.py`` are byte-identical fleet-wide with their content
+# owned elsewhere; "never reformat these two" was a rule people had to remember,
+# and is now a rule the config enforces.
+#
+# THE FIX THAT REMOVES AN ENTRY: hoist the legacy literal into a short
+# module-level constant carrying the marker, so no wrap is possible.
+# ``tests/_legacy_contracts.py`` exists for exactly that and already holds four.
+# It is a change to test and script code, deliberately not bundled into a
+# lint-coverage change. Delete an entry once its file has no in-line marker left.
+exclude = [
+    # markers: 4 — the module the hoist-fix above targets
+    "_legacy_contracts.py",
+    # markers: 1 — the legacy version env var, inside a setenv() call
+    "test_api_status.py",
+    # markers: 3
+    "test_client_metapackages.py",
+    # markers: 1
+    "test_doc_memory_spec.py",
+    # markers: 6 — a legacy KEYWORD argument name; cannot be hoisted to a constant
+    "test_env_dual_read.py",
+    # markers: 1
+    "test_env_write_new_names.py",
+    # markers: 2 — the pinned wire event_type in a dict literal
+    "test_events/test_pubsub_bus.py",
+    # markers: 4 — the pinned wire value asserted four ways
+    "test_events/test_topics.py",
+    # markers: 72 — the engine's own test; markers ARE its fixtures
+    "test_legacy_name_ratchet.py",
+]

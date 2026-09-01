@@ -32,7 +32,11 @@ def _inputs(**overrides) -> ClusterFingerprintInputs:
         "goal_phrase": "Deploy script hangs on step 7 in eu-west",
         "domain": "devops",
         "entity_ids": ["e1", "e2", "e3"],
-        "step_skeleton": ["run preflight check", "execute deploy script", "rollback on failure"],
+        "step_skeleton": [
+            "run preflight check",
+            "execute deploy script",
+            "rollback on failure",
+        ],
         "entity_centralities": None,
     }
     base.update(overrides)
@@ -125,7 +129,11 @@ class TestPermutationInvariance:
         a = _inputs(domain="DevOps")
         b = _inputs(domain="devops")
         c = _inputs(domain="  DEVOPS  ")
-        assert compute_fingerprint(a).fp == compute_fingerprint(b).fp == compute_fingerprint(c).fp
+        assert (
+            compute_fingerprint(a).fp
+            == compute_fingerprint(b).fp
+            == compute_fingerprint(c).fp
+        )
 
 
 # ── P3: Step ordering significance + within-step normalization ────
@@ -164,7 +172,7 @@ class TestStepOrdering:
 class TestTopKEntityStability:
     def test_adding_low_centrality_entity_does_not_shift(self):
         base_ents = ["e1", "e2", "e3", "e4", "e5"]
-        centralities = {e: 1.0 for e in base_ents}
+        centralities = dict.fromkeys(base_ents, 1.0)
         # Sixth entity, very low centrality — won't crack top 5.
         plus_one_ents = base_ents + ["e6"]
         plus_one_centralities = {**centralities, "e6": 0.001}
@@ -178,9 +186,9 @@ class TestTopKEntityStability:
         # fingerprint legitimately changes — the cluster's identity
         # really did move.
         base_ents = ["e1", "e2", "e3", "e4", "e5"]
-        centralities = {e: 1.0 for e in base_ents}
+        centralities = dict.fromkeys(base_ents, 1.0)
         plus_one_ents = base_ents + ["e6"]
-        plus_one_centralities = {**{e: 0.1 for e in base_ents}, "e6": 10.0}
+        plus_one_centralities = {**dict.fromkeys(base_ents, 0.1), "e6": 10.0}
 
         a = _inputs(entity_ids=base_ents, entity_centralities=centralities)
         b = _inputs(entity_ids=plus_one_ents, entity_centralities=plus_one_centralities)
@@ -194,7 +202,7 @@ class TestTopKEntityStability:
         ``sorted(set(...))`` — this asserts the centrality path
         matches that contract."""
         ents = ["e1", "e1", "e2", "e2", "e3", "e4", "e5", "e6"]
-        cent = {e: 1.0 for e in set(ents)}
+        cent = dict.fromkeys(set(ents), 1.0)
         # With dedup: top-5 by id ASC is e1..e5. Without dedup, the
         # ranked list would be ["e1","e1","e2","e2","e3"] — the
         # duplicates would crowd out e4 and e5.
@@ -207,7 +215,7 @@ class TestTopKEntityStability:
         # of input order.
         ents_v1 = ["e1", "e2", "e3", "e4", "e5", "e6", "e7"]
         ents_v2 = ["e7", "e2", "e6", "e1", "e5", "e3", "e4"]
-        cent = {e: 1.0 for e in ents_v1}
+        cent = dict.fromkeys(ents_v1, 1.0)
 
         a = _inputs(entity_ids=ents_v1, entity_centralities=cent)
         b = _inputs(entity_ids=ents_v2, entity_centralities=cent)
@@ -283,12 +291,16 @@ class TestGoalPhraseTopK:
     def test_top_k_caps_at_constant(self):
         # 10 distinct tokens; only the first GOAL_PHRASE_TOP_K (sorted)
         # influence the fingerprint.
-        a = _inputs(goal_phrase="apple banana cherry date elderberry "
-                                "fig grape honeydew imbe jackfruit")
+        a = _inputs(
+            goal_phrase="apple banana cherry date elderberry "
+            "fig grape honeydew imbe jackfruit"
+        )
         # First 6 sorted: apple, banana, cherry, date, elderberry, fig
         # Adding "kiwi" (which sorts after "jackfruit") wouldn't crack the top 6.
-        b = _inputs(goal_phrase="apple banana cherry date elderberry "
-                                "fig grape honeydew imbe jackfruit kiwi")
+        b = _inputs(
+            goal_phrase="apple banana cherry date elderberry "
+            "fig grape honeydew imbe jackfruit kiwi"
+        )
         assert compute_fingerprint(a).fp == compute_fingerprint(b).fp
 
 
@@ -305,7 +317,9 @@ class TestCanonicalFormAnatomy:
         assert "steps=" in cf
 
     def test_entities_separator_is_comma(self):
-        cf = render_canonical_form(_inputs(entity_ids=["e1", "e2"], entity_centralities=None))
+        cf = render_canonical_form(
+            _inputs(entity_ids=["e1", "e2"], entity_centralities=None)
+        )
         assert "entities=e1,e2" in cf
 
     def test_steps_separator_is_pipe(self):

@@ -8,7 +8,7 @@ from tests._legacy_contracts import frozen_topic
 
 def test_members_compare_equal_to_their_string_value() -> None:
     assert Topics.Memory.ENRICHED == "memclaw.memory.enriched"  # legacy-name-ok: rule 3 — asserts the enum's current wire value
-    assert Topics.Audit.EVENT_RECORDED == frozen_topic("audit.event-recorded")
+    assert frozen_topic("audit.event-recorded") == Topics.Audit.EVENT_RECORDED
 
 
 def test_members_format_as_their_string_value() -> None:

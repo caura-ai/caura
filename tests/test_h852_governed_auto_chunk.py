@@ -70,7 +70,9 @@ def _parent_row() -> dict:
     }
 
 
-def _config(*, pii: dict | None = None, non_business: dict | None = None) -> ResolvedConfig:
+def _config(
+    *, pii: dict | None = None, non_business: dict | None = None
+) -> ResolvedConfig:
     """A real ``ResolvedConfig`` — the enum/default resolution is part of what a
     governance test should exercise, and a stand-in object drifts from it."""
     governance: dict = {}
@@ -433,7 +435,9 @@ def test_only_the_persisting_compositions_apply_the_llm_verdict() -> None:
         for name in dir(compositions)
         if name.startswith("build_") and name.endswith("_pipeline")
     }
-    assert len(builders) >= 6, f"composition set shrank unexpectedly: {sorted(builders)}"
+    assert len(builders) >= 6, (
+        f"composition set shrank unexpectedly: {sorted(builders)}"
+    )
 
     applies = {
         name

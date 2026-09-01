@@ -13,7 +13,6 @@ No DB required. Verifies the deterministic triple-emission contract:
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -47,7 +46,7 @@ def _input(content: str, subject_id=None, extra_links=None, **kwargs) -> MemoryC
 
 def _ctx(data: MemoryCreate, *, flag: bool = True) -> PipelineContext:
     return PipelineContext(
-                data={"input": data, "memory_fields": {"metadata": {}}},
+        data={"input": data, "memory_fields": {"metadata": {}}},
         tenant_config=SimpleNamespace(triple_emission_enabled=flag),
     )
 

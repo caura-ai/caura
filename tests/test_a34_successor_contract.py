@@ -184,7 +184,9 @@ async def test_multiple_stale_rows_each_get_their_successor(monkeypatch):
         _mem_ns(s1, status="outdated", score=2.0),
         _mem_ns(s2, status="conflicted", score=1.0),
     ]
-    out = await _run(rows, [_successor_dict(n1, s1), _successor_dict(n2, s2)], monkeypatch)
+    out = await _run(
+        rows, [_successor_dict(n1, s1), _successor_dict(n2, s2)], monkeypatch
+    )
     assert [str(m.id) for m in out] == [str(n1), str(s1), str(n2), str(s2)]
 
 

@@ -28,6 +28,7 @@ dedicated tests at the end of this file.
 
 from __future__ import annotations
 
+from datetime import UTC
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
@@ -162,7 +163,7 @@ async def test_collect_memories_forwards_valid_at_and_readable_tenant_ids():
     from the scored-search fallthrough's (cross-tenant read widening and
     historical-question filtering both broken).
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.search.classify_query import ClassifyQuery
@@ -170,7 +171,7 @@ async def test_collect_memories_forwards_valid_at_and_readable_tenant_ids():
 
     matched_entity_id = uuid4()
     matched_memory_id = str(uuid4())
-    valid_at_dt = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
+    valid_at_dt = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
     fake_storage = AsyncMock()
     fake_storage.fts_search_entities = AsyncMock(return_value=[str(matched_entity_id)])
@@ -753,7 +754,9 @@ async def test_post_load_shortfall_declines_and_says_why(caplog) -> None:
 
     from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
 
-    caplog.set_level(logging.INFO, logger="core_api.pipeline.steps.search.classify_query")
+    caplog.set_level(
+        logging.INFO, logger="core_api.pipeline.steps.search.classify_query"
+    )
     eid = uuid4()
     linked = [str(uuid4()) for _ in range(5)]
     sc = _entity_fixture(eid, linked, loaded_ids=linked[:2])
@@ -784,7 +787,9 @@ async def test_a_wholly_filtered_pool_is_not_reported_as_no_links(caplog) -> Non
 
     from core_api.pipeline.steps.search.retrieval_types import RetrievalStrategy
 
-    caplog.set_level(logging.INFO, logger="core_api.pipeline.steps.search.classify_query")
+    caplog.set_level(
+        logging.INFO, logger="core_api.pipeline.steps.search.classify_query"
+    )
     eid = uuid4()
     linked = [str(uuid4()) for _ in range(5)]
     sc = _entity_fixture(eid, linked, loaded_ids=[])  # storage admitted nothing
@@ -809,7 +814,9 @@ async def test_the_genuinely_empty_case_still_says_no_linked_memories(caplog) ->
     just have moved the inaccuracy."""
     import logging
 
-    caplog.set_level(logging.INFO, logger="core_api.pipeline.steps.search.classify_query")
+    caplog.set_level(
+        logging.INFO, logger="core_api.pipeline.steps.search.classify_query"
+    )
     eid = uuid4()
     sc = _entity_fixture(eid, [])  # entity matched, links none
 

@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
+
 from core_api.services.usage_meter import UsageMeter, current_period_start
 
 pytestmark = pytest.mark.unit
@@ -262,8 +263,9 @@ async def test_a_row_missing_period_start_is_a_422_not_a_500():
     sits OUTSIDE the try/except below it — so the miss surfaced as exactly the
     500 the coercion block exists to prevent. Caught in review.
     """
-    from core_storage_api.routers.tenant_usage import increment_tenant_usage
     from fastapi import HTTPException
+
+    from core_storage_api.routers.tenant_usage import increment_tenant_usage
 
     class _Req:
         async def json(self):

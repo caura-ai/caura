@@ -7,7 +7,7 @@ Validates that:
 - Multi-value predicates skip RDF and fall through to semantic check
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -17,7 +17,6 @@ from core_api.constants import (
     VECTOR_DIM,
 )
 from tests._contradiction_batch_compat import install_batch_status_replay_shim
-
 
 # ---------------------------------------------------------------------------
 # Constants sanity
@@ -162,8 +161,10 @@ def _make_memory(**kwargs):
     return {
         "id": str(kwargs.get("id", uuid4())),
         "tenant_id": kwargs.get("tenant_id", "test-tenant"),
-        "fleet_id": kwargs.get("fleet_id", None),
-        "subject_entity_id": str(kwargs["subject_entity_id"]) if kwargs.get("subject_entity_id") else None,
+        "fleet_id": kwargs.get("fleet_id"),
+        "subject_entity_id": str(kwargs["subject_entity_id"])
+        if kwargs.get("subject_entity_id")
+        else None,
         "predicate": kwargs.get("predicate", "lives_in"),
         "object_value": kwargs.get("object_value", "Tel Aviv"),
         "content": kwargs.get("content", "Test memory content for contradiction"),

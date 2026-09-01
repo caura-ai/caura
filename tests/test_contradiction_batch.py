@@ -192,7 +192,6 @@ class TestBatchedJudgeA61:
 
         from core_api.constants import VECTOR_DIM
         from core_api.services.contradiction_detector import _detect
-
         from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
         new = {

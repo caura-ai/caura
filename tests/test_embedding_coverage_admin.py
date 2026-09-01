@@ -20,7 +20,8 @@ from fastapi import HTTPException
 from core_api.auth import AuthContext
 from core_api.clients.storage_client import get_storage_client
 from core_api.routes.lifecycle import embedding_coverage_all_tenants
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 pytestmark = pytest.mark.asyncio
 
@@ -101,7 +102,9 @@ async def test_aggregate_is_worst_first(client):
     anything earlier in the session happened to leave a stale row behind.
     """
     aggregate = await get_storage_client().get_embedding_coverage_all()
-    worst_first = [r["stale_embeddings"] + r["missing_embeddings"] for r in aggregate["tenants"]]
+    worst_first = [
+        r["stale_embeddings"] + r["missing_embeddings"] for r in aggregate["tenants"]
+    ]
     assert worst_first == sorted(worst_first, reverse=True), aggregate["tenants"]
 
 

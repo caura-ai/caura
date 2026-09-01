@@ -27,7 +27,6 @@ from core_api.constants import VECTOR_DIM
 from core_api.services.contradiction_detector import _detect, _pick_older
 from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
-
 # ---------------------------------------------------------------------------
 # _pick_older helper — pure function, no I/O
 # ---------------------------------------------------------------------------

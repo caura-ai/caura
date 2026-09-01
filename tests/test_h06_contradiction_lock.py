@@ -52,7 +52,7 @@ class _FakeLocks:
         self.acquired: list[str] = []
         self.released: list[str] = []
 
-    async def set_nx(self, key: str, value: str, ttl: int) -> bool:  # noqa: ARG002
+    async def set_nx(self, key: str, value: str, ttl: int) -> bool:
         if key in self.keys:
             return False
         self.keys[key] = value
@@ -75,7 +75,10 @@ def _locks(fake: _FakeLocks):
     """Patch both cache primitives the detector uses onto ``fake``."""
     return (
         patch("core_api.services.contradiction_detector.cache_set_nx", new=fake.set_nx),
-        patch("core_api.services.contradiction_detector.cache_delete_if", new=fake.delete_if),
+        patch(
+            "core_api.services.contradiction_detector.cache_delete_if",
+            new=fake.delete_if,
+        ),
     )
 
 
@@ -125,10 +128,20 @@ async def test_path_a_edit_within_the_ttl_is_still_checked():
     ):
         # ENRICHED then EMBEDDED — same content, must collapse to one run.
         await detect_contradictions_async(
-            mid, "t1", "f1", original, [0.1] * 10, new_memory=_memory(mid, content=original)
+            mid,
+            "t1",
+            "f1",
+            original,
+            [0.1] * 10,
+            new_memory=_memory(mid, content=original),
         )
         await detect_contradictions_async(
-            mid, "t1", "f1", original, [0.1] * 10, new_memory=_memory(mid, content=original)
+            mid,
+            "t1",
+            "f1",
+            original,
+            [0.1] * 10,
+            new_memory=_memory(mid, content=original),
         )
         assert detect_mock.call_count == 1, "duplicate delivery must still be deduped"
 
@@ -158,10 +171,19 @@ async def test_path_c_edit_within_the_ttl_is_still_checked():
     sc.get_memory = AsyncMock(return_value=_memory(mid, content="the sky is blue"))
 
     a, d = _locks(fake)
-    with a, d, patch("core_api.services.contradiction_detector.get_storage_client", return_value=sc):
+    with (
+        a,
+        d,
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+    ):
         await detect_contradictions_by_entities_async(mid, "t1", "f1")
         await detect_contradictions_by_entities_async(mid, "t1", "f1")
-        assert sc.find_entity_overlap_candidates.call_count == 1, "re-extraction must dedupe"
+        assert sc.find_entity_overlap_candidates.call_count == 1, (
+            "re-extraction must dedupe"
+        )
 
         # Content edited; entity extraction re-runs and fires Path C again.
         sc.get_memory = AsyncMock(return_value=_memory(mid, content="the sky is green"))
@@ -197,14 +219,18 @@ async def test_path_a_releases_the_lock_when_detection_raises():
         ) as detect_mock,
     ):
         # The detector swallows the failure — the consumers rely on that to ack.
-        await detect_contradictions_async(mid, "t1", "f1", content, [0.1] * 10, new_memory=mem)
+        await detect_contradictions_async(
+            mid, "t1", "f1", content, [0.1] * 10, new_memory=mem
+        )
         assert detect_mock.call_count == 1
         assert fake.released, "a failed run must drop its lock"
 
         # A later trigger for the same memory and the same content can retry.
         detect_mock.side_effect = None
         detect_mock.return_value = []
-        await detect_contradictions_async(mid, "t1", "f1", content, [0.1] * 10, new_memory=mem)
+        await detect_contradictions_async(
+            mid, "t1", "f1", content, [0.1] * 10, new_memory=mem
+        )
 
     assert detect_mock.call_count == 2
 
@@ -221,17 +247,28 @@ async def test_path_c_releases_the_lock_when_detection_raises():
     sc.get_memory = AsyncMock(return_value=_memory(mid, content="the sky is blue"))
     sc.update_memory_status = AsyncMock()
     install_batch_status_replay_shim(sc)
-    sc.find_entity_overlap_candidates = AsyncMock(side_effect=RuntimeError("storage down"))
+    sc.find_entity_overlap_candidates = AsyncMock(
+        side_effect=RuntimeError("storage down")
+    )
 
     a, d = _locks(fake)
-    with a, d, patch("core_api.services.contradiction_detector.get_storage_client", return_value=sc):
+    with (
+        a,
+        d,
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
+    ):
         await detect_contradictions_by_entities_async(mid, "t1", "f1")
         assert fake.released, "a failed Path C run must drop its lock"
 
         sc.find_entity_overlap_candidates = AsyncMock(return_value=[])
         await detect_contradictions_by_entities_async(mid, "t1", "f1")
 
-    assert sc.find_entity_overlap_candidates.call_count == 1, "the retry must reach detection"
+    assert sc.find_entity_overlap_candidates.call_count == 1, (
+        "the retry must reach detection"
+    )
 
 
 @pytest.mark.asyncio
@@ -264,7 +301,10 @@ async def test_path_c_releases_the_lock_when_it_throws_mid_detection():
     with (
         a,
         d,
-        patch("core_api.services.contradiction_detector.get_storage_client", return_value=sc),
+        patch(
+            "core_api.services.contradiction_detector.get_storage_client",
+            return_value=sc,
+        ),
         patch(
             "core_api.services.contradiction_detector._subjects_differ_with_certainty",
             side_effect=RuntimeError("preflight exploded"),
@@ -298,13 +338,23 @@ async def test_a_gone_row_never_takes_a_lock_at_all():
         ) as detect_mock,
     ):
         await detect_contradictions_async(
-            mid, "t1", "f1", content, [0.1] * 10, new_memory=_memory(mid, content=content, deleted=True)
+            mid,
+            "t1",
+            "f1",
+            content,
+            [0.1] * 10,
+            new_memory=_memory(mid, content=content, deleted=True),
         )
         detect_mock.assert_not_called()
         assert fake.acquired == [], "a gone row must not consume a lock"
 
         await detect_contradictions_async(
-            mid, "t1", "f1", content, [0.1] * 10, new_memory=_memory(mid, content=content)
+            mid,
+            "t1",
+            "f1",
+            content,
+            [0.1] * 10,
+            new_memory=_memory(mid, content=content),
         )
 
     detect_mock.assert_called_once()
@@ -380,9 +430,13 @@ async def test_a_completed_run_keeps_its_lock():
             return_value=[],
         ) as detect_mock,
     ):
-        await detect_contradictions_async(mid, "t1", "f1", content, [0.1] * 10, new_memory=mem)
+        await detect_contradictions_async(
+            mid, "t1", "f1", content, [0.1] * 10, new_memory=mem
+        )
         assert fake.released == [], "a completed run must NOT release its lock"
-        await detect_contradictions_async(mid, "t1", "f1", content, [0.1] * 10, new_memory=mem)
+        await detect_contradictions_async(
+            mid, "t1", "f1", content, [0.1] * 10, new_memory=mem
+        )
 
     assert detect_mock.call_count == 1
 
@@ -427,7 +481,9 @@ async def test_a_late_release_cannot_take_a_successor_s_lock():
             new=_detect_then_lose_the_lock,
         ),
     ):
-        await detect_contradictions_async(mid, "t1", "f1", content, [0.1] * 10, new_memory=mem)
+        await detect_contradictions_async(
+            mid, "t1", "f1", content, [0.1] * 10, new_memory=mem
+        )
 
     assert fake.keys.get(key) == "successor-token", (
         "the late release must not delete the lock a successor now holds"
@@ -458,7 +514,9 @@ async def test_a_row_with_no_content_still_gets_a_usable_key():
             return_value=[],
         ) as detect_mock,
     ):
-        await detect_contradictions_async(mid, "t1", "f1", None, [0.1] * 10, new_memory=mem)
+        await detect_contradictions_async(
+            mid, "t1", "f1", None, [0.1] * 10, new_memory=mem
+        )
 
     detect_mock.assert_called_once()
     assert len(fake.acquired) == 1
@@ -524,7 +582,9 @@ async def test_cache_delete_if_is_total():
         async def eval(self, *a, **kw):
             raise RuntimeError("connection reset")
 
-    with patch("core_api.cache._get_redis", new_callable=AsyncMock, return_value=_Boom()):
+    with patch(
+        "core_api.cache._get_redis", new_callable=AsyncMock, return_value=_Boom()
+    ):
         assert await cache_delete_if("k", "tok") is False
 
     with patch("core_api.cache._get_redis", new_callable=AsyncMock, return_value=None):
@@ -542,7 +602,7 @@ async def test_cache_delete_if_only_deletes_a_matching_value():
             self.store = {"k": "mine"}
             self.evals = 0
 
-        async def eval(self, script, numkeys, key, arg):  # noqa: ARG002
+        async def eval(self, script, numkeys, key, arg):
             self.evals += 1
             if self.store.get(key) == arg:
                 del self.store[key]

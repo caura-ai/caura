@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import get_test_auth, uid as _uid
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 pytestmark = pytest.mark.asyncio
 
@@ -97,9 +98,7 @@ async def _set_keystone(client, headers, tenant_id, **overrides):
 async def test_list_keystones_empty(client):
     """GET returns an empty list for a tenant with no keystones — no 500."""
     tenant_id, headers = get_test_auth(_ks_tenant())
-    resp = await client.get(
-        f"/api/v1/keystones?tenant_id={tenant_id}", headers=headers
-    )
+    resp = await client.get(f"/api/v1/keystones?tenant_id={tenant_id}", headers=headers)
     assert resp.status_code == 200
     # Genuinely empty, now the tenant is this test's own. Asserting only
     # ``isinstance(..., list)`` is what let a shared tenant accumulate 197 rules
@@ -186,9 +185,13 @@ async def test_set_allowed_for_standalone_admin_without_agent_id(client):
     synthetic, unregistered ``rest-admin`` principal. The bypass is narrow:
     it only applies when no agent identity is asserted at all — the
     X-Agent-ID-bearing tests below still go through the full trust gate."""
-    tenant_id, headers = get_test_auth(_ks_tenant())  # bare standalone admin — NO X-Agent-ID
+    tenant_id, headers = get_test_auth(
+        _ks_tenant()
+    )  # bare standalone admin — NO X-Agent-ID
     tag = _uid()
-    resp = await _set_keystone(client, headers, tenant_id, doc_id=f"ks-{tag}", weight="high")
+    resp = await _set_keystone(
+        client, headers, tenant_id, doc_id=f"ks-{tag}", weight="high"
+    )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["doc_id"] == f"ks-{tag}"
@@ -381,9 +384,10 @@ async def test_xagent_id_mismatch_with_auth_rejected(client):
     # via the admin-key path (the admin path discards X-Agent-ID
     # before constructing AuthContext). To prove the helper raises,
     # we call it directly with a synthetic AuthContext.
+    from fastapi import HTTPException
+
     from core_api.auth import AuthContext
     from core_api.routes.keystones import _resolve_caller_identity
-    from fastapi import HTTPException
 
     auth = AuthContext(tenant_id="t", agent_id="alice")
     try:

@@ -11,18 +11,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core_api import errors
-
 # C32 / API-05: ``detail`` on an auth refusal is now
 # ``{"code", "message", "details"}`` so the eight distinct reasons this boundary
 # can refuse a request stop collapsing into the single status-derived
 # ``FORBIDDEN``. The human message is unchanged and lives under ``["message"]``;
 # these assertions follow it there, and additionally pin the code — which is the
 # part a caller is now expected to branch on.
-
 from fastapi import HTTPException
 
-from core_api import suppression
+from core_api import errors, suppression
 from core_api.auth import _block_if_any_readable_suppressed, _block_if_suppressed
 
 

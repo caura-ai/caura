@@ -1,9 +1,6 @@
 """E2E install-plugin script generation tests through HTTP API."""
 
-import pytest
-
-from tests.conftest import get_test_auth, uid as _uid
-
+from tests.conftest import get_test_auth
 
 # ---------------------------------------------------------------------------
 # POST /api/install-plugin (preferred — no secrets in URL)
@@ -94,7 +91,7 @@ async def test_script_has_chmod_600(client):
         json={"fleet_id": "f", "api_url": "https://x.com", "api_key": "k"},
     )
     assert resp.status_code == 200
-    assert 'chmod 600' in resp.text
+    assert "chmod 600" in resp.text
 
 
 async def test_script_contains_correct_env_vars(client):
@@ -111,8 +108,13 @@ async def test_script_contains_correct_env_vars(client):
     assert resp.status_code == 200
     script = resp.text
     # Check .env block contains all five vars
-    for var in ("CAURA_API_URL", "CAURA_API_KEY", "CAURA_FLEET_ID",
-                "CAURA_TENANT_ID", "CAURA_NODE_NAME"):
+    for var in (
+        "CAURA_API_URL",
+        "CAURA_API_KEY",
+        "CAURA_FLEET_ID",
+        "CAURA_TENANT_ID",
+        "CAURA_NODE_NAME",
+    ):
         assert var in script, f"Missing {var} in script"
 
 
@@ -143,7 +145,7 @@ async def test_shell_injection_api_url(client):
 
 async def test_shell_injection_fleet_id(client):
     """Malicious fleet_id is shell-quoted."""
-    malicious = '$(cat /etc/passwd)'
+    malicious = "$(cat /etc/passwd)"
     resp = await client.post(
         "/api/v1/install-plugin",
         json={

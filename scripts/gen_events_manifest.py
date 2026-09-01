@@ -24,8 +24,9 @@ import argparse
 import difflib
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from unittest import mock
 
 from common.events import lifecycle_handlers

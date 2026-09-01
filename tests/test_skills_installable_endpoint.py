@@ -15,8 +15,6 @@ Asserted contract:
 
 from __future__ import annotations
 
-import pytest
-
 from tests.conftest import get_test_auth
 
 
@@ -97,7 +95,7 @@ async def test_installable_fails_closed_on_settings_error(client, monkeypatch):
     queried = {"called": False}
 
     class _NeverStorage:
-        async def query_documents(self, params):  # noqa: ARG002
+        async def query_documents(self, params):
             queried["called"] = True
             return []
 

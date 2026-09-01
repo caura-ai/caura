@@ -5,6 +5,7 @@ They exercise both paths with identical inputs and compare the MemoryOut results
 """
 
 import uuid
+from datetime import UTC
 
 import pytest
 from sqlalchemy import text
@@ -94,7 +95,6 @@ async def _seed_memories(count: int = 3) -> list[MemoryOut]:
 @pytest.mark.asyncio
 async def test_resolve_search_profile_defaults():
     """ResolveSearchProfile sets search_params with default constants."""
-    from unittest.mock import AsyncMock
 
     from core_api.constants import MIN_SEARCH_SIMILARITY
     from core_api.pipeline.context import PipelineContext
@@ -103,7 +103,7 @@ async def test_resolve_search_profile_defaults():
     )
 
     ctx = PipelineContext(
-                data={
+        data={
             "query": "test query",
             "top_k": 5,
             "search_profile": None,
@@ -123,7 +123,6 @@ async def test_resolve_search_profile_defaults():
 async def test_extract_temporal_hint_today():
     """ExtractTemporalHint detects 'today' as 1-day window."""
     from datetime import timedelta
-    from unittest.mock import AsyncMock
 
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.search.extract_temporal_hint import (
@@ -131,7 +130,7 @@ async def test_extract_temporal_hint_today():
     )
 
     ctx = PipelineContext(
-                data={"query": "what happened today"},
+        data={"query": "what happened today"},
     )
     step = ExtractTemporalHint()
     await step.execute(ctx)
@@ -142,7 +141,6 @@ async def test_extract_temporal_hint_today():
 @pytest.mark.asyncio
 async def test_extract_temporal_hint_none():
     """ExtractTemporalHint returns None for non-temporal queries."""
-    from unittest.mock import AsyncMock
 
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.search.extract_temporal_hint import (
@@ -150,7 +148,7 @@ async def test_extract_temporal_hint_none():
     )
 
     ctx = PipelineContext(
-                data={"query": "favorite color"},
+        data={"query": "favorite color"},
     )
     step = ExtractTemporalHint()
     await step.execute(ctx)
@@ -162,7 +160,6 @@ async def test_extract_temporal_hint_none():
 @pytest.mark.asyncio
 async def test_extract_temporal_hint_sets_date_range():
     """ExtractTemporalHint sets date_range_filter for temporal queries."""
-    from unittest.mock import AsyncMock
 
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.search.extract_temporal_hint import (
@@ -170,7 +167,7 @@ async def test_extract_temporal_hint_sets_date_range():
     )
 
     ctx = PipelineContext(
-                data={"query": "what happened two months ago"},
+        data={"query": "what happened two months ago"},
     )
     step = ExtractTemporalHint()
     await step.execute(ctx)
@@ -184,7 +181,6 @@ async def test_extract_temporal_hint_sets_date_range():
 async def test_extract_temporal_hint_uses_valid_at_as_reference():
     """ExtractTemporalHint uses valid_at as reference datetime when available."""
     from datetime import datetime
-    from unittest.mock import AsyncMock
 
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.search.extract_temporal_hint import (
@@ -193,7 +189,7 @@ async def test_extract_temporal_hint_uses_valid_at_as_reference():
 
     ref = datetime(2026, 4, 14, 12, 0, 0)
     ctx = PipelineContext(
-                data={"query": "notes from two weeks ago", "valid_at": ref},
+        data={"query": "notes from two weeks ago", "valid_at": ref},
     )
     step = ExtractTemporalHint()
     await step.execute(ctx)
@@ -230,7 +226,7 @@ async def test_post_filter_results_keeps_configured_cosine_floor_strict():
         ),
     ]
     ctx = PipelineContext(
-                data={
+        data={
             "raw_rows": rows,
             "search_params": {"min_similarity": 0.5},
         },
@@ -293,13 +289,13 @@ async def test_post_filter_results_allows_fts_match_past_global_default_floor():
 @pytest.mark.asyncio
 async def test_load_and_serialize_uses_preloaded_entity_links():
     """LoadAndSerialize reads entity_links from rows instead of querying DB."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
 
-    from core_api.schemas import EntityLinkOut
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.search.load_and_serialize import LoadAndSerialize
+    from core_api.schemas import EntityLinkOut
 
     mem = MagicMock()
     mem.id = uuid.uuid4()
@@ -314,7 +310,7 @@ async def test_load_and_serialize_uses_preloaded_entity_links():
     mem.source_uri = None
     mem.run_id = None
     mem.metadata_ = None
-    mem.created_at = datetime.now(timezone.utc)
+    mem.created_at = datetime.now(UTC)
     mem.expires_at = None
     mem.subject_entity_id = None
     mem.predicate = None
@@ -338,7 +334,7 @@ async def test_load_and_serialize_uses_preloaded_entity_links():
 
     mock_db = AsyncMock()
     ctx = PipelineContext(
-                data={"filtered_rows": [row]},
+        data={"filtered_rows": [row]},
     )
     step = LoadAndSerialize()
     await step.execute(ctx)
@@ -440,7 +436,6 @@ async def test_track_recalls_background_routes_to_storage():
 @pytest.mark.asyncio
 async def test_pipeline_failure_includes_error_detail():
     """Pipeline failure HTTPException includes the original error message."""
-    from unittest.mock import AsyncMock
 
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.runner import Pipeline
@@ -468,7 +463,7 @@ async def test_pipeline_failure_includes_error_detail():
 @pytest.mark.asyncio
 async def test_search_pipeline_failure_logs_error_not_in_detail():
     """_search_memories_pipeline logs the error but does not leak it in the HTTP detail."""
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
 
     from fastapi import HTTPException
 
@@ -493,7 +488,8 @@ async def test_search_pipeline_failure_logs_error_not_in_detail():
         from core_api.services.memory_service import _search_memories_pipeline
 
         with pytest.raises(HTTPException) as exc_info:
-            await _search_memories_pipeline(                tenant_id="t1",
+            await _search_memories_pipeline(
+                tenant_id="t1",
                 query="test",
             )
 
@@ -516,7 +512,7 @@ async def test_search_pipeline_failure_logs_error_not_in_detail():
 async def test_parallel_embed_gather_has_timeout():
     """ParallelEmbedAndEntityBoost has a timeout on asyncio.gather."""
     import asyncio
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
 
     from fastapi import HTTPException
 
@@ -526,7 +522,7 @@ async def test_parallel_embed_gather_has_timeout():
     )
 
     ctx = PipelineContext(
-                data={
+        data={
             "query": "test",
             "tenant_id": "t1",
             "tenant_config": None,
@@ -578,7 +574,8 @@ async def test_pipeline_search_returns_results():
     try:
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tid,
+        results = await search_memories(
+            tenant_id=tid,
             query="quick brown fox",
             fleet_ids=[FLEET_ID],
             caller_agent_id=AGENT_ID,
@@ -603,7 +600,8 @@ async def test_legacy_search_returns_results():
     try:
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=tid,
+        results = await search_memories(
+            tenant_id=tid,
             query="quick brown fox",
             fleet_ids=[FLEET_ID],
             caller_agent_id=AGENT_ID,
@@ -670,7 +668,8 @@ async def test_search_pipeline_empty_results():
     try:
         from core_api.services.memory_service import search_memories
 
-        results = await search_memories(tenant_id=f"nonexistent-tenant-{uuid.uuid4().hex[:8]}",
+        results = await search_memories(
+            tenant_id=f"nonexistent-tenant-{uuid.uuid4().hex[:8]}",
             query="zzz no match zzz",
         )
         assert results == []
@@ -685,7 +684,9 @@ async def test_search_pipeline_empty_results():
 
 
 @pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
-async def test_recall_returns_memory_with_pending_embedding(db, monkeypatch, use_pipeline):
+async def test_recall_returns_memory_with_pending_embedding(
+    db, monkeypatch, use_pipeline
+):
     """A memory must be recallable before its embedding backfill lands.
 
     Production defers the embedding: under ``deployment_mode=deferred`` the row

@@ -33,7 +33,8 @@ import pytest
 from common.models import Memory
 from core_api.schemas import MemoryUpdate
 from core_api.services.memory_service import NON_NULLABLE_UPDATE_FIELDS
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth
+from tests.conftest import uid as _uid
 
 # ``asyncio_mode = auto`` (pytest.ini) runs the async tests below without an
 # explicit asyncio mark; adding one would also land on the sync drift test.
@@ -88,8 +89,12 @@ async def test_explicit_null_on_non_nullable_field_is_400(client, tenant_id, fie
         headers=headers,
     )
 
-    assert resp.status_code == 400, f"{field}: expected 400, got {resp.status_code} {resp.text}"
-    assert field in resp.json()["detail"], f"{field}: message should name the field — {resp.text}"
+    assert resp.status_code == 400, (
+        f"{field}: expected 400, got {resp.status_code} {resp.text}"
+    )
+    assert field in resp.json()["detail"], (
+        f"{field}: message should name the field — {resp.text}"
+    )
 
 
 async def test_null_on_several_non_nullable_fields_names_all_of_them(client, tenant_id):
@@ -125,7 +130,9 @@ async def test_explicit_null_still_clears_a_nullable_field(client, tenant_id, fi
         headers=headers,
     )
 
-    assert resp.status_code == 200, f"{field}: expected 200, got {resp.status_code} {resp.text}"
+    assert resp.status_code == 200, (
+        f"{field}: expected 200, got {resp.status_code} {resp.text}"
+    )
     assert resp.json()[field] is None
 
 

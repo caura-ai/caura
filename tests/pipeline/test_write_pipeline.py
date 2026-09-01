@@ -47,6 +47,7 @@ def _make_input(
 async def test_validate_step_rejects_short_content():
     """CheckContentLength raises 422 for content below minimum length."""
     from fastapi import HTTPException
+
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.check_content_length import CheckContentLength
 
@@ -153,6 +154,7 @@ async def test_compute_content_hash_skips_cache_lookup_when_embedding_deferred(
     storm load (noisy-neighbor scenario) it observed p95 of ~17.8 s on
     staging — the single step that dominated the write degradation."""
     from unittest.mock import patch
+
     from core_api.config import settings
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
@@ -183,6 +185,7 @@ async def test_compute_content_hash_still_looks_up_when_embedding_inline(
     inline ``get_embedding`` call. Regression guard for the path the
     deferred-mode fix MUST NOT break."""
     from unittest.mock import patch
+
     from core_api.config import settings
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.compute_content_hash import ComputeContentHash
@@ -210,6 +213,7 @@ async def test_check_exact_duplicate_records_dedup_lookup_ms():
     insert (``storage_ms``) and from core-api-side overhead — the split
     that attributes the single_write p99 tail."""
     from unittest.mock import patch
+
     from core_api.pipeline.context import PipelineContext
     from core_api.pipeline.steps.write.check_exact_duplicate import CheckExactDuplicate
 
@@ -461,6 +465,7 @@ async def test_pipeline_emits_latency_log_on_pipeline_failure(caplog):
     from unittest.mock import patch
 
     from fastapi import HTTPException
+
     from core_api.pipeline.runner import Pipeline
     from core_api.services import memory_service
 
@@ -558,6 +563,7 @@ async def test_pipeline_extract_only(db):
 async def test_pipeline_hash_dedup():
     """Pipeline path raises 409 on duplicate content_hash."""
     from fastapi import HTTPException
+
     from core_api.services import memory_service
 
     original = memory_service._USE_PIPELINE_WRITE
@@ -582,6 +588,7 @@ async def test_pipeline_hash_dedup():
 async def test_pipeline_quality_gate():
     """Pipeline path rejects short content with 422."""
     from fastapi import HTTPException
+
     from core_api.services import memory_service
 
     original = memory_service._USE_PIPELINE_WRITE
@@ -939,7 +946,9 @@ async def test_bad_entity_link_does_not_abandon_the_committed_row(caplog):
             entity_links=[EntityLinkIn(entity_id=ghost, role="subject")],
         )
 
-        with caplog.at_level(logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"):
+        with caplog.at_level(
+            logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
+        ):
             result = await create_memory(data)
 
         # 1. The write stands. Previously a 500.
@@ -983,7 +992,9 @@ async def test_good_entity_links_are_still_reported():
         )
         data = _make_input(
             content="H-05 probe: a memory whose entity link resolves cleanly, at length.",
-            entity_links=[EntityLinkIn(entity_id=uuid.UUID(entity["id"]), role="subject")],
+            entity_links=[
+                EntityLinkIn(entity_id=uuid.UUID(entity["id"]), role="subject")
+            ],
         )
 
         result = await create_memory(data)
@@ -1123,11 +1134,11 @@ async def test_a_bad_id_is_classified_permanent_not_transient(caplog):
 
         dropped = [r for r in caplog.records if "entity link failed" in r.getMessage()]
         assert dropped, "the dropped link left no trace"
-        assert getattr(dropped[0], "permanent") is True, (
+        assert dropped[0].permanent is True, (
             "a nonexistent entity_id is the caller's input, not a storage outage — "
             "misclassifying it sends on-call after the wrong system"
         )
-        assert getattr(dropped[0], "status_code") == 409
+        assert dropped[0].status_code == 409
     finally:
         memory_service._USE_PIPELINE_WRITE = original
 
@@ -1164,7 +1175,9 @@ async def test_a_storage_outage_is_classified_transient_and_summarised(caplog):
 
         with (
             patch.object(sc, "create_entity_link", new=AsyncMock(side_effect=outage)),
-            caplog.at_level(logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"),
+            caplog.at_level(
+                logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
+            ),
         ):
             result = await create_memory(
                 _make_input(
@@ -1178,15 +1191,17 @@ async def test_a_storage_outage_is_classified_transient_and_summarised(caplog):
         assert result.entity_links == []
 
         per_link = [r for r in caplog.records if "entity link failed" in r.getMessage()]
-        assert all(getattr(r, "permanent") is False for r in per_link), (
+        assert all(r.permanent is False for r in per_link), (
             "a 503 is storage's problem, not the caller's"
         )
         # Capped, so log volume does not track caller input.
         assert len(per_link) == 5, f"expected the cap to hold, got {len(per_link)}"
         # ...and the cap does not hide the outage.
-        summary = [r for r in caplog.records if "entity links dropped" in r.getMessage()]
+        summary = [
+            r for r in caplog.records if "entity links dropped" in r.getMessage()
+        ]
         assert summary, "the cap swallowed the outage signal"
-        assert getattr(summary[0], "transient") == 7
-        assert getattr(summary[0], "dropped") == 7
+        assert summary[0].transient == 7
+        assert summary[0].dropped == 7
     finally:
         memory_service._USE_PIPELINE_WRITE = original

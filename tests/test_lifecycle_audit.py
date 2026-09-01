@@ -25,7 +25,6 @@ from core_api.services.lifecycle_audit import (
 )
 from tests._legacy_contracts import INSIGHTS_AGENT_ID
 
-
 _UNSET = object()  # "count_active was never called" sentinel
 
 
@@ -34,7 +33,7 @@ class _FakeStorage:
         self._active = active
         # Records the status the gate asked for, so a refactor can't silently
         # widen this spend gate to the live set (see the status= test below).
-        self.status_arg: str | None | object = _UNSET
+        self.status_arg: str | object | None = _UNSET
 
     async def count_active(
         self, org_id: str, fleet_id: str | None, status: str | None = None
@@ -138,7 +137,10 @@ async def test_insights_attributes_and_registers_dedicated_agent() -> None:
     class _InsightsStorage:
         async def insights_activity_gate(self, *, tenant_id: str, fleet_id):
             # Corpus has grown since the last insight → run proceeds.
-            return {"latest_non_insight": "2026-07-08T00:00:00+00:00", "latest_insight": None}
+            return {
+                "latest_non_insight": "2026-07-08T00:00:00+00:00",
+                "latest_insight": None,
+            }
 
         async def get_agent(self, agent_id: str, tenant_id: str) -> dict | None:
             return None  # not yet registered → should create
@@ -185,13 +187,18 @@ async def test_insights_does_not_reregister_existing_agent() -> None:
 
     class _InsightsStorage:
         async def insights_activity_gate(self, *, tenant_id: str, fleet_id):
-            return {"latest_non_insight": "2026-07-08T00:00:00+00:00", "latest_insight": None}
+            return {
+                "latest_non_insight": "2026-07-08T00:00:00+00:00",
+                "latest_insight": None,
+            }
 
         async def get_agent(self, agent_id: str, tenant_id: str) -> dict | None:
             # Already registered (operator may have since customised it).
             return {"agent_id": agent_id, "tenant_id": tenant_id, "trust_level": 2}
 
-        async def create_or_update_agent(self, payload: dict) -> dict:  # pragma: no cover
+        async def create_or_update_agent(
+            self, payload: dict
+        ) -> dict:  # pragma: no cover
             raise AssertionError("must not re-register an existing insighter agent")
 
     class _On:
@@ -223,12 +230,17 @@ async def test_insights_registration_failure_does_not_abort_run() -> None:
 
     class _InsightsStorage:
         async def insights_activity_gate(self, *, tenant_id: str, fleet_id):
-            return {"latest_non_insight": "2026-07-08T00:00:00+00:00", "latest_insight": None}
+            return {
+                "latest_non_insight": "2026-07-08T00:00:00+00:00",
+                "latest_insight": None,
+            }
 
         async def get_agent(self, agent_id: str, tenant_id: str) -> dict | None:
             raise RuntimeError("storage down")
 
-        async def create_or_update_agent(self, payload: dict) -> dict:  # pragma: no cover
+        async def create_or_update_agent(
+            self, payload: dict
+        ) -> dict:  # pragma: no cover
             raise AssertionError("unreachable — get_agent raised first")
 
     class _On:
@@ -261,7 +273,9 @@ async def test_insights_skips_registration_when_auto_disabled() -> None:
         auto_insights_enabled = False
 
     class _Storage:
-        async def create_or_update_agent(self, payload: dict) -> dict:  # pragma: no cover
+        async def create_or_update_agent(
+            self, payload: dict
+        ) -> dict:  # pragma: no cover
             raise AssertionError("must not register when auto_insights disabled")
 
     adapter = _CoreApiLifecycleAdapter(_Storage())

@@ -284,7 +284,9 @@ async def test_embed_backfill_handler_sweeps_the_orgs_tenant() -> None:
     # library default of 100.
     from core_worker.config import settings
 
-    assert swept.await_args.kwargs["max_inflight"] == settings.embed_backfill_max_inflight
+    assert (
+        swept.await_args.kwargs["max_inflight"] == settings.embed_backfill_max_inflight
+    )
     assert settings.embed_backfill_max_inflight < 100
 
 
@@ -307,13 +309,17 @@ async def test_embed_backfill_handler_logs_the_counts(caplog) -> None:
     report = MagicMock(scanned=9, published=8, skipped_missing=1, elapsed_s=1.25)
     with (
         caplog.at_level(logging.INFO, logger="core_worker.consumer"),
-        patch.object(consumer, "run_embedding_backfill", AsyncMock(return_value=report)),
+        patch.object(
+            consumer, "run_embedding_backfill", AsyncMock(return_value=report)
+        ),
         patch.object(consumer, "get_storage_client", MagicMock()),
         patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()),
     ):
         await consumer.handle_embed_backfill_request(event)
 
-    rec = next(r for r in caplog.records if r.getMessage() == "embed-backfill sweep processed")
+    rec = next(
+        r for r in caplog.records if r.getMessage() == "embed-backfill sweep processed"
+    )
     assert rec.org_id == "org-42"
     assert rec.scanned == 9
     assert rec.published == 8
@@ -378,7 +384,9 @@ async def test_embed_backfill_handler_finalises_the_audit_row() -> None:
 
     report = MagicMock(scanned=9, published=8, skipped_missing=1, elapsed_s=1.25)
     with (
-        patch.object(consumer, "run_embedding_backfill", AsyncMock(return_value=report)),
+        patch.object(
+            consumer, "run_embedding_backfill", AsyncMock(return_value=report)
+        ),
         patch.object(consumer, "get_storage_client", MagicMock()),
         patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()) as audit,
     ):
@@ -425,7 +433,9 @@ async def test_embed_backfill_handler_marks_audit_failed_then_reraises() -> None
     assert audit.await_count == 2, [c.kwargs for c in audit.await_args_list]
     final = audit.await_args_list[-1]
     status = final.kwargs["status"]
-    assert status in _VALID_STATUSES, f"{status!r} would 422; valid: {sorted(_VALID_STATUSES)}"
+    assert status in _VALID_STATUSES, (
+        f"{status!r} would 422; valid: {sorted(_VALID_STATUSES)}"
+    )
     assert status == "failure"
     assert "storage exploded" in final.kwargs["error_message"]
 
@@ -540,7 +550,9 @@ async def test_embed_backfill_marks_in_progress_before_sweeping() -> None:
 
     report = MagicMock(scanned=9, published=8, skipped_missing=1, elapsed_s=1.25)
     with (
-        patch.object(consumer, "run_embedding_backfill", AsyncMock(return_value=report)),
+        patch.object(
+            consumer, "run_embedding_backfill", AsyncMock(return_value=report)
+        ),
         patch.object(consumer, "get_storage_client", MagicMock()),
         patch.object(consumer, "update_lifecycle_audit_row", AsyncMock()) as audit,
     ):
@@ -579,7 +591,9 @@ async def test_embed_backfill_sweeps_even_if_in_progress_update_fails() -> None:
 
     report = MagicMock(scanned=3, published=3, skipped_missing=0, elapsed_s=0.5)
     with (
-        patch.object(consumer, "run_embedding_backfill", AsyncMock(return_value=report)) as swept,
+        patch.object(
+            consumer, "run_embedding_backfill", AsyncMock(return_value=report)
+        ) as swept,
         patch.object(consumer, "get_storage_client", MagicMock()),
         patch.object(
             consumer,

@@ -32,7 +32,6 @@ import pytest
 from common.constants import VECTOR_DIM
 from common.embedding.providers.openai import OpenAIEmbeddingProvider
 
-
 # ---------------------------------------------------------------------------
 # Test fixtures
 # ---------------------------------------------------------------------------

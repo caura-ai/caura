@@ -620,8 +620,7 @@ def main() -> int:
                 file=sys.stderr,
             )
         with open(args.json_out, "a") as f:
-            for s in summaries:
-                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+            f.writelines(json.dumps(s, ensure_ascii=False) + "\n" for s in summaries)
         print(f"Wrote {len(summaries)} run summary record(s) to {args.json_out}")
 
     return 0 if total_fail == 0 else 1

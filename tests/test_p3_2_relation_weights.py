@@ -17,7 +17,6 @@ from core_api.constants import (
     _relation_weight,
 )
 
-
 # ---------------------------------------------------------------------------
 # Unit tests: constants and helper
 # ---------------------------------------------------------------------------
@@ -49,8 +48,15 @@ class TestRelationTypeWeights:
 
     def test_known_relation_types_present(self):
         """Types from the LLM extraction prompt must be in the map."""
-        expected = {"manages", "works_on", "uses", "belongs_to",
-                    "created_by", "depends_on", "located_in"}
+        expected = {
+            "manages",
+            "works_on",
+            "uses",
+            "belongs_to",
+            "created_by",
+            "depends_on",
+            "located_in",
+        }
         for t in expected:
             assert t in RELATION_TYPE_WEIGHTS, f"Missing relation type: {t}"
 
@@ -66,7 +72,9 @@ class TestRelationWeightHelper:
     def test_known_type_default_row_weight(self):
         """Known type with default DB weight (1.0) returns the type weight."""
         assert _relation_weight("manages", 1.0) == RELATION_TYPE_WEIGHTS["manages"]
-        assert _relation_weight("located_in", 1.0) == RELATION_TYPE_WEIGHTS["located_in"]
+        assert (
+            _relation_weight("located_in", 1.0) == RELATION_TYPE_WEIGHTS["located_in"]
+        )
 
     def test_unknown_type_gets_default(self):
         """Unknown relation type falls back to DEFAULT_RELATION_TYPE_WEIGHT."""
@@ -74,12 +82,16 @@ class TestRelationWeightHelper:
 
     def test_row_weight_multiplier(self):
         """DB row weight multiplies the type weight."""
-        assert _relation_weight("manages", 0.5) == RELATION_TYPE_WEIGHTS["manages"] * 0.5
+        assert (
+            _relation_weight("manages", 0.5) == RELATION_TYPE_WEIGHTS["manages"] * 0.5
+        )
 
     def test_case_insensitive(self):
         """Relation types should match case-insensitively."""
         assert _relation_weight("MANAGES", 1.0) == RELATION_TYPE_WEIGHTS["manages"]
-        assert _relation_weight("Located_In", 1.0) == RELATION_TYPE_WEIGHTS["located_in"]
+        assert (
+            _relation_weight("Located_In", 1.0) == RELATION_TYPE_WEIGHTS["located_in"]
+        )
 
     def test_zero_row_weight(self):
         """Zero DB weight should produce zero effective weight."""
@@ -126,13 +138,20 @@ class TestExpandGraphReturnStructure:
             eid_strong: (1, RELATION_TYPE_WEIGHTS["manages"]),
             eid_weak: (1, RELATION_TYPE_WEIGHTS["located_in"]),
         }
-        result = self._simulate_boost(hops, [
-            (mid_strong, eid_strong),
-            (mid_weak, eid_weak),
-        ])
+        result = self._simulate_boost(
+            hops,
+            [
+                (mid_strong, eid_strong),
+                (mid_weak, eid_weak),
+            ],
+        )
         assert result[mid_strong] > result[mid_weak]
-        assert result[mid_strong] == GRAPH_HOP_BOOST[1] * RELATION_TYPE_WEIGHTS["manages"]
-        assert result[mid_weak] == GRAPH_HOP_BOOST[1] * RELATION_TYPE_WEIGHTS["located_in"]
+        assert (
+            result[mid_strong] == GRAPH_HOP_BOOST[1] * RELATION_TYPE_WEIGHTS["manages"]
+        )
+        assert (
+            result[mid_weak] == GRAPH_HOP_BOOST[1] * RELATION_TYPE_WEIGHTS["located_in"]
+        )
 
     def test_weak_hop1_can_be_below_strong_hop2(self):
         """A weak relation at hop 1 can produce a lower boost than a strong
@@ -148,10 +167,13 @@ class TestExpandGraphReturnStructure:
             eid_weak_h1: (1, RELATION_TYPE_WEIGHTS["located_in"]),
             eid_strong_h2: (2, RELATION_TYPE_WEIGHTS["manages"]),
         }
-        result = self._simulate_boost(hops, [
-            (mid_weak, eid_weak_h1),
-            (mid_strong, eid_strong_h2),
-        ])
+        result = self._simulate_boost(
+            hops,
+            [
+                (mid_weak, eid_weak_h1),
+                (mid_strong, eid_strong_h2),
+            ],
+        )
         # Strong relation at hop 2 should outrank weak relation at hop 1
         assert result[mid_strong] > result[mid_weak]
 
@@ -166,10 +188,13 @@ class TestExpandGraphReturnStructure:
             eid_strong: (0, 1.0),
             eid_weak: (1, RELATION_TYPE_WEIGHTS["located_in"]),
         }
-        result = self._simulate_boost(hops, [
-            (shared_mid, eid_weak),
-            (shared_mid, eid_strong),
-        ])
+        result = self._simulate_boost(
+            hops,
+            [
+                (shared_mid, eid_weak),
+                (shared_mid, eid_strong),
+            ],
+        )
         assert result[shared_mid] == GRAPH_HOP_BOOST[0] * 1.0
 
 
@@ -183,24 +208,29 @@ class TestExpandGraphRelationWeights:
     """Verify expand_graph returns relation weights from the DB."""
 
     async def _create_entity(self, sc, tenant_id, fleet_id, name):
-        entity = await sc.create_entity({
-            "tenant_id": tenant_id,
-            "fleet_id": fleet_id,
-            "entity_type": "concept",
-            "canonical_name": name,
-        })
+        entity = await sc.create_entity(
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "entity_type": "concept",
+                "canonical_name": name,
+            }
+        )
         return entity
 
-    async def _create_relation(self, sc, tenant_id, fleet_id, from_id, to_id,
-                               relation_type, weight=1.0):
-        rel = await sc.create_relation({
-            "tenant_id": tenant_id,
-            "fleet_id": fleet_id,
-            "from_entity_id": str(from_id),
-            "to_entity_id": str(to_id),
-            "relation_type": relation_type,
-            "weight": weight,
-        })
+    async def _create_relation(
+        self, sc, tenant_id, fleet_id, from_id, to_id, relation_type, weight=1.0
+    ):
+        rel = await sc.create_relation(
+            {
+                "tenant_id": tenant_id,
+                "fleet_id": fleet_id,
+                "from_entity_id": str(from_id),
+                "to_entity_id": str(to_id),
+                "relation_type": relation_type,
+                "weight": weight,
+            }
+        )
         return rel
 
     async def test_strong_relation_returns_high_weight(self, tenant_id, fleet_id):
@@ -213,7 +243,12 @@ class TestExpandGraphRelationWeights:
         seed_id = uuid.UUID(seed["id"])
         manager_id = uuid.UUID(manager["id"])
         await self._create_relation(
-            sc, tenant_id, fleet_id, manager_id, seed_id, "manages",
+            sc,
+            tenant_id,
+            fleet_id,
+            manager_id,
+            seed_id,
+            "manages",
         )
 
         result = await expand_graph([seed_id], tenant_id, fleet_id)
@@ -233,7 +268,12 @@ class TestExpandGraphRelationWeights:
         team_id = uuid.UUID(team["id"])
         building_id = uuid.UUID(building["id"])
         await self._create_relation(
-            sc, tenant_id, fleet_id, team_id, building_id, "located_in",
+            sc,
+            tenant_id,
+            fleet_id,
+            team_id,
+            building_id,
+            "located_in",
         )
 
         result = await expand_graph([team_id], tenant_id, fleet_id)
@@ -252,10 +292,20 @@ class TestExpandGraphRelationWeights:
         team_id = uuid.UUID(team["id"])
         person_id = uuid.UUID(person["id"])
         await self._create_relation(
-            sc, tenant_id, fleet_id, person_id, team_id, "located_in",
+            sc,
+            tenant_id,
+            fleet_id,
+            person_id,
+            team_id,
+            "located_in",
         )
         await self._create_relation(
-            sc, tenant_id, fleet_id, person_id, team_id, "manages",
+            sc,
+            tenant_id,
+            fleet_id,
+            person_id,
+            team_id,
+            "manages",
         )
 
         result = await expand_graph([team_id], tenant_id, fleet_id)
@@ -286,7 +336,13 @@ class TestExpandGraphRelationWeights:
         a_id = uuid.UUID(a["id"])
         b_id = uuid.UUID(b["id"])
         await self._create_relation(
-            sc, tenant_id, fleet_id, a_id, b_id, "depends_on", weight=0.5,
+            sc,
+            tenant_id,
+            fleet_id,
+            a_id,
+            b_id,
+            "depends_on",
+            weight=0.5,
         )
 
         result = await expand_graph([a_id], tenant_id, fleet_id)

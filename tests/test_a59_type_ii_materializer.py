@@ -13,6 +13,7 @@ Contract under test:
 """
 
 import pytest
+
 from core_api.services import type_ii_materializer as tm
 
 pytestmark = pytest.mark.unit

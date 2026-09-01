@@ -23,7 +23,7 @@ from __future__ import annotations
 import inspect
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -45,7 +45,9 @@ _APPLY_OUTCOME_RESULT = {
 }
 
 
-async def _run_evolve_capturing_apply_kwargs(monkeypatch, *, related_ids, filter_result):
+async def _run_evolve_capturing_apply_kwargs(
+    monkeypatch, *, related_ids, filter_result
+):
     """Drive caura_evolve with mocked collaborators, returning the kwargs
     the handler passed to ``_apply_outcome_to_db``."""
     captured: dict = {}
@@ -59,7 +61,9 @@ async def _run_evolve_capturing_apply_kwargs(monkeypatch, *, related_ids, filter
         return _APPLY_OUTCOME_RESULT
 
     monkeypatch.setattr(mcp_server, "_no_db", _session)
-    monkeypatch.setattr(mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None)))
+    monkeypatch.setattr(
+        mcp_server, "_require_trust", AsyncMock(return_value=(3, False, None))
+    )
     monkeypatch.setattr(mcp_server, "check_and_increment", AsyncMock())
     monkeypatch.setattr(
         "core_api.services.evolve_service._filter_by_scope",
@@ -73,7 +77,9 @@ async def _run_evolve_capturing_apply_kwargs(monkeypatch, *, related_ids, filter
         "core_api.services.evolve_service._maybe_generate_rule",
         AsyncMock(return_value=(None, "not_failure_or_partial")),
     )
-    monkeypatch.setattr("core_api.services.evolve_service._apply_outcome_to_db", _spy_apply)
+    monkeypatch.setattr(
+        "core_api.services.evolve_service._apply_outcome_to_db", _spy_apply
+    )
 
     await mcp_server.caura_evolve(
         outcome="a thing happened",

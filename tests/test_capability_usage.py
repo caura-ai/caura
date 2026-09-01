@@ -6,7 +6,6 @@ map and the MCP ``call_tool`` wrapper.
 """
 
 import asyncio
-import logging
 
 import pytest
 from fastapi import APIRouter, FastAPI, Request
@@ -88,7 +87,9 @@ async def test_flush_loop_emits_and_shutdown_flushes():
     async def _capture(rows):
         captured.append(rows)
 
-    agg = CapabilityUsageAggregator(flush_interval_seconds=0.05, flush_callable=_capture)
+    agg = CapabilityUsageAggregator(
+        flush_interval_seconds=0.05, flush_callable=_capture
+    )
     await agg.start()
     agg.record(capability="recall", transport="mcp", tenant_id="t1")
     await asyncio.sleep(0.12)  # let at least one interval tick fire
@@ -194,9 +195,7 @@ async def test_mcp_call_tool_records_capability_and_op(monkeypatch):
     import core_api.mcp_server as mcp_server
 
     calls: list[dict] = []
-    monkeypatch.setattr(
-        mcp_server, "record_usage", lambda **kw: calls.append(kw)
-    )
+    monkeypatch.setattr(mcp_server, "record_usage", lambda **kw: calls.append(kw))
     # Authenticated tenant in the MCP context var the wrapper reads.
     monkeypatch.setattr(mcp_server, "_get_tenant", lambda: "t-mcp")
 
@@ -210,7 +209,7 @@ async def test_mcp_call_tool_records_capability_and_op(monkeypatch):
 
     assert len(calls) == 1
     k = calls[0]
-    assert k["capability"] == "doc"   # caura_ prefix stripped
+    assert k["capability"] == "doc"  # caura_ prefix stripped
     assert k["op"] == "search"
     assert k["transport"] == "mcp"
     assert k["tenant_id"] == "t-mcp"
@@ -279,9 +278,7 @@ async def test_every_capability_key_matches_a_real_route():
 
     walk(app.routes)
 
-    missing = sorted(
-        (m, p) for (m, p) in _REST_CAPABILITY if m not in real.get(p, ())
-    )
+    missing = sorted((m, p) for (m, p) in _REST_CAPABILITY if m not in real.get(p, ()))
     assert not missing, (
         f"{len(missing)} of {len(_REST_CAPABILITY)} capability keys match no "
         f"route on the real app, so those capabilities record nothing: "

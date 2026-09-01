@@ -372,9 +372,11 @@ async def test_log_action_mints_unique_client_event_id() -> None:
     fake_queue = MagicMock()
     fake_queue.enqueue = _capture
     with patch.object(audit_service, "get_audit_queue", return_value=fake_queue):
-        await audit_service.log_action(tenant_id="t", action="create", resource_type="memory"
+        await audit_service.log_action(
+            tenant_id="t", action="create", resource_type="memory"
         )
-        await audit_service.log_action(tenant_id="t", action="create", resource_type="memory"
+        await audit_service.log_action(
+            tenant_id="t", action="create", resource_type="memory"
         )
 
     assert len(captured) == 2
@@ -404,12 +406,14 @@ async def test_log_action_critical_falls_back_to_sync_on_full_queue() -> None:
         patch.object(audit_service, "get_storage_client", return_value=fake_storage),
     ):
         # Non-critical: dropped on overflow, no synchronous write.
-        await audit_service.log_action(tenant_id="t", action="create", resource_type="memory"
+        await audit_service.log_action(
+            tenant_id="t", action="create", resource_type="memory"
         )
         fake_storage.create_audit_log.assert_not_called()
 
         # Critical: falls back to the synchronous storage write.
-        await audit_service.log_action(tenant_id="t",
+        await audit_service.log_action(
+            tenant_id="t",
             action="nonbusiness_pregate_drop",
             resource_type="memory",
             critical=True,
@@ -420,7 +424,9 @@ async def test_log_action_critical_falls_back_to_sync_on_full_queue() -> None:
     # The non-critical enqueue must NOT be silent (a real drop should count +
     # warn); the critical one MUST be silent (it's recovered via the sync
     # write, so it isn't a real drop and shouldn't inflate the metric).
-    silent_flags = [c.kwargs.get("silent", False) for c in full_queue.enqueue.call_args_list]
+    silent_flags = [
+        c.kwargs.get("silent", False) for c in full_queue.enqueue.call_args_list
+    ]
     assert silent_flags == [False, True]
 
 
@@ -441,7 +447,8 @@ async def test_log_action_critical_uses_queue_when_not_full() -> None:
         patch.object(audit_service, "get_audit_queue", return_value=ok_queue),
         patch.object(audit_service, "get_storage_client", return_value=fake_storage),
     ):
-        await audit_service.log_action(tenant_id="t",
+        await audit_service.log_action(
+            tenant_id="t",
             action="nonbusiness_pregate_drop",
             resource_type="memory",
             critical=True,
@@ -471,7 +478,8 @@ async def test_log_action_critical_sync_failure_does_not_propagate() -> None:
         patch.object(audit_service, "get_storage_client", return_value=fake_storage),
     ):
         # Must NOT raise despite both the queue and the sync write failing.
-        await audit_service.log_action(tenant_id="t",
+        await audit_service.log_action(
+            tenant_id="t",
             action="nonbusiness_pregate_drop",
             resource_type="memory",
             critical=True,

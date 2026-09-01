@@ -14,7 +14,6 @@ from core_api.services.memory_enrichment import (
     _validate_enrichment,
 )
 
-
 # ---------------------------------------------------------------------------
 # Validator: episode strips ts_valid_end
 # ---------------------------------------------------------------------------
@@ -129,9 +128,12 @@ class TestPromptContainsEpisodeRule:
         """The prompt must explicitly tell the LLM not to set end dates on episodes."""
         assert "episode" in ENRICHMENT_PROMPT.lower()
         # Look for the specific guidance
-        assert "DO NOT set ts_valid_end for memory_type \"episode\"" in ENRICHMENT_PROMPT
+        assert 'DO NOT set ts_valid_end for memory_type "episode"' in ENRICHMENT_PROMPT
 
     def test_prompt_forbids_relative_modifier_inference(self):
         """Specific anti-pattern: relative modifiers like 'this month' are a trap."""
         assert "this month" in ENRICHMENT_PROMPT
-        assert "DO NOT infer ts_valid_end from relative time modifiers" in ENRICHMENT_PROMPT
+        assert (
+            "DO NOT infer ts_valid_end from relative time modifiers"
+            in ENRICHMENT_PROMPT
+        )

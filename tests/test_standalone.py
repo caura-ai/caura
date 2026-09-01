@@ -10,6 +10,7 @@ pytestmark = pytest.mark.asyncio
 def _get_standalone_tenant() -> str:
     """Return the standalone tenant_id by calling init_standalone()."""
     from core_api.standalone import init_standalone
+
     return init_standalone()
 
 
@@ -29,22 +30,28 @@ async def test_standalone_write_no_auth(client):
     """Write a memory without auth headers in standalone mode."""
     tenant_id = _get_standalone_tenant()
     tag = _uid()
-    resp = await client.post("/api/v1/memories", json={
-        "tenant_id": tenant_id,
-        "content": f"Standalone write test [{tag}]",
-        "agent_id": f"test-agent-{tag}",
-        "fleet_id": f"test-fleet-{tag}",
-    })
+    resp = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "content": f"Standalone write test [{tag}]",
+            "agent_id": f"test-agent-{tag}",
+            "fleet_id": f"test-fleet-{tag}",
+        },
+    )
     assert resp.status_code == 201
 
 
 async def test_standalone_search_no_auth(client):
     """Search without auth headers in standalone mode."""
     tenant_id = _get_standalone_tenant()
-    resp = await client.post("/api/v1/search", json={
-        "tenant_id": tenant_id,
-        "query": "test",
-    })
+    resp = await client.post(
+        "/api/v1/search",
+        json={
+            "tenant_id": tenant_id,
+            "query": "test",
+        },
+    )
     assert resp.status_code == 200
 
 
@@ -85,20 +92,26 @@ async def test_standalone_write_no_tenant_id(client):
     """Write a memory without tenant_id in body — middleware injects it."""
     _get_standalone_tenant()
     tag = _uid()
-    resp = await client.post("/api/v1/memories", json={
-        "content": f"No tenant_id in body test [{tag}]",
-        "agent_id": f"inject-agent-{tag}",
-        "fleet_id": f"inject-fleet-{tag}",
-    })
+    resp = await client.post(
+        "/api/v1/memories",
+        json={
+            "content": f"No tenant_id in body test [{tag}]",
+            "agent_id": f"inject-agent-{tag}",
+            "fleet_id": f"inject-fleet-{tag}",
+        },
+    )
     assert resp.status_code == 201
 
 
 async def test_standalone_search_no_tenant_id(client):
     """Search without tenant_id in body — middleware injects it."""
     _get_standalone_tenant()
-    resp = await client.post("/api/v1/search", json={
-        "query": "test",
-    })
+    resp = await client.post(
+        "/api/v1/search",
+        json={
+            "query": "test",
+        },
+    )
     assert resp.status_code == 200
 
 
@@ -117,31 +130,40 @@ class TestStandaloneWorkflow:
         tag = _uid()
 
         # Write two memories (use unique agent/fleet to avoid trust-level conflicts)
-        m1 = await client.post("/api/v1/memories", json={
-            "tenant_id": tenant_id,
-            "content": f"The project uses PostgreSQL with pgvector for embeddings [{tag}]",
-            "agent_id": f"integ-agent-{tag}",
-            "fleet_id": f"integ-fleet-{tag}",
-            "memory_type": "fact",
-        })
+        m1 = await client.post(
+            "/api/v1/memories",
+            json={
+                "tenant_id": tenant_id,
+                "content": f"The project uses PostgreSQL with pgvector for embeddings [{tag}]",
+                "agent_id": f"integ-agent-{tag}",
+                "fleet_id": f"integ-fleet-{tag}",
+                "memory_type": "fact",
+            },
+        )
         assert m1.status_code == 201
         m1_id = m1.json()["id"]
 
-        m2 = await client.post("/api/v1/memories", json={
-            "tenant_id": tenant_id,
-            "content": f"Redis is used as a caching layer [{tag}]",
-            "agent_id": f"integ-agent-{tag}",
-            "fleet_id": f"integ-fleet-{tag}",
-            "memory_type": "fact",
-        })
+        m2 = await client.post(
+            "/api/v1/memories",
+            json={
+                "tenant_id": tenant_id,
+                "content": f"Redis is used as a caching layer [{tag}]",
+                "agent_id": f"integ-agent-{tag}",
+                "fleet_id": f"integ-fleet-{tag}",
+                "memory_type": "fact",
+            },
+        )
         assert m2.status_code == 201
         m2_id = m2.json()["id"]
 
         # Search for one of them (use exact content substring for reliability with fake embeddings)
-        search = await client.post("/api/v1/search", json={
-            "tenant_id": tenant_id,
-            "query": f"PostgreSQL with pgvector for embeddings [{tag}]",
-        })
+        search = await client.post(
+            "/api/v1/search",
+            json={
+                "tenant_id": tenant_id,
+                "query": f"PostgreSQL with pgvector for embeddings [{tag}]",
+            },
+        )
         assert search.status_code == 200
         results = search.json()
         assert len(results) >= 1
@@ -160,7 +182,9 @@ class TestStandaloneWorkflow:
         assert m2_id in ids
 
         # Delete one
-        del_resp = await client.delete(f"/api/v1/memories/{m2_id}?tenant_id={tenant_id}")
+        del_resp = await client.delete(
+            f"/api/v1/memories/{m2_id}?tenant_id={tenant_id}"
+        )
         assert del_resp.status_code == 204
 
         # Verify it's gone
@@ -196,13 +220,16 @@ class TestStandaloneWorkflow:
         tag = _uid()
 
         # Write a memory with a named entity
-        await client.post("/api/v1/memories", json={
-            "tenant_id": tenant_id,
-            "content": f"John prefers to communicate via Slack [{tag}]",
-            "agent_id": f"assistant-agent-{tag}",
-            "fleet_id": f"comms-fleet-{tag}",
-            "memory_type": "preference",
-        })
+        await client.post(
+            "/api/v1/memories",
+            json={
+                "tenant_id": tenant_id,
+                "content": f"John prefers to communicate via Slack [{tag}]",
+                "agent_id": f"assistant-agent-{tag}",
+                "fleet_id": f"comms-fleet-{tag}",
+                "memory_type": "preference",
+            },
+        )
 
         # Agents endpoint should list the agent
         agents = await client.get(f"/api/v1/agents?tenant_id={tenant_id}")
@@ -216,21 +243,27 @@ class TestStandaloneWorkflow:
         tag = _uid()
 
         # Write to the standalone tenant works
-        resp = await client.post("/api/v1/memories", json={
-            "tenant_id": tenant_id,
-            "content": f"Allowed write for isolation test [{tag}]",
-            "agent_id": f"isolation-agent-{tag}",
-            "fleet_id": f"isolation-fleet-{tag}",
-        })
+        resp = await client.post(
+            "/api/v1/memories",
+            json={
+                "tenant_id": tenant_id,
+                "content": f"Allowed write for isolation test [{tag}]",
+                "agent_id": f"isolation-agent-{tag}",
+                "fleet_id": f"isolation-fleet-{tag}",
+            },
+        )
         assert resp.status_code == 201
 
         # Write to a different tenant is forbidden
-        resp = await client.post("/api/v1/memories", json={
-            "tenant_id": "some-other-tenant",
-            "content": "Should be blocked",
-            "agent_id": f"isolation-agent-{tag}",
-            "fleet_id": f"isolation-fleet-{tag}",
-        })
+        resp = await client.post(
+            "/api/v1/memories",
+            json={
+                "tenant_id": "some-other-tenant",
+                "content": "Should be blocked",
+                "agent_id": f"isolation-agent-{tag}",
+                "fleet_id": f"isolation-fleet-{tag}",
+            },
+        )
         assert resp.status_code == 403
 
     async def test_admin_endpoints_still_require_admin_key(self, client):
@@ -257,28 +290,37 @@ class TestZeroConfigWorkflow:
         tag = _uid()
 
         # Write
-        m1 = await client.post("/api/v1/memories", json={
-            "content": f"Zero-config: the deployment uses Kubernetes [{tag}]",
-            "agent_id": f"zero-agent-{tag}",
-            "fleet_id": f"zero-fleet-{tag}",
-            "memory_type": "fact",
-        })
+        m1 = await client.post(
+            "/api/v1/memories",
+            json={
+                "content": f"Zero-config: the deployment uses Kubernetes [{tag}]",
+                "agent_id": f"zero-agent-{tag}",
+                "fleet_id": f"zero-fleet-{tag}",
+                "memory_type": "fact",
+            },
+        )
         assert m1.status_code == 201
         m1_id = m1.json()["id"]
 
-        m2 = await client.post("/api/v1/memories", json={
-            "content": f"Zero-config: CI pipeline runs on GitHub Actions [{tag}]",
-            "agent_id": f"zero-agent-{tag}",
-            "fleet_id": f"zero-fleet-{tag}",
-            "memory_type": "fact",
-        })
+        m2 = await client.post(
+            "/api/v1/memories",
+            json={
+                "content": f"Zero-config: CI pipeline runs on GitHub Actions [{tag}]",
+                "agent_id": f"zero-agent-{tag}",
+                "fleet_id": f"zero-fleet-{tag}",
+                "memory_type": "fact",
+            },
+        )
         assert m2.status_code == 201
         m2_id = m2.json()["id"]
 
         # Search (no tenant_id in body — use exact content for reliability with fake embeddings)
-        search = await client.post("/api/v1/search", json={
-            "query": f"deployment uses Kubernetes [{tag}]",
-        })
+        search = await client.post(
+            "/api/v1/search",
+            json={
+                "query": f"deployment uses Kubernetes [{tag}]",
+            },
+        )
         assert search.status_code == 200
 
         # Read by ID (no tenant_id in query)
@@ -351,6 +393,7 @@ async def test_standalone_explicit_auth_still_works(client):
 async def test_non_standalone_requires_auth(client, monkeypatch):
     """When is_standalone=False, unauthenticated requests are rejected."""
     from core_api.config import settings
+
     monkeypatch.setattr(settings, "is_standalone", False)
     resp = await client.get("/api/v1/memories?tenant_id=any-tenant")
     # Without admin_key configured: AuthContext(tenant_id=None) → enforce_tenant → 403

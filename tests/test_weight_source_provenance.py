@@ -22,14 +22,15 @@ provenance question for ``memory_type``, and is registered in the same
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
 from core_api.constants import DEFAULT_MEMORY_WEIGHT
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.write.merge_enrichment_fields import MergeEnrichmentFields
-from core_api.services.system_metadata import PLATFORM_ONLY_KEYS, sanitize_caller_metadata
+from core_api.services.system_metadata import (
+    PLATFORM_ONLY_KEYS,
+    sanitize_caller_metadata,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -60,7 +61,9 @@ class _Enrichment:
 
 
 async def _run(*, caller_weight=None, enrichment=None):
-    ctx = PipelineContext(data={"input": _Input(caller_weight), "enrichment": enrichment})
+    ctx = PipelineContext(
+        data={"input": _Input(caller_weight), "enrichment": enrichment}
+    )
     await MergeEnrichmentFields().execute(ctx)
     return ctx.data["memory_fields"]
 
@@ -128,4 +131,6 @@ def test_weight_source_cannot_be_forged_by_a_caller():
     because it would look authoritative.
     """
     assert "weight_source" in PLATFORM_ONLY_KEYS
-    assert sanitize_caller_metadata({"weight_source": "caller", "mine": 1}) == {"mine": 1}
+    assert sanitize_caller_metadata({"weight_source": "caller", "mine": 1}) == {
+        "mine": 1
+    }

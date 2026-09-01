@@ -80,8 +80,7 @@ async def test_create_memory_tolerates_db_none(db, write_mode):
     tenant = _tenant()
     content = f"The Eiffel Tower is in Paris ({write_mode} mode)." + _PADDING
 
-    result = await create_memory(_make_input(tenant, content, write_mode=write_mode)
-    )
+    result = await create_memory(_make_input(tenant, content, write_mode=write_mode))
 
     assert isinstance(result, MemoryOut)
     assert result.content == content

@@ -119,7 +119,9 @@ async def test_whoami_still_looks_nothing_up(client):
 # are unaffected.
 
 
-async def test_whoami_does_not_claim_gateway_identity_without_the_secret(client, monkeypatch):
+async def test_whoami_does_not_claim_gateway_identity_without_the_secret(
+    client, monkeypatch
+):
     """The spoof: identity headers with no secret must not report a gateway."""
     from core_api.config import settings
 
@@ -138,7 +140,9 @@ async def test_whoami_does_not_claim_gateway_identity_without_the_secret(client,
     assert data["agent_id"] is None
 
 
-async def test_whoami_does_not_claim_gateway_identity_with_a_wrong_secret(client, monkeypatch):
+async def test_whoami_does_not_claim_gateway_identity_with_a_wrong_secret(
+    client, monkeypatch
+):
     from core_api.config import settings
 
     monkeypatch.setattr(settings, "gateway_shared_secret", "s3cret")
@@ -150,7 +154,9 @@ async def test_whoami_does_not_claim_gateway_identity_with_a_wrong_secret(client
     assert resp.json()["via_gateway"] is False
 
 
-async def test_whoami_honors_the_gateway_identity_with_the_correct_secret(client, monkeypatch):
+async def test_whoami_honors_the_gateway_identity_with_the_correct_secret(
+    client, monkeypatch
+):
     """The real gateway path keeps working — this is a narrowing, not a block."""
     from core_api.config import settings
 

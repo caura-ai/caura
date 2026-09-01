@@ -25,7 +25,7 @@ Coverage targets:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -48,7 +48,6 @@ from core_api.services.forge.forge_service import (
     run_forge_distill,
 )
 from core_api.services.session_trace import SessionTraceRow
-
 
 # ── Helpers ────────────────────────────────────────────────────────
 
@@ -74,8 +73,8 @@ def _trace(
         memory_ids=memory_ids if memory_ids is not None else [f"{run_id}-m1"],
         entity_ids=entity_ids if entity_ids is not None else ["e1", "e2"],
         signals_summary={},
-        started_at=started or datetime(2026, 5, 1, tzinfo=timezone.utc),
-        ended_at=ended or datetime(2026, 5, 2, tzinfo=timezone.utc),
+        started_at=started or datetime(2026, 5, 1, tzinfo=UTC),
+        ended_at=ended or datetime(2026, 5, 2, tzinfo=UTC),
         goal_phrase=None,
     )
 
@@ -96,7 +95,7 @@ def _golden_llm_response(**overrides) -> dict[str, Any]:
         "slug": "deploy-eu-west-dns",
         "description": "Use fallback DNS resolver when eu-west deploy step 7 hangs.",
         "summary": "Detects a hung step 7 on eu-west deploys and switches to the "
-                   "fallback DNS resolver before retrying.",
+        "fallback DNS resolver before retrying.",
         "content": "## When to use\n…\n## Steps\n1. …",
         "tags": ["deploy", "eu-west", "dns"],
         "evidence": "4 sessions / 3 agents in Apr 18–28, 100% success when applied.",
@@ -114,7 +113,9 @@ class TestBuildDistillPrompt:
     def test_prompt_contains_all_traces(self):
         snaps = [
             TraceSnapshot(
-                run_id=f"r{i}", agent_id=f"a{i}", outcome_label="success",
+                run_id=f"r{i}",
+                agent_id=f"a{i}",
+                outcome_label="success",
                 memory_excerpts=[f"trace {i} content excerpt"],
                 entity_ids=["e1"],
                 started_at_iso="2026-05-01T00:00:00+00:00",
@@ -122,53 +123,68 @@ class TestBuildDistillPrompt:
             )
             for i in range(3)
         ]
-        prompt = build_distill_prompt(ClusterPromptInputs(
-            tenant_id="t1", fleet_id="f1", traces=snaps,
-        ))
+        prompt = build_distill_prompt(
+            ClusterPromptInputs(
+                tenant_id="t1",
+                fleet_id="f1",
+                traces=snaps,
+            )
+        )
         assert "3 trace(s)" in prompt
         # Each trace appears as a labeled block.
         for i in range(3):
-            assert f"Trace {i+1}/3" in prompt
+            assert f"Trace {i + 1}/3" in prompt
             assert f"r{i}" in prompt
             assert f"a{i}" in prompt
 
     def test_schema_version_pinned_in_preamble(self):
-        prompt = build_distill_prompt(ClusterPromptInputs(
-            tenant_id="t1", fleet_id=None, traces=[]
-        ))
+        prompt = build_distill_prompt(
+            ClusterPromptInputs(tenant_id="t1", fleet_id=None, traces=[])
+        )
         assert DISTILL_SCHEMA_VERSION in prompt
         # Sanity: schema_version is mentioned at least twice
         # (preamble + footer).
         assert prompt.count(DISTILL_SCHEMA_VERSION) >= 2
 
     def test_top_entities_listed(self):
-        prompt = build_distill_prompt(ClusterPromptInputs(
-            tenant_id="t1", fleet_id="f1", traces=[],
-            top_entity_ids=["mysql", "deploy", "step7"],
-        ))
+        prompt = build_distill_prompt(
+            ClusterPromptInputs(
+                tenant_id="t1",
+                fleet_id="f1",
+                traces=[],
+                top_entity_ids=["mysql", "deploy", "step7"],
+            )
+        )
         # Section renamed to make the UUID nature of the values explicit.
         assert "Top entity IDs (UUIDs)" in prompt
         # Sorted + deduped.
         assert "deploy" in prompt and "mysql" in prompt and "step7" in prompt
 
     def test_hint_domain_included_when_present(self):
-        prompt = build_distill_prompt(ClusterPromptInputs(
-            tenant_id="t1", fleet_id=None, traces=[], hint_domain="security",
-        ))
+        prompt = build_distill_prompt(
+            ClusterPromptInputs(
+                tenant_id="t1",
+                fleet_id=None,
+                traces=[],
+                hint_domain="security",
+            )
+        )
         assert "Suggested domain" in prompt
         assert "security" in prompt
 
     def test_outcome_label_per_trace(self):
         snap = TraceSnapshot(
-            run_id="r1", agent_id="a1", outcome_label="failure",
+            run_id="r1",
+            agent_id="a1",
+            outcome_label="failure",
             memory_excerpts=["..."],
             entity_ids=["e1"],
             started_at_iso="2026-05-01T00:00:00+00:00",
             ended_at_iso="2026-05-01T01:00:00+00:00",
         )
-        prompt = build_distill_prompt(ClusterPromptInputs(
-            tenant_id="t1", fleet_id=None, traces=[snap]
-        ))
+        prompt = build_distill_prompt(
+            ClusterPromptInputs(tenant_id="t1", fleet_id=None, traces=[snap])
+        )
         assert "outcome: failure" in prompt
 
     def test_entity_ids_sorted_in_prompt(self):
@@ -176,15 +192,17 @@ class TestBuildDistillPrompt:
         # same cluster (same prompt → same LLM output assuming
         # temperature=0).
         snap = TraceSnapshot(
-            run_id="r1", agent_id="a1", outcome_label="success",
+            run_id="r1",
+            agent_id="a1",
+            outcome_label="success",
             memory_excerpts=[],
             entity_ids=["z-ent", "a-ent", "m-ent"],
             started_at_iso="2026-05-01T00:00:00+00:00",
             ended_at_iso="2026-05-01T01:00:00+00:00",
         )
-        prompt = build_distill_prompt(ClusterPromptInputs(
-            tenant_id="t1", fleet_id=None, traces=[snap]
-        ))
+        prompt = build_distill_prompt(
+            ClusterPromptInputs(tenant_id="t1", fleet_id=None, traces=[snap])
+        )
         line = next(l for l in prompt.splitlines() if l.startswith("entities:"))
         assert "a-ent" in line and "m-ent" in line and "z-ent" in line
         assert line.index("a-ent") < line.index("m-ent") < line.index("z-ent")
@@ -224,7 +242,9 @@ class TestParseDistillResponse:
         # changes!" or similar after a closing brace. The previous
         # regex-based extractor (anchored on $) failed this case;
         # the JSONDecoder.raw_decode path handles it.
-        raw = json.dumps(_golden_llm_response()) + "\n\nLet me know if you want changes!"
+        raw = (
+            json.dumps(_golden_llm_response()) + "\n\nLet me know if you want changes!"
+        )
         parsed = parse_distill_response(raw)
         assert parsed["domain"] == "devops"
 
@@ -315,14 +335,14 @@ class TestParseDistillResponse:
     @pytest.mark.parametrize(
         "bad_slug",
         [
-            "Deploy-Eu-West",          # uppercase
-            "deploy eu west",          # spaces
-            "-deploy-eu-west",         # leading punctuation
-            ".deploy",                 # leading dot
-            "deploy/eu/west",          # forward slash (route prefixes that itself)
-            "deploy@eu",               # at-sign
-            "",                        # empty
-            "a" * 101,                 # too long
+            "Deploy-Eu-West",  # uppercase
+            "deploy eu west",  # spaces
+            "-deploy-eu-west",  # leading punctuation
+            ".deploy",  # leading dot
+            "deploy/eu/west",  # forward slash (route prefixes that itself)
+            "deploy@eu",  # at-sign
+            "",  # empty
+            "a" * 101,  # too long
         ],
     )
     def test_invalid_slug_format_rejected(self, bad_slug):
@@ -337,7 +357,14 @@ class TestParseDistillResponse:
 
     def test_valid_slug_formats_accepted(self):
         # Lowercase alphanumeric + . _ -, starting with a-z0-9.
-        for ok in ("deploy", "deploy-eu-west", "deploy.v4", "deploy_v4", "a", "0deploy"):
+        for ok in (
+            "deploy",
+            "deploy-eu-west",
+            "deploy.v4",
+            "deploy_v4",
+            "a",
+            "0deploy",
+        ):
             parsed = parse_distill_response(json.dumps(_golden_llm_response(slug=ok)))
             assert parsed["slug"] == ok
 
@@ -346,6 +373,7 @@ class TestParseDistillResponse:
         # format. Without this, the LLM has no signal — we'd get an
         # unhelpfully-high rejection rate at parse time downstream.
         from core_api.services.forge.distill_prompt import _SYSTEM_PREAMBLE_FILLED
+
         assert "slug" in _SYSTEM_PREAMBLE_FILLED
         assert "lowercase-kebab-case" in _SYSTEM_PREAMBLE_FILLED
         assert "[a-z0-9]" in _SYSTEM_PREAMBLE_FILLED
@@ -381,8 +409,17 @@ class TestForgeDryRunFakeLLMFallback:
         assert parsed["kind"] == "create"
         # Required schema keys all present.
         for key in (
-            "goal_phrase", "domain", "step_skeleton", "name", "slug",
-            "description", "summary", "content", "tags", "evidence", "goal",
+            "goal_phrase",
+            "domain",
+            "step_skeleton",
+            "name",
+            "slug",
+            "description",
+            "summary",
+            "content",
+            "tags",
+            "evidence",
+            "goal",
         ):
             assert key in parsed, f"fake-LLM missing required key: {key}"
 
@@ -443,6 +480,7 @@ class TestForgeDryRunFakeLLMFallback:
         assert slug1 != slug2
         # Both still match the route's slug regex.
         from core_api.services.forge.distill_prompt import _SLUG_RE
+
         assert _SLUG_RE.fullmatch(slug1)
         assert _SLUG_RE.fullmatch(slug2)
 
@@ -541,7 +579,7 @@ class TestEntityJaccardClustering:
 class TestClusterGates:
     def test_min_cluster_size_filter(self):
         clusters = [
-            [_trace(run_id=f"r{i}", agent_id=f"a{i}") for i in range(2)],   # too small
+            [_trace(run_id=f"r{i}", agent_id=f"a{i}") for i in range(2)],  # too small
             [_trace(run_id=f"r{i}", agent_id=f"a{i}") for i in range(3, 7)],  # 4 traces
         ]
         eligible = _gate_clusters(clusters, min_cluster_size=3, min_distinct_agents=3)
@@ -551,7 +589,9 @@ class TestClusterGates:
     def test_min_distinct_agents_filter(self):
         # 5 traces but all same agent — anti-poison.
         single_agent = [_trace(run_id=f"r{i}", agent_id="alice") for i in range(5)]
-        eligible = _gate_clusters([single_agent], min_cluster_size=3, min_distinct_agents=3)
+        eligible = _gate_clusters(
+            [single_agent], min_cluster_size=3, min_distinct_agents=3
+        )
         assert eligible == []
 
         # 5 traces from 3 agents — OK.
@@ -597,7 +637,8 @@ def _two_eligible_clusters() -> list:
     for programming errors rather than I/O).
     """
     return [
-        _trace(run_id=f"r{i}", agent_id=f"a{i}", entity_ids=["e1", "e2", "e3"]) for i in range(4)
+        _trace(run_id=f"r{i}", agent_id=f"a{i}", entity_ids=["e1", "e2", "e3"])
+        for i in range(4)
     ] + [
         _trace(run_id=f"r{i + 10}", agent_id=f"b{i}", entity_ids=["x1", "x2", "x3"])
         for i in range(4)
@@ -637,19 +678,24 @@ def _capture_writer() -> tuple[list[dict[str, Any]], Any]:
 class TestForgeRunOrchestration:
     def _patch_build(self, monkeypatch, traces: list[SessionTraceRow]):
         """Stub out the session-trace builder so we don't need DB."""
+
         async def fake_build(*_args, **_kwargs):
             return traces
+
         import core_api.services.forge.forge_service as svc
+
         monkeypatch.setattr(svc, "build_session_traces", fake_build)
 
     @pytest.mark.asyncio
     async def test_no_traces_no_candidates(self, monkeypatch):
         self._patch_build(monkeypatch, [])
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id="f1",
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id="f1",
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -664,10 +710,12 @@ class TestForgeRunOrchestration:
         # 4 traces, all entity-overlapping, 4 distinct agents.
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="acme", fleet_id="ops",
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="acme",
+            fleet_id="ops",
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -685,7 +733,7 @@ class TestForgeRunOrchestration:
         assert doc["collection"] == "skills"
         assert doc["doc_id"].startswith("forge/")
         d = doc["data"]
-        assert d["status"] == "candidate"          # NEVER auto-promotes in Phase 1
+        assert d["status"] == "candidate"  # NEVER auto-promotes in Phase 1
         assert d["source"] == "forge"
         assert d["kind"] == "create"
         assert d["cluster_fingerprint"].startswith(f"fp:{FINGERPRINT_FORMULA_VERSION}:")
@@ -700,16 +748,22 @@ class TestForgeRunOrchestration:
     async def test_unlabeled_traces_dropped(self, monkeypatch):
         # 4 unknown-outcome traces → nothing to distill.
         traces = [
-            _trace(run_id=f"r{i}", agent_id=f"a{i}", outcome="unknown",
-                   entity_ids=["e1", "e2"])
+            _trace(
+                run_id=f"r{i}",
+                agent_id=f"a{i}",
+                outcome="unknown",
+                entity_ids=["e1", "e2"],
+            )
             for i in range(4)
         ]
         self._patch_build(monkeypatch, traces)
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -725,10 +779,12 @@ class TestForgeRunOrchestration:
         # 2 traces (below default min_cluster_size=3).
         self._patch_build(monkeypatch, _passing_traces(2))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -747,10 +803,12 @@ class TestForgeRunOrchestration:
         ]
         self._patch_build(monkeypatch, traces)
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -764,13 +822,15 @@ class TestForgeRunOrchestration:
     async def test_poison_skip_does_not_write(self, monkeypatch):
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
-            poison_checker=_poison_always,        # everything is poisoned
+            poison_checker=_poison_always,  # everything is poisoned
             candidate_writer=writer,
         )
         assert result.candidates_skipped_poisoned == 1
@@ -780,29 +840,34 @@ class TestForgeRunOrchestration:
     @pytest.mark.asyncio
     async def test_distill_error_skip_does_not_abort_run(self, monkeypatch):
         # Two clusters with disjoint entity sets, both eligible.
-        traces = (
-            [_trace(run_id=f"r{i}", agent_id=f"a{i}", entity_ids=["e1", "e2", "e3"])
-             for i in range(4)]
-            +
-            [_trace(run_id=f"r{i+10}", agent_id=f"b{i}", entity_ids=["x1", "x2", "x3"])
-             for i in range(4)]
-        )
+        traces = [
+            _trace(run_id=f"r{i}", agent_id=f"a{i}", entity_ids=["e1", "e2", "e3"])
+            for i in range(4)
+        ] + [
+            _trace(run_id=f"r{i + 10}", agent_id=f"b{i}", entity_ids=["x1", "x2", "x3"])
+            for i in range(4)
+        ]
         self._patch_build(monkeypatch, traces)
 
         # LLM returns nonsense for the FIRST cluster but a golden
         # response for any subsequent call.
         call_counter = {"n": 0}
+
         async def flaky_llm(_prompt: str) -> str:
             call_counter["n"] += 1
             if call_counter["n"] == 1:
                 return "not json"
-            return json.dumps(_golden_llm_response(slug=f"deploy-eu-west-dns-{call_counter['n']}"))
+            return json.dumps(
+                _golden_llm_response(slug=f"deploy-eu-west-dns-{call_counter['n']}")
+            )
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=flaky_llm,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -816,29 +881,40 @@ class TestForgeRunOrchestration:
     async def test_max_writes_per_run_caps_output(self, monkeypatch):
         # 3 clusters, but config limits writes to 1.
         traces = (
-            [_trace(run_id=f"r{i}", agent_id=f"a{i}", entity_ids=["e1", "e2", "e3"])
-             for i in range(4)]
-            +
-            [_trace(run_id=f"r{i+10}", agent_id=f"b{i}", entity_ids=["x1", "x2", "x3"])
-             for i in range(4)]
-            +
-            [_trace(run_id=f"r{i+20}", agent_id=f"c{i}", entity_ids=["y1", "y2", "y3"])
-             for i in range(4)]
+            [
+                _trace(run_id=f"r{i}", agent_id=f"a{i}", entity_ids=["e1", "e2", "e3"])
+                for i in range(4)
+            ]
+            + [
+                _trace(
+                    run_id=f"r{i + 10}", agent_id=f"b{i}", entity_ids=["x1", "x2", "x3"]
+                )
+                for i in range(4)
+            ]
+            + [
+                _trace(
+                    run_id=f"r{i + 20}", agent_id=f"c{i}", entity_ids=["y1", "y2", "y3"]
+                )
+                for i in range(4)
+            ]
         )
         self._patch_build(monkeypatch, traces)
 
         # Distinct slug per call so doc_ids don't collide.
         call_counter = {"n": 0}
+
         async def llm_unique(_prompt: str) -> str:
             call_counter["n"] += 1
             return json.dumps(_golden_llm_response(slug=f"slug-{call_counter['n']}"))
 
         captured, writer = _capture_writer()
         cfg = ForgeConfig(max_writes_per_run=1)
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=llm_unique,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -865,7 +941,9 @@ class TestForgeRunResultTimestamps:
     def _patch_build(self, monkeypatch, traces):
         async def fake_build(*_args, **_kwargs):
             return list(traces)
+
         import core_api.services.forge.forge_service as svc
+
         monkeypatch.setattr(svc, "build_session_traces", fake_build)
 
     @pytest.mark.asyncio
@@ -878,17 +956,19 @@ class TestForgeRunResultTimestamps:
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
 
-        before = datetime.now(timezone.utc)
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id="f1",
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        before = datetime.now(UTC)
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id="f1",
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
             candidate_writer=writer,
         )
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         # The stamp lies between before and after.
         assert before <= result.started_at <= after
@@ -918,15 +998,17 @@ class TestForgeRunResilience:
     def _patch_build(self, monkeypatch, traces):
         async def fake_build(*_args, **_kwargs):
             return list(traces)
-        import core_api.services.forge.forge_service as svc
-        monkeypatch.setattr(svc, "build_session_traces", fake_build)
 
+        import core_api.services.forge.forge_service as svc
+
+        monkeypatch.setattr(svc, "build_session_traces", fake_build)
 
     @pytest.mark.asyncio
     async def test_llm_timeout_on_one_cluster_skips_it(self, monkeypatch):
         self._patch_build(monkeypatch, _two_eligible_clusters())
 
         call = {"n": 0}
+
         async def llm(_prompt: str) -> str:
             call["n"] += 1
             if call["n"] == 1:
@@ -934,10 +1016,12 @@ class TestForgeRunResilience:
             return json.dumps(_golden_llm_response(slug=f"s-{call['n']}"))
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=llm,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -958,6 +1042,7 @@ class TestForgeRunResilience:
         self._patch_build(monkeypatch, _two_eligible_clusters())
 
         call = {"n": 0}
+
         async def fetcher(mids):
             call["n"] += 1
             if call["n"] == 1:
@@ -965,10 +1050,12 @@ class TestForgeRunResilience:
             return {m: f"content {m}" for m in mids}
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=fetcher,
             poison_checker=_poison_never,
@@ -984,6 +1071,7 @@ class TestForgeRunResilience:
         self._patch_build(monkeypatch, _two_eligible_clusters())
 
         call = {"n": 0}
+
         async def poisoner(_fp):
             call["n"] += 1
             if call["n"] == 1:
@@ -991,10 +1079,12 @@ class TestForgeRunResilience:
             return False
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=poisoner,
@@ -1006,7 +1096,9 @@ class TestForgeRunResilience:
         assert result.candidates_written == 1
 
     @pytest.mark.asyncio
-    async def test_llm_returning_kind_update_is_rejected_as_distill_error(self, monkeypatch):
+    async def test_llm_returning_kind_update_is_rejected_as_distill_error(
+        self, monkeypatch
+    ):
         """Phase-1 invariant: Forge only mints kind='create'. If the
         model returns kind='update' (with hash-binding to a live
         target), the v2-diff card flow doesn't exist yet — we'd
@@ -1016,19 +1108,24 @@ class TestForgeRunResilience:
         self._patch_build(monkeypatch, _two_eligible_clusters())
 
         call = {"n": 0}
+
         async def llm(_prompt: str) -> str:
             call["n"] += 1
             if call["n"] == 1:
                 # First cluster: forbidden kind='update' from the model.
-                return json.dumps(_golden_llm_response(kind="update", slug=f"u-{call['n']}"))
+                return json.dumps(
+                    _golden_llm_response(kind="update", slug=f"u-{call['n']}")
+                )
             # Second cluster: well-formed.
             return json.dumps(_golden_llm_response(slug=f"c-{call['n']}"))
 
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=llm,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -1047,21 +1144,25 @@ class TestForgeRunResilience:
         # Unique slug per LLM call so we can tell them apart in the
         # writer.
         call_counter = {"n": 0}
+
         async def llm_unique(_prompt):
             call_counter["n"] += 1
             return json.dumps(_golden_llm_response(slug=f"slug-{call_counter['n']}"))
 
         write_attempts: list[str] = []
+
         async def writer(doc):
             slug = doc["data"]["slug"]
             write_attempts.append(slug)
             if slug == "slug-1":
                 raise RuntimeError("simulated UNIQUE violation")
 
-        result = await run_forge_distill(            run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=llm_unique,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -1087,17 +1188,21 @@ class TestForgeRunLabel:
     def _patch_build(self, monkeypatch, traces):
         async def fake_build(*_args, **_kwargs):
             return list(traces)
+
         import core_api.services.forge.forge_service as svc
+
         monkeypatch.setattr(svc, "build_session_traces", fake_build)
 
     @pytest.mark.asyncio
     async def test_run_label_lands_on_result(self, monkeypatch):
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            run_label="forge-cron-20260607T1845",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        result = await run_forge_distill(
+            run_label="forge-cron-20260607T1845",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -1109,10 +1214,12 @@ class TestForgeRunLabel:
     async def test_run_label_stamped_on_every_candidate(self, monkeypatch):
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        await run_forge_distill(            run_label="forge-cron-acme-20260607T1845",
-            tenant_id="acme", fleet_id="ops",
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+        await run_forge_distill(
+            run_label="forge-cron-acme-20260607T1845",
+            tenant_id="acme",
+            fleet_id="ops",
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -1120,7 +1227,9 @@ class TestForgeRunLabel:
         )
         assert len(captured) == 1
         # Every candidate carries the label on origin.run_id — NOT None.
-        assert captured[0]["data"]["origin"]["run_id"] == "forge-cron-acme-20260607T1845"
+        assert (
+            captured[0]["data"]["origin"]["run_id"] == "forge-cron-acme-20260607T1845"
+        )
 
 
 # ── No-overwrite guard (status_checker) ────────────────────────────
@@ -1139,15 +1248,18 @@ class TestForgeStatusCheckerGuard:
     def _patch_build(self, monkeypatch, traces):
         async def fake_build(*_args, **_kwargs):
             return list(traces)
+
         import core_api.services.forge.forge_service as svc
+
         monkeypatch.setattr(svc, "build_session_traces", fake_build)
 
     def _kw(self):
         return dict(
             run_label="test-run",
-            tenant_id="t1", fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -1157,10 +1269,14 @@ class TestForgeStatusCheckerGuard:
     async def test_active_target_skipped(self, monkeypatch):
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
+
         # status_checker reports the target is already 'active' —
         # operator-approved. Don't clobber.
-        async def existing_active(_t, _c, _d): return "active"
-        result = await run_forge_distill(            candidate_writer=writer,
+        async def existing_active(_t, _c, _d):
+            return "active"
+
+        result = await run_forge_distill(
+            candidate_writer=writer,
             status_checker=existing_active,
             **self._kw(),
         )
@@ -1168,7 +1284,9 @@ class TestForgeStatusCheckerGuard:
         assert result.candidates_written == 0
         assert captured == []
 
-    @pytest.mark.parametrize("status", ["rejected", "quarantined", "stale", "deprecated"])
+    @pytest.mark.parametrize(
+        "status", ["rejected", "quarantined", "stale", "deprecated"]
+    )
     @pytest.mark.asyncio
     async def test_terminal_states_skipped(self, monkeypatch, status):
         # Any non-candidate status counts: rejected (poison-flagged
@@ -1176,8 +1294,12 @@ class TestForgeStatusCheckerGuard:
         # deprecated. None of these should be re-overwritten by Forge.
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        async def existing(*_): return status
-        result = await run_forge_distill(            candidate_writer=writer,
+
+        async def existing(*_):
+            return status
+
+        result = await run_forge_distill(
+            candidate_writer=writer,
             status_checker=existing,
             **self._kw(),
         )
@@ -1190,8 +1312,12 @@ class TestForgeStatusCheckerGuard:
         # refine path — Forge should write.
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        async def existing_candidate(*_): return "candidate"
-        result = await run_forge_distill(            candidate_writer=writer,
+
+        async def existing_candidate(*_):
+            return "candidate"
+
+        result = await run_forge_distill(
+            candidate_writer=writer,
             status_checker=existing_candidate,
             **self._kw(),
         )
@@ -1204,8 +1330,12 @@ class TestForgeStatusCheckerGuard:
         # status_checker returns None → no existing doc → write.
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        async def no_existing(*_): return None
-        result = await run_forge_distill(            candidate_writer=writer,
+
+        async def no_existing(*_):
+            return None
+
+        result = await run_forge_distill(
+            candidate_writer=writer,
             status_checker=no_existing,
             **self._kw(),
         )
@@ -1218,7 +1348,8 @@ class TestForgeStatusCheckerGuard:
         # candidate gets written. Eval harness path.
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            candidate_writer=writer,
+        result = await run_forge_distill(
+            candidate_writer=writer,
             # status_checker omitted entirely
             **self._kw(),
         )
@@ -1234,9 +1365,11 @@ class TestForgeStatusCheckerGuard:
         audits, Phase-4 v2-diff cards) rely on the field being
         present and matching ``sha256(content.encode('utf-8'))``."""
         import hashlib
+
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        await run_forge_distill(            candidate_writer=writer,
+        await run_forge_distill(
+            candidate_writer=writer,
             **self._kw(),
         )
         assert len(captured) == 1
@@ -1244,7 +1377,9 @@ class TestForgeStatusCheckerGuard:
         assert "content_hash" in doc
         assert doc["content_hash"].startswith("sha256:")
         # Hash matches the content byte-for-byte.
-        expected = "sha256:" + hashlib.sha256(doc["content"].encode("utf-8")).hexdigest()
+        expected = (
+            "sha256:" + hashlib.sha256(doc["content"].encode("utf-8")).hexdigest()
+        )
         assert doc["content_hash"] == expected
 
     @pytest.mark.asyncio
@@ -1255,7 +1390,8 @@ class TestForgeStatusCheckerGuard:
         ``state='clean'`` so candidates pass through without flag."""
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        await run_forge_distill(            candidate_writer=writer,
+        await run_forge_distill(
+            candidate_writer=writer,
             **self._kw(),
         )
         doc = captured[0]["data"]
@@ -1268,7 +1404,9 @@ class TestForgeStatusCheckerGuard:
         assert doc["scan"]["findings"] == []
 
     @pytest.mark.asyncio
-    async def test_sentinel_fatal_finding_increments_sentinel_counter(self, monkeypatch):
+    async def test_sentinel_fatal_finding_increments_sentinel_counter(
+        self, monkeypatch
+    ):
         """A fatal Sentinel finding (path violation / hard size cap)
         must abort the write — but increment the dedicated
         ``candidates_skipped_sentinel`` counter, NOT
@@ -1309,8 +1447,10 @@ class TestForgeStatusCheckerGuard:
         # forge_service imported the symbol — also monkeypatch the
         # module's local binding.
         import core_api.services.forge.forge_service as svc
+
         monkeypatch.setattr(svc, "scan_skill_doc", fatal_scan)
-        result = await run_forge_distill(            candidate_writer=writer,
+        result = await run_forge_distill(
+            candidate_writer=writer,
             **self._kw(),
         )
         # Sentinel-fatal lands in its OWN bucket — poisoned-fingerprint
@@ -1329,7 +1469,8 @@ class TestForgeStatusCheckerGuard:
         inbox query, etc.)."""
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        result = await run_forge_distill(            candidate_writer=writer,
+        result = await run_forge_distill(
+            candidate_writer=writer,
             **self._kw(),
         )
         assert result.candidates_written == 1
@@ -1350,8 +1491,12 @@ class TestForgeStatusCheckerGuard:
         # is a safer default than 'assume nothing exists'.
         self._patch_build(monkeypatch, _passing_traces(4))
         captured, writer = _capture_writer()
-        async def boom(*_): raise RuntimeError("simulated storage hiccup")
-        result = await run_forge_distill(            candidate_writer=writer,
+
+        async def boom(*_):
+            raise RuntimeError("simulated storage hiccup")
+
+        result = await run_forge_distill(
+            candidate_writer=writer,
             status_checker=boom,
             **self._kw(),
         )
@@ -1375,7 +1520,9 @@ class TestForgeDeterminism:
     def _patch_build(self, monkeypatch, traces):
         async def fake_build(*_args, **_kwargs):
             return list(traces)
+
         import core_api.services.forge.forge_service as svc
+
         monkeypatch.setattr(svc, "build_session_traces", fake_build)
 
     @pytest.mark.asyncio
@@ -1386,9 +1533,10 @@ class TestForgeDeterminism:
         cap2, w2 = _capture_writer()
         kw = dict(
             run_label="test-determinism-run",
-            tenant_id="t1", fleet_id="f1",
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            tenant_id="t1",
+            fleet_id="f1",
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=_poison_never,
@@ -1434,8 +1582,8 @@ class TestInternalErrorBucket:
             run_label="test-run",
             tenant_id="t1",
             fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=three_arg_checker,
@@ -1468,8 +1616,8 @@ class TestInternalErrorBucket:
             run_label="test-run",
             tenant_id="t1",
             fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=flaky_checker,
@@ -1481,7 +1629,9 @@ class TestInternalErrorBucket:
         assert result.candidates_skipped_io_error == 0
 
     @pytest.mark.asyncio
-    async def test_a_run_that_wrote_nothing_says_so_at_error_level(self, monkeypatch, caplog):
+    async def test_a_run_that_wrote_nothing_says_so_at_error_level(
+        self, monkeypatch, caplog
+    ):
         """The signal H-08 never produced. Per-cluster tracebacks already existed;
         what was missing was one line saying the run as a whole was broken."""
         import logging
@@ -1497,8 +1647,8 @@ class TestInternalErrorBucket:
             run_label="test-run",
             tenant_id="t1",
             fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=three_arg_checker,
@@ -1513,7 +1663,9 @@ class TestInternalErrorBucket:
         assert "candidates_skipped_internal_error" in summary[0]
 
     @pytest.mark.asyncio
-    async def test_a_run_that_wrote_something_does_not_page_anyone(self, monkeypatch, caplog):
+    async def test_a_run_that_wrote_something_does_not_page_anyone(
+        self, monkeypatch, caplog
+    ):
         """One malformed cluster among successes is routine. If this summary fired
         there too it would be ignored within a week, which is how alerts die."""
         import logging
@@ -1534,8 +1686,8 @@ class TestInternalErrorBucket:
             run_label="test-run",
             tenant_id="t1",
             fleet_id=None,
-            window_start=datetime(2026, 5, 1, tzinfo=timezone.utc),
-            window_end=datetime(2026, 5, 15, tzinfo=timezone.utc),
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
             llm_fn=_llm_returns_golden,
             memory_fetcher=_memory_fetcher_always,
             poison_checker=flaky_checker,

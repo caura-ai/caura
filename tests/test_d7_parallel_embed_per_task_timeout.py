@@ -28,13 +28,14 @@ import logging
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
+
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.search import parallel_embed_entity_boost as mod
 from core_api.pipeline.steps.search.parallel_embed_entity_boost import (
     ParallelEmbedAndEntityBoost,
 )
 from core_api.services.memory_service import BlankQuery
-from fastapi import HTTPException
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -44,8 +45,7 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 # ---------------------------------------------------------------------------
 
 _EMBED_PATH = (
-    "core_api.pipeline.steps.search.parallel_embed_entity_boost"
-    "._get_or_cache_embedding"
+    "core_api.pipeline.steps.search.parallel_embed_entity_boost._get_or_cache_embedding"
 )
 _BOOST_PATH = (
     "core_api.pipeline.steps.search.parallel_embed_entity_boost"
@@ -62,7 +62,7 @@ def _make_ctx() -> PipelineContext:
     (the D step's existing test) — same keys, same default ``graph_max_hops``.
     """
     return PipelineContext(
-                data={
+        data={
             "query": "test",
             "tenant_id": "t1",
             "tenant_config": None,

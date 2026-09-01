@@ -67,7 +67,7 @@ from pathlib import Path
 # Re-check by sampling qa items per category value, not by consulting a summary.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _locomo_bench import (  # noqa: E402  (path shim above must run first)
+from _locomo_bench import (
     _post,
     embed,
     load_locomo,

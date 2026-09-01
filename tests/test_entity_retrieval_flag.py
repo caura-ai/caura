@@ -74,7 +74,11 @@ def _classify_ctx(*, fts_weight: float = 0.3, **extra) -> PipelineContext:
         "query": _ENTITY_QUERY,
         "tenant_id": "t1",
         "fleet_ids": ["fleet-1"],
-        "search_params": {"graph_max_hops": 2, "top_k": _TOP_K, "fts_weight": fts_weight},
+        "search_params": {
+            "graph_max_hops": 2,
+            "top_k": _TOP_K,
+            "fts_weight": fts_weight,
+        },
         **extra,
     }
     return PipelineContext(data=data)

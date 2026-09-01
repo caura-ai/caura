@@ -8,6 +8,8 @@ D6:  the default status policy hides superseded rows and said so nowhere.
 """
 
 import pytest
+from pydantic import ValidationError
+
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.search import load_and_serialize as las
 from core_api.schemas import (
@@ -16,7 +18,6 @@ from core_api.schemas import (
     SearchRequest,
     SearchResponse,
 )
-from pydantic import ValidationError
 
 pytestmark = pytest.mark.unit
 

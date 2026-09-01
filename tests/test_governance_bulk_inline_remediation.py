@@ -32,7 +32,6 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from sqlalchemy import text
 
 from core_api.config import settings
@@ -42,10 +41,14 @@ from core_api.services.organization_settings import ResolvedConfig
 
 # Long enough to clear CheckContentLength's minimum-length quality gate, and
 # deliberately free of anything the deterministic PII scanner matches.
-_PADDING = " This memory carries enough surrounding context to pass the content-length gate."
+_PADDING = (
+    " This memory carries enough surrounding context to pass the content-length gate."
+)
 
 
-def _cfg(*, pii=False, pii_action="drop", nb=False, nb_disposition="drop") -> ResolvedConfig:
+def _cfg(
+    *, pii=False, pii_action="drop", nb=False, nb_disposition="drop"
+) -> ResolvedConfig:
     return ResolvedConfig(
         {
             "enrichment": {"enabled": True, "provider": "fake"},
@@ -133,7 +136,9 @@ async def _write_one(monkeypatch, *, cfg, enrichment):
     return memory_id
 
 
-async def test_bulk_inline_write_drops_a_pii_memory_when_configured(monkeypatch, _engine):
+async def test_bulk_inline_write_drops_a_pii_memory_when_configured(
+    monkeypatch, _engine
+):
     """The gap: an LLM PII verdict must soft-delete a bulk-created row.
 
     Fails pre-fix — the row stays live because nothing consumed the verdict.
@@ -149,7 +154,9 @@ async def test_bulk_inline_write_drops_a_pii_memory_when_configured(monkeypatch,
     )
 
 
-async def test_bulk_inline_write_drops_a_personal_memory_when_configured(monkeypatch, _engine):
+async def test_bulk_inline_write_drops_a_personal_memory_when_configured(
+    monkeypatch, _engine
+):
     """The non-business half, which additionally needs ``business_relevance``
     to have been persisted by the bulk path."""
     memory_id = await _write_one(
@@ -179,7 +186,9 @@ async def test_bulk_inline_write_keeps_clean_content(monkeypatch, _engine):
     )
 
 
-async def test_deterministic_gate_still_rejects_before_the_row_exists(monkeypatch, _engine):
+async def test_deterministic_gate_still_rejects_before_the_row_exists(
+    monkeypatch, _engine
+):
     """The pre-write gate is unchanged: pattern-detectable PII never persists.
 
     Distinguishes the two mechanisms — this one refuses the item outright rather
@@ -190,7 +199,9 @@ async def test_deterministic_gate_still_rejects_before_the_row_exists(monkeypatc
         tenant_id=f"test-tenant-govbulk-{uuid.uuid4().hex[:8]}",
         fleet_id="test-fleet",
         agent_id="test-agent",
-        items=[BulkMemoryItem(content="Reach me at alice.smith@example.com." + _PADDING)],
+        items=[
+            BulkMemoryItem(content="Reach me at alice.smith@example.com." + _PADDING)
+        ],
     )
     with (
         patch(

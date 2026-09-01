@@ -39,9 +39,13 @@ async def test_declared_type_is_not_retried() -> None:
     fn, calls = _counting(Shape("bad shape"))
 
     with pytest.raises(Shape):
-        await call_with_retry(fn, label="t", max_attempts=3, base_delay=0, non_retryable=(Shape,))
+        await call_with_retry(
+            fn, label="t", max_attempts=3, base_delay=0, non_retryable=(Shape,)
+        )
 
-    assert len(calls) == 1, f"a declared-deterministic failure must run once; ran {len(calls)}x"
+    assert len(calls) == 1, (
+        f"a declared-deterministic failure must run once; ran {len(calls)}x"
+    )
 
 
 async def test_undeclared_type_still_retries() -> None:
@@ -49,9 +53,13 @@ async def test_undeclared_type_still_retries() -> None:
     fn, calls = _counting(Transport("timeout"))
 
     with pytest.raises(Transport):
-        await call_with_retry(fn, label="t", max_attempts=3, base_delay=0, non_retryable=(Shape,))
+        await call_with_retry(
+            fn, label="t", max_attempts=3, base_delay=0, non_retryable=(Shape,)
+        )
 
-    assert len(calls) == 3, f"a transport failure must still use its budget; ran {len(calls)}x"
+    assert len(calls) == 3, (
+        f"a transport failure must still use its budget; ran {len(calls)}x"
+    )
 
 
 async def test_default_is_a_no_op_for_existing_callers() -> None:
@@ -77,7 +85,9 @@ async def test_subclasses_are_covered() -> None:
     fn, calls = _counting(Narrower("bad shape"))
 
     with pytest.raises(Narrower):
-        await call_with_retry(fn, label="t", max_attempts=3, base_delay=0, non_retryable=(Shape,))
+        await call_with_retry(
+            fn, label="t", max_attempts=3, base_delay=0, non_retryable=(Shape,)
+        )
 
     assert len(calls) == 1
 
@@ -146,12 +156,16 @@ async def test_fallback_provider_still_runs_after_a_non_retryable_primary() -> N
         non_retryable=(Shape,),
     )
 
-    assert got == "fallback-result", f"the fallback provider must get its turn; got {got!r}"
+    assert got == "fallback-result", (
+        f"the fallback provider must get its turn; got {got!r}"
+    )
     # One primary attempt (not three), then the fallback.
     assert seen == ["openai", "gemini"], f"expected one try each; got {seen!r}"
 
 
-async def test_fake_fn_is_the_last_resort_when_both_providers_are_deterministic() -> None:
+async def test_fake_fn_is_the_last_resort_when_both_providers_are_deterministic() -> (
+    None
+):
     """If every provider fails the same way, the heuristic still answers.
 
     ``call_with_fallback``'s contract is that it always returns something.

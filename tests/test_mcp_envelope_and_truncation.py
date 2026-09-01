@@ -20,7 +20,7 @@ this extends the same permanent alias to ``caura_list``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -36,7 +36,7 @@ class _MemoryStub:
     def __init__(self, mid: str):
         self.mid = mid
 
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": self.mid}
 
 
@@ -46,7 +46,7 @@ class _FakeConfig:
     entity_retrieval = True
 
 
-async def _fake_resolve_config(tenant_id):  # noqa: ARG001
+async def _fake_resolve_config(tenant_id):
     return _FakeConfig()
 
 
@@ -57,7 +57,7 @@ def _wire_recall(monkeypatch):
 
 def _out_stub(mid: str):
     class _Out:
-        def model_dump(self, mode="python"):  # noqa: ARG002
+        def model_dump(self, mode="python"):
             return {"id": mid}
 
     return _Out()
@@ -122,7 +122,10 @@ async def test_recall_over_cap_keeps_the_human_warning(mcp_env, monkeypatch):
 
     payload = parse_envelope(await mcp_server.caura_recall(query="x", top_k=1000))
 
-    assert f"capped at the maximum allowed value of {MAX_SEARCH_TOP_K}" in payload["warning"]
+    assert (
+        f"capped at the maximum allowed value of {MAX_SEARCH_TOP_K}"
+        in payload["warning"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +135,10 @@ async def test_recall_over_cap_keeps_the_human_warning(mcp_env, monkeypatch):
 
 async def test_list_dual_emits_items_and_results(mcp_env, monkeypatch):
     """Both keys, same rows — a REST-shaped parser reads ``items`` and works."""
-    rows = [{"id": str(uuid4()), "created_at": datetime.now(timezone.utc).isoformat()} for _ in range(2)]
+    rows = [
+        {"id": str(uuid4()), "created_at": datetime.now(UTC).isoformat()}
+        for _ in range(2)
+    ]
     stub_storage_client(monkeypatch, list_memories_by_filters=rows)
     monkeypatch.setattr(mcp_server, "_memory_to_out", lambda m: _out_stub(m["id"]))
 
@@ -160,7 +166,10 @@ async def test_list_items_reflects_the_served_slice(mcp_env, monkeypatch):
     alias bound to the raw storage rows would leak the probe row into ``items``
     while ``results`` stayed correct — and the two keys would disagree.
     """
-    rows = [{"id": str(uuid4()), "created_at": datetime.now(timezone.utc).isoformat()} for _ in range(3)]
+    rows = [
+        {"id": str(uuid4()), "created_at": datetime.now(UTC).isoformat()}
+        for _ in range(3)
+    ]
     stub_storage_client(monkeypatch, list_memories_by_filters=rows)
     monkeypatch.setattr(mcp_server, "_memory_to_out", lambda m: _out_stub(m["id"]))
 

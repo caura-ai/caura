@@ -140,7 +140,11 @@ class _Mem(SimpleNamespace):
 
 def _mem(content: str) -> _Mem:
     return _Mem(
-        content=content, memory_type="fact", title=None, status="active", ts_valid_start=None
+        content=content,
+        memory_type="fact",
+        title=None,
+        status="active",
+        ts_valid_start=None,
     )
 
 

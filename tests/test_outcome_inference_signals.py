@@ -19,7 +19,7 @@ to return controlled rows (as the storage response dicts) and assert:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -30,8 +30,6 @@ from core_api.services.outcome_inference import (
     SignalEvidence,
     SignalKind,
     SignalQuery,
-)
-from core_api.services.outcome_inference import (
     contradictions,
     cross_agent_reuse,
     external_hooks,
@@ -39,7 +37,6 @@ from core_api.services.outcome_inference import (
     supersessions,
     terminal_memory,
 )
-
 
 # ── Storage-client mock harness ────────────────────────────────────
 #
@@ -72,8 +69,8 @@ def _query(**overrides) -> SignalQuery:
     base = {
         "tenant_id": "t1",
         "fleet_id": None,
-        "window_start": datetime(2026, 5, 1, tzinfo=timezone.utc),
-        "window_end": datetime(2026, 5, 15, tzinfo=timezone.utc),
+        "window_start": datetime(2026, 5, 1, tzinfo=UTC),
+        "window_end": datetime(2026, 5, 15, tzinfo=UTC),
         "run_id": None,
         "agent_id": None,
     }
@@ -123,7 +120,7 @@ class TestSignalTypes:
             weight=0.7,
             memory_ids=("m-1", "m-2"),
             details={"superseded_by_memory_id": "m-3"},
-            observed_at=datetime(2026, 5, 10, 12, 0, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 10, 12, 0, tzinfo=UTC),
         )
         j = ev.as_jsonb()
         assert j["polarity"] == "failure"
@@ -177,17 +174,32 @@ class TestSupersessionExtractor:
         assert ev.details["superseded_by_memory_id"] == "new-mem-1"
         assert ev.details["run_id"] == "run-A"
         assert ev.details["agent_id"] == "sasha"
-        assert ev.observed_at == datetime(2026, 5, 5, tzinfo=timezone.utc)
+        assert ev.observed_at == datetime(2026, 5, 5, tzinfo=UTC)
 
     @pytest.mark.asyncio
     async def test_one_evidence_per_supersession(self):
         rows = [
-            {"superseded_id": "m1", "run_id": "r1", "agent_id": "a1", "by_id": "n1",
-             "observed_at": "2026-05-03T00:00:00+00:00"},
-            {"superseded_id": "m2", "run_id": "r2", "agent_id": "a2", "by_id": "n2",
-             "observed_at": "2026-05-04T00:00:00+00:00"},
-            {"superseded_id": "m3", "run_id": "r1", "agent_id": "a1", "by_id": "n3",
-             "observed_at": "2026-05-07T00:00:00+00:00"},
+            {
+                "superseded_id": "m1",
+                "run_id": "r1",
+                "agent_id": "a1",
+                "by_id": "n1",
+                "observed_at": "2026-05-03T00:00:00+00:00",
+            },
+            {
+                "superseded_id": "m2",
+                "run_id": "r2",
+                "agent_id": "a2",
+                "by_id": "n2",
+                "observed_at": "2026-05-04T00:00:00+00:00",
+            },
+            {
+                "superseded_id": "m3",
+                "run_id": "r1",
+                "agent_id": "a1",
+                "by_id": "n3",
+                "observed_at": "2026-05-07T00:00:00+00:00",
+            },
         ]
         _fake, ctx, _ = _patch_signal_client(supersessions, rows)
         with ctx:
@@ -293,7 +305,9 @@ class TestContradictionExtractor:
         kwargs = getattr(fake, method).await_args.kwargs
         # The status set is threaded as a list (storage binds it as a
         # text[] for ``= ANY(...)``).
-        assert kwargs["contradicted_statuses"] == list(contradictions.CONTRADICTED_STATUSES)
+        assert kwargs["contradicted_statuses"] == list(
+            contradictions.CONTRADICTED_STATUSES
+        )
         assert kwargs["tenant_id"] == "acme"
 
     @pytest.mark.asyncio
@@ -307,8 +321,8 @@ class TestContradictionExtractor:
 
     @pytest.mark.asyncio
     async def test_window_boundaries_passed_to_client(self):
-        start = datetime(2026, 4, 1, tzinfo=timezone.utc)
-        end = datetime(2026, 4, 15, tzinfo=timezone.utc)
+        start = datetime(2026, 4, 1, tzinfo=UTC)
+        end = datetime(2026, 4, 15, tzinfo=UTC)
         fake, ctx, method = _patch_signal_client(contradictions, [])
         with ctx:
             await contradictions.extract(_query(window_start=start, window_end=end))
@@ -327,12 +341,22 @@ class TestMultiSignalIndependence:
         # Running both extractors against unrelated rows must NOT
         # leak between them.
         sup_rows = [
-            {"superseded_id": "s1", "run_id": "r1", "agent_id": "a1", "by_id": "n1",
-             "observed_at": "2026-05-05T00:00:00+00:00"}
+            {
+                "superseded_id": "s1",
+                "run_id": "r1",
+                "agent_id": "a1",
+                "by_id": "n1",
+                "observed_at": "2026-05-05T00:00:00+00:00",
+            }
         ]
         con_rows = [
-            {"memory_id": "c1", "run_id": "r2", "agent_id": "a2", "status": "outdated",
-             "observed_at": "2026-05-06T00:00:00+00:00"}
+            {
+                "memory_id": "c1",
+                "run_id": "r2",
+                "agent_id": "a2",
+                "status": "outdated",
+                "observed_at": "2026-05-06T00:00:00+00:00",
+            }
         ]
         _f1, ctx1, _ = _patch_signal_client(supersessions, sup_rows)
         with ctx1:
@@ -353,17 +377,39 @@ class TestMultiSignalIndependence:
         # extractors must accept a row with no observed_at without
         # crashing. (Happens when older memories have no recall timestamp.)
         cases = (
-            (supersessions, [{"superseded_id": "s", "run_id": "r", "agent_id": "a", "by_id": "n",
-                              "observed_at": None}]),
-            (contradictions, [{"memory_id": "c", "run_id": "r", "agent_id": "a", "status": "outdated",
-                               "observed_at": None}]),
+            (
+                supersessions,
+                [
+                    {
+                        "superseded_id": "s",
+                        "run_id": "r",
+                        "agent_id": "a",
+                        "by_id": "n",
+                        "observed_at": None,
+                    }
+                ],
+            ),
+            (
+                contradictions,
+                [
+                    {
+                        "memory_id": "c",
+                        "run_id": "r",
+                        "agent_id": "a",
+                        "status": "outdated",
+                        "observed_at": None,
+                    }
+                ],
+            ),
         )
         for mod, rows in cases:
             _fake, ctx, _ = _patch_signal_client(mod, rows)
             with ctx:
                 out = await mod.extract(_query())
             assert len(out) == 1
-            assert out[0].observed_at is None or isinstance(out[0].observed_at, datetime)
+            assert out[0].observed_at is None or isinstance(
+                out[0].observed_at, datetime
+            )
 
 
 # ── Window degenerate cases ───────────────────────────────────────
@@ -375,10 +421,12 @@ class TestWindowDegenerateCases:
     async def test_empty_window_returns_empty(self):
         # window_start == window_end → storage returns 0 rows; the
         # extractor returns [].
-        same = datetime(2026, 5, 10, tzinfo=timezone.utc)
+        same = datetime(2026, 5, 10, tzinfo=UTC)
         _fake, ctx, _ = _patch_signal_client(supersessions, [])
         with ctx:
-            out = await supersessions.extract(_query(window_start=same, window_end=same))
+            out = await supersessions.extract(
+                _query(window_start=same, window_end=same)
+            )
         assert out == []
 
     @pytest.mark.asyncio
@@ -389,8 +437,8 @@ class TestWindowDegenerateCases:
         with ctx:
             out = await contradictions.extract(
                 _query(
-                    window_start=datetime(2026, 5, 10, tzinfo=timezone.utc),
-                    window_end=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                    window_start=datetime(2026, 5, 10, tzinfo=UTC),
+                    window_end=datetime(2026, 5, 1, tzinfo=UTC),
                 )
             )
         assert out == []
@@ -400,16 +448,21 @@ class TestWindowDegenerateCases:
         # A one-year window with many rows must collect every row storage
         # returns — the extractor does NOT impose its own LIMIT.
         many = [
-            {"superseded_id": f"m{i}", "run_id": f"r{i}", "agent_id": "a", "by_id": f"n{i}",
-             "observed_at": "2026-05-05T00:00:00+00:00"}
+            {
+                "superseded_id": f"m{i}",
+                "run_id": f"r{i}",
+                "agent_id": "a",
+                "by_id": f"n{i}",
+                "observed_at": "2026-05-05T00:00:00+00:00",
+            }
             for i in range(50)
         ]
         _fake, ctx, _ = _patch_signal_client(supersessions, many)
         with ctx:
             out = await supersessions.extract(
                 _query(
-                    window_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                    window_end=datetime(2027, 1, 1, tzinfo=timezone.utc),
+                    window_start=datetime(2026, 1, 1, tzinfo=UTC),
+                    window_end=datetime(2027, 1, 1, tzinfo=UTC),
                 )
             )
         assert len(out) == 50
@@ -424,42 +477,58 @@ class TestTerminalMemoryClassifier:
 
     def test_success_keyword_shipped(self):
         from core_api.services.outcome_inference.terminal_memory import _classify
+
         assert _classify("Shipped to prod") == Polarity.SUCCESS
 
     def test_success_keyword_deployed_phrase(self):
         from core_api.services.outcome_inference.terminal_memory import _classify
+
         assert _classify("Deployed v4 to eu-west, all green") == Polarity.SUCCESS
 
     def test_failure_keyword_blocked(self):
         from core_api.services.outcome_inference.terminal_memory import _classify
-        assert _classify("Blocked on infra outage, will resume tomorrow") == Polarity.FAILURE
+
+        assert (
+            _classify("Blocked on infra outage, will resume tomorrow")
+            == Polarity.FAILURE
+        )
 
     def test_failure_phrase_gave_up(self):
         from core_api.services.outcome_inference.terminal_memory import _classify
+
         assert _classify("Gave up after 4 hours of retries") == Polarity.FAILURE
 
     def test_failure_phrase_rolled_back(self):
         from core_api.services.outcome_inference.terminal_memory import _classify
-        assert _classify("Rolled back the change — DB grew too fast") == Polarity.FAILURE
+
+        assert (
+            _classify("Rolled back the change — DB grew too fast") == Polarity.FAILURE
+        )
 
     def test_ambiguous_returns_none(self):
         from core_api.services.outcome_inference.terminal_memory import _classify
+
         # No keywords from either set.
         assert _classify("Looked at the dashboard, thinking through next steps") is None
 
     def test_failure_wins_over_success_in_same_text(self):
         # Asymmetric tie-breaking rule from module docstring.
         from core_api.services.outcome_inference.terminal_memory import _classify
-        assert _classify("Deployed but rolled back five minutes later") == Polarity.FAILURE
+
+        assert (
+            _classify("Deployed but rolled back five minutes later") == Polarity.FAILURE
+        )
 
     def test_empty_content_returns_none(self):
         from core_api.services.outcome_inference.terminal_memory import _classify
+
         assert _classify("") is None
         assert _classify(None) is None  # type: ignore[arg-type]
 
     def test_word_boundary_avoids_substring_false_positive(self):
         # "preshipped" should NOT fire shipped — \b boundary.
         from core_api.services.outcome_inference.terminal_memory import _classify
+
         assert _classify("preshipped (early-access feature)") is None
 
 
@@ -490,15 +559,21 @@ class TestTerminalMemoryExtractor:
         assert out[0].kind == SignalKind.TERMINAL_MEMORY
         assert out[0].polarity == Polarity.SUCCESS
         assert out[0].weight == DEFAULT_SIGNAL_WEIGHTS[SignalKind.TERMINAL_MEMORY]
-        assert out[0].details["classifier_version"] == terminal_memory.CLASSIFIER_VERSION
+        assert (
+            out[0].details["classifier_version"] == terminal_memory.CLASSIFIER_VERSION
+        )
         assert out[0].details["verdict"] == "success"
 
     @pytest.mark.asyncio
     async def test_failure_terminal_emits_failure(self):
         rows = [
-            {"memory_id": "m1", "run_id": "r1", "agent_id": "kai",
-             "content": "Blocked — DNS resolver hangs",
-             "observed_at": "2026-05-10T00:00:00+00:00"}
+            {
+                "memory_id": "m1",
+                "run_id": "r1",
+                "agent_id": "kai",
+                "content": "Blocked — DNS resolver hangs",
+                "observed_at": "2026-05-10T00:00:00+00:00",
+            }
         ]
         _fake, ctx, _ = _patch_signal_client(terminal_memory, rows)
         with ctx:
@@ -509,9 +584,13 @@ class TestTerminalMemoryExtractor:
     async def test_ambiguous_terminal_not_emitted(self):
         # Classifier returns None → no evidence at all.
         rows = [
-            {"memory_id": "m1", "run_id": "r1", "agent_id": "a",
-             "content": "Looking into it.",
-             "observed_at": "2026-05-10T00:00:00+00:00"}
+            {
+                "memory_id": "m1",
+                "run_id": "r1",
+                "agent_id": "a",
+                "content": "Looking into it.",
+                "observed_at": "2026-05-10T00:00:00+00:00",
+            }
         ]
         _fake, ctx, _ = _patch_signal_client(terminal_memory, rows)
         with ctx:
@@ -573,7 +652,10 @@ class TestCrossAgentReuseExtractor:
         assert out[0].polarity == Polarity.NEUTRAL
         assert out[0].weight == DEFAULT_SIGNAL_WEIGHTS[SignalKind.CROSS_AGENT_REUSE]
         assert out[0].details["recall_count"] == 8
-        assert out[0].details["threshold"] == cross_agent_reuse.DEFAULT_RECALL_COUNT_THRESHOLD
+        assert (
+            out[0].details["threshold"]
+            == cross_agent_reuse.DEFAULT_RECALL_COUNT_THRESHOLD
+        )
 
     @pytest.mark.asyncio
     async def test_threshold_is_passed_to_client(self):
@@ -655,6 +737,7 @@ class TestSignalRegistry:
 
     def test_each_module_exposes_extract_coroutine(self):
         import asyncio
+
         for mod in self.ALL_MODULES:
             assert asyncio.iscoroutinefunction(mod.extract), (
                 f"{mod.__name__}.extract must be a coroutine"
@@ -678,7 +761,17 @@ class TestSignalRegistry:
             doc = (mod.__doc__ or "").lower()
             assert any(
                 token in doc
-                for token in ("memories.", "track_recalls", "recall_event", "memory_recalls",
-                              "external", "audit", "recall_count", "contradiction",
-                              "supersedes", "phase 2", "phase 5")
+                for token in (
+                    "memories.",
+                    "track_recalls",
+                    "recall_event",
+                    "memory_recalls",
+                    "external",
+                    "audit",
+                    "recall_count",
+                    "contradiction",
+                    "supersedes",
+                    "phase 2",
+                    "phase 5",
+                )
             ), f"{mod.__name__} docstring lacks data-source breadcrumb"

@@ -41,19 +41,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from core_api.services.forge.forge_service import (
-    ForgeConfig,
     _cluster_by_entity_overlap,
     _gate_clusters,
-    run_forge_distill,
 )
 from core_api.services.session_trace import SessionTraceRow
-
 
 # ── Fleet fixture builder ─────────────────────────────────────────
 
@@ -91,8 +88,8 @@ def _spec_to_row(spec: _TraceSpec) -> SessionTraceRow:
         memory_ids=list(spec.memory_ids),
         entity_ids=list(spec.entity_ids),
         signals_summary={},
-        started_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
-        ended_at=datetime(2026, 5, 1, 1, tzinfo=timezone.utc),
+        started_at=datetime(2026, 5, 1, tzinfo=UTC),
+        ended_at=datetime(2026, 5, 1, 1, tzinfo=UTC),
         goal_phrase=None,
     )
 
@@ -104,37 +101,53 @@ _FLEET_A = _Fleet(
     traces=tuple(
         # Cluster: deploy-eu-west (4 traces, 4 distinct agents)
         [
-            _TraceSpec(f"run-deploy-{i}", f"agent-deploy-{i}", "success",
-                       ("deploy", "eu-west", "step7", "dns"),
-                       (f"deploy-m{i}-1", f"deploy-m{i}-2"),
-                       "deploy_eu_west")
+            _TraceSpec(
+                f"run-deploy-{i}",
+                f"agent-deploy-{i}",
+                "success",
+                ("deploy", "eu-west", "step7", "dns"),
+                (f"deploy-m{i}-1", f"deploy-m{i}-2"),
+                "deploy_eu_west",
+            )
             for i in range(4)
         ]
         +
         # Cluster: brand-guidelines (3 traces, 3 distinct agents)
         [
-            _TraceSpec(f"run-brand-{i}", f"agent-brand-{i}", "success",
-                       ("brand", "tokens", "design-system", "typography"),
-                       (f"brand-m{i}-1",),
-                       "brand_guidelines")
+            _TraceSpec(
+                f"run-brand-{i}",
+                f"agent-brand-{i}",
+                "success",
+                ("brand", "tokens", "design-system", "typography"),
+                (f"brand-m{i}-1",),
+                "brand_guidelines",
+            )
             for i in range(3)
         ]
         +
         # Cluster: oncall (3 traces, 3 distinct agents)
         [
-            _TraceSpec(f"run-oncall-{i}", f"agent-oncall-{i}", "success",
-                       ("oncall", "alert", "pager", "incident"),
-                       (f"oncall-m{i}-1",),
-                       "oncall")
+            _TraceSpec(
+                f"run-oncall-{i}",
+                f"agent-oncall-{i}",
+                "success",
+                ("oncall", "alert", "pager", "incident"),
+                (f"oncall-m{i}-1",),
+                "oncall",
+            )
             for i in range(3)
         ]
         +
         # Noise: 1 trace with disjoint entities
         [
-            _TraceSpec("run-noise", "agent-noise", "success",
-                       ("isolated-entity",),
-                       ("noise-m1",),
-                       "noise")
+            _TraceSpec(
+                "run-noise",
+                "agent-noise",
+                "success",
+                ("isolated-entity",),
+                ("noise-m1",),
+                "noise",
+            )
         ]
     ),
     expected_clusters={"deploy_eu_west": 4, "brand_guidelines": 3, "oncall": 3},
@@ -149,28 +162,40 @@ _FLEET_B = _Fleet(
         # Cluster: security scan (4 traces) — shares 1 peripheral
         # entity "monitoring" with the next cluster.
         [
-            _TraceSpec(f"run-sec-{i}", f"agent-sec-{i}", "success",
-                       ("scan", "vuln", "cve", "patch", "monitoring"),
-                       (f"sec-m{i}-1",),
-                       "security_scan")
+            _TraceSpec(
+                f"run-sec-{i}",
+                f"agent-sec-{i}",
+                "success",
+                ("scan", "vuln", "cve", "patch", "monitoring"),
+                (f"sec-m{i}-1",),
+                "security_scan",
+            )
             for i in range(4)
         ]
         +
         # Cluster: monitoring-deploy (4 traces) — shares "monitoring" with sec.
         [
-            _TraceSpec(f"run-mon-{i}", f"agent-mon-{i}", "success",
-                       ("monitoring", "alert", "grafana", "dashboard"),
-                       (f"mon-m{i}-1",),
-                       "monitoring_deploy")
+            _TraceSpec(
+                f"run-mon-{i}",
+                f"agent-mon-{i}",
+                "success",
+                ("monitoring", "alert", "grafana", "dashboard"),
+                (f"mon-m{i}-1",),
+                "monitoring_deploy",
+            )
             for i in range(4)
         ]
         +
         # Cluster: pure-product (3 traces) — fully disjoint.
         [
-            _TraceSpec(f"run-prod-{i}", f"agent-prod-{i}", "success",
-                       ("ab-test", "experiment", "control", "variant"),
-                       (f"prod-m{i}-1",),
-                       "product_ab_test")
+            _TraceSpec(
+                f"run-prod-{i}",
+                f"agent-prod-{i}",
+                "success",
+                ("ab-test", "experiment", "control", "variant"),
+                (f"prod-m{i}-1",),
+                "product_ab_test",
+            )
             for i in range(3)
         ]
     ),
@@ -189,28 +214,40 @@ _FLEET_C = _Fleet(
     traces=tuple(
         # Small: 3 traces, 3 agents
         [
-            _TraceSpec(f"run-S-{i}", f"agent-S-{i}", "success",
-                       ("small-A", "small-B", "small-C"),
-                       (f"S-m{i}-1",),
-                       "small_cluster")
+            _TraceSpec(
+                f"run-S-{i}",
+                f"agent-S-{i}",
+                "success",
+                ("small-A", "small-B", "small-C"),
+                (f"S-m{i}-1",),
+                "small_cluster",
+            )
             for i in range(3)
         ]
         +
         # Medium: 6 traces, 4 agents (one agent appears twice)
         [
-            _TraceSpec(f"run-M-{i}", f"agent-M-{min(i, 3)}", "success",
-                       ("medium-A", "medium-B", "medium-C", "medium-D"),
-                       (f"M-m{i}-1", f"M-m{i}-2"),
-                       "medium_cluster")
+            _TraceSpec(
+                f"run-M-{i}",
+                f"agent-M-{min(i, 3)}",
+                "success",
+                ("medium-A", "medium-B", "medium-C", "medium-D"),
+                (f"M-m{i}-1", f"M-m{i}-2"),
+                "medium_cluster",
+            )
             for i in range(6)
         ]
         +
         # Large: 10 traces, 5 agents
         [
-            _TraceSpec(f"run-L-{i}", f"agent-L-{i % 5}", "success",
-                       ("large-A", "large-B", "large-C", "large-D", "large-E"),
-                       (f"L-m{i}-1",),
-                       "large_cluster")
+            _TraceSpec(
+                f"run-L-{i}",
+                f"agent-L-{i % 5}",
+                "success",
+                ("large-A", "large-B", "large-C", "large-D", "large-E"),
+                (f"L-m{i}-1",),
+                "large_cluster",
+            )
             for i in range(10)
         ]
     ),
@@ -416,14 +453,16 @@ class TestPhase1AggregateReport:
         rows: list[dict[str, Any]] = []
         for fleet in ALL_FLEETS:
             emitted = _emitted_clusters(fleet)
-            rows.append({
-                "fleet": fleet.name,
-                "n_traces": len(fleet.traces),
-                "n_emitted_clusters": len(emitted),
-                "stability_rate": round(_stability_rate(fleet), 4),
-                "cluster_precision": round(_cluster_precision(emitted), 4),
-                "cluster_recall": round(_cluster_recall(fleet, emitted), 4),
-            })
+            rows.append(
+                {
+                    "fleet": fleet.name,
+                    "n_traces": len(fleet.traces),
+                    "n_emitted_clusters": len(emitted),
+                    "stability_rate": round(_stability_rate(fleet), 4),
+                    "cluster_precision": round(_cluster_precision(emitted), 4),
+                    "cluster_recall": round(_cluster_recall(fleet, emitted), 4),
+                }
+            )
 
         # Aggregate.
         overall = {

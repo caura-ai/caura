@@ -11,12 +11,11 @@ import pytest
 
 from common.embedding import fake_embedding
 from core_api.constants import (
+    DEFAULT_SEARCH_TOP_K,
     GRAPH_HOP_BOOST,
     GRAPH_MAX_BOOSTED_MEMORIES,
-    DEFAULT_SEARCH_TOP_K,
 )
 from core_api.services.memory_service import search_memories
-
 
 # ---------------------------------------------------------------------------
 # Unit tests: constants and capped logic
@@ -151,7 +150,9 @@ def fanout_tenant():
 class TestGraphFanoutIntegration:
     """Verify fan-out cap works in the real search pipeline."""
 
-    async def _create_entity_with_memories(self, sc, tenant_id, fleet_id, entity_name, num_memories):
+    async def _create_entity_with_memories(
+        self, sc, tenant_id, fleet_id, entity_name, num_memories
+    ):
         """Create an entity and link it to N memories, committed so search sees them.
 
         Writes through ``sc``, not ``db`` — ``db`` rolls its transaction back at
@@ -168,46 +169,64 @@ class TestGraphFanoutIntegration:
         alone leaves them NULL and the entity would never match, silently skipping
         the graph boost whose cap is what this class tests. CI migrates first.
         """
-        entity = await sc.create_entity({
-            "tenant_id": tenant_id,
-            "entity_type": "concept",
-            "canonical_name": entity_name,
-            "fleet_id": fleet_id,
-        })
+        entity = await sc.create_entity(
+            {
+                "tenant_id": tenant_id,
+                "entity_type": "concept",
+                "canonical_name": entity_name,
+                "fleet_id": fleet_id,
+            }
+        )
         # Embed the entity name itself, and query by it, so cosine is 1.0 rather
         # than an incidental value — the cap is what's under test, not the gate.
         embedding = fake_embedding(entity_name)
-        created = await sc.create_memories([
-            {
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                "agent_id": "test-agent",
-                "memory_type": "fact",
-                "content": f"Memory {i} about {entity_name}",
-                "embedding": embedding,
-                "weight": 0.5,
-                "content_hash": f"hash-{entity_name}-{i}",
-                "status": "active",
-                "client_request_id": str(uuid.uuid4()),
-            }
-            for i in range(num_memories)
-        ])
+        created = await sc.create_memories(
+            [
+                {
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "agent_id": "test-agent",
+                    "memory_type": "fact",
+                    "content": f"Memory {i} about {entity_name}",
+                    "embedding": embedding,
+                    "weight": 0.5,
+                    "content_hash": f"hash-{entity_name}-{i}",
+                    "status": "active",
+                    "client_request_id": str(uuid.uuid4()),
+                }
+                for i in range(num_memories)
+            ]
+        )
         memory_ids = [row["id"] for row in created]
         assert all(memory_ids), "bulk insert did not return an id for every memory"
-        await sc.bulk_upsert_entity_links(tenant_id, [
-            {"input_idx": i, "memory_id": mid, "entity_id": entity["id"], "role": "subject"}
-            for i, mid in enumerate(memory_ids)
-        ])
+        await sc.bulk_upsert_entity_links(
+            tenant_id,
+            [
+                {
+                    "input_idx": i,
+                    "memory_id": mid,
+                    "entity_id": entity["id"],
+                    "role": "subject",
+                }
+                for i, mid in enumerate(memory_ids)
+            ],
+        )
         return memory_ids
 
     async def test_small_fanout_all_boosted(self, sc, fanout_tenant, fleet_id):
         """Below the cap, all linked memories are returned."""
         entity_name = f"pythonprog{uuid.uuid4().hex[:8]}"
         memory_ids = await self._create_entity_with_memories(
-            sc, fanout_tenant, fleet_id, entity_name, 5,
+            sc,
+            fanout_tenant,
+            fleet_id,
+            entity_name,
+            5,
         )
 
-        results = await search_memories(fanout_tenant, entity_name, fleet_ids=[fleet_id], top_k=10)
+        results = await search_memories(
+            fanout_tenant, entity_name, fleet_ids=[fleet_id], top_k=10
+        )
 
         # Assert on this test's own rows, not on a bare count.
         assert {str(r.id) for r in results} == set(memory_ids)
@@ -217,10 +236,16 @@ class TestGraphFanoutIntegration:
         entity_name = f"populartopic{uuid.uuid4().hex[:8]}"
         num_memories = GRAPH_MAX_BOOSTED_MEMORIES + 30
         memory_ids = await self._create_entity_with_memories(
-            sc, fanout_tenant, fleet_id, entity_name, num_memories,
+            sc,
+            fanout_tenant,
+            fleet_id,
+            entity_name,
+            num_memories,
         )
 
-        results = await search_memories(fanout_tenant, entity_name, fleet_ids=[fleet_id], top_k=10)
+        results = await search_memories(
+            fanout_tenant, entity_name, fleet_ids=[fleet_id], top_k=10
+        )
 
         # top_k is honoured despite the fan-out, and every slot is one of ours.
         assert len(results) == 10

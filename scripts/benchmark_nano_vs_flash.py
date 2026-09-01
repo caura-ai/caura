@@ -42,8 +42,8 @@ TASKS = [
         "prompt": (
             "Classify this memory and return JSON with keys: memory_type, title, tags, weight (0-1).\n"
             "Memory types: fact, episode, decision, preference, task, plan, intention, commitment, action, outcome, cancellation, rule.\n\n"
-            "Content: \"We decided to migrate from MySQL to PostgreSQL 16 for the analytics service because of "
-            "better JSON support and pgvector for embeddings. Migration deadline is June 15, 2026.\"\n\n"
+            'Content: "We decided to migrate from MySQL to PostgreSQL 16 for the analytics service because of '
+            'better JSON support and pgvector for embeddings. Migration deadline is June 15, 2026."\n\n'
             "Return ONLY valid JSON, no markdown."
         ),
     },
@@ -52,9 +52,9 @@ TASKS = [
         "prompt": (
             "Extract all entities (people, organizations, technologies, projects) and their relations from this text. "
             "Return JSON with keys: entities (list of {name, type}), relations (list of {from, relation, to}).\n\n"
-            "Text: \"Sarah Chen from the Platform team led the Redis cluster migration for Project Atlas. "
+            'Text: "Sarah Chen from the Platform team led the Redis cluster migration for Project Atlas. '
             "She coordinated with DevOps lead Mike Torres to set up the new 3-node cluster on AWS. "
-            "The migration was approved by CTO Lisa Park.\"\n\n"
+            'The migration was approved by CTO Lisa Park."\n\n'
             "Return ONLY valid JSON, no markdown."
         ),
     },
@@ -74,7 +74,10 @@ TASKS = [
 
 # ── API calls ──
 
-async def call_openai(client: httpx.AsyncClient, prompt: str) -> tuple[str, float, int, int]:
+
+async def call_openai(
+    client: httpx.AsyncClient, prompt: str
+) -> tuple[str, float, int, int]:
     """Returns (response_text, latency_ms, input_tokens, output_tokens)."""
     t0 = time.perf_counter()
     r = await client.post(
@@ -92,10 +95,17 @@ async def call_openai(client: httpx.AsyncClient, prompt: str) -> tuple[str, floa
     data = r.json()
     text = data["choices"][0]["message"]["content"]
     usage = data.get("usage", {})
-    return text, latency, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+    return (
+        text,
+        latency,
+        usage.get("prompt_tokens", 0),
+        usage.get("completion_tokens", 0),
+    )
 
 
-async def call_gemini(client: httpx.AsyncClient, prompt: str) -> tuple[str, float, int, int]:
+async def call_gemini(
+    client: httpx.AsyncClient, prompt: str
+) -> tuple[str, float, int, int]:
     """Returns (response_text, latency_ms, input_tokens, output_tokens)."""
     t0 = time.perf_counter()
     r = await client.post(
@@ -112,10 +122,16 @@ async def call_gemini(client: httpx.AsyncClient, prompt: str) -> tuple[str, floa
         raise RuntimeError(f"Gemini API error: {json.dumps(data, indent=2)}")
     text = data["candidates"][0]["content"]["parts"][0]["text"]
     usage = data.get("usageMetadata", {})
-    return text, latency, usage.get("promptTokenCount", 0), usage.get("candidatesTokenCount", 0)
+    return (
+        text,
+        latency,
+        usage.get("promptTokenCount", 0),
+        usage.get("candidatesTokenCount", 0),
+    )
 
 
 # ── Runner ──
+
 
 async def benchmark():
     print()
@@ -177,27 +193,35 @@ async def benchmark():
             winner_speed = "GPT" if gpt_avg < gem_avg else "Gemini"
             diff = abs(gpt_avg - gem_avg) / max(gpt_avg, gem_avg) * 100
 
-            results.append({
-                "task": task["name"],
-                "gpt_avg_ms": round(gpt_avg),
-                "gem_avg_ms": round(gem_avg),
-                "gpt_tok_s": round(gpt_tps, 1),
-                "gem_tok_s": round(gem_tps, 1),
-                "gpt_cost": gpt_cost,
-                "gem_cost": gem_cost,
-                "winner_speed": winner_speed,
-                "diff_pct": round(diff, 1),
-            })
+            results.append(
+                {
+                    "task": task["name"],
+                    "gpt_avg_ms": round(gpt_avg),
+                    "gem_avg_ms": round(gem_avg),
+                    "gpt_tok_s": round(gpt_tps, 1),
+                    "gem_tok_s": round(gem_tps, 1),
+                    "gpt_cost": gpt_cost,
+                    "gem_cost": gem_cost,
+                    "winner_speed": winner_speed,
+                    "diff_pct": round(diff, 1),
+                }
+            )
 
             print(f"  {task['name']}")
-            print(f"    GPT-5.4-nano:           {gpt_avg:7.0f}ms  ({gpt_tps:5.1f} tok/s)  ${gpt_cost:.6f}/call")
-            print(f"    Gemini 3.1 Flash Lite:  {gem_avg:7.0f}ms  ({gem_tps:5.1f} tok/s)  ${gem_cost:.6f}/call")
-            print(f"    Speed: {winner_speed} ({diff:.1f}% faster)  |  Cost: {'GPT' if gpt_cost < gem_cost else 'Gemini'} ({abs(gpt_cost - gem_cost) / max(gpt_cost, gem_cost) * 100:.0f}% cheaper)")
+            print(
+                f"    GPT-5.4-nano:           {gpt_avg:7.0f}ms  ({gpt_tps:5.1f} tok/s)  ${gpt_cost:.6f}/call"
+            )
+            print(
+                f"    Gemini 3.1 Flash Lite:  {gem_avg:7.0f}ms  ({gem_tps:5.1f} tok/s)  ${gem_cost:.6f}/call"
+            )
+            print(
+                f"    Speed: {winner_speed} ({diff:.1f}% faster)  |  Cost: {'GPT' if gpt_cost < gem_cost else 'Gemini'} ({abs(gpt_cost - gem_cost) / max(gpt_cost, gem_cost) * 100:.0f}% cheaper)"
+            )
             print()
-            print(f"    GPT sample output:")
+            print("    GPT sample output:")
             for line in gpt_last[:200].split("\n"):
                 print(f"      {line}")
-            print(f"    Gemini sample output:")
+            print("    Gemini sample output:")
             for line in gem_last[:200].split("\n"):
                 print(f"      {line}")
             print()
@@ -205,10 +229,14 @@ async def benchmark():
         # Summary table
         w = 78
         print("  " + "=" * w)
-        print(f"  {'Task':<25} {'GPT (ms)':>8} {'Gem (ms)':>9} {'GPT $/call':>11} {'Gem $/call':>11} {'Speed':>7} {'Cost':>7}")
+        print(
+            f"  {'Task':<25} {'GPT (ms)':>8} {'Gem (ms)':>9} {'GPT $/call':>11} {'Gem $/call':>11} {'Speed':>7} {'Cost':>7}"
+        )
         print("  " + "-" * w)
         for r in results:
-            print(f"  {r['task']:<25} {r['gpt_avg_ms']:>8} {r['gem_avg_ms']:>9} {r['gpt_cost']:>11.6f} {r['gem_cost']:>11.6f} {'GPT' if r['gpt_avg_ms'] < r['gem_avg_ms'] else 'Gem':>7} {'GPT' if r['gpt_cost'] < r['gem_cost'] else 'Gem':>7}")
+            print(
+                f"  {r['task']:<25} {r['gpt_avg_ms']:>8} {r['gem_avg_ms']:>9} {r['gpt_cost']:>11.6f} {r['gem_cost']:>11.6f} {'GPT' if r['gpt_avg_ms'] < r['gem_avg_ms'] else 'Gem':>7} {'GPT' if r['gpt_cost'] < r['gem_cost'] else 'Gem':>7}"
+            )
         print("  " + "=" * w)
 
         gpt_total_ms = sum(r["gpt_avg_ms"] for r in results)
@@ -216,10 +244,16 @@ async def benchmark():
         gpt_total_cost = sum(r["gpt_cost"] for r in results)
         gem_total_cost = sum(r["gem_cost"] for r in results)
 
-        print(f"  Latency:  GPT {gpt_total_ms}ms  vs  Gemini {gem_total_ms}ms  ->  {'GPT-5.4-nano' if gpt_total_ms < gem_total_ms else 'Gemini 3.1 Flash Lite'} faster")
-        print(f"  Cost:     GPT ${gpt_total_cost:.6f}  vs  Gemini ${gem_total_cost:.6f}  ->  {'GPT-5.4-nano' if gpt_total_cost < gem_total_cost else 'Gemini 3.1 Flash Lite'} cheaper")
+        print(
+            f"  Latency:  GPT {gpt_total_ms}ms  vs  Gemini {gem_total_ms}ms  ->  {'GPT-5.4-nano' if gpt_total_ms < gem_total_ms else 'Gemini 3.1 Flash Lite'} faster"
+        )
+        print(
+            f"  Cost:     GPT ${gpt_total_cost:.6f}  vs  Gemini ${gem_total_cost:.6f}  ->  {'GPT-5.4-nano' if gpt_total_cost < gem_total_cost else 'Gemini 3.1 Flash Lite'} cheaper"
+        )
         cost_per_1k = {"gpt": gpt_total_cost * 1000, "gem": gem_total_cost * 1000}
-        print(f"  At 1K calls:  GPT ${cost_per_1k['gpt']:.2f}  vs  Gemini ${cost_per_1k['gem']:.2f}")
+        print(
+            f"  At 1K calls:  GPT ${cost_per_1k['gpt']:.2f}  vs  Gemini ${cost_per_1k['gem']:.2f}"
+        )
         print()
 
 

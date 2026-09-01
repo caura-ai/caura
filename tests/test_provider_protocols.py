@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-
 import logging
+from uuid import uuid4
 
 import pytest
 
-from uuid import uuid4
-
+from common.embedding import (
+    FakeEmbeddingProvider,
+    fake_embedding,  # noqa: F401
+    get_embedding_provider,
+)
+from common.embedding.providers.openai import OpenAIEmbeddingProvider
 from core_api.constants import VECTOR_DIM
 from core_api.protocols import (
     ConflictResolver,
@@ -20,14 +24,9 @@ from core_api.protocols import (
     JobQueue,
     LLMProvider,
     Resolution,
-    STMBackend,
     SearchFilters,
+    STMBackend,
     StorageBackend,
-)
-from common.embedding import (
-    FakeEmbeddingProvider,
-    fake_embedding,  # noqa: F401
-    get_embedding_provider,
 )
 from core_api.providers import (
     get_conflict_resolver,
@@ -37,12 +36,10 @@ from core_api.providers import (
     get_stm_backend,
     get_storage_backend,
 )
-from common.embedding.providers.openai import OpenAIEmbeddingProvider
 from core_api.providers._retry import call_with_fallback, call_with_retry
 from core_api.providers.fake_provider import FakeLLMProvider
 from core_api.providers.openai_provider import OpenAILLMProvider
 from core_api.providers.vertex_provider import VertexLLMProvider
-
 
 # ---------------------------------------------------------------------------
 # Protocol conformance
@@ -351,13 +348,18 @@ class TestCallWithFallback:
             # returns (None, None) and the tier never runs.
             (_MockTenantConfig(fb_provider=None), "no fallback provider configured"),
             # Resolves, but to the provider that just failed.
-            (_MockTenantConfig(fb_provider="primary"), "resolved fallback is the primary"),
+            (
+                _MockTenantConfig(fb_provider="primary"),
+                "resolved fallback is the primary",
+            ),
             # No config at all — e.g. a caller that never plumbed one through.
             (None, "no tenant config exposing resolve_fallback()"),
         ],
     )
     @pytest.mark.asyncio
-    async def test_skipped_fallback_tier_says_so(self, caplog, tenant_config, expected_reason):
+    async def test_skipped_fallback_tier_says_so(
+        self, caplog, tenant_config, expected_reason
+    ):
         """A silently-skipped fallback tier must announce itself.
 
         Every skip path logged nothing, so "All LLM providers failed" was the only
@@ -378,7 +380,9 @@ class TestCallWithFallback:
             )
 
         assert result == {"empty": True}
-        skip_lines = [r.getMessage() for r in caplog.records if "SKIPPED" in r.getMessage()]
+        skip_lines = [
+            r.getMessage() for r in caplog.records if "SKIPPED" in r.getMessage()
+        ]
         assert len(skip_lines) == 1, f"expected exactly one skip line, got {skip_lines}"
         assert expected_reason in skip_lines[0]
 
@@ -618,7 +622,10 @@ class TestSqliteBackend:
         from core_api.providers import sqlite_backend
 
         monkeypatch.setenv("HOME", str(tmp_path))
-        for tilde_path in (sqlite_backend._LEGACY_DB_PATH, sqlite_backend._DEFAULT_DB_PATH):
+        for tilde_path in (
+            sqlite_backend._LEGACY_DB_PATH,
+            sqlite_backend._DEFAULT_DB_PATH,
+        ):
             path = _os.path.expanduser(tilde_path)
             _os.makedirs(_os.path.dirname(path), exist_ok=True)
             with open(path, "wb"):

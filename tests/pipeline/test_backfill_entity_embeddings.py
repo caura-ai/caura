@@ -37,7 +37,9 @@ async def test_read_embed_write_roundtrip():
     """Read NULL-embedding rows → embed each → write back via storage."""
     eid = str(uuid.uuid4())
     sc = MagicMock()
-    sc.list_null_embedding_entities = AsyncMock(return_value=[{"id": eid, "canonical_name": "Globex"}])
+    sc.list_null_embedding_entities = AsyncMock(
+        return_value=[{"id": eid, "canonical_name": "Globex"}]
+    )
     sc.set_entity_embeddings = AsyncMock(return_value=1)
 
     async def _fake_embed(text, tenant_config, **_kwargs):
@@ -83,7 +85,9 @@ async def test_no_null_embedding_entities_skips():
 async def test_embed_failure_skips_row_but_does_not_fail_step():
     eid = str(uuid.uuid4())
     sc = MagicMock()
-    sc.list_null_embedding_entities = AsyncMock(return_value=[{"id": eid, "canonical_name": "Globex"}])
+    sc.list_null_embedding_entities = AsyncMock(
+        return_value=[{"id": eid, "canonical_name": "Globex"}]
+    )
     sc.set_entity_embeddings = AsyncMock(return_value=0)
 
     async def _boom(text, tenant_config):

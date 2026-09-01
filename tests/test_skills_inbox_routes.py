@@ -511,12 +511,16 @@ async def test_admin_key_without_tenant_is_400_not_401(storage, settings, side_e
     assert r_action.status_code == 400, r_action.text
 
 
-async def test_tenant_key_with_conflicting_tenant_is_403(storage, settings, side_effects):
+async def test_tenant_key_with_conflicting_tenant_is_403(
+    storage, settings, side_effects
+):
     """A tenant-scoped key cannot act on ANOTHER tenant via ?tenant_id=."""
     storage.seed(forge_doc())
     async with make_client() as client:
         r_list = await client.get(f"{BASE}?tenant_id=t-other")
-        r_action = await client.post(f"{BASE}/{SLUG}/defer?tenant_id=t-other", json=None)
+        r_action = await client.post(
+            f"{BASE}/{SLUG}/defer?tenant_id=t-other", json=None
+        )
     assert r_list.status_code == 403, r_list.text
     assert r_action.status_code == 403, r_action.text
     for r in (r_list, r_action):
@@ -895,12 +899,25 @@ async def test_findings_capped_and_malformed_entries_skipped(storage, settings):
     """A pathological doc can carry an unbounded/garbage findings list —
     the card surfaces at most _MAX_CARD_FINDINGS well-formed entries."""
     many = [
-        {"code": f"S-{i:03d}", "severity": "warn", "message": f"finding {i}", "fatal": False}
+        {
+            "code": f"S-{i:03d}",
+            "severity": "warn",
+            "message": f"finding {i}",
+            "fatal": False,
+        }
         for i in range(30)
     ]
     many.insert(0, "not-a-dict")  # malformed entry must be skipped, not 500
     storage.query_rows = [
-        forge_doc(scan={"state": "quarantined", "critical": 30, "warn": 0, "info": 0, "findings": many})
+        forge_doc(
+            scan={
+                "state": "quarantined",
+                "critical": 30,
+                "warn": 0,
+                "info": 0,
+                "findings": many,
+            }
+        )
     ]
     async with make_client() as client:
         r = await client.get(BASE)
@@ -938,7 +955,8 @@ async def test_truncated_true_when_oversample_saturates(storage, settings):
     # oversample = min(2*2, 400) = 4; return exactly 4 rows, but make
     # them all deferred so the page itself isn't even full.
     storage.query_rows = [
-        forge_doc(slug=f"s{i}", deferred_at="2026-07-19T00:00:00+00:00") for i in range(4)
+        forge_doc(slug=f"s{i}", deferred_at="2026-07-19T00:00:00+00:00")
+        for i in range(4)
     ]
     async with make_client() as client:
         r = await client.get(f"{BASE}?limit=50")

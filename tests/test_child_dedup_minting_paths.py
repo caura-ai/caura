@@ -415,7 +415,9 @@ async def test_the_parent_child_count_is_the_number_of_children_that_exist() -> 
     )
 
     async def _chunks(_content, _x, _cfg):
-        return [{"content": c, "suggested_type": "fact"} for c in ("one", "two", "three")]
+        return [
+            {"content": c, "suggested_type": "fact"} for c in ("one", "two", "three")
+        ]
 
     async def _embeddings(texts, _cfg, background=False):
         return [[0.0] for _ in texts]
@@ -527,7 +529,9 @@ async def test_auto_chunk_writes_a_repeated_chunk_once() -> None:
     assert [c["content"] for c in children] == ["same chunk", "other"]
 
 
-async def test_auto_chunk_skips_the_storage_call_when_every_child_is_a_duplicate() -> None:
+async def test_auto_chunk_skips_the_storage_call_when_every_child_is_a_duplicate() -> (
+    None
+):
     """``create_memories([])`` would be a wasted roundtrip, and the storage-side
     statement would build an INSERT with no VALUES."""
     live_hash = memory_service._content_hash(TENANT, FLEET, "only chunk")
@@ -545,7 +549,9 @@ async def test_auto_chunk_skips_the_storage_call_when_every_child_is_a_duplicate
 # ---------------------------------------------------------------------------
 
 
-async def _run_legacy_auto_chunk(chunks: list[str], live: dict[str, dict]) -> list[dict]:
+async def _run_legacy_auto_chunk(
+    chunks: list[str], live: dict[str, dict]
+) -> list[dict]:
     """Drive ``_create_memory_legacy``'s auto-chunk branch.
 
     Tested separately rather than assumed to match the pipeline handler: on two

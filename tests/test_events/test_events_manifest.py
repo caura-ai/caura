@@ -14,13 +14,14 @@ import json
 import re
 from pathlib import Path
 
-from common.events.topics import Topics, renamed
 from scripts.gen_events_manifest import (
     _DIRECT_SUBSCRIBES,
     MANIFEST_PATH,
     _serialize,
     build_manifest,
 )
+
+from common.events.topics import Topics, renamed
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONSUMER_FILES = {
@@ -36,7 +37,9 @@ _DIRECT_SUBSCRIBE_RE = re.compile(
     r"bus\.subscribe\(\s*Topics\.(Memory|Lifecycle)\.([A-Z_]+)"
 )
 # ``<brand>.<family>.<event>`` — three non-empty lowercase segments.
-_TOPIC_SHAPE_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*){2}")
+_TOPIC_SHAPE_RE = re.compile(
+    r"[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*){2}"
+)
 
 
 def test_events_manifest_is_in_sync() -> None:
@@ -102,7 +105,9 @@ def test_direct_subscribes_match_consumer_files() -> None:
     """
     for service, path in _CONSUMER_FILES.items():
         pairs = _DIRECT_SUBSCRIBE_RE.findall(path.read_text(encoding="utf-8"))
-        found = sorted(str(getattr(getattr(Topics, family), name)) for family, name in pairs)
+        found = sorted(
+            str(getattr(getattr(Topics, family), name)) for family, name in pairs
+        )
         expected = sorted(_DIRECT_SUBSCRIBES[service])
         assert found == expected, (
             f"{service}: _DIRECT_SUBSCRIBES in scripts/gen_events_manifest.py is out of "

@@ -48,7 +48,6 @@ from core_api.services.skill_lifecycle import (
     validate_and_normalize_skill_write,
 )
 
-
 # --- Test fixtures --------------------------------------------------------
 
 
@@ -106,23 +105,26 @@ def _valid_doc(**overrides) -> dict:
 @pytest.mark.unit
 class TestEnumConstants:
     def test_allowed_sources(self):
-        assert ALLOWED_SOURCES == frozenset({"forge", "agent", "manual", "imported"})
+        assert frozenset({"forge", "agent", "manual", "imported"}) == ALLOWED_SOURCES
 
     def test_allowed_kinds(self):
-        assert ALLOWED_KINDS == frozenset({"create", "update"})
+        assert frozenset({"create", "update"}) == ALLOWED_KINDS
 
     def test_allowed_statuses(self):
         # Mirrors plan §5 lifecycle states.
-        assert ALLOWED_STATUSES == frozenset(
-            {
-                "candidate",
-                "staged",
-                "active",
-                "rejected",
-                "quarantined",
-                "stale",
-                "deprecated",
-            }
+        assert (
+            frozenset(
+                {
+                    "candidate",
+                    "staged",
+                    "active",
+                    "rejected",
+                    "quarantined",
+                    "stale",
+                    "deprecated",
+                }
+            )
+            == ALLOWED_STATUSES
         )
 
     def test_admin_only_partitions(self):
@@ -139,8 +141,9 @@ class TestEnumConstants:
         # System-managed terminal/hold states. Disjoint from admin and
         # internal sets — system-only means "no HTTP caller may set
         # these directly". Subset of ALLOWED_STATUSES.
-        assert SYSTEM_ONLY_STATUSES == frozenset(
-            {"quarantined", "rejected", "stale", "deprecated"}
+        assert (
+            frozenset({"quarantined", "rejected", "stale", "deprecated"})
+            == SYSTEM_ONLY_STATUSES
         )
         assert SYSTEM_ONLY_STATUSES.isdisjoint(ADMIN_ONLY_STATUSES)
         assert SYSTEM_ONLY_STATUSES.isdisjoint(INTERNAL_ONLY_STATUSES)
@@ -665,7 +668,9 @@ def _strip_docstrings_and_comments(src: str) -> str:
 
     drop: set[int] = set()
     for node in ast.walk(ast.parse(src)):
-        if not isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        if not isinstance(
+            node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+        ):
             continue
         body = getattr(node, "body", [])
         if (
@@ -674,7 +679,9 @@ def _strip_docstrings_and_comments(src: str) -> str:
             and isinstance(body[0].value, ast.Constant)
             and isinstance(body[0].value.value, str)
         ):
-            drop.update(range(body[0].lineno, (body[0].end_lineno or body[0].lineno) + 1))
+            drop.update(
+                range(body[0].lineno, (body[0].end_lineno or body[0].lineno) + 1)
+            )
 
     # Truncate each line at its comment, if any (1-indexed rows, 0-indexed cols).
     cut: dict[int, int] = {}
@@ -844,7 +851,10 @@ class TestMigrationChain:
             # not doing it — caught by mutation: stripping the real
             # ``autocommit_block`` still passed, because the docstring named it.
             code = _strip_docstrings_and_comments(src)
-            if "VALIDATE CONSTRAINT" not in code.upper() or ".autocommit_block()" not in code:
+            if (
+                "VALIDATE CONSTRAINT" not in code.upper()
+                or ".autocommit_block()" not in code
+            ):
                 violations.append(
                     f"{f.name}: SET NOT NULL on {sorted(hit)} without the "
                     "CHECK-NOT-VALID / VALIDATE / autocommit_block pattern"
@@ -1006,6 +1016,7 @@ class TestForgeEventPayloadNaming:
     def test_publisher_kwarg_matches_payload_field(self):
         # The publisher's keyword argument also spells max_writes_per_run.
         import inspect
+
         from common.events.lifecycle_publishers import publish_forge_distill_request
 
         sig = inspect.signature(publish_forge_distill_request)

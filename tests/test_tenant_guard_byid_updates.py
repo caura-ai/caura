@@ -19,10 +19,10 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from core_storage_api.services.postgres_service import PostgresService, get_read_session
 from sqlalchemy import text
 
 from common.embedding import fake_embedding
+from core_storage_api.services.postgres_service import PostgresService, get_read_session
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -76,12 +76,15 @@ async def test_memory_update_metadata_patch_wrong_tenant_is_noop(sc):
     mem_id = UUID(await _seed_memory(sc, owner, metadata={"k": "orig"}))
 
     await svc.memory_update(mem_id, _t(), {"metadata_patch": {"k": "hacked"}})
-    assert (await svc.memory_get_by_id_for_tenant(mem_id, owner)).metadata_ == {"k": "orig"}, (
-        "metadata merge blocked for wrong tenant"
-    )
+    assert (await svc.memory_get_by_id_for_tenant(mem_id, owner)).metadata_ == {
+        "k": "orig"
+    }, "metadata merge blocked for wrong tenant"
 
     await svc.memory_update(mem_id, owner, {"metadata_patch": {"k": "new", "added": 1}})
-    assert (await svc.memory_get_by_id_for_tenant(mem_id, owner)).metadata_ == {"k": "new", "added": 1}
+    assert (await svc.memory_get_by_id_for_tenant(mem_id, owner)).metadata_ == {
+        "k": "new",
+        "added": 1,
+    }
 
 
 async def test_update_memory_route_wrong_tenant_returns_none(sc):
@@ -91,11 +94,15 @@ async def test_update_memory_route_wrong_tenant_returns_none(sc):
 
     result = await sc.update_memory(mem_id, _t(), {"weight": 0.42})
     assert result is None, "wrong-tenant PATCH 404s -> client returns None"
-    assert (await PostgresService().memory_get_by_id_for_tenant(UUID(mem_id), owner)).weight == 0.5
+    assert (
+        await PostgresService().memory_get_by_id_for_tenant(UUID(mem_id), owner)
+    ).weight == 0.5
 
     ok = await sc.update_memory(mem_id, owner, {"weight": 0.42})
     assert ok == {"ok": True}
-    assert (await PostgresService().memory_get_by_id_for_tenant(UUID(mem_id), owner)).weight == 0.42
+    assert (
+        await PostgresService().memory_get_by_id_for_tenant(UUID(mem_id), owner)
+    ).weight == 0.42
 
 
 async def test_update_memory_route_requires_tenant(sc):
@@ -116,24 +123,30 @@ async def test_update_embedding_wrong_tenant_is_noop(sc):
     svc = PostgresService()
     owner = _t()
     mem_id = await _seed_memory(sc, owner)  # seeded without an embedding
-    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).embedding is None
+    assert (
+        await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)
+    ).embedding is None
 
     # Wrong tenant matches no row -> route 404 -> client returns None, no write.
     wrong = await sc.update_embedding(mem_id, _t(), fake_embedding("vector"))
     assert wrong is None, "wrong-tenant embedding write 404s -> client None"
-    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).embedding is None, (
-        "wrong tenant must not write the embedding"
-    )
+    assert (
+        await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)
+    ).embedding is None, "wrong tenant must not write the embedding"
 
     ok = await sc.update_embedding(mem_id, owner, fake_embedding("vector"))
     assert ok == {"ok": True}
-    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).embedding is not None
+    assert (
+        await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)
+    ).embedding is not None
 
 
 async def test_update_embedding_requires_tenant(sc):
     mem_id = await _seed_memory(sc, _t())
     with pytest.raises(httpx.HTTPStatusError) as exc:
-        await sc._patch(f"/memories/{mem_id}/embedding", {"embedding": fake_embedding("x")})
+        await sc._patch(
+            f"/memories/{mem_id}/embedding", {"embedding": fake_embedding("x")}
+        )
     assert exc.value.response.status_code == 422
 
 
@@ -146,15 +159,19 @@ async def test_mark_dedup_checked_wrong_tenant_is_noop(sc):
     svc = PostgresService()
     owner = _t()
     mem_id = await _seed_memory(sc, owner)
-    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).last_dedup_checked_at is None
+    assert (
+        await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)
+    ).last_dedup_checked_at is None
 
     await sc.mark_dedup_checked([mem_id], _t())
-    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).last_dedup_checked_at is None, (
-        "wrong tenant must not stamp last_dedup_checked_at"
-    )
+    assert (
+        await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)
+    ).last_dedup_checked_at is None, "wrong tenant must not stamp last_dedup_checked_at"
 
     await sc.mark_dedup_checked([mem_id], owner)
-    assert (await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)).last_dedup_checked_at is not None
+    assert (
+        await svc.memory_get_by_id_for_tenant(UUID(mem_id), owner)
+    ).last_dedup_checked_at is not None
 
 
 async def test_mark_dedup_checked_requires_tenant(sc):
@@ -181,9 +198,10 @@ async def test_update_memory_surfaces_a_refused_entity_link(sc):
     The memory here belongs to the caller; only the entity is foreign, so this
     is the entity half of the storage predicate seen from core-api.
     """
+    from fastapi import HTTPException
+
     from core_api.schemas import MemoryUpdate
     from core_api.services.memory_service import update_memory
-    from fastapi import HTTPException
 
     owner, stranger = _t(), _t()
     mem_id = UUID(await _seed_memory(sc, owner, embedding=fake_embedding("linkable")))
@@ -201,7 +219,9 @@ async def test_update_memory_surfaces_a_refused_entity_link(sc):
         await update_memory(
             mem_id,
             owner,
-            MemoryUpdate(entity_links=[{"entity_id": foreign_entity, "role": "subject"}]),
+            MemoryUpdate(
+                entity_links=[{"entity_id": foreign_entity, "role": "subject"}]
+            ),
         )
 
     assert exc.value.status_code == 422

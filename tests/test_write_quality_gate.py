@@ -3,11 +3,11 @@
 Unit tests — no database required.
 """
 
-import pytest
 from unittest.mock import AsyncMock
 
-from core_api.constants import CRYSTALLIZER_SHORT_CONTENT_CHARS
+import pytest
 
+from core_api.constants import CRYSTALLIZER_SHORT_CONTENT_CHARS
 
 # ---------------------------------------------------------------------------
 # Constants sanity
@@ -52,6 +52,7 @@ class TestCreateMemoryQualityGate:
 
     async def test_rejects_empty_content(self, mock_db, make_data):
         from fastapi import HTTPException
+
         from core_api.services.memory_service import create_memory
 
         with pytest.raises(HTTPException) as exc_info:
@@ -61,6 +62,7 @@ class TestCreateMemoryQualityGate:
 
     async def test_rejects_short_content(self, mock_db, make_data):
         from fastapi import HTTPException
+
         from core_api.services.memory_service import create_memory
 
         with pytest.raises(HTTPException) as exc_info:
@@ -70,6 +72,7 @@ class TestCreateMemoryQualityGate:
     async def test_rejects_whitespace_padded_short(self, mock_db, make_data):
         """'  hi  ' strips to 2 chars — should reject."""
         from fastapi import HTTPException
+
         from core_api.services.memory_service import create_memory
 
         with pytest.raises(HTTPException) as exc_info:
@@ -78,6 +81,7 @@ class TestCreateMemoryQualityGate:
 
     async def test_rejects_exactly_9_chars(self, mock_db, make_data):
         from fastapi import HTTPException
+
         from core_api.services.memory_service import create_memory
 
         with pytest.raises(HTTPException) as exc_info:
@@ -87,6 +91,7 @@ class TestCreateMemoryQualityGate:
     async def test_accepts_exactly_10_chars(self, mock_db, make_data):
         """10 chars should pass the quality gate (not raise 422 'too short')."""
         from fastapi import HTTPException
+
         from core_api.services.memory_service import create_memory
 
         # Should NOT raise a 422 "too short" — may succeed or raise other errors

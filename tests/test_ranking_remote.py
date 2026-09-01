@@ -282,10 +282,12 @@ async def test_success_re_arms_the_permanent_error(monkeypatch, caplog):
         return httpx.Response(413, text="too big")
 
     r = _client_with(flipping)
+
     def permanent():
         return [
             rec for rec in caplog.records if "failed permanently" in rec.getMessage()
         ]
+
     with caplog.at_level("ERROR"):
         await _run_service(r, monkeypatch, attempts=1)
         assert len(permanent()) == 1
@@ -440,7 +442,10 @@ def _chunk_recorder(status=200, score_for=None):
         return httpx.Response(
             200,
             json=[
-                {"index": i, "score": (score_for(body["texts"][i]) if score_for else 1.0)}
+                {
+                    "index": i,
+                    "score": (score_for(body["texts"][i]) if score_for else 1.0),
+                }
                 for i in range(n)
             ],
         )
@@ -521,6 +526,7 @@ async def test_permanent_chunk_failure_wins_over_a_transient_sibling(monkeypatch
     Misreporting it transient would spend the retry budget re-earning the same
     rejection.
     """
+
     async def handler(request):
         texts = json.loads(request.content)["texts"]
         await asyncio.sleep(0.01)

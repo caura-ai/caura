@@ -27,10 +27,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
-import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLIENTS = REPO_ROOT / "clients"

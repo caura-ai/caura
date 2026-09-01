@@ -53,7 +53,9 @@ class TestInstallCredentialAuthContext:
     """``get_auth_context`` Path 4 (X-Tenant-ID header) extracts the
     new credential-kind + install-uuid headers when present."""
 
-    async def test_install_credential_headers_populate_context(self, _disable_standalone):
+    async def test_install_credential_headers_populate_context(
+        self, _disable_standalone
+    ):
         request = _request(
             {
                 "X-Tenant-ID": "tenant-broker-01",
@@ -83,7 +85,9 @@ class TestInstallCredentialAuthContext:
         assert ctx.is_install_credential is False
         assert ctx.install_uuid is None
 
-    async def test_missing_credential_kind_header_defaults_to_false(self, _disable_standalone):
+    async def test_missing_credential_kind_header_defaults_to_false(
+        self, _disable_standalone
+    ):
         """Gateways that haven't been updated to forward the new
         header (or OSS-direct deployments without a gateway) leave
         the flag False — preserves the existing CAURA-602 contract
@@ -95,7 +99,9 @@ class TestInstallCredentialAuthContext:
         assert ctx.is_install_credential is False
         assert ctx.install_uuid is None
 
-    async def test_credential_kind_header_is_case_insensitive(self, _disable_standalone):
+    async def test_credential_kind_header_is_case_insensitive(
+        self, _disable_standalone
+    ):
         """HTTP headers are case-insensitive; the routing layer
         sometimes lowercases them. Both forms must produce the same
         AuthContext."""

@@ -68,7 +68,9 @@ def _parent_row(visibility: str = "scope_team") -> dict:
     }
 
 
-def _enrichment(facts: list[AtomicFact], *, contains_pii: bool = False, personal: bool = False):
+def _enrichment(
+    facts: list[AtomicFact], *, contains_pii: bool = False, personal: bool = False
+):
     return SimpleNamespace(
         memory_type="fact",
         weight=0.5,
@@ -142,12 +144,18 @@ async def _run(
 
     with (
         patch.object(memory_service, "get_storage_client", lambda: sc),
-        patch.object(memory_service, "track_task", MagicMock(side_effect=_stub_track_task)),
+        patch.object(
+            memory_service, "track_task", MagicMock(side_effect=_stub_track_task)
+        ),
         patch.object(memory_service, "tracked_task", new=_stub_tracked_task),
         patch.object(memory_service, "get_embedding", new=_embed),
         patch(
             "core_api.services.memory_enrichment.enrich_memory",
-            new=AsyncMock(return_value=_enrichment(facts, contains_pii=contains_pii, personal=personal)),
+            new=AsyncMock(
+                return_value=_enrichment(
+                    facts, contains_pii=contains_pii, personal=personal
+                )
+            ),
         ),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -199,7 +207,9 @@ async def test_a_dropped_parent_creates_no_children():
         contains_pii=True,
     )
 
-    assert children == [], "a policy that says this row must not exist spawned derived rows"
+    assert children == [], (
+        "a policy that says this row must not exist spawned derived rows"
+    )
     assert calls == ["remediate"], "governance must run before, not after, the fan-out"
 
 

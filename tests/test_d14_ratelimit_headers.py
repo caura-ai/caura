@@ -61,7 +61,9 @@ async def test_bulkhead_429_carries_retry_after(monkeypatch):
         def release(self):
             pass
 
-    monkeypatch.setattr(ptc, "_get_semaphore", lambda scope, tenant_id: _NeverAcquires())
+    monkeypatch.setattr(
+        ptc, "_get_semaphore", lambda scope, tenant_id: _NeverAcquires()
+    )
     monkeypatch.setattr(ptc.settings, "per_tenant_acquire_timeout_seconds", 0.01)
     with pytest.raises(HTTPException) as exc_info:
         async with ptc.per_tenant_slot("search", "t1"):

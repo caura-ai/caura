@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from core_api.services.contradiction import relationship as rel
 
 pytestmark = pytest.mark.unit

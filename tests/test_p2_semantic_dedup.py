@@ -26,7 +26,7 @@ import statistics
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -45,10 +45,10 @@ from core_api.constants import (
 from core_api.services.memory_service import _find_semantic_duplicate
 from core_storage_api.services import postgres_service as ps
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def close_embedding(base_text: str, noise: float = 0.001) -> list[float]:
     """Produce an embedding very close to fake_embedding(base_text).
@@ -62,12 +62,15 @@ def close_embedding(base_text: str, noise: float = 0.001) -> list[float]:
 
 
 def _content_hash(tenant_id: str, fleet_id: str | None, content: str) -> str:
-    return hashlib.sha256(f"{tenant_id}:{fleet_id or ''}:{content}".encode()).hexdigest()
+    return hashlib.sha256(
+        f"{tenant_id}:{fleet_id or ''}:{content}".encode()
+    ).hexdigest()
 
 
 # ---------------------------------------------------------------------------
 # Unit tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.unit
 class TestSemanticDedupConstants:
@@ -100,8 +103,13 @@ class TestFindSemanticDuplicateMocked:
         mock_sc = AsyncMock()
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=None)
 
-        with patch("core_api.services.memory_service.get_storage_client", return_value=mock_sc):
-            result = await _find_semantic_duplicate("tenant-1", None, [0.1] * VECTOR_DIM,
+        with patch(
+            "core_api.services.memory_service.get_storage_client", return_value=mock_sc
+        ):
+            result = await _find_semantic_duplicate(
+                "tenant-1",
+                None,
+                [0.1] * VECTOR_DIM,
             )
         assert result is None
 
@@ -112,8 +120,13 @@ class TestFindSemanticDuplicateMocked:
         mock_sc = AsyncMock()
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=mock_memory)
 
-        with patch("core_api.services.memory_service.get_storage_client", return_value=mock_sc):
-            result = await _find_semantic_duplicate("tenant-1", None, [0.1] * VECTOR_DIM,
+        with patch(
+            "core_api.services.memory_service.get_storage_client", return_value=mock_sc
+        ):
+            result = await _find_semantic_duplicate(
+                "tenant-1",
+                None,
+                [0.1] * VECTOR_DIM,
             )
         assert result is mock_memory
 
@@ -124,8 +137,13 @@ class TestFindSemanticDuplicateMocked:
         mock_sc = AsyncMock()
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=None)
 
-        with patch("core_api.services.memory_service.get_storage_client", return_value=mock_sc):
-            await _find_semantic_duplicate("tenant-1", "fleet-a", [0.1] * VECTOR_DIM,
+        with patch(
+            "core_api.services.memory_service.get_storage_client", return_value=mock_sc
+        ):
+            await _find_semantic_duplicate(
+                "tenant-1",
+                "fleet-a",
+                [0.1] * VECTOR_DIM,
             )
 
         call_data = mock_sc.find_semantic_duplicate.call_args[0][0]
@@ -139,8 +157,14 @@ class TestFindSemanticDuplicateMocked:
         mock_sc.find_semantic_duplicate = AsyncMock(return_value=None)
 
         exclude = uuid4()
-        with patch("core_api.services.memory_service.get_storage_client", return_value=mock_sc):
-            await _find_semantic_duplicate("tenant-1", None, [0.1] * VECTOR_DIM, exclude_id=exclude,
+        with patch(
+            "core_api.services.memory_service.get_storage_client", return_value=mock_sc
+        ):
+            await _find_semantic_duplicate(
+                "tenant-1",
+                None,
+                [0.1] * VECTOR_DIM,
+                exclude_id=exclude,
             )
 
         call_data = mock_sc.find_semantic_duplicate.call_args[0][0]
@@ -153,16 +177,19 @@ class TestSemanticDedupToggle:
 
     def test_default_enabled(self):
         from core_api.services.organization_settings import ResolvedConfig
+
         cfg = ResolvedConfig({})
         assert cfg.semantic_dedup_enabled is True
 
     def test_explicitly_disabled(self):
         from core_api.services.organization_settings import ResolvedConfig
+
         cfg = ResolvedConfig({"dedup": {"semantic_dedup_enabled": False}})
         assert cfg.semantic_dedup_enabled is False
 
     def test_explicitly_enabled(self):
         from core_api.services.organization_settings import ResolvedConfig
+
         cfg = ResolvedConfig({"dedup": {"semantic_dedup_enabled": True}})
         assert cfg.semantic_dedup_enabled is True
 
@@ -190,6 +217,7 @@ class TestCloseEmbeddingHelper:
         other = fake_embedding("The weather is sunny in Alaska")
 
         import math
+
         dot = sum(a * b for a, b in zip(base, other))
         norm_a = math.sqrt(sum(a * a for a in base))
         norm_b = math.sqrt(sum(b * b for b in other))
@@ -203,16 +231,25 @@ class TestCloseEmbeddingHelper:
 # Integration tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.integration
 class TestSemanticDedupIntegration:
     """End-to-end semantic dedup with real DB."""
 
     async def _insert_memory(
-        self, tenant_id, content, *,
-        embedding=None, fleet_id=None, status="active",
-        agent_id="test-agent", memory_type="fact", deleted_at=None,
+        self,
+        tenant_id,
+        content,
+        *,
+        embedding=None,
+        fleet_id=None,
+        status="active",
+        agent_id="test-agent",
+        memory_type="fact",
+        deleted_at=None,
     ):
         from core_api.clients.storage_client import get_storage_client
+
         sc = get_storage_client()
         emb = embedding or fake_embedding(content)
         ch = _content_hash(tenant_id, fleet_id, content)
@@ -228,7 +265,11 @@ class TestSemanticDedupIntegration:
             "status": status,
         }
         if deleted_at is not None:
-            payload["deleted_at"] = deleted_at.isoformat() if hasattr(deleted_at, 'isoformat') else deleted_at
+            payload["deleted_at"] = (
+                deleted_at.isoformat()
+                if hasattr(deleted_at, "isoformat")
+                else deleted_at
+            )
         mem = await sc.create_memory(payload)
         return mem  # returns a dict
 
@@ -285,8 +326,9 @@ class TestSemanticDedupIntegration:
         """Soft-deleted memory should not be considered a duplicate."""
         content = "Important meeting tomorrow"
         await self._insert_memory(
-            tenant_id, content,
-            deleted_at=datetime.now(timezone.utc),
+            tenant_id,
+            content,
+            deleted_at=datetime.now(UTC),
         )
 
         emb = fake_embedding(content)
@@ -325,11 +367,16 @@ class TestSemanticDedupIntegration:
 
         # Second memory being "updated" to similar content
         updating_mem = await self._insert_memory(
-            tenant_id, "Something completely different",
+            tenant_id,
+            "Something completely different",
         )
 
         emb = fake_embedding(existing_content)
-        dup = await _find_semantic_duplicate(tenant_id, None, emb, exclude_id=updating_mem["id"],
+        dup = await _find_semantic_duplicate(
+            tenant_id,
+            None,
+            emb,
+            exclude_id=updating_mem["id"],
         )
         assert dup is not None
 
@@ -342,7 +389,11 @@ class TestSemanticDedupIntegration:
 
         # Same embedding but excluding self
         emb = fake_embedding(content)
-        dup = await _find_semantic_duplicate(tenant_id, None, emb, exclude_id=mem["id"],
+        dup = await _find_semantic_duplicate(
+            tenant_id,
+            None,
+            emb,
+            exclude_id=mem["id"],
         )
         assert dup is None
 
@@ -455,7 +506,9 @@ async def test_semantic_dedup_query_latency(count: int, budget_ms: float) -> Non
         mean_ms, median_ms, max_ms = await _measure(tenant)
 
         print(f"\n{'─' * 60}")
-        print(f"SEMANTIC DEDUP QUERY ({count} memories, {_BENCH_ITERATIONS} iterations)")
+        print(
+            f"SEMANTIC DEDUP QUERY ({count} memories, {_BENCH_ITERATIONS} iterations)"
+        )
         print(f"  mean={mean_ms:.2f}ms  median={median_ms:.2f}ms  max={max_ms:.2f}ms")
         print(f"{'─' * 60}")
 

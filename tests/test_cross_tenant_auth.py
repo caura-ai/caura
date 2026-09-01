@@ -217,7 +217,8 @@ async def test_log_cross_tenant_read_noop_for_single_tenant():
     from core_api.services.audit_service import log_cross_tenant_read
 
     with patch("core_api.services.audit_service.log_action", new=AsyncMock()) as mock:
-        await log_cross_tenant_read(            home_tenant_id="home",
+        await log_cross_tenant_read(
+            home_tenant_id="home",
             home_agent_id="agent-1",
             source_tenants=[],
             surface="caura_recall",
@@ -236,7 +237,8 @@ async def test_log_cross_tenant_read_emits_per_source_tenant():
     from core_api.services.audit_service import log_cross_tenant_read
 
     with patch("core_api.services.audit_service.log_action", new=AsyncMock()) as mock:
-        await log_cross_tenant_read(            home_tenant_id="home",
+        await log_cross_tenant_read(
+            home_tenant_id="home",
             home_agent_id="agent-1",
             source_tenants=["src-a", "src-b"],
             surface="caura_recall",

@@ -119,11 +119,17 @@ async def test_merge_step_preserves_caller_summary():
     """Input arrives PRE-SANITIZED (create_memory chokepoint strips forgeries
     before the governance gate); the merge step's job is the clobber fix."""
     from core_api.pipeline.context import PipelineContext
-    from core_api.pipeline.steps.write.merge_enrichment_fields import MergeEnrichmentFields
+    from core_api.pipeline.steps.write.merge_enrichment_fields import (
+        MergeEnrichmentFields,
+    )
 
     ctx = PipelineContext(
         data={
-            "input": _Input(sanitize_caller_metadata({"summary": "MINE", "llm_ms": 9999, "custom": "kept"})),
+            "input": _Input(
+                sanitize_caller_metadata(
+                    {"summary": "MINE", "llm_ms": 9999, "custom": "kept"}
+                )
+            ),
             "enrichment": _Enrichment(),
             "resolved_write_mode": "strong",
         }
@@ -142,11 +148,21 @@ async def test_merge_step_does_not_clobber_upstream_gate_flags():
     """The governance gate writes PII flags into the input metadata BEFORE the
     merge step — the regression that moved sanitize to the entry chokepoint."""
     from core_api.pipeline.context import PipelineContext
-    from core_api.pipeline.steps.write.merge_enrichment_fields import MergeEnrichmentFields
+    from core_api.pipeline.steps.write.merge_enrichment_fields import (
+        MergeEnrichmentFields,
+    )
 
-    gate_written = {"contains_pii": True, "pii_types": ["email"], SYSTEM_NAMESPACE: {"contains_pii": True, "pii_types": ["email"]}}
+    gate_written = {
+        "contains_pii": True,
+        "pii_types": ["email"],
+        SYSTEM_NAMESPACE: {"contains_pii": True, "pii_types": ["email"]},
+    }
     ctx = PipelineContext(
-        data={"input": _Input(dict(gate_written)), "enrichment": None, "resolved_write_mode": "fast"}
+        data={
+            "input": _Input(dict(gate_written)),
+            "enrichment": None,
+            "resolved_write_mode": "fast",
+        }
     )
     await MergeEnrichmentFields().execute(ctx)
     md = ctx.data["memory_fields"]["metadata"]

@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+
 from tests._contradiction_batch_compat import install_batch_status_replay_shim
 
 pytestmark = pytest.mark.unit

@@ -163,7 +163,9 @@ def paired_stats(deltas: list[float], rng) -> dict:
     would otherwise swamp the effect being measured.
     """
     boots = sorted(
-        statistics.fmean([deltas[rng.randrange(len(deltas))] for _ in range(len(deltas))])
+        statistics.fmean(
+            [deltas[rng.randrange(len(deltas))] for _ in range(len(deltas))]
+        )
         for _ in range(4000)
     )
     lo, hi = boots[100], boots[3900]

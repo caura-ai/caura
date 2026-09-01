@@ -13,7 +13,6 @@ from core_api.constants import (
 )
 from core_api.services.memory_service import _adaptive_fts_weight, _is_specific_token
 
-
 # ---------------------------------------------------------------------------
 # _is_specific_token
 # ---------------------------------------------------------------------------

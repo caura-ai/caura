@@ -27,7 +27,9 @@ from tests.conftest import get_test_auth
 
 
 @pytest.mark.integration
-async def test_exact_duplicate_answers_with_fields_and_keeps_the_sentence(client) -> None:
+async def test_exact_duplicate_answers_with_fields_and_keeps_the_sentence(
+    client,
+) -> None:
     tenant_id, headers = get_test_auth(f"t-c29-{uuid.uuid4().hex[:8]}")
     body = {
         "tenant_id": tenant_id,
@@ -120,7 +122,9 @@ def test_a_semantic_hit_is_not_treated_as_a_retry_no_op() -> None:
         duplicate_memory.core_api_detail(
             duplicate_memory.near_message("abc"),
             **duplicate_memory.duplicate_fields(
-                reason=duplicate_memory.REASON_SEMANTIC, existing_id="abc", similarity=0.97
+                reason=duplicate_memory.REASON_SEMANTIC,
+                existing_id="abc",
+                similarity=0.97,
             ),
         )
     )
@@ -158,7 +162,10 @@ def test_an_older_storage_response_yields_no_fields_rather_than_an_error() -> No
     sends ``detail``."""
     import httpx
 
-    from core_api.clients.storage_client import _storage_detail, _storage_duplicate_fields
+    from core_api.clients.storage_client import (
+        _storage_detail,
+        _storage_duplicate_fields,
+    )
 
     old = httpx.Response(409, json={"detail": "Duplicate memory exists: abc"})
     assert _storage_duplicate_fields(old) == {}

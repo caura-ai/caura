@@ -81,7 +81,9 @@ async def test_bind_timer_isolates_per_task() -> None:
     assert 15.0 <= results[2] < 35.0
 
 
-async def test_log_request_uses_info_for_fast_queries(caplog: pytest.LogCaptureFixture) -> None:
+async def test_log_request_uses_info_for_fast_queries(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     caplog.set_level(logging.INFO, logger="caura.observability")
     log_request("scored-search", tenant_id="t1", db_ms=10.0, total_ms=12.0, row_count=3)
     rec = caplog.records[-1]
@@ -93,7 +95,9 @@ async def test_log_request_uses_info_for_fast_queries(caplog: pytest.LogCaptureF
     assert rec.slow is False
 
 
-async def test_log_request_upgrades_to_warning_when_slow(caplog: pytest.LogCaptureFixture) -> None:
+async def test_log_request_upgrades_to_warning_when_slow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     caplog.set_level(logging.INFO, logger="caura.observability")
     log_request(
         "scored-search",
@@ -116,7 +120,9 @@ async def test_log_request_rejects_reserved_kwargs() -> None:
         log_request("scored-search", slow=True, db_ms=10.0)
 
 
-async def test_log_request_without_db_ms_stays_info(caplog: pytest.LogCaptureFixture) -> None:
+async def test_log_request_without_db_ms_stays_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """GET hits that miss the cache don't always carry db_ms — the helper
     must not crash or upgrade severity when the field isn't present."""
     caplog.set_level(logging.INFO, logger="caura.observability")

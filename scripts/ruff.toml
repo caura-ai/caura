@@ -1,0 +1,225 @@
+# Ruff contract for repo-root scripts/ — pinned deliberately, and the sibling of
+# scripts/mypy.ini. Same tree, same reasoning; that file gates types, this one
+# gates lint and format.
+#
+# WHY THIS FILE EXISTS: scripts/ appeared in NO ruff scope in ci.yml, and the
+# repo has no root [tool.ruff], so `ruff check scripts/` had no ancestor config
+# and fell back to ruff's BUILT-IN defaults. The effective rule set was
+# "whatever the installed ruff version happens to ship" — which is not stable:
+# the defaults expanded from 59 to 413 rules across the 0.16 bump (OSS #684,
+# enterprise #879/#898). That is what prompted common/ruff.toml here; scripts/
+# never got the same treatment.
+#
+# It bites in a specific way. With CI not linting scripts/ at all, the only gate
+# was the pre-commit ruff hook, which runs per CHANGED FILE. So a ruff bump
+# plants findings in files nobody is touching, and they surface later as a
+# blocked commit for whoever edits one next, for reasons unrelated to their
+# change. caura-enterprise hit exactly that on its #981 and worked around it
+# with --no-verify; its scripts/ruff.toml is the fix this mirrors.
+#
+# WHY THIS RULE SET: byte-for-byte the select/ignore lists of
+# caura-enterprise/scripts/ruff.toml, which is common/ruff.toml's proven list
+# plus the families that catch real things in a scripts/ tree. Kept identical so
+# a script moving between the two repos is not linted differently, and so the two
+# files stay diffable. Each addition over common/ is load-bearing there and here:
+#
+#   * ``BLE`` — deliberate broad catches carry ``# noqa: BLE001``. Drop BLE and
+#     every one becomes an unused-noqa error, and the deliberate breadth loses
+#     the annotation documenting it.
+#   * ``S`` — these scripts shell out and fetch URLs against real projects;
+#     bandit's checks are worth more here than in library code.
+#   * ``EXE``/``FURB``/``PLW`` — cheap, and each caught something real.
+#
+# ``line-length`` is 88 — ruff's own default, matching common/ruff.toml and
+# enterprise's scripts/ruff.toml rather than the 110 used by core-*/src. Pinned
+# rather than inherited, and MEASURED rather than assumed: at 88, 13 of 31 files
+# want reformatting; at 110 it is 29, and at 200 it is still 29. These files were
+# written by ``ruff format`` at its default width, so a wider limit does not
+# accommodate them — it tells the formatter to JOIN lines that are correctly
+# wrapped today, and makes the diff bigger. 88 is the minimum-churn value, not a
+# compromise. Both fleet-wide engine files, legacy_name_ratchet.py and
+# do_not_touch_sentinel.py, are already clean at it.
+#
+# E501 is ignored, as everywhere in this estate, so line-length governs
+# ``ruff format`` only and never fails ``ruff check``.
+line-length = 88
+target-version = "py312"
+exclude = [
+    ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".venv", "__pycache__", "build", "dist",
+]
+
+[lint]
+select = [
+    "E", "W", "F", "I", "B", "BLE", "C4", "UP", "ARG",
+    "SIM", "TCH", "PTH", "RUF", "ASYNC", "S", "EXE", "FURB", "PLW",
+]
+ignore = [
+    # Mirrors common/ruff.toml's ignore list, so a rule that is noise in one
+    # tree is not suddenly an error in the other.
+    "E501", "TC001", "TC002", "TC003", "ARG001", "ARG002",
+    "B008", "B904", "RUF022", "PTH123", "SIM117", "RUF012", "RUF009",
+    # Inherent to what these scripts ARE, not defects to suppress one by one.
+    # They drive gcloud/docker and fetch deploy URLs; that is the job. Flagging
+    # it per call site would mean a noqa on every script added.
+    #   S603 subprocess-without-shell-equals-true
+    #   S607 start-process-with-partial-path  (``gcloud`` off PATH, deliberate)
+    #   S310 suspicious-url-open-usage
+    "S603", "S607", "S310",
+]
+fixable = ["ALL"]
+
+[lint.per-file-ignores]
+# The ratchet engine is byte-identical fleet-wide and another package owns its
+# content, so its findings cannot be fixed here — the fix would have to land in
+# every repo at once or the copies diverge. Contained rather than dropped from
+# `select`, so the three families still bite in every other script.
+#
+# caura-enterprise/scripts/ruff.toml carries this same entry with the same three
+# codes. Its comment explains itself as "vendored byte-for-byte from caura, whose
+# CI does not apply this enterprise-only scripts rule set" — a sentence this
+# change makes stale, since caura's CI now applies exactly that rule set. The
+# entry stays correct in both; only enterprise's rationale needs a reword.
+#
+#   PLW0603 global _ACTIVE_CONFIG   (2 sites: the config is process-wide state)
+#   PLW2901 loop variable overwritten (2 sites)
+#   S101    assert used              (2 sites, in its self-check)
+"legacy_name_ratchet.py" = ["PLW0603", "PLW2901", "S101"]
+
+
+# ---------------------------------------------------------------------------
+# BACKLOG — a ratchet, not a category. Shrink; never add.
+#
+# 145 findings in 24 files, listed BY NAME with the codes each one
+# still trips and how many times. That shape is deliberate and it is the whole
+# design: a file becomes exempt only by someone adding it here in a reviewed
+# diff, never by being born in the right directory. scripts/mypy.ini reached
+# the same conclusion for types in this same tree — its #983 review rejected a
+# module-level ``ignore_errors``, and #998 tore out two globs covering 105
+# modules to gate the 19 that actually failed. A glob here would silently
+# swallow every future script.
+#
+# The gate is landing WITHOUT this backlog cleared, deliberately: landing a gate
+# together with its backlog is how gates get reverted. What matters is that
+# every file NOT listed here is gated as of this commit, and so is every file
+# added after it.
+#
+# The mechanical half is already gone rather than exempted — 56 findings
+# fixed by ``ruff check --fix`` in this same commit (import order, the
+# ``datetime.UTC`` alias, unused imports, f-strings without placeholders). What
+# is left needs a human: mostly ``os.path`` -> ``pathlib`` modernisation (PTH, 43) and
+# deliberate broad catches in throwaway benchmark scripts (BLE001, 20), but
+# also three real ones worth a look: B023 loop-variable capture in
+# benchmark_blend_locomo.py, S608 string-built SQL in
+# _f3_wet_test_observer.py, and B905 bare ``zip()`` in 8 places.
+#
+# Delete an entry once its file is clean.
+# ---------------------------------------------------------------------------
+# 11: PLW1510x2, PTH103, PTH118, S108, S608x6
+"_f3_wet_test_observer.py" = ["PLW1510", "PTH103", "PTH118", "S108", "S608"]
+# 9: B023x3, B905x3, S101x2, S311
+"benchmark_blend_locomo.py" = ["B023", "B905", "S101", "S311"]
+# 1: EXE001
+"benchmark_nano_vs_flash.py" = ["EXE001"]
+# 32: ASYNC230x2, ASYNC240x4, B007, B905, BLE001x5, C408x2, E741, PTH100x3, PTH110x2, PTH118x2, PTH120x6, SIM103, SIM115x2
+"benchmark_openai_models.py" = ["ASYNC230", "ASYNC240", "B007", "B905", "BLE001", "C408", "E741", "PTH100", "PTH110", "PTH118", "PTH120", "SIM103", "SIM115"]
+# 4: B905x2, S101, S311
+"benchmark_rerank_locomo.py" = ["B905", "S101", "S311"]
+# 3: S105x3
+"check_readme_quickstart.py" = ["S105"]
+# 1: EXE001
+"export_tool_specs.py" = ["EXE001"]
+# 1: EXE001
+"forge_dry_run.py" = ["EXE001"]
+# 10: BLE001x5, EXE001, PLW1510, PTH111, S110, SIM105
+"gateway_integration_test.py" = ["BLE001", "EXE001", "PLW1510", "PTH111", "S110", "SIM105"]
+# 1: EXE001
+"gen_events_manifest.py" = ["EXE001"]
+# 9: BLE001, C401x4, PTH103, PTH118x2, RUF001
+"hyperagent_test.py" = ["BLE001", "C401", "PTH103", "PTH118", "RUF001"]
+# 1: EXE001
+"latency_test.py" = ["EXE001"]
+# 3: BLE001, EXE001, S108
+"mcp_tool_smoke.py" = ["BLE001", "EXE001", "S108"]
+# 6: EXE001, PTH100, PTH120, RUF001, S311x2
+"repro_contradictions_collision.py" = ["EXE001", "PTH100", "PTH120", "RUF001", "S311"]
+# 3: BLE001, PTH100, PTH120
+"repro_contradictions_diagnostic.py" = ["BLE001", "PTH100", "PTH120"]
+# 2: PTH100, PTH120
+"repro_contradictions_not_detected.py" = ["PTH100", "PTH120"]
+# 5: EXE001, PTH100, PTH120, S311x2
+"repro_contradictions_proper_noun.py" = ["EXE001", "PTH100", "PTH120", "S311"]
+# 6: BLE001, EXE001, PTH100, PTH120, S311x2
+"repro_contradictions_race.py" = ["BLE001", "EXE001", "PTH100", "PTH120", "S311"]
+# 2: PTH100, PTH120
+"repro_contradictions_with_entity_links.py" = ["PTH100", "PTH120"]
+# 12: BLE001x5, EXE001, S110x3, SIM105x3
+"smoke_test.py" = ["BLE001", "EXE001", "S110", "SIM105"]
+# 4: B905x2, RUF002x2
+"tenant_scope_gate.py" = ["B905", "RUF002"]
+# 5: BLE001, EXE001, RUF001, RUF059, S108
+"trust_matrix_e2e.py" = ["BLE001", "EXE001", "RUF001", "RUF059", "S108"]
+# 6: PTH100, PTH110, PTH118x2, PTH120, PTH202
+"wet_test_contradiction_prompt.py" = ["PTH100", "PTH110", "PTH118", "PTH120", "PTH202"]
+# 8: EXE002, PTH100, PTH110, PTH118x2, PTH120, PTH202, RUF001
+"wet_test_direction_invariance.py" = ["EXE002", "PTH100", "PTH110", "PTH118", "PTH120", "PTH202", "RUF001"]
+
+[lint.isort]
+known-first-party = [
+    "core_api", "core_storage_api", "core_operations", "core_worker", "common",
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+# EXCLUDED FROM ``ruff format`` ONLY. Every file below is still fully
+# lint-checked by the ``[lint]`` section above; only the formatter is held off.
+#
+# THE RULE, and it is one rule rather than 7 judgements: the formatter may not
+# touch a file that carries a line-level ``legacy-name-ok`` or
+# ``legacy-name-floor`` marker. ``legacy_name_ratchet.py`` greps LINE BY LINE — a
+# marker exempts the line it sits on and nothing else. When ``ruff format`` wraps
+# a marked statement past 88 columns, the legacy name goes to one line and the
+# trailing comment to another, so the name lands on an UNMARKED line. The ratchet
+# then reports the marker deleted and the name newly minted, and fails.
+#
+# MEASURED on this change before these exclusions existed: 11 markers displaced
+# across 6 files, ratchet exit 1, reporting 11 exemptions removed and the legacy
+# name "added" in 6 files that nobody had semantically touched.
+#
+# Re-attaching each comment to its name's line does NOT converge. Ruff's
+# preferred layout for three of those sites puts the trailing comment on a line
+# that does not hold the name at all — the ``1,`` of a ``replace()`` call, the
+# blank-string argument of a ``setenv()``, the right-hand side of a comparison —
+# so every reformat displaces it again. Verified by doing it and re-running both
+# gates.
+#
+# Two things this buys beyond a green build. The pre-commit ruff-format hook
+# reads this list too, so it can no longer displace a marker on someone's
+# unrelated commit — a live trap, not a hypothetical, since that hook is what
+# formats these files today. And ``legacy_name_ratchet.py`` and
+# ``do_not_touch_sentinel.py`` are byte-identical fleet-wide with their content
+# owned elsewhere; "never reformat these two" was a rule people had to remember,
+# and is now a rule the config enforces.
+#
+# THE FIX THAT REMOVES AN ENTRY: hoist the legacy literal into a short
+# module-level constant carrying the marker, so no wrap is possible.
+# ``tests/_legacy_contracts.py`` exists for exactly that and already holds four.
+# It is a change to test and script code, deliberately not bundled into a
+# lint-coverage change. Delete an entry once its file has no in-line marker left.
+exclude = [
+    # markers: 1 — the legacy dual-read env prefix, inside a replace() call
+    "_env_compat.py",
+    # markers: 1
+    "_f3_wet_test_observer.py",
+    # markers: 1
+    "benchmark_blend_locomo.py",
+    # markers: 45 — and byte-identical fleet-wide; content owned elsewhere
+    "do_not_touch_sentinel.py",
+    # markers: 4 — incl. the old plugin's tools-file heading inside an `or (...)`
+    "gateway_integration_test.py",
+    # markers: 8 — the engine itself; byte-identical fleet-wide
+    "legacy_name_ratchet.py",
+    # markers: 1
+    "wet_test_direction_invariance.py",
+]

@@ -91,7 +91,7 @@ class SmokeTest:
         t_start = time.monotonic()
 
         if not self.json_output:
-            print(f"\n  Caura Smoke Test")
+            print("\n  Caura Smoke Test")
             print(f"  URL: {self.base}")
             print(f"  Tenant: {TENANT}")
             print()
@@ -873,7 +873,7 @@ class SmokeTest:
             self.check(
                 "Update: content applied",
                 r.json().get("content") == new_content,
-                f"content mismatch",
+                "content mismatch",
             )
             self.check(
                 "Update: title applied",

@@ -76,7 +76,8 @@ async def _weight(mem_id: str) -> float:
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT weight FROM memories WHERE id = CAST(:id AS uuid)"), {"id": mem_id}
+                text("SELECT weight FROM memories WHERE id = CAST(:id AS uuid)"),
+                {"id": mem_id},
             )
         ).fetchone()
     return float(row.weight)
@@ -86,7 +87,8 @@ async def _metadata(mem_id: str) -> dict | None:
     async with get_session() as session:
         row = (
             await session.execute(
-                text("SELECT metadata FROM memories WHERE id = CAST(:id AS uuid)"), {"id": mem_id}
+                text("SELECT metadata FROM memories WHERE id = CAST(:id AS uuid)"),
+                {"id": mem_id},
             )
         ).fetchone()
     meta = row.metadata
@@ -127,8 +129,12 @@ async def test_filter_scope_agent_keeps_only_caller(sc):
 
 async def test_filter_scope_fleet_keeps_only_fleet(sc):
     tenant = _t()
-    ours = await _seed_memory(tenant_id=tenant, agent_id="a", fleet_id="fleet-x", content="ours")
-    theirs = await _seed_memory(tenant_id=tenant, agent_id="b", fleet_id="fleet-y", content="theirs")
+    ours = await _seed_memory(
+        tenant_id=tenant, agent_id="a", fleet_id="fleet-x", content="ours"
+    )
+    theirs = await _seed_memory(
+        tenant_id=tenant, agent_id="b", fleet_id="fleet-y", content="theirs"
+    )
     allowed = await sc.evolve_filter_by_scope(
         tenant_id=tenant,
         caller_agent_id="a",
@@ -237,7 +243,12 @@ async def test_apply_weights_clamps_at_cap(sc):
 async def test_apply_weights_backfills_source_outcome_id(sc):
     tenant = _t()
     target = await _seed_memory(tenant_id=tenant, agent_id="a", weight=0.5)
-    rule = await _seed_memory(tenant_id=tenant, agent_id="a", memory_type="rule", metadata={"generated_by": "evolve"})
+    rule = await _seed_memory(
+        tenant_id=tenant,
+        agent_id="a",
+        memory_type="rule",
+        metadata={"generated_by": "evolve"},
+    )
     outcome_id = "11111111-1111-1111-1111-111111111111"
     resp = await sc.evolve_apply_weights(
         tenant_id=tenant,
@@ -341,7 +352,12 @@ async def test_filter_invalid_uuid_in_ids_422(storage_http):
     # converts it to a 422 for direct storage callers instead of a 500.
     resp = await storage_http.post(
         "/api/v1/storage/evolve/filter-by-scope",
-        json={"tenant_id": "t", "caller_agent_id": "a", "scope": "agent", "ids": ["not-a-uuid"]},
+        json={
+            "tenant_id": "t",
+            "caller_agent_id": "a",
+            "scope": "agent",
+            "ids": ["not-a-uuid"],
+        },
     )
     assert resp.status_code == 422
 

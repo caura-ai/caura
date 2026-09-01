@@ -29,7 +29,7 @@ These tests pin the contract at all three layers:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -63,7 +63,7 @@ def _fake_memory(mid: str | None = None, content: str = "fact") -> MagicMock:
     m.title = None
     m.status = "active"
     m.ts_valid_start = None
-    m.created_at = datetime.now(timezone.utc)
+    m.created_at = datetime.now(UTC)
     m.model_dump = MagicMock(
         return_value={"id": str(m.id), "content": content, "memory_type": "fact"}
     )
@@ -297,7 +297,8 @@ async def test_mcp_recall_brief_contains_both_keys(mcp_env, monkeypatch):
         AsyncMock(return_value=_minimal_config(recall_enabled=True)),
     )
     monkeypatch.setattr(
-        "core_api.clients.storage_client.CoreStorageClient.get_agent", AsyncMock(return_value=None)
+        "core_api.clients.storage_client.CoreStorageClient.get_agent",
+        AsyncMock(return_value=None),
     )
 
     from core_api import mcp_server

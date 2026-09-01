@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -91,7 +91,7 @@ class _MemoryRow:
         self.deleted_at = None
         self.embedding = None
 
-    def model_dump(self, mode: str = "python"):  # noqa: ARG002
+    def model_dump(self, mode: str = "python"):
         return {"id": self.id, "tenant_id": self.tenant_id}
 
 
@@ -163,7 +163,11 @@ async def test_caura_recall_emits_cross_tenant_audit(
     monkeypatch.setattr(
         mcp_server,
         "resolve_config",
-        AsyncMock(return_value=SimpleNamespace(recall_boost=False, graph_expand=False, entity_retrieval=True)),
+        AsyncMock(
+            return_value=SimpleNamespace(
+                recall_boost=False, graph_expand=False, entity_retrieval=True
+            )
+        ),
     )
     stub_storage_client(monkeypatch, get_agent=None)
 
@@ -387,7 +391,9 @@ async def test_rest_documents_search_emits_cross_tenant_audit(monkeypatch):
     monkeypatch.setattr(documents_routes, "check_and_increment", AsyncMock())
     # The route imports ``get_embedding`` at module top-level, so patch it
     # in the route module's namespace (not at the source).
-    monkeypatch.setattr(documents_routes, "get_embedding", AsyncMock(return_value=[0.1] * 8))
+    monkeypatch.setattr(
+        documents_routes, "get_embedding", AsyncMock(return_value=[0.1] * 8)
+    )
 
     body = documents_routes.DocSearchRequest(
         tenant_id="home",
@@ -396,7 +402,10 @@ async def test_rest_documents_search_emits_cross_tenant_audit(monkeypatch):
     )
     auth = _cross_tenant_auth()
 
-    await documents_routes.search_documents(body=body, auth=auth,)
+    await documents_routes.search_documents(
+        body=body,
+        auth=auth,
+    )
 
     spy.assert_awaited()
     kwargs = spy.await_args.kwargs

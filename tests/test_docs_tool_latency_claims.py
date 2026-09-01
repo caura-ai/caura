@@ -58,4 +58,6 @@ def test_latency_table_names_the_slow_tool():
 
     assert "caura_insights" in section
     # The advice is only actionable with a concrete number to size against.
-    assert re.search(r"\d+(\.\d+)?\s*s", section), "the table must keep at least one timing"
+    assert re.search(r"\d+(\.\d+)?\s*s", section), (
+        "the table must keep at least one timing"
+    )
