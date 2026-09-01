@@ -1657,6 +1657,7 @@
                 "type": "null"
               }
             ],
+            "description": "Restrict results to one status. When omitted, superseded memories are hidden: 'outdated' rows are excluded, and 'conflicted' rows are excluded unless they exactly match the query text. Their replacements are injected in their place. Pass an explicit status to bypass this and read the superseded rows directly.",
             "title": "Status Filter"
           },
           "tenant_id": {
@@ -1716,12 +1717,53 @@
             "description": "Whether this search bumped recall_count for the memories it returned. False means they were not reinforced: the caller presented no agent identity (a tenant-scoped key that did not set filter_agent_id — recall_count stays 0 for that caller and recall_boost never engages), the call set diagnostic=true, or nothing matched.",
             "title": "Recall Tracked",
             "type": "boolean"
+          },
+          "warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/SearchWarning"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warnings"
           }
         },
         "required": [
           "items"
         ],
         "title": "SearchResponse",
+        "type": "object"
+      },
+      "SearchWarning": {
+        "description": "A28 — a coded, non-fatal caveat about the result set.\n\nThe search succeeded, but something the caller would reasonably assume\nhappened did not. Distinct from ``SearchDiagnostic``: that is opt-in\nintrospection, this is unsolicited and only present when there is something\nto say.",
+        "properties": {
+          "code": {
+            "description": "Stable slug, e.g. 'successor_enrichment_incomplete'.",
+            "title": "Code",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "description": "Machine-readable context.",
+            "title": "Details",
+            "type": "object"
+          },
+          "message": {
+            "description": "Human-readable summary of what is incomplete.",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "SearchWarning",
         "type": "object"
       },
       "UsageSummary": {

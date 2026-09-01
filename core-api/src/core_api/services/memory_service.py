@@ -4498,6 +4498,9 @@ async def search_memories(
     search_profile: dict | None = None,
     diagnostic: bool = False,
     diagnostic_ctx: dict | None = None,
+    # A28 — always-on channel for caller-visible warnings (unlike
+    # diagnostic_ctx, which is opt-in). Filled by pipeline steps.
+    warnings_ctx: list | None = None,
     readable_tenant_ids: list[str] | None = None,
     source: str = "search",
     min_similarity: float | None = None,
@@ -4529,6 +4532,7 @@ async def search_memories(
             search_profile=search_profile,
             diagnostic=diagnostic,
             diagnostic_ctx=diagnostic_ctx,
+            warnings_ctx=warnings_ctx,
             readable_tenant_ids=readable_tenant_ids,
             source=source,
             min_similarity=min_similarity,
@@ -4583,6 +4587,9 @@ async def _search_memories_pipeline(
     search_profile: dict | None = None,
     diagnostic: bool = False,
     diagnostic_ctx: dict | None = None,
+    # A28 — always-on channel for caller-visible warnings (unlike
+    # diagnostic_ctx, which is opt-in). Filled by pipeline steps.
+    warnings_ctx: list | None = None,
     readable_tenant_ids: list[str] | None = None,
     source: str = "search",
     min_similarity: float | None = None,
@@ -4658,6 +4665,12 @@ async def _search_memories_pipeline(
         # pinned counter is fine — the exact silent-zero this field exists to
         # end.
         recall_ctx["recall_tracked"] = bool(ctx.data.get("recall_tracked"))
+
+    # A28 — hand any step-emitted warnings back to the caller. Unconditional:
+    # a caller that did not ask for diagnostics still needs to hear that the
+    # result set is missing successors it would normally carry.
+    if warnings_ctx is not None:
+        warnings_ctx.extend(ctx.data.get("warnings", []) or [])
 
     return ctx.data["results"]
 

@@ -58,6 +58,7 @@ from core_api.schemas import (
     SearchDiagnostic,
     SearchRequest,
     SearchResponse,
+    SearchWarning,
     STMWriteResponse,
     UsageSummary,
 )
@@ -1798,6 +1799,9 @@ async def _search_inner(
     # Filled by TrackRecalls (via search_memories) with whether this search
     # dispatched a recall_count bump — reported to the caller below.
     recall_ctx: dict = {}
+    # A28 — always collected (no request flag gates it); only serialized below
+    # when a step actually put something in it.
+    search_warnings: list = []
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -1833,6 +1837,7 @@ async def _search_inner(
             readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
             diagnostic=body.diagnostic,
             diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
+            warnings_ctx=search_warnings,
             min_similarity=body.min_similarity,
             recall_ctx=recall_ctx,
         )
@@ -1857,12 +1862,15 @@ async def _search_inner(
                 },
             )
     recall_tracked = bool(recall_ctx.get("recall_tracked"))
+    # A28 — null when empty (matches ``diagnostic``); purely additive.
+    warn_out = [SearchWarning(**w) for w in search_warnings] or None
     if not body.diagnostic:
-        return SearchResponse(items=results, recall_tracked=recall_tracked)
+        return SearchResponse(items=results, recall_tracked=recall_tracked, warnings=warn_out)
     counts = diagnostic_ctx.get("counts", {}) or {}
     return SearchResponse(
         items=results,
         recall_tracked=recall_tracked,
+        warnings=warn_out,
         diagnostic=SearchDiagnostic(
             retrieval_strategy=diagnostic_ctx.get("retrieval_strategy"),
             top_k_requested=diagnostic_ctx.get("diagnostic_original_top_k"),

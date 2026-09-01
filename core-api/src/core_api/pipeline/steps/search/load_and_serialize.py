@@ -13,7 +13,29 @@ from core_api.services.memory_service import _memory_to_out
 
 logger = logging.getLogger(__name__)
 
-MAX_SUCCESSOR_LOOKUPS = 10
+# A28 — defensive ceiling on the successor lookup's IN-list, NOT a cost control.
+#
+# This was 10, which truncated silently: a result set with more than ten
+# outdated/conflicted rows left the 11th onward with no successor loaded and no
+# signal to the caller, so a stale claim surfaced as if no correction existed —
+# the exact failure the A34 contract exists to prevent.
+#
+# The truncation bought nothing. ``find_successors`` is ONE storage call, and on
+# the storage side ONE indexed query (``supersedes_id IN (...)`` with no LIMIT),
+# so ten ids and a thousand cost the same round-trip. The bound survives only to
+# keep a pathological array parameter away from Postgres' bind limits, and is set
+# far above anything the public contract can produce: ``top_k`` is capped at
+# MAX_SEARCH_TOP_K (20), so ``outdated_ids`` cannot approach this from the API.
+# If it ever does engage, the caller is TOLD (see SUCCESSOR_ENRICHMENT_INCOMPLETE
+# below) rather than silently handed stale rows.
+MAX_SUCCESSOR_LOOKUPS = 1000
+
+# Coded warning surfaced on the search response when successor injection could
+# not be completed. Two causes, one signal: the bound above engaged, or the
+# storage call failed. Both previously produced nothing but a server-side log,
+# which meant the caller could not distinguish "no correction exists" from "we
+# did not look".
+SUCCESSOR_ENRICHMENT_INCOMPLETE = "successor_enrichment_incomplete"
 
 _SCORE_FACTORS = (
     "vec_sim",
@@ -33,6 +55,29 @@ def _mem_field(memory, key: str):
     if isinstance(memory, dict):
         return memory.get(key)
     return None
+
+
+def _warn(ctx: PipelineContext, *, reason: str, stale_result_count: int, enriched: int) -> None:
+    """Record a caller-visible warning that successor injection was incomplete.
+
+    Written into ``ctx.data["warnings"]``, which the search service hands back to
+    the route. Unlike the D12 diagnostic block this is NOT opt-in: a caller who
+    did not ask for diagnostics still needs to know the result set is missing
+    corrections it would otherwise have carried.
+    """
+    ctx.data.setdefault("warnings", []).append(
+        {
+            "code": SUCCESSOR_ENRICHMENT_INCOMPLETE,
+            "message": (
+                "Some outdated/conflicted results may be missing the newer memory that supersedes them."
+            ),
+            "details": {
+                "reason": reason,
+                "stale_result_count": stale_result_count,
+                "enriched": enriched,
+            },
+        }
+    )
 
 
 def _score_parts(row) -> ScoreParts | None:
@@ -64,13 +109,24 @@ class LoadAndSerialize:
             in ("outdated", "conflicted")
         ]
         if outdated_ids:
-            if len(outdated_ids) > MAX_SUCCESSOR_LOOKUPS:
+            stale_total = len(outdated_ids)
+            if stale_total > MAX_SUCCESSOR_LOOKUPS:
                 logger.warning(
                     "Capping successor lookups from %d to %d",
-                    len(outdated_ids),
+                    stale_total,
                     MAX_SUCCESSOR_LOOKUPS,
                 )
                 outdated_ids = outdated_ids[:MAX_SUCCESSOR_LOOKUPS]
+                # Partial enrichment beats none — the rows that DID get a
+                # successor keep the A34 guarantee — but the caller has to know
+                # the set is incomplete, or an unenriched stale row reads as
+                # "no correction exists".
+                _warn(
+                    ctx,
+                    reason="lookup_bound_exceeded",
+                    stale_result_count=stale_total,
+                    enriched=MAX_SUCCESSOR_LOOKUPS,
+                )
             existing_ids = {
                 str(row.Memory.id if hasattr(row.Memory, "id") else row.Memory.get("id")) for row in rows
             }
@@ -95,6 +151,11 @@ class LoadAndSerialize:
                     "find_successors failed; continuing without successor enrichment", exc_info=True
                 )
                 successors = []
+                # Same class of silence as the cap: the search still returns
+                # stale rows, but nothing looked for their corrections. Degrading
+                # to an un-enriched result set is the right behaviour; doing it
+                # invisibly is not.
+                _warn(ctx, reason="storage_error", stale_result_count=stale_total, enriched=0)
             for successor in successors:
                 sid = successor.get("id")
                 if sid not in existing_ids:
