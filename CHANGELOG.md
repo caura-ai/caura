@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.40.0](https://github.com/caura-ai/caura/compare/backend-v2.39.4...backend-v2.40.0) (2026-09-01)
+
+
+### Features
+
+* **mcp:** make a capped top_k visible and name list rows items ([#1190](https://github.com/caura-ai/caura/issues/1190)) ([6711083](https://github.com/caura-ai/caura/commit/67110830f82cff0250ed5c586f3fa95ae008659b))
+
 ## [2.39.4](https://github.com/caura-ai/caura/compare/backend-v2.39.3...backend-v2.39.4) (2026-09-01)
 
 
