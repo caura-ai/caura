@@ -93,7 +93,12 @@ from core_api.services.recall_service import summarize_memories
 # directly from ``core_api.services.trust_service``.
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
-from core_api.services.usage_service import charges_write_quota, recall_operation
+from core_api.services.usage_service import (
+    MutatingOp,
+    charges_write_quota,
+    plan_limit_gated,
+    recall_operation,
+)
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
 from core_api.trust_utils import (
     effective_keystone_min_trust,
@@ -129,6 +134,15 @@ _credential_kind_var: contextvars.ContextVar[str | None] = contextvars.ContextVa
 _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "mcp_install_uuid", default=None
 )
+# Plan-limit read-only mode, computed by the platform from the persisted usage
+# counters and stamped as X-Org-Read-Only (see ``usage_service``'s module
+# docstring). REST reads it via ``AuthContext.is_read_only``; until now the MCP
+# middleware never read it at all, so no MCP tool could see plan-limit mode
+# (caura-ai/caura#1205).
+#
+# OBSERVED, NOT ENFORCED, for now. Nothing refuses on this yet — see
+# ``_observe_plan_limit`` below for why that sequencing is deliberate.
+_org_read_only_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_org_read_only", default=False)
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
@@ -334,6 +348,22 @@ class MCPAuthMiddleware:
             _install_uuid_var.set(
                 (headers.get(b"x-install-uuid", b"").decode() or None) if via_gateway else None
             )
+            # Plan-limit read-only mode. Gateway-verified path only, for the
+            # same reason as the attributes above but with the direction of the
+            # risk reversed: for identity, self-assertion buys access the caller
+            # should not have; here, self-assertion the OTHER way — a direct
+            # caller simply omitting the header — would CLEAR its own read-only
+            # flag. Deriving it from ``via_gateway`` makes both impossible: off
+            # the verified path the value is not caller-influenced at all.
+            #
+            # Assigned on every request like its neighbours, never left unset.
+            # A stale True bleeding into the next request on a reused ASGI task
+            # would refuse a paying tenant; a stale False would be a billing
+            # bypass. Both are silent, so neither is allowed to depend on a
+            # header being present.
+            _org_read_only_var.set(
+                (headers.get(b"x-org-read-only", b"").decode().lower() == "true") if via_gateway else False
+            )
 
         await self.app(scope, receive, send)
 
@@ -366,6 +396,54 @@ def _is_install_credential() -> bool:
 def _get_install_uuid() -> str | None:
     """The broker's install UUID (X-Install-UUID), or None for non-broker calls."""
     return _install_uuid_var.get(None)
+
+
+def _is_org_read_only() -> bool:
+    """True when the platform stamped this org over its plan limit.
+
+    The MCP twin of ``AuthContext.is_read_only``. Read only by
+    ``_observe_plan_limit`` today — nothing refuses on it yet.
+    """
+    return _org_read_only_var.get(False)
+
+
+def _observe_plan_limit(op: MutatingOp, tenant_id: str) -> None:
+    """Record that ``op`` ran while the org was over its plan limit.
+
+    DELIBERATELY DOES NOT REFUSE. This is step one of caura-ai/caura#1205,
+    which closes a real divergence — an over-plan org is refused a write on
+    REST and allowed the same write on MCP — but closes it in a direction that
+    takes capability AWAY from tenants who have it today. Enforcing in the same
+    change that first plumbs the signal would mean discovering the blast radius
+    from the support queue.
+
+    So: emit what WOULD be refused, ship it, read the logs, then enforce with
+    the number in hand. The log also answers a question that cannot be answered
+    from this repo at all — whether the gateway stamps ``x-org-read-only`` on
+    the ``/mcp`` route or only on ``/api/v1``. The header has no producer in
+    OSS; if this line never fires in production, that is the first thing to
+    check.
+
+    READ SILENCE CAREFULLY. Three different things produce no log, and only one
+    of them is "nothing would be refused": the gateway may not stamp the header
+    on this route at all (above), or the tenant may never have been marked over
+    plan because the MCP batch path records no usage to compute that from
+    (caura-ai/caura#1220). Rule those out before reading a quiet log as a
+    green light to enforce.
+
+    Logged at WARNING rather than INFO because a firing line means real money:
+    a write that the plan says should not have happened.
+    """
+    if not _is_org_read_only() or not plan_limit_gated(op):
+        return
+    logger.warning(
+        "mcp_plan_limit_would_refuse",
+        extra={
+            "tenant_id": tenant_id,
+            "mcp_operation": op,
+            "enforced": False,
+        },
+    )
 
 
 def _is_write_allowed() -> bool:
@@ -1071,6 +1149,11 @@ async def caura_write(
             if not fleet_id and agent.get("fleet_id"):
                 fleet_id = agent["fleet_id"]
             if content is not None:
+                # Observation only; the write proceeds. The batch path below
+                # carries the ``bulk_create`` twin — between them they cover
+                # every op on this surface that ``PLAN_LIMIT_GATED_OPS``
+                # names (MCP exposes no ``redistribute``).
+                _observe_plan_limit("create", tenant_id)
                 if charges_write_quota("create"):
                     await check_and_increment(tenant_id, "write")
                 result = await create_memory(
@@ -1124,6 +1207,23 @@ async def caura_write(
             for _idx, _item in enumerate(bulk_items):
                 if refuse := _refuse_reserved_memory_type(_item.memory_type, index=_idx):
                     return _with_latency(refuse, t0)
+            # The batch twin of the single-write observation above. This is the
+            # path where an over-plan tenant can add the most rows per call, so
+            # leaving it out would have made the numbers read low in exactly
+            # the direction that matters.
+            #
+            # NOTE while you are here: this path charges NO write quota at all
+            # — no ``check_and_increment``, no ``bulk_check_and_increment``,
+            # while REST's ``POST /memories/bulk`` charges one per item
+            # (caura-ai/caura#1220). Filed rather than fixed here: that one
+            # changes billing, this one only changes logging.
+            #
+            # It also bounds what the line below can tell you. The counters
+            # that never move here are the same counters ``x-org-read-only`` is
+            # computed from, so a batch-heavy tenant may never be marked over
+            # plan at all — meaning silence from this observation is not by
+            # itself evidence that nothing would be refused.
+            _observe_plan_limit("bulk_create", tenant_id)
             bulk_data = BulkMemoryCreate(
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,

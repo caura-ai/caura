@@ -39,6 +39,7 @@ def _reset_mcp_context_vars():
     mcp_server._readable_tenant_ids_var.set(None)
     mcp_server._scopes_var.set(None)
     mcp_server._via_gateway_var.set(False)
+    mcp_server._org_read_only_var.set(False)
 
 
 async def _call_middleware(headers: list[tuple[bytes, bytes]]):
@@ -197,3 +198,60 @@ async def test_identity_headers_ignored_without_tenant_header(monkeypatch):
     assert mcp_server._get_agent_id() is None
     assert mcp_server._get_readable_tenants() == []
     assert mcp_server._get_scopes() is None
+
+
+# ---------------------------------------------------------------------------
+# S2 — plan-limit read-only mode (X-Org-Read-Only)
+#
+# The gateway computes "over plan" from the persisted counters and stamps this
+# header; REST turns it into a 403 via ``AuthContext.is_read_only``. The MCP
+# middleware never read it, so no MCP tool could see plan-limit mode at all
+# (caura-ai/caura#1205).
+#
+# The risk here runs the OPPOSITE way to the identity headers above. There,
+# self-assertion buys access; here, a direct caller simply OMITTING the header
+# would clear its own read-only flag. Both are closed by the same rule: the
+# value is honoured only on the gateway-verified path.
+# ---------------------------------------------------------------------------
+
+
+async def test_org_read_only_is_honored_on_the_gateway_path(monkeypatch):
+    monkeypatch.setattr(settings, "gateway_shared_secret", None)
+    await _call_middleware(
+        [(b"x-tenant-id", b"tenant-A"), (b"x-org-read-only", b"true")]
+    )
+    assert mcp_server._is_org_read_only() is True
+
+
+async def test_org_read_only_is_ignored_off_the_gateway_path(monkeypatch):
+    """A direct caller must not be able to SET one either."""
+    monkeypatch.setattr(settings, "gateway_shared_secret", None)
+    monkeypatch.setattr(settings, "is_standalone", False)
+    await _call_middleware(
+        [(b"x-api-key", b"some-key"), (b"x-org-read-only", b"true")]
+    )
+    assert mcp_server._is_org_read_only() is False
+
+
+async def test_org_read_only_does_not_bleed_between_requests(monkeypatch):
+    """The billing-bypass case: a stale False would let an over-plan tenant
+    through, a stale True would refuse a paying one. Both silent, so the var is
+    assigned on every request rather than only when the header is present."""
+    monkeypatch.setattr(settings, "gateway_shared_secret", None)
+    await _call_middleware(
+        [(b"x-tenant-id", b"tenant-A"), (b"x-org-read-only", b"true")]
+    )
+    assert mcp_server._is_org_read_only() is True
+
+    await _call_middleware([(b"x-tenant-id", b"tenant-A")])
+    assert mcp_server._is_org_read_only() is False
+
+
+async def test_org_read_only_requires_the_gateway_secret_when_configured(monkeypatch):
+    """Rejected before any context var is set — the perimeter runs first."""
+    monkeypatch.setattr(settings, "gateway_shared_secret", "s3cret")
+    app_called, _ = await _call_middleware(
+        [(b"x-tenant-id", b"tenant-A"), (b"x-org-read-only", b"true")]
+    )
+    assert app_called is False
+    assert mcp_server._is_org_read_only() is False
