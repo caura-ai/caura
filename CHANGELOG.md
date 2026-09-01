@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.41.1](https://github.com/caura-ai/caura/compare/backend-v2.41.0...backend-v2.41.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **storage:** make the insights routes' tenant binding visible to the gate ([#1199](https://github.com/caura-ai/caura/issues/1199)) ([43baa5a](https://github.com/caura-ai/caura/commit/43baa5a22c09ff08d97a1e63eddb0bf7a70b7a0f))
+
 ## [2.41.0](https://github.com/caura-ai/caura/compare/backend-v2.40.0...backend-v2.41.0) (2026-09-01)
 
 
