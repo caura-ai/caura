@@ -106,7 +106,7 @@ def get_admin_headers() -> dict:
 
 
 def uid() -> str:
-    """Short unique suffix — for distinct content (409s) and distinct tenant ids."""
+    """Short unique suffix for exact-duplicate-safe content and tenant ids."""
     return uuid.uuid4().hex[:8]
 
 

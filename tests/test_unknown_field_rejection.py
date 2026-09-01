@@ -25,7 +25,8 @@ Three things are pinned here, and the third matters as much as the first two:
 
 import pytest
 
-from tests.conftest import get_test_auth, uid as _uid
+from tests.conftest import get_test_auth, new_tenant_id
+from tests.conftest import uid as _uid
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +106,9 @@ async def test_memory_create_rejects_plausible_but_undeclared_field(client):
 
 async def test_memory_update_rejects_unknown_field(client):
     """PATCH /memories/{id} — a typo here is a silent 200 no-op."""
-    tenant_id, headers = get_test_auth()
+    # Use a sweep-visible tenant so semantic dedup from unrelated tests cannot
+    # reject this setup write before the PATCH assertion is reached.
+    tenant_id, headers = get_test_auth(new_tenant_id())
     created = await client.post(
         "/api/v1/memories",
         json={
