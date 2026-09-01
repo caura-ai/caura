@@ -51,6 +51,13 @@ from core_api.constants import (
 # today; the alias-safety test pins that the search aliases still work.
 STRICT_WRITE_BODY = ConfigDict(extra="forbid")
 
+# C6 — fields the SERVER owns on a memory row. A caller may never supply these
+# on a write body; ``MemoryCreate._refuse_server_owned_fields`` turns them into
+# an explanatory 422 instead of the generic unknown-field one. Deliberately a
+# short explicit list rather than a pattern: everything not named here keeps the
+# ordinary ``extra="forbid"`` behaviour, so a typo is still just a typo.
+SERVER_OWNED_MEMORY_FIELDS = ("supersedes_id",)
+
 
 # --- Memory ---
 
@@ -110,6 +117,42 @@ class MemoryCreate(BaseModel):
             "it is a per-write choice rather than a default to flip."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_server_owned_fields(cls, data):
+        """C6 — refuse ``supersedes_id`` on create, and say why.
+
+        Supersession is established by the SERVER, never by the caller: the
+        contradiction detector decides that a new memory retires an older one
+        and writes the pointer through ``update_memory_status``, which is
+        CAS-guarded against NULL so two concurrent detections cannot both claim
+        the same predecessor. There is deliberately no public route that sets
+        ``supersedes_id`` directly.
+
+        Accepting it here would hand a caller a pointer at an arbitrary
+        predecessor with no check that the row exists, shares the tenant, or is
+        not already superseded — and would bypass the CAS entirely. So the
+        answer to C6's "intentional or oversight?" is *intentional*.
+
+        ``extra="forbid"`` already rejected this, but with pydantic's generic
+        "Extra inputs are not permitted", which cannot tell a caller whether the
+        field is misspelled, unsupported, or deliberately refused. This runs
+        BEFORE that check (mode="before" sees the raw payload) purely to replace
+        the message. Every other unknown field still falls through to the
+        existing unknown-field 422 — the denylist is named, not a category, so a
+        genuine typo keeps its old behaviour.
+        """
+        if isinstance(data, dict):
+            present = [f for f in SERVER_OWNED_MEMORY_FIELDS if f in data]
+            if present:
+                raise ValueError(
+                    f"{', '.join(present)} is set by the server, not by the caller, and cannot be "
+                    "supplied on create. Supersession is established by contradiction detection: "
+                    "write the corrected fact as an ordinary memory and the detector links it to "
+                    "the row it supersedes."
+                )
+        return data
 
 
 class BulkMemoryItem(BaseModel):
@@ -576,6 +619,20 @@ class SearchDiagnostic(BaseModel):
     all_candidates: list[dict] = []
 
 
+class SearchWarning(BaseModel):
+    """A28 — a coded, non-fatal caveat about the result set.
+
+    The search succeeded, but something the caller would reasonably assume
+    happened did not. Distinct from ``SearchDiagnostic``: that is opt-in
+    introspection, this is unsolicited and only present when there is something
+    to say.
+    """
+
+    code: str = Field(description="Stable slug, e.g. 'successor_enrichment_incomplete'.")
+    message: str = Field(description="Human-readable summary of what is incomplete.")
+    details: dict = Field(default_factory=dict, description="Machine-readable context.")
+
+
 class SearchResponse(BaseModel):
     """Envelope for search results — matches PaginatedMemoryResponse shape."""
 
@@ -602,6 +659,12 @@ class SearchResponse(BaseModel):
     )
     # D12 — present only when the request set ``diagnostic=true``.
     diagnostic: SearchDiagnostic | None = None
+    # A28 — ``null`` when there is nothing to warn about, exactly as
+    # ``diagnostic`` already behaves (FastAPI serializes None fields rather than
+    # dropping them). Deliberately NOT switched to exclude_none: that would also
+    # change ``diagnostic``'s existing serialization. Additive for integrators —
+    # a new nullable key alongside one they already tolerate.
+    warnings: list[SearchWarning] | None = None
 
 
 class SearchRequest(BaseModel):
@@ -653,6 +716,21 @@ class SearchRequest(BaseModel):
         default=None,
         pattern=MEMORY_STATUSES_PATTERN,
         validation_alias=AliasChoices("status_filter", "status"),
+        # D6 — the default is NOT "every status". With this unset, search
+        # excludes rows the contradiction detector has retired: ``outdated``
+        # always, and ``conflicted`` unless the row is an exact lexical match
+        # for the query. That is deliberate (a stale claim shouldn't dilute
+        # ranking) but it was undocumented, which is what made it feel silent:
+        # a caller could not tell "nothing matched" from "matches were withheld".
+        # Setting this to an explicit status turns the default policy off and
+        # returns that status verbatim.
+        description=(
+            "Restrict results to one status. When omitted, superseded memories are "
+            "hidden: 'outdated' rows are excluded, and 'conflicted' rows are excluded "
+            "unless they exactly match the query text. Their replacements are injected "
+            "in their place. Pass an explicit status to bypass this and read the "
+            "superseded rows directly."
+        ),
     )
     valid_at: datetime | None = None
     top_k: int = Field(
