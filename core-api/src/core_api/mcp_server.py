@@ -1428,7 +1428,32 @@ async def caura_manage(
                     resource_id=uid,
                     detail={"old_status": old_status, "new_status": status},
                 )
-                return _with_latency(f"Memory {memory_id} status updated: {old_status} -> {status}", t0)
+                # Structured, not prose. ``op=read``/``op=update`` return
+                # serialized objects and every refusal returns a JSON error
+                # envelope, so a prose sentence here left one tool with three
+                # return shapes and forced callers to sniff the type — and then
+                # to sniff the TEXT, because a string is the success case only
+                # if it does not happen to contain "Error". A predicate like
+                # that passes for years and silently inverts the day someone
+                # rewords a message.
+                #
+                # Keys copied from REST ``PATCH /memories/{id}/status``
+                # (``memory_id``/``old_status``/``new_status``, see
+                # ``openapi_responses.MemoryStatusPatchResponse``) so the two
+                # surfaces are parseable by one client.
+                return _with_latency(
+                    json.dumps(
+                        {
+                            "memory_id": str(uid),
+                            "old_status": old_status,
+                            "new_status": status,
+                            # The old prose, kept for chat rendering.
+                            "message": f"Memory {memory_id} status updated: {old_status} -> {status}",
+                        },
+                        default=str,
+                    ),
+                    t0,
+                )
             if op == "update":
                 # C3/C8: reject agent-supplied server-reserved types on update,
                 # mirroring the single-write guard above. No-op when memory_type
@@ -1485,7 +1510,24 @@ async def caura_manage(
                         t0,
                     )
             await soft_delete_memory(uid, tenant_id)
-            return _with_latency(f"Memory {memory_id} deleted.", t0)
+            # Structured for the same reason as ``op=transition`` above. REST
+            # DELETE returns 204 with no body, so there is no shape to copy
+            # here; ``memory_id`` matches the transition key rather than the
+            # bare ``id`` so one tool does not name the same thing two ways.
+            # ``deleted`` reports that the delete succeeded, not that the row is
+            # gone — this is a soft delete, which is why the smoke asserts the
+            # read-back 404 rather than trusting the acknowledgement.
+            return _with_latency(
+                json.dumps(
+                    {
+                        "memory_id": str(uid),
+                        "deleted": True,
+                        "message": f"Memory {memory_id} deleted.",
+                    },
+                    default=str,
+                ),
+                t0,
+            )
         except HTTPException as e:
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
             return _with_latency(

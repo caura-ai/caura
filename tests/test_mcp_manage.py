@@ -132,7 +132,12 @@ async def test_manage_transition_happy_path(mcp_env, monkeypatch):
     out = await mcp_server.caura_manage(
         op="transition", memory_id=VALID_UID, status="archived"
     )
-    assert "active -> archived" in strip_latency(out)
+    payload = parse_envelope(out)
+    assert payload["memory_id"] == VALID_UID
+    assert payload["old_status"] == "active"
+    assert payload["new_status"] == "archived"
+    # The prose survives for chat rendering, in a field of its own.
+    assert "active -> archived" in payload["message"]
     sc.update_memory_status.assert_awaited_once()
 
 
@@ -160,7 +165,10 @@ async def test_manage_update_happy_path(mcp_env):
 async def test_manage_delete_happy_path(mcp_env):
     mcp_env["service"]("soft_delete_memory").return_value = None
     out = await mcp_server.caura_manage(op="delete", memory_id=VALID_UID)
-    assert f"Memory {VALID_UID} deleted" in strip_latency(out)
+    payload = parse_envelope(out)
+    assert payload["memory_id"] == VALID_UID
+    assert payload["deleted"] is True
+    assert f"Memory {VALID_UID} deleted" in payload["message"]
     mcp_env["service_mocks"]["soft_delete_memory"].assert_awaited_once()
 
 
