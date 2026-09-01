@@ -63,7 +63,7 @@ is exactly these five fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `default_base` | validated ref string | Gate comparison ref when `--base` is omitted. |
-| `release_please_changelogs` | boolean | Permit generated changelog lines only on release-please's own branch. |
+| `release_please_changelogs` | boolean | Exempt whole files whose basename starts with `CHANGELOG` (case-insensitive), only on an authenticated release-please pull request. |
 | `mirror_paths` | list of root-relative paths | Generated mirrors gated in their authoring repository. |
 | `mirror_manifest` | root-relative path or `null` | Existing vendored-file manifest whose keys are mirror paths. |
 | `marker_inventory_meta_paths` | list of root-relative paths | Paths omitted only from marker analytics. |
@@ -84,6 +84,21 @@ only analytics omit their self-referential markers.
 `openclaw-fleet-tester` keeps `release_please_changelogs=true` during the
 mechanical port even though the flag is currently dead there. Removing it is a
 separate behavior change requiring separate approval.
+
+The exemption authenticates the pull request from GitHub's event payload, not
+from its branch name alone. The source branch must use release-please's prefix,
+the immutable pull-request author id must be the Caura deploy bot
+(`265395343`), and the head and base repository ids must match. The bot id and
+repository ids are assigned by GitHub rather than supplied by a contributor, so
+a fork author cannot opt into the exemption by naming a branch. Missing,
+malformed, or non-`pull_request` event context receives no exemption. All three
+repositories with the flag enabled run this gate on `pull_request`, not
+`pull_request_target`.
+
+Once authenticated, the exemption is file-wide: the engine skips every matched
+line in each path whose basename starts with `CHANGELOG` (case-insensitive). It
+does not identify individual generated lines. No path outside that basename
+predicate is exempt.
 
 ## Report contract
 

@@ -130,6 +130,7 @@ EXEMPT_MARKER = "legacy-name-ok"
 FLOOR_MARKER = "legacy-name-floor"
 
 _CONFIG_PATH = "scripts/legacy_name_ratchet.json"
+_RELEASE_PLEASE_AUTHOR_ID = 265395343
 _CONFIG_FIELDS = frozenset(
     {
         "default_base",
@@ -644,18 +645,48 @@ def _literal(path: str) -> str:
     return f":(literal){path}"
 
 
-def _release_please_branch() -> bool:
-    """True when CI builds release-please's own PR branch.
+def _release_please_pull_request() -> bool:
+    """True when CI builds a release-please PR created by Caura's deploy bot.
 
     release-please regenerates per-package CHANGELOGs by quoting merged PR
     titles verbatim, so titles that legitimately carried the old brand
     (history — rule 2 says never edit it) resurface as lines this tally
-    cannot tell from fresh minting. Only that bot's branches get the
-    exemption; a human editing a CHANGELOG still answers to the gate.
-    GITHUB_HEAD_REF is set by Actions on pull_request runs and absent
-    locally, so local runs keep full coverage.
+    cannot tell from fresh minting.
+
+    The branch prefix selects the release-please convention but cannot
+    authenticate it: a pull-request author chooses their source branch name.
+    Authentication comes from GitHub's event payload instead. The immutable
+    author id must be Caura's deploy bot, and the head and base repository ids
+    must match so even that bot cannot grant the exemption to a fork. GitHub
+    owns all three ids; the pull-request author cannot supply them.
+
+    Missing, malformed or non-pull-request event context fails closed. Local
+    runs therefore keep full coverage, as do any future workflow triggers that
+    have not deliberately adopted this contract.
     """
-    return os.environ.get("GITHUB_HEAD_REF", "").startswith("release-please--")
+    if os.environ.get("GITHUB_EVENT_NAME") != "pull_request" or not os.environ.get(
+        "GITHUB_HEAD_REF", ""
+    ).startswith("release-please--"):
+        return False
+
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if not event_path:
+        return False
+    try:
+        event = json.loads(Path(event_path).read_text(encoding="utf-8"))
+        pull_request = event["pull_request"]
+        author_id = pull_request["user"]["id"]
+        head_repo_id = pull_request["head"]["repo"]["id"]
+        base_repo_id = pull_request["base"]["repo"]["id"]
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+    ids = (author_id, head_repo_id, base_repo_id)
+    return (
+        all(isinstance(value, int) and not isinstance(value, bool) for value in ids)
+        and author_id == _RELEASE_PLEASE_AUTHOR_ID
+        and head_repo_id == base_repo_id
+    )
 
 
 class Scan(NamedTuple):
@@ -1674,17 +1705,19 @@ def main() -> int:
 
     grown = {}
     excused: dict[str, Counter[str]] = {}
-    generated_changelogs: list[str] = []
-    release_branch = (
-        _ACTIVE_CONFIG.release_please_changelogs and _release_please_branch()
+    exempt_changelogs: list[str] = []
+    release_pull_request = (
+        _ACTIVE_CONFIG.release_please_changelogs and _release_please_pull_request()
     )
     # Sorted: the budget is spent as files are visited, so the order decides which
     # destination is charged when one text lands in several. Arbitrary is fine;
     # unstable is not.
     for path in sorted(head):
-        if release_branch and path.rsplit("/", 1)[-1].upper().startswith("CHANGELOG"):
+        if release_pull_request and path.rsplit("/", 1)[-1].upper().startswith(
+            "CHANGELOG"
+        ):
             if head[path] > base.get(path, 0):
-                generated_changelogs.append(path)
+                exempt_changelogs.append(path)
             continue
         before, n = base.get(path, 0), head[path]
         # Deliberately NOT gated on ``n > before``. A file that drops one branded
@@ -1703,12 +1736,12 @@ def main() -> int:
     _report_removed_exemptions(base_scan.exempt_by_file, head_scan.exempt_by_file)
     _report_excused_moves(excused, base_by_file, head_by_file)
 
-    if generated_changelogs:
+    if exempt_changelogs:
         print(
-            f"{len(generated_changelogs)} generated CHANGELOG file(s) exempt on this "
-            "release-please branch (titles quoted from history):"
+            f"{len(exempt_changelogs)} CHANGELOG file(s) exempt on this "
+            "authenticated release-please pull request (titles quoted from history):"
         )
-        for path in sorted(generated_changelogs):
+        for path in sorted(exempt_changelogs):
             print(f"  {path}")
 
     if not grown:
