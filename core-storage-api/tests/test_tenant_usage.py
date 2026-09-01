@@ -87,7 +87,7 @@ class TestIncrementRequiresATenantPerRow:
         assert "tenant_id" in r.text
         # The whole batch is refused, so the well-formed row in it did not land
         # either: the guard runs over every row before any write is attempted.
-        assert await _query(client, tenant_ids=[tenant], period_start=AUGUST) == {"periods": []}
+        assert await _query(client, tenant_id=tenant, period_start=AUGUST) == {"periods": []}
 
     async def test_a_row_without_an_operation_is_refused(self, client: AsyncClient):
         tenant = f"t-{_uid()}"
@@ -99,25 +99,16 @@ class TestIncrementRequiresATenantPerRow:
 
         assert r.status_code == 422, r.text
         assert "row 0" in r.text
-        assert await _query(client, tenant_ids=[tenant], period_start=AUGUST) == {"periods": []}
+        assert await _query(client, tenant_id=tenant, period_start=AUGUST) == {"periods": []}
 
 
-async def test_counts_sum_across_the_orgs_tenants(client: AsyncClient):
-    """An org owns several tenants and is billed as one. Reporting a single
-    tenant's counts would under-bill by however many tenants it has."""
-    a, b = f"t-{_uid()}", f"t-{_uid()}"
-    await _increment(
-        client,
-        [
-            _row(a, "write", AUGUST, 5),
-            _row(b, "write", AUGUST, 7),
-            _row(b, "search", AUGUST, 2),
-        ],
-    )
-
-    got = await _query(client, tenant_ids=[a, b], period_start=AUGUST)
-
-    assert got["periods"] == [{"period_start": AUGUST, "operations": {"write": 12, "search": 2}}]
+# ``test_counts_sum_across_the_orgs_tenants`` lived here and is deliberately
+# gone (#1095, contract step). Summing an ORG's tenants was the capability the
+# plural ``tenant_ids`` existed for, and it moved to ``platform-admin-api``,
+# which owns the org->tenant mapping this service cannot see. Its replacement is
+# ``test_totals_are_summed_across_tenants`` in
+# ``platform-admin-api/tests/test_core_storage_client_usage_fanout.py``. Storage
+# answers for one tenant now, and that is the point rather than a regression.
 
 
 async def test_a_tenant_outside_the_org_is_not_counted(client: AsyncClient):
@@ -127,7 +118,7 @@ async def test_a_tenant_outside_the_org_is_not_counted(client: AsyncClient):
         [_row(a, "write", AUGUST, 3), _row(outsider, "write", AUGUST, 100)],
     )
 
-    got = await _query(client, tenant_ids=[a], period_start=AUGUST)
+    got = await _query(client, tenant_id=a, period_start=AUGUST)
 
     assert got["periods"][0]["operations"] == {"write": 3}
 
@@ -146,7 +137,7 @@ async def test_operations_without_a_platform_column_survive(client: AsyncClient)
         ],
     )
 
-    got = await _query(client, tenant_ids=[t], period_start=AUGUST)
+    got = await _query(client, tenant_id=t, period_start=AUGUST)
 
     assert got["periods"][0]["operations"] == {"write": 1, "insights": 4, "evolve": 2}
 
@@ -171,7 +162,7 @@ async def test_periods_means_periods_not_rows(client: AsyncClient):
         ],
     )
 
-    got = await _query(client, tenant_ids=[t], periods=2)
+    got = await _query(client, tenant_id=t, periods=2)
 
     assert [p["period_start"] for p in got["periods"]] == [AUGUST, JULY]
     assert got["periods"][1]["operations"] == {"write": 9}
@@ -183,7 +174,7 @@ async def test_quiet_periods_do_not_consume_the_window(client: AsyncClient):
     t = f"t-{_uid()}"
     await _increment(client, [_row(t, "write", AUGUST, 1), _row(t, "write", JUNE, 2)])
 
-    got = await _query(client, tenant_ids=[t], periods=2)
+    got = await _query(client, tenant_id=t, periods=2)
 
     assert [p["period_start"] for p in got["periods"]] == [AUGUST, JUNE]
 
@@ -191,10 +182,28 @@ async def test_quiet_periods_do_not_consume_the_window(client: AsyncClient):
 async def test_an_unknown_tenant_reads_empty_rather_than_404(client: AsyncClient):
     """A brand-new org has no counters yet, and that is not an error — the
     dashboard shows zeros. The legacy endpoint 404'd on this."""
-    assert await _query(client, tenant_ids=[f"t-{_uid()}"]) == {"periods": []}
+    assert await _query(client, tenant_id=f"t-{_uid()}") == {"periods": []}
 
 
-async def test_an_empty_tenant_list_is_rejected(client: AsyncClient):
-    """An org with no tenants must not read as 'total every tenant'."""
-    r = await client.post(f"{PREFIX}/tenant-usage/query", json={"tenant_ids": []})
-    assert r.status_code == 422
+async def test_a_missing_tenant_id_is_rejected(client: AsyncClient):
+    """Was ``test_an_empty_tenant_list_is_rejected``. The plural is gone, so
+    the shape of "named no scope" changed from ``[]`` to an absent field — but
+    the requirement is the same one, and it is the requirement that matters:
+    an unscoped query must never be read as "every tenant"."""
+    r = await client.post(f"{PREFIX}/tenant-usage/query", json={})
+    assert r.status_code == 422, r.text
+
+
+async def test_an_empty_tenant_id_is_rejected(client: AsyncClient):
+    """``min_length=1`` — an empty string is a caller that lost its scope, not
+    a caller asking about a tenant named ""."""
+    r = await client.post(f"{PREFIX}/tenant-usage/query", json={"tenant_id": ""})
+    assert r.status_code == 422, r.text
+
+
+async def test_the_plural_field_is_gone(client: AsyncClient):
+    """The defect #1095 closes: a caller can no longer hand this service the
+    list of tenants to total. Sending only the old field is now an unscoped
+    request and must be refused, not silently honoured."""
+    r = await client.post(f"{PREFIX}/tenant-usage/query", json={"tenant_ids": [f"t-{_uid()}"]})
+    assert r.status_code == 422, r.text

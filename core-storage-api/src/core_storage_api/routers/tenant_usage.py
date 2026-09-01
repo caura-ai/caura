@@ -31,75 +31,44 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from core_storage_api.services.postgres_service import PostgresService
 
 router = APIRouter(prefix="/tenant-usage", tags=["TenantUsage"])
 _svc = PostgresService()
 
-#: A list longer than this is a caller sending its whole tenant table by
-#: accident, not a large org. It does NOT bound the query's cost — that scales
-#: with how much history the named tenants have, which nothing here caps.
-MAX_TENANTS_PER_QUERY = 1000
-
 
 class TenantUsageQuery(BaseModel):
-    """Which tenant (or tenants), and which periods, to total.
+    """Which tenant, and which periods, to total.
 
-    A POST for a read: the tenant list is the org's whole tenant set, which has
-    no fixed bound, and a query string does. Validated by pydantic rather than
-    hand-parsed — the write endpoint below hand-parses because it coerces
-    per-row datetimes, and that is exactly where a missing key turned into a
-    500 in review.
+    A POST for a read rather than a GET: kept from the plural era because the
+    body already carries optional period parameters and the sibling endpoint
+    below is a POST, not because the scope needs the room.
 
-    EXPAND STEP OF #1095 (expand / migrate / contract). ``tenant_id`` is the
-    binding singular scope and is the one to use; ``tenant_ids`` is the legacy
-    plural that lets a caller name its own scope, which is the defect #1095
-    exists to close. Both are accepted here, exactly one is required, and
-    NOTHING IS FIXED YET — the plural path is still unbound until the contract
-    step deletes it. Do not read this step as closing #1095.
-
-    The two cannot be collapsed in one release because ``platform-admin-api``
-    and ``core-storage-api`` deploy separately, platform FIRST
-    (``deploy-to-staging.yml``: the ``oss`` job is ``needs: [guard-branch,
-    platform]``). So the new caller reaches the old storage before the new
-    storage exists, and storage has to accept the singular field before
-    anything sends it.
+    CONTRACT STEP OF #1095. ``tenant_ids`` (plural) is GONE. It let a caller
+    hand this service the list of tenants to total, which is the caller naming
+    its own scope -- and since #1066 the only credential here is a shared
+    secret carrying no tenant identity, so nothing could check the list against
+    who sent it. The org-level fan-out and summing now live in
+    ``platform-admin-api``, which resolves ``org_id -> tenant_ids`` against
+    ``platform-storage-api`` and is the only party that can say which tenants
+    an org owns. Do not reintroduce a plural field here; the check it would
+    need cannot be written on this side of the boundary.
     """
 
-    tenant_id: str | None = None
-    tenant_ids: list[str] | None = Field(default=None, min_length=1, max_length=MAX_TENANTS_PER_QUERY)
+    tenant_id: str = Field(min_length=1)
     period_start: datetime | None = None
     periods: int = Field(default=6, ge=1, le=24)
-
-    @model_validator(mode="after")
-    def _exactly_one_scope(self) -> TenantUsageQuery:
-        """Exactly one of ``tenant_id`` / ``tenant_ids``.
-
-        Neither is a caller that forgot its scope, and defaulting to "all
-        tenants" is the one answer this endpoint must never give. Both at once
-        is ambiguous rather than harmless: silently preferring the singular
-        would let a caller believe the wider list was honoured.
-        """
-        if (self.tenant_id is None) == (self.tenant_ids is None):
-            raise ValueError("exactly one of 'tenant_id' or 'tenant_ids' is required")
-        return self
 
 
 @router.post("/query")
 async def query_tenant_usage(body: TenantUsageQuery) -> dict:
-    """Total the counters for a set of tenants, per period, per operation.
+    """Total one tenant's counters, per period, per operation.
 
-    Body: ``{tenant_id | tenant_ids, period_start?, periods?}`` →
+    Body: ``{tenant_id, period_start?, periods?}`` →
     ``{"periods": [{"period_start": iso, "operations": {op: total}}, ...]}``,
     newest first.
-
-    The response shape is identical either way: a singular request is the
-    one-element case of the same aggregate, so the migrating caller sums N
-    responses instead of reading one. That is deliberate — a different shape
-    for the singular path would make the migrate step a rewrite rather than a
-    loop.
 
     The operation names are passed through as stored rather than mapped onto a
     fixed writes/searches/recalls triple. core-api also meters ``insights`` and
@@ -107,17 +76,9 @@ async def query_tenant_usage(body: TenantUsageQuery) -> dict:
     have no such column — mapping here would silently discard counts the write
     path is already paying for.
     """
-    tenants = [body.tenant_id] if body.tenant_id is not None else body.tenant_ids
-    if tenants is None:
-        # Unreachable while ``_exactly_one_scope`` stands, and deliberately not
-        # an ``assert``: this is the one endpoint where an unscoped query must
-        # never become "every tenant", so the guard fails closed on its own
-        # rather than trusting a validator a later edit could drop. It also
-        # narrows the type for mypy without a cast.
-        raise HTTPException(status_code=422, detail="a tenant scope is required")
     return {
         "periods": await _svc.tenant_usage_query(
-            tenants,
+            body.tenant_id,
             period_start=body.period_start,
             periods=body.periods,
         )

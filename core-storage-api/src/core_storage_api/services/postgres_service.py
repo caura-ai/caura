@@ -3996,15 +3996,20 @@ class PostgresService:
 
     async def tenant_usage_query(
         self,
-        tenant_ids: list[str],
+        tenant_id: str,
         *,
         period_start: datetime | None = None,
         periods: int = 6,
     ) -> list[dict]:
-        """Per-period, per-operation totals summed across ``tenant_ids``.
+        """Per-period, per-operation totals for ONE tenant.
 
-        Summed across tenants because the consumer bills an ORGANISATION and an
-        org owns several tenants; the meter only ever knows the tenant. Returns
+        Takes a binding singular ``tenant_id`` (#1095, contract step). It used
+        to take a ``tenant_ids`` LIST and sum across it, because the consumer
+        bills an ORGANISATION and an org owns several tenants. That summing now
+        happens in ``platform-admin-api``, which owns the org->tenant mapping;
+        this service does not, so a list arriving here could never be checked
+        against the caller and was simply the caller naming its own scope.
+        Returns
         ``[{"period_start": iso-string, "operations": {op: total}}, ...]``,
         newest period first.
 
@@ -4018,8 +4023,6 @@ class PostgresService:
         core-api currently emits; the table keys the operation as data
         deliberately, so a new one needs no migration.
         """
-        if not tenant_ids:
-            return []
 
         # No ORDER BY on the aggregate: the newest-first contract is met by
         # sorting the reshaped result below, which is at most ``periods``
@@ -4030,7 +4033,7 @@ class PostgresService:
                 TenantUsageCounter.operation,
                 func.sum(TenantUsageCounter.count).label("total"),
             )
-            .where(TenantUsageCounter.tenant_id.in_(tenant_ids))
+            .where(TenantUsageCounter.tenant_id == tenant_id)
             .group_by(TenantUsageCounter.period_start, TenantUsageCounter.operation)
         )
         if period_start is not None:
