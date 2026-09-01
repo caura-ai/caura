@@ -8,7 +8,9 @@ Covers:
 - ``include_deleted`` only honored at trust ≥ 3 (silently ignored below).
 - Invalid cursor / ISO dates.
 - Cursor vs sort/order constraint (only created_at/desc).
-- Happy path (zero rows) shape: ``{count, results, next_cursor, scope}``.
+- Happy path (zero rows) shape: ``{count, results, items, next_cursor, scope}``
+  — ``items`` dual-emits the same list as ``results`` (see
+  ``tests/test_mcp_envelope_and_truncation.py``).
 """
 
 from __future__ import annotations
@@ -319,7 +321,13 @@ async def test_list_happy_path_empty_results(mcp_env, monkeypatch):
     stub_storage_client(monkeypatch, list_memories_by_filters=[])
     out = await mcp_server.caura_list()
     payload = parse_envelope(out)
-    assert payload == {"count": 0, "results": [], "next_cursor": None, "scope": "agent"}
+    assert payload == {
+        "count": 0,
+        "results": [],
+        "items": [],
+        "next_cursor": None,
+        "scope": "agent",
+    }
 
 
 async def test_list_happy_path_with_rows_and_next_cursor(mcp_env, monkeypatch):

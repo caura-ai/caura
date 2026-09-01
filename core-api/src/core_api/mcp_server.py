@@ -867,10 +867,26 @@ async def caura_recall(
         # C31/D1 — ``items`` is the canonical list key everywhere; ``results``
         # stays as a permanent dual-emit alias (same list object, two keys) so
         # existing consumers keep working. ``count`` per the contract.
+        # ``top_k`` over ``MAX_SEARCH_TOP_K`` is capped here rather than
+        # rejected — REST /search 422s on the same input (``schemas.py``,
+        # ``le=MAX_SEARCH_TOP_K``), and silent capping stays the friendlier
+        # default for an agent surface. But it has to be VISIBLE: with no
+        # error, no flag and no total, a client that asked for 50 and got 20
+        # cannot tell a capped page from an exhausted result set, and will
+        # conclude the tenant holds 20 matching memories. The tool description
+        # documents the cap, which is not a runtime signal — agents do not read
+        # parameter descriptions before believing a result set is complete.
+        #
+        # Reports only that the REQUESTED top_k was lowered. A full page at an
+        # uncapped ``top_k`` is still not proof of exhaustion; that would need a
+        # total, which this surface does not compute.
         payload: dict = {
             "results": _rows,
             "items": _rows,
             "count": len(_rows),
+            "truncated": top_k > capped_top_k,
+            "requested_top_k": top_k,
+            "effective_top_k": capped_top_k,
         }
         if diagnostic:
             counts = diagnostic_ctx.get("counts", {}) or {}
@@ -885,7 +901,10 @@ async def caura_recall(
                 },
                 "all_candidates": diagnostic_ctx.get("all_candidates", []) or [],
             }
-        if top_k > MAX_SEARCH_TOP_K:
+        if payload["truncated"]:
+            # Kept alongside the structured fields above, not replaced by them:
+            # the prose renders in a chat surface, and dropping a field a client
+            # may already read would be a breaking change for no gain.
             payload["warning"] = f"top_k was capped at the maximum allowed value of {MAX_SEARCH_TOP_K}."
         if include_brief:
             payload["brief"] = await summarize_memories(
@@ -2569,9 +2588,21 @@ async def caura_list(
                     surface="caura_list",
                     result_count_by_tenant=counts,
                 )
+            # C31/D1 — ``items`` is the canonical list key everywhere, and
+            # ``caura_recall`` already dual-emits it beside ``results``. This
+            # envelope did not, so REST ``MemoryList.items`` and MCP
+            # ``results`` named the same list two ways and no client could
+            # share a response parser across the surfaces. Same list object,
+            # two keys; ``results`` stays as a permanent alias.
             return _with_latency(
                 json.dumps(
-                    {"count": len(items), "results": items, "next_cursor": next_cursor, "scope": scope},
+                    {
+                        "count": len(items),
+                        "results": items,
+                        "items": items,
+                        "next_cursor": next_cursor,
+                        "scope": scope,
+                    },
                     default=str,
                 ),
                 t0,
