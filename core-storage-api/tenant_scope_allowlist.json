@@ -80,13 +80,6 @@
       "note": "Verified: data['tenant_id'] is stored on FleetCommand after the route confirms the node has that tenant."
     },
     {
-      "id": "method:fleet_add_node",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "opaque-body-write",
-      "note": "Verified: data['tenant_id'] is stored directly on the FleetNode row."
-    },
-    {
       "id": "method:fleet_upsert_node",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
