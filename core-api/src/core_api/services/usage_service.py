@@ -43,13 +43,128 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Literal, get_args
 
 from core_api.services.hooks import get_hooks
 
 logger = logging.getLogger(__name__)
 
 OperationType = Literal["write", "search", "recall", "insights", "evolve"]
+
+# --- Per-verb usage policy: what a mutating operation costs, and what gates it -
+#
+# TWO INDEPENDENT AXES, and they do not line up. Collapsing them into one
+# boolean is wrong for ``update``, which charges the write budget but is NOT
+# refused when the org is over plan:
+#
+#     verb          charges write budget   refused when over plan
+#     create               yes                     yes
+#     bulk_create          yes                     yes
+#     update               yes                     NO      <-- see below
+#     redistribute         yes                     yes
+#     transition            no                      no
+#     delete                no                      no
+#     bulk_delete           no                      no
+#
+# Both axes previously existed only as the presence or absence of a call at
+# each REST route and each MCP tool, so "free" was expressed by an omission —
+# invisible in review. That is how the surfaces drifted: the same tenant at its
+# cap was refused a status transition over REST (``enforce_usage_limits()`` on
+# ``PATCH /memories/{id}/status``) and allowed one over MCP
+# (``caura_manage(op="transition")``, which checked nothing).
+#
+# THE DECISION: transitions and deletes are free and ungated by plan limits, on
+# both surfaces.
+#
+# The principle is GROWTH, not direction. Read-only mode exists to stop an
+# over-plan org adding to the store; ``AuthContext.enforce_usage_limits`` spells
+# out the corollary — "users in read-only mode must be able to delete data to
+# get back under limits". A status transition writes one column on a row that
+# already exists. It adds nothing, in EITHER direction: ``active -> archived``
+# and ``archived -> active`` leave the store exactly the same size, so neither
+# is the thing read-only mode is defending against.
+#
+# That direction-independence is deliberate and was questioned in review, so the
+# reasoning is recorded rather than left implicit. Reactivating an archived
+# memory looks like it should cost something, but against the counters this
+# service actually maintains it cannot: ``tenant_usage_counters`` is keyed
+# ``(tenant_id, operation, period_start)`` — a monotonic count of OPERATIONS per
+# period, with no active-row or footprint dimension anywhere. There is no
+# quantity for a reactivation to inflate, and equally none for an archive to
+# reduce. Both directions are inert.
+#
+# ⚠ REVISIT IF THAT CHANGES. If a plan ever meters live rows (an "active
+# memories" cap rather than an operations-per-period cap), then archiving really
+# would reduce usage and reactivating really would raise it, and this verb stops
+# being safe to treat as one thing — it would need to discriminate on the
+# ``old_status -> new_status`` pair. Note that such a fix is only implementable
+# on REST today: MCP cannot see plan-limit mode at all (see below), so gating
+# one direction there would rebuild the exact surface drift this table exists to
+# close.
+#
+# ``enforce_read_only()`` is NEITHER axis. That is the demo-mode gate, a
+# separate question, and it stays on the transition route.
+#
+# ``update`` is recorded as it BEHAVES, not as it arguably should: it charges
+# quota while skipping both ``enforce_usage_limits()`` and
+# ``enforce_read_only()``, which makes it the only mutating memory route gated
+# by neither (caura-ai/caura#1204 — the demo-mode half of that looks like an
+# oversight rather than a decision). Encoding it faithfully here keeps this
+# table a description of the system rather than an aspiration, so wiring a call
+# site through it cannot silently change behaviour.
+WRITE_QUOTA_OPS: frozenset[str] = frozenset({"create", "bulk_create", "update", "redistribute"})
+
+# Ops refused when the org is over its plan limit. A subset of the above minus
+# ``update`` — see the note on it. REST-ONLY IN PRACTICE: the MCP surface
+# cannot consult this because it has no read-only signal at all — the MCP
+# middleware never reads the gateway's ``x-org-read-only`` header, so no MCP
+# tool can see plan-limit mode (caura-ai/caura#1205). Until that is closed, any
+# op listed here is gated on REST and ungated on MCP, which is exactly why
+# ``transition`` is deliberately NOT listed.
+PLAN_LIMIT_GATED_OPS: frozenset[str] = frozenset({"create", "bulk_create", "redistribute"})
+
+# Typed so a mistyped verb is a mypy error at the call site rather than a
+# ``ValueError`` at request time — i.e. a 500 for the caller.
+#
+# It does NOT catch today's call sites, and the honest reason is worth writing
+# down rather than discovering later: ``core_api.routes.memories`` and
+# ``core_api.mcp_server`` are both on the ``ignore_errors`` list in
+# ``core-api/pyproject.toml``, which is where every lookup added here lives.
+# Verified by mistyping one and watching mypy still report success. So the
+# runtime check below is the ACTUAL protection at those two call sites, not a
+# belt-and-braces extra — do not delete it on the assumption the type covers it.
+# The annotation still earns its place: it is correct for callers outside the
+# exempted modules, and it starts working for these the day either module comes
+# off that list, which the config itself calls a to-do rather than a policy.
+MutatingOp = Literal["create", "bulk_create", "update", "redistribute", "transition", "delete", "bulk_delete"]
+
+_KNOWN_OPS: frozenset[str] = frozenset(get_args(MutatingOp))
+
+
+def _known(op: str) -> str:
+    """Reject an unrecognised verb rather than answering a question nobody asked.
+
+    Defaulting either way is silent: a new mutating op would be quietly free
+    (revenue leak) or quietly charged (surprise refusals). Raising makes adding
+    one a decision.
+    """
+    if op not in _KNOWN_OPS:
+        raise ValueError(
+            f"No usage policy for operation {op!r}. Add it to the tables in "
+            f"usage_service — known: {sorted(_KNOWN_OPS)}."
+        )
+    return op
+
+
+def charges_write_quota(op: MutatingOp) -> bool:
+    """Whether ``op`` costs write budget (i.e. calls ``check_and_increment``)."""
+    return _known(op) in WRITE_QUOTA_OPS
+
+
+def plan_limit_gated(op: MutatingOp) -> bool:
+    """Whether ``op`` is refused when the org is over its plan limit."""
+    return _known(op) in PLAN_LIMIT_GATED_OPS
+
 
 # One traceback per failed write would turn a meter outage into a log-volume
 # incident on top of a metering one. Same throttle shape as ``audit_queue``'s

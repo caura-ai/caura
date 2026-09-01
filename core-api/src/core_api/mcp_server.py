@@ -93,8 +93,8 @@ from core_api.services.recall_service import summarize_memories
 # directly from ``core_api.services.trust_service``.
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
+from core_api.services.usage_service import charges_write_quota, recall_operation
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
-from core_api.services.usage_service import recall_operation
 from core_api.trust_utils import (
     effective_keystone_min_trust,
     keystone_min_trust,
@@ -1071,7 +1071,8 @@ async def caura_write(
             if not fleet_id and agent.get("fleet_id"):
                 fleet_id = agent["fleet_id"]
             if content is not None:
-                await check_and_increment(tenant_id, "write")
+                if charges_write_quota("create"):
+                    await check_and_increment(tenant_id, "write")
                 result = await create_memory(
                     MemoryCreate(
                         tenant_id=tenant_id,
@@ -1429,6 +1430,14 @@ async def caura_manage(
                         t0,
                     )
                 old_status = memory.get("status")
+                # Asked, not assumed — ``transition`` is not in
+                # ``WRITE_QUOTA_OPS``, so this charges nothing today. Written as
+                # a lookup rather than as an absent call because "free"
+                # expressed by omission is invisible in review, and an omission
+                # on one surface and a call on the other is precisely how these
+                # two drifted.
+                if charges_write_quota("transition"):
+                    await check_and_increment(tenant_id, "write")
                 await sc.update_memory_status(str(uid), status, tenant_id=tenant_id)
                 await log_action(
                     tenant_id=tenant_id,
@@ -1495,7 +1504,8 @@ async def caura_manage(
                     )
                 # WRITE → home tenant only. ``update_memory`` is storage-routed
                 # and scopes the row to the explicit ``tenant_id``.
-                await check_and_increment(tenant_id, "write")
+                if charges_write_quota("update"):
+                    await check_and_increment(tenant_id, "write")
                 result = await update_memory(uid, tenant_id, MemoryUpdate(**fields), agent_id=agent_id)
                 return _with_latency(_serialize(result), t0)
             # op == "delete" — WRITE → home tenant only.
@@ -1519,6 +1529,8 @@ async def caura_manage(
                         ),
                         t0,
                     )
+            if charges_write_quota("delete"):
+                await check_and_increment(tenant_id, "write")
             await soft_delete_memory(uid, tenant_id)
             # Structured for the same reason as ``op=transition`` above. REST
             # DELETE returns 204 with no body, so there is no shape to copy
@@ -3452,6 +3464,13 @@ async def caura_keystones_set(
                 # because deletes don't charge the write budget (mirrors
                 # the REST route skipping ``enforce_usage_limits`` on
                 # DELETE).
+                #
+                # That reasoning, and the matching decision for ``transition``,
+                # are recorded in ``usage_service.WRITE_QUOTA_OPS`` /
+                # ``PLAN_LIMIT_GATED_OPS``. Keystone ops are their own verb
+                # namespace and are NOT in those tables, so this branch stays
+                # hand-coded — the memory-CRUD call sites on both surfaces are
+                # the ones wired through the lookup.
                 await check_and_increment(tenant_id, "write")
                 # Storage owns scope/weight/fleet/agent shape validation;
                 # surface its 422s directly so we don't drift from the
