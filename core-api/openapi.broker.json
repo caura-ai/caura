@@ -1698,6 +1698,12 @@
             },
             "title": "Items",
             "type": "array"
+          },
+          "recall_tracked": {
+            "default": false,
+            "description": "Whether this search bumped recall_count for the memories it returned. False means they were not reinforced: the caller presented no agent identity (a tenant-scoped key that did not set filter_agent_id — recall_count stays 0 for that caller and recall_boost never engages), the call set diagnostic=true, or nothing matched.",
+            "title": "Recall Tracked",
+            "type": "boolean"
           }
         },
         "required": [
