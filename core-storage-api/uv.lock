@@ -305,7 +305,7 @@ wheels = [
 
 [[package]]
 name = "core-storage-api"
-version = "2.27.0"
+version = "2.41.1"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
