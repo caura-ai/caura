@@ -25,13 +25,28 @@
         },
         {
           "type": "toml",
+          "path": "core-api/uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='core-api')].version"
+        },
+        {
+          "type": "toml",
           "path": "core-worker/pyproject.toml",
           "jsonpath": "$.project.version"
         },
         {
           "type": "toml",
+          "path": "core-worker/uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='core-worker')].version"
+        },
+        {
+          "type": "toml",
           "path": "core-storage-api/pyproject.toml",
           "jsonpath": "$.project.version"
+        },
+        {
+          "type": "toml",
+          "path": "core-storage-api/uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='core-storage-api')].version"
         }
       ]
     },
