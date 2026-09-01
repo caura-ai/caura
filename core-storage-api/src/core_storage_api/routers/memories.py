@@ -1092,6 +1092,31 @@ async def record_memory_conflict(request: Request) -> dict:
     """A55 — persist a memory_conflicts classification record (additive; the
     memory-row status/supersedes effect is applied separately)."""
     body: dict = await request.json()
+    # Both referenced memories must belong to the tenant the record is filed
+    # under. ``memory_conflicts.{new,old}_memory_id`` have FKs to ``memories.id``
+    # but there is NO cross-column tenant constraint, so an insert naming
+    # another tenant's memory UUID satisfies the FK and lands. Worse, the
+    # unguarded route also answered "does this id exist?" for any id in the
+    # system: a real UUID returned 200 while an unknown one raised
+    # ForeignKeyViolationError, which no handler catches, so it came back as a
+    # 500. Identical defect and identical fix to ``POST /fleet/commands``.
+    #
+    # ``_require`` rather than ``body.get``: a missing tenant would otherwise
+    # skip the check entirely, and it is what makes this binding legible to the
+    # tenant-scope gate's AST pass.
+    tenant_id = _require(body, "tenant_id")
+    for key in ("new_memory_id", "old_memory_id"):
+        raw = _require(body, key)
+        try:
+            memory = await _svc.memory_get_by_id_for_tenant(UUID(str(raw)), tenant_id)
+        except (ValueError, TypeError):
+            # Not a UUID at all. Same answer as "not yours" — see below.
+            memory = None
+        if memory is None:
+            # 404 for "no such memory" and "not your memory" alike, so the
+            # route cannot be used to test whether a UUID exists. Mirrors the
+            # fleet-command guard and audit finding #22.
+            raise HTTPException(status_code=404, detail="Memory not found")
     try:
         row = await _svc.memory_conflict_record(body)
     except ValueError as exc:

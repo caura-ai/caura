@@ -111,7 +111,7 @@
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
       "category": "opaque-body-write",
-      "note": "Verified: payload['tenant_id'] is assigned directly to the MemoryConflict row."
+      "note": "Verified: payload['tenant_id'] is assigned directly to the MemoryConflict row, after the route confirms BOTH new_memory_id and old_memory_id belong to that tenant. The FKs to memories.id carry no cross-column tenant constraint, so that route guard is the whole of the binding for the referenced rows -- same shape as method:fleet_add_command."
     },
     {
       "id": "method:memory_count_all",
@@ -389,13 +389,6 @@
       "evidence": "no binding tenant read from the request",
       "category": "opaque-body-write",
       "note": "Verified: every body item carries tenant_id; memory_add_all rejects mixed-tenant batches and scopes recovery."
-    },
-    {
-      "id": "route:POST /api/v1/storage/memories/conflicts",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write",
-      "note": "Verified: body tenant_id is assigned directly to the MemoryConflict row by memory_conflict_record."
     },
     {
       "id": "route:POST /api/v1/storage/memories/dedup-reviews",
