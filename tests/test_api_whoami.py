@@ -50,10 +50,12 @@ async def test_whoami_standalone_or_anonymous(client):
 # differently from a plain agent key.
 #
 # ECHO ONLY, and that is load-bearing rather than lazy: ``/whoami`` has no auth
-# dependency and no gateway-shared-secret check, so it is safe precisely because
-# it looks nothing up. A field that resolved caller-supplied ids against storage
-# would let anyone read another tenant's attributes — which is why
-# ``trust_level`` is NOT here and is blocked on a perimeter fix.
+# dependency, so it is safe precisely because it looks nothing up. The gateway
+# perimeter check added below narrows who may claim a gateway identity, but it
+# does not lift this: with no shared secret configured (OSS self-hosted) the
+# header path is trusted by design, so a field resolving caller-supplied ids
+# against storage would still let anyone read another tenant's attributes.
+# ``trust_level`` therefore remains NOT here — see #1202.
 
 
 async def test_whoami_reports_key_kind_from_the_gateway(client):
@@ -101,3 +103,87 @@ async def test_whoami_still_looks_nothing_up(client):
     data = resp.json()
     assert data["tenant_id"] == "tenant-that-does-not-exist"
     assert data["agent_id"] == "agent-that-does-not-exist"
+
+
+# --- gateway perimeter ------------------------------------------------------
+#
+# ``via_gateway`` is not an echo like the fields beside it. ``tenant_id`` /
+# ``capabilities`` / ``key_kind`` report what the caller sent; ``via_gateway``
+# is core-api's own claim about how the request arrived. Returning True on the
+# strength of a header the caller set themselves made the probe assert a
+# provenance it never verified — on the endpoint whose stated job is telling an
+# integrator how their request actually resolves.
+#
+# The check mirrors ``MCPAuthMiddleware``: required only when a shared secret
+# is configured, so OSS self-hosted deployments (and this suite's other tests)
+# are unaffected.
+
+
+async def test_whoami_does_not_claim_gateway_identity_without_the_secret(client, monkeypatch):
+    """The spoof: identity headers with no secret must not report a gateway."""
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "gateway_shared_secret", "s3cret")
+    resp = await client.get(
+        "/api/v1/whoami",
+        headers={"X-Tenant-ID": "victim-tenant", "X-Agent-ID": "victim-agent"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["via_gateway"] is False
+    assert data["auth_source"] != "gateway-header"
+    # The unverified identity must not be reflected back either — echoing it
+    # under auth_source=anonymous would still tell a caller its spoof "took".
+    assert data["tenant_id"] != "victim-tenant"
+    assert data["agent_id"] is None
+
+
+async def test_whoami_does_not_claim_gateway_identity_with_a_wrong_secret(client, monkeypatch):
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "gateway_shared_secret", "s3cret")
+    resp = await client.get(
+        "/api/v1/whoami",
+        headers={"X-Tenant-ID": "victim-tenant", "X-Gateway-Secret": "wrong"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["via_gateway"] is False
+
+
+async def test_whoami_honors_the_gateway_identity_with_the_correct_secret(client, monkeypatch):
+    """The real gateway path keeps working — this is a narrowing, not a block."""
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "gateway_shared_secret", "s3cret")
+    resp = await client.get(
+        "/api/v1/whoami",
+        headers={
+            "X-Tenant-ID": "real-tenant",
+            "X-Agent-ID": "real-agent",
+            "X-Gateway-Secret": "s3cret",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["via_gateway"] is True
+    assert data["auth_source"] == "gateway-header"
+    assert data["tenant_id"] == "real-tenant"
+
+
+async def test_whoami_trusts_headers_when_no_secret_is_configured(client, monkeypatch):
+    """OSS self-hosted is untouched: no secret configured, no new check.
+
+    Pins the scope of this change. Without it a self-hosted deployment that
+    never sets a gateway secret would lose its identity probe entirely.
+    """
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "gateway_shared_secret", None)
+    resp = await client.get(
+        "/api/v1/whoami",
+        headers={"X-Tenant-ID": "solo-tenant", "X-Agent-ID": "solo-agent"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["via_gateway"] is True
+    assert data["tenant_id"] == "solo-tenant"
