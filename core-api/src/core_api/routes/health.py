@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 from typing import Any
 
@@ -35,6 +36,20 @@ async def version():
     return {"version": VERSION}
 
 
+def _gateway_verified(request: Request) -> bool:
+    """True when the caller proved this request came through the gateway.
+
+    Mirrors ``MCPAuthMiddleware``: the identity headers carry no credential
+    of their own, so when a shared secret is configured the request must
+    present it. When none is configured (OSS self-hosted, and the test
+    suite) the header path is trusted exactly as before.
+    """
+    gw_secret = settings.gateway_shared_secret
+    if not gw_secret:
+        return True
+    return hmac.compare_digest(request.headers.get("x-gateway-secret", ""), gw_secret)
+
+
 @router.get("/whoami")
 async def whoami(request: Request) -> dict:
     """Identity probe — returns the caller's resolved (tenant_id, agent_id)
@@ -44,13 +59,29 @@ async def whoami(request: Request) -> dict:
 
     Resolution priority mirrors MCPAuthMiddleware:
       gateway-header — X-Tenant-ID (and optionally X-Agent-ID) injected
-                       by the enterprise gateway after auth_request
+                       by the enterprise gateway after auth_request, and
+                       only when the gateway secret verifies (below)
       standalone     — settings.is_standalone fixed tenant
       anonymous      — no auth resolved (caller will hit 401 on first
                        write; this endpoint stays open as a probe)
     """
     tenant_id = request.headers.get("x-tenant-id")
     agent_id = request.headers.get("x-agent-id")
+    if tenant_id and not _gateway_verified(request):
+        # Unverified identity headers make every field derived from them
+        # unverified too — including ``via_gateway``, which unlike the fields
+        # beside it is NOT an echo but core-api's own assertion about how the
+        # request arrived. Claiming ``via_gateway: true`` on the strength of a
+        # header the caller set themselves states as fact something never
+        # checked, on the one endpoint whose whole job is telling an
+        # integrator how their request actually resolves.
+        #
+        # Degrade rather than 401: a probe is most useful when it reports the
+        # real resolution, and "your headers are not being trusted here" is
+        # precisely the diagnosis a misconfigured integration needs. The
+        # request falls through to standalone/anonymous below, which is what
+        # a write on this same connection would resolve to.
+        tenant_id = None
     if tenant_id:
         # Surface the cross-tenant scope the gateway plumbed so callers
         # can verify what their credential authorizes WITHOUT having to
@@ -81,12 +112,17 @@ async def whoami(request: Request) -> dict:
             #
             # Echo, like ``capabilities`` and ``auth_mode`` beside it — this
             # endpoint reports what the gateway asserted about the caller and
-            # LOOKS NOTHING UP. That is what keeps it safe without a perimeter
-            # check: there is no auth dependency and no shared-secret
-            # verification here, so a field that resolved caller-supplied ids
-            # against storage would let anyone read another tenant's
-            # attributes. Keep additions to this handler echo-only until that
-            # check exists (issue: /whoami perimeter).
+            # LOOKS NOTHING UP.
+            #
+            # Keep it that way. The perimeter check above closes the identity
+            # spoof for deployments that CONFIGURE a gateway secret; it does
+            # not make a lookup safe everywhere, because with no secret set
+            # (OSS self-hosted) ``_gateway_verified`` trusts the header path
+            # by design. There is still no auth dependency on this route, so
+            # a field resolving caller-supplied ids against storage would let
+            # anyone on such a deployment read another tenant's attributes.
+            # A lookup-backed field (``trust_level``) needs that case
+            # answered first — see #1202.
             "key_kind": (request.headers.get("x-caura-credential-kind") or "").lower() or None,
         }
     if settings.is_standalone:
