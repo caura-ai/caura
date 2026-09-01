@@ -40,3 +40,64 @@ async def test_whoami_standalone_or_anonymous(client):
     data = resp.json()
     assert data["via_gateway"] is False
     assert data["auth_source"] in {"standalone", "anonymous"}
+
+
+# --- key_kind ---------------------------------------------------------------
+#
+# The gateway already resolves credential provenance and sends it as
+# ``x-caura-credential-kind`` (``auth.py`` and the MCP middleware both read it).
+# Surfacing it saves a caller guessing why an install-scoped key behaves
+# differently from a plain agent key.
+#
+# ECHO ONLY, and that is load-bearing rather than lazy: ``/whoami`` has no auth
+# dependency and no gateway-shared-secret check, so it is safe precisely because
+# it looks nothing up. A field that resolved caller-supplied ids against storage
+# would let anyone read another tenant's attributes — which is why
+# ``trust_level`` is NOT here and is blocked on a perimeter fix.
+
+
+async def test_whoami_reports_key_kind_from_the_gateway(client):
+    resp = await client.get(
+        "/api/v1/whoami",
+        headers={
+            "X-Tenant-ID": "probe-tenant",
+            "X-Agent-ID": "probe-agent",
+            "X-Caura-Credential-Kind": "Install_Credential",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    # Normalised, matching how ``auth.py`` compares it.
+    assert resp.json()["key_kind"] == "install_credential"
+
+
+async def test_whoami_key_kind_is_none_when_the_gateway_sends_none(client):
+    resp = await client.get("/api/v1/whoami", headers={"X-Tenant-ID": "probe-tenant"})
+    assert resp.status_code == 200
+    assert resp.json()["key_kind"] is None
+
+
+async def test_whoami_key_kind_present_on_every_branch(client):
+    """Stable shape: a caller reads the key without branching on auth_source."""
+    resp = await client.get("/api/v1/whoami")
+    assert resp.status_code == 200
+    assert "key_kind" in resp.json()
+
+
+async def test_whoami_still_looks_nothing_up(client):
+    """An unknown tenant/agent is echoed, not resolved — no storage, no 404.
+
+    Pins the property that makes the missing perimeter check survivable. If
+    someone adds a lookup here, this stops being true and the endpoint becomes
+    a cross-tenant probe.
+    """
+    resp = await client.get(
+        "/api/v1/whoami",
+        headers={
+            "X-Tenant-ID": "tenant-that-does-not-exist",
+            "X-Agent-ID": "agent-that-does-not-exist",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["tenant_id"] == "tenant-that-does-not-exist"
+    assert data["agent_id"] == "agent-that-does-not-exist"
