@@ -10,6 +10,25 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.42.0](https://github.com/caura-ai/caura/compare/backend-v2.41.1...backend-v2.42.0) (2026-09-01)
+
+
+### Features
+
+* **api:** report the credential kind from /whoami ([#1203](https://github.com/caura-ai/caura/issues/1203)) ([826805b](https://github.com/caura-ai/caura/commit/826805b7cc12bfa55f4c395db94dc38d56801ebe))
+* **write:** report where a memory's weight came from ([#1207](https://github.com/caura-ai/caura/issues/1207)) ([9034066](https://github.com/caura-ai/caura/commit/9034066e15eb575da95acafcc811ccf19d148e27))
+
+
+### Bug Fixes
+
+* **release:** keep service lock versions in sync ([#1213](https://github.com/caura-ai/caura/issues/1213)) ([3fe2715](https://github.com/caura-ai/caura/commit/3fe271558dfc00ac2154a898ef2844e46fb5cc29))
+* **usage:** let a tenant at its plan limit still transition a memory ([#1196](https://github.com/caura-ai/caura/issues/1196)) ([1630255](https://github.com/caura-ai/caura/commit/1630255037acf573b71a94d8534ce3fac2d6405a))
+
+
+### Documentation
+
+* **mcp:** tell integrators to size tool timeouts for caura_insights ([#1201](https://github.com/caura-ai/caura/issues/1201)) ([aef6f4c](https://github.com/caura-ai/caura/commit/aef6f4c0785138f569e7926b0fba58b6db19965f))
+
 ## [2.41.1](https://github.com/caura-ai/caura/compare/backend-v2.41.0...backend-v2.41.1) (2026-09-01)
 
 
