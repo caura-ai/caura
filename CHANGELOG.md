@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.39.4](https://github.com/caura-ai/caura/compare/backend-v2.39.3...backend-v2.39.4) (2026-09-01)
+
+
+### Dependencies
+
+* update slowapi requirement from &lt;1.0,&gt;=0.1.9 to &gt;=0.1.10,&lt;1.0 ([#918](https://github.com/caura-ai/caura/issues/918)) ([fd00918](https://github.com/caura-ai/caura/commit/fd009185fde922ea6a5ae69bb13b8f9693cfe7ea))
+
 ## [2.39.3](https://github.com/caura-ai/caura/compare/backend-v2.39.2...backend-v2.39.3) (2026-09-01)
 
 
