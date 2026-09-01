@@ -615,6 +615,30 @@ class SearchRequest(BaseModel):
     fleet_ids: list[str] | None = None
     query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
     filter_agent_id: str | None = None
+    # The identity knob, separate from the filter above. Before this, the two
+    # were one field: the visibility identity was DERIVED from
+    # ``filter_agent_id``, so a tenant-scoped key (``auth.agent_id`` is None)
+    # could only present an identity by also narrowing results to that agent's
+    # authored rows. ``GET /memories`` has drawn the same distinction in
+    # production for a while; /search was the odd one out.
+    #
+    # Grants no new visibility. ``scope_agent`` rows are admitted by
+    # ``visibility == "scope_agent" AND agent_id == caller_agent_id`` — keyed
+    # on the author column, the same one the filter matches — so naming X here
+    # admits exactly X's own scope_agent rows plus the shared rows, both
+    # already reachable today. The restriction that an AGENT credential may
+    # only name itself carries over unchanged.
+    caller_agent_id: str | None = Field(
+        default=None,
+        description=(
+            "Assert the agent identity this search runs as, WITHOUT filtering "
+            "results to that agent's own memories (use filter_agent_id for "
+            "that). Determines which scope_agent memories are visible and "
+            "whose trust/fleet level the read is gated against. Ignored when "
+            "the credential already carries an agent identity, which wins. An "
+            "agent-scoped credential may only name itself."
+        ),
+    )
     # C31/D2 — the short names are canonical (the spellings the MCP tools use);
     # the historical `*_filter` forms stay accepted forever as aliases. Before
     # this, `memory_type=fact` (the MCP spelling) was silently DROPPED by the

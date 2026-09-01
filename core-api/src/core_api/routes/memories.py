@@ -1753,7 +1753,27 @@ async def _search_inner(
                 f"authenticated agent identity '{auth.agent_id}'."
             ),
         )
-    eff_agent_id = body.filter_agent_id or auth.agent_id
+    # Same rule for the identity knob. ``caller_agent_id`` feeds exactly the two
+    # things ``filter_agent_id`` used to smuggle in — the visibility identity and
+    # the subject of the trust<2 fleet forcing below — so leaving it unguarded
+    # would reopen the escalation the check above closes, by a new spelling.
+    if auth.agent_id and body.caller_agent_id and body.caller_agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"caller_agent_id '{body.caller_agent_id}' does not match the "
+                f"authenticated agent identity '{auth.agent_id}'."
+            ),
+        )
+    # Identity, in precedence order: an authenticated agent always wins, then an
+    # explicit assertion, then the legacy derivation from the filter so existing
+    # callers are untouched. The filter itself is passed separately below and is
+    # unchanged — it was already a distinct parameter all the way down to the
+    # storage predicate; only the identity was derived from it.
+    eff_agent_id = auth.agent_id or body.caller_agent_id or body.filter_agent_id
+    # True when the identity was ASSERTED by a tenant-scoped caller rather than
+    # authenticated. Gates the recall_count bump below — see the note there.
+    identity_asserted = bool(not auth.agent_id and body.caller_agent_id)
     if auth.tenant_id:  # skip for admin
         if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
@@ -1792,6 +1812,15 @@ async def _search_inner(
             # explicit filter) so the caller sees its own scope_agent rows and
             # nobody else's, even when filter_agent_id is omitted.
             caller_agent_id=eff_agent_id,
+            # An identity the caller ASSERTED does not move recall_count unless
+            # the tenant opted in. Ranking is the reason: recall_boost defaults
+            # to True, so without this gate one integration adding
+            # caller_agent_id would reshuffle results for every other caller in
+            # the tenant. An authenticated agent identity is unaffected.
+            #
+            # Resolved here rather than in the step because the tenant config
+            # lives at the route; the pipeline gets the decision, not the inputs.
+            allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
             memory_type_filter=body.memory_type_filter,
             status_filter=body.status_filter,
             valid_at=body.valid_at,
