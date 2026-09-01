@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.42.2](https://github.com/caura-ai/caura/compare/backend-v2.42.1...backend-v2.42.2) (2026-09-01)
+
+
+### Bug Fixes
+
+* **api:** enforce the read-only capability gate on memory update ([#1217](https://github.com/caura-ai/caura/issues/1217)) ([1b9e3ce](https://github.com/caura-ai/caura/commit/1b9e3ce6a12a68abe820704d0b8480296b7b572e))
+* **api:** stop /whoami claiming a gateway identity it never verified ([#1218](https://github.com/caura-ai/caura/issues/1218)) ([81c9b8d](https://github.com/caura-ai/caura/commit/81c9b8d6640bcd3d0a2bbca207c404c814db57d7))
+
 ## [2.42.1](https://github.com/caura-ai/caura/compare/backend-v2.42.0...backend-v2.42.1) (2026-09-01)
 
 
