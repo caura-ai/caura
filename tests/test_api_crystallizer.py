@@ -202,6 +202,76 @@ async def test_get_report_foreign_tenant_returns_404_not_403():
             )
 
 
+async def test_get_report_403_cannot_be_used_to_probe_for_reports():
+    """The 403 must not vary with whether the report exists (audit finding #22).
+
+    The test above covers the case where the caller names a tenant it MAY read.
+    This one covers the other half, which #1167 introduced: naming a tenant the
+    credential may NOT read is a 403, on a route that previously had only 404s.
+    A 403 that depended on the report would be the enumeration oracle finding
+    #22 closed — ask about a tenant you cannot read, and the status tells you
+    whether the id exists there.
+
+    It does not depend on the report, and the reason is positional:
+    ``enforce_readable_tenant`` runs BEFORE the fetch, so it compares two
+    strings the caller already knows and never learns anything about the row.
+
+    **That ordering is the whole guarantee, and it is the kind of thing an
+    ordinary refactor moves.** Hoisting the lookup, or sliding the auth call
+    down past the ``if not report`` to avoid a redundant check on the happy
+    path, both reintroduce the oracle — verified by doing it: with the call
+    moved after the fetch, every other test in this file and all of
+    ``test_auth_context.py`` still pass, while an unreadable tenant answers 403
+    for a report that exists and 404 for one that does not.
+
+    Both assertions below are load-bearing. The first states the property; the
+    second states the mechanism, and fails on the reorder even if some future
+    shape makes the statuses coincide by accident.
+
+    Second concrete instance of the shape in #847 — an audit finding
+    reintroducible by a change that reads as a cleanup, with nothing watching.
+    """
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4
+
+    from fastapi import HTTPException
+
+    from core_api.auth import AuthContext
+    from core_api.routes.crystallizer import get_report
+
+    caller = AuthContext(tenant_id="tenant-B", is_admin=False)
+    unreadable = "tenant-A"
+
+    async def _probe(storage_answer):
+        """Ask about ``unreadable``; return (status, times storage was called)."""
+        sc_mock = AsyncMock()
+        sc_mock.get_report = AsyncMock(return_value=storage_answer)
+        status = 200
+        with patch(
+            "core_api.routes.crystallizer.get_storage_client", return_value=sc_mock
+        ):
+            try:
+                await get_report(report_id=uuid4(), tenant_id=unreadable, auth=caller)
+            except HTTPException as e:
+                status = e.status_code
+        return status, sc_mock.get_report.await_count
+
+    # A report that exists in the unreadable tenant, and one that does not.
+    present, present_calls = await _probe({"id": str(uuid4()), "tenant_id": unreadable})
+    absent, absent_calls = await _probe(None)
+
+    assert present == absent == 403, (
+        "the response to an unreadable tenant must not depend on whether the report "
+        f"exists: got {present} when present and {absent} when absent — that difference "
+        "is an existence oracle for report ids in other tenants (audit finding #22)"
+    )
+    assert present_calls == absent_calls == 0, (
+        "enforce_readable_tenant must run BEFORE the fetch; storage was consulted "
+        f"{present_calls or absent_calls} time(s) for a tenant the caller may not read, "
+        "which is what lets the response carry information about the row"
+    )
+
+
 async def test_get_report_foreign_tenant_admin_bypass():
     """Admin keys keep their cross-tenant read ability — by naming the tenant.
 
