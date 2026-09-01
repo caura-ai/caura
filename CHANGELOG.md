@@ -10,6 +10,24 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.41.0](https://github.com/caura-ai/caura/compare/backend-v2.40.0...backend-v2.41.0) (2026-09-01)
+
+
+### Features
+
+* **api:** report whether a search bumped recall_count ([#1189](https://github.com/caura-ai/caura/issues/1189)) ([3327242](https://github.com/caura-ai/caura/commit/3327242110f0096fb5877326dc25b66700066326))
+* **mcp:** return objects from caura_manage transition and delete ([#1192](https://github.com/caura-ai/caura/issues/1192)) ([5742a7b](https://github.com/caura-ai/caura/commit/5742a7bd95f82e718470e8f79faa90afd2f04133))
+
+
+### Bug Fixes
+
+* **ci:** authenticate release-please changelog exemption ([#1194](https://github.com/caura-ai/caura/issues/1194)) ([7482218](https://github.com/caura-ai/caura/commit/7482218ed2ae89f4e0f896cdba1175a5301d794c))
+
+
+### Documentation
+
+* define alias retirement policy ([#1193](https://github.com/caura-ai/caura/issues/1193)) ([d15973b](https://github.com/caura-ai/caura/commit/d15973be8f70e9ef8b4e9e7ae2203d9721adcf17))
+
 ## [2.40.0](https://github.com/caura-ai/caura/compare/backend-v2.39.4...backend-v2.40.0) (2026-09-01)
 
 
