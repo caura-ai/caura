@@ -9230,13 +9230,6 @@ class PostgresService:
             await session.flush()
             return result.scalar_one()
 
-    async def fleet_add_node(self, data: dict) -> FleetNode:
-        async with get_session() as session:
-            node = FleetNode(**data)
-            session.add(node)
-            await session.flush()
-            return node
-
     async def fleet_get_node_id(
         self,
         *,
