@@ -36,7 +36,7 @@ EMBEDDED_EVENT_BYTES = json.dumps({"event_type": EMBEDDED_TOPIC}).encode()
 @pytest.fixture
 def bus() -> PubSubEventBus:
     # ``dual_subscribe=True`` here and at every other construction in this file.
-    # With ``lifecycle`` flipped, the construction guard refuses ``dual=False``
+    # With ``memory`` flipped, the construction guard refuses ``dual=False``
     # (a flipped family would publish under a name the bus does not bind), so
     # the default is no longer constructible in this repo. None of the tests
     # here are ABOUT that default — they cover topic prefixing, tunables, env
@@ -71,9 +71,7 @@ async def test_publish_encodes_envelope_as_json(bus: PubSubEventBus) -> None:
 
     bus._publisher.publish.assert_called_once()
     topic_path, data = bus._publisher.publish.call_args[0]
-    assert (
-        topic_path == f"projects/proj/topics/{frozen_topic('memory.embed-requested')}"
-    )
+    assert topic_path == "projects/proj/topics/caura.memory.embed-requested"
     parsed = json.loads(data.decode())
     assert parsed["event_type"] == Topics.Memory.EMBED_REQUESTED
     assert parsed["tenant_id"] == "t1"
@@ -90,7 +88,7 @@ async def test_topic_prefix_scopes_publish(bus: PubSubEventBus) -> None:
     )
     await bus.publish(Topics.Memory.EMBEDDED, event)
     topic_path, _ = bus._publisher.publish.call_args[0]
-    assert topic_path == f"projects/proj/topics/prod--{EMBEDDED_TOPIC}"
+    assert topic_path == "projects/proj/topics/prod--caura.memory.embedded"
 
 
 def test_topic_name_prefix_and_no_op() -> None:

@@ -10,10 +10,10 @@ Two properties carry the whole step, and both are asserted here rather than
 described:
 
 * **Publishing moves one family at a time.** ``lifecycle`` flipped on
-  2026-08-28; every other family still targets the name it targeted before. The
-  per-family assertions below are what stop a further family riding along in a
-  diff that looks like it only touched one line — each flip has to restate the
-  set, which is the point.
+  2026-08-28 and ``memory`` on 2026-09-01; every other family still targets the
+  name it targeted before. The per-family assertions below are what stop a
+  further family riding along in a diff that looks like it only touched one
+  line — each flip has to restate the set, which is the point.
 * **Never dual-publish.** One publish call produces exactly one message. The
   alternative cutover — publish to both names for a while — delivers every event
   twice to every subscriber bound to both, which is the failure the ordering
@@ -24,10 +24,10 @@ opposite ones and a missing twin fails differently in each.
 
 THE CONTRACT CHANGES WHAT A DEFAULT-CONSTRUCTED BUS MEANS AGAIN. ``lifecycle``
 stays in ``FLIPPED_FAMILIES``, but all nine of its enum members now carry the
-current name. ``renamed`` is therefore the identity for every member, so
-``publish_name`` and ``subscribe_names(dual=False)`` agree and the construction
-guard permits the default again. Tests about *the flag's parse rule* still take
-the ``nothing_flipped`` fixture so their precondition cannot depend on cutover
+current name. ``memory`` is deliberately still pre-contract: its members carry
+the legacy names, so its publisher flip makes the construction guard require
+dual-subscribe again. Tests about *the flag's parse rule* still take the
+``nothing_flipped`` fixture so their precondition cannot depend on cutover
 state; flip and contract assertions use the real set below.
 """
 
@@ -49,11 +49,12 @@ from common.events.factory import get_event_bus, reset_event_bus_for_testing
 def nothing_flipped(monkeypatch: pytest.MonkeyPatch) -> None:
     """Decouple flag-parse tests from the current family cutover state.
 
-    Contracting ``lifecycle`` makes ``dual=False`` constructible again, but the
-    tests using this fixture ask a separate question — whether blank parses as
-    off and whether the Pub/Sub backend defaults to one name. Emptying the set
-    keeps those tests independent of whichever family is flipped next while
-    leaving the bus, factory and parser themselves untouched.
+    Contracting ``lifecycle`` made ``dual=False`` constructible again; the
+    uncontracted ``memory`` flip makes the real set require dual-subscribe once
+    more. Tests using this fixture ask a separate question — whether blank
+    parses as off and whether the Pub/Sub backend defaults to one name. Emptying
+    the set keeps those tests independent of cutover state while leaving the
+    bus, factory and parser themselves untouched.
 
     The alternative, passing ``dual_subscribe=True``, would silently change what
     those tests assert — they would stop covering the default path, which is the
@@ -65,7 +66,7 @@ def nothing_flipped(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def bus() -> PubSubEventBus:
     # dual on: this is what all 12 pubsub-backed deployables actually run, and
-    # it remains the required operational setting for the other families.
+    # it is the required operational setting for the memory flip.
     b = PubSubEventBus(
         project_id="proj", subscription_prefix="test", dual_subscribe=True
     )
@@ -125,7 +126,7 @@ def test_subscribe_names_dual_returns_both_without_duplicates() -> None:
     )
 
 
-# ── publishing is unchanged: the property that makes step 2 shippable ─
+# ── publishing moves one family at a time ────────────────────────────
 
 
 # Hand-spelled rather than derived from ``topics_mod``. Deriving it would make
@@ -134,7 +135,7 @@ def test_subscribe_names_dual_returns_both_without_duplicates() -> None:
 # has to be stated in exactly two places — the module, and this literal — and the
 # equality in ``test_exactly_the_flipped_families_are_flipped`` is what turns the
 # second one into a deliberate stop rather than a chore.
-FLIPPED = frozenset({"lifecycle"})
+FLIPPED = frozenset({"lifecycle", "memory"})
 # Hand-spelled independently of ``Topics.Lifecycle`` so a new member requires an
 # explicit contract decision. An already-contracted family has no legacy twin to
 # bind: its current-topic infrastructure must exist before a new member ships.
@@ -189,15 +190,18 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     the worst outcome available in this cutover, because it also looks like
     progress.
 
-    ``memory`` is the natural next family and is otherwise ready on the same
-    evidence, but it declares ``.created``, which exists in neither environment
-    — a smaller instance of what disqualifies ``pipeline``. Provision or remove
-    that member before flipping it, so the flip carries no exception.
+    ``memory`` joined on 2026-09-01 — the second SHARED family, mirrored into
+    caura-enterprise in the same cycle. Its absent ``.created`` declaration had
+    already been removed. The live re-measurement found 12/12 running Pub/Sub
+    deployables dual-subscribing and 16/16 active durable twins attached to the
+    matching twin topics (8 per environment), with no ephemerals. Its enum
+    members remain on the legacy names because contraction is the next step,
+    not part of this flip.
     """
     assert topics_mod.FLIPPED_FAMILIES == FLIPPED
     assert "audit" not in topics_mod.FLIPPED_FAMILIES
     assert "pipeline" not in topics_mod.FLIPPED_FAMILIES
-    assert "memory" not in topics_mod.FLIPPED_FAMILIES
+    assert "org" not in topics_mod.FLIPPED_FAMILIES
 
 
 def test_known_families_are_derived_from_the_enums() -> None:
@@ -277,12 +281,12 @@ def test_publish_name_is_the_identity_for_every_unflipped_family() -> None:
         assert topics_mod.publish_name(topic) == str(topic)
 
 
-async def test_publish_targets_the_unrenamed_topic(bus: PubSubEventBus) -> None:
+async def test_publish_targets_the_memory_twin(bus: PubSubEventBus) -> None:
     await bus.publish(
         Topics.Memory.EMBED_REQUESTED, Event(event_type=Topics.Memory.EMBED_REQUESTED)
     )
     topic_path, _ = bus._publisher.publish.call_args[0]
-    assert topic_path == f"projects/proj/topics/{Topics.Memory.EMBED_REQUESTED}"
+    assert topic_path == "projects/proj/topics/caura.memory.embed-requested"
 
 
 async def test_dual_subscribe_does_not_dual_publish(bus: PubSubEventBus) -> None:
@@ -298,7 +302,7 @@ async def test_dual_subscribe_does_not_dual_publish(bus: PubSubEventBus) -> None
 
     assert bus._publisher.publish.call_count == 1
     topic_path, data = bus._publisher.publish.call_args[0]
-    assert topic_path == f"projects/proj/topics/{Topics.Memory.EMBEDDED}"
+    assert topic_path == "projects/proj/topics/caura.memory.embedded"
     # The envelope is untouched too: event_type is payload, not routing.
     assert json.loads(data.decode())["event_type"] == str(Topics.Memory.EMBEDDED)
 
@@ -508,10 +512,9 @@ async def test_dual_subscribe_flag_reads_anything_but_an_explicit_yes_as_off(
 def test_nothing_publishes_unbound_in_the_configuration_the_services_run() -> None:
     """The deployed dual-on setting leaves no publisher unbound.
 
-    Contracted lifecycle members are safe with either setting, but dual-on must
-    remain the operational invariant: later flips of the still-uncontracted
-    families depend on it. Every one of the 12 pubsub-backed deployables was
-    confirmed running this setting before the lifecycle flip.
+    Contracted lifecycle members are safe with either setting, while the
+    uncontracted memory flip depends on dual-on. All 12 pubsub-backed
+    deployables were re-confirmed running this setting before the memory flip.
     """
     assert topics_mod.unbound_publish_topics(dual=True) == ()
 
@@ -567,7 +570,9 @@ def test_pubsub_bus_constructs_when_the_flip_is_matched_by_dual_subscribe(
     assert b._dual_subscribe is True
 
 
-def test_the_guard_does_not_fire_once_lifecycle_is_fully_contracted() -> None:
+def test_the_guard_does_not_fire_once_lifecycle_is_fully_contracted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The false positive an emptiness check would cause — the reason this guard
     compares names instead of testing ``FLIPPED_FAMILIES`` for emptiness.
 
@@ -582,8 +587,9 @@ def test_the_guard_does_not_fire_once_lifecycle_is_fully_contracted() -> None:
     This uses the real nine-member family rather than a one-topic simulation so
     one missed literal cannot hide behind the other eight contracted members.
     """
-    # Non-empty FLIPPED_FAMILIES, dual off — and yet nothing is unbound.
-    assert topics_mod.FLIPPED_FAMILIES == frozenset({"lifecycle"})
+    # Isolate the contracted family from the real, still-uncontracted memory
+    # flip: non-empty FLIPPED_FAMILIES, dual off, and nothing is unbound.
+    monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"lifecycle"}))
     assert topics_mod.unbound_publish_topics(dual=False) == ()
     PubSubEventBus(project_id="proj", subscription_prefix="test")
 

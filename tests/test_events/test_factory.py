@@ -14,11 +14,11 @@ pytestmark = pytest.mark.asyncio
 def dual_subscribe_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """The dual-subscribe setting every deployed service actually runs with.
 
-    Since ``lifecycle`` was flipped, a Pub/Sub bus constructed with the flag off
-    is refused at construction — a flipped family would otherwise publish under
-    a name the bus does not bind, which delivers nothing and raises nothing. The
-    tests below are about the FACTORY's backend selection and its
-    ``max_messages`` plumbing, not about the flag, so they take the setting all
+    Since ``memory`` is flipped but not yet contracted, a Pub/Sub bus constructed
+    with the flag off is refused at construction — a flipped family would
+    otherwise publish under a name the bus does not bind, which delivers nothing
+    and raises nothing. The tests below cover the FACTORY's backend selection and
+    its ``max_messages`` plumbing, not the flag, so they take the setting all
     12 pubsub-backed deployables were confirmed running at their live revision.
     Setting the env var rather than emptying ``FLIPPED_FAMILIES`` keeps the real
     flag-parsing path under test; the parse rule itself is covered in
