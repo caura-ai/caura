@@ -825,6 +825,8 @@ class CoreStorageClient:
         exclude_id: str | None = None,
         fleet_id: str | None = None,
         object_value: str | None = None,
+        visibility: str | None = None,
+        agent_id: str | None = None,
     ) -> list[dict]:
         params: dict[str, Any] = {
             "tenant_id": tenant_id,
@@ -837,6 +839,11 @@ class CoreStorageClient:
             params["fleet_id"] = fleet_id
         if object_value is not None:
             params["object_value"] = object_value
+        # A54 — scope RDF candidates the same way the semantic path is scoped.
+        if visibility is not None:
+            params["visibility"] = visibility
+        if agent_id is not None:
+            params["agent_id"] = agent_id
         return await self._get_list("/memories/rdf-conflicts", **params)
 
     async def scored_search(self, data: dict) -> list[dict]:
