@@ -622,6 +622,15 @@ async def _detect(
             # ``updates`` is empty. Keyed by ``memory_id`` — see
             # ``_merge_status_update`` for the dedupe rationale.
             updates: dict[str, dict] = {}
+            # A32 (verified 2026-08-31, no code change): the bare ``if
+            # verdict`` below is safe. ``_judge_contradiction`` forces the
+            # verdict to False on every low-confidence branch, so an
+            # LLM-derived True always carries ``_CONF_CLEAN`` — pinned
+            # exhaustively in ``tests/test_a32_forward_confidence_gate.py``.
+            # The one producer of a low-confidence True is the DELIBERATE fake
+            # provider (``_pairwise_fake_fn`` -> ``_CONF_FALLBACK``), which an
+            # operator opts into for dev/CI; gating that away would break the
+            # stand-in without making anything safer.
             for candidate, (verdict, _confidence, _raw) in zip(candidates, judged):
                 # CAURA-132 diag — Path A semantic per-candidate verdict.
                 logger.debug(
@@ -1097,6 +1106,28 @@ _CONF_GATE1 = 0.60
 _CONF_FALLBACK = 0.50
 
 
+def _judge_provider(tenant_config) -> str:
+    """Provider for CONTRADICTION judging.
+
+    C2 — this used to read the entity-extraction provider directly, so the
+    two were welded together: moving entity extraction to a cheaper model
+    silently moved the contradiction judge with it. ``contradiction_provider``
+    overrides it when set; empty preserves the historical behaviour exactly.
+    """
+    if settings.contradiction_provider:
+        return settings.contradiction_provider
+    return tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
+
+
+def _judge_model_attr() -> str:
+    """Model attribute name handed to ``call_with_fallback`` for judging.
+
+    Same split as ``_judge_provider``: an explicit ``contradiction_model``
+    wins, otherwise the entity-extraction model is used as before.
+    """
+    return "contradiction_model" if settings.contradiction_model else "entity_extraction_model"
+
+
 def _judge_contradiction(raw) -> tuple[bool, float]:
     """A4 #12 — wrap ``_parse_contradiction_response`` with a confidence
     score derived from the model's own coherence.
@@ -1168,9 +1199,7 @@ async def _llm_contradiction_check(
     3. Abstain — or, when the operator ASKED for the fake provider, the
        negation-word heuristic. See :func:`common.llm.retry.deliberate_fake_provider`.
     """
-    provider_name = (
-        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
-    )
+    provider_name = _judge_provider(tenant_config)
 
     prompt = CONTRADICTION_PROMPT.format(new_content=new_content[:500], old_content=old_content[:500])
 
@@ -1184,7 +1213,7 @@ async def _llm_contradiction_check(
         fake_fn=_pairwise_fake_fn(provider_name, new_content, old_content),
         tenant_config=tenant_config,
         service_label="contradiction",
-        model_attr="entity_extraction_model",
+        model_attr=_judge_model_attr(),
         timeout=10.0,
     )
 
@@ -1317,9 +1346,7 @@ async def _llm_contradiction_check_batch(
     a contradiction. The caller runs each raw through ``_judge_contradiction``,
     so the safety gates are identical to the per-candidate path. E4: the reply
     is sparse — see ``_expand_sparse_batch``."""
-    provider_name = (
-        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
-    )
+    provider_name = _judge_provider(tenant_config)
     candidates_block = "\n".join(f"[{i}] {c.get('content', '')[:500]}" for i, c in enumerate(candidates))
     prompt = BATCH_CONTRADICTION_PROMPT.format(
         new_content=new_content[:500], candidates_block=candidates_block
@@ -1335,7 +1362,7 @@ async def _llm_contradiction_check_batch(
         fake_fn=_batch_fake_fn(provider_name, new_content, candidates),
         tenant_config=tenant_config,
         service_label="contradiction_batch",
-        model_attr="entity_extraction_model",
+        model_attr=_judge_model_attr(),
         timeout=15.0,
     )
 
@@ -1746,9 +1773,7 @@ async def _llm_entity_aware_contradiction_check(
     non-empty before invoking — see ``_attempt_path_c_retraction`` for
     the guard.
     """
-    provider_name = (
-        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
-    )
+    provider_name = _judge_provider(tenant_config)
 
     prompt = ENTITY_AWARE_CONTRADICTION_PROMPT.format(
         new_content=new_content[:500],
@@ -1767,7 +1792,7 @@ async def _llm_entity_aware_contradiction_check(
         fake_fn=_pairwise_fake_fn(provider_name, new_content, old_content),
         tenant_config=tenant_config,
         service_label="contradiction-entity-aware",
-        model_attr="entity_extraction_model",
+        model_attr=_judge_model_attr(),
         timeout=10.0,
     )
 
@@ -1866,9 +1891,7 @@ async def _llm_entity_aware_contradiction_check_batch(
     through ``_judge_contradiction`` so the safety gates are identical to the
     per-candidate entity-aware path.
     """
-    provider_name = (
-        tenant_config.entity_extraction_provider if tenant_config else settings.entity_extraction_provider
-    )
+    provider_name = _judge_provider(tenant_config)
     candidates_block = "\n".join(
         f"[{i}] {c.get('content', '')[:500]}\n    RESOLVED ENTITIES: "
         f"{_format_entity_context(c.get('entities', []))}"
@@ -1890,7 +1913,7 @@ async def _llm_entity_aware_contradiction_check_batch(
         fake_fn=_batch_fake_fn(provider_name, new_content, candidates),
         tenant_config=tenant_config,
         service_label="contradiction-entity-aware_batch",
-        model_attr="entity_extraction_model",
+        model_attr=_judge_model_attr(),
         timeout=15.0,
     )
 
