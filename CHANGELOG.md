@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.43.0](https://github.com/caura-ai/caura/compare/backend-v2.42.2...backend-v2.43.0) (2026-09-01)
+
+
+### Features
+
+* **mcp:** report the writes a plan limit would have refused ([#1221](https://github.com/caura-ai/caura/issues/1221)) ([63e5723](https://github.com/caura-ai/caura/commit/63e5723d6821456493c6fb4374c4dc1dd6462252))
+* **search:** let a caller assert an identity without filtering to it ([#1222](https://github.com/caura-ai/caura/issues/1222)) ([b63ce8a](https://github.com/caura-ai/caura/commit/b63ce8a5f3f72aeba10e3e19b1f4d391b6ada17a))
+
 ## [2.42.2](https://github.com/caura-ai/caura/compare/backend-v2.42.1...backend-v2.42.2) (2026-09-01)
 
 
