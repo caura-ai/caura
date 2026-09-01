@@ -371,48 +371,6 @@
       "category": "no-tenant-data"
     },
     {
-      "id": "route:POST /api/v1/storage/insights/contradictions",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write",
-      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
-    },
-    {
-      "id": "route:POST /api/v1/storage/insights/discover-sample",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write",
-      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
-    },
-    {
-      "id": "route:POST /api/v1/storage/insights/divergence",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write",
-      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
-    },
-    {
-      "id": "route:POST /api/v1/storage/insights/failures",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write",
-      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
-    },
-    {
-      "id": "route:POST /api/v1/storage/insights/patterns",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write",
-      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
-    },
-    {
-      "id": "route:POST /api/v1/storage/insights/stale",
-      "verdict": "NONE",
-      "evidence": "no binding tenant read from the request",
-      "category": "opaque-body-write",
-      "note": "Verified: _scope_args calls the fail-closed _require(body, 'tenant_id') and passes it to the query."
-    },
-    {
       "id": "route:POST /api/v1/storage/memories",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
