@@ -69,7 +69,7 @@ is exactly these five fields:
 | `marker_inventory_meta_paths` | list of root-relative paths | Paths omitted only from marker analytics. |
 
 No sixth field is part of this port. Engine-wide rules, including marker-system
-code/test exclusions and the meaning of the two markers, remain in the engine.
+code/test exclusions and marker semantics, remain in the engine.
 A declared manifest must be a readable JSON object whose keys are valid
 repository-relative paths. Missing or malformed manifests fail closed rather
 than silently moving their mirrors into the fleet-summable headline.
@@ -100,6 +100,43 @@ line in each path whose basename starts with `CHANGELOG` (case-insensitive). It
 does not identify individual generated lines. No path outside that basename
 predicate is exempt.
 
+## Deferred work is an attribute, not an exemption
+
+`legacy-name-deferred: <reason> (<doc path or issue URL>)` records work that a
+decision explicitly postpones. It is deliberately outside the permanent-marker
+table and regular expression. The scan stores it as an attribute of a counted
+line, so a newly written deferred line fails exactly as the same unmarked line
+would. Adding the annotation to an already-counted line is text-neutral for the
+ratchet; it cannot provide headroom or turn a red build green.
+
+The reference is mandatory and is checked in the exact tree being scanned.
+Working-tree document references must be regular repository files that are
+already committed or fully staged; intent-to-add entries, symlinks, and
+submodules do not qualify. HTTPS issue references are syntax-checked without
+making gate availability depend on a remote service. Malformed syntax, a
+missing document, or a local-only document fails the gate.
+
+A line carrying both deferred and a permanent `legacy-name-ok` or
+`legacy-name-floor` marker is a hard error. The permanent marker still wins the
+classification, because `_kind()` remains the only exemption decision, but the
+gate then fails the contradiction instead of silently publishing a deferred
+line outside the headline. This differs from the measured alias-plus-floor
+population: those are two compatible permanent claims, while permanent and
+deferred are mutually exclusive lifecycle states. There is no deferred
+population to preserve, so choosing a hard error now has no migration cost.
+
+The only sanctioned count increase is a same-path `legacy-name-floor` to
+`legacy-name-deferred` replacement. It must preserve the exact text before the
+marker, including comment introducer and internal whitespace, and the exact
+syntactic closer after it. As everywhere else in this engine, outer indentation
+is normalized before text comparison, so reindentation alone is not treated as
+a new branded line. A surviving floor or alias occurrence consumes the base
+floor before transition matching, so one old floor cannot authorize both a
+permanent successor and a deferred duplicate. Each net-new deferred occurrence
+is allocated once: an old counted line in the same path claims it before the
+count-increasing floor transition is considered. The exception is derived from
+the base line; a line that had no base floor marker cannot use it.
+
 ## Report contract
 
 A bare `--report` is current inventory only. It does not resolve a base and
@@ -118,14 +155,23 @@ labels it “never sum,” and discloses any excluded mirror inventory.
 `--report --json` makes the boundary structural:
 
 - `headline.name` is `gated`; it contains numeric `lines` and `files` plus
-  `aggregation: {"allowed": true, "operation": "sum"}`.
+  `aggregation: {"allowed": true, "operation": "sum"}`. Its additive
+  `deferred` member partitions out valid deferred lines by file and decision
+  reference without removing them from `headline.lines`.
 - `diagnostics.present` contains an explicit denied aggregation contract and a
   display string. It deliberately has no numeric `lines` or `files` fields, so
   a generic caller cannot select a `present` number and silently sum it.
 - Mirror details remain auditable under `diagnostics.mirrors`, also tagged with
   denied aggregation.
-- `scope`, marker inventory, and an optional explicit-base change object carry
-  the remaining bounded diagnostics.
+- `marker_inventory.counts` includes the deferred token separately, including a
+  recognized marker whose syntax or reference is invalid.
+- `deferred_validation` exposes whether every recognized deferred marker is
+  valid and lists bounded path/line diagnostics when one is not.
+- `scope` and an optional explicit-base change object carry the remaining
+  bounded diagnostics. When present, `change.deferred` distinguishes
+  count-neutral annotations from narrowly excused floor-to-deferred increases.
+  These additions are backward-compatible fields in the existing
+  `legacy-name-ratchet-report/v1` object; existing field meanings do not change.
 
 ## Gate invariants and tests
 

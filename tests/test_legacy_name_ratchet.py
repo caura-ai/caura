@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -270,6 +271,22 @@ _EACH = pytest.mark.parametrize("m", _MARKERS, ids=lambda m: m.marker)
 # identical reasons is collapsed to a "Nx <reason>" header rather than printed
 # line by line.
 _GROUPED = 6
+
+_DEFERRED_MARKER = "legacy-name-deferred"
+_DECISION_DOC = "docs/rebrand-decision.md"
+
+
+def _write_decision(repo: Path) -> None:
+    path = repo / _DECISION_DOC
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Rebrand decision\n\nThe remaining rename is deliberately postponed.\n"
+    )
+    _git(repo, "add", _DECISION_DOC)
+
+
+def _deferred(reason: str = "the rename is deliberately postponed") -> str:
+    return f"{_DEFERRED_MARKER}: {reason} ({_DECISION_DOC})"
 
 
 @_EACH
@@ -546,6 +563,653 @@ def test_a_removed_floor_mention_is_still_reported(repo: Path) -> None:
     assert "the command name" in result.stdout
 
 
+# ── deferred work: counted, visible, and never an exemption ─────────────────
+
+
+def test_a_new_deferred_line_is_still_counted_and_still_fails(repo: Path) -> None:
+    """Recognition must not become exemption.
+
+    The inventory assertion makes this fail on the pre-feature engine, where the
+    unknown token happens to stay counted. The exit-code assertion makes it fail
+    on the dangerous implementation that recognises the token by adding it to
+    the exempt-marker table.
+    """
+    _write_decision(repo)
+    _stage(
+        repo,
+        "new.py",
+        f'IMPORT = "{LEGACY}/pkg"  # {_deferred()}\n',
+    )
+
+    gate = _run(repo)
+    report = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+
+    assert gate.returncode == 1
+    assert "does not make this build green" in gate.stdout
+    assert report["headline"]["lines"] == 2
+    assert report["headline"]["deferred"]["lines"] == 1
+    assert report["marker_inventory"]["counts"][_DEFERRED_MARKER] == 1
+
+
+def test_annotating_an_existing_counted_line_as_deferred_is_count_neutral(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    _git(repo, "commit", "-qm", "record the decision")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 existing counted line(s) annotated as deferred" in result.stdout
+    assert "No new lines" in result.stdout
+
+
+def test_report_ties_deferred_lines_to_the_gated_headline_and_decision(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    human = _run(repo, "--report", base=None).stdout
+    payload = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+
+    assert f"Of which 1 deferred by {_DECISION_DOC}." in human
+    assert payload["headline"]["deferred"] == {
+        "lines": 1,
+        "by_file": {"existing.py": 1},
+        "by_reference": {_DECISION_DOC: 1},
+    }
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "legacy-name-deferredly: later (docs/rebrand-decision.md)",
+        "somelegacy-name-deferred: later (docs/rebrand-decision.md)",
+    ],
+    ids=["right-bound", "left-bound"],
+)
+def test_deferred_marker_is_bounded_on_both_sides(repo: Path, suffix: str) -> None:
+    _write_decision(repo)
+    _stage(repo, "new.py", f'KEY = "{LEGACY}"  # {suffix}\n')
+
+    gate = _run(repo)
+    report = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+
+    assert gate.returncode == 1
+    assert report["marker_inventory"]["counts"][_DEFERRED_MARKER] == 0
+
+
+def test_deferred_marker_is_recognised_case_insensitively(repo: Path) -> None:
+    _write_decision(repo)
+    _stage(
+        repo,
+        "new.py",
+        f'KEY = "{LEGACY}"  # {_DEFERRED_MARKER.upper()}: later ({_DECISION_DOC})\n',
+    )
+
+    gate = _run(repo)
+    report = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+
+    assert gate.returncode == 1
+    assert report["marker_inventory"]["counts"][_DEFERRED_MARKER] == 1
+
+
+def test_a_deferred_marker_without_a_reference_fails_even_when_preexisting(
+    repo: Path,
+) -> None:
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later\n'
+    )
+    _git(repo, "add", "existing.py")
+    _git(repo, "commit", "-qm", "commit an invalid deferred marker")
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "Invalid legacy-name-deferred marker" in result.stdout
+    assert "decision reference is required" in result.stdout
+
+
+def test_a_deferred_marker_with_a_missing_decision_document_fails(
+    repo: Path,
+) -> None:
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later (docs/missing.md)\n'
+    )
+    _git(repo, "add", "existing.py")
+    _git(repo, "commit", "-qm", "commit a dangling deferred marker")
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "decision document does not exist: docs/missing.md" in result.stdout
+
+
+def test_an_issue_url_is_a_valid_deferred_decision_reference(repo: Path) -> None:
+    reference = "https://github.com/caura-ai/caura/issues/1234"
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later ({reference})\n'
+    )
+    _git(repo, "add", "existing.py")
+    _git(repo, "commit", "-qm", "commit a referenced deferral")
+
+    gate = _run(repo)
+    report = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+
+    assert gate.returncode == 0, gate.stdout
+    assert report["headline"]["deferred"]["by_reference"] == {reference: 1}
+
+
+def test_a_document_fragment_is_a_valid_deferred_decision_reference(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    reference = f"{_DECISION_DOC}#remaining-module-path"
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later ({reference})\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "commit a referenced deferral")
+
+    gate = _run(repo)
+    report = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+
+    assert gate.returncode == 0, gate.stdout
+    assert report["headline"]["deferred"]["by_reference"] == {reference: 1}
+
+
+@pytest.mark.parametrize(
+    ("annotation", "message"),
+    [
+        (
+            f"{_DEFERRED_MARKER} later ({_DECISION_DOC})",
+            "use 'legacy-name-deferred:",
+        ),
+        (
+            f"{_DEFERRED_MARKER}: ({_DECISION_DOC})",
+            "a reason is required",
+        ),
+        (
+            f"{_deferred()}  {_deferred()}",
+            "marker must appear exactly once",
+        ),
+        (
+            f"{_DEFERRED_MARKER}: later (../outside.md)",
+            "repository-relative",
+        ),
+        # The two URL rejections are separate messages on purpose: one says the
+        # scheme is wrong, the other that the URL locates nothing. Pinned apart
+        # because a single message covering both named a problem the author did
+        # not have, whichever of the two they actually made.
+        (
+            f"{_DEFERRED_MARKER}: later (https://github.com)",
+            "not a bare domain",
+        ),
+        (
+            f"{_DEFERRED_MARKER}: later (http://github.com/o/p/issues/1)",
+            "absolute HTTPS URL",
+        ),
+    ],
+    ids=[
+        "missing-colon",
+        "empty-reason",
+        "duplicate",
+        "unsafe-path",
+        "bare-domain",
+        "wrong-scheme",
+    ],
+)
+def test_malformed_deferred_syntax_fails_when_preexisting(
+    repo: Path, annotation: str, message: str
+) -> None:
+    _write_decision(repo)
+    (repo / "existing.py").write_text(f'URL = "https://{LEGACY}.net"  # {annotation}\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "commit an invalid deferral")
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert message in result.stdout
+
+
+def test_report_exposes_invalid_deferred_markers_without_exempting_them(
+    repo: Path,
+) -> None:
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later\n'
+    )
+    _git(repo, "add", "existing.py")
+
+    payload = json.loads(_run(repo, "--report", "--json", base=None).stdout)
+
+    assert payload["headline"]["lines"] == 1
+    assert payload["headline"]["deferred"]["lines"] == 0
+    assert payload["marker_inventory"]["counts"][_DEFERRED_MARKER] == 1
+    assert payload["deferred_validation"] == {
+        "valid": False,
+        "problems": [
+            {
+                "path": "existing.py",
+                "line": 1,
+                "message": "a decision reference is required in parentheses",
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("permanent", ["legacy-name-ok", "legacy-name-floor"])
+def test_deferred_cannot_be_combined_with_a_permanent_marker(
+    repo: Path, permanent: str
+) -> None:
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # {permanent}: permanent  {_deferred()}\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "commit contradictory markers")
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "cannot be combined" in result.stdout
+    assert permanent in result.stdout
+
+
+def test_floor_to_deferred_is_a_narrow_excused_transition(repo: Path) -> None:
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: permanent path\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "classify the line as floor")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 floor-to-deferred transition(s) excused" in result.stdout
+    assert "+1 net" in result.stdout
+
+
+def test_floor_to_deferred_supports_a_marker_inside_a_quoted_value(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'VALUE = "{LEGACY} legacy-name-floor: frozen value"\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "classify the quoted value as floor")
+    _stage(
+        repo,
+        "existing.py",
+        f'VALUE = "{LEGACY} {_deferred()}"\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 floor-to-deferred transition(s) excused" in result.stdout
+
+
+def test_floor_to_deferred_does_not_treat_reason_punctuation_as_syntax(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: frozen path (documented)\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "classify the documented path as floor")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 floor-to-deferred transition(s) excused" in result.stdout
+
+
+def test_floor_to_deferred_pairs_a_surviving_floor_by_exact_frame(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: hash comment\n'
+        f'URL = "https://{LEGACY}.net"  // legacy-name-floor: slash comment\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "classify two syntax frames as floor")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n'
+        f'URL = "https://{LEGACY}.net"  // legacy-name-floor: slash comment\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 floor-to-deferred transition(s) excused" in result.stdout
+
+
+def test_one_deferred_occurrence_is_allocated_to_only_one_transition(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"\n'
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: permanent path\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "record counted and floor occurrences")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    gate = _run(repo)
+    payload = json.loads(_run(repo, "--report", "--json").stdout)
+
+    assert gate.returncode == 0, gate.stdout
+    assert "1 existing counted line(s) annotated as deferred" in gate.stdout
+    assert "floor-to-deferred transition(s) excused" not in gate.stdout
+    assert payload["change"]["deferred"] == {
+        "annotated": 1,
+        "floor_to_deferred": 0,
+    }
+
+
+def test_floor_to_deferred_rejects_content_after_the_decision_reference(
+    repo: Path,
+) -> None:
+    """The transition may replace an annotation, never hide another edit."""
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: permanent path\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "classify the line as floor")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()} AND_NEW_CONTENT\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "floor-to-deferred transition(s) excused" not in result.stdout
+
+
+def test_floor_to_deferred_preserves_the_comment_introducer(repo: Path) -> None:
+    """Changing ``#`` to ``//`` is more than changing the marker annotation."""
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: permanent path\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "classify the line as floor")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  // {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "floor-to-deferred transition(s) excused" not in result.stdout
+
+
+def test_floor_to_deferred_cannot_reuse_a_floor_reclassified_as_an_alias(
+    repo: Path,
+) -> None:
+    """One base floor occurrence can fund one successor, not two."""
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: permanent path\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "classify the line as floor")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # legacy-name-ok: compatibility alias\n'
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "floor-to-deferred transition(s) excused" not in result.stdout
+
+
+def test_floor_to_deferred_cannot_reuse_a_deferred_metadata_edit(
+    repo: Path,
+) -> None:
+    """Changing a decision reference does not create another deferred line."""
+    first = "docs/first-decision.md"
+    second = "docs/second-decision.md"
+    for reference in (first, second):
+        path = repo / reference
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {reference}\n")
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: permanent path\n'
+        f'URL = "https://{LEGACY}.net" # '
+        f"{_DEFERRED_MARKER}: first decision ({first})\n"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "record floor and deferred occurrences")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # '
+        f"{_DEFERRED_MARKER}: revised decision ({second})\n"
+        f'URL = "https://{LEGACY}.net"\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "floor-to-deferred transition(s) excused" not in result.stdout
+
+
+def test_deferred_canonicalization_preserves_syntactic_suffix_whitespace(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    _git(repo, "commit", "-qm", "record the decision")
+    (repo / "existing.py").write_text(f'KEY = ("{LEGACY}" );\n')
+    _git(repo, "add", "existing.py")
+    _git(repo, "commit", "-qm", "use a spaced expression")
+    _stage(
+        repo,
+        "existing.py",
+        f'KEY = ("{LEGACY} {_deferred()}" );\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "No new lines" in result.stdout
+
+
+def test_a_deferred_duplicate_is_not_reported_as_an_existing_annotation(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    _git(repo, "commit", "-qm", "record the decision")
+    plain = f'URL = "https://{LEGACY}.net"\n'
+    _stage(
+        repo,
+        "existing.py",
+        plain + f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "existing counted line(s) annotated as deferred" not in result.stdout
+
+
+def test_an_untracked_decision_document_cannot_validate_a_deferral(repo: Path) -> None:
+    path = repo / _DECISION_DOC
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Local-only decision\n")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "decision document is not tracked" in result.stdout
+
+
+def test_an_intent_to_add_document_cannot_validate_a_deferral(repo: Path) -> None:
+    path = repo / _DECISION_DOC
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Not staged yet\n")
+    _git(repo, "add", "-N", _DECISION_DOC)
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "decision document is not committed or staged" in result.stdout
+
+
+def test_intent_to_add_cannot_hide_a_staged_document_deletion(repo: Path) -> None:
+    _write_decision(repo)
+    _git(repo, "commit", "-qm", "record the decision")
+    _git(repo, "rm", "--cached", _DECISION_DOC)
+    _git(repo, "add", "-N", _DECISION_DOC)
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "decision document is staged for deletion" in result.stdout
+
+
+def test_a_fully_staged_document_rename_can_validate_a_deferral(repo: Path) -> None:
+    old = "docs/old-decision.md"
+    path = repo / old
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# Rebrand decision\n")
+    _git(repo, "add", old)
+    _git(repo, "commit", "-qm", "record the old decision path")
+    _git(repo, "mv", old, _DECISION_DOC)
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_a_symlink_cannot_validate_a_deferred_document_reference(
+    repo: Path,
+) -> None:
+    path = repo / _DECISION_DOC
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to("/etc/passwd")
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "commit an external decision symlink")
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "decision document must be a regular repository file" in result.stdout
+
+
+def test_explicit_base_report_treats_a_deferred_annotation_as_count_neutral(
+    repo: Path,
+) -> None:
+    _write_decision(repo)
+    _git(repo, "commit", "-qm", "record the decision")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    payload = json.loads(_run(repo, "--report", "--json").stdout)
+
+    assert payload["change"] == {
+        "available": True,
+        "base": "HEAD",
+        "added": 0,
+        "annotated": 0,
+        "removed": 0,
+        "moved": 0,
+        "net": 0,
+        "deferred": {"annotated": 1, "floor_to_deferred": 0},
+    }
+
+
+def test_explicit_base_report_names_a_floor_to_deferred_excusal(repo: Path) -> None:
+    _write_decision(repo)
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # legacy-name-floor: permanent path\n'
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "classify the line as floor")
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_deferred()}\n',
+    )
+
+    human = _run(repo, "--report").stdout
+    payload = json.loads(_run(repo, "--report", "--json").stdout)
+
+    assert payload["change"]["added"] == 1
+    assert payload["change"]["net"] == 1
+    assert payload["change"]["deferred"] == {
+        "annotated": 0,
+        "floor_to_deferred": 1,
+    }
+    assert "1 floor-to-deferred excusal(s)" in human
+
+
 # ── what must NOT fail ───────────────────────────────────────────────────────
 
 
@@ -725,7 +1389,7 @@ def test_a_move_does_not_launder_an_addition_beside_it(repo: Path) -> None:
     assert "SNUCK" in offenders
     # The moved line is not why this failed, and pointing at it there sends the
     # reader to "fix" a line that was already in the tree.
-    assert "URL" not in offenders
+    assert "URL =" not in offenders
 
 
 def test_identical_added_lines_are_all_named_with_the_split_stated(repo: Path) -> None:
@@ -1600,8 +2264,10 @@ def test_change_summary_falls_back_when_replay_cannot_spawn_git(
         {"existing.py": Counter({"legacy text": 1})},
         Counter({"legacy text": 1}),
         {},
+        {},
+        (),
     )
-    head = scan_type({}, Counter(), {})
+    head = scan_type({}, Counter(), {}, {}, ())
 
     def cannot_spawn(_: list[str]) -> str:
         raise OSError("argument list too long")
@@ -2312,6 +2978,11 @@ def test_json_exposes_only_the_gated_metric_as_aggregatable(repo: Path) -> None:
         "allowed": True,
         "operation": "sum",
     }
+    assert payload["headline"]["deferred"] == {
+        "lines": 0,
+        "by_file": {},
+        "by_reference": {},
+    }
     present = payload["diagnostics"]["present"]
     assert present["aggregation"]["allowed"] is False
     assert set(present) == {"aggregation", "display"}
@@ -2321,6 +2992,7 @@ def test_json_exposes_only_the_gated_metric_as_aggregatable(repo: Path) -> None:
         "tracked_files_only": True,
         "untracked_files_omitted": 0,
     }
+    assert payload["deferred_validation"] == {"valid": True, "problems": []}
     assert payload["change"] is None
 
 
@@ -2337,6 +3009,7 @@ def test_json_includes_an_explicit_base_change_split(repo: Path) -> None:
         "removed": 0,
         "moved": 0,
         "net": 1,
+        "deferred": {"annotated": 0, "floor_to_deferred": 0},
     }
 
 
@@ -2514,3 +3187,179 @@ def test_a_declared_mirror_manifest_must_be_usable(
     assert result.returncode == 2
     assert message in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_an_invalid_marker_and_a_minted_line_are_reported_in_one_run(
+    repo: Path,
+) -> None:
+    """Both failures print, because they are independent and both need fixing.
+
+    Failing on the first one found hid the second entirely: the author fixed the
+    marker, pushed, and only then learned a line had been minted — one wasted CI
+    round trip per occurrence, in eight repositories.
+    """
+    _stage(repo, "minted.py", f'KEY = "{LEGACY.upper()}_KEY"\n')
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "Invalid legacy-name-deferred marker" in result.stdout
+    assert "minted.py" in result.stdout
+
+
+def test_an_invalid_marker_alone_never_reports_a_passing_gate(repo: Path) -> None:
+    """The marker is already in the base tree, so nothing is minted by this change.
+
+    That is the one shape where the mint check has nothing to say and the marker
+    is the only thing wrong, so it is the shape that decides whether reporting
+    every violation in one run cost the gate its teeth. It must not print any of
+    the passing summaries, and it must not exit 0.
+    """
+    (repo / "existing.py").write_text(
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later\n'
+    )
+    _git(repo, "add", "existing.py")
+    _git(repo, "commit", "-qm", "commit an invalid deferred marker")
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "Invalid legacy-name-deferred marker" in result.stdout
+    assert "Gate passes" not in result.stdout
+    assert result.stdout.rstrip().endswith("marker(s) above do.")
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["http://example.test/i/1", "HTTP://example.test/i/1", "ftp://example.test/i/1"],
+    ids=["http", "uppercase-http", "ftp"],
+)
+def test_a_non_https_reference_is_named_as_a_scheme_problem(
+    repo: Path, reference: str
+) -> None:
+    """A reference with any scheme is answered as a URL, not as a path.
+
+    Testing the literal ``https://`` sent every other spelling down the path
+    branch, where it failed as a repository-relative path — an error naming a
+    problem the author did not have.
+    """
+    _stage(
+        repo,
+        "new.py",
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later ({reference})\n',
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert "must be an absolute HTTPS URL" in result.stdout
+    assert "repository-relative" not in result.stdout
+
+
+@pytest.mark.parametrize("scheme", ["https", "HTTPS"], ids=["lower", "upper"])
+def test_an_https_reference_is_accepted_whatever_its_scheme_casing(
+    repo: Path, scheme: str
+) -> None:
+    """``HTTPS://`` is as absolute as ``https://``; only the casing differs."""
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later '
+        f"({scheme}://example.test/i/1)\n",
+    )
+
+    assert _run(repo).returncode == 0
+
+
+def test_the_engine_stays_formatter_stable() -> None:
+    """The eight-repo byte-parity guarantee rests on this and nothing asserted it.
+
+    One repository's pre-commit hooks format this file rather than excluding it,
+    so a construct the formatter would rewrite gets rewritten there on commit —
+    silently, at exactly the moment the copy is supposed to become byte-identical
+    to canonical. The parity check then fails on a file nobody knowingly edited.
+
+    Checked at the formatter's own defaults rather than any repository's config,
+    because this file is byte-identical across repositories whose configs are
+    not. Read-only: the writing form of ``ruff format`` must never be run on this
+    file. Skipped rather than failed where ruff is absent, so a repository that
+    does not ship it in its test environment is not held to a tool it lacks.
+    """
+    ruff = shutil.which("ruff")
+    if ruff is None:
+        pytest.skip("ruff is not installed in this environment")
+
+    result = subprocess.run(
+        [ruff, "format", "--check", "--isolated", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, (
+        f"{SCRIPT.name} is not formatter-stable, so a repository whose pre-commit "
+        f"hooks format it will rewrite it and break byte-parity:\n{result.stdout}"
+    )
+
+
+def test_a_floor_transition_survives_a_same_text_relocation_elsewhere(
+    repo: Path,
+) -> None:
+    """Two independent bugs met here, and the second was hidden by the first.
+
+    The change is: one file's floor marker becomes deferred in place, while a
+    byte-identical deferred line is deleted from a second file and re-added to a
+    third. Nothing is minted — the repo gains exactly the one occurrence the
+    transition sanctions, and the other is a move.
+
+    The relocation rule used to claim the transitioned line first, because the
+    identical text existed in the base tree; the transition then went
+    unrecognised, its floor line was reported as deleted, and its successor was
+    charged as a mint. Fixing that exposed the second bug: the excused
+    occurrence was dropped from the file's tally without spending its unit of
+    the shared repo-wide budget, so the unit stayed available and the genuine
+    move at the far end was charged instead. Either one alone fails this.
+    """
+    _write_decision(repo)
+    body = f'URL = "https://{LEGACY}.net"'
+    floor = f"{body}  # legacy-name-floor: frozen path\n"
+    deferred = f"{body}  # {_deferred()}\n"
+
+    (repo / "a.py").write_text(floor)
+    (repo / "c.py").write_text(deferred)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "a floor line, and the same text deferred elsewhere")
+
+    _stage(repo, "a.py", deferred)  # floor -> deferred, in place
+    _stage(repo, "c.py", "PLACEHOLDER = 1\n")  # the other copy leaves here
+    _stage(repo, "b.py", deferred)  # ...and arrives here: a move
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "floor-to-deferred transition(s) excused" in result.stdout
+    assert "treated as moved rather than added" in result.stdout
+
+
+def test_a_query_only_https_reference_is_accepted(repo: Path) -> None:
+    """A tracker that addresses an issue by query string still locates it.
+
+    No slash before the query, so ``urlsplit`` yields an empty path — the shape
+    the old non-empty-path requirement rejected, with a message about the scheme
+    rather than about the path it was really objecting to. With a slash it
+    passed either way, which is why this spells the URL out rather than reusing
+    a tidier one.
+    """
+    _stage(
+        repo,
+        "existing.py",
+        f'URL = "https://{LEGACY}.net"  # {_DEFERRED_MARKER}: later '
+        "(https://tracker.example?id=1234)\n",
+    )
+
+    assert _run(repo).returncode == 0
