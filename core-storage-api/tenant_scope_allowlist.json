@@ -3,12 +3,12 @@
   "_categories": {
     "no-tenant-data": "Touches no tenant-scoped table at all \u2014 liveness probes, the pg_locks snapshot, idempotency keys. There is no tenant to bind to.",
     "cross-tenant-by-design": "Legitimately spans tenants and would be wrong if it did not: the capability-usage flush (one batch carries many tenants' counters, migration 023), the tenant-discovery lists that drive the lifecycle fanout, and global operational counts.",
-    "opaque-body-write": "An insert/upsert whose tenant travels as a field inside the payload dict rather than as a parameter, so no signature can carry it. The binding is real but lives in the row being written; the route above is responsible for having validated it.",
+    "opaque-body-write": "An insert/upsert whose tenant travels as a field inside the payload dict rather than as a parameter, so no signature can carry it. The binding is real but lives in the row being written, which settles which tenant OWNS the new row. WHAT IT DOES NOT SETTLE is whether that tenant is the right one. Since #1066 the only credential this service accepts is a shared secret carrying no tenant identity: it authenticates THAT a caller is internal, never WHICH tenant it speaks for. A foreign ``tenant_id`` in the body is written faithfully and nothing here can tell. The accepted control is that the caller was correct \u2014 say that plainly rather than deferring to an unnamed route. (This replaces ``the route above is responsible for having validated it``, which named no route and, for a caller reaching this service directly, referred to nothing.) A write that ALSO references other rows by bare id raises a separate question this category does not answer: that id needs its own tenant check, as ``POST /fleet/commands`` and ``POST /memories/conflicts`` do.",
     "admin-unscoped": "A deliberate operator-facing path that runs across tenants, reached only through an admin-gated route upstream.",
     "grant-in-lieu-of-tenant": "Scoped only by a caller-supplied list of tenants \u2014 a ``readable_tenant_ids`` grant, or a ``tenant_ids`` filter \u2014 with no binding tenant behind it. ALSO BACKLOG. Storage authenticates nothing and takes the list verbatim from the request body, so accepting it in place of a home tenant is strictly weaker than requiring one: the caller names its own scope. Where sibling routes DO require a binding tenant, the difference is an inconsistency to resolve rather than a design. Added as its own category because filing such a route under ``cross-tenant-by-design`` said the opposite of what its note said.",
     "id-addressed-write": "Addressed by a primary key the caller is assumed to already hold, with no tenant predicate, AND it mutates the row. THIS IS THE TOP OF THE BACKLOG. GHSA-wgvw-28pq-jc36 was the read form of this shape; these are the same defect where the consequence is a write, so knowing a UUID is enough to change or destroy another tenant's row, not merely to read it. Fix these before the read half. Shrink; never add.",
-    "id-addressed-read": "Addressed by a primary key the caller is assumed to already hold, with no tenant predicate, and it only reads. THIS IS THE BACKLOG. It is the shape of GHSA-wgvw-28pq-jc36 \u2014 knowing a UUID is not the same as being entitled to the row behind it \u2014 and every entry here is one an attacker who can reach storage directly can use. Shrink; never add.",
-    "blind-spot": "The path IS scoped, but by an idiom the AST pass cannot read \u2014 an inline ``if not isinstance(...): raise`` rather than the shared ``_require`` guard. The entry records that a human checked it. Prefer rewriting the guard to use ``_require`` and deleting the entry."
+    "id-addressed-read": "Addressed by a primary key the caller is assumed to already hold, with no tenant predicate, and it only reads. THIS IS THE BACKLOG. It is the shape of GHSA-wgvw-28pq-jc36 \u2014 knowing a UUID is not the same as being entitled to the row behind it \u2014 and every entry here is one that any caller reaching this service can use against any tenant. Until #1066 that meant anyone who could reach the port; it now means any holder of the shared secret. That is a narrower set, not a smaller consequence: the secret says nothing about which tenant its holder speaks for, so the reach of a single entry is unchanged. Shrink; never add.",
+    "blind-spot": "The path IS scoped, but by an idiom the AST pass cannot read \u2014 an inline ``if not isinstance(...): raise`` rather than the shared ``_require`` guard. The entry records that a human checked it. Prefer rewriting the guard to use ``_require`` and deleting the entry. THIS IS A BACKLOG CATEGORY, and filing here counts against the backlog exactly as the ``id-addressed-*`` pair does \u2014 it is not a tidier home for a path that is merely awkward to read. In particular, a ``_require`` this pass misses because it sits one frame down in a HELPER does not belong here: the pass reads each handler's own AST, so hoisting that call into the handler scores the route REQUIRED and the entry deletes outright rather than moving (#1199, which did that for six ``insights/*`` routes)."
   },
   "exceptions": [
     {
@@ -56,7 +56,7 @@
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
       "category": "opaque-body-write",
-      "note": "Verified: payload['tenant_id'] is assigned directly to the DedupReview row."
+      "note": "Verified: payload['tenant_id'] is assigned directly to the DedupReview row. new_memory_id and candidate_memory_id are caller-supplied and unvalidated, but inert: both are plain UUID columns with NO foreign key, so an unknown id cannot be told from a real one, and new_content/candidate_content are caller-supplied snapshots, so storage never joins back to the rows they name. Traced in #1180."
     },
     {
       "id": "method:entity_add",
@@ -148,7 +148,7 @@
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
       "category": "opaque-body-write",
-      "note": "Verified: event['tenant_id'] is stored on RecallEvent; candidate rows are attached to that new event."
+      "note": "Verified: event['tenant_id'] is stored on RecallEvent; candidate rows are attached to that new event. RecallCandidate has no tenant_id of its own and no FK -- it is scoped only by the ON DELETE CASCADE from recall_event -- so a caller-supplied candidate memory_id is unvalidated. Inert TODAY only because nothing reads the table: when repeat_recall's Phase 2 read lands, that JOIN must carry a tenant predicate or a foreign memory_id becomes a cross-tenant content read. Traced in #1180."
     },
     {
       "id": "method:relation_add",
@@ -395,7 +395,7 @@
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
       "category": "opaque-body-write",
-      "note": "Verified: body tenant_id is assigned directly to the DedupReview row by dedup_review_enqueue."
+      "note": "Verified: body tenant_id is assigned directly to the DedupReview row by dedup_review_enqueue. The two caller-supplied memory ids are unvalidated but inert -- no FK, and no join back to the rows they name. See method:dedup_review_enqueue; traced in #1180."
     },
     {
       "id": "route:POST /api/v1/storage/reports",
