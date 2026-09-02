@@ -808,6 +808,17 @@ class CoreStorageClient:
         # is picked up by a later crystallizer pass.
         return await self._post("/memories/entity-overlap-candidates", data, read=True)  # type: ignore[return-value]
 
+    async def find_by_supersedes_id(self, tenant_id: str, supersedes_id: str) -> list[dict]:
+        """A53 — rows whose supersedes_id points at ``supersedes_id``.
+
+        Retraction-shaped: unlike ``find_successors`` this applies no status or
+        visibility filter, because retraction must reach the row that owns the
+        chain edge whatever state it is in.
+        """
+        return await self._get_list(
+            "/memories/by-supersedes-id", tenant_id=tenant_id, supersedes_id=supersedes_id
+        )
+
     async def find_successors(self, data: dict) -> list[dict]:
         return await self._post("/memories/find-successors", data, read=True)  # type: ignore[return-value]
 

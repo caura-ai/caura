@@ -373,6 +373,17 @@ async def find_entity_overlap_candidates(request: Request) -> list[dict]:
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 
 
+@router.get("/by-supersedes-id")
+async def find_by_supersedes_id(tenant_id: str, supersedes_id: str) -> list[dict]:
+    """A53 — rows owning a chain edge INTO the given memory, for retraction.
+
+    Distinct from /find-successors, which is search-shaped (status + visibility
+    scoped). Retraction needs the edge owner in any state.
+    """
+    memories = await _svc.memory_find_by_supersedes_id(tenant_id=tenant_id, supersedes_id=UUID(supersedes_id))
+    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+
+
 @router.post("/find-successors")
 async def find_successors(request: Request) -> list[dict]:
     body: dict = await request.json()

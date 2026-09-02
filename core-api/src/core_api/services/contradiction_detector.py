@@ -1996,11 +1996,15 @@ async def _attempt_entity_retraction(
     disagrees with sufficient confidence. Returns True iff a retraction
     was performed.
 
-    Lookup is a direct dereference of ``new_memory.supersedes_id`` —
-    bypasses A4 #11's ``include_supersedes`` filter (which is structurally
-    inverted relative to Path A's chain shape — see follow-up). Works
-    in both canonical and flipped Path A directions: the dereferenced
-    row IS the conflicted candidate in either case.
+    A53 — resolution is DIRECTION-AWARE. Canonical verdicts put the edge on
+    ``new_memory`` (dereference ``supersedes_id``); flipped verdicts put it on
+    the pre-existing candidate and leave ``new_memory`` ``outdated`` with a NULL
+    ``supersedes_id``. The previous implementation dereferenced ``new_memory``
+    unconditionally and so returned False for every flipped verdict — and this
+    docstring used to claim the opposite ("works in both directions"), which was
+    never true. The flipped counterpart is found with a retraction-shaped
+    storage lookup; a chain claimed by more than one row is left alone rather
+    than guessed at.
 
     Retraction is a two-step write via A4 #10:
       1. ``update_memory_status(candidate.id, "active")`` — revert
@@ -2027,21 +2031,72 @@ async def _attempt_entity_retraction(
         )
         return False
 
-    retraction_target_id = new_memory.get("supersedes_id")
-    if not retraction_target_id:
-        return False
-
-    # Bound once: both the candidate lookup and the entity-context fetches below
-    # are by bare id and must be scoped to the row's own tenant.
+    # Bound once: the candidate lookup and the entity-context fetches below are
+    # by bare id and must be scoped to the row's own tenant.
     retraction_tenant_id = str(new_memory["tenant_id"])
-    candidate = await sc.get_memory(str(retraction_target_id), retraction_tenant_id)
+
+    # A53 — resolve the pair DIRECTION-AWARE. The content route (ex-"Path A")
+    # records its verdict two different ways:
+    #
+    #   canonical: new_memory wins  -> new_memory.supersedes_id = candidate.id
+    #                                  candidate becomes `conflicted`
+    #   flipped:   candidate wins   -> candidate.supersedes_id = new_memory.id
+    #                                  NEW_MEMORY becomes `outdated`
+    #
+    # The old code only dereferenced ``new_memory.supersedes_id``, which is NULL
+    # in the flipped case — so a flipped verdict could never be retracted, and
+    # the docstring claiming otherwise was simply wrong. The row to revert and
+    # the row owning the edge swap places between the two directions.
+    edge_owner: dict | None = None  # the row whose supersedes_id must be cleared
+    candidate: dict | None = None  # the row whose status must be reverted
+
+    if new_memory.get("supersedes_id"):
+        candidate = await sc.get_memory(str(new_memory["supersedes_id"]), retraction_tenant_id)
+        edge_owner = new_memory
+    else:
+        # Flipped: find who points AT us. Retraction-shaped lookup on purpose —
+        # ``find_successors`` filters to active/confirmed and applies visibility
+        # scoping, so it would miss the edge owner precisely when it matters.
+        try:
+            owners = await sc.find_by_supersedes_id(
+                retraction_tenant_id, str(new_memory.get("id"))
+            )
+        except Exception:
+            logger.warning(
+                "Retraction could not resolve the flipped counterpart for memory %s",
+                new_memory.get("id"),
+                exc_info=True,
+            )
+            return False
+        if len(owners) != 1:
+            # Zero: nothing to retract. More than one: the chain is ambiguous and
+            # picking arbitrarily could clear an edge a DIFFERENT contradiction
+            # legitimately created. Leave it to a human / the next run.
+            if owners:
+                logger.warning(
+                    "Retraction skipped for memory %s: %d rows claim the chain edge",
+                    new_memory.get("id"),
+                    len(owners),
+                )
+            return False
+        edge_owner = owners[0]
+        candidate = new_memory
+
     if not candidate or candidate.get("deleted_at") is not None:
         return False
-    # Only retract rows still in the conflicted state Path A produced.
-    # If the row has already been moved on by another writer (or by
-    # a previous Path C invocation), our retraction is no longer
-    # meaningful — skip without calling the judge.
-    if candidate.get("status") != "conflicted":
+
+    # Only retract a row still in the state the content route produced. Shape-
+    # based, not a single status literal: canonical marks the loser
+    # ``conflicted``, flipped marks it ``outdated``. If another writer (or an
+    # earlier retraction) already moved the row on, ours is no longer meaningful
+    # — skip without paying for the judge.
+    if candidate.get("status") not in ("conflicted", "outdated"):
+        return False
+
+    # The edge must still point where we think it does; otherwise the pair we
+    # resolved is not the pair the chain describes. The storage CAS below is the
+    # real guard, but failing here avoids an LLM call we would only discard.
+    if str(edge_owner.get("supersedes_id") or "") != str(candidate.get("id")):
         return False
 
     new_content = new_memory.get("content", "") or ""
@@ -2163,13 +2218,21 @@ async def _attempt_entity_retraction(
             f"Path C retraction missing tenant_id (candidate={candidate.get('id')}, "
             f"new_memory={new_memory.get('id')})"
         )
+    # A53 — revert the LOSER and clear the edge on whichever row OWNS it. In the
+    # canonical direction that is new_memory; in the flipped direction it is the
+    # pre-existing candidate, and the loser is new_memory itself. Writing these
+    # the canonical way round in a flipped chain would revert the wrong row and
+    # leave the real edge dangling.
     await sc.update_memory_status(str(candidate.get("id")), "active", tenant_id=cand_tenant)
     try:
         await sc.update_memory_status(
-            str(new_memory.get("id")),
-            new_memory.get("status", "active"),
-            tenant_id=new_tenant,
+            str(edge_owner.get("id")),
+            edge_owner.get("status", "active"),
+            tenant_id=str(edge_owner.get("tenant_id") or new_tenant),
             unset_supersedes=True,
+            # CAS anchor: the edge must still point at the row we just reverted,
+            # or another writer has taken the chain and this retraction is no
+            # longer ours to make.
             expected_supersedes_id=str(candidate.get("id")),
         )
     except Exception as e:
