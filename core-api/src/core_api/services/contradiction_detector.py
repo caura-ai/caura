@@ -2058,9 +2058,7 @@ async def _attempt_entity_retraction(
         # ``find_successors`` filters to active/confirmed and applies visibility
         # scoping, so it would miss the edge owner precisely when it matters.
         try:
-            owners = await sc.find_by_supersedes_id(
-                retraction_tenant_id, str(new_memory.get("id"))
-            )
+            owners = await sc.find_by_supersedes_id(retraction_tenant_id, str(new_memory.get("id")))
         except Exception:
             logger.warning(
                 "Retraction could not resolve the flipped counterpart for memory %s",
