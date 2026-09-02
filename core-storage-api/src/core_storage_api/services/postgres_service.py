@@ -2532,6 +2532,33 @@ class PostgresService:
     # D-0) Supersedes chain: find successor memories
     # ------------------------------------------------------------------
 
+    async def memory_find_by_supersedes_id(
+        self,
+        tenant_id: str,
+        supersedes_id: UUID,
+    ) -> list[Memory]:
+        """Rows whose ``supersedes_id`` points AT the given memory.
+
+        A53 — retraction-shaped, deliberately NOT ``memory_find_successors``.
+        That one is search-shaped: it filters ``status IN (active, confirmed)``
+        and applies fleet/visibility/agent scoping, because its job is to show a
+        caller the correction they are allowed to see. Retraction has the
+        opposite need — it must find the row that OWNS the chain edge whatever
+        state that row is in, or the edge is silently left dangling and the
+        flipped verdict can never be undone.
+
+        Tenant-scoped (the one filter that is a boundary, not a preference) and
+        excludes soft-deleted rows. Returns every match so the caller can refuse
+        to act on an ambiguous chain rather than picking one arbitrarily.
+        """
+        async with get_session() as session:
+            stmt = select(Memory).where(
+                Memory.tenant_id == tenant_id,
+                Memory.supersedes_id == supersedes_id,
+                Memory.deleted_at.is_(None),
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
     async def memory_find_successors(
         self,
         supersedes_ids: list[UUID],
