@@ -367,7 +367,20 @@ async def find_entity_overlap_candidates(request: Request) -> list[dict]:
         visibility=body.get("visibility", "scope_team"),
         limit=body.get("limit", 8),
         include_supersedes=bool(body.get("include_supersedes", False)),
+        # A54 — owner identity, applied only for the scope_agent tier.
+        agent_id=body.get("agent_id"),
     )
+    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+
+
+@router.get("/by-supersedes-id")
+async def find_by_supersedes_id(tenant_id: str, supersedes_id: str) -> list[dict]:
+    """A53 — rows owning a chain edge INTO the given memory, for retraction.
+
+    Distinct from /find-successors, which is search-shaped (status + visibility
+    scoped). Retraction needs the edge owner in any state.
+    """
+    memories = await _svc.memory_find_by_supersedes_id(tenant_id=tenant_id, supersedes_id=UUID(supersedes_id))
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 
 
@@ -410,6 +423,8 @@ async def find_similar_candidates(request: Request) -> list[dict]:
         # through the constant.
         threshold=body.get("threshold", CONTRADICTION_SIMILARITY_THRESHOLD),
         limit=body.get("limit", CONTRADICTION_CANDIDATE_WINDOW),
+        # A54 — owner identity, applied only for the scope_agent tier.
+        agent_id=body.get("agent_id"),
     )
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 
@@ -549,6 +564,11 @@ async def find_rdf_conflicts(
     exclude_id: str | None = None,
     fleet_id: str | None = None,
     object_value: str | None = None,
+    # A54 — the writer's visibility tier (and owning agent when the tier is
+    # agent-private). Optional on the wire so a storage instance deployed ahead
+    # of core-api keeps serving; core-api always sends them.
+    visibility: str | None = None,
+    agent_id: str | None = None,
 ) -> list[dict]:
     # CAURA-123 — forward ``fleet_id`` and ``object_value`` to the
     # service. Without ``object_value`` the previous default of ``""``
@@ -564,6 +584,8 @@ async def find_rdf_conflicts(
         object_value=object_value or "",
         memory_id=UUID(exclude_id) if exclude_id else UUID(int=0),
         fleet_id=fleet_id,
+        visibility=visibility,
+        agent_id=agent_id,
     )
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 

@@ -59,11 +59,11 @@ def _content_fingerprint(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
 
 
-def _path_a_lock_key(memory_id, content: str) -> str:
+def _content_lock_key(memory_id, content: str) -> str:
     return f"contradiction:path_a:{memory_id}:{_content_fingerprint(content)}"
 
 
-def _path_c_lock_key(memory_id, content: str) -> str:
+def _entity_lock_key(memory_id, content: str) -> str:
     return f"contradiction:path_c:{memory_id}:{_content_fingerprint(content)}"
 
 
@@ -72,7 +72,7 @@ def _lock_token() -> str:
     return _uuid.uuid4().hex
 
 
-async def _acquire_path_a_lock(memory_id, content: str, token: str) -> bool:
+async def _acquire_content_lock(memory_id, content: str, token: str) -> bool:
     """Try to acquire the Path A (semantic + RDF) idempotency lock for
     ``memory_id`` at this ``content``. Returns True iff this caller owns the
     lock and should proceed; False if another caller already holds it and we
@@ -83,15 +83,15 @@ async def _acquire_path_a_lock(memory_id, content: str, token: str) -> bool:
     run that checked the previous text. ``token`` identifies THIS acquisition
     so the release can tell its own lock from a successor's.
     """
-    return await cache_set_nx(_path_a_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
+    return await cache_set_nx(_content_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
 
 
-async def _acquire_path_c_lock(memory_id, content: str, token: str) -> bool:
+async def _acquire_entity_lock(memory_id, content: str, token: str) -> bool:
     """Try to acquire the Path C (entity-overlap) idempotency lock for
     ``memory_id`` at this ``content``. Returns True iff this caller owns the
     lock; False means another caller already ran detection for this memory at
     this content."""
-    return await cache_set_nx(_path_c_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
+    return await cache_set_nx(_entity_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
 
 
 async def _release_lock(key: str, token: str) -> None:
@@ -260,7 +260,7 @@ async def detect_contradictions_async(
         # EMBEDDED handlers fire ``detect_contradictions_async`` for
         # the same memory; whichever arrives first owns the lock and
         # runs detection, the other skips. Fail-open: if Redis is
-        # unavailable, ``_acquire_path_a_lock`` returns True and we
+        # unavailable, ``_acquire_content_lock`` returns True and we
         # fall back to the prior double-detection behaviour (storage
         # CAS still keeps writes idempotent).
         # H-06: keyed on the CONTENT as well as the memory, so an edit
@@ -284,9 +284,9 @@ async def detect_contradictions_async(
         # and silently costs that memory its detection.
         raw_content = new_memory.get("content")
         examined = raw_content if raw_content is not None else (content or "")
-        lock_key = _path_a_lock_key(memory_id, examined)
+        lock_key = _content_lock_key(memory_id, examined)
         lock_token = _lock_token()
-        if not await _acquire_path_a_lock(memory_id, examined, lock_token):
+        if not await _acquire_content_lock(memory_id, examined, lock_token):
             skipped = True
             return
         lock_held = True
@@ -296,12 +296,22 @@ async def detect_contradictions_async(
         concluded = True
         n_conflicts = len(contradictions) if contradictions else 0
 
-        if contradictions:
-            logger.info(
-                "Async contradiction detection found %d conflict(s) for memory %s",
-                len(contradictions),
-                memory_id,
-            )
+        # D3 — log EVERY concluded run, not only the ones that found something.
+        # Before this, a run that found nothing was indistinguishable in the logs
+        # from a run that never happened (lock contention, an early return, a
+        # crashed worker), so "did detection run for this memory?" was
+        # unanswerable — and the answer matters most exactly when a contradiction
+        # was expected and none appeared.
+        logger.info(
+            "Async contradiction detection completed for memory %s: %d conflict(s)",
+            memory_id,
+            n_conflicts,
+            extra={
+                "path": "contradiction-detection",
+                "memory_id": str(memory_id),
+                "conflicts_found": n_conflicts,
+            },
+        )
 
     except Exception:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
@@ -412,6 +422,15 @@ async def _detect(
             # excludes same-value rows. Otherwise two writes of the
             # same fact trigger a false conflict on themselves.
             object_value=object_value,
+            # A54 — scope by the writer's visibility tier, exactly as the
+            # semantic path does below. Without it the RDF path could select
+            # another agent's ``scope_agent`` row as a candidate and then mark
+            # it outdated/conflicted: a status write into a row this writer
+            # cannot read. ``agent_id`` pins the owner for the agent-private
+            # tier, where the visibility value alone says only "private to SOME
+            # agent" and so still matches a different agent's private rows.
+            visibility=new_memory.get("visibility", "scope_team"),
+            agent_id=new_memory.get("agent_id"),
         )
         # CAURA-125 — state-corruption guard. When ``rdf_conflicts``
         # mixes older and newer candidates relative to ``new_memory``,
@@ -564,6 +583,10 @@ async def _detect(
                 # scope_org/scope_agent writes from being marked as superseding
                 # scope_team memories (cross-scope chain pollution).
                 "visibility": new_memory.get("visibility", "scope_team"),
+                # A54 — pins the OWNER for the scope_agent tier. The tier alone
+                # matches any agent's private rows, so without this a writer can
+                # mark another agent's private memory conflicted.
+                "agent_id": new_memory.get("agent_id"),
             }
         )
         # CAURA-132 diag — Path A semantic invocation + candidate count.
@@ -1389,7 +1412,7 @@ def _skip_contradiction_pairwise() -> tuple[bool, float]:
       out of non-exact-match recall. So the damage is to semantic/vector recall,
       which is the path that matters for a memory product, not to lookup-by-phrasing.
     * Recovery exists but is narrow. No sweep re-checks the status, and Path C's
-      retraction judge (:func:`_attempt_path_c_retraction`) only restores the
+      retraction judge (:func:`_attempt_entity_retraction`) only restores the
       canonical direction, needs resolved entities on both sides, needs confidence
       ≥ ``RETRACTION_CONFIDENCE_THRESHOLD`` (0.90), and is tenant kill-switchable.
       A flipped-direction mark is never revisited.
@@ -1770,7 +1793,7 @@ async def _llm_entity_aware_contradiction_check(
     parser; differs only in the prompt template (which receives resolved
     entity context as ``{new_entities}`` / ``{old_entities}``). Callers
     MUST have verified both ``new_entities`` and ``old_entities`` are
-    non-empty before invoking — see ``_attempt_path_c_retraction`` for
+    non-empty before invoking — see ``_attempt_entity_retraction`` for
     the guard.
     """
     provider_name = _judge_provider(tenant_config)
@@ -1935,7 +1958,7 @@ async def _llm_entity_aware_contradiction_check_batch(
 # entity context"; the comment block at A4 #13's introduction promised
 # the judge would see the resolved entity_links and answer a different,
 # entity-aware question than Path A's semantic similarity check. In
-# practice ``_attempt_path_c_retraction`` calls ``_llm_contradiction_check
+# practice ``_attempt_entity_retraction`` calls ``_llm_contradiction_check
 # (new_content, old_content, ...)`` with the SAME prompt and SAME inputs
 # as Path A's semantic judge. There is no entity context in the request
 # — it is the same LLM call rolled twice.
@@ -1964,7 +1987,7 @@ async def _llm_entity_aware_contradiction_check_batch(
 RETRACTION_CONFIDENCE_THRESHOLD = _CONF_CLEAN
 
 
-async def _attempt_path_c_retraction(
+async def _attempt_entity_retraction(
     sc,
     new_memory: dict,
     tenant_config,
@@ -1973,11 +1996,15 @@ async def _attempt_path_c_retraction(
     disagrees with sufficient confidence. Returns True iff a retraction
     was performed.
 
-    Lookup is a direct dereference of ``new_memory.supersedes_id`` —
-    bypasses A4 #11's ``include_supersedes`` filter (which is structurally
-    inverted relative to Path A's chain shape — see follow-up). Works
-    in both canonical and flipped Path A directions: the dereferenced
-    row IS the conflicted candidate in either case.
+    A53 — resolution is DIRECTION-AWARE. Canonical verdicts put the edge on
+    ``new_memory`` (dereference ``supersedes_id``); flipped verdicts put it on
+    the pre-existing candidate and leave ``new_memory`` ``outdated`` with a NULL
+    ``supersedes_id``. The previous implementation dereferenced ``new_memory``
+    unconditionally and so returned False for every flipped verdict — and this
+    docstring used to claim the opposite ("works in both directions"), which was
+    never true. The flipped counterpart is found with a retraction-shaped
+    storage lookup; a chain claimed by more than one row is left alone rather
+    than guessed at.
 
     Retraction is a two-step write via A4 #10:
       1. ``update_memory_status(candidate.id, "active")`` — revert
@@ -2004,21 +2031,70 @@ async def _attempt_path_c_retraction(
         )
         return False
 
-    retraction_target_id = new_memory.get("supersedes_id")
-    if not retraction_target_id:
-        return False
-
-    # Bound once: both the candidate lookup and the entity-context fetches below
-    # are by bare id and must be scoped to the row's own tenant.
+    # Bound once: the candidate lookup and the entity-context fetches below are
+    # by bare id and must be scoped to the row's own tenant.
     retraction_tenant_id = str(new_memory["tenant_id"])
-    candidate = await sc.get_memory(str(retraction_target_id), retraction_tenant_id)
+
+    # A53 — resolve the pair DIRECTION-AWARE. The content route (ex-"Path A")
+    # records its verdict two different ways:
+    #
+    #   canonical: new_memory wins  -> new_memory.supersedes_id = candidate.id
+    #                                  candidate becomes `conflicted`
+    #   flipped:   candidate wins   -> candidate.supersedes_id = new_memory.id
+    #                                  NEW_MEMORY becomes `outdated`
+    #
+    # The old code only dereferenced ``new_memory.supersedes_id``, which is NULL
+    # in the flipped case — so a flipped verdict could never be retracted, and
+    # the docstring claiming otherwise was simply wrong. The row to revert and
+    # the row owning the edge swap places between the two directions.
+    edge_owner: dict | None = None  # the row whose supersedes_id must be cleared
+    candidate: dict | None = None  # the row whose status must be reverted
+
+    if new_memory.get("supersedes_id"):
+        candidate = await sc.get_memory(str(new_memory["supersedes_id"]), retraction_tenant_id)
+        edge_owner = new_memory
+    else:
+        # Flipped: find who points AT us. Retraction-shaped lookup on purpose —
+        # ``find_successors`` filters to active/confirmed and applies visibility
+        # scoping, so it would miss the edge owner precisely when it matters.
+        try:
+            owners = await sc.find_by_supersedes_id(retraction_tenant_id, str(new_memory.get("id")))
+        except Exception:
+            logger.warning(
+                "Retraction could not resolve the flipped counterpart for memory %s",
+                new_memory.get("id"),
+                exc_info=True,
+            )
+            return False
+        if len(owners) != 1:
+            # Zero: nothing to retract. More than one: the chain is ambiguous and
+            # picking arbitrarily could clear an edge a DIFFERENT contradiction
+            # legitimately created. Leave it to a human / the next run.
+            if owners:
+                logger.warning(
+                    "Retraction skipped for memory %s: %d rows claim the chain edge",
+                    new_memory.get("id"),
+                    len(owners),
+                )
+            return False
+        edge_owner = owners[0]
+        candidate = new_memory
+
     if not candidate or candidate.get("deleted_at") is not None:
         return False
-    # Only retract rows still in the conflicted state Path A produced.
-    # If the row has already been moved on by another writer (or by
-    # a previous Path C invocation), our retraction is no longer
-    # meaningful — skip without calling the judge.
-    if candidate.get("status") != "conflicted":
+
+    # Only retract a row still in the state the content route produced. Shape-
+    # based, not a single status literal: canonical marks the loser
+    # ``conflicted``, flipped marks it ``outdated``. If another writer (or an
+    # earlier retraction) already moved the row on, ours is no longer meaningful
+    # — skip without paying for the judge.
+    if candidate.get("status") not in ("conflicted", "outdated"):
+        return False
+
+    # The edge must still point where we think it does; otherwise the pair we
+    # resolved is not the pair the chain describes. The storage CAS below is the
+    # real guard, but failing here avoids an LLM call we would only discard.
+    if str(edge_owner.get("supersedes_id") or "") != str(candidate.get("id")):
         return False
 
     new_content = new_memory.get("content", "") or ""
@@ -2140,13 +2216,21 @@ async def _attempt_path_c_retraction(
             f"Path C retraction missing tenant_id (candidate={candidate.get('id')}, "
             f"new_memory={new_memory.get('id')})"
         )
+    # A53 — revert the LOSER and clear the edge on whichever row OWNS it. In the
+    # canonical direction that is new_memory; in the flipped direction it is the
+    # pre-existing candidate, and the loser is new_memory itself. Writing these
+    # the canonical way round in a flipped chain would revert the wrong row and
+    # leave the real edge dangling.
     await sc.update_memory_status(str(candidate.get("id")), "active", tenant_id=cand_tenant)
     try:
         await sc.update_memory_status(
-            str(new_memory.get("id")),
-            new_memory.get("status", "active"),
-            tenant_id=new_tenant,
+            str(edge_owner.get("id")),
+            edge_owner.get("status", "active"),
+            tenant_id=str(edge_owner.get("tenant_id") or new_tenant),
             unset_supersedes=True,
+            # CAS anchor: the edge must still point at the row we just reverted,
+            # or another writer has taken the chain and this retraction is no
+            # longer ours to make.
             expected_supersedes_id=str(candidate.get("id")),
         )
     except Exception as e:
@@ -2223,9 +2307,9 @@ async def detect_contradictions_by_entities_async(
         # H-06: per-content, so entity re-extraction after a content edit is
         # not deduped against the run that examined the previous text.
         content = new_memory.get("content") or ""
-        lock_key = _path_c_lock_key(memory_id, content)
+        lock_key = _entity_lock_key(memory_id, content)
         lock_token = _lock_token()
-        if not await _acquire_path_c_lock(memory_id, content, lock_token):
+        if not await _acquire_entity_lock(memory_id, content, lock_token):
             skipped = True
             return
         lock_held = True
@@ -2239,7 +2323,7 @@ async def detect_contradictions_by_entities_async(
         # entities with new_memory. A retraction in this phase doesn't
         # short-circuit the detection phase — Path C may still find a
         # different (genuine) contradiction below.
-        if await _attempt_path_c_retraction(sc, new_memory, tenant_config):
+        if await _attempt_entity_retraction(sc, new_memory, tenant_config):
             n_retractions = 1
             # The new memory's ``supersedes_id`` was just cleared.
             # Re-fetch so the detection phase below sees the fresh state.
@@ -2254,6 +2338,10 @@ async def detect_contradictions_by_entities_async(
                 "fleet_id": fleet_id,
                 # Same visibility scoping as the semantic path above.
                 "visibility": new_memory.get("visibility", "scope_team"),
+                # A54 — pins the OWNER for the scope_agent tier. The tier alone
+                # matches any agent's private rows, so without this a writer can
+                # mark another agent's private memory conflicted.
+                "agent_id": new_memory.get("agent_id"),
             }
         )
         n_candidates = len(candidates) if candidates else 0
@@ -2694,16 +2782,16 @@ async def detect_contradictions_by_entities_async(
                 )
 
         if updates:
-            path_c_result = await sc.batch_update_status(
+            entity_result = await sc.batch_update_status(
                 {"updates": list(updates.values())}, tenant_id=tenant_id
             )
-            if path_c_result.get("skipped"):
+            if entity_result.get("skipped"):
                 # See RDF path in ``_detect`` for the ``skipped`` semantics.
                 logger.warning(
                     "batch_update_status (Path C entity-overlap) skipped %d row(s) (trigger memory %s): %s",
-                    len(path_c_result["skipped"]),
+                    len(entity_result["skipped"]),
                     memory_id,
-                    path_c_result["skipped"],
+                    entity_result["skipped"],
                 )
         concluded = True
 
