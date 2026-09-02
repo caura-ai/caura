@@ -18,10 +18,34 @@ reuse via the recall_count threshold — it's an over-approximation
 but conservative on the firing side: ``recall_count >= 5`` typically
 means ≥3 distinct agents in practice.
 
-**Phase 2+ upgrade path**: a ``memory_recalls`` table keyed
-``(memory_id, agent_id, last_recalled_at)`` gives the exact distinct-
-agent count without inflation. The extractor signature stays the
-same; the SQL gets sharper. Tracked as OQ-future.
+**Phase 2+ upgrade path**: ``recall_event`` + ``recall_candidate``
+(migration 027) already shipped, and ``recall_event`` carries
+``agent_id`` — so joining the two gives the exact distinct-agent count
+without the self-recall inflation described above. The extractor
+signature stays the same; the SQL gets sharper.
+
+The ``memory_recalls`` table this file used to name as that path,
+keyed ``(memory_id, agent_id, last_recalled_at)``, was never built and
+is not what shipped — do not go looking for it, and do not carry it
+forward as OQ-future work. ``repeat_recall`` names the same
+non-existent table for the same reason and was corrected first.
+
+**READ THIS BEFORE WRITING THE PHASE 2 QUERY — the obvious join is
+cross-tenant.** ``recall_candidate`` has NO ``tenant_id`` of its own
+and NO foreign key on ``memory_id``; it is scoped only by the ``ON
+DELETE CASCADE`` from ``recall_event``, and ``POST
+/memories/recall-log`` does not validate the candidate ids it is
+handed — core-storage-api constructs each row verbatim. So a
+``recall_candidate`` row CAN name a memory belonging to another
+tenant.
+
+That matters more for THIS signal than for ``repeat_recall``, because
+this one counts DISTINCT ``agent_id`` per memory: an unconstrained
+join would count another tenant's agents toward a memory's reuse
+score, which both inflates the count and makes "some other tenant
+recalled this too" observable in this tenant's signal. Constrain on
+``recall_event.tenant_id`` explicitly; the cascade is not a tenant
+predicate.
 """
 
 from __future__ import annotations

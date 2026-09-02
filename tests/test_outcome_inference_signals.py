@@ -747,6 +747,32 @@ class TestSignalRegistry:
         kinds = [mod.kind for mod in self.ALL_MODULES]
         assert len(kinds) == len(set(kinds)), "duplicate signal kinds across modules"
 
+    def test_memory_recalls_is_never_named_as_a_live_path(self):
+        # ``memory_recalls`` was never built. Two docstrings named it as the
+        # Phase 2 deliverable and sent operators looking for a table that does
+        # not exist; both were corrected (#1232, and the cross-agent-reuse one
+        # after it). What shipped instead is ``recall_event`` +
+        # ``recall_candidate`` (migration 027).
+        #
+        # This is the ENFORCING half of those two corrections. Prose saying
+        # "do not go looking for it" cannot stop the name being reintroduced as
+        # an upgrade path by the next author, who has no reason to know it is
+        # fictional — the name reads like a table that ought to exist. So the
+        # rule is mechanical: mention it if you like, but only while saying it
+        # was never built.
+        for mod in self.ALL_MODULES:
+            doc = mod.__doc__ or ""
+            if "memory_recalls" not in doc:
+                continue
+            assert "never built" in doc, (
+                f"{mod.__name__} names ``memory_recalls`` without stating it "
+                "was never built. That table does not exist; the shipped "
+                "recall log is ``recall_event`` + ``recall_candidate`` "
+                "(migration 027). Either point at those, or keep the "
+                "'was never built' disclaimer so the next reader is not sent "
+                "looking for it."
+            )
+
     def test_each_module_documents_its_data_source(self):
         # Every signal module's docstring must reference its data
         # source ("memories.", "track_recalls", "recall_event", or
