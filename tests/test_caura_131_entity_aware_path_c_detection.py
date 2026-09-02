@@ -163,7 +163,7 @@ async def test_entity_aware_judge_used_when_both_contexts_present():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -227,7 +227,7 @@ async def test_fallback_to_base_judge_when_new_memory_has_empty_context():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -277,7 +277,7 @@ async def test_fallback_to_base_judge_when_candidate_has_empty_context():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -351,7 +351,7 @@ async def test_fallback_to_base_judge_when_context_fetch_fails(caplog):
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -451,7 +451,7 @@ async def test_fallback_to_base_judge_logs_timeouterror_explicitly(caplog):
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -528,7 +528,7 @@ async def test_fallback_to_base_judge_when_candidate_set_exceeds_cap():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -607,7 +607,7 @@ async def test_a1_17_matched_candidates_do_not_count_toward_cap():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -696,7 +696,7 @@ async def test_detection_fetch_skipped_when_total_exceeds_detection_cap():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -772,7 +772,7 @@ async def test_a61_multi_candidate_entity_aware_batches_once_and_flags():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -853,7 +853,7 @@ async def test_l34_preflight_still_drops_collision_after_refactor():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),

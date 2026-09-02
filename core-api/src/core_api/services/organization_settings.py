@@ -199,7 +199,7 @@ DEFAULT_SETTINGS: dict = {
         # the global default (true).
         "triple_emission_enabled": None,
         # CAURA-130 (L3.8) — Path C retraction kill-switch. When true
-        # (the default), Path C's ``_attempt_path_c_retraction`` runs
+        # (the default), Path C's ``_attempt_entity_retraction`` runs
         # the entity-aware judge and may revert a Path A verdict. When
         # false, Path C skips retraction entirely and Path A's verdict
         # stands. Ops escape valve for tenants whose retraction
