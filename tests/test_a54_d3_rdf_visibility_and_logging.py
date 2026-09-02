@@ -23,6 +23,7 @@ SEMANTIC query, so the fix covers all three contradiction candidate paths.
 import inspect
 
 import pytest
+
 from core_api.services import contradiction_detector as cd
 
 pytestmark = pytest.mark.unit
