@@ -10,6 +10,27 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.46.0](https://github.com/caura-ai/caura/compare/backend-v2.45.0...backend-v2.46.0) (2026-09-02)
+
+
+### Features
+
+* **gate:** a third marker for deferred work that stays counted ([#1234](https://github.com/caura-ai/caura/issues/1234)) ([bb90c09](https://github.com/caura-ai/caura/commit/bb90c0936d1442b1217a6040367180114cf5d4de))
+* **storage:** accept a binding tenant_id on the usage query (expand step) ([#1235](https://github.com/caura-ai/caura/issues/1235)) ([d30e311](https://github.com/caura-ai/caura/commit/d30e31186882d176abc246e445a9c3e4bf415e0a))
+
+
+### Bug Fixes
+
+* **contradiction:** stop candidate queries reaching into another agent's private memories (A54, D3) ([#1237](https://github.com/caura-ai/caura/issues/1237)) ([cf33cb5](https://github.com/caura-ai/caura/commit/cf33cb58235a9bd539e5bf0f9d62990dd68e881a))
+* **gate:** stop a floor-to-deferred transition charging an unrelated move ([#1238](https://github.com/caura-ai/caura/issues/1238)) ([4d3a03d](https://github.com/caura-ai/caura/commit/4d3a03dfa77498225aaa1b2139b343a4c52d49ee))
+* **storage:** require a binding tenant on the usage query (contract step) ([#1236](https://github.com/caura-ai/caura/issues/1236)) ([98d515a](https://github.com/caura-ai/caura/commit/98d515ac14d0438c9a8f1f720040eac329d1be01))
+
+
+### Documentation
+
+* **outcome-inference:** correct the recall-log gap and pin the Phase 2 tenant predicate ([#1232](https://github.com/caura-ai/caura/issues/1232)) ([c07013c](https://github.com/caura-ai/caura/commit/c07013c3e966a87112ca9adb9c7fac17bcc66cc2))
+* **outcome-inference:** stop naming a table that was never built ([#1241](https://github.com/caura-ai/caura/issues/1241)) ([e084ff6](https://github.com/caura-ai/caura/commit/e084ff61907619afa05c941ab19c84d0bfd6a283))
+
 ## [2.45.0](https://github.com/caura-ai/caura/compare/backend-v2.44.0...backend-v2.45.0) (2026-09-01)
 
 
