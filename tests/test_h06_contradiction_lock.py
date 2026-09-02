@@ -319,7 +319,7 @@ async def test_path_a_keys_on_the_row_that_will_be_examined_not_the_caller_copy(
     caller that lets the two drift apart.
     """
     from core_api.services.contradiction_detector import (
-        _path_a_lock_key,
+        _content_lock_key,
         detect_contradictions_async,
     )
 
@@ -341,7 +341,7 @@ async def test_path_a_keys_on_the_row_that_will_be_examined_not_the_caller_copy(
             mid, "t1", "f1", stale, [0.1] * 10, new_memory=_memory(mid, content=current)
         )
 
-    assert fake.acquired == [_path_a_lock_key(mid, current)]
+    assert fake.acquired == [_content_lock_key(mid, current)]
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +401,7 @@ async def test_a_late_release_cannot_take_a_successor_s_lock():
     before the first one's ``finally`` fires.
     """
     from core_api.services.contradiction_detector import (
-        _path_a_lock_key,
+        _content_lock_key,
         detect_contradictions_async,
     )
 
@@ -409,7 +409,7 @@ async def test_a_late_release_cannot_take_a_successor_s_lock():
     fake = _FakeLocks()
     content = "the sky is blue"
     mem = _memory(mid, content=content)
-    key = _path_a_lock_key(mid, content)
+    key = _content_lock_key(mid, content)
 
     async def _detect_then_lose_the_lock(*_a, **_kw):
         # The TTL lapses while this run is still working, and a fresh run
@@ -472,7 +472,7 @@ async def test_an_empty_row_content_is_a_real_value_not_a_missing_one():
     never looks at, undoing the guarantee two tests above.
     """
     from core_api.services.contradiction_detector import (
-        _path_a_lock_key,
+        _content_lock_key,
         detect_contradictions_async,
     )
 
@@ -494,23 +494,23 @@ async def test_an_empty_row_content_is_a_real_value_not_a_missing_one():
             mid, "t1", "f1", "a stale caller copy", [0.1] * 10, new_memory=mem
         )
 
-    assert fake.acquired == [_path_a_lock_key(mid, "")]
+    assert fake.acquired == [_content_lock_key(mid, "")]
 
 
 @pytest.mark.asyncio
 async def test_paths_keep_independent_locks_per_content():
     """Path A and Path C must still not block each other, now per content."""
     from core_api.services.contradiction_detector import (
-        _path_a_lock_key,
-        _path_c_lock_key,
+        _content_lock_key,
+        _entity_lock_key,
     )
 
     mid = uuid4()
-    assert _path_a_lock_key(mid, "x") != _path_c_lock_key(mid, "x")
-    assert _path_a_lock_key(mid, "x") != _path_a_lock_key(mid, "y")
+    assert _content_lock_key(mid, "x") != _entity_lock_key(mid, "x")
+    assert _content_lock_key(mid, "x") != _content_lock_key(mid, "y")
     # Same inputs must be stable across calls, or the dedup never fires at all.
-    assert _path_a_lock_key(mid, "x") == _path_a_lock_key(mid, "x")
-    assert str(mid) in _path_a_lock_key(mid, "x")
+    assert _content_lock_key(mid, "x") == _content_lock_key(mid, "x")
+    assert str(mid) in _content_lock_key(mid, "x")
 
 
 @pytest.mark.asyncio

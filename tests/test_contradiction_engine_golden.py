@@ -210,7 +210,7 @@ async def _run_path_c(*, verdict: bool, retraction: bool) -> list[list]:
     # retraction scenario: new already supersedes cand (a prior Path-A verdict),
     # cand is outdated, no fresh overlap — only the retraction re-judge runs.
     # Retraction only fires on a candidate still in the ``conflicted`` state
-    # Path A produced (see _attempt_path_c_retraction guard).
+    # Path A produced (see _attempt_entity_retraction guard).
     sc = _sc_for_path_c(
         cand_status="conflicted" if retraction else "active",
         overlap=not retraction,

@@ -59,11 +59,11 @@ def _content_fingerprint(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()[:32]
 
 
-def _path_a_lock_key(memory_id, content: str) -> str:
+def _content_lock_key(memory_id, content: str) -> str:
     return f"contradiction:path_a:{memory_id}:{_content_fingerprint(content)}"
 
 
-def _path_c_lock_key(memory_id, content: str) -> str:
+def _entity_lock_key(memory_id, content: str) -> str:
     return f"contradiction:path_c:{memory_id}:{_content_fingerprint(content)}"
 
 
@@ -72,7 +72,7 @@ def _lock_token() -> str:
     return _uuid.uuid4().hex
 
 
-async def _acquire_path_a_lock(memory_id, content: str, token: str) -> bool:
+async def _acquire_content_lock(memory_id, content: str, token: str) -> bool:
     """Try to acquire the Path A (semantic + RDF) idempotency lock for
     ``memory_id`` at this ``content``. Returns True iff this caller owns the
     lock and should proceed; False if another caller already holds it and we
@@ -83,15 +83,15 @@ async def _acquire_path_a_lock(memory_id, content: str, token: str) -> bool:
     run that checked the previous text. ``token`` identifies THIS acquisition
     so the release can tell its own lock from a successor's.
     """
-    return await cache_set_nx(_path_a_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
+    return await cache_set_nx(_content_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
 
 
-async def _acquire_path_c_lock(memory_id, content: str, token: str) -> bool:
+async def _acquire_entity_lock(memory_id, content: str, token: str) -> bool:
     """Try to acquire the Path C (entity-overlap) idempotency lock for
     ``memory_id`` at this ``content``. Returns True iff this caller owns the
     lock; False means another caller already ran detection for this memory at
     this content."""
-    return await cache_set_nx(_path_c_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
+    return await cache_set_nx(_entity_lock_key(memory_id, content), token, _DETECTION_LOCK_TTL_SECONDS)
 
 
 async def _release_lock(key: str, token: str) -> None:
@@ -260,7 +260,7 @@ async def detect_contradictions_async(
         # EMBEDDED handlers fire ``detect_contradictions_async`` for
         # the same memory; whichever arrives first owns the lock and
         # runs detection, the other skips. Fail-open: if Redis is
-        # unavailable, ``_acquire_path_a_lock`` returns True and we
+        # unavailable, ``_acquire_content_lock`` returns True and we
         # fall back to the prior double-detection behaviour (storage
         # CAS still keeps writes idempotent).
         # H-06: keyed on the CONTENT as well as the memory, so an edit
@@ -284,9 +284,9 @@ async def detect_contradictions_async(
         # and silently costs that memory its detection.
         raw_content = new_memory.get("content")
         examined = raw_content if raw_content is not None else (content or "")
-        lock_key = _path_a_lock_key(memory_id, examined)
+        lock_key = _content_lock_key(memory_id, examined)
         lock_token = _lock_token()
-        if not await _acquire_path_a_lock(memory_id, examined, lock_token):
+        if not await _acquire_content_lock(memory_id, examined, lock_token):
             skipped = True
             return
         lock_held = True
@@ -1412,7 +1412,7 @@ def _skip_contradiction_pairwise() -> tuple[bool, float]:
       out of non-exact-match recall. So the damage is to semantic/vector recall,
       which is the path that matters for a memory product, not to lookup-by-phrasing.
     * Recovery exists but is narrow. No sweep re-checks the status, and Path C's
-      retraction judge (:func:`_attempt_path_c_retraction`) only restores the
+      retraction judge (:func:`_attempt_entity_retraction`) only restores the
       canonical direction, needs resolved entities on both sides, needs confidence
       ≥ ``RETRACTION_CONFIDENCE_THRESHOLD`` (0.90), and is tenant kill-switchable.
       A flipped-direction mark is never revisited.
@@ -1793,7 +1793,7 @@ async def _llm_entity_aware_contradiction_check(
     parser; differs only in the prompt template (which receives resolved
     entity context as ``{new_entities}`` / ``{old_entities}``). Callers
     MUST have verified both ``new_entities`` and ``old_entities`` are
-    non-empty before invoking — see ``_attempt_path_c_retraction`` for
+    non-empty before invoking — see ``_attempt_entity_retraction`` for
     the guard.
     """
     provider_name = _judge_provider(tenant_config)
@@ -1958,7 +1958,7 @@ async def _llm_entity_aware_contradiction_check_batch(
 # entity context"; the comment block at A4 #13's introduction promised
 # the judge would see the resolved entity_links and answer a different,
 # entity-aware question than Path A's semantic similarity check. In
-# practice ``_attempt_path_c_retraction`` calls ``_llm_contradiction_check
+# practice ``_attempt_entity_retraction`` calls ``_llm_contradiction_check
 # (new_content, old_content, ...)`` with the SAME prompt and SAME inputs
 # as Path A's semantic judge. There is no entity context in the request
 # — it is the same LLM call rolled twice.
@@ -1987,7 +1987,7 @@ async def _llm_entity_aware_contradiction_check_batch(
 RETRACTION_CONFIDENCE_THRESHOLD = _CONF_CLEAN
 
 
-async def _attempt_path_c_retraction(
+async def _attempt_entity_retraction(
     sc,
     new_memory: dict,
     tenant_config,
@@ -2246,9 +2246,9 @@ async def detect_contradictions_by_entities_async(
         # H-06: per-content, so entity re-extraction after a content edit is
         # not deduped against the run that examined the previous text.
         content = new_memory.get("content") or ""
-        lock_key = _path_c_lock_key(memory_id, content)
+        lock_key = _entity_lock_key(memory_id, content)
         lock_token = _lock_token()
-        if not await _acquire_path_c_lock(memory_id, content, lock_token):
+        if not await _acquire_entity_lock(memory_id, content, lock_token):
             skipped = True
             return
         lock_held = True
@@ -2262,7 +2262,7 @@ async def detect_contradictions_by_entities_async(
         # entities with new_memory. A retraction in this phase doesn't
         # short-circuit the detection phase — Path C may still find a
         # different (genuine) contradiction below.
-        if await _attempt_path_c_retraction(sc, new_memory, tenant_config):
+        if await _attempt_entity_retraction(sc, new_memory, tenant_config):
             n_retractions = 1
             # The new memory's ``supersedes_id`` was just cleared.
             # Re-fetch so the detection phase below sees the fresh state.
@@ -2721,16 +2721,16 @@ async def detect_contradictions_by_entities_async(
                 )
 
         if updates:
-            path_c_result = await sc.batch_update_status(
+            entity_result = await sc.batch_update_status(
                 {"updates": list(updates.values())}, tenant_id=tenant_id
             )
-            if path_c_result.get("skipped"):
+            if entity_result.get("skipped"):
                 # See RDF path in ``_detect`` for the ``skipped`` semantics.
                 logger.warning(
                     "batch_update_status (Path C entity-overlap) skipped %d row(s) (trigger memory %s): %s",
-                    len(path_c_result["skipped"]),
+                    len(entity_result["skipped"]),
                     memory_id,
-                    path_c_result["skipped"],
+                    entity_result["skipped"],
                 )
         concluded = True
 

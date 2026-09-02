@@ -89,7 +89,7 @@ async def test_path_a_second_call_skips_when_lock_already_held():
     # would see.
     with (
         patch(
-            "core_api.services.contradiction_detector._acquire_path_a_lock",
+            "core_api.services.contradiction_detector._acquire_content_lock",
             new_callable=AsyncMock,
             return_value=False,
             create=True,
@@ -117,7 +117,7 @@ async def test_path_a_first_call_runs_when_lock_acquired():
 
     with (
         patch(
-            "core_api.services.contradiction_detector._acquire_path_a_lock",
+            "core_api.services.contradiction_detector._acquire_content_lock",
             new_callable=AsyncMock,
             return_value=True,
             create=True,
@@ -162,7 +162,7 @@ async def test_path_c_second_call_skips_when_lock_already_held():
 
     with (
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=False,
             create=True,
@@ -194,7 +194,7 @@ async def test_path_c_first_call_runs_when_lock_acquired():
 
     with (
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
             create=True,
@@ -231,8 +231,8 @@ async def test_path_a_and_path_c_use_independent_locks():
     SETNX calls, no shared state.
     """
     from core_api.services.contradiction_detector import (
-        _acquire_path_a_lock,
-        _acquire_path_c_lock,
+        _acquire_content_lock,
+        _acquire_entity_lock,
     )
 
     # Both helpers exist and are callable. Pin the key separation by
@@ -249,8 +249,8 @@ async def test_path_a_and_path_c_use_independent_locks():
         new=fake_set_nx,
         create=True,
     ):
-        await _acquire_path_a_lock(mid, "memory content", "tok")
-        await _acquire_path_c_lock(mid, "memory content", "tok")
+        await _acquire_content_lock(mid, "memory content", "tok")
+        await _acquire_entity_lock(mid, "memory content", "tok")
 
     assert len(captured) == 2
     assert captured[0] != captured[1], (
@@ -273,7 +273,7 @@ async def test_path_a_runs_when_redis_unavailable():
     so the FIRST detection still runs. Subsequent duplicates also
     run — that's the current behavior. The idempotency is best-effort,
     not load-bearing for correctness (storage CAS still guards)."""
-    from core_api.services.contradiction_detector import _acquire_path_a_lock
+    from core_api.services.contradiction_detector import _acquire_content_lock
 
     async def redis_down(key, value, ttl):
         return True  # fail-open
@@ -283,7 +283,7 @@ async def test_path_a_runs_when_redis_unavailable():
         new=redis_down,
         create=True,
     ):
-        assert await _acquire_path_a_lock(uuid4(), "memory content", "tok") is True
+        assert await _acquire_content_lock(uuid4(), "memory content", "tok") is True
 
 
 # ---------------------------------------------------------------------------

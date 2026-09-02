@@ -345,11 +345,11 @@ async def test_path_c_filters_candidates_with_distinct_subject():
             new=judge,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new=AsyncMock(return_value=True),
         ),
         patch(
-            "core_api.services.contradiction_detector._attempt_path_c_retraction",
+            "core_api.services.contradiction_detector._attempt_entity_retraction",
             new=AsyncMock(return_value=False),
         ),
         patch(
@@ -418,11 +418,11 @@ async def test_path_c_calls_judge_when_subjects_match():
             new=judge,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new=AsyncMock(return_value=True),
         ),
         patch(
-            "core_api.services.contradiction_detector._attempt_path_c_retraction",
+            "core_api.services.contradiction_detector._attempt_entity_retraction",
             new=AsyncMock(return_value=False),
         ),
         patch(
@@ -484,11 +484,11 @@ async def test_path_c_falls_through_when_new_memory_has_no_subject():
             new=judge,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new=AsyncMock(return_value=True),
         ),
         patch(
-            "core_api.services.contradiction_detector._attempt_path_c_retraction",
+            "core_api.services.contradiction_detector._attempt_entity_retraction",
             new=AsyncMock(return_value=False),
         ),
         patch(

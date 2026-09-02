@@ -11,7 +11,7 @@
   * ``ResolvedConfig.retraction_enabled`` resolver (L3.8): JSONB
     absence → True; explicit False → False; explicit True → True.
 
-The kill-switch behaviour in ``_attempt_path_c_retraction`` itself
+The kill-switch behaviour in ``_attempt_entity_retraction`` itself
 is locked in by tests in ``tests/test_a4_13_path_c_retraction.py``.
 """
 
@@ -316,7 +316,7 @@ async def test_forward_preflight_drops_collision_when_subject_entity_id_null():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -375,7 +375,7 @@ async def test_forward_preflight_keeps_candidate_when_subjects_truly_match():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -440,7 +440,7 @@ async def test_l34_preflight_skips_drop_check_when_both_subject_ids_nonnull():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -488,7 +488,7 @@ async def test_forward_preflight_fails_open_on_storage_error():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -538,7 +538,7 @@ async def test_forward_preflight_caps_fallthrough_set_at_max():
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -585,7 +585,7 @@ def _wt3_patches(sc, base_judge, entity_aware_judge):
             create=True,
         ),
         patch(
-            "core_api.services.contradiction_detector._acquire_path_c_lock",
+            "core_api.services.contradiction_detector._acquire_entity_lock",
             new_callable=AsyncMock,
             return_value=True,
         ),

@@ -701,7 +701,7 @@ async def test_retraction_context_fetch_failure_logs_exc_type(caplog):
 
     # Patch ``_fetch_entity_context`` directly so the TimeoutError
     # surfaces at the OUTER ``asyncio.wait_for`` boundary in
-    # ``_attempt_path_c_retraction``. The inner helper swallows
+    # ``_attempt_entity_retraction``. The inner helper swallows
     # storage failures and returns ``[]``; patching it is the only
     # way to exercise the outer ``except Exception`` where the
     # CAURA-134 WARNING + symmetric INFO logs live.
