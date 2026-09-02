@@ -131,26 +131,30 @@ def test_a_plural_tenant_list_is_not_a_binding_scope() -> None:
     """``tenant_ids`` names which tenants to span; it does not confine to one.
 
     The gate cannot see whether such a list was derived from a verified
-    caller-tenant relationship or taken verbatim from the body, and the live
-    instance is the unsafe one: ``POST /tenant-usage/query`` forwards
-    ``body.tenant_ids`` straight through to the query. Crediting it is a false
-    REQUIRED, the direction the gate must never be wrong in.
+    caller-tenant relationship or taken verbatim from the body, so crediting it
+    would be a false REQUIRED — the direction this gate must never be wrong in.
 
-    Asserted through the real enumeration against the real service, not a
-    synthetic class — classifying a stand-in here would mean reimplementing the
-    rule under test and asserting the copy agrees with itself.
+    THIS TEST USED TO PIN A LIVE INSTANCE. ``POST /tenant-usage/query``
+    forwarded ``body.tenant_ids`` straight through, and the assertions here
+    named it by id. #1095 removed the plural field, so the example is gone and
+    ``tenant_usage_query`` now scores REQUIRED on a binding singular
+    ``tenant_id``. What survives is the rule, which is the part that has to
+    hold whether or not anything currently breaks it: the key stays out of
+    ``BINDING_SCOPE``, and no live method may be credited on a plural list.
     """
     assert "tenant_ids" not in gate.BINDING_SCOPE
 
+    # The former offender is fixed, and stays fixed: it is now bound.
     entries = {e.key: e for e in gate.enumerate_methods()}
-    assert entries["tenant_usage_query"].verdict == "NONE"
+    assert entries["tenant_usage_query"].verdict == "REQUIRED"
 
-    listed = {e["id"]: e for e in json.loads(ALLOWLIST.read_text())["exceptions"]}
-    assert listed["method:tenant_usage_query"]["category"] == "grant-in-lieu-of-tenant"
-    assert (
-        listed["route:POST /api/v1/storage/tenant-usage/query"]["category"]
-        == "grant-in-lieu-of-tenant"
-    )
+    # The category outlives its last occupant. Nothing is filed under it now,
+    # and it stays DEFINED so a future offender has somewhere to land and the
+    # gate keeps flagging it as backlog rather than silently accepting it.
+    listed = json.loads(ALLOWLIST.read_text())["exceptions"]
+    assert not [e for e in listed if e["category"] == "grant-in-lieu-of-tenant"]
+    assert "grant-in-lieu-of-tenant" in gate.CATEGORIES
+    assert "grant-in-lieu-of-tenant" in gate.BACKLOG_CATEGORIES
 
 
 def test_the_id_addressed_backlog_is_split_by_blast_radius() -> None:
@@ -266,7 +270,12 @@ def test_every_owned_entry_carries_a_tracked_issue() -> None:
     """
     listed = json.loads(ALLOWLIST.read_text())["exceptions"]
     owned = [e for e in listed if e["category"] in gate.TRACKED_CATEGORIES]
-    assert owned, "expected a non-empty owned backlog"
+    # No floor on the count. This asserted ``owned`` was non-empty, which was
+    # true while the owned backlog had entries and became a FAILURE the moment
+    # it was emptied — #1095 cleared the last ``grant-in-lieu-of-tenant`` and
+    # ``id-addressed-write`` has been empty since #1082. An empty owned backlog
+    # is the goal state, so the property here is "whatever is owned carries a
+    # reference", which is vacuously true at zero and still bites at one.
     untracked = [
         e["id"] for e in owned if not gate.ISSUE_REF.search(e.get("note") or "")
     ]

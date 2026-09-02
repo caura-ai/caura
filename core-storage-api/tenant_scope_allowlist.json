@@ -172,13 +172,6 @@
       "note": "Verified: every row carries tenant_id, which is stored and participates in the usage-counter conflict key."
     },
     {
-      "id": "method:tenant_usage_query",
-      "verdict": "NONE",
-      "evidence": "no binding tenant parameter",
-      "category": "grant-in-lieu-of-tenant",
-      "note": "Takes tenant_ids (plural) and no binding tenant. The one caller, POST /tenant-usage/query, passes body.tenant_ids verbatim, so the caller names the tenants it totals. Was classified REQUIRED until tenant_ids was removed from BINDING_SCOPE; a singular tenant_id the org is checked against would resolve it. Tracked in #1095."
-    },
-    {
       "id": "method:tenants_list_active",
       "verdict": "NONE",
       "evidence": "no binding tenant parameter",
@@ -422,8 +415,8 @@
       "id": "route:POST /api/v1/storage/tenant-usage/query",
       "verdict": "NONE",
       "evidence": "no binding tenant read from the request",
-      "category": "grant-in-lieu-of-tenant",
-      "note": "Reclassified from opaque-body-write, which describes an insert whose tenant rides in the payload; this is a POST-for-read and inserts nothing. Its only scope is the caller-supplied tenant_ids list it forwards to tenant_usage_query. Tracked in #1095."
+      "category": "blind-spot",
+      "note": "#1095 is FIXED here: tenant_ids (plural) is gone and the route now requires a binding singular tenant_id. It stays listed only because the guard is a pydantic field on TenantUsageQuery -- `tenant_id: str = Field(min_length=1)` -- and the AST pass reads dict-style access (`body[...]`, `body.get(...)`, `_require(body, ...)`), not model attribute access, so it cannot see it. A request omitting tenant_id 422s; test_no_scope_is_422 and test_the_plural_field_is_gone pin that. DO NOT hand-parse the body to satisfy the gate: this router chose pydantic deliberately (see its docstring -- the hand-parsed sibling below is where a missing key became a 500), and trading real validation for static visibility would be backwards. The durable fix is teaching the gate to read a required pydantic field; this is the only allowlisted route shaped that way today, which is why it has not been worth doing yet."
     }
   ]
 }
