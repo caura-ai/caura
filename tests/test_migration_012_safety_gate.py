@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+LEGACY_ENV = "MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS"  # legacy-name-ok: rule 3 env alias
+
 
 def _load_migration():
     """Re-import the migration module fresh.
@@ -85,7 +87,7 @@ def test_gate_proceeds_on_empty_db_without_opt_in(
     """Fresh install: row count == 0, env unset → upgrade() runs to
     completion (no RuntimeError)."""
     monkeypatch.delenv("CAURA_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
-    monkeypatch.delenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
+    monkeypatch.delenv(LEGACY_ENV, raising=False)
     _patch_op(monkeypatch, existing_count=0)
     mig = _load_migration()
     mig.upgrade()  # must not raise
@@ -98,7 +100,7 @@ def test_gate_refuses_destructive_run_without_opt_in(
     """Populated DB, env unset → RuntimeError with the row count and
     the env var name in the message."""
     monkeypatch.delenv("CAURA_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
-    monkeypatch.delenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
+    monkeypatch.delenv(LEGACY_ENV, raising=False)
     _patch_op(monkeypatch, existing_count=42_000)
     mig = _load_migration()
     with pytest.raises(RuntimeError) as ei:
@@ -107,7 +109,7 @@ def test_gate_refuses_destructive_run_without_opt_in(
     # The refusal must teach the canonical name and still name the legacy
     # alias operators may have in runbooks.
     assert "CAURA_RUN_DESTRUCTIVE_MIGRATIONS" in str(ei.value)
-    assert "MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS" in str(ei.value)
+    assert LEGACY_ENV in str(ei.value)
 
 
 @pytest.mark.unit
@@ -130,7 +132,7 @@ def test_gate_treats_non_true_values_as_opt_out(
     """Anything other than (case-insensitive) ``"true"`` is treated as
     opt-out, so an operator's typo doesn't accidentally green-light
     data destruction."""
-    monkeypatch.setenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", val)
+    monkeypatch.setenv(LEGACY_ENV, val)
     _patch_op(monkeypatch, existing_count=10)
     mig = _load_migration()
     with pytest.raises(RuntimeError):
@@ -145,7 +147,7 @@ def test_gate_accepts_case_insensitive_true(
 ) -> None:
     """``MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=TRUE`` (or ``True``) opts
     in. Operators commonly capitalize bool envs."""
-    monkeypatch.setenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", val)
+    monkeypatch.setenv(LEGACY_ENV, val)
     _patch_op(monkeypatch, existing_count=10)
     mig = _load_migration()
     mig.upgrade()  # must not raise
@@ -157,7 +159,7 @@ def test_gate_accepts_legacy_env_alias(
 ) -> None:
     """The legacy opt-in spelling keeps working forever (rule 3)."""
     monkeypatch.delenv("CAURA_RUN_DESTRUCTIVE_MIGRATIONS", raising=False)
-    monkeypatch.setenv("MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS", "true")
+    monkeypatch.setenv(LEGACY_ENV, "true")
     _patch_op(monkeypatch, existing_count=10)
     mig = _load_migration()
     mig.upgrade()  # must not raise
