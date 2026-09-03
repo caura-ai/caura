@@ -1,6 +1,6 @@
 # caura-client
 
-> Formerly `memclaw-client` — the old package name, `memclaw_client` import, and `MemClaw` class remain permanent aliases. <!-- legacy-name-ok: taught as legacy alias -->
+> Formerly `memclaw-client`. The old `memclaw-client` PyPI package and `memclaw_client` import were retired; the `MemClaw` class remains a permanent alias. <!-- legacy-name-ok: taught as legacy alias -->
 
 Official Python client for [Caura](https://caura.ai) — governed shared
 memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).

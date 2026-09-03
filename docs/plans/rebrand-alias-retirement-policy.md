@@ -1,5 +1,9 @@
 # Rebrand alias retirement policy
 
+**SUPERSEDED 2026-09-02 by Eldad's direction — legacy names are deleted, not retained;
+"permanent by choice" no longer applies to any row below. Each owning lane updates its
+own rows as it reaches them; see `codex-packages/PLAN.md`.**
+
 **Status:** proposed 2026-09-01 · **Scope:** policy only · **Owner:** Caura release owner
 
 This document decides when a retired identity may stop resolving. It changes no DNS,
@@ -54,8 +58,8 @@ These decisions are accepted inputs from AI or existing permanent-alias contract
 | Homebrew | old `memclaw` token's rename record | Keep the rename record permanently after migration. | <!-- legacy-name-ok: names AI's permanent Homebrew compatibility token -->
 | Scoop | old `memclaw` manifest | Keep it updated from the canonical release description; Scoop has no proven installed-app rename. | <!-- legacy-name-ok: names AI's permanent Scoop compatibility manifest -->
 | Installer entry point | `https://memclaw.dev/install.sh` | Resolve permanently, serving a self-migrating installer when the new channel exists. | <!-- legacy-name-ok: names AI's permanent installer URL -->
-| Python client | PyPI `memclaw-client`, import `memclaw_client`, and the `MemClaw*` class/error names | Permanent forwarding and object-identity aliases, as pinned by the client alias tests and sentinel. | <!-- legacy-name-ok: names the permanent Python client compatibility surface -->
-| npm client | `@caura/memclaw-client` | Permanent forwarding alias. | <!-- legacy-name-ok: names the permanent npm client compatibility surface -->
+| Python client | The `MemClaw*` class/error names inside `caura_client` | Permanent object-identity aliases, as pinned by the client alias tests and sentinel. PyPI `memclaw-client` and the `memclaw_client` import package were retired 2026-09 — no transition owed to pre-rename installs. | <!-- legacy-name-ok: names the permanent Python client class-alias surface -->
+| npm client | ~~`@caura/memclaw-client`~~ | Retired 2026-09; the forwarding alias was deleted, not kept. | <!-- legacy-name-ok: records the retirement of a formerly-permanent npm client alias -->
 | Interviewer | `memclaw-interviewer` command, config path, lock name, and cron marker | Permanent installed-machine aliases; existing crontabs and state must keep converging on one implementation. | <!-- legacy-name-ok: names permanent interviewer installed-state contracts -->
 | MCP | `memclaw_*` tool calls and the `mcpServers.memclaw` server/config key | Permanent dispatch/config aliases. Saved prompts and deployed agent configuration cannot be counted reliably. | <!-- legacy-name-ok: names permanent MCP tool and server aliases -->
 | Plugin and REST | plugin id/path/skill slug `memclaw`, `/api/v1/memclaw`, and legacy managed-file markers | Permanent installed-state and route aliases protected by the do-not-touch sentinel. | <!-- legacy-name-ok: names permanent plugin, skill, and REST aliases -->

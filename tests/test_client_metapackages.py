@@ -1,11 +1,11 @@
 """Invariants for the client metapackages under ``clients/``.
 
 Three distributions on PyPI (``caura``, ``caura-sdk``, ``caura-client``) and
-three on npm (``@caura/client``, ``@caura/sdk``, and the legacy alias they
-preserve) install the same client. The aliases exist because install
-instructions in the wild — much of it AI-generated — point at names we did not
-choose, and a name that 404s is either a dead instruction or, on PyPI where
-anyone may claim an unused name, an open door.
+two on npm (``@caura/client``, ``@caura/sdk``) install the same client. The
+aliases exist because install instructions in the wild — much of it
+AI-generated — point at names we did not choose, and a name that 404s is
+either a dead instruction or, on PyPI where anyone may claim an unused name,
+an open door.
 
 That shape has two failure modes with no natural symptom, and this module pins
 both:
@@ -47,7 +47,6 @@ PY_DISTS = {
 
 NPM_DISTS = {
     "typescript": "@caura/client",
-    "npm-legacy-client": "@caura/memclaw-client",  # legacy-name-ok: published alias
     "npm-sdk": "@caura/sdk",
 }
 
@@ -55,17 +54,13 @@ NPM_DISTS = {
 # dependency. Neither alias reaches through another alias, so a future client
 # change remains a one-package change.
 NPM_REEXPORT_TARGET = {
-    "npm-legacy-client": NPM_DISTS["typescript"],
     "npm-sdk": "@caura/client",
 }
 
 # Metapackages only — the implementation is excluded, since it is the thing
 # they all depend on.
 PY_METAPACKAGES = ("caura-meta", "caura-sdk-meta")
-NPM_METAPACKAGES = ("npm-legacy-client", "npm-sdk")
-LEGACY_NPM_CLIENT_TAG = (
-    "memclaw-client-ts-v1.0.2"  # legacy-name-ok: guard compatibility case
-)
+NPM_METAPACKAGES = ("npm-sdk",)
 
 
 def _pyproject(directory: str) -> dict:
@@ -181,16 +176,6 @@ def test_npm_metapackages_reexport_what_they_depend_on(directory: str) -> None:
 
 
 @pytest.mark.unit
-def test_npm_alias_dependency_direction_avoids_historical_cycle() -> None:
-    """The old canonical 1.0.0 wrapper must not satisfy the forward alias."""
-    legacy_alias = _package_json("npm-legacy-client")
-    assert legacy_alias["dependencies"]["@caura/client"] == "^1.0.1"
-
-    canonical = _package_json("typescript")
-    assert NPM_DISTS["npm-legacy-client"] not in canonical.get("dependencies", {})
-
-
-@pytest.mark.unit
 def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() -> None:
     workflow = (WORKFLOWS / "publish-npm-client.yml").read_text()
     guard = "      - name: The tag must agree with package.json\n"
@@ -209,12 +194,6 @@ def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() ->
     [
         ("caura-client-ts-v1.0.1", "typescript", True, "both Caura-spelled"),
         ("caura-npm-v1.0.1", "typescript", True, "both Caura-spelled"),
-        (
-            "caura-client-ts-v1.0.1",
-            "npm-legacy-client",
-            False,
-            "is Caura-spelled but package.json publishes",
-        ),
         (
             "unrelated-v1.0.1",
             "typescript",
@@ -261,24 +240,6 @@ def test_npm_client_tag_package_agreement_rejects_an_unknown_brand(
         "package.json publishes @other/client, whose brand is not recognized"
         in result.stdout
     )
-
-
-@pytest.mark.unit
-def test_legacy_npm_tag_still_publishes_the_legacy_alias() -> None:
-    workflow = (WORKFLOWS / "publish-npm-legacy-client.yml").read_text()
-    tag_pattern = LEGACY_NPM_CLIENT_TAG.removesuffix("1.0.2") + "*"
-    assert f'- "{tag_pattern}"' in workflow
-    assert "working-directory: clients/npm-legacy-client" in workflow
-
-    result = _run_workflow_step(
-        "publish-npm-legacy-client.yml",
-        "The tag must agree with package.json",
-        CLIENTS / "npm-legacy-client",
-        LEGACY_NPM_CLIENT_TAG,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    published_alias = "@caura/memclaw-client@1.0.2"  # legacy-name-ok: alias path
-    assert f"publishing {published_alias}" in result.stdout
 
 
 @pytest.mark.unit
