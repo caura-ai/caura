@@ -186,7 +186,7 @@ export function cleanupStaleHeartbeatEducation(
   // is `\n\n---\n\n` (2+2); after a previous strip leaves a reduced
   // form `\n---\n\n` (1+2), this still matches.
   const re =
-    /(?:\n{1,2}---\n{1,2})?You have been connected to MemClaw[^\n]*?always include your agent_id\.\n?/;
+    /(?:\n{1,2}---\n{1,2})?You have been connected to MemClaw[^\n]*?always include your agent_id\.\n?/; // legacy-name-floor: floor
   let cur = content;
   let cleaned = false;
   // Bounded loop: stale paragraphs accumulate one per upgrade. A few
@@ -217,7 +217,7 @@ function cleanupPhantomEducationFiles(baseDir: string): void {
       const content = readFileSync(fpath, "utf-8");
       const isPluginOrphan =
         (fname === "TOOLS.md" &&
-          (content.includes("MemClaw — Tools Available") ||
+          (content.includes("MemClaw — Tools Available") || // legacy-name-floor: floor
             content.includes("Caura — Tools Available"))) ||
         (fname === "AGENTS.md" && content.includes("## Memory V2"));
       if (isPluginOrphan) {
@@ -571,7 +571,7 @@ export function spliceFencedBlock(
   legacyHeadingPrefix: string,
   options: { force?: boolean; backupPath?: string } = {},
 ): SpliceResult {
-  const tag = `memclaw:${marker}`;
+  const tag = `memclaw:${marker}`; // legacy-name-floor: floor
   const innerContent = newBlock.replace(/^\n+|\n+$/g, "");
   const version = blockHash(innerContent);
   const fenced = `<!-- ${tag} v=${version} -->\n${innerContent}\n<!-- /${tag} -->\n`;
@@ -696,10 +696,10 @@ export function writeEducationFiles(
         // `## MemClaw — Long-Term Agent Memory (auto-added by plugin)` // legacy-name-floor: historical heading family
         // (0.98.5), and any future variant that keeps the same
         // `## MemClaw —` lead. // legacy-name-floor: historical heading family
-        "## MemClaw —",
+        "## MemClaw —", // legacy-name-floor: floor
         {
           force: options.force,
-          backupPath: toolsPath + ".memclaw-bak",
+          backupPath: toolsPath + ".memclaw-bak", // legacy-name-floor: pinned backup suffix
         },
       );
       if (toolsResult.updated) {
@@ -724,7 +724,7 @@ export function writeEducationFiles(
         "## Memory V2",
         {
           force: options.force,
-          backupPath: agentsPath + ".memclaw-bak",
+          backupPath: agentsPath + ".memclaw-bak", // legacy-name-floor: pinned backup suffix
         },
       );
       if (agentsResult.updated) {

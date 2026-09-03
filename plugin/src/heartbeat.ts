@@ -503,10 +503,10 @@ export async function sendHeartbeat(): Promise<void> {
         try {
           const hb =
             existsSync(join(wsPath, "HEARTBEAT.md")) &&
-            readFileSync(join(wsPath, "HEARTBEAT.md"), "utf-8").includes("memclaw");
+            readFileSync(join(wsPath, "HEARTBEAT.md"), "utf-8").includes("memclaw"); // legacy-name-floor: floor
           const tools =
             existsSync(join(wsPath, "TOOLS.md")) &&
-            readFileSync(join(wsPath, "TOOLS.md"), "utf-8").toLowerCase().includes("memclaw");
+            readFileSync(join(wsPath, "TOOLS.md"), "utf-8").toLowerCase().includes("memclaw"); // legacy-name-floor: floor
           workspaceFiles[d] = { heartbeat_md: !!hb, tools_md: !!tools };
         } catch {
           // Skip workspace on error
@@ -517,7 +517,7 @@ export async function sendHeartbeat(): Promise<void> {
     }
 
     // Shared plugin skill file — checked once, reported on setup_status.
-    const sharedSkillPath = join(getPluginDir(), "skills", "memclaw", "SKILL.md");
+    const sharedSkillPath = join(getPluginDir(), "skills", "memclaw", "SKILL.md"); // legacy-name-floor: shipped skill path
     const sharedSkillPresent = existsSync(sharedSkillPath);
 
     // Auto-educate every discovered workspace on each heartbeat. This is
@@ -541,7 +541,7 @@ export async function sendHeartbeat(): Promise<void> {
           const wsPath = join(ocBase, wsDir);
           workspaceFiles[wsDir].tools_md =
             existsSync(join(wsPath, "TOOLS.md")) &&
-            readFileSync(join(wsPath, "TOOLS.md"), "utf-8").toLowerCase().includes("memclaw");
+            readFileSync(join(wsPath, "TOOLS.md"), "utf-8").toLowerCase().includes("memclaw"); // legacy-name-floor: floor
         }
       }
     } catch (e: unknown) {
@@ -738,7 +738,7 @@ async function processCommand(cmd: {
           "interview-buffer.ts",
         ];
         const FALLBACK_ROOT_FILES = [
-          "openclaw.plugin.json", "tools.json", "skills/memclaw/SKILL.md",
+          "openclaw.plugin.json", "tools.json", "skills/memclaw/SKILL.md", // legacy-name-floor: shipped skill path
         ];
 
         let srcFiles: string[] = FALLBACK_SRC_FILES;
