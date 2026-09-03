@@ -787,6 +787,44 @@ def _included_mirrors(config: Config | None = None) -> tuple[str, ...]:
     return tuple(f":(top,literal){path}" for path in _mirror_paths(config))
 
 
+def _excluded_changelogs() -> tuple[str, ...]:
+    """Every ``CHANGELOG.md``, unconditionally excluded from the gate.
+
+    Eldad's explicit decision. release-please regenerates each package's
+    CHANGELOG from merged PR titles, and the fleet's convention names
+    whatever a commit removes — including, when that is the change, the
+    old brand itself. That makes CHANGELOG.md a counted file charging the
+    programme for RECORDING that it removed a legacy name — every release
+    shipping rename work mints at least one gated line describing it, on a
+    line no human wrote.
+
+    ``_release_please_pull_request`` below already exempts this, but only
+    while CI is live inside that one authenticated pull_request event —
+    correct at that PR's own merge, and blind afterward: a later status
+    audit, a local run, or any other PR's base diff re-measures outside
+    that event and the same line reads as a fresh mint, because the
+    mechanism is scoped to an event rather than to a fact about the file.
+    A CHANGELOG is a dated historical record in every context, not only in
+    one CI event, so this exclusion is unconditional and independent of
+    CI/PR context — a policy about what the file IS, not a widened
+    authentication check.
+
+    Deliberately not folded into ``mirror_paths`` (config-driven, exact
+    paths only): a monorepo can carry one CHANGELOG.md per package, at
+    unrelated paths, so a literal list would need a new entry every time a
+    service gains its own — the same hand-maintenance drift this exclusion
+    exists to remove, just moved to file-list granularity.
+
+    ``icase``: the old authenticated exemption matched the basename
+    case-insensitively (``str.upper().startswith("CHANGELOG")``); matching
+    the same way here means a differently-cased CHANGELOG (release-please
+    has always emitted the canonical casing in this fleet, but nothing
+    enforces that) is not a silent gap in what "unconditional" claims to
+    cover.
+    """
+    return (":(exclude,glob,top,icase)**/CHANGELOG.md",)
+
+
 def _grep(
     tree: str | None,
     pathspec: str | list[str] = ":/",
@@ -822,6 +860,7 @@ def _grep(
     args += [pathspec] if isinstance(pathspec, str) else pathspec
     if exclusions:
         args += _excluded_mirrors()
+        args += _excluded_changelogs()
 
     prefix = f"{tree}:" if tree is not None else ""
 
@@ -932,6 +971,13 @@ def _literal(path: str) -> str:
 
 def _release_please_pull_request() -> bool:
     """True when CI builds a release-please PR created by Caura's deploy bot.
+
+    Dead code as of the unconditional CHANGELOG.md exclusion in
+    ``_excluded_changelogs``: ``_grep`` strips every CHANGELOG.md line
+    before this function's caller ever sees it, so no path can reach the
+    ``release_please_changelogs`` check below any more. Kept in place,
+    redundant rather than load-bearing -- see ``_excluded_changelogs`` for
+    why removing it is a separate change.
 
     release-please regenerates per-package CHANGELOGs by quoting merged PR
     titles verbatim, so titles that legitimately carried the old brand
@@ -2410,6 +2456,10 @@ def main() -> int:
     grown = {}
     excused: dict[str, Counter[str]] = {}
     exempt_changelogs: list[str] = []
+    # Dead since _excluded_changelogs: no path in `head` ever starts with
+    # "CHANGELOG" any more, because _grep already stripped every such line
+    # before head/base were built. Kept, not load-bearing -- see
+    # _excluded_changelogs's docstring.
     release_pull_request = (
         _ACTIVE_CONFIG.release_please_changelogs and _release_please_pull_request()
     )
