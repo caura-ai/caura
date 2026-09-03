@@ -727,7 +727,7 @@ See [NOTICE](NOTICE) for copyright and third-party attributions.
 
 ## Trademarks
 
-"MemClaw" and "Caura" are trademarks of Caura. The Apache License 2.0 grants
+"Caura" is a trademark of Caura. The Apache License 2.0 grants
 permission to use the source code but does not grant permission to use these
 names, logos, or branding in a way that suggests endorsement of, or affiliation
 with, any derivative work. See Apache License 2.0 §6 for the full legal terms.
