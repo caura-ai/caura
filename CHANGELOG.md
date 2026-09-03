@@ -10,6 +10,21 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.46.2](https://github.com/caura-ai/caura/compare/backend-v2.46.1...backend-v2.46.2) (2026-09-03)
+
+
+### Bug Fixes
+
+* **auth:** scope the delete trust gate to agent credentials ([#1259](https://github.com/caura-ai/caura/issues/1259)) ([e21b383](https://github.com/caura-ai/caura/commit/e21b383b4faa1af551006bda48bb2db0334f622d))
+* **clients:** retire the memclaw-interviewer console script ([#1245](https://github.com/caura-ai/caura/issues/1245)) ([70950a1](https://github.com/caura-ai/caura/commit/70950a1831d826816c701189911eb91be42b7c2d))
+* **plugin:** rename the systemd TLS drop-in from memclaw-tls.conf to caura-tls.conf ([#1247](https://github.com/caura-ai/caura/issues/1247)) ([c093048](https://github.com/caura-ai/caura/commit/c0930483b89f8431bc2fe9c60d3b23906367a421))
+
+
+### Documentation
+
+* drop the MemClaw trademark assertion from NOTICE and README ([#1258](https://github.com/caura-ai/caura/issues/1258)) ([74521e1](https://github.com/caura-ai/caura/commit/74521e17500d21a68f3994b2856e7013a1b1d7cf))
+* floor-mark two more memclaw mentions in the integration guide ([#1254](https://github.com/caura-ai/caura/issues/1254)) ([113e4ba](https://github.com/caura-ai/caura/commit/113e4ba4284e3d9b6d592a3d9a755398645d3eb1))
+
 ## [2.46.1](https://github.com/caura-ai/caura/compare/backend-v2.46.0...backend-v2.46.1) (2026-09-03)
 
 
