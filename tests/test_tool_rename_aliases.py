@@ -43,12 +43,13 @@ async def _outcome(name: str) -> tuple[str, str]:
     # error text mentions the canonical name under either spelling; what
     # matters is the error class (validation vs unknown-tool), not which
     # spelling was used.
-    suffix = name.removeprefix("caura_").removeprefix("memclaw_")
+    suffix = name.removeprefix("caura_")
+    suffix = suffix.removeprefix("memclaw_")  # legacy-name-ok: rule 3 dispatch alias
 
     def _normalize(text: str) -> str:
-        return text.replace(f"caura_{suffix}", "<tool>").replace(
-            f"memclaw_{suffix}", "<tool>"
-        )
+        text = text.replace(f"caura_{suffix}", "<tool>")
+        legacy_marker = f"memclaw_{suffix}"  # legacy-name-ok: rule 3 dispatch alias
+        return text.replace(legacy_marker, "<tool>")
 
     try:
         result = await mcp_server.mcp.call_tool(name, {})
@@ -64,7 +65,7 @@ async def test_listing_exposes_only_caura_names():
     offenders = [n for n in names if not n.startswith("caura_")]
     assert not offenders, (
         f"tools/list must advertise only caura_* names, got {offenders}. "
-        "Legacy memclaw_* names are dispatch aliases, never listed — "
+        "Legacy memclaw_* names are dispatch aliases, never listed — "  # legacy-name-ok: rule 3
         "dual-listing doubles every client's tool-schema token budget."
     )
 
@@ -75,7 +76,8 @@ async def test_every_tool_dispatches_under_its_legacy_name():
     registered tool — including tools that did not exist at rename time.
     """
     for name in await _listed_tool_names():
-        legacy = "memclaw_" + name.removeprefix("caura_")
+        suffix = name.removeprefix("caura_")
+        legacy = "memclaw_" + suffix  # legacy-name-ok: rule 3 dispatch alias
         canonical_kind, canonical_detail = await _outcome(name)
         legacy_kind, legacy_detail = await _outcome(legacy)
         assert "unknown tool" not in legacy_detail.lower(), (
@@ -98,7 +100,7 @@ async def test_legacy_alias_reaches_the_handler_body(monkeypatch):
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._AUTH_ERROR)
 
     result = await mcp_server.mcp.call_tool(
-        "memclaw_write",
+        "memclaw_write",  # legacy-name-ok: rule 3 dispatch alias
         {"content": "alias probe body", "agent_id": "claude-eldad"},
     )
     envelope = parse_envelope(result)
@@ -108,6 +110,9 @@ async def test_legacy_alias_reaches_the_handler_body(monkeypatch):
 @pytest.mark.asyncio
 async def test_unknown_names_still_fail_under_both_prefixes():
     """The shim must not turn nonexistent tools into false positives."""
-    for bogus in ("caura_nonexistent", "memclaw_nonexistent"):
+    for bogus in (
+        "caura_nonexistent",
+        "memclaw_nonexistent",  # legacy-name-ok: rule 3 dispatch alias
+    ):
         with pytest.raises(ToolError):
             await mcp_server.mcp.call_tool(bogus, {})

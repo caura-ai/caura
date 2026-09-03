@@ -41,15 +41,20 @@ for _k, _v in _TEST_DEFAULTS.items():
 
 # Defensively unset env vars that change auth shape and routinely leak in
 # from developers' shells (the OSS plugin onboarding writes
-# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many
+# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many  # legacy-name-ok: rule 3 env alias
 # rc files source it for the openclaw CLI). A leaked value flips
-# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``
+# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``  # legacy-name-ok: rule 3 dual-read field
 # enforce the gate at Path 2 with 401s before any standalone-mode
 # bypass — silently failing every test that doesn't sniff the env
 # itself (e.g. test_rate_limit's auth-gated burst test, which gets all
 # 401s instead of the expected 200/429 mix). Unset rather than
 # setdefault — setdefault doesn't override an existing env value.
-for _leaky in ("MEMCLAW_API_KEY", "MEMCLAW_KEY", "CAURA_API_KEY", "CAURA_KEY"):
+for _leaky in (
+    "MEMCLAW_API_KEY",  # legacy-name-ok: rule 3 env alias
+    "MEMCLAW_KEY",  # legacy-name-ok: rule 3 env alias
+    "CAURA_API_KEY",
+    "CAURA_KEY",
+):
     os.environ.pop(_leaky, None)
 
 # ruff: noqa: E402 — these imports MUST stay below the env defaults above;
