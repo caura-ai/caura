@@ -561,7 +561,7 @@ export class CauraContextEngine {
         `config keys=${Object.keys(this.config || {}).join(",") || "(empty)"}`,
     );
 
-    const testContent = `memclaw-smoke-${Date.now()}`;
+    const testContent = `memclaw-smoke-${Date.now()}`; // legacy-name-floor: floor
     let writtenId: string | null = null;
     // Hoisted out of the try so the finally-block cleanup DELETE can pass
     // the tenant_id the backend requires (see below).

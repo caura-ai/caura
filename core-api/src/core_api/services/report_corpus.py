@@ -45,7 +45,7 @@ NON_COHESIVE_TITLE_REGEX = (
     r"(heartbeat|health[- ]?check|healthz|healthy|watchdog|gpu.?health|no.?change|"
     r"auth error|zero auth|0 auth|encrypted|unreadable|no readable|no actionable|"
     r"no usable|no_reply|polled|quickcheck|app-fleet|discovery script|"
-    r"gateway (active|reachable)|cache refresh|memclaw-smoke)"
+    r"gateway (active|reachable)|cache refresh|memclaw-smoke)"  # legacy-name-floor: floor
 )
 _NON_COHESIVE_TITLE_RE = re.compile(NON_COHESIVE_TITLE_REGEX, re.IGNORECASE)
 

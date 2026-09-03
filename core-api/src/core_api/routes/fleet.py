@@ -428,7 +428,7 @@ async def _auto_upgrade_enabled_for_tenant(tenant_id: str) -> bool:
     """
     try:
         raw = await get_raw_settings(tenant_id)
-        flag = raw.get("memclaw", {}).get("auto_upgrade_enabled")
+        flag = raw.get("memclaw", {}).get("auto_upgrade_enabled")  # legacy-name-floor: floor
         # None (no override) → use the global default (true).
         return flag is not False
     except Exception:

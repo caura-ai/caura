@@ -219,7 +219,7 @@ DEFAULT_SETTINGS: dict = {
     # is a separate global guard that prevents auto-deploy specifically
     # for plugin versions whose deploy machinery is itself broken
     # (currently: 2.3.0 — drift in srcFiles + missing version-stamp).
-    "memclaw": {
+    "memclaw": {  # legacy-name-floor: floor
         "auto_upgrade_enabled": None,  # None = use global default (true)
     },
     "security_audit": {
@@ -595,7 +595,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "chunking.auto_chunk_enabled": bool,
     "agents.require_agent_approval": bool,
     "entity_blocklist": list,
-    "memclaw.auto_upgrade_enabled": bool,
+    "memclaw.auto_upgrade_enabled": bool,  # legacy-name-floor: floor
     "write.triple_emission_enabled": bool,
     "write.retraction_enabled": bool,
     # Skill Factory SF-006 — type validators for the skills_factory namespace.

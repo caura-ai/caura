@@ -969,7 +969,11 @@ app.include_router(keystones_router, prefix="/api/v1")
 # shipped as /api/v1/memclaw/keystones and customer scripts call it. The
 # canonical path is now the brand-neutral /api/v1/keystones (matching every
 # other route); the old prefix keeps serving forever, hidden from the schema.
-app.include_router(keystones_router, prefix="/api/v1/memclaw", include_in_schema=False)
+app.include_router(
+    keystones_router,
+    prefix="/api/v1/memclaw",  # legacy-name-floor: floor
+    include_in_schema=False,
+)
 app.include_router(crystallizer_router, prefix="/api/v1")
 app.include_router(plugin_router, prefix="/api/v1")
 # Bootstrap aliases — see plugin.py:plugin_bootstrap_router for rationale.
