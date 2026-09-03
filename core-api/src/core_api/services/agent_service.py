@@ -501,7 +501,21 @@ async def enforce_delete(
     tenant_id: str,
     agent_id: str,
 ) -> None:
-    """Enforce delete permissions."""
+    """Enforce delete permissions for an AGENT credential.
+
+    Scope of the gate, decided 2026-09-03 after REST and MCP were measured
+    giving opposite answers to the same call: **the trust ladder governs agent
+    credentials; tenant scope governs tenant keys.**
+
+    A tenant key is not gated here, because it has no trust level to compare —
+    it is a tenant-wide credential, and deleting inside its own tenant is
+    within the authority it already holds for read, update and bulk delete.
+    Callers therefore invoke this only when they hold an authenticated agent
+    identity, and MUST NOT synthesize one from caller-supplied input to reach
+    it: a gate a caller can opt into by naming an identity is not a gate. See
+    ``routes.memories.delete_memory`` and the three MCP sites in
+    ``mcp_server`` for the guard shape this contract expects.
+    """
     agent = await lookup_agent(tenant_id, agent_id)
     if not agent:
         raise HTTPException(
