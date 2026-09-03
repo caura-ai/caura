@@ -7,15 +7,15 @@ services:
   db:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: memclaw
+      POSTGRES_USER: caura
       POSTGRES_PASSWORD: changeme
-      POSTGRES_DB: memclaw
+      POSTGRES_DB: caura
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U memclaw"]
+      test: ["CMD-SHELL", "pg_isready -U caura"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -78,12 +78,12 @@ services:
       - storage_secret:/run/caura-storage:ro
     environment:
       PYTHONPATH: /app/core-storage-api/src:/app
-      DATABASE_URL: postgresql+asyncpg://memclaw:changeme@db:5432/memclaw
+      DATABASE_URL: postgresql+asyncpg://caura:changeme@db:5432/caura
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
-      POSTGRES_USER: memclaw
+      POSTGRES_USER: caura
       POSTGRES_PASSWORD: changeme
-      POSTGRES_DB: memclaw
+      POSTGRES_DB: caura
       POSTGRES_REQUIRE_SSL: "false"
       ENVIRONMENT: development
       CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"

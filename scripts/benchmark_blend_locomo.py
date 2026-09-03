@@ -74,7 +74,11 @@ from _locomo_bench import (
 )
 from core_api.constants import FTS_RANK_SCALE, FTS_WEIGHT
 
-DEFAULT_PG_DSN = "postgresql://memclaw:changeme@localhost:5433/memclaw"  # legacy-name-ok: existing local benchmark database defaults
+# The "existing local benchmark database defaults" this preserved are retired:
+# the ephemeral local/CI Postgres role+db population was renamed memclaw ->  # legacy-name-floor: historical note on a completed rename
+# caura together in one sweep (see core_storage_api.config.LOCAL_DATABASE_URL).
+# Not a legacy-name-ok alias — just the current default.
+DEFAULT_PG_DSN = "postgresql://caura:changeme@localhost:5433/caura"
 
 # Recall first: it is the question this harness exists to answer, and the one the
 # ranking change can get wrong. The ordering metrics come along because a change

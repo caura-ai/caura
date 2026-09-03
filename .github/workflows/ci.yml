@@ -19,13 +19,13 @@ jobs:
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_DB: memclaw
-          POSTGRES_USER: memclaw
+          POSTGRES_DB: caura
+          POSTGRES_USER: caura
           POSTGRES_PASSWORD: changeme
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U memclaw"
+          --health-cmd "pg_isready -U caura"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -484,16 +484,16 @@ jobs:
         run: uv run mypy --config-file scripts/mypy.ini scripts/
 
       - name: Enable pgvector extension
-        run: PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+        run: PGPASSWORD=changeme psql -h localhost -U caura -d caura -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
       - name: Run migrations
         run: alembic upgrade head
         env:
           PYTHONPATH: core-api/src:core-storage-api/src:.
           POSTGRES_HOST: localhost
-          POSTGRES_USER: memclaw
+          POSTGRES_USER: caura
           POSTGRES_PASSWORD: changeme
-          POSTGRES_DB: memclaw
+          POSTGRES_DB: caura
           POSTGRES_REQUIRE_SSL: "false"
 
       - name: Run tests
@@ -507,11 +507,11 @@ jobs:
         env:
           PYTHONPATH: core-api/src:core-storage-api/src:.
           POSTGRES_HOST: localhost
-          POSTGRES_USER: memclaw
+          POSTGRES_USER: caura
           POSTGRES_PASSWORD: changeme
-          POSTGRES_DB: memclaw
+          POSTGRES_DB: caura
           POSTGRES_REQUIRE_SSL: "false"
-          TEST_DATABASE_URL: "postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw"
+          TEST_DATABASE_URL: "postgresql+asyncpg://caura:changeme@localhost:5432/caura"
           EMBEDDING_PROVIDER: fake
           ENTITY_EXTRACTION_PROVIDER: none
           USE_LLM_FOR_MEMORY_CREATION: "false"
@@ -568,9 +568,9 @@ jobs:
         # `|| true`, which would also swallow a genuine connection or auth
         # failure and defer the confusion to the pytest step below.
         run: |
-          PGPASSWORD=changeme psql -h localhost -U memclaw -d memclaw -v ON_ERROR_STOP=1 <<'SQL'
-          SELECT 'CREATE DATABASE memclaw_storage'
-          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'memclaw_storage')\gexec
+          PGPASSWORD=changeme psql -h localhost -U caura -d caura -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT 'CREATE DATABASE caura_storage'
+          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'caura_storage')\gexec
           SQL
 
       - name: Run core-storage-api integration tests
@@ -580,7 +580,7 @@ jobs:
           POSTGRES_REQUIRE_SSL: "false"
           # This suite reads DATABASE_URL (not TEST_DATABASE_URL) — its conftest
           # migrates whatever core_storage_api.config points at.
-          DATABASE_URL: "postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw_storage"
+          DATABASE_URL: "postgresql+asyncpg://caura:changeme@localhost:5432/caura_storage"
           EMBEDDING_PROVIDER: fake
           ENTITY_EXTRACTION_PROVIDER: none
           USE_LLM_FOR_MEMORY_CREATION: "false"
