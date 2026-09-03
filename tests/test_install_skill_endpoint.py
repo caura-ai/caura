@@ -161,6 +161,22 @@ def test_skill_company_brain_installs_to_company_brain_dirs():
     assert f"skills/{FROZEN_PLUGIN_SLUG}" not in script
 
 
+def test_skill_caura_installs_to_caura_dirs():
+    """``?skill=caura`` swaps the skill name through the paths, the fetch
+    URL, and the title — same shape as company-brain, proving the new
+    slug is independently allowlisted rather than piggybacking on the
+    default. Never touches the historical slug's dirs."""
+    client = _client()
+    resp = client.get("/api/v1/install-skill?agent=both&skill=caura")
+    assert resp.status_code == 200
+    script = resp.text
+    assert "=== Caura Skill Installer (direct-MCP) ===" in script
+    assert "$HOME/.claude/skills/caura" in script
+    assert "$HOME/.agents/skills/caura" in script
+    assert "/api/v1/skill/caura" in script
+    assert f"skills/{FROZEN_PLUGIN_SLUG}" not in script
+
+
 def test_invalid_skill_returns_400():
     client = _client()
     resp = client.get("/api/v1/install-skill?skill=not-a-real-skill")
@@ -192,6 +208,29 @@ def test_serve_company_brain_skill():
     resp = client.get("/api/v1/skill/company-brain")
     assert resp.status_code == 200
     assert "name: company-brain" in resp.text
+
+
+def test_serve_caura_skill_independently_of_memclaw():  # legacy-name-ok: rule 3 compat-alias test, dual-path transition
+    """/skill/caura serves its own file (static/skills/caura/SKILL.md),
+    not a forwarded copy of the historical route's response. This is the
+    in-process proof that the two slugs are genuinely dual-served
+    rather than one aliasing the other — the thing an authenticated
+    request against the live deploy would otherwise be needed to show.
+    Proves the CODE is correct; does not by itself prove the deployed
+    edge reaches this code path (see PR body)."""
+    client = _client()
+    caura_resp = client.get("/api/v1/skill/caura")
+    legacy_resp = client.get(DEFAULT_SKILL_ENDPOINT)
+    assert caura_resp.status_code == 200
+    assert legacy_resp.status_code == 200
+    assert "name: caura" in caura_resp.text
+    assert f"name: {FROZEN_PLUGIN_SLUG}" in legacy_resp.text
+    # The two skills describe the same product and are mostly identical
+    # prose, but their self-referential install paths must differ —
+    # this is what would break if /skill/caura silently went back to
+    # forwarding the historical route's response.
+    assert "skills/caura/SKILL.md" in caura_resp.text
+    assert "skills/caura/SKILL.md" not in legacy_resp.text
 
 
 def test_serve_unknown_skill_returns_404():

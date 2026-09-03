@@ -57,8 +57,14 @@ _plugin_files = [
 
 # Plugin-root-relative files served alongside the src/*.ts files.
 # - tools.json: tool SoT, loaded by tool-specs.ts.
-# - skills/memclaw/SKILL.md: shared plugin skill, discovered by OpenClaw
-#   via openclaw.plugin.json:skills (one copy per node).
+# - skills/memclaw/SKILL.md, skills/caura/SKILL.md: shared plugin skill.  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+#   Both are served during the rebrand transition (dual-path: "memclaw"  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+#   is the historical bundled skill already on disk on every existing
+#   install; "caura" is the new one). Discovered by OpenClaw via
+#   openclaw.plugin.json:skills (one copy per node). Removing either
+#   entry here without also updating reconcile-skills.ts's
+#   PROTECTED_SKILLS in the same change deletes that skill directory
+#   from every install within one heartbeat.
 # - openclaw.plugin.json: plugin manifest. Must be served (not baked into
 #   the install script as a HEREDOC) because the manifest changes
 #   periodically as OpenClaw evolves its plugin contract — e.g. the
@@ -70,6 +76,7 @@ _plugin_files = [
 _plugin_root_files = {
     "tools.json",
     "skills/memclaw/SKILL.md",
+    "skills/caura/SKILL.md",
     "openclaw.plugin.json",
 }
 
@@ -694,10 +701,15 @@ _VALID_SKILL_AGENTS = {"claude-code", "codex", "both"}
 # Skills installable via ``/install-skill?skill=…`` and served at
 # ``/skill/{skill}``. Strictly allowlisted — the value is interpolated into a
 # filesystem path and the generated script, so an arbitrary value must never
-# reach either. ``memclaw`` is the default (the operational manual); the
-# opt-in ``company-brain`` posture skill layers on top of it.
+# reach either. ``memclaw`` is the default (the operational manual, still  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+# the default during the rebrand transition — see
+# docs/plans/skills-dual-path-transition.md); ``caura`` is the same
+# operational manual under its new name, served independently so both
+# install paths can be verified on their own. The opt-in ``company-brain``
+# posture skill layers on top of either.
 _SKILL_LABELS = {
     "memclaw": "Caura",  # legacy-name-floor: wire — ?skill= param + on-disk dir
+    "caura": "Caura",
     "company-brain": "Company Brain",
 }
 _VALID_SKILLS = frozenset(_SKILL_LABELS)
@@ -827,7 +839,7 @@ async def install_skill_script(
     agent: str = Query(default="both", description="claude-code | codex | both"),
     skill: str = Query(
         default="memclaw",
-        description="Which skill to install: memclaw (default) | company-brain",
+        description="Which skill to install: memclaw (default) | caura | company-brain",  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
     ),
     api_url: str | None = Query(
         default=None,
@@ -870,12 +882,6 @@ async def install_skill_script(
     return PlainTextResponse(script, media_type="text/plain")
 
 
-@router.get("/skill/caura", response_class=PlainTextResponse)
-async def skill_caura():
-    """Rebrand alias for /skill/memclaw — same content, new name."""
-    return await skill_memclaw()
-
-
 @router.get("/skill/memclaw", response_class=PlainTextResponse)
 async def skill_memclaw():
     """Serve the direct-MCP SKILL.md adapter.
@@ -899,7 +905,9 @@ async def skill_by_name(skill: str):
     guidance with no tenant data. ``memclaw`` is also served by the explicit
     ``/skill/memclaw`` route above (registered first, so it wins for that
     name and keeps the default path unchanged); this handles the rest of the
-    allowlist (e.g. ``company-brain``).
+    allowlist, including ``caura`` (served from ``static/skills/caura/``,
+    independent of and identical in structure to the sibling copy served
+    by the route above during the rebrand transition) and ``company-brain``.
 
     ``skill`` is used only as a key into the precomputed ``_SKILL_FILES`` map,
     so the served path is always a fixed constant — the request value never
