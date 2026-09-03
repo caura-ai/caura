@@ -284,7 +284,7 @@ class Settings(BaseSettings):
     # joiners take no slot), so one hot tenant's search storm can't
     # occupy the whole embedding service and starve other tenants
     # (noisy-neighbor-search). The TEI backend is a fixed pool
-    # (``staging-memclaw-tei``: 2 instances x containerConcurrency 10 =
+    # (``staging-memclaw-tei``: 2 instances x containerConcurrency 10 =  # legacy-name-floor: live, mid-cutover — staging-caura-tei twin already exists
     # ~20 slots, no autoscale); with cap N on M core-api instances a
     # single tenant holds at most ``N * M`` of those, leaving headroom
     # for everyone else. Tighter than ``per_tenant_search_concurrency``
