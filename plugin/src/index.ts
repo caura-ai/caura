@@ -188,7 +188,22 @@ const cauraPlugin = {
 
     // --- Gateway methods ---
 
-    api.registerGatewayMethod("memclaw.status", ({ respond }: any) => {
+    // Dual-read alias (rebrand transition, docs/plans/gateway-rpc-dual-read-alias.md):
+    // registers the same handler under both the canonical "caura.*" name
+    // and the historical "memclaw.*" one. registerGatewayMethod takes an // legacy-name-ok: dual-read alias (docs/plans/gateway-rpc-dual-read-alias.md)
+    // exact string per call with no shared prefix-stripping layer (unlike
+    // the MCP tool-name shim), so both names are registered explicitly
+    // rather than translated at dispatch time.
+    const registerGatewayMethodDualRead = (
+      canonicalName: string,
+      legacyName: string,
+      handler: (...args: any[]) => any,
+    ) => {
+      api.registerGatewayMethod(canonicalName, handler);
+      api.registerGatewayMethod(legacyName, handler);
+    };
+
+    registerGatewayMethodDualRead("caura.status", "memclaw.status", ({ respond }: any) => {  // legacy-name-ok: dual-read alias (docs/plans/gateway-rpc-dual-read-alias.md)
       const config = readOpenClawConfig();
       respond({
         id: PLUGIN_ID,
@@ -214,7 +229,7 @@ const cauraPlugin = {
       });
     });
 
-    api.registerGatewayMethod("memclaw.allowlist.check", ({ respond }: any) => {
+    registerGatewayMethodDualRead("caura.allowlist.check", "memclaw.allowlist.check", ({ respond }: any) => {  // legacy-name-ok: dual-read alias (docs/plans/gateway-rpc-dual-read-alias.md)
       const config = readOpenClawConfig();
       if (!config) {
         respond({ ok: false, error: "openclaw.json not found", path: getOpenClawConfigPath() });
@@ -232,7 +247,7 @@ const cauraPlugin = {
       });
     });
 
-    api.registerGatewayMethod("memclaw.allowlist.fix", ({ respond }: any) => {
+    registerGatewayMethodDualRead("caura.allowlist.fix", "memclaw.allowlist.fix", ({ respond }: any) => {  // legacy-name-ok: dual-read alias (docs/plans/gateway-rpc-dual-read-alias.md)
       const { changed, changes, error } = autoFixAllowlist({ forceSlotOverride: true });
       if (error) {
         respond({ ok: false, error: "Failed to write config: " + error });
@@ -252,7 +267,7 @@ const cauraPlugin = {
     // Deploy plugin — receive new source, env vars, build.
     // Gateway methods are already gated by OpenClaw operator auth, but we add
     // a token check as defense-in-depth (consistent with heartbeat HMAC model).
-    api.registerGatewayMethod("memclaw.deploy", ({ respond, params }: any) => {
+    registerGatewayMethodDualRead("caura.deploy", "memclaw.deploy", ({ respond, params }: any) => {  // legacy-name-ok: dual-read alias (docs/plans/gateway-rpc-dual-read-alias.md)
       if (CAURA_API_KEY && params?.token !== CAURA_API_KEY) {
         respond({ ok: false, error: "invalid or missing token" });
         return;
@@ -283,7 +298,7 @@ const cauraPlugin = {
     });
 
     // Read current plugin source and env vars
-    api.registerGatewayMethod("memclaw.deploy.status", ({ respond }: any) => {
+    registerGatewayMethodDualRead("caura.deploy.status", "memclaw.deploy.status", ({ respond }: any) => {  // legacy-name-ok: dual-read alias (docs/plans/gateway-rpc-dual-read-alias.md)
       const pluginDir = getPluginDir();
       const srcPath = getPluginSrcPath();
       const envPath = getPluginEnvPath();
@@ -784,7 +799,7 @@ const cauraPlugin = {
     }
 
     // --- Educate gateway method ---
-    api.registerGatewayMethod("memclaw.educate", ({ respond, params }: any) => {
+    registerGatewayMethodDualRead("caura.educate", "memclaw.educate", ({ respond, params }: any) => {  // legacy-name-ok: dual-read alias (docs/plans/gateway-rpc-dual-read-alias.md)
       const { prompt, workspaces: filterWs } = params || {};
       if (!prompt || typeof prompt !== "string") {
         respond({ ok: false, error: "prompt is required" });
