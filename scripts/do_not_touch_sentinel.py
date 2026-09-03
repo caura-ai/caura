@@ -229,12 +229,6 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     # -- Published channel names. Renaming these strands installed users. ------
     Sentinel(
-        path="clients/python/src/memclaw_client/__init__.py",  # legacy-name-floor: pinned floor path
-        text="from caura_client import *",
-        kind=LITERAL,
-        breaks="both pip install spellings lose the permanent legacy import surface",
-    ),
-    Sentinel(
         path="clients/python/src/caura_client/client.py",
         text="MemClaw = Caura",  # legacy-name-floor: pinned floor assignment
         kind=LITERAL,
@@ -254,27 +248,9 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="clients/python/tests/test_legacy_alias.py",
-        text="assert memclaw_client.MemClaw is caura_client.Caura",  # legacy-name-floor: pinned floor assertion
+        text="assert caura_client.MemClaw is caura_client.Caura",  # legacy-name-ok: rule 3 permanent class alias, sentinel pin
         kind=LITERAL,
-        breaks="the end-to-end legacy client identity contract can disappear with its test",
-    ),
-    Sentinel(
-        path="clients/python/tests/test_legacy_alias.py",
-        text="assert memclaw_client.MemClawError is caura_client.CauraError",  # legacy-name-floor: pinned floor assertion
-        kind=LITERAL,
-        breaks="the end-to-end legacy error identity contract can disappear with its test",
-    ),
-    Sentinel(
-        path="clients/python/tests/test_legacy_alias.py",
-        text="assert memclaw_client.MemClawAPIError is caura_client.CauraAPIError",  # legacy-name-floor: pinned floor assertion
-        kind=LITERAL,
-        breaks="the end-to-end legacy API-error identity contract can disappear with its test",
-    ),
-    Sentinel(
-        path="clients/npm-legacy-client/package.json",
-        text="@caura/memclaw-client",  # legacy-name-floor: floor
-        kind=LITERAL,
-        breaks="the permanent npm compatibility alias disappears for existing installs",
+        breaks="the class-level legacy identity contract can disappear with its test",
     ),
     Sentinel(
         path="clients/python/pyproject.toml",
@@ -317,18 +293,6 @@ SENTINELS: tuple[Sentinel, ...] = (
             "uninstall stops finding crontab entries customers already have, "
             "and re-install duplicates them instead of replacing"
         ),
-    ),
-    Sentinel(
-        path=".github/workflows/publish-python-client.yml",
-        text="memclaw-client-v*",  # legacy-name-floor: floor
-        kind=LITERAL,
-        breaks="the release tag pattern stops triggering a publish",
-    ),
-    Sentinel(
-        path=".github/workflows/publish-npm-legacy-client.yml",
-        text="memclaw-client-ts-v*",  # legacy-name-floor: floor
-        kind=LITERAL,
-        breaks="the release tag pattern stops triggering a publish",
     ),
     # -- Immutable migration history. Rule 2: point at it, never rewrite it. ---
     Sentinel(

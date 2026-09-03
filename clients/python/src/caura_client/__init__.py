@@ -3,8 +3,9 @@ memory for AI agent fleets.
 
 The 2026-08 rename is additive: ``Caura`` is the canonical client class and
 ``MemClaw`` remains a permanent alias, mirroring the MCP tool rename
-(caura_* canonical, memclaw_* accepted forever). The ``memclaw_client``
-import package likewise remains importable forever — see its ``__init__``.
+convention. The separate legacy import package and the two legacy
+package-forwarder distributions that once depended on this one were retired
+2026-09; no transition is owed to pre-rename installs.
 """
 
 from __future__ import annotations

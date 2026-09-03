@@ -10,14 +10,13 @@ name: Publish the @caura/sdk alias
 # hole, only a 404 on an install line we did not write. Recorded because the
 # original finding rated both halves the same and they are not the same.
 #
-# GATES. This workflow keeps every gate from `publish-npm-legacy-client.yml`
-# — credential present, tag agrees with package.json, dependencies already on
-# the registry, publish, verify the registry actually serves it — but not that
-# file's full commentary. READ THAT FILE for why each gate exists; every one of
-# them is there because it failed in production first. The two are deliberate
-# duplicates for now: consolidating them into a reusable `workflow_call` is the
-# right end state but changes both alias release paths, so it stays separate
-# from this package-identity migration.
+# GATES. This workflow's gate shape — credential present, tag agrees with
+# package.json, dependencies already on the registry, publish, verify the
+# registry actually serves it — was carried over from the (now-retired)
+# `publish-npm-legacy-client.yml`, which the npm legacy client alias used
+# before it was deleted; every one of these gates is there because its
+# equivalent failed in production first. Consolidating this shape into a
+# reusable `workflow_call` remains the right end state, just not done yet.
 #
 # One-time setup by a maintainer:
 #   1. `NPM_TOKEN` repository secret — an npm automation token with publish
