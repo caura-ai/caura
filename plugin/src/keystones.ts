@@ -333,7 +333,7 @@ async function _fetchAndCache(
     }
     const raw = await apiCall(
       "GET",
-      "/memclaw/keystones",
+      "/memclaw/keystones", // legacy-name-floor: live compatibility route
       undefined,
       query,
       controller.signal,

@@ -750,7 +750,7 @@ const cauraPlugin = {
     // --- Context engine ---
     try {
       if (typeof api.registerContextEngine === "function") {
-        api.registerContextEngine("memclaw", (config: Record<string, unknown> | undefined | null) => {
+        api.registerContextEngine("memclaw", (config: Record<string, unknown> | undefined | null) => { // legacy-name-floor: registers under the kept engine id (info.id)
           return new CauraContextEngine(config);
         });
         console.log("[caura] ContextEngine 'memclaw' registered");  // legacy-name-floor: names the kept engine id (info.id)
