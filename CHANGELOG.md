@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.46.1](https://github.com/caura-ai/caura/compare/backend-v2.46.0...backend-v2.46.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* **clients:** delete the legacy memclaw client packages and workflow ([#1244](https://github.com/caura-ai/caura/issues/1244)) ([caa1c3e](https://github.com/caura-ai/caura/commit/caa1c3e81a1b23334718cf3a120d34e554b4158d))
+
 ## [2.46.0](https://github.com/caura-ai/caura/compare/backend-v2.45.0...backend-v2.46.0) (2026-09-02)
 
 
