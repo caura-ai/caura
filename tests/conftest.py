@@ -71,7 +71,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 TEST_DB_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw",
+    "postgresql+asyncpg://caura:changeme@127.0.0.1:5432/caura",
 )
 
 # NOT what the ``tenant_id`` fixture returns — that mints a fresh id per test. This

@@ -20,7 +20,7 @@ Usage:
 
     # Or supply an explicit DSN:
     python -m core_storage_api.scripts.preflight_012 \\
-        --dsn postgresql+asyncpg://memclaw:changeme@localhost:5432/memclaw
+        --dsn postgresql+asyncpg://caura:changeme@localhost:5432/caura
 
     # Machine-readable output, e.g. for piping into jq:
     python -m core_storage_api.scripts.preflight_012 --json
@@ -207,9 +207,9 @@ def _resolve_dsn() -> str:
 
         host = os.environ.get("POSTGRES_HOST", "localhost")
         port = os.environ.get("POSTGRES_PORT", "5432")
-        user = os.environ.get("POSTGRES_USER", "memclaw")
+        user = os.environ.get("POSTGRES_USER", "caura")
         password = os.environ.get("POSTGRES_PASSWORD", "")
-        db = os.environ.get("POSTGRES_DB", "memclaw")
+        db = os.environ.get("POSTGRES_DB", "caura")
         # URL-encode user + password before interpolating. Real
         # production passwords routinely contain ``@``, ``:``, ``/``,
         # ``?``, ``#`` and other characters that would otherwise be
