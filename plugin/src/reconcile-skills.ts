@@ -64,8 +64,17 @@ import { logError } from "./logger.js";
  * reconciliation, even when the catalog returns no rows (a fresh
  * tenant or a fleet with zero shared skills should NOT wipe the
  * agent's onboarding skill).
+ *
+ * Both slugs are protected during the rebrand transition: "memclaw" is — legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+ * the historical bundled skill (still on disk on every existing
+ * install), "caura" is the new one shipped alongside it starting this
+ * release. This set MUST be updated in the same commit/deploy as any
+ * change to which skill directories are bundled — the reconciler runs
+ * every heartbeat (60s) and deletes any on-disk slug that is neither
+ * catalog-desired nor in this set, so a slug present on disk but
+ * missing here is deleted within one tick, not "eventually".
  */
-export const PROTECTED_SKILLS: ReadonlySet<string> = new Set(["memclaw"]);
+export const PROTECTED_SKILLS: ReadonlySet<string> = new Set(["memclaw", "caura"]); // legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
 
 // Per-skill ownership marker for ``additive`` (shared/foreign) target
 // dirs. Caura writes this sentinel inside every skill dir it creates

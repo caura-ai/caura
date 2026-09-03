@@ -135,6 +135,13 @@ describe("reconcileSkills", () => {
     assert.ok(PROTECTED_SKILLS.has(FROZEN_PLUGIN_ID));
   });
 
+  test("PROTECTED_SKILLS also contains the new caura slug during the rebrand transition", () => {
+    // The plugin id (FROZEN_PLUGIN_ID) and the bundled skill's slug are
+    // independent identifiers that happen to share a value historically —
+    // this asserts the skill slug specifically, not the frozen plugin id.
+    assert.ok(PROTECTED_SKILLS.has("caura"));
+  });
+
   test("invariant 2: cold start pulls every catalog skill", async () => {
     plantOnDisk(FROZEN_PLUGIN_ID); // only the bundled skill
     mockCatalog = [

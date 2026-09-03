@@ -739,6 +739,7 @@ async function processCommand(cmd: {
         ];
         const FALLBACK_ROOT_FILES = [
           "openclaw.plugin.json", "tools.json", "skills/memclaw/SKILL.md", // legacy-name-floor: shipped skill path
+          "skills/caura/SKILL.md",
         ];
 
         let srcFiles: string[] = FALLBACK_SRC_FILES;
