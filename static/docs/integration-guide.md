@@ -305,11 +305,11 @@ The plugin registers 11 tools (the MCP surface minus the MCP-only `caura_keyston
   - `restart` — gateway restart
 - **Auto-education** — on first load, writes SKILL.md, TOOLS.md, AGENTS.md to all agent workspaces. New workspaces are auto-educated on heartbeat
 - **Auto-resolve** — `tenant_id` is resolved from the API key at startup, so agents never need to specify it
-- **Gateway RPC** — exposes `memclaw.status`, `memclaw.deploy`, `memclaw.deploy.status`, `memclaw.educate`, `memclaw.allowlist.check`, `memclaw.allowlist.fix` methods
+- **Gateway RPC** — exposes `memclaw.status`, `memclaw.deploy`, `memclaw.deploy.status`, `memclaw.educate`, `memclaw.allowlist.check`, `memclaw.allowlist.fix` methods <!-- legacy-name-floor: live gateway RPC method names -->
 
 ### Educating agents
 
-On first plugin load, agents are **auto-educated** — the plugin writes SKILL.md, TOOLS.md, and AGENTS.md to all agent workspaces automatically. The `.educated` flag at `~/.openclaw/plugins/memclaw/.educated` prevents re-running on subsequent restarts.
+On first plugin load, agents are **auto-educated** — the plugin writes SKILL.md, TOOLS.md, and AGENTS.md to all agent workspaces automatically. The `.educated` flag at `~/.openclaw/plugins/memclaw/.educated` prevents re-running on subsequent restarts. <!-- legacy-name-floor: frozen install path -->
 
 For manual or targeted education via the Fleet page:
 
