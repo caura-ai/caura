@@ -128,6 +128,12 @@ The identity headers are trusted on the gateway-header auth path. Set
 set `CAURA_API_KEY`; that shared-key path authenticates first and prevents the
 header-trust path from being reached.
 
+This holds on **both** surfaces. `/mcp` is a separate ASGI mount with its own
+auth middleware rather than a route behind `get_auth_context`, so "authenticates
+first" is a property each surface has to implement for itself. When the key is
+set, send it as `X-API-Key` (or a Bearer token) on MCP calls too; without it the
+request is refused `401` before any identity header is consulted.
+
 **Rate limiting (managed platform)**
 
 These limits apply to the managed platform at `caura.ai`. A self-hosted deployment enforces its own, looser per-route limits out of the box — see the [self-hosted rate limiting](../README.md#rate-limiting) section.
