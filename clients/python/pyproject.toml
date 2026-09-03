@@ -12,7 +12,6 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Caura", email = "hello@caura.ai" }]
 keywords = [
     "caura",
-    "memclaw",  # legacy-name-floor: published registry keyword
     "agent-memory",
     "ai-agents",
     "llm-memory",
@@ -40,8 +39,6 @@ dependencies = ["httpx>=0.27"]
 
 [project.scripts]
 caura-interviewer = "caura_client.interviewer.cli:main"
-# Legacy command name, kept forever — pre-rename cron entries invoke it.
-memclaw-interviewer = "caura_client.interviewer.cli:main"
 
 [project.optional-dependencies]
 # ruff pinned to the 0.15 line (matches .pre-commit-config.yaml's v0.15.4): the

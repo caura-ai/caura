@@ -30,7 +30,7 @@ from typing import Optional
 
 # Marker comment appended to our managed cron line so uninstall/idempotent
 # re-install can find and remove exactly our entry, never the user's others.
-CRON_MARKER = "# memclaw-interviewer (managed)"
+CRON_MARKER = "# memclaw-interviewer (managed)"  # legacy-name-deferred: matches a pre-rename customer's existing crontab line, one release only (docs/plans/rebrand-alias-retirement-policy.md)
 
 # Only the connection identity is persisted to the env file (0600). Non-secret
 # behavior flags (--harness, --all-projects) ride on the cron command instead.
@@ -47,7 +47,7 @@ _INTERVAL_RE = re.compile(r"^(\d+)\s*([mh])$", re.IGNORECASE)
 
 
 def config_dir() -> Path:
-    return Path.home() / ".config" / "memclaw-interviewer"
+    return Path.home() / ".config" / "memclaw-interviewer"  # legacy-name-deferred: existing customer config directory, one release only (docs/plans/rebrand-alias-retirement-policy.md)
 
 
 def env_file_path() -> Path:
@@ -82,16 +82,18 @@ def interval_to_cron(interval: str) -> str:
 def resolve_cmd() -> str:
     """Absolute invocation for the CLI, resilient to how it was installed.
 
-    Prefer the current console-script on PATH, then the legacy one (rule 3 —
-    a pre-rename install ships only that name); fall back to ``<python> -m``
-    so a venv/editable install still schedules a working command. Each path
+    Prefer the current console-script on PATH, then the legacy one — a
+    pre-rename install ships only that name, and the old entry point itself
+    is gone as of this release, so this fallback exists only to find it on
+    machines that installed it before then; fall back to ``<python> -m`` so a
+    venv/editable install still schedules a working command. Each path
     component is shell-quoted here (NOT the whole string — the fallback is
-    two words and quoting it wholesale would make sh treat it as one
-    command name).
+    two words and quoting it wholesale would make sh treat it as one command
+    name).
     """
     exe = shutil.which("caura-interviewer")
     if not exe:
-        exe = shutil.which("memclaw-interviewer")  # legacy-name-ok: rule 3 — pre-rename installs ship only the old console script
+        exe = shutil.which("memclaw-interviewer")  # legacy-name-ok: finds a pre-rename install's console script for exactly one release after its removal from pyproject.toml, then drop this fallback (docs/plans/rebrand-alias-retirement-policy.md)
     if exe:
         return shlex.quote(exe)
     return f"{shlex.quote(sys.executable)} -m caura_client.interviewer.cli"

@@ -253,12 +253,6 @@ SENTINELS: tuple[Sentinel, ...] = (
         breaks="the class-level legacy identity contract can disappear with its test",
     ),
     Sentinel(
-        path="clients/python/pyproject.toml",
-        text="memclaw-interviewer",  # legacy-name-floor: floor
-        kind=LITERAL,
-        breaks="the installed console script disappears from every existing crontab",
-    ),
-    Sentinel(
         path="clients/python/src/caura_client/interviewer/installer.py",
         text='".config" / "memclaw-interviewer"',  # legacy-name-floor: floor
         kind=LITERAL,
