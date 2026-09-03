@@ -1497,10 +1497,26 @@ async def delete_memory(
 ):
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
-    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
-    # the caller-supplied query param so an agent credential can't skip the
-    # trust gate by omitting/spoofing ``agent_id``.
-    caller_agent_id = auth.agent_id or agent_id
+    # AUTHORIZATION PRINCIPAL — the authenticated agent identity ONLY (gateway
+    # X-Agent-ID). Never the ``agent_id`` query param: the param is caller-
+    # asserted data, and treating it as a principal let a tenant key choose
+    # whether the trust gate applied at all — omit it and the gate was skipped,
+    # or name any trust>=3 agent in the tenant and it passed. The only caller it
+    # reliably stopped was the honest one naming a low-trust identity.
+    #
+    # ``None`` here means the credential carries no agent identity (a tenant
+    # key). That is not a missing check — see the gate's contract in
+    # ``enforce_delete``: the trust ladder governs AGENT credentials; a tenant
+    # key is authorized by tenant scope and holds no trust level to compare.
+    # This matches MCP, where the same distinction is already load-bearing on
+    # read / update / lineage / bulk_delete (mcp_server.py:1359-1365).
+    caller_agent_id = auth.agent_id
+    # ATTRIBUTION — deliberately NOT the same value. The audit row records who
+    # the caller says performed the delete, so the query param still counts
+    # here: dropping it would attribute a tenant key's deletes to ``None`` and
+    # lose the only identity the request carried. Authorization must not trust
+    # this value; the audit log must not discard it.
+    attribution_agent_id = auth.agent_id or agent_id
     if auth.tenant_id and caller_agent_id:
         await enforce_delete(tenant_id, caller_agent_id)
         # Cross-fleet / scope_agent row authorization (write threshold).
@@ -1531,7 +1547,7 @@ async def delete_memory(
         # Attribute to the effective identity (gateway X-Agent-ID wins over
         # the query param) — logging the raw param attributed a gateway
         # agent's deletes to None whenever it omitted ``agent_id``.
-        agent_id=caller_agent_id,
+        agent_id=attribution_agent_id,
         action="delete",
         resource_type="memory",
         resource_id=memory_id,

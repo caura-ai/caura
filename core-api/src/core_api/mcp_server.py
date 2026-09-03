@@ -1390,7 +1390,17 @@ async def caura_manage(
                 # Trust gate (>= 3), mirroring single delete / REST DELETE. Blocks
                 # the cross-fleet bulk-delete-by-id IDOR for sub-admin agents; a
                 # trust>=3 admin agent retains tenant-wide delete (parity with
-                # enforce_fleet_write). No-op for tenant-scoped credentials.
+                # enforce_fleet_write).
+                #
+                # ``caller_agent_id is None`` (a tenant-scoped credential) skips
+                # the gate BY DESIGN, not by omission — the trust ladder governs
+                # agent credentials and a tenant key holds no trust level. See
+                # ``enforce_delete``'s contract. Do NOT "fix" this by falling
+                # back to the ``agent_id`` tool argument: that value is
+                # caller-asserted, so it would let a tenant key pass the gate by
+                # naming any trust>=3 agent, and ``caller_agent_id`` is also the
+                # principal for the ``authorize_memory_access`` scope checks
+                # below and on read / update / lineage.
                 if caller_agent_id:
                     await enforce_delete(tenant_id, caller_agent_id)
                 # HOME-tenant scoped soft-delete: the storage method applies the
@@ -1618,6 +1628,12 @@ async def caura_manage(
                 result = await update_memory(uid, tenant_id, MemoryUpdate(**fields), agent_id=agent_id)
                 return _with_latency(_serialize(result), t0)
             # op == "delete" — WRITE → home tenant only.
+            #
+            # ``caller_agent_id is None`` (a tenant-scoped credential) means both
+            # checks below are skipped, and that is the decided behaviour rather
+            # than a gap: the trust ladder governs agent credentials, tenant
+            # scope governs tenant keys (see ``enforce_delete``). The same
+            # distinction already governs read / update / lineage above.
             if caller_agent_id:
                 # Trust gate (>= 3) + cross-fleet / scope_agent row authorization,
                 # mirroring REST DELETE /memories/{id}.
@@ -2505,6 +2521,10 @@ async def caura_doc(
                 return _with_latency(_error_response("INVALID_ARGUMENTS", "op=delete requires 'doc_id'."), t0)
             # Admin-trust (>= 3) gate for agent credentials, parity with memory
             # deletes — a routine trust-1 agent must not destroy tenant documents.
+            # "for agent credentials" is the whole scope of the gate: a
+            # tenant-scoped credential has no trust level and is authorized by
+            # tenant scope instead, so ``caller_agent_id is None`` skipping this
+            # is the decided contract (``enforce_delete``), not a missing check.
             if caller_agent_id:
                 await enforce_delete(tenant_id, caller_agent_id)
             # Active-only existence gate for skills: an agent must not be

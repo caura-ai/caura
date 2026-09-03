@@ -229,6 +229,50 @@ def as_agent(monkeypatch):
     _app.dependency_overrides.pop(_gac, None)
 
 
+@pytest.fixture
+def as_tenant_key(monkeypatch):
+    """Authenticate as a TENANT-scoped credential: a tenant, and no agent identity.
+
+    USE THIS, NOT ``get_test_auth()``, for anything touching the delete trust
+    gate. ``get_test_auth()`` returns the ADMIN key, which resolves to
+    ``AuthContext(tenant_id=None, is_admin=True)`` — so ``if auth.tenant_id and
+    caller_agent_id:`` is false on the ``tenant_id`` half before the identity
+    half is even read, and **the admin key cannot exercise this gate at all.**
+
+    Why that matters more than it looks: a test written with the admin key
+    passes identically before and after any change to the gate, because it
+    never reaches it. It does not fail loudly — it succeeds for the wrong
+    reason, which is indistinguishable from working. The first draft of the
+    tests below used it and would have been worthless in exactly that way;
+    reading the auth paths is the only way to catch it, since running it looks
+    like a pass.
+
+    The credential that actually reaches the gate without an agent identity is
+    a tenant key: ``tenant_id`` set, ``agent_id`` None. That is the shape the
+    REST/MCP parity smoke measured and the one this fixture installs.
+    """
+    from core_api.app import app
+    from core_api.auth import AuthContext, get_auth_context
+    from core_api.tenant_context import set_current_tenant
+
+    def _install(tenant_id: str):
+        async def _dep():
+            set_current_tenant(tenant_id)
+            return AuthContext(
+                tenant_id=tenant_id,
+                agent_id=None,
+                readable_tenant_ids=[tenant_id],
+            )
+
+        app.dependency_overrides[get_auth_context] = _dep
+
+    yield _install
+    from core_api.app import app as _app
+    from core_api.auth import get_auth_context as _gac
+
+    _app.dependency_overrides.pop(_gac, None)
+
+
 async def _write(
     client,
     headers,
@@ -463,3 +507,167 @@ async def test_rest_delete_all_tenant_key_unchanged(client):
         headers=headers,
     )
     assert r.status_code == 204, r.text
+
+
+# ---------------------------------------------------------------------------
+# The delete gate's scope: agent credentials only
+#
+# Decided 2026-09-03. REST and MCP were measured returning opposite answers to
+# the same call — the same credential, tenant and ``agent_id`` got 403 on
+# ``DELETE /memories/{id}`` and success on ``caura_manage op=delete``. REST was
+# the surface in the wrong: it built its authorization principal as
+# ``auth.agent_id or agent_id``, promoting a caller-supplied query parameter to
+# a principal. That gave a tenant key the choice of whether the gate applied —
+# omit the param to skip it, or name any trust>=3 agent to pass it — so the only
+# caller it reliably refused was the honest one naming a low-trust identity.
+#
+# The ruling: the trust ladder governs AGENT credentials; tenant scope governs
+# TENANT keys. A tenant key holds no trust level to compare and is authorized by
+# tenant scope, exactly as it already is on this route's bulk siblings
+# (``test_rest_delete_all_tenant_key_unchanged`` above) and on MCP read /
+# update / lineage / bulk_delete.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_rest_delete_byid_tenant_key_not_trust_gated(
+    client, as_tenant_key, patch_lookup
+):
+    """A tenant key naming a low-trust agent may delete; the gate is not its gate.
+
+    THIS IS THE TEST THAT FAILS WITHOUT THE FIX. Before the change the route
+    read the ``agent_id`` query param as its principal, so ``yanki-smoke``
+    (trust 1) was looked up, failed ``enforce_delete``'s trust>=3 bar, and the
+    request got 403 — while the identical call over MCP succeeded. Confirmed
+    failing on the parent commit: 403 != 204.
+    """
+    from tests.conftest import get_test_auth
+
+    tenant_id, headers = get_test_auth()
+    mem_id = await _write(
+        client,
+        headers,
+        tenant_id,
+        agent_id="yanki-smoke",
+        fleet_id=None,
+        visibility="scope_team",
+    )
+    # Resolve ``yanki-smoke`` as a real but low-trust agent. If the param were
+    # still a principal this is what would refuse the call.
+    patch_lookup(fleet_id=None, trust_level=1)
+    as_tenant_key(tenant_id)
+
+    r = await client.delete(
+        f"/api/v1/memories/{mem_id}?tenant_id={tenant_id}&agent_id=yanki-smoke",
+    )
+    assert r.status_code == 204, r.text
+
+
+@pytest.mark.integration
+async def test_rest_delete_byid_tenant_key_still_attributed_to_named_agent(
+    client, as_tenant_key, patch_lookup, monkeypatch
+):
+    """Dropping the param as a PRINCIPAL must not drop it as ATTRIBUTION.
+
+    The two uses sat one line apart behind a single variable, which is how the
+    defect was born; this pins them apart. The audit row must still name
+    ``yanki-smoke`` — attributing a tenant key's deletes to ``None`` would trade
+    an authorization bug for an accountability one.
+    """
+    from core_api.routes import memories as memories_route
+    from tests.conftest import get_test_auth
+
+    tenant_id, headers = get_test_auth()
+    mem_id = await _write(
+        client,
+        headers,
+        tenant_id,
+        agent_id="yanki-smoke",
+        fleet_id=None,
+        visibility="scope_team",
+    )
+    patch_lookup(fleet_id=None, trust_level=1)
+
+    seen: list[dict] = []
+    real_log_action = memories_route.log_action
+
+    async def _spy(**kwargs):
+        seen.append(kwargs)
+        return await real_log_action(**kwargs)
+
+    monkeypatch.setattr(memories_route, "log_action", _spy)
+    as_tenant_key(tenant_id)
+
+    r = await client.delete(
+        f"/api/v1/memories/{mem_id}?tenant_id={tenant_id}&agent_id=yanki-smoke",
+    )
+    assert r.status_code == 204, r.text
+
+    deletes = [k for k in seen if k.get("action") == "delete"]
+    assert deletes, f"no delete audit row logged; saw {[k.get('action') for k in seen]}"
+    assert deletes[0]["agent_id"] == "yanki-smoke", (
+        "tenant key's delete must stay attributed to the agent_id it supplied, "
+        f"got {deletes[0]['agent_id']!r}"
+    )
+
+
+@pytest.mark.integration
+async def test_rest_delete_byid_low_trust_agent_credential_still_403(
+    client, as_agent, patch_lookup
+):
+    """GUARD, NOT EVIDENCE — this passes both before and after the fix.
+
+    It exists so a future change cannot quietly widen the tenant-key exemption
+    into an agent-credential one. An authenticated trust-1 agent (identity from
+    the gateway's X-Agent-ID, never from the query param) is still refused.
+    Do not read this test's green as confirmation that the fix works: the test
+    above is the one that changes behaviour.
+    """
+    from tests.conftest import get_test_auth
+
+    tenant_id, headers = get_test_auth()
+    mem_id = await _write(
+        client,
+        headers,
+        tenant_id,
+        agent_id="bob",
+        fleet_id="fleet-beta",
+        visibility="scope_team",
+    )
+    as_agent(tenant_id, "bob")
+    patch_lookup(fleet_id="fleet-beta", trust_level=1)
+
+    r = await client.delete(f"/api/v1/memories/{mem_id}?tenant_id={tenant_id}")
+    assert r.status_code == 403, r.text
+    assert "not permitted to delete" in r.text
+
+
+@pytest.mark.integration
+async def test_rest_delete_byid_agent_credential_cannot_spoof_via_param(
+    client, as_agent, patch_lookup
+):
+    """GUARD, NOT EVIDENCE — passes before and after.
+
+    The precedence rule the old comment claimed (``auth.agent_id`` wins over the
+    param) held for agent credentials and still holds, now because the param is
+    not consulted for authorization at all. A trust-1 agent naming a trust-3
+    identity in the query string is still refused on its own trust level.
+    """
+    from tests.conftest import get_test_auth
+
+    tenant_id, headers = get_test_auth()
+    mem_id = await _write(
+        client,
+        headers,
+        tenant_id,
+        agent_id="bob",
+        fleet_id="fleet-beta",
+        visibility="scope_team",
+    )
+    as_agent(tenant_id, "bob")
+    patch_lookup(fleet_id="fleet-beta", trust_level=1)
+
+    r = await client.delete(
+        f"/api/v1/memories/{mem_id}?tenant_id={tenant_id}&agent_id=admin-agent"
+    )
+    assert r.status_code == 403, r.text
