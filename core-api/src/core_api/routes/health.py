@@ -23,6 +23,7 @@ from core_api.providers._platform import (
     get_platform_llm,
 )
 from core_api.routes.plugin import _plugin_version
+from core_api.services.agent_service import lookup_agent
 from core_api.tools import REGISTRY  # SoT registry — populated at import time
 from core_api.version_compat import MIN_RECOMMENDED_PLUGIN_VERSION
 
@@ -50,6 +51,79 @@ def _gateway_verified(request: Request) -> bool:
     return hmac.compare_digest(request.headers.get("x-gateway-secret", ""), gw_secret)
 
 
+async def _trust_fields(request: Request, tenant_id: str | None, agent_id: str | None) -> dict[str, Any]:
+    """Resolve ``trust_level`` / ``trust_source`` for the identity probe.
+
+    WHY THIS IS GUARDED, and it is the reason the field did not ship with
+    ``key_kind`` (#1202): every other field on ``/whoami`` is an ECHO of what
+    the caller sent, which is what makes an endpoint with no auth dependency
+    survivable. ``trust_level`` cannot be an echo — it is a storage lookup
+    keyed on caller-supplied ids. The perimeter check on the branch above
+    closes the identity spoof only for deployments that CONFIGURE a gateway
+    secret; with none set (OSS self-hosted) ``_gateway_verified`` trusts the
+    header path by design. So an unguarded lookup here would let anyone on
+    such a deployment read any agent's attributes in any tenant, by asking.
+
+    The narrow answer: look up only when a gateway secret is configured AND
+    THIS REQUEST presented it. Then the ids are the gateway's assertion rather
+    than the caller's. Everywhere else the field degrades to ``None`` with a
+    ``trust_source`` saying why, and the endpoint keeps looking nothing up —
+    the property ``test_whoami_still_looks_nothing_up`` pins.
+
+    Both halves of that check live HERE rather than being inherited from the
+    caller. The sole call site is already inside ``whoami``'s verified branch,
+    so the request-level check is redundant today — but a guard that is
+    correct only because of where it is called is one refactor away from being
+    wrong, and this one is the whole reason the lookup is allowed to exist.
+    Self-contained, it stays correct if the call moves or a second caller
+    appears.
+
+    ``trust_source`` exists so ``trust_level: null`` is never ambiguous. A
+    caller that cannot tell "no trust level applies to me" from "I could not
+    find out" is back to discovering its permissions by attempting a
+    destructive operation, which is the thing this field exists to stop.
+    """
+    # No agent identity ⇒ a tenant-scoped credential. Not "unknown": the trust
+    # ladder governs agent credentials and does not apply here at all, so
+    # ``None`` is the complete and correct answer (see ``enforce_delete``).
+    if not agent_id or not tenant_id:
+        return {"trust_level": None, "trust_source": "none"}
+    if not settings.gateway_shared_secret or not _gateway_verified(request):
+        return {"trust_level": None, "trust_source": "unavailable"}
+    try:
+        # Bounded like every other dependency call in this file. An error is
+        # not the only way storage can ruin a probe: a backend that is UP BUT
+        # SLOW never raises, and the storage client's read timeout is 120s
+        # with retry-on-transient above it, so an unbounded await could hang
+        # ``/whoami`` for minutes. ``PROBE_TIMEOUT_SECONDS`` exists for exactly
+        # this — "a stalled backend can't hang the whole probe" — and this
+        # field introduced the first I/O on this route, so it inherits the
+        # rule rather than getting an exemption from it.
+        #
+        # ``asyncio.TimeoutError`` is an ``OSError`` subclass, so the handler
+        # below already catches it; no separate clause needed.
+        agent = await asyncio.wait_for(lookup_agent(tenant_id, agent_id), timeout=PROBE_TIMEOUT_SECONDS)
+    except Exception:
+        # This is the endpoint's only I/O, and it must not be able to take the
+        # endpoint down. ``/whoami`` is a diagnostic probe that answered
+        # without touching storage until this field existed; a caller reaches
+        # for it precisely when something is already wrong, so returning 500
+        # because storage is unreachable removes the tool at the moment it is
+        # needed. Degrade to the same "could not determine" answer the
+        # no-perimeter case gives — which is honest, and is exactly the
+        # distinction ``trust_source`` exists to express: this is not a
+        # statement about the caller's permissions, it is the absence of one.
+        # Matches the storage/event-bus probes below, which degrade the same way.
+        logger.exception("whoami trust lookup failed; degrading to unavailable")
+        return {"trust_level": None, "trust_source": "unavailable"}
+    if agent is None:
+        # Registered-agent absence is a real, actionable answer: an
+        # unregistered identity is refused by ``enforce_delete`` before any
+        # trust comparison happens.
+        return {"trust_level": None, "trust_source": "unregistered"}
+    return {"trust_level": agent.get("trust_level", 0), "trust_source": "lookup"}
+
+
 @router.get("/whoami")
 async def whoami(request: Request) -> dict:
     """Identity probe — returns the caller's resolved (tenant_id, agent_id)
@@ -64,6 +138,14 @@ async def whoami(request: Request) -> dict:
       standalone     — settings.is_standalone fixed tenant
       anonymous      — no auth resolved (caller will hit 401 on first
                        write; this endpoint stays open as a probe)
+
+    ``trust_level`` / ``trust_source`` answer "may I delete?" without
+    attempting a delete to find out. The two regimes differ and were not
+    previously discoverable: an AGENT credential is governed by the trust
+    ladder (``enforce_delete`` requires >= 3), while a TENANT key holds no
+    trust level and is authorized by tenant scope instead. ``trust_source``
+    distinguishes "no trust level applies to me" from "I could not find
+    out" — see ``_trust_fields`` for why the lookup is guarded.
     """
     tenant_id = request.headers.get("x-tenant-id")
     agent_id = request.headers.get("x-agent-id")
@@ -112,18 +194,9 @@ async def whoami(request: Request) -> dict:
             #
             # Echo, like ``capabilities`` and ``auth_mode`` beside it — this
             # endpoint reports what the gateway asserted about the caller and
-            # LOOKS NOTHING UP.
-            #
-            # Keep it that way. The perimeter check above closes the identity
-            # spoof for deployments that CONFIGURE a gateway secret; it does
-            # not make a lookup safe everywhere, because with no secret set
-            # (OSS self-hosted) ``_gateway_verified`` trusts the header path
-            # by design. There is still no auth dependency on this route, so
-            # a field resolving caller-supplied ids against storage would let
-            # anyone on such a deployment read another tenant's attributes.
-            # A lookup-backed field (``trust_level``) needs that case
-            # answered first — see #1202.
+            # looks it up only under the conditions ``_trust_fields`` states.
             "key_kind": (request.headers.get("x-caura-credential-kind") or "").lower() or None,
+            **await _trust_fields(request, tenant_id, agent_id),
         }
     if settings.is_standalone:
         from core_api.standalone import get_standalone_tenant_id
@@ -138,6 +211,10 @@ async def whoami(request: Request) -> dict:
             "capabilities": None,
             "auth_mode": None,
             "key_kind": None,
+            # Standalone resolves a tenant and never an agent, so the trust
+            # ladder does not apply — same answer as a tenant key.
+            "trust_level": None,
+            "trust_source": "none",
         }
     return {
         "tenant_id": None,
@@ -148,6 +225,8 @@ async def whoami(request: Request) -> dict:
         "capabilities": None,
         "auth_mode": None,
         "key_kind": None,
+        "trust_level": None,
+        "trust_source": "none",
     }
 
 
