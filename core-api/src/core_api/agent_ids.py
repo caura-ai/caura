@@ -20,7 +20,7 @@ DEFAULT_AGENT_ID = "mcp-agent"
 # collapsing onto the anonymous default (which is unregistered, so its writes
 # never surface in Prism or the per-agent report). Registered per-tenant with
 # ``belonging_type='service'`` the first time the job runs for that tenant.
-INSIGHTER_AGENT_ID = "memclaw-insighter"
+INSIGHTER_AGENT_ID = "memclaw-insighter"  # legacy-name-floor: floor
 
 # Trust tier the insighter self-registers at: service level, granting cross-fleet
 # read (>=2, needed for scope='all') and write (>=3, it persists scope_org
@@ -39,7 +39,7 @@ INSIGHTER_TRUST_LEVEL = 3
 # cosmetic here: ``caura_insights`` defaults to ``scope="agent"``, which filters
 # ``Memory.agent_id == agent_id``, so rows attributed to this service identity are
 # invisible to every real agent's default insights run.
-DOC_INDEXER_AGENT_ID = "memclaw-doc-indexer"
+DOC_INDEXER_AGENT_ID = "memclaw-doc-indexer"  # legacy-name-floor: floor
 
 # Bare ``"main"`` is the OpenClaw plugin's *unset* default agent_id: when an
 # operator never sets ``CAURA_AGENT_ID`` every install collapses onto this one

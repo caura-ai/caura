@@ -77,7 +77,7 @@ export const PROTECTED_SKILLS: ReadonlySet<string> = new Set(["memclaw"]);
 // Choosing a per-skill marker over a central manifest makes the safety
 // property fail-safe: a missing marker means "leave it alone", never
 // "delete it".
-export const OWNED_MARKER = ".memclaw-owned";
+export const OWNED_MARKER = ".memclaw-owned"; // legacy-name-floor: floor
 const OWNED_MARKER_BODY =
   "This skill directory is managed by the Caura plugin reconciler.\n" +
   "Do not edit by hand — it is overwritten/removed to match the catalog.\n";

@@ -318,7 +318,7 @@ else
 fi
 echo ""
 
-PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"
+PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"  # legacy-name-floor: floor
 CONFIG_PATH="$HOME/.openclaw/openclaw.json"
 
 # When the on-prem uses self-signed TLS, the bootstrap fetches below
@@ -575,7 +575,7 @@ SDEOF
       # The systemd drop-in only covers the openclaw-gateway *service*, not
       # the customer's terminal sessions. Idempotent — guarded by a marker
       # comment so re-running install-plugin doesn't append duplicates.
-      _RC_MARKER="# memclaw-onprem CA - managed by install-plugin"
+      _RC_MARKER="# memclaw-onprem CA - managed by install-plugin"  # legacy-name-floor: pinned floor string
       _RC_LINE='[ -r "'"$PLUGIN_DIR"'/onprem-ca.pem" ] && export NODE_EXTRA_CA_CERTS="'"$PLUGIN_DIR"'/onprem-ca.pem"'
       for _RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
         [ -f "$_RC" ] || continue

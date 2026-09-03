@@ -675,8 +675,8 @@ class _InstrumentedFastMCP(FastMCP):
         # them is the one thing the rebrand promised never to do. Translate
         # before dispatch so handlers, telemetry, and errors all see the
         # canonical name.
-        if isinstance(name, str) and name.startswith("memclaw_"):
-            name = "caura_" + name.removeprefix("memclaw_")
+        if isinstance(name, str) and name.startswith("memclaw_"):  # legacy-name-floor: floor
+            name = "caura_" + name.removeprefix("memclaw_")  # legacy-name-floor: floor
         t0 = time.perf_counter()
         status = "ok"
         try:

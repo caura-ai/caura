@@ -8,7 +8,7 @@ export function getOpenClawBaseDir(): string {
 
 /** ~/.openclaw/plugins/memclaw */ // legacy-name-floor: frozen install path
 export function getPluginDir(): string {
-  return join(getOpenClawBaseDir(), "plugins", "memclaw");
+  return join(getOpenClawBaseDir(), "plugins", "memclaw"); // legacy-name-floor: floor
 }
 
 /** ~/.openclaw/openclaw.json */
