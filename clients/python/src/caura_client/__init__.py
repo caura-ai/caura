@@ -10,26 +10,26 @@ package-forwarder distributions that once depended on this one were retired
 
 from __future__ import annotations
 
-from .client import DEFAULT_BASE_URL, Caura, MemClaw
+from .client import DEFAULT_BASE_URL, Caura, MemClaw  # legacy-name-ok: rule 3 permanent class alias
 from .exceptions import (
     AuthError,
     CauraAPIError,
     CauraError,
-    MemClawAPIError,
-    MemClawError,
+    MemClawAPIError,  # legacy-name-ok: rule 3 permanent exception alias
+    MemClawError,  # legacy-name-ok: rule 3 permanent exception alias
     NotFoundError,
 )
 from .models import Memory, RecallResult
 
 __all__ = [
     "Caura",
-    "MemClaw",
+    "MemClaw",  # legacy-name-ok: rule 3 permanent class alias
     "Memory",
     "RecallResult",
     "CauraError",
     "CauraAPIError",
-    "MemClawError",
-    "MemClawAPIError",
+    "MemClawError",  # legacy-name-ok: rule 3 permanent exception alias
+    "MemClawAPIError",  # legacy-name-ok: rule 3 permanent exception alias
     "AuthError",
     "NotFoundError",
     "DEFAULT_BASE_URL",

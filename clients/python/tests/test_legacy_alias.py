@@ -17,12 +17,12 @@ import caura_client
 
 
 def test_class_alias_is_identity_not_subclass():
-    assert caura_client.MemClaw is caura_client.Caura
+    assert caura_client.MemClaw is caura_client.Caura  # legacy-name-ok: rule 3 permanent class alias
 
 
 def test_legacy_exception_catches_new_raises():
     err = caura_client.CauraAPIError(500, "boom")
     try:
         raise err
-    except caura_client.MemClawAPIError as caught:
+    except caura_client.MemClawAPIError as caught:  # legacy-name-ok: rule 3 permanent exception alias
         assert caught.status_code == 500

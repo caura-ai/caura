@@ -217,10 +217,10 @@ async function raiseForStatus(res: Response): Promise<void> {
 
 // Permanent legacy aliases (2026-08 rename) — same classes/types, so
 // instanceof and catch clauses agree across old and new spellings.
-export const MemClaw = Caura;
-export type MemClaw = Caura;
-export const MemClawError = CauraError;
-export type MemClawError = CauraError;
-export const MemClawApiError = CauraApiError;
-export type MemClawApiError = CauraApiError;
-export type MemClawOptions = CauraOptions;
+export const MemClaw = Caura; // legacy-name-ok: rule 3 permanent class alias
+export type MemClaw = Caura; // legacy-name-ok: rule 3 permanent class alias
+export const MemClawError = CauraError; // legacy-name-ok: rule 3 permanent exception alias
+export type MemClawError = CauraError; // legacy-name-ok: rule 3 permanent exception alias
+export const MemClawApiError = CauraApiError; // legacy-name-ok: rule 3 permanent exception alias
+export type MemClawApiError = CauraApiError; // legacy-name-ok: rule 3 permanent exception alias
+export type MemClawOptions = CauraOptions; // legacy-name-ok: rule 3 permanent options-type alias
