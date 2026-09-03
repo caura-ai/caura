@@ -191,11 +191,19 @@ Operations that escalate the required level:
 - `caura_manage op=delete` → trust 3
 
 **Knowing your own level.** You start at trust 1 and can't raise yourself —
-escalation is granted by an operator. There's no self-query, so don't
-pre-emptively avoid an operation you're unsure about: attempt it. A permission
-error names both your current level and the one required (e.g. *"Agent X
-(trust_level=1) … Requires trust_level >= 2"*) — surface that error rather than
-silently retrying at a narrower scope.
+escalation is granted by an operator. `GET /api/v1/whoami` reports it:
+`trust_level`, plus a `trust_source` saying how to read it — `lookup` (your
+level, authoritative), `none` (you hold a tenant-scoped credential, which the
+trust ladder does not govern), `unregistered` (no agent row yet), or
+`unavailable` (this deployment cannot resolve it — e.g. self-hosted with no
+gateway). Ask it rather than discovering your permissions by attempting the
+operation. That matters most for `op=delete`: it is irreversible, and its
+refusal — *"access policy: principals of fleet 'none' are not permitted to
+delete memories."* — names neither your level nor the one required, so probing
+with it teaches you nothing. Where `trust_source` is `unavailable` the refusal
+is still your only source of truth; the trust-ladder errors do name both levels
+(e.g. *"Agent X (trust_level=1) < required 2"*) — surface that error rather
+than silently retrying at a narrower scope.
 
 **Visibility (on write)** decides who can see a memory: `scope_agent` (private)
 · `scope_team` *(default — your fleet)* · `scope_org` (all fleets in tenant).
