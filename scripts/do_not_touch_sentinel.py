@@ -196,7 +196,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="core-api/src/core_api/routes/plugin.py",
-        text='cat > "$_SD_DIR/memclaw-tls.conf" << SDEOF',  # legacy-name-floor: pinned floor string
+        text='cat > "$_SD_DIR/caura-tls.conf" << SDEOF',
         kind=LITERAL,
         breaks="re-install writes a second systemd drop-in instead of replacing the customer file",
     ),
