@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     # Local developers can set LOG_FORMAT_JSON=false for structlog's
     # coloured ConsoleRenderer.
     log_format_json: bool = True
-    # On-prem deployments set this to /var/log/memclaw/<service>/<service>.log
+    # On-prem deployments set this to /var/log/caura/<service>/<service>.log
     # so logs land on disk too (daily-rotated, 5-day retention). Empty string
     # means stdout only — the SaaS default, unchanged.
     log_file: str = ""

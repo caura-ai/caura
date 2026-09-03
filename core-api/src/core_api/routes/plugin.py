@@ -341,7 +341,7 @@ mkdir -p "$PLUGIN_DIR/src"
 echo "[2/7] Writing package.json..."
 cat > "$PLUGIN_DIR/package.json" << PACKAGE_EOF
 {{
-  "name": "@caura/memclaw",
+  "name": "@caura/plugin",
   "version": "$CAURA_PLUGIN_VERSION",
   "description": "OpenClaw plugin for Caura central memory",
   "private": true,

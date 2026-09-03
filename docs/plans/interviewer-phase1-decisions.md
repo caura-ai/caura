@@ -1,7 +1,7 @@
 # Interviewer Phase 1 — Open-Question Resolutions
 
 **Branch:** `interviewer-phase1` · **Date:** 2026-07-16
-**Parent specs:** MemClaw doc store `design_docs/interviewer-feature-plan`, `design_docs/interviewer-phase1-spec`
+**Parent specs:** Caura doc store `design_docs/interviewer-feature-plan`, `design_docs/interviewer-phase1-spec`
 
 Task #1 of the Phase-1 prep: the four questions that gated the build, resolved against source.
 

@@ -328,7 +328,7 @@ class Settings(BaseSettings):
     # Local developers can set LOG_FORMAT_JSON=false for structlog's
     # coloured ConsoleRenderer.
     log_format_json: bool = True
-    # On-prem deployments set this to /var/log/memclaw/core-api/core-api.log so
+    # On-prem deployments set this to /var/log/caura/core-api/core-api.log so
     # logs land on disk too (daily-rotated, 5-day retention). Empty = stdout only.
     log_file: str = ""
     # Default False: standalone=True bypasses tenant auth, so it must be an explicit opt-in.

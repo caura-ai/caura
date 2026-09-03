@@ -108,7 +108,7 @@ async function searchMemories(
     const arr = parseSearchItems(results);
     return arr.map((m: Record<string, unknown>) => ({
       content: (m.content as string) || "",
-      path: `memclaw://${m.id}`,
+      path: `caura://${m.id}`,
       score: (m.score as number) ?? (m.similarity as number) ?? 0,
       metadata: {
         memory_type: m.memory_type,
@@ -702,7 +702,7 @@ const cauraPlugin = {
                 // probed. Cheap live check by attempting a tiny search; it
                 // updates the tracker as a side-effect via trackReachability.
                 try {
-                  await searchMemories("__memclaw_probe__", 1);
+                  await searchMemories("__caura_probe__", 1);
                   return { ok: true };
                 } catch (e: unknown) {
                   const msg = String((e as { message?: unknown })?.message ?? e);
