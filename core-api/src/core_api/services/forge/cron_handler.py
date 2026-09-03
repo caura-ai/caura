@@ -1,7 +1,7 @@
 """Forge cron tick — the production scheduler entry point (SF-CR3).
 
 Mirrors the manual ``scripts/forge_dry_run.py`` harness but wired into the
-``memclaw.lifecycle.forge-distill-requested`` consumer so the autonomous
+``caura.lifecycle.forge-distill-requested`` consumer so the autonomous
 scheduler (Cloud Scheduler / k8s CronJob → ``POST /admin/lifecycle/
 fanout/forge-distill``) drives one tick per opted-in tenant.
 

@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     # subscription and dead-letter topic are Terraform-provisioned (the bus
     # only auto-creates broadcast subscriptions), so until infra lands, a fire
     # would publish into a topic nothing consumes. Flip this on after
-    # provisioning ``memclaw.lifecycle.embed-backfill-requested``.
+    # provisioning ``caura.lifecycle.embed-backfill-requested``.
     embed_backfill_enabled: bool = False
     # 04:00, deliberately NOT the 02:00 slot every other lifecycle tick
     # defaults to. That window is already congested enough that the nightly
