@@ -650,7 +650,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       if (k === "agent_id" && !enriched.fleet_id) continue;
       query[k] = String(v);
     }
-    return apiCall("GET", "/memclaw/keystones", undefined, query, signal);
+    return apiCall("GET", "/memclaw/keystones", undefined, query, signal); // legacy-name-floor: live compatibility route
   },
 
 };

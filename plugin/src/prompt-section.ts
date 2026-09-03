@@ -40,7 +40,7 @@ function buildRecallLines(availableTools: Set<string>): string[] {
       "scratchpad). Operating rules (recall before; write durable " +
       "outcomes, supersede don't delete), quality rules, and per-tool " +
       "reference live in the " +
-      "**memclaw** skill, which your runtime loads automatically — open " +
+      "**memclaw** skill, which your runtime loads automatically — open " + // legacy-name-floor: shipped skill name
       "it via your skill system before your first Caura call this " +
       "session. Do NOT search the filesystem for it.",
   );

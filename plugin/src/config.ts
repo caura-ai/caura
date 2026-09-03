@@ -187,7 +187,7 @@ export function autoFixAllowlist(options?: {
     if (previousSlot && !options?.forceSlotOverride) {
       console.warn(
         `[caura] plugins.slots.memory already set to "${previousSlot}" — ` +
-          `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
+          `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` + // legacy-name-floor: live gateway RPC name
           `or set CAURA_AUTO_FIX_CONFIG=true to force.`,
       );
     } else {
@@ -216,7 +216,7 @@ export function autoFixAllowlist(options?: {
     if (previousCe && !options?.forceSlotOverride) {
       console.warn(
         `[caura] plugins.slots.contextEngine already set to "${previousCe}" — ` +
-          `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` +
+          `skipping auto-override. Run "openclaw gateway memclaw.allowlist.fix" ` + // legacy-name-floor: live gateway RPC name
           `or set CAURA_AUTO_FIX_CONFIG=true to force. ` +
           `Note: keystone rules will NOT inject without contextEngine="${PLUGIN_ID}".`,
       );

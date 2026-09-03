@@ -125,7 +125,7 @@ export function _resetBootstrapForTests(): void {
  */
 export function isDuplicateMemoryError(e: unknown): boolean {
   if (!(e instanceof Error)) return false;
-  return /\b(?:MemClaw|Caura) API 409\b/.test(e.message);
+  return /\b(?:MemClaw|Caura) API 409\b/.test(e.message); // legacy-name-floor: legacy error text
 }
 
 function pushToBuffer(sessionKey: string, message: IngestMessage): void {
