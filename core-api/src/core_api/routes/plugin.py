@@ -556,7 +556,11 @@ case "$CAURA_API_URL" in
       chmod 0644 "$PLUGIN_DIR/onprem-ca.pem"
       _SD_DIR="$HOME/.config/systemd/user/openclaw-gateway.service.d"
       mkdir -p "$_SD_DIR"
-      cat > "$_SD_DIR/memclaw-tls.conf" << SDEOF
+      # One release only: remove the pre-rename drop-in so re-running
+      # install-plugin doesn't leave both files behind, each declaring the
+      # same Environment= line redundantly.
+      rm -f "$_SD_DIR/memclaw-tls.conf"  # legacy-name-ok: removes the pre-rename drop-in for exactly one caura-client release, then drop this line (docs/plans/rebrand-alias-retirement-policy.md)
+      cat > "$_SD_DIR/caura-tls.conf" << SDEOF
 [Service]
 Environment="NODE_EXTRA_CA_CERTS=$PLUGIN_DIR/onprem-ca.pem"
 SDEOF
@@ -580,7 +584,7 @@ SDEOF
         fi
       done
       echo "    Saved CA → $PLUGIN_DIR/onprem-ca.pem"
-      echo "    Drop-in   → $_SD_DIR/memclaw-tls.conf"
+      echo "    Drop-in   → $_SD_DIR/caura-tls.conf"
       echo "    Shell env → ~/.bashrc + ~/.zshrc (NODE_EXTRA_CA_CERTS for new shells)"
     else
       rm -f "$PLUGIN_DIR/onprem-ca.pem"

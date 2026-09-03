@@ -32,6 +32,37 @@ async def test_post_install_plugin_generates_script(client):
     assert "node-alpha" in script
 
 
+async def test_post_install_plugin_tls_bootstrap_writes_caura_named_drop_in(client):
+    """The TLS-bootstrap branch (HTTPS api_url) writes the new drop-in name and
+    cleans up the retired one for one release, so a re-install doesn't leave
+    both, matching what it prints to the operator."""
+    _, headers = get_test_auth()
+    resp = await client.post(
+        "/api/v1/install-plugin",
+        json={
+            "fleet_id": "my-fleet",
+            "api_url": "https://caura.example.com",
+            "api_key": "sk-test-key-1234",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    script = resp.text
+    new_write = 'cat > "$_SD_DIR/caura-tls.conf" << SDEOF'
+    old_cleanup = (
+        'rm -f "$_SD_DIR/memclaw-tls.conf"'  # legacy-name-ok: one-release cleanup
+    )
+    assert new_write in script
+    assert old_cleanup in script
+    # The rm must precede the write, or a re-install briefly has neither file.
+    assert script.index(old_cleanup) < script.index(new_write)
+    # The printed path must match the file actually written — exactly one
+    # mention of the retired name (the rm), never as what's printed or written.
+    old_name = "memclaw-tls.conf"  # legacy-name-ok: one-release cleanup
+    assert 'echo "    Drop-in   → $_SD_DIR/caura-tls.conf"' in script
+    assert script.count(old_name) == 1
+
+
 async def test_post_install_plugin_api_key_from_header(client):
     """POST body.api_key takes precedence; falls back to X-API-Key header."""
     resp = await client.post(
