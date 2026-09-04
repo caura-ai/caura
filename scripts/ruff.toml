@@ -37,8 +37,8 @@
 # written by ``ruff format`` at its default width, so a wider limit does not
 # accommodate them — it tells the formatter to JOIN lines that are correctly
 # wrapped today, and makes the diff bigger. 88 is the minimum-churn value, not a
-# compromise. Both fleet-wide engine files, legacy_name_ratchet.py and
-# do_not_touch_sentinel.py, are already clean at it.
+# compromise. Both marker-carrying files this config format-excludes below,
+# legacy_name_ratchet.py and do_not_touch_sentinel.py, are already clean at it.
 #
 # E501 is ignored, as everywhere in this estate, so line-length governs
 # ``ruff format`` only and never fails ``ruff check``.
@@ -194,13 +194,24 @@ indent-style = "space"
 # so every reformat displaces it again. Verified by doing it and re-running both
 # gates.
 #
-# Two things this buys beyond a green build. The pre-commit ruff-format hook
-# reads this list too, so it can no longer displace a marker on someone's
+# One more thing this buys beyond a green build: the pre-commit ruff-format
+# hook reads this list too, so it can no longer displace a marker on someone's
 # unrelated commit — a live trap, not a hypothetical, since that hook is what
-# formats these files today. And ``legacy_name_ratchet.py`` and
-# ``do_not_touch_sentinel.py`` are byte-identical fleet-wide with their content
-# owned elsewhere; "never reformat these two" was a rule people had to remember,
-# and is now a rule the config enforces.
+# formats these files today.
+#
+# ``legacy_name_ratchet.py`` carries an extra reason of its own: it is
+# byte-identical fleet-wide, with its content read by the org's required
+# workflow, so a reformat here would not just risk a marker, it would desync
+# every consumer at once. ``do_not_touch_sentinel.py`` does NOT share that
+# second reason — despite this file's own comment once saying otherwise, a
+# direct diff against every repo in the fleet (sizes from 13KB to 41KB, no two
+# matching) confirms its sentinel list is genuinely per-repo data, the same
+# way caura-bus's own copy documents itself: "written from scratch — no other
+# repo's entries copied in." It is excluded here for the first reason alone —
+# it carries the same line-positional markers, and a reformat would displace
+# them exactly the way it would anywhere else. "Never reformat these two" was
+# a rule people had to remember for two different reasons; it is now one rule
+# the config enforces, for however many reasons apply to each file.
 #
 # THE FIX THAT REMOVES AN ENTRY: hoist the legacy literal into a short
 # module-level constant carrying the marker, so no wrap is possible.
@@ -214,7 +225,7 @@ exclude = [
     "_f3_wet_test_observer.py",
     # markers: 1
     "benchmark_blend_locomo.py",
-    # markers: 45 — and byte-identical fleet-wide; content owned elsewhere
+    # markers: 45 — its own per-repo sentinel list, not byte-identical fleet-wide
     "do_not_touch_sentinel.py",
     # markers: 4 — incl. the old plugin's tools-file heading inside an `or (...)`
     "gateway_integration_test.py",

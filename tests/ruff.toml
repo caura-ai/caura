@@ -236,13 +236,19 @@ indent-style = "space"
 # so every reformat displaces it again. Verified by doing it and re-running both
 # gates.
 #
-# Two things this buys beyond a green build. The pre-commit ruff-format hook
-# reads this list too, so it can no longer displace a marker on someone's
+# One more thing this buys beyond a green build: the pre-commit ruff-format
+# hook reads this list too, so it can no longer displace a marker on someone's
 # unrelated commit — a live trap, not a hypothetical, since that hook is what
-# formats these files today. And ``legacy_name_ratchet.py`` and
-# ``do_not_touch_sentinel.py`` are byte-identical fleet-wide with their content
-# owned elsewhere; "never reformat these two" was a rule people had to remember,
-# and is now a rule the config enforces.
+# formats these files today.
+#
+# ``test_legacy_name_ratchet.py`` carries an extra reason of its own: the
+# engine it tests is byte-identical fleet-wide, with its content read by the
+# org's required workflow, so this test suite is not free to diverge from
+# what that engine actually does. (An earlier version of this comment also
+# named ``do_not_touch_sentinel.py`` here, copied from scripts/ruff.toml's
+# identical paragraph — that file's own exclude list doesn't even include an
+# entry for it, and the claim was wrong there too: its sentinel list is
+# genuinely per-repo data, not byte-identical fleet-wide.)
 #
 # THE FIX THAT REMOVES AN ENTRY: hoist the legacy literal into a short
 # module-level constant carrying the marker, so no wrap is possible.
