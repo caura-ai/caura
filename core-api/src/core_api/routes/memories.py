@@ -1370,14 +1370,12 @@ async def _write_memories_bulk_inner(
     )
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
-    usage = None
-    if auth.tenant_id:  # skip enforcement + metering for admin
+    if auth.tenant_id:  # skip enforcement for admin
         await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
-        usage = await bulk_check_and_increment(body.tenant_id, len(body.items))
-    if usage:
-        response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
-        response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
 
+    # Metering deliberately does NOT happen here — see after the write. This
+    # used to be ``usage = await bulk_check_and_increment(...)`` on this line,
+    # before the try, and no failure path gave it back.
     try:
         result = await asyncio.wait_for(
             create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),
@@ -1509,6 +1507,32 @@ async def _write_memories_bulk_inner(
                 "Retry-After": str(app_settings.storage_network_error_retry_after_seconds),
             },
         )
+
+    # Meter here, AFTER the write, because every failure path above raises and
+    # so charges nothing. Charging up front meant a batch that wrote nothing was
+    # billed anyway, and the retry contract makes that compound rather than
+    # merely round: core-api answers a storage failure by telling the client to
+    # retry with the same ``X-Bulk-Attempt-Id``, so one un-writable batch was
+    # charged once per attempt, indefinitely. Measured on the 2026-09-02
+    # incident: ~648 attempts/hour for 41 hours against a 100-item batch that
+    # never wrote a row.
+    #
+    # Nothing here is an enforcement gate, which is what makes moving it safe.
+    # ``allowed`` has no reader in core-api (see ``usage_service._meter``) —
+    # enforcement travels via ``x-org-read-only`` — so this call only records.
+    # ``enforce_fleet_write`` above IS a gate and stays before the write.
+    #
+    # Still ``len(body.items)`` rather than ``result.created``, deliberately.
+    # That keeps the amount charged for a successful batch identical to before,
+    # so this fixes charging on FAILURE and is not a repricing of per-item
+    # duplicates or errors. Those are a billing decision, and
+    # ``meters_mcp_bulk_write``'s docstring is the precedent for treating one as
+    # such rather than shipping it as a deploy side effect.
+    if auth.tenant_id:
+        usage = await bulk_check_and_increment(body.tenant_id, len(body.items))
+        if usage:
+            response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
+            response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
 
     bulk_resp = _bulk_response(result)
     if idem:
