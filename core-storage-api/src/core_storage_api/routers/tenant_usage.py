@@ -129,6 +129,23 @@ async def increment_tenant_usage(request: Request) -> dict:
         # prevent, instead of the intended 422.
         if not isinstance(r.get("period_start"), datetime):
             raise HTTPException(status_code=422, detail=f"row {i}: 'period_start' is required")
+        # ``count`` is ADDED to the stored total, never assigned, so a negative
+        # here decrements a billing counter rather than recording a small one.
+        # Left unchecked it is a plan-enforcement bypass and not a loud one: the
+        # platform asks ``used > limit``, so a counter pushed below zero reads as
+        # far under budget and simply stops refusing writes for that tenant.
+        #
+        # Absent is fine and means 1 (the service's default) — only a present
+        # value is judged. ``bool`` is excluded because it is an ``int`` in
+        # Python and a JSON ``true`` silently metering 1 operation is a coercion
+        # nobody asked for; the caller should say what it means.
+        if "count" in r:
+            c = r["count"]
+            if isinstance(c, bool) or not isinstance(c, int) or c < 0:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"row {i}: 'count' must be a non-negative integer, got {c!r}",
+                )
         coerced.append(r)
 
     try:
