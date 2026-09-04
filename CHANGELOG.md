@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.47.4](https://github.com/caura-ai/caura/compare/backend-v2.47.3...backend-v2.47.4) (2026-09-04)
+
+
+### Bug Fixes
+
+* **storage:** record provenance in the embedding backfill ([#1289](https://github.com/caura-ai/caura/issues/1289)) ([37cf8ab](https://github.com/caura-ai/caura/commit/37cf8ab86a39e9c36b302c637e422a4b52d3ab4e))
+
 ## [2.47.3](https://github.com/caura-ai/caura/compare/backend-v2.47.2...backend-v2.47.3) (2026-09-04)
 
 
