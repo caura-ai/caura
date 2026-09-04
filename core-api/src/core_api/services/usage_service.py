@@ -98,9 +98,12 @@ OperationType = Literal["write", "search", "recall", "insights", "evolve"]
 # would reduce usage and reactivating really would raise it, and this verb stops
 # being safe to treat as one thing — it would need to discriminate on the
 # ``old_status -> new_status`` pair. Note that such a fix is only implementable
-# on REST today: MCP cannot see plan-limit mode at all (see below), so gating
-# one direction there would rebuild the exact surface drift this table exists to
-# close.
+# on REST today — but not for the reason this comment used to give. It said MCP
+# "cannot see plan-limit mode at all"; MCP can see it now and simply does not
+# refuse on it (see below). The conclusion is unchanged and the reason is not:
+# gating one direction there would still rebuild the exact surface drift this
+# table exists to close, because a gate MCP observes but never enforces is not
+# a gate.
 #
 # ``enforce_read_only()`` is NEITHER axis. That is the demo-mode gate, a
 # separate question, and it stays on the transition route.
