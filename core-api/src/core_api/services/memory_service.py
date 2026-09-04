@@ -2649,7 +2649,7 @@ async def create_memories_bulk(
             # just captures the batch-level exception.
             track_task(
                 tracked_task(
-                    _reembed_memories_bulk(reembed_batch, data.tenant_id),
+                    _reembed_memories_bulk(reembed_batch, data.tenant_id, data.fleet_id),
                     f"reembed_bulk[{len(reembed_batch)}]",
                     None,
                     data.tenant_id,
@@ -3019,19 +3019,86 @@ async def _reembed_memory(
 async def _reembed_memories_bulk(
     items: list[tuple[UUID, str]],
     tenant_id: str,
+    fleet_id: str | None,
 ) -> None:
     """Batched background re-embed for bulk-originated memories.
 
     One ``get_embeddings_batch`` call covers all items, preserving the
     packing behaviour the hot-path bulk code used. Any per-item failure
-    falls back to ``_reembed_memory`` so a partial batch doesn't leave
-    some rows without embeddings forever.
+    routes through ``_schedule_embed_or_reembed`` so a partial batch
+    doesn't leave some rows without embeddings forever.
+
+    ``fleet_id`` exists so those fallbacks can stamp provenance. All five
+    of them used to omit ``content_hash``, and the omission is silent all
+    the way down: ``_schedule_embed_or_reembed`` forwards ``None``,
+    ``handle_embed_request`` passes it to ``update_memory_embedding``, and
+    that writes the vector while leaving ``embedded_content_hash`` NULL --
+    deliberately, because "unknown provenance is honest, a wrong hash is
+    not". The row lands in ``unknown_provenance``, which is documented as
+    meaning "written before migration 037" and which nothing re-embeds
+    (both embedding backfills select ``embedding IS NULL``, and these rows
+    have one), so it leaves the staleness detector's reach permanently. No
+    error, no log, no failed request. Measured 2026-09-04: 241 such rows,
+    all bulk-created, one tenant.
+
+    Threaded in rather than derived here, because ``_content_hash`` hashes
+    ``tenant:fleet:content``: computing it without the fleet would produce
+    a wrong hash for every fleet-scoped memory, which is worse than the
+    NULL it replaces, since a wrong hash reads as verified freshness. A
+    scalar because a bulk batch is single-fleet by construction --
+    ``memory_add_all`` rejects a batch whose items disagree on ``fleet_id``
+    -- and the route resolves ``body.fleet_id`` before the insert, so this
+    is the value the rows carry.
     """
     from core_api.services.contradiction import Trigger, run_contradiction_detection
     from core_api.services.organization_settings import resolve_config
 
     if not items:
         return
+
+    def _fallback(memory_id: UUID, content: str) -> None:
+        """Hand one item to the per-item retry, provenance included.
+
+        One helper rather than five copies at the call sites below, because
+        the copies were the defect: five siblings, the same omitted
+        ``content_hash`` at each, so repairing them individually would
+        leave five places for it to come back. There is now one place to
+        omit it from, and ``test_embed_provenance_call_sites.py`` fails
+        statically if a sixth call site appears that bypasses this.
+
+        Routes through the inline/deferred router rather than calling
+        ``_reembed_memory`` directly. In deferred mode this hands the item
+        to EMBED_REQUESTED, so the retry lives on Pub/Sub (redelivery +
+        DLQ) instead of in this process.
+
+        That is what makes the fallback DURABLE. Direct in-process retry
+        meant a failed 50-item batch fanned out to 50 x
+        _REEMBED_MAX_RETRIES x EMBEDDING_RETRY_ATTEMPTS provider calls, all
+        contending for the same saturated backend; when they exhausted, the
+        rows stayed embedding=NULL with no further recovery -- a manual CLI
+        backfill was the only way out. That is exactly how ~430 memories
+        were stranded in the 2026-07-27 incident.
+
+        ``is_failure_fallback=True`` still gives the INLINE branch its
+        thundering-herd backoff (the provider just failed, for this item or
+        for the whole batch); the deferred branch ignores it because
+        Pub/Sub owns backoff.
+        """
+        track_task(
+            tracked_task(
+                _schedule_embed_or_reembed(
+                    memory_id,
+                    content,
+                    tenant_id,
+                    content_hash=_content_hash(tenant_id, fleet_id, content),
+                    is_failure_fallback=True,
+                ),
+                "reembed",
+                memory_id,
+                tenant_id,
+            )
+        )
+
     try:
         tenant_config = await resolve_config(tenant_id)
     except Exception:
@@ -3069,32 +3136,7 @@ async def _reembed_memories_bulk(
         # Exception, so shutdown-path cancellations still propagate.
         logger.exception("Bulk re-embed batch call failed; falling back to per-item re-embed")
         for memory_id, content in items:
-            track_task(
-                tracked_task(
-                    # Route through the inline/deferred router rather than
-                    # calling _reembed_memory directly. In deferred mode this
-                    # hands each item to EMBED_REQUESTED, so the retry lives on
-                    # Pub/Sub (redelivery + DLQ) instead of in this process.
-                    #
-                    # That is what makes the fallback DURABLE. Direct in-process
-                    # retry meant a failed 50-item batch fanned out to 50 x
-                    # _REEMBED_MAX_RETRIES x EMBEDDING_RETRY_ATTEMPTS provider
-                    # calls, all contending for the same saturated backend; when
-                    # they exhausted, the rows stayed embedding=NULL with no
-                    # further recovery — a manual CLI backfill was the only way
-                    # out. That is exactly how ~430 memories were stranded in
-                    # the 2026-07-27 incident.
-                    #
-                    # is_failure_fallback=True still gives the INLINE branch its
-                    # thundering-herd backoff (the provider just failed for the
-                    # whole batch); the deferred branch ignores it because
-                    # Pub/Sub owns backoff.
-                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
-                    "reembed",
-                    memory_id,
-                    tenant_id,
-                )
-            )
+            _fallback(memory_id, content)
         return
 
     # Materialise the strict zip up front so a length mismatch surfaces as
@@ -3108,14 +3150,7 @@ async def _reembed_memories_bulk(
             len(items),
         )
         for memory_id, content in items:
-            track_task(
-                tracked_task(
-                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
-                    "reembed",
-                    memory_id,
-                    tenant_id,
-                )
-            )
+            _fallback(memory_id, content)
         return
 
     sc = get_storage_client()
@@ -3131,16 +3166,7 @@ async def _reembed_memories_bulk(
 
     for ((memory_id, content), embedding), mem in zip(pairs, mems):
         if embedding is None:
-            track_task(
-                tracked_task(
-                    # Per-item None after a partial batch success is
-                    # still a provider partial-failure — back off.
-                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
-                    "reembed",
-                    memory_id,
-                    tenant_id,
-                )
-            )
+            _fallback(memory_id, content)
             continue
         if isinstance(mem, BaseException):
             # A transient get_memory failure here would otherwise strand
@@ -3151,14 +3177,7 @@ async def _reembed_memories_bulk(
                 memory_id,
                 exc_info=mem,
             )
-            track_task(
-                tracked_task(
-                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
-                    "reembed",
-                    memory_id,
-                    tenant_id,
-                )
-            )
+            _fallback(memory_id, content)
             continue
         if mem is None or mem.get("deleted_at") is not None:
             continue
@@ -3204,14 +3223,7 @@ async def _reembed_memories_bulk(
                 "Bulk re-embed PATCH failed for memory %s; scheduling per-item retry",
                 memory_id,
             )
-            track_task(
-                tracked_task(
-                    _schedule_embed_or_reembed(memory_id, content, tenant_id, is_failure_fallback=True),
-                    "reembed",
-                    memory_id,
-                    tenant_id,
-                )
-            )
+            _fallback(memory_id, content)
             continue
         track_task(
             tracked_task(
