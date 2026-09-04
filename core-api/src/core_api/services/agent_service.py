@@ -1,6 +1,7 @@
 """Agent trust-level enforcement for fleet-scoped access control."""
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -284,23 +285,52 @@ async def enforce_fleet_read(
     fleet_id: str | None,
 ) -> None:
     """Enforce read permissions for search/list (read-only — never creates agents)."""
+    await enforce_fleet_read_many(tenant_id, agent_id, [fleet_id])
+
+
+async def enforce_fleet_read_many(
+    tenant_id: str,
+    agent_id: str,
+    fleet_ids: Sequence[str | None],
+) -> None:
+    """Enforce read permissions for EVERY requested fleet.
+
+    The multi-fleet form is the load-bearing one. The search/recall routes take
+    a ``fleet_ids`` LIST, and gating only the single-element case left a caller
+    able to widen its own read by naming extra fleets: a trust-1 agent sending
+    ``["victim-fleet", "own-fleet"]`` satisfied neither the "no fleets given, so
+    force own fleet" branch (the list is non-empty) nor the "exactly one fleet,
+    so check the ladder" branch (length is 2), and the unchecked list went
+    straight to the storage predicate, which returns ``scope_team`` rows with
+    full content for every fleet listed. Asking for MORE must never be the way
+    to be asked for LESS.
+
+    One ``lookup_agent`` for the whole list, not one per fleet — these routes
+    are the search hot path, and a per-element call would turn a widened
+    ``fleet_ids`` into a storage-call amplifier.
+
+    ``enforce_fleet_read`` delegates here so the single- and multi-fleet ladders
+    cannot drift apart, the same reason ``resolve_read_fleet_gate`` is shared
+    across its four surfaces. Semantics for a one-element list are unchanged.
+    """
     agent = await lookup_agent(tenant_id, agent_id)
 
     # Unknown agent — allow the read (agent registration happens on writes)
     if not agent:
         return
 
-    # Reading own fleet or tenant-wide is always allowed
-    if fleet_id is None or fleet_id == agent.get("fleet_id"):
-        return
-
-    # Cross-fleet read requires level >= 2
+    own_fleet = agent.get("fleet_id")
     trust = agent.get("trust_level", 0)
-    if trust < 2:
-        raise HTTPException(
-            status_code=403,
-            detail=f"fleet-scope policy: fleet '{fleet_id}' is not readable by principals of fleet '{agent.get('fleet_id') or 'none'}'.",
-        )
+    for fleet_id in fleet_ids:
+        # Reading own fleet or tenant-wide is always allowed
+        if fleet_id is None or fleet_id == own_fleet:
+            continue
+        # Cross-fleet read requires level >= 2
+        if trust < 2:
+            raise HTTPException(
+                status_code=403,
+                detail=f"fleet-scope policy: fleet '{fleet_id}' is not readable by principals of fleet '{own_fleet or 'none'}'.",
+            )
 
 
 async def resolve_read_fleet_gate(

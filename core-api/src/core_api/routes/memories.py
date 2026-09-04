@@ -68,6 +68,7 @@ from core_api.services.agent_service import (
     broker_owned_agent_id,
     enforce_delete,
     enforce_fleet_read,
+    enforce_fleet_read_many,
     enforce_fleet_write,
     get_or_create_agent,
     lookup_agent,
@@ -1797,8 +1798,14 @@ async def _search_inner(
             _agent = await get_or_create_agent(body.tenant_id, eff_agent_id, fleet_id_hint)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]  # Force fleet scoping for trust < 2
-            if body.fleet_ids and len(body.fleet_ids) == 1:
-                await enforce_fleet_read(body.tenant_id, eff_agent_id, body.fleet_ids[0])
+            # EVERY requested fleet, not just the single-fleet case. Gating only
+            # ``len == 1`` meant a trust-1 agent could read a fleet it has no
+            # rights to simply by naming a second one: the forcing branch above
+            # is skipped (the list is non-empty) and the ladder was skipped
+            # (length != 1), so the list reached storage unchecked and came back
+            # with full ``scope_team`` content.
+            if body.fleet_ids:
+                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids)
         usage = await check_and_increment(body.tenant_id, "search")
     if usage:
         response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
@@ -2088,8 +2095,9 @@ async def recall_endpoint(
             _agent = await get_or_create_agent(body.tenant_id, body.filter_agent_id, fleet_id_hint)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]
-            if body.fleet_ids and len(body.fleet_ids) == 1:
-                await enforce_fleet_read(body.tenant_id, body.filter_agent_id, body.fleet_ids[0])
+            # Same widening as /search above — see the note there.
+            if body.fleet_ids:
+                await enforce_fleet_read_many(body.tenant_id, body.filter_agent_id, body.fleet_ids)
         # D13 — a recall is a recall, not a search: plans meter them separately
         # and the recalls counter never moved because this site (and the MCP
         # twin) billed "search". Flag-gated; see ``recall_operation``.
