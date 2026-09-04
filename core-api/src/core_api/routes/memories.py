@@ -1714,6 +1714,69 @@ async def update_memory_endpoint(
     )
 
 
+def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[str | None, bool]:
+    """Resolve the identity a search-shaped read runs as, refusing a spoof.
+
+    Returns ``(eff_agent_id, identity_asserted)``.
+
+    An agent credential may only name ITSELF. ``eff_agent_id`` is body-first,
+    and it feeds BOTH the visibility identity (which ``scope_agent`` rows are
+    readable) AND the trust/fleet enforcement at the callsite, so a
+    caller-asserted id bought two escalations at once:
+
+      1. Disclosure — naming a peer made that peer the visibility identity, so
+         its scope_agent memories (and private STM notes surfaced through
+         search) came back with full content, not just ids.
+      2. Gate evasion — the trust < 2 fleet forcing runs against this same id,
+         so naming a trust-3 peer skipped the forcing entirely. That is the
+         identical escalation /memories/redistribute was fixed for in the
+         2026-06-11 audit, which ran its trust gate against a caller-supplied
+         agent_id.
+
+    A tenant/user credential (``auth.agent_id`` is None) is unaffected and may
+    still name any agent — the restriction is on agent-scoped credentials,
+    which is where the threat is.
+
+    SHARED because ``/recall`` shipped without any of it. It re-derived the
+    identity itself, straight from ``body.filter_agent_id``, so both
+    escalations above were live on that route while ``/search`` refused them —
+    and ``caller_agent_id``, which the schema documents as the way to assert an
+    identity, was silently dropped there. Two routes parsing the same
+    ``SearchRequest`` must not disagree about what the fields mean; one
+    implementation is the only way that stays true.
+    """
+    if auth.agent_id and body.filter_agent_id and body.filter_agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"filter_agent_id '{body.filter_agent_id}' does not match the "
+                f"authenticated agent identity '{auth.agent_id}'."
+            ),
+        )
+    # Same rule for the identity knob. ``caller_agent_id`` feeds exactly the two
+    # things ``filter_agent_id`` used to smuggle in — the visibility identity and
+    # the subject of the trust<2 fleet forcing — so leaving it unguarded would
+    # reopen the escalation the check above closes, by a new spelling.
+    if auth.agent_id and body.caller_agent_id and body.caller_agent_id != auth.agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"caller_agent_id '{body.caller_agent_id}' does not match the "
+                f"authenticated agent identity '{auth.agent_id}'."
+            ),
+        )
+    # Identity, in precedence order: an authenticated agent always wins, then an
+    # explicit assertion, then the legacy derivation from the filter so existing
+    # callers are untouched. The filter itself is passed separately at the
+    # callsite and is unchanged — it was already a distinct parameter all the way
+    # down to the storage predicate; only the identity was derived from it.
+    eff_agent_id = auth.agent_id or body.caller_agent_id or body.filter_agent_id
+    # True when the identity was ASSERTED by a tenant-scoped caller rather than
+    # authenticated. Gates the recall_count bump — see the note at the callsite.
+    identity_asserted = bool(not auth.agent_id and body.caller_agent_id)
+    return eff_agent_id, identity_asserted
+
+
 @router.post("/search", response_model=SearchResponse)
 @search_limit
 async def search(
@@ -1746,52 +1809,7 @@ async def _search_inner(
     # content, so this is a direct disclosure, not just id harvesting). A
     # tenant/user credential (auth.agent_id None, no filter) keeps full-tenant
     # search, unchanged.
-    # An agent credential may only filter to ITSELF. ``eff_agent_id`` below is
-    # body-first, and it feeds BOTH the visibility identity (which scope_agent
-    # rows are readable) AND the trust/fleet enforcement a few lines down, so a
-    # caller-asserted ``filter_agent_id`` bought two escalations at once:
-    #
-    #   1. Disclosure — naming a peer made that peer the visibility identity, so
-    #      its scope_agent memories (and private STM notes surfaced through
-    #      search) came back with full content, not just ids.
-    #   2. Gate evasion — the trust < 2 fleet forcing below runs against this
-    #      same id, so naming a trust-3 peer skipped the forcing entirely. That
-    #      is the identical escalation /memories/redistribute was fixed for in
-    #      the 2026-06-11 audit, which ran its trust gate against a
-    #      caller-supplied agent_id.
-    #
-    # A tenant/user credential (``auth.agent_id`` is None) is unaffected and may
-    # still filter by any agent — the restriction is on agent-scoped credentials,
-    # which is where the threat is.
-    if auth.agent_id and body.filter_agent_id and body.filter_agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"filter_agent_id '{body.filter_agent_id}' does not match the "
-                f"authenticated agent identity '{auth.agent_id}'."
-            ),
-        )
-    # Same rule for the identity knob. ``caller_agent_id`` feeds exactly the two
-    # things ``filter_agent_id`` used to smuggle in — the visibility identity and
-    # the subject of the trust<2 fleet forcing below — so leaving it unguarded
-    # would reopen the escalation the check above closes, by a new spelling.
-    if auth.agent_id and body.caller_agent_id and body.caller_agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"caller_agent_id '{body.caller_agent_id}' does not match the "
-                f"authenticated agent identity '{auth.agent_id}'."
-            ),
-        )
-    # Identity, in precedence order: an authenticated agent always wins, then an
-    # explicit assertion, then the legacy derivation from the filter so existing
-    # callers are untouched. The filter itself is passed separately below and is
-    # unchanged — it was already a distinct parameter all the way down to the
-    # storage predicate; only the identity was derived from it.
-    eff_agent_id = auth.agent_id or body.caller_agent_id or body.filter_agent_id
-    # True when the identity was ASSERTED by a tenant-scoped caller rather than
-    # authenticated. Gates the recall_count bump below — see the note there.
-    identity_asserted = bool(not auth.agent_id and body.caller_agent_id)
+    eff_agent_id, identity_asserted = _resolve_read_identity(auth, body)
     if auth.tenant_id:  # skip for admin
         if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
@@ -2089,15 +2107,26 @@ async def recall_endpoint(
     """
     # Read endpoint — readable set widening applies (see /search).
     auth.enforce_readable_tenant(body.tenant_id)
+    # Identity resolved by the SAME rule as /search. This route used to run the
+    # trust gate, the fleet forcing and the visibility identity all off the raw
+    # ``body.filter_agent_id``, so an agent-scoped credential naming a peer read
+    # that peer's private rows and inherited its trust level for the fleet
+    # forcing — the escalation /search already refuses.
+    eff_agent_id, identity_asserted = _resolve_read_identity(auth, body)
     if auth.tenant_id:
-        if body.filter_agent_id:
+        if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
-            _agent = await get_or_create_agent(body.tenant_id, body.filter_agent_id, fleet_id_hint)
+            _agent = await get_or_create_agent(body.tenant_id, eff_agent_id, fleet_id_hint)
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]
-            # Same widening as /search above — see the note there.
+            # Both halves matter and they are independent: EVERY requested
+            # fleet is gated (#1267), against the RESOLVED identity rather than
+            # the raw ``filter_agent_id`` (this change). Gating every fleet
+            # against a spoofable principal would still let an agent inherit a
+            # peer's trust level; gating the right principal on only the
+            # single-fleet case would still let it widen by naming two.
             if body.fleet_ids:
-                await enforce_fleet_read_many(body.tenant_id, body.filter_agent_id, body.fleet_ids)
+                await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids)
         # D13 — a recall is a recall, not a search: plans meter them separately
         # and the recalls counter never moved because this site (and the MCP
         # twin) billed "search". Flag-gated; see ``recall_operation``.
@@ -2122,7 +2151,19 @@ async def recall_endpoint(
         query=body.query,
         fleet_ids=body.fleet_ids,
         filter_agent_id=body.filter_agent_id,
-        caller_agent_id=body.filter_agent_id,
+        # The IDENTITY, not the filter. Hardwiring this to ``filter_agent_id``
+        # is what made a named peer the visibility identity, and it silently
+        # dropped ``caller_agent_id`` — a field the schema documents as
+        # "assert the agent identity this search runs as", honoured on /search
+        # and no-op'd here, so the same body returned different rows on the two
+        # routes with no error. The filter above stays a separate parameter.
+        caller_agent_id=eff_agent_id,
+        # Same ranking guard /search applies: an ASSERTED identity must not move
+        # recall_count unless the tenant opted in, or one integration adding
+        # caller_agent_id reshuffles results for every other caller. Carried
+        # here because honouring the field without this would fix a dropped
+        # knob by giving it a side effect /search deliberately suppresses.
+        allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
         memory_type_filter=body.memory_type_filter,
         status_filter=body.status_filter,
         top_k=body.top_k,
