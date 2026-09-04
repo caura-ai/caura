@@ -102,6 +102,92 @@ class TestIncrementRequiresATenantPerRow:
         assert await _query(client, tenant_id=tenant, period_start=AUGUST) == {"periods": []}
 
 
+class TestTheCounterCannotBeDrivenNegative:
+    """A negative ``count`` is a plan-enforcement bypass, not a small number.
+
+    The upsert ADDS (``count = count + excluded.count``), so a negative in the
+    body decrements the stored total. The platform then asks ``used > limit``,
+    which a counter below zero answers "no" for any limit — enforcement stops
+    for that tenant and nothing says so. These pin the two places that is now
+    refused: the router, and the table underneath it.
+    """
+
+    async def test_a_negative_count_is_refused(self, client: AsyncClient):
+        tenant, operation = f"t-{_uid()}", f"op-{_uid()}"
+        await _increment(client, [_row(tenant, operation, AUGUST, 10)])
+
+        r = await client.post(
+            f"{PREFIX}/tenant-usage/increment",
+            json={"rows": [_row(tenant, operation, AUGUST, -50)]},
+        )
+
+        assert r.status_code == 422, r.text
+        assert "row 0" in r.text
+        assert "count" in r.text
+        # The established total is untouched — the batch was refused before any
+        # write, so the decrement never reached the upsert.
+        got = await _query(client, tenant_id=tenant, period_start=AUGUST)
+        assert got["periods"][0]["operations"][operation] == 10
+
+    async def test_a_boolean_count_is_refused(self, client: AsyncClient):
+        """``bool`` is an ``int`` in Python, so a JSON ``true`` would otherwise
+        meter exactly 1 operation by accident rather than by request."""
+        tenant, operation = f"t-{_uid()}", f"op-{_uid()}"
+
+        r = await client.post(
+            f"{PREFIX}/tenant-usage/increment",
+            json={"rows": [{**_row(tenant, operation, AUGUST, 1), "count": True}]},
+        )
+
+        assert r.status_code == 422, r.text
+        assert await _query(client, tenant_id=tenant, period_start=AUGUST) == {"periods": []}
+
+    async def test_a_zero_count_is_still_accepted(self, client: AsyncClient):
+        """The boundary the guard must not over-reach: zero is a legitimate
+        no-op flush, and refusing it would break the meter rather than protect
+        it."""
+        tenant, operation = f"t-{_uid()}", f"op-{_uid()}"
+
+        await _increment(client, [_row(tenant, operation, AUGUST, 0)])
+
+        got = await _query(client, tenant_id=tenant, period_start=AUGUST)
+        assert got["periods"][0]["operations"][operation] == 0
+
+    async def test_the_table_refuses_a_negative_count_beneath_the_router(self):
+        """The floor under the edge check, covering what it cannot see.
+
+        The router only guards the request path. The way this gap was actually
+        found was a correction run by hand against the table, which reaches the
+        column directly — so the constraint is tested directly too, not through
+        the endpoint that would reject the row before it got there.
+        """
+        from datetime import datetime
+
+        from sqlalchemy import text as _text
+        from sqlalchemy.exc import IntegrityError
+
+        from core_storage_api.services.postgres_service import get_session
+
+        with pytest.raises(IntegrityError, match="ck_tenant_usage_counters_count_nonneg"):
+            async with get_session() as session:
+                await session.execute(
+                    _text(
+                        "INSERT INTO tenant_usage_counters "
+                        "(tenant_id, operation, period_start, count) "
+                        "VALUES (:t, :o, :p, -1)"
+                    ),
+                    # A real ``datetime``: asyncpg rejects a str bound to a
+                    # timestamptz parameter outright rather than coercing it,
+                    # which is the same reason the router parses
+                    # ``period_start`` before it reaches the insert.
+                    {
+                        "t": f"t-{_uid()}",
+                        "o": f"op-{_uid()}",
+                        "p": datetime.fromisoformat(AUGUST),
+                    },
+                )
+
+
 # ``test_counts_sum_across_the_orgs_tenants`` lived here and is deliberately
 # gone (#1095, contract step). Summing an ORG's tenants was the capability the
 # plural ``tenant_ids`` existed for, and it moved to ``platform-admin-api``,

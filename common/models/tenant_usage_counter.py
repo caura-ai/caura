@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Index, Text, text
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, Index, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.models.base import Base
@@ -57,6 +57,8 @@ class TenantUsageCounter(Base):
         DateTime(timezone=True), nullable=False
     )
 
+    # Non-negative by CHECK, not merely by convention — see the constraint in
+    # ``__table_args__`` for why this column in particular earns one.
     count: Mapped[int] = mapped_column(
         BigInteger, nullable=False, server_default=text("0")
     )
@@ -68,9 +70,27 @@ class TenantUsageCounter(Base):
     )
 
     __table_args__ = (
-        # Names and columns must match migration 039 exactly, so a
+        # Names and columns must match migrations 039 and 042 exactly, so a
         # model-created schema (create_all / autogenerate) agrees with the
         # migration-created one.
+        #
+        # A negative count is not a smaller number here, it is a DISABLED plan
+        # limit. The platform's ``_is_over_plan_limits`` asks ``used > limit``,
+        # so a counter driven below zero reads as enormously under budget and
+        # silently stops enforcing for that tenant — the failure mode this
+        # constraint exists to convert into a loud one. That is what separates
+        # this column from the counts on ``capability_usage``, which are equally
+        # unconstrained but feed an adoption report: there a bad number skews a
+        # chart, here it stops refusing writes that should be refused.
+        #
+        # The reachable path is not hypothetical. ``tenant_usage_increment``
+        # upserts ``count = count + excluded.count`` and the router validates
+        # ``tenant_id``, ``operation`` and ``period_start`` but historically not
+        # ``count``, so a negative in the request body decremented the stored
+        # counter. The router now rejects that at the edge; this constraint is
+        # the floor under it, covering the correction-by-hand case the edge
+        # check cannot see.
+        CheckConstraint("count >= 0", name="ck_tenant_usage_counters_count_nonneg"),
         #
         # This unique index is the ``ON CONFLICT`` target. Without it the
         # upsert has nothing to bind to and concurrent writers quietly create
