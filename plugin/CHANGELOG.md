@@ -4,6 +4,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.20.0](https://github.com/caura-ai/caura/compare/plugin-v2.19.7...plugin-v2.20.0) (2026-09-04)
+
+
+### Features
+
+* dual-path serve the bundled and standalone skills under caura alongside memclaw ([#1261](https://github.com/caura-ai/caura/issues/1261)) ([43cb230](https://github.com/caura-ai/caura/commit/43cb230ae9f897d2f0009e68d7fc54fdd1c62f9e))
+* dual-read alias the six gateway RPC commands from memclaw.* to caura.* ([#1263](https://github.com/caura-ai/caura/issues/1263)) ([a087c7a](https://github.com/caura-ai/caura/commit/a087c7a2ee9017e384b454b13c82e20e58769f73))
+
+
+### Documentation
+
+* **skills:** stop telling agents to discover permissions by attempting the operation ([#1264](https://github.com/caura-ai/caura/issues/1264)) ([4693c42](https://github.com/caura-ai/caura/commit/4693c42695f36e7ecf26c8eab3ce1473fbdc59d6))
+
 ## [2.19.7](https://github.com/caura-ai/caura/compare/plugin-v2.19.6...plugin-v2.19.7) (2026-09-01)
 
 

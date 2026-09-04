@@ -10,6 +10,28 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.47.0](https://github.com/caura-ai/caura/compare/backend-v2.46.2...backend-v2.47.0) (2026-09-04)
+
+
+### Features
+
+* dual-path serve the bundled and standalone skills under caura alongside memclaw ([#1261](https://github.com/caura-ai/caura/issues/1261)) ([43cb230](https://github.com/caura-ai/caura/commit/43cb230ae9f897d2f0009e68d7fc54fdd1c62f9e))
+* dual-read alias the six gateway RPC commands from memclaw.* to caura.* ([#1263](https://github.com/caura-ai/caura/issues/1263)) ([a087c7a](https://github.com/caura-ai/caura/commit/a087c7a2ee9017e384b454b13c82e20e58769f73))
+* **whoami:** report trust_level so callers stop probing to find out ([#1260](https://github.com/caura-ai/caura/issues/1260)) ([b87e1ea](https://github.com/caura-ai/caura/commit/b87e1ea1ecae7e5d117fe1795c218dec0303004b))
+
+
+### Bug Fixes
+
+* **mcp:** enforce CAURA_API_KEY on /mcp before the header-trust path ([#1266](https://github.com/caura-ai/caura/issues/1266)) ([eb69f46](https://github.com/caura-ai/caura/commit/eb69f46a6f6b9cf2d93f8ffa528e2d6de5d550a3))
+* **ratchet:** exclude CHANGELOG.md from the gate unconditionally ([#1265](https://github.com/caura-ai/caura/issues/1265)) ([b83038d](https://github.com/caura-ai/caura/commit/b83038d74a146d2305f7181b8699491c55c916ad))
+* **recall:** resolve the read identity by the same rule as /search ([#1268](https://github.com/caura-ai/caura/issues/1268)) ([873eb6b](https://github.com/caura-ai/caura/commit/873eb6b4d9135afd948ca9abc1744f4c3ca59d3a))
+* **search:** gate every requested fleet, not just the single-fleet case ([#1267](https://github.com/caura-ai/caura/issues/1267)) ([10db245](https://github.com/caura-ai/caura/commit/10db245874c004514b2a90a68ec9aadf7316b866))
+
+
+### Documentation
+
+* **skills:** stop telling agents to discover permissions by attempting the operation ([#1264](https://github.com/caura-ai/caura/issues/1264)) ([4693c42](https://github.com/caura-ai/caura/commit/4693c42695f36e7ecf26c8eab3ce1473fbdc59d6))
+
 ## [2.46.2](https://github.com/caura-ai/caura/compare/backend-v2.46.1...backend-v2.46.2) (2026-09-03)
 
 
