@@ -66,8 +66,16 @@ Usage:
         --rewrite-hint-prefixed --tenant-id tenant-abc --dry-run
 
 Scope:
-- ``memories.embedding`` — re-embedded from ``memories.content``.
+- ``memories.embedding`` — re-embedded from ``memories.content``, and
+  ``memories.embedded_content_hash`` stamped in the same statement with the
+  ``content_hash`` read alongside that content. Without the stamp this sweep
+  moved rows out of ``embedding IS NULL`` — the population both backfills
+  scan — and into ``embedding IS NOT NULL AND embedded_content_hash IS
+  NULL``, which nothing scans, so the row silently left every repair path
+  and the staleness detector at once.
 - ``entities.name_embedding`` — re-embedded from ``entities.canonical_name``.
+  No provenance stamp: migration 037 added ``embedded_content_hash`` to
+  ``memories`` only, and ``entities`` carries no content hash to record.
 - ``documents.embedding`` — NOT handled. Documents store opaque JSON and
   the embed source is fixed to ``data["summary"]`` (with a back-compat
   fallback to ``data["description"]`` for ``collection="skills"``).
@@ -93,6 +101,7 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +112,19 @@ logger = logging.getLogger(__name__)
 # rather than blipping. Better to halt and let the operator escalate
 # than to spend the next hour writing nothing.
 _MAX_CONSECUTIVE_NONES = 20
+
+
+class _Provenance(NamedTuple):
+    """Which columns carry a table's embedding provenance.
+
+    A pair rather than two optional fields on ``_TableSpec``, so "one set and
+    the other not" cannot be written down. Half a pair silently disables
+    stamping, which is the exact failure this records against — a sweep that
+    writes vectors and attests nothing. Unrepresentable beats validated.
+    """
+
+    source_hash_column: str  # read alongside the content
+    stamp_column: str  # the value read is written back here
 
 
 @dataclasses.dataclass
@@ -124,6 +146,12 @@ class _TableSpec:
     # asserts this is set so a misconfigured spec fails loudly rather
     # than emitting SQL against a nonexistent column.
     metadata_column: str | None = None
+    # Which text each stored vector was built from. ``None`` for tables that
+    # cannot record it: migration 037 added ``embedded_content_hash`` to
+    # ``memories`` alone, and ``entities`` has neither that column nor a
+    # content hash to attest — emitting the assignment there would fail with
+    # an undefined-column error on every write.
+    provenance: _Provenance | None = None
 
 
 _TARGETS: tuple[_TableSpec, ...] = (
@@ -132,7 +160,15 @@ _TARGETS: tuple[_TableSpec, ...] = (
         embedding_column="embedding",
         content_column="content",
         has_deleted_at=True,
-        metadata_column="metadata_",
+        # The DATABASE column is ``metadata``. ``metadata_`` is the Python
+        # attribute name on the ORM model — ``mapped_column("metadata", JSONB)``
+        # renames it because ``metadata`` collides with SQLAlchemy's own
+        # ``Base.metadata``. This script emits raw SQL, so it needs the
+        # database's name. Carrying the ORM's spelling here meant
+        # ``--rewrite-hint-prefixed`` raised UndefinedColumnError on its first
+        # statement and had therefore never completed a run.
+        metadata_column="metadata",
+        provenance=_Provenance("content_hash", "embedded_content_hash"),
     ),
     _TableSpec(
         table="entities",
@@ -159,8 +195,14 @@ async def _iter_rows(
     tenant_id: str | None,
     batch_size: int,
     rewrite_hint_prefixed: bool,
-) -> AsyncIterator[list[tuple[uuid.UUID, str]]]:
-    """Yield batches of (id, content) for rows that need (re-)embedding.
+) -> AsyncIterator[list[tuple[uuid.UUID, str, str | None]]]:
+    """Yield batches of (id, content, content_hash) for rows that need (re-)embedding.
+
+    ``content_hash`` is the provenance source — the hash of the text this
+    row holds — and is ``None`` for tables that don't carry it (entities).
+    It is read here, in the same statement as the content, on purpose: see
+    ``_embed_and_write`` for why the value must travel with the text rather
+    than being re-read at write time.
 
     Two scan modes:
       - Default: rows where the embedding is NULL (post-12 backfill,
@@ -187,7 +229,10 @@ async def _iter_rows(
     after: uuid.UUID | None = None
     while True:
         params: dict = {"limit": batch_size}
-        sql = f"SELECT id, {spec.content_column} FROM {spec.table} WHERE "
+        selected = f"id, {spec.content_column}"
+        if spec.provenance:
+            selected += f", {spec.provenance.source_hash_column}"
+        sql = f"SELECT {selected} FROM {spec.table} WHERE "
         if rewrite_hint_prefixed:
             # Rewrite mode: target rows that were embedded with the
             # pre-CAURA-222 hint prefix. The metadata key is preserved
@@ -198,9 +243,16 @@ async def _iter_rows(
                     f"rewrite_hint_prefixed scan requires a metadata column on "
                     f"_TableSpec.table={spec.table!r}; got metadata_column=None"
                 )
+            # No ``? 'retrieval_hint'`` existence test. ``?`` is jsonb-only and
+            # this column is ``json`` (the migration chain creates it that way
+            # regardless of the model declaring JSONB), so it raised
+            # UndefinedFunctionError: operator does not exist: json ? unknown.
+            # It was also redundant — the COALESCE below already excludes an
+            # absent key: ``->>`` yields NULL for a missing key and for a NULL
+            # metadata, which coalesces to '' and fails the ``<> ''`` test.
+            # One clause, correct on both json and jsonb.
             sql += (
                 f"{spec.embedding_column} IS NOT NULL "
-                f"AND {spec.metadata_column} ? 'retrieval_hint' "
                 f"AND COALESCE({spec.metadata_column}->>'retrieval_hint', '') <> '' "
             )
         else:
@@ -223,7 +275,7 @@ async def _iter_rows(
             rows = result.all()
         if not rows:
             return
-        yield [(row[0], row[1]) for row in rows]
+        yield [(row[0], row[1], row[2] if spec.provenance else None) for row in rows]
         after = rows[-1][0]
 
 
@@ -247,7 +299,7 @@ async def _backfill_one_table(
     consecutive_nones = 0
     none_lock = asyncio.Lock()
 
-    async def _embed_and_write(row_id: uuid.UUID, content: str | None) -> None:
+    async def _embed_and_write(row_id: uuid.UUID, content: str | None, content_hash: str | None) -> None:
         nonlocal embedded, skipped_empty, none_returns, consecutive_nones
         if not content:
             # Defensive: ``content`` is NOT NULL on memories but is
@@ -297,9 +349,46 @@ async def _backfill_one_table(
                 # PostgreSQL parses the string at server side rather
                 # than relying on implicit-cast inference, which would
                 # depend on asyncpg's chosen wire-type for the param.
+                #
+                # Provenance is written in the SAME statement as the vector.
+                # Writing the vector alone is what made this script a
+                # producer of the very rows it exists to repair: it moved
+                # them out of ``embedding IS NULL`` (which both backfills
+                # scan) and into ``embedding IS NOT NULL AND
+                # embedded_content_hash IS NULL``, which nothing scans at
+                # all. The row left every repair path and the staleness
+                # detector in one write, silently.
+                #
+                # ``:ch`` is the hash READ ALONGSIDE THE CONTENT, not a
+                # SQL-side ``= content_hash``. That distinction is the whole
+                # correctness argument. A content update landing in the
+                # fetch -> embed -> write window would leave the row's
+                # ``content_hash`` describing text this vector was not built
+                # from, and a self-referential assignment would stamp that
+                # new hash onto the old vector — recording the row as
+                # freshly embedded at the exact moment it went stale. Naming
+                # the value we embedded keeps the column's promise true:
+                # afterwards ``embedded_content_hash != content_hash``, and
+                # the staleness detector correctly picks the row up.
+                # ``memory_update_embedding`` refuses the same re-read for
+                # the same reason.
+                #
+                # A NULL ``content_hash`` writes NULL, deliberately. Unknown
+                # provenance is honest; a guessed hash reads downstream as
+                # verified freshness and is worse than the NULL it replaced.
+                # Under ``--rewrite-hint-prefixed`` this can CLEAR an
+                # existing stamp, which is also correct: that stamp
+                # described the hint-prefixed vector being overwritten here,
+                # so keeping it would assert freshness for a vector that no
+                # longer exists.
+                assignments = f"{spec.embedding_column} = (:emb)::vector"
+                params: dict = {"emb": str(vec), "id": row_id}
+                if spec.provenance:
+                    assignments += f", {spec.provenance.stamp_column} = :ch"
+                    params["ch"] = content_hash
                 await conn.execute(
-                    text(f"UPDATE {spec.table} SET {spec.embedding_column} = (:emb)::vector WHERE id = :id"),
-                    {"emb": str(vec), "id": row_id},
+                    text(f"UPDATE {spec.table} SET {assignments} WHERE id = :id"),
+                    params,
                 )
                 await conn.commit()
             embedded += 1
@@ -312,7 +401,7 @@ async def _backfill_one_table(
         rewrite_hint_prefixed=rewrite_hint_prefixed,
     ):
         scanned += len(batch)
-        await asyncio.gather(*(_embed_and_write(rid, c) for rid, c in batch))
+        await asyncio.gather(*(_embed_and_write(rid, c, ch) for rid, c, ch in batch))
         logger.info(
             "backfill[%s] progress: scanned=%d embedded=%d empty=%d none=%d",
             spec.table,
