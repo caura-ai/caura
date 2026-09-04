@@ -91,6 +91,48 @@ async def test_find_duplicate_hash_stays_on_writer() -> None:
     assert len(reader.requests) == 0
 
 
+async def test_governance_child_lookup_stays_on_writer() -> None:
+    """H-10 — the cascade reads rows it is about to soft-delete.
+
+    A read-your-write, and the FIRST ``_get_list`` caller that is one: the
+    method's own comment used to say no caller sat on a write path, which is
+    why it had no opt-out. On a retry after a partial cascade failure this
+    lookup must not return children whose delete already committed — a replica
+    under lag would hand them back, and the cascade would re-audit and
+    re-soft-delete a row it had already handled, putting a duplicate
+    destructive entry in a compliance log.
+    """
+    client, writer, reader = await _fresh_client(
+        writer_url="http://writer:8002", reader_url="http://reader:8002"
+    )
+
+    await client.find_children_by_parent_id(
+        "t1", "11111111-1111-1111-1111-111111111111"
+    )
+
+    assert len(writer.requests) == 1
+    assert len(reader.requests) == 0
+    assert writer.requests[0].url.path.endswith("/memories/by-parent-id")
+
+
+async def test_get_list_still_defaults_to_the_reader() -> None:
+    """OVER-CORRECTION GUARD. The opt-out must stay opt-IN.
+
+    Adding a ``read`` parameter to ``_get_list`` must not change where its
+    existing callers go. This pins that for one of them rather than asserting
+    anything about whether the replica is the right home for each — that is a
+    per-caller question this change does not reopen.
+    """
+    client, writer, reader = await _fresh_client(
+        writer_url="http://writer:8002", reader_url="http://reader:8002"
+    )
+
+    await client.find_by_supersedes_id("t1", "11111111-1111-1111-1111-111111111111")
+
+    assert len(reader.requests) == 1
+    assert len(writer.requests) == 0
+
+
 async def test_exact_lifecycle_audit_read_stays_on_writer() -> None:
     """A just-created canary audit must not transiently 404 on a replica."""
     client, writer, reader = await _fresh_client(

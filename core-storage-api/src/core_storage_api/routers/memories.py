@@ -385,6 +385,19 @@ async def find_by_supersedes_id(tenant_id: str, supersedes_id: str) -> list[dict
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 
 
+@router.get("/by-parent-id")
+async def find_children_by_parent_id(tenant_id: str, parent_id: str) -> list[dict]:
+    """H-10 — live rows derived from a parent, for governance cascade.
+
+    ``parent_id`` is matched against child ``metadata.parent_memory_id`` and is
+    NOT parsed as a UUID here: it is compared as the string the writer stored,
+    so a malformed value matches nothing instead of 500ing the remediation that
+    is trying to enforce a drop.
+    """
+    memories = await _svc.memory_find_children_by_parent_id(tenant_id=tenant_id, parent_id=parent_id)
+    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+
+
 @router.post("/find-successors")
 async def find_successors(request: Request) -> list[dict]:
     body: dict = await request.json()

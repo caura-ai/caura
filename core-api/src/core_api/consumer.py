@@ -38,7 +38,10 @@ from common.events.org_settings_changed_event import OrgSettingsChangedEvent
 from common.events.topics import Topics
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.contradiction import Trigger, run_contradiction_detection
-from core_api.services.governance_remediation import remediate_after_enrichment
+from core_api.services.governance_remediation import (
+    GovernanceCascadeError,
+    remediate_after_enrichment,
+)
 from core_api.services.organization_settings import invalidate_cache, resolve_config
 
 logger = logging.getLogger(__name__)
@@ -104,7 +107,32 @@ async def handle_memory_enriched(event: Event) -> None:
     # counterpart to the synchronous GovernanceDecision step. ``resolve_config``
     # tolerates a None session (cache-first; cold-miss opens its own).
     gov_cfg = await resolve_config(payload.tenant_id)
-    if (await remediate_after_enrichment(memory, gov_cfg)).dropped:
+    try:
+        outcome = await remediate_after_enrichment(memory, gov_cfg)
+    except GovernanceCascadeError as exc:
+        # The parent WAS remediated; only rows derived from it could not be.
+        # Caught HERE and nowhere deeper, because the two callers of
+        # ``remediate_after_enrichment`` need opposite things from this failure:
+        #
+        #   - ``_enrich_memory_background`` is about to create MORE derived rows,
+        #     so it must abort. It does not catch this, and must not.
+        #   - this handler creates nothing. Letting the raise through would nack
+        #     the event, and the dispatcher redelivers on nack — re-running the
+        #     whole drop branch and emitting a SECOND ``critical=True`` audit for
+        #     a memory already dropped. Every redelivery. Duplicate destructive
+        #     entries in a tamper-evident log, for a row nothing further can be
+        #     done to.
+        #
+        # The outcome rides on the exception precisely so this branch can honour
+        # the parent's verdict without re-running it.
+        outcome = exc.outcome
+        logger.error(
+            "memory-enriched: governance remediated the row but could not clean up "
+            "rows derived from it; they still carry content the policy forbade",
+            exc_info=True,
+            extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
+        )
+    if outcome.dropped:
         # Row was dropped by policy — skip contradiction detection on it.
         logger.info(
             "memory-enriched: row dropped by governance policy; ack",

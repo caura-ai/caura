@@ -2798,6 +2798,39 @@ class PostgresService:
             )
             return list((await session.execute(stmt)).scalars().all())
 
+    async def memory_find_children_by_parent_id(
+        self,
+        tenant_id: str,
+        parent_id: str,
+    ) -> list[Memory]:
+        """Live rows derived from ``parent_id`` via ``metadata.parent_memory_id``.
+
+        H-10. Governance remediation lands on the PARENT — the row the enriched
+        event names — but on a deferred deployment the auto-chunk children were
+        already committed before any verdict existed. Without this the drop
+        reached one row and left N carrying the same content live and
+        team-visible, permanently: children are never enriched, so nothing
+        revisits them.
+
+        Filtered on the JSON key rather than a column because that is where the
+        link lives — ``parent_memory_id`` has only ever been written into child
+        metadata. A column would be better and is not what production rows
+        carry, so the fix has to read what is actually there.
+
+        Tenant-scoped, which is the filter that is a boundary rather than a
+        preference; ``deleted_at IS NULL`` because a row already gone needs no
+        second remediation. No visibility or status scoping: remediation must
+        reach every derived row whatever state it is in, the same reasoning
+        ``memory_find_by_supersedes_id`` above records for retraction.
+        """
+        async with get_session() as session:
+            stmt = select(Memory).where(
+                Memory.tenant_id == tenant_id,
+                Memory.metadata_["parent_memory_id"].astext == parent_id,
+                Memory.deleted_at.is_(None),
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
     async def memory_find_successors(
         self,
         supersedes_ids: list[UUID],

@@ -491,16 +491,28 @@ class CoreStorageClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def _get_list(self, path: str, **params: Any) -> list[dict]:
-        # All current _get_list callers are pure list/stats endpoints; none
-        # sit on the write path, so no per-call opt-out is needed yet.
-        headers = await self._auth_headers(read=True)
+    async def _get_list(self, path: str, *, read: bool = True, **params: Any) -> list[dict]:
+        """List GET. ``read=False`` routes to the WRITER, same as :meth:`_get`.
+
+        This used to say "all current callers are pure list/stats endpoints;
+        none sit on the write path, so no per-call opt-out is needed yet" — true
+        when written, and falsified by the governance cascade
+        (``find_children_by_parent_id``), which reads rows it is about to delete
+        and reasons about what a retry will find. A replica read cannot support
+        that reasoning: under lag a retry sees an already-deleted child as live
+        and re-audits it. So the opt-out is here now, and the claim that it was
+        unnecessary is gone rather than left standing next to a caller that
+        needs it.
+        """
+        prefix = self._read_prefix if read else self._prefix
+        headers = await self._auth_headers(read=read)
 
         def _do() -> Awaitable[httpx.Response]:
-            return self._read_http.get(f"{self._read_prefix}{path}", params=params, headers=headers)
+            http = self._read_http if read else self._http
+            return http.get(f"{prefix}{path}", params=params, headers=headers)
 
         resp = await self._execute(_do, retry=_read_retry, label=f"GET-list {path}")
-        self._maybe_evict_on_auth_error(resp, read=True)
+        self._maybe_evict_on_auth_error(resp, read=read)
         resp.raise_for_status()
         return resp.json()
 
@@ -913,6 +925,27 @@ class CoreStorageClient:
         """
         return await self._get_list(
             "/memories/by-supersedes-id", tenant_id=tenant_id, supersedes_id=supersedes_id
+        )
+
+    async def find_children_by_parent_id(self, tenant_id: str, parent_id: str) -> list[dict]:
+        """H-10 — live rows whose ``metadata.parent_memory_id`` is ``parent_id``.
+
+        Governance-remediation-shaped: no status or visibility filter, because a
+        drop must reach every derived row whatever state it is in. Soft-deleted
+        rows are excluded storage-side — one already gone needs no second
+        remediation.
+
+        ``read=False`` — the WRITER, not the replica. This is a read-your-write:
+        the caller is about to soft-delete what comes back, and on a retry after
+        a partial failure it depends on the already-deleted rows being absent.
+        A replica cannot honour that under lag; it would hand back a child whose
+        delete has committed on the primary, and the cascade would re-audit and
+        re-delete it — putting a duplicate destructive entry in a compliance log
+        for a row that was already handled. Same reasoning ``get_memory`` records
+        for its own ``read=False``.
+        """
+        return await self._get_list(
+            "/memories/by-parent-id", read=False, tenant_id=tenant_id, parent_id=parent_id
         )
 
     async def find_successors(self, data: dict) -> list[dict]:
