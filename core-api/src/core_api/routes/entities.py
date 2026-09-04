@@ -15,7 +15,12 @@ from core_api.schemas import (
     RelationUpsertOut,
 )
 from core_api.services.audit_service import log_cross_tenant_read
-from core_api.services.entity_service import get_entity, upsert_entity, upsert_relation
+from core_api.services.entity_service import (
+    filter_relations_by_evidence_visibility,
+    get_entity,
+    upsert_entity,
+    upsert_relation,
+)
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
 
 logger = logging.getLogger(__name__)
@@ -100,6 +105,31 @@ async def get_graph(
 
     entities = graph.get("entities", [])
     relations = graph.get("relations", [])
+
+    # Evidence-visibility filter, shared with ``GET /entities/{id}`` (audit
+    # H-03). The sibling has always dropped edges whose evidence memory the
+    # caller cannot read; this route returned every edge for the tenant —
+    # ``relation_type``, both endpoints, and ``evidence_memory_id`` verbatim —
+    # behind nothing but ``enforce_readable_tenant``. So an agent could read
+    # here exactly what the sibling refused it: the triple derived from a
+    # peer's ``scope_agent`` memory, plus that memory's id. ``fleet_id`` is
+    # optional, so omitting it asked for every fleet at once.
+    #
+    # The raw memory text was never exposed either way. The derived triple IS
+    # the leak — "(anna) -negotiates-> (zenith acquisition)" carries the
+    # secret without carrying the sentence.
+    #
+    # No-op for tenant / user / admin credentials (``agent_id`` None), matching
+    # the sibling's contract rather than narrowing this route for dashboards.
+    #
+    # Runs BEFORE the log line and the cross-tenant audit below, so both count
+    # what was actually disclosed. Counting pre-filter would overstate the
+    # disclosure and record a cross-tenant read of edges that were withheld.
+    relations = await filter_relations_by_evidence_visibility(
+        relations,
+        tenant_id=tenant_id,
+        caller_agent_id=auth.agent_id,
+    )
 
     logger.info(
         f"Graph query: tenant={tenant_id} fleet={fleet_id} → {len(entities)} entities, {len(relations)} relations"

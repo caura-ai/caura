@@ -133,6 +133,94 @@ async def upsert_entity(
     )
 
 
+async def filter_relations_by_evidence_visibility(
+    relations: list[dict],
+    *,
+    tenant_id: str,
+    caller_agent_id: str | None,
+    caller_agent: dict | None = None,
+    pre_authorized_memory_ids: set[str] | None = None,
+) -> list[dict]:
+    """Drop relation edges whose evidence memory the caller may not read.
+
+    The scope contract (audit S5 / C14): an agent credential must not
+    enumerate relation edges or ``evidence_memory_id``s pointing at memories
+    it cannot read. The raw memory text stays unreadable either way — the leak
+    is the memory-DERIVED triple plus the private memory's id.
+
+    Shared deliberately. This filter used to live inside :func:`get_entity`,
+    which made the guarantee a property of ONE caller — and ``GET /graph``,
+    reading the same edges from a different storage call, had no filter at all
+    (audit H-03). The comment in ``get_entity`` about its tenant check already
+    names that defect class: a guarantee that lives in one caller is not a
+    guarantee. Route both readers through here so a third one cannot be added
+    without it.
+
+    ``caller_agent_id`` of ``None`` means a tenant / user / admin credential:
+    the list is returned unchanged, matching the linked-memory filter's
+    contract in the same module.
+
+    Args:
+        relations: dicts carrying ``evidence_memory_id`` (other keys ignored).
+        caller_agent: the caller's pre-fetched agent row, when the calling code
+            already resolved it. Resolved here once if not supplied — never
+            per-edge, which would be N+1 over the graph.
+        pre_authorized_memory_ids: ids the caller has already been shown by
+            the same response (``get_entity``'s linked memories), so their
+            edges need no second lookup.
+    """
+    if not caller_agent_id or not relations:
+        return relations
+
+    from core_api.services.agent_service import (
+        lookup_agent,
+        memory_access_allowed_for_agent,
+    )
+
+    sc = get_storage_client()
+    if caller_agent is None:
+        caller_agent = await lookup_agent(tenant_id, caller_agent_id)
+
+    authorized_ids = pre_authorized_memory_ids or set()
+    unknown_evidence_ids = list(
+        dict.fromkeys(
+            str(rel["evidence_memory_id"])
+            for rel in relations
+            if rel.get("evidence_memory_id") and str(rel["evidence_memory_id"]) not in authorized_ids
+        )
+    )
+    evidence_rows: dict[str, dict | None] = {}
+    if unknown_evidence_ids:
+        # One bulk round-trip (not per-relation); missing / cross-tenant ids
+        # come back as None in-slot.
+        fetched = await sc.bulk_get_memories(unknown_evidence_ids, tenant_id=tenant_id)
+        evidence_rows = dict(zip(unknown_evidence_ids, fetched))
+
+    def _visible(rel: dict) -> bool:
+        evidence_id = rel.get("evidence_memory_id")
+        if not evidence_id:
+            # No evidence ⇒ no memory-derived content and no id to leak.
+            return True
+        evidence_id = str(evidence_id)
+        if evidence_id in authorized_ids:
+            return True
+        row = evidence_rows.get(evidence_id)
+        if row is None:
+            # Deleted / nonexistent / cross-tenant evidence — don't leak the
+            # edge or the memory id. Fails CLOSED: an unresolvable evidence id
+            # is the one case where we cannot show the caller may read it.
+            return False
+        return memory_access_allowed_for_agent(
+            caller_agent,
+            caller_agent_id,
+            visibility=row.get("visibility"),
+            owner_agent_id=row.get("agent_id"),
+            fleet_id=row.get("fleet_id"),
+        )
+
+    return [rel for rel in relations if _visible(rel)]
+
+
 async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | None = None) -> EntityOut | None:
     sc = get_storage_client()
     result = await sc.get_entity_with_linked_memories(str(entity_id), tenant_id)
@@ -245,45 +333,17 @@ async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | Non
                 "evidence_memory_id": rel.get("evidence_memory_id"),
             }
         )
-    if caller_agent_id and relations_raw:
-        from core_api.services.agent_service import memory_access_allowed_for_agent
-
-        authorized_ids = {str(mem.get("id")) for mem in linked_memories_raw if mem.get("id")}
-        unknown_evidence_ids = list(
-            dict.fromkeys(
-                str(rel["evidence_memory_id"])
-                for rel in relations_raw
-                if rel.get("evidence_memory_id") and str(rel["evidence_memory_id"]) not in authorized_ids
-            )
-        )
-        evidence_rows: dict[str, dict | None] = {}
-        if unknown_evidence_ids:
-            # One bulk round-trip (not per-relation); missing / cross-tenant
-            # ids come back as None in-slot.
-            fetched = await sc.bulk_get_memories(unknown_evidence_ids, tenant_id=tenant_id)
-            evidence_rows = dict(zip(unknown_evidence_ids, fetched))
-
-        def _relation_visible(rel: dict) -> bool:
-            evidence_id = rel.get("evidence_memory_id")
-            if not evidence_id:
-                return True
-            evidence_id = str(evidence_id)
-            if evidence_id in authorized_ids:
-                return True
-            row = evidence_rows.get(evidence_id)
-            if row is None:
-                # Deleted / nonexistent / cross-tenant evidence — don't leak
-                # the edge or the memory id.
-                return False
-            return memory_access_allowed_for_agent(
-                caller_agent,
-                caller_agent_id,
-                visibility=row.get("visibility"),
-                owner_agent_id=row.get("agent_id"),
-                fleet_id=row.get("fleet_id"),
-            )
-
-        relations_raw = [rel for rel in relations_raw if _relation_visible(rel)]
+    # Shared with ``GET /graph`` — see
+    # :func:`filter_relations_by_evidence_visibility`. ``caller_agent`` is
+    # passed through because the linked-memory filter above already resolved
+    # it; the helper would otherwise repeat the lookup.
+    relations_raw = await filter_relations_by_evidence_visibility(
+        relations_raw,
+        tenant_id=tenant_id,
+        caller_agent_id=caller_agent_id,
+        caller_agent=caller_agent,
+        pre_authorized_memory_ids={str(mem.get("id")) for mem in linked_memories_raw if mem.get("id")},
+    )
     relations = [
         RelationOut(
             id=rel.get("id"),
