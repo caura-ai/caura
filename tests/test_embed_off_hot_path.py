@@ -36,6 +36,11 @@ pytestmark = pytest.mark.asyncio
 
 
 TENANT_ID = f"test-594-{uuid.uuid4().hex[:8]}"
+# Non-None on purpose. ``_content_hash`` hashes ``tenant:fleet:content``, so a
+# None fleet would make a hash computed without the fleet indistinguishable
+# from one computed with it — and that is precisely the bug the provenance
+# assertions below are guarding against.
+FLEET_ID = f"fleet-594-{uuid.uuid4().hex[:8]}"
 
 
 def _input(
@@ -491,7 +496,7 @@ async def test_bulk_reembed_preserves_batching() -> None:
             new=AsyncMock(return_value=None),
         ),
     ):
-        await memory_service._reembed_memories_bulk(items, TENANT_ID)
+        await memory_service._reembed_memories_bulk(items, TENANT_ID, FLEET_ID)
 
     assert batch_calls == [5], "expected ONE batch call covering all 5 items"
     # update_embedding once per item; contradiction detection scheduled once per item.
@@ -702,11 +707,168 @@ async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
         ),
     ):
         items = [(uuid.uuid4(), f"m{i}") for i in range(3)]
-        await memory_service._reembed_memories_bulk(items, TENANT_ID)
+        await memory_service._reembed_memories_bulk(items, TENANT_ID, FLEET_ID)
 
     assert len(called_with) == 3
     for call in called_with:
         assert call["kwargs"].get("is_failure_fallback") is True
+
+
+# Every way ``_reembed_memories_bulk`` can decide to hand an item to the
+# per-item fallback. The five call sites are one helper now, so these cover
+# the helper being reached correctly from each branch rather than five copies
+# of it; a sixth site that bypasses the helper entirely is caught statically
+# by ``test_schedule_embed_or_reembed_call_sites_pass_hash`` below.
+_PROVENANCE_BRANCHES = (
+    "batch-raise",
+    "batch-short",
+    "batch-none",
+    "get-memory-raise",
+    "update-raise",
+)
+
+
+@pytest.mark.parametrize("branch", _PROVENANCE_BRANCHES)
+async def test_bulk_reembed_fallback_carries_provenance(branch: str) -> None:
+    """A fallback re-embed must still say WHICH text it embedded.
+
+    See ``_reembed_memories_bulk``'s docstring for the failure mode. The short
+    version: omitting ``content_hash`` is silent end to end and parks the row
+    in ``unknown_provenance``, which nothing sweeps.
+
+    Asserting the exact hash rather than merely "a hash is present", because
+    ``_content_hash`` covers ``tenant:fleet:content`` — a value computed
+    without the fleet would be present, wrong, and read downstream as verified
+    freshness. That is worse than the NULL it replaced.
+    """
+    from core_api.services import memory_service
+
+    scheduled, patched = await _provenance_harness(branch, n_items=3)
+
+    assert scheduled, f"branch={branch!r} scheduled no fallback; it was not reached"
+    for content, content_hash in scheduled.items():
+        assert content_hash == memory_service._content_hash(
+            TENANT_ID, FLEET_ID, content
+        ), (
+            f"fallback for {content!r} carried {content_hash!r}; a re-embed that does not "
+            "name the text it embedded lands the row in unknown_provenance forever"
+        )
+
+    # The direct PATCH path, on whichever branch reaches it — ``update-raise``
+    # fails only the first item, so its siblings land here. Vacuous on the
+    # branches that never PATCH.
+    #
+    # This does NOT prove the two paths agree on the fleet: the harness hands
+    # ``_get_memory`` the same FLEET_ID the fallback uses, so that equality is
+    # constructed by the harness, not tested. What it does catch is the direct
+    # path dropping its provenance stamp altogether, which is the regression
+    # actually reachable from an edit here.
+    for content, content_hash in patched.items():
+        assert content_hash == memory_service._content_hash(
+            TENANT_ID, FLEET_ID, content
+        ), f"direct PATCH for {content!r} carried {content_hash!r}"
+
+
+async def _provenance_harness(
+    branch: str,
+    *,
+    n_items: int,
+) -> tuple[dict[str, str | None], dict[str, str | None]]:
+    """Drive ``_reembed_memories_bulk`` down one branch and report both stamps.
+
+    Returns ``({content: content_hash}, {content: embedded_content_hash})`` —
+    fallback schedules first, direct PATCHes second. ``_content_hash`` itself
+    is deliberately NOT patched: the value it returns is the thing under test,
+    so a stand-in would assert the harness against itself.
+    """
+    from core_api.services import memory_service
+
+    if branch not in _PROVENANCE_BRANCHES:
+        raise AssertionError(
+            f"unknown branch {branch!r}; expected one of {_PROVENANCE_BRANCHES}"
+        )
+
+    items = [(uuid.uuid4(), f"provenance-body-{i}") for i in range(n_items)]
+    first_id = str(items[0][0])
+    by_id = {str(mid): content for mid, content in items}
+
+    scheduled: dict[str, str | None] = {}
+    patched: dict[str, str | None] = {}
+
+    def _capture_schedule(_memory_id, content, _tenant_id, **kwargs):
+        scheduled[content] = kwargs.get("content_hash")
+
+        async def _noop() -> None:
+            return None
+
+        return _noop()
+
+    async def _batch(texts, _cfg, *, budget_s=None, **_kwargs):
+        if branch == "batch-raise":
+            raise RuntimeError("simulated provider outage")
+        if branch == "batch-short":
+            # Provider partial-failed mid-batch: strict zip raises ValueError.
+            return [[0.1] * VECTOR_DIM for _ in texts[:-1]]
+        if branch == "batch-none":
+            return [None for _ in texts]
+        return [[0.1] * VECTOR_DIM for _ in texts]
+
+    async def _get_memory(mid: str, _tenant_id: str, **_kw):
+        if branch == "get-memory-raise":
+            raise RuntimeError("storage transient error")
+        # ``fleet_id`` is what the row actually carries, and it is FLEET_ID
+        # because memory_add_all wrote the whole batch under one fleet. The
+        # direct path hashes this field, so a harness that returned some other
+        # fleet here would be testing a batch that cannot exist.
+        return {"id": mid, "deleted_at": None, "fleet_id": FLEET_ID, "embedding": None}
+
+    async def _update_embedding(
+        mid: str, _tenant_id, _embedding, embedded_content_hash=None
+    ):
+        # First item only, so one item takes the fallback while its siblings
+        # take the direct PATCH — both stamps observable in a single run.
+        if branch == "update-raise" and mid == first_id:
+            raise RuntimeError("connection pool exhausted for the first item")
+        patched[by_id[mid]] = embedded_content_hash
+
+    sc = MagicMock()
+    sc.get_memory = AsyncMock(side_effect=_get_memory)
+    sc.update_embedding = AsyncMock(side_effect=_update_embedding)
+
+    def _fake_detect(*_a, **_kw):
+        async def _noop() -> None:
+            return None
+
+        return _noop()
+
+    def _stub_tracked_task(coro, _name, *_a, **_k):
+        coro.close()
+        return None
+
+    with (
+        patch.object(memory_service, "get_embeddings_batch", new=_batch),
+        patch.object(memory_service, "get_storage_client", return_value=sc),
+        patch.object(
+            memory_service, "_schedule_embed_or_reembed", new=_capture_schedule
+        ),
+        patch(
+            "core_api.services.contradiction_detector.detect_contradictions_async",
+            new=_fake_detect,
+        ),
+        patch.object(memory_service, "track_task"),
+        patch.object(
+            memory_service,
+            "tracked_task",
+            new=MagicMock(side_effect=_stub_tracked_task),
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        await memory_service._reembed_memories_bulk(items, TENANT_ID, FLEET_ID)
+
+    return scheduled, patched
 
 
 async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> None:
@@ -752,7 +914,7 @@ async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> Non
         ),
     ):
         items = [(uuid.uuid4(), f"m{i}") for i in range(3)]
-        await memory_service._reembed_memories_bulk(items, TENANT_ID)
+        await memory_service._reembed_memories_bulk(items, TENANT_ID, FLEET_ID)
 
     # All 3 items land in the per-item fallback despite the auth error
     # being outside the original narrow except list.
@@ -815,7 +977,7 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
         ),
     ):
         await memory_service._reembed_memories_bulk(
-            [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID
+            [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID, FLEET_ID
         )
 
     # Item B went through the normal write pass.
@@ -889,7 +1051,7 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
         ),
     ):
         await memory_service._reembed_memories_bulk(
-            [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID
+            [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID, FLEET_ID
         )
 
     # Both PATCH calls attempted (loop didn't abort on item A's failure).
@@ -966,7 +1128,7 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
         ),
     ):
         await memory_service._reembed_memories_bulk(
-            [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID
+            [(mem_a_id, "body a"), (mem_b_id, "body b")], TENANT_ID, FLEET_ID
         )
 
     # mem_a: race guard → no PATCH, contradiction on the EXISTING embedding
@@ -1019,7 +1181,7 @@ async def test_bulk_reembed_falls_back_on_length_mismatch() -> None:
             new=AsyncMock(return_value=None),
         ),
     ):
-        await memory_service._reembed_memories_bulk(items, TENANT_ID)
+        await memory_service._reembed_memories_bulk(items, TENANT_ID, FLEET_ID)
 
     # No PATCHes landed — we never entered the per-item loop.
     sc.update_embedding.assert_not_called()
