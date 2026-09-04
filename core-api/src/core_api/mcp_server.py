@@ -488,19 +488,32 @@ def _observe_plan_limit(op: MutatingOp, tenant_id: str) -> None:
     from the support queue.
 
     So: emit what WOULD be refused, ship it, read the logs, then enforce with
-    the number in hand. The log also answers a question that cannot be answered
-    from this repo at all — whether the gateway stamps ``x-org-read-only`` on
-    the ``/mcp`` route or only on ``/api/v1``. The header has no producer in
-    OSS; if this line never fires in production, that is the first thing to
-    check.
+    the number in hand.
 
-    READ SILENCE CAREFULLY. Three different things produce no log, and only one
-    of them is "nothing would be refused": the gateway may not stamp the header
-    on this route at all (above), or the tenant may never have been marked over
-    plan because the MCP batch path records no usage to compute that from —
-    which stays true while ``meters_mcp_bulk_write()`` is off, its default
-    (caura-ai/caura#1220). Rule those out before reading a quiet log as a
-    green light to enforce.
+    THE GATEWAY QUESTION IS ANSWERED — IT IS YES. This docstring used to say the
+    log was the only way to learn "whether the gateway stamps
+    ``x-org-read-only`` on the ``/mcp`` route or only on ``/api/v1``", because
+    the header has no producer in OSS. It has one in caura-enterprise, and it
+    was read there at ``origin/dev`` ``13564142``:
+    ``gateway/nginx.conf.template`` gives both
+    ``location = /mcp`` and ``location /mcp/`` the same
+    ``auth_request_set $org_read_only`` / ``proxy_set_header X-Org-Read-Only``
+    pair the ``/api/v1/`` catch-all has, alongside ``X-Gateway-Secret`` — so
+    ``via_gateway`` is true and the header is honoured. The value originates in
+    ``platform-auth-api``'s ``/_auth``, which sets it on an expired license, a
+    cached read-only verdict, or a live storage lookup.
+
+    READ SILENCE CAREFULLY — but one of the three causes is now ruled out. A
+    quiet log is NOT explained by the gateway skipping this route. What is left:
+    the tenant may never have been marked over plan, because the MCP batch path
+    records no usage to compute that from while ``meters_mcp_bulk_write()`` is
+    off, its default (caura-ai/caura#1220) — or there is genuinely nothing to
+    refuse. Rule the first out before reading a quiet log as a green light.
+
+    Note that ``/_auth`` fails OPEN on its own storage lookup: an exception
+    there returns without the header, so a storage outage reads as "not
+    read-only" for the cache TTL. That is a fourth reason a log can be quiet
+    while a tenant is genuinely over plan, and it lives outside this repo.
 
     Logged at WARNING rather than INFO because a firing line means real money:
     a write that the plan says should not have happened.
