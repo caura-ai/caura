@@ -296,10 +296,18 @@ def _drop_duplicate_facts(
       discard would be the dominant cost of deduping at all.
 
     Dropping rather than collapsing-and-reporting is deliberate: these children
-    are derived rows, not caller-submitted items. Nothing upstream holds an
-    index into them — both auto-chunk handlers discard ``create_memories``'
-    return value entirely — so there is no per-item result to point at a
-    survivor, and the parent memory is what the caller gets back either way.
+    are derived rows, not caller-submitted items. Nothing the CALLER holds
+    indexes into them — the parent memory is what a caller gets back either
+    way — so there is no per-item result to point at a survivor.
+
+    Both auto-chunk handlers do now consume ``create_memories``' return value
+    (H-09, to queue a re-embed for a child that landed unembedded), which an
+    earlier version of this docstring cited as "discarded entirely". That does
+    not reopen the question: the results are joined by ``client_request_id``,
+    which each surviving payload carries, so a fact dropped HERE — before any
+    payload is built — simply has no entry to be misaligned against. It is a
+    positional index into the pre-dedup facts that this ordering would break,
+    and nothing takes one.
     """
     kept: list[dict] = []
     seen: set[str] = set()
@@ -345,8 +353,24 @@ async def _insert_children_or_degrade(
     tenant_id: str,
     parent_id: str,
     source: str,
-) -> None:
+) -> list[dict] | None:
     """Insert auto-chunk children; a duplicate refusal degrades, never raises.
+
+    Returns ``create_memories``' per-item results — one entry per input
+    payload, each carrying its ``client_request_id`` and its ``id``, the
+    latter populated whether or not this attempt was the one that committed
+    the row. Callers need them to queue a re-embed for a child inserted
+    without a vector.
+
+    ``None`` means NOTHING WAS WRITTEN by this call (the duplicate refusal
+    below); ``[]`` means there was nothing to write. The distinction is not
+    cosmetic — see :func:`_queue_child_reembeds`, which must not report N
+    unrepairable rows for a batch that never reached the table.
+
+    Consumers pair results to payloads by ``client_request_id`` rather than by
+    position — see ``_queue_child_reembeds``. The order IS input order, but
+    describing the return by its order invites a positional join, and the
+    mispairing that would cause on this path is silent.
 
     The parent row is ALREADY COMMITTED by the time this runs. Raising here would
     hand the caller a 500 for a write that persisted, and leave the parent
@@ -370,10 +394,10 @@ async def _insert_children_or_degrade(
     and the storage-side statement would build an INSERT with no VALUES.
     """
     if not payloads:
-        return
+        return []
     async with per_tenant_storage_slot("storage_write", tenant_id):
         try:
-            await get_storage_client().create_memories(payloads)
+            return await get_storage_client().create_memories(payloads)
         except DuplicateMemoryError:
             logger.warning(
                 "auto-chunk children refused as duplicates; parent kept without them",
@@ -382,6 +406,230 @@ async def _insert_children_or_degrade(
                     "parent_memory_id": parent_id,
                     "children_dropped": len(payloads),
                 },
+            )
+            # ``None``, NOT ``[]``: nothing was written by this call, which is a
+            # different fact from "written, and here are the results". The repair
+            # loop has to tell them apart — an empty RESULT list against a
+            # non-empty payload list is a broken contract worth shouting about,
+            # while this case is already fully explained by the warning above.
+            return None
+
+
+async def _embed_children_or_degrade(
+    child_texts: list[str],
+    tenant_config,
+    *,
+    parent_id: str,
+) -> list[list[float] | None]:
+    """Batch-embed auto-chunk children; a provider failure degrades, never raises.
+
+    Audit H-09. ``get_embeddings_batch`` raises on every provider-side error,
+    gate saturation, quota and misconfig — its own docstring notes that both
+    bulk callers wrap it. Both auto-chunk callers run it AFTER the parent row
+    is committed and OUTSIDE the request's ``try/finally``, so an escaping
+    exception produced:
+
+      - silent data loss: no children written, while the parent's metadata
+        claimed ``auto_chunked`` and ``child_count=N``, leaving the source
+        document unrecallable and nothing recording why;
+      - no backfills: parent enrich, entity extraction and parent embed all
+        sit below this call, so a parent inserted with ``embedding=None``
+        stayed unembedded — the 2026-07-27 stranded-rows shape;
+      - a PERMANENT wedge, the part that made it unrecoverable: the retry
+        re-chunks, hits the same full-document ``content_hash``, and migration
+        040's live-row uniqueness answers 409 against the childless parent.
+        The children could never be written without deleting the parent by
+        hand.
+
+    Two asymmetries settle the policy. The parent's own embed already degrades
+    to ``None`` on these same failures, so the parent commits unembedded rather
+    than failing; and the child INSERT already degrades for this exact reason —
+    see :func:`_insert_children_or_degrade`. The child EMBED between them was
+    the only step that still raised.
+
+    Deliberately NOT mode-dependent like the bulk path, which fails the request
+    under ``inline_embedding``. There nothing has persisted when the embed
+    fails, so refusing is clean. Here the parent is committed, which inverts
+    the trade: refusing loses the children AND wedges every retry, while
+    degrading keeps the facts and leaves a repair queued.
+
+    SHARED by the pipeline and legacy handlers on purpose. The legacy path is
+    dormant, not dead — the flag at the top of this module documents flipping
+    it as the emergency-rollback lever — and an emergency rollback is
+    plausibly happening BECAUSE something is degraded, which is the same
+    condition that trips this. Two copies of a degrade policy is how the two
+    paths diverge; one is how they cannot.
+    """
+    try:
+        return await get_embeddings_batch(child_texts, tenant_config, background=False)
+    except Exception:
+        logger.warning(
+            # Conditional throughout, and BOTH clauses had to become so. This
+            # fires before the insert has been attempted, so it knows only that
+            # the embed failed: a duplicate refusal writes nothing, and a child
+            # returned without a usable id gets no repair. Neither "persisting"
+            # nor "a re-embed queued" is a fact here, and stating either as one
+            # would be this module's own bug class in a log line — the first
+            # draft fixed the second clause and left the first asserting the
+            # same thing one clause earlier.
+            "auto-chunk child embed failed after the parent committed; "
+            "%d child(ren) will be inserted unembedded if the write proceeds — "
+            "a re-embed is queued for each one that lands with a usable id",
+            len(child_texts),
+            extra={"parent_memory_id": parent_id, "child_count": len(child_texts)},
+            exc_info=True,
+        )
+        return [None] * len(child_texts)
+
+
+def _mark_child_embedding_pending(child_meta: dict, child_embedding) -> None:
+    """Flag a child that is persisting without a vector.
+
+    ``embedding_pending`` is public API, not bookkeeping: ``MemoryOut.metadata``
+    documents an ABSENT flag as "that stage ran inline", so omitting it here
+    would state the opposite of the truth and make these rows
+    indistinguishable from fully-embedded ones to every consumer. Same flag the
+    atomic-fact fan-out sets, for the same reason.
+    """
+    if child_embedding is None:
+        child_meta["embedding_pending"] = True
+
+
+def _queue_child_reembeds(
+    child_payloads: list[dict],
+    child_results: list[dict] | None,
+    *,
+    tenant_id: str,
+    parent_id: str,
+) -> None:
+    """Queue a re-embed for every child that landed without a vector.
+
+    Only does anything when the embed above degraded; the healthy path leaves
+    this with nothing to do, which matters because the alternative would queue
+    N pointless tasks on every ordinary auto-chunk write.
+
+    ``child_results is None`` means the insert wrote NOTHING (duplicate
+    refusal), and this returns silently. Every payload would otherwise fall
+    through to the no-id branch below and report N rows "persisted unembedded"
+    that were never persisted at all — false alarms whose most likely moment is
+    the retry-after-degradation case this whole fix targets, telling an on-call
+    engineer to hunt for orphaned rows that do not exist. The refusal already
+    has its own WARNING, with the count, in
+    :func:`_insert_children_or_degrade`.
+
+    Scheduled explicitly rather than left to the nightly sweep: the sweep is
+    gated on ``embed_backfill_enabled``, which defaults FALSE, and a deployment
+    that never enabled it is how ~430 memories were stranded in the 2026-07-27
+    incident this module already carries a postmortem for.
+    ``_schedule_embed_or_reembed`` publishes EMBED_REQUESTED in deferred mode
+    and retries in-process otherwise, so it covers both.
+
+    Payloads are joined to results by ``client_request_id``, NOT by position,
+    mirroring ``create_memories_bulk``. Position would in fact work today —
+    ``memory_add_all`` builds its response by iterating the input and looking
+    each id up in a dict, so "one entry per item in input order" is guaranteed
+    by construction rather than merely documented. The join is what makes that
+    guarantee stop mattering, and it is free: ``client_request_id`` is
+    MANDATORY on every item (``memory_add_all`` refuses a batch without it),
+    so there is no case where the key is absent to key on.
+
+    Worth the paranoia because of what this loop does with the pairing rather
+    than how likely it is to break. A mispaired entry does not drop a repair —
+    it embeds THIS payload's text and persists the vector against ANOTHER
+    child's row, leaving that row's embedding silently inconsistent with its
+    own stored content. That is a recall-quality corruption with no error and
+    no log, on a path that only runs when the provider is already degraded.
+    A missing entry now takes the loud no-id branch instead of shifting every
+    subsequent pair by one.
+
+    NOTHING here may raise. This runs after the parent AND the children are
+    committed, so an escaping exception would answer a fully-persisted write
+    with a 500 — the exact H-09 shape, moved from the embed step to the repair
+    step. The scheduling is guarded per child, so one bad id costs one
+    unrepaired row rather than the whole sweep.
+    """
+    if child_results is None:
+        return
+    if child_payloads and not child_results:
+        # Rows went to the table and the insert reported on none of them — a
+        # broken contract, not a per-child outcome, so it gets ONE line rather
+        # than N. Distinct from the ``None`` above, which is the honest
+        # "nothing was written" answer.
+        logger.error(
+            "auto-chunk insert returned no per-item results for %d child(ren) of "
+            "parent %s; NO re-embed scheduled for any of them",
+            len(child_payloads),
+            parent_id,
+        )
+        return
+    by_request_id = {
+        r["client_request_id"]: r for r in child_results if isinstance(r, dict) and r.get("client_request_id")
+    }
+    for payload in child_payloads:
+        if payload.get("embedding") is not None:
+            continue
+        # ``.get``, not ``[]``: a payload without a request id cannot be joined
+        # to anything, so it belongs in the no-id branch below rather than
+        # raising a KeyError out of a request whose rows are already committed.
+        request_id = payload.get("client_request_id")
+        result = by_request_id.get(request_id) if request_id else None
+        child_id = result.get("id") if isinstance(result, dict) else None
+        if not child_id:
+            # Loud, and deliberately not folded in with the repaired ones: this
+            # row is unembedded with NO repair queued, which is strictly worse
+            # than the counted case, and only the off-by-default sweep would
+            # ever find it. Logs the response SHAPE, never the response —
+            # ``result`` belongs to a row carrying the fact text, so
+            # interpolating it would put memory content, and any PII in it,
+            # into an ERROR log. The request id is safe to name and is the only
+            # handle on WHICH child this was: it is ``auto-chunk:<uuid4>``,
+            # minted server-side, and derived from nothing the caller sent.
+            logger.error(
+                "auto-chunk child persisted unembedded but the bulk insert returned "
+                "no usable id (request_id=%s, result keys: %s) for parent %s; "
+                "NO re-embed scheduled",
+                request_id,
+                sorted(result) if isinstance(result, dict) else type(result).__name__,
+                parent_id,
+            )
+            continue
+        try:
+            child_uuid = UUID(str(child_id))
+            track_task(
+                tracked_task(
+                    _schedule_embed_or_reembed(
+                        child_uuid,
+                        payload["content"],
+                        tenant_id,
+                        content_hash=payload["content_hash"],
+                        is_failure_fallback=True,
+                    ),
+                    "embed_or_publish",
+                    # The CHILD, not the parent: a backfill logged against the
+                    # wrong row repairs nothing and misdirects the operator.
+                    child_uuid,
+                    tenant_id,
+                )
+            )
+        except Exception:
+            # This whole helper runs AFTER the rows are committed, which is the
+            # invariant H-09 is about — so the repair step must not be the thing
+            # that raises. ``UUID(str(child_id))`` is the concrete way it could:
+            # a storage id that stopped being a UUID string would take a request
+            # whose parent and children all persisted and answer it 500, which
+            # is the defect this PR removes, moved one step later. Same shape as
+            # the audit-hook guard a few lines below the call sites.
+            #
+            # PER-CHILD rather than around the loop, and that is the point: a
+            # catch outside would let one malformed id cancel the repairs for
+            # every other child, turning one unrepaired row into N. Logged with
+            # the request id and never the payload, which holds the fact text.
+            logger.error(
+                "auto-chunk child re-embed could not be scheduled "
+                "(request_id=%s) for parent %s; this row stays unembedded",
+                request_id,
+                parent_id,
+                exc_info=True,
             )
 
 
@@ -933,7 +1181,12 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         child_texts = [fact["content"] for fact in facts]
         # Auto-chunk children of a synchronous create: same priority as the
         # parent embed, which is already background=False.
-        child_embeddings = await get_embeddings_batch(child_texts, tenant_config, background=False)
+        #
+        # Degrades rather than raising — the parent is already committed. See
+        # ``_embed_children_or_degrade``, shared with the legacy handler.
+        child_embeddings = await _embed_children_or_degrade(
+            child_texts, tenant_config, parent_id=str(parent_id)
+        )
 
         child_payloads = []
         for fact, child_embedding in zip(facts, child_embeddings):
@@ -946,6 +1199,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             # parent row, so the children cannot end up labelled differently
             # from the row they were cut out of.
             _inherit_governance_signals(child_meta, parent_metadata)
+            _mark_child_embedding_pending(child_meta, child_embedding)
             child_payloads.append(
                 {
                     "tenant_id": data.tenant_id,
@@ -968,11 +1222,20 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # Auto-chunk children — second storage roundtrip in this request after
         # the parent insert above. The parent is committed, so a refusal here
         # degrades rather than raising; see ``_insert_children_or_degrade``.
-        await _insert_children_or_degrade(
+        child_results = await _insert_children_or_degrade(
             child_payloads,
             tenant_id=data.tenant_id,
             parent_id=str(parent_id),
             source="auto_chunk",
+        )
+
+        # Queue a repair for any child that landed without a vector; a no-op on
+        # the healthy path. Shared with the legacy handler.
+        _queue_child_reembeds(
+            child_payloads,
+            child_results,
+            tenant_id=data.tenant_id,
+            parent_id=str(parent_id),
         )
 
         # #856: the two deferred-path backfills. Until this, the multi-fact exit
@@ -1304,11 +1567,26 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
             child_texts = [fact["content"] for fact in facts]
             # Auto-chunk children of a synchronous create — see the sibling
             # call in the ctx-based auto-chunk handler.
-            child_embeddings = await get_embeddings_batch(child_texts, tenant_config, background=False)
+            #
+            # Same degrade as the pipeline path, via the same helper. This path
+            # is dormant rather than dead: the flag at the top of this module
+            # documents flipping it as the emergency-rollback lever, and an
+            # emergency rollback is plausibly happening BECAUSE something is
+            # degraded — the same condition that trips H-09. Leaving the defect
+            # here would have meant it resurfacing during exactly the incident
+            # that lever exists for.
+            child_embeddings = await _embed_children_or_degrade(
+                child_texts, tenant_config, parent_id=str(parent_id)
+            )
 
             child_payloads = []
             for fact, child_embedding in zip(facts, child_embeddings):
                 child_ch = _content_hash(data.tenant_id, data.fleet_id, fact["content"])
+                child_meta = {
+                    "parent_memory_id": str(parent_id),
+                    "source": "auto_chunk",
+                }
+                _mark_child_embedding_pending(child_meta, child_embedding)
                 child_payloads.append(
                     {
                         "tenant_id": data.tenant_id,
@@ -1320,10 +1598,7 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
                         "weight": weight,
                         "source_uri": data.source_uri,
                         "run_id": data.run_id,
-                        "metadata_": {
-                            "parent_memory_id": str(parent_id),
-                            "source": "auto_chunk",
-                        },
+                        "metadata_": child_meta,
                         "content_hash": child_ch,
                         "client_request_id": _auto_chunk_request_id(),
                         "expires_at": data.expires_at.isoformat() if data.expires_at else None,
@@ -1334,11 +1609,17 @@ async def _create_memory_legacy(data: MemoryCreate) -> MemoryOut:
             # Legacy-path auto-chunk children. See
             # ``_handle_auto_chunk_from_ctx`` for the pipeline-path equivalent;
             # the parent is committed here too, so the same degrade applies.
-            await _insert_children_or_degrade(
+            child_results = await _insert_children_or_degrade(
                 child_payloads,
                 tenant_id=data.tenant_id,
                 parent_id=str(parent_id),
                 source="auto_chunk_legacy",
+            )
+            _queue_child_reembeds(
+                child_payloads,
+                child_results,
+                tenant_id=data.tenant_id,
+                parent_id=str(parent_id),
             )
 
             if tenant_config.entity_extraction_enabled:
@@ -2119,9 +2400,22 @@ async def create_memories_bulk(
                 ) from exc
 
         # Map each storage result back to its source item via
-        # ``client_request_id``. Postgres ``RETURNING`` order is
-        # unspecified for ``ON CONFLICT DO NOTHING``, so we never
-        # zip on positional index.
+        # ``client_request_id``, never by positional index.
+        #
+        # The reason is NOT that this list arrives in an arbitrary order.
+        # Postgres ``RETURNING`` order is indeed unspecified under
+        # ``ON CONFLICT DO NOTHING``, but ``memory_add_all`` absorbs that: it
+        # collects RETURNING into a dict and then builds its response by
+        # iterating the INPUT, so "one entry per item in input order" holds by
+        # construction and is documented at all three layers it crosses. This
+        # comment used to attribute the join to the raw SQL behaviour, which
+        # reads as a claim that the RESPONSE is unordered — it is not, and a
+        # reviewer took the mismatch for a bug in a sibling caller.
+        #
+        # The join stays regardless, because it makes the guarantee stop
+        # mattering across a service boundary we do not deploy in lockstep,
+        # and because ``client_request_id`` is mandatory on every item, so it
+        # costs nothing.
         by_request_id = {r["client_request_id"]: r for r in storage_results}
 
         # Track the (orig_idx, mem_data, mem_id) trios for the
