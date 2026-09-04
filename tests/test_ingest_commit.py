@@ -57,6 +57,11 @@ def captured(monkeypatch):
     state = SimpleNamespace(
         writes=[],
         bulk_calls=[],
+        # One entry per ``create_memories_bulk`` call. H-07 made a commit of
+        # >BULK_MAX_ITEMS facts issue several, and every one of them must
+        # carry the SAME attempt id — see the batching comment in
+        # ``ingest_commit``.
+        bulk_attempt_ids=[],
         bulk_find_calls=[],
         resolve_config_calls=[],
         bulk_find_result={},
@@ -66,6 +71,10 @@ def captured(monkeypatch):
         # as per-item ``status="error"`` results rather than raising
         # through ``asyncio.gather``.
         write_raise_for={},
+        # Whole-CALL failure injection, keyed on the 0-based batch number —
+        # distinct from ``write_raise_for``, which produces per-item error
+        # results. This is the 504-from-the-bulk-endpoint shape.
+        raise_http_on_batch={},
     )
 
     async def fake_resolve_config(tenant_id):
@@ -100,7 +109,11 @@ def captured(monkeypatch):
         from core_api.schemas import BulkItemResult, BulkMemoryResponse
         from core_api.services.memory_service import _content_hash as ch_fn
 
+        batch_no = len(state.bulk_calls)
         state.bulk_calls.append(data)
+        state.bulk_attempt_ids.append(bulk_attempt_id)
+        if batch_no in state.raise_http_on_batch:
+            raise state.raise_http_on_batch[batch_no]
         if state.write_delay_ms:
             await asyncio.sleep(state.write_delay_ms / 1000.0)
 
@@ -721,3 +734,114 @@ async def test_response_always_carries_errored_field(captured):
     result = await ingest_service.ingest_commit(request=req)
     assert "errored" in result
     assert result["errored"] == 0
+
+
+# ---------------------------------------------------------------------------
+# H-07 — a commit larger than one bulk batch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_commit_larger_than_one_batch_persists_every_fact(captured):
+    """H-07. ``BulkMemoryCreate.items`` caps at ``BULK_MAX_ITEMS``; nothing upstream did.
+
+    ``IngestCommitRequest.facts`` carries no ``max_length`` and preview caps
+    nothing either — it accepts documents up to 100k tokens, sections them at
+    ~2k, and asks for 5-20 facts per section, so clearing 100 facts is routine
+    rather than exotic.
+
+    Building one oversized ``BulkMemoryCreate`` raised
+    ``pydantic.ValidationError``, outside the ``try`` below it (which catches
+    only ``HTTPException``), and core-api registers no handler for the raw
+    pydantic error — ``RequestValidationError`` is FastAPI's request-body
+    wrapper and a hand-built model does not raise it. So it surfaced as an
+    opaque 500 with ZERO facts persisted, and the retry re-extracted the same
+    over-100 set and failed identically.
+
+    The assertion that matters is the last one: every fact's content reaches
+    the write path exactly once, in order. Counting batches alone would pass on
+    a chunking bug that dropped or duplicated a fact at a boundary.
+    """
+    from core_api.constants import BULK_MAX_ITEMS
+
+    n = BULK_MAX_ITEMS + 50
+    facts = [f"h07 fact number {i}" for i in range(n)]
+
+    req = _request("t1", *facts)
+    result = await ingest_service.ingest_commit(request=req)
+
+    assert result["facts_extracted"] == n
+    assert result["memories_created"] == n, result
+    assert result["errored"] == 0
+
+    sizes = [len(c.items) for c in captured.bulk_calls]
+    assert sizes == [BULK_MAX_ITEMS, 50], sizes
+
+    written = [w.content for w in captured.writes]
+    assert written == facts, "chunking dropped, duplicated or reordered a fact"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_every_batch_shares_one_attempt_id(captured):
+    """Batches share ``run_id`` as the attempt id, and must keep sharing it.
+
+    Per-batch ids (``f"{run_id}:batch{n}"``) look tidier and are wrong: the
+    pre-loop dedup shrinks the survivor list between attempts, so a retry
+    re-cuts the boundaries and the same fact lands in a different batch. With
+    the batch number in the key, that fact would compute a DIFFERENT id on
+    every retry, losing the ``duplicate_attempt`` resolution that reusing
+    ``run_id`` exists to provide.
+
+    Safe only because H-08 made the per-item key content-derived — batch
+    boundaries do not enter the key at all.
+    """
+    from core_api.constants import BULK_MAX_ITEMS
+
+    facts = [f"h07 shared attempt id {i}" for i in range(BULK_MAX_ITEMS + 5)]
+    req = _request("t1", *facts, run_id="run-h07")
+    await ingest_service.ingest_commit(request=req)
+
+    assert len(captured.bulk_attempt_ids) == 2, captured.bulk_attempt_ids
+    assert captured.bulk_attempt_ids == ["run-h07", "run-h07"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_failed_batch_stops_the_run_and_reports_what_landed(captured, caplog):
+    """A batch failing mid-run must not be reported as if nothing persisted.
+
+    This path previously zeroed the counts and logged "0 facts persisted on
+    this attempt" — true when there was only ever one batch, and a false
+    statement to an operator once there can be several. The earlier batches'
+    rows are real, and the cleanup decision depends on knowing that.
+
+    It also stops rather than pressing on: these failures are overwhelmingly
+    systemic (storage down, budget burned), so continuing would queue every
+    remaining batch behind the same wall and turn one failure into N.
+    """
+    from fastapi import HTTPException
+
+    from core_api.constants import BULK_MAX_ITEMS
+
+    n = BULK_MAX_ITEMS * 2 + 10
+    facts = [f"h07 partial {i}" for i in range(n)]
+    # Second batch (0-based index 1) fails; the third must never be attempted.
+    captured.raise_http_on_batch = {1: HTTPException(status_code=504, detail="burned")}
+
+    req = _request("t1", *facts)
+    with caplog.at_level("ERROR"):
+        result = await ingest_service.ingest_commit(request=req)
+
+    assert len(captured.bulk_calls) == 2, "the run continued past a failed batch"
+    # Batch 1 landed and is still counted.
+    assert result["memories_created"] == BULK_MAX_ITEMS, result
+    # The failed batch and the un-attempted one are both errored.
+    assert result["errored"] == n - BULK_MAX_ITEMS, result
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("0 facts persisted" in m for m in msgs), (
+        f"the log claims nothing persisted while {result['memories_created']} rows exist: {msgs}"
+    )
+    assert any("not attempted" in m for m in msgs), msgs
