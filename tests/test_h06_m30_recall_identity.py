@@ -196,6 +196,68 @@ async def test_recall_tenant_key_may_still_name_any_agent(client, sc, as_auth):
     assert resp.status_code == 200, resp.text
 
 
+async def test_recall_binds_an_omitted_filter_to_the_authenticated_agent(
+    client, sc, as_auth, monkeypatch
+):
+    """The DEFAULT path: no filter at all, which was the worse of the two holes.
+
+    Every other test here names an identity explicitly, so all of them passed
+    while this case went unpinned — and it is the one that needs no crafted
+    request. Pre-fix, ``caller_agent_id=body.filter_agent_id`` meant an omitted
+    filter passed ``None``, which is the tenant-wide visibility a tenant
+    credential gets, and the trust<2 fleet forcing sat inside
+    ``if body.filter_agent_id:`` so it did not run either. A trust-1 agent
+    issuing the most ordinary possible recall read across fleets.
+
+    Asserted on the ARGUMENTS reaching ``search_memories`` rather than on the
+    result set, because that is what distinguishes "bound to the caller" from
+    "happened to return the same rows": an unbound read can coincide with a
+    bound one whenever the caller has nothing hidden from it, and then a
+    results-parity assertion passes while the identity is still wrong.
+
+    Credit: this case, and the argument-level assertion, come from @zznate's
+    PR #995 — the fix for the report in #994. #1268 (this file) landed the
+    shared resolver first and covered a vector #995 did not, but shipped
+    without this test; it is theirs.
+    """
+    # Patched on ``memory_service``, NOT on the route module. ``/recall``
+    # re-imports the function inside the handler
+    # (``from core_api.services.memory_service import search_memories``), so it
+    # resolves the name at call time from the service module and never sees a
+    # patch applied to the route's own module-level binding — which is the one
+    # ``/search`` uses. Patching the route seam here silently no-ops and the
+    # real search runs, so the assertions below read whatever the last real
+    # call happened to leave. #995 patched this seam for this reason.
+    from core_api.services import memory_service
+
+    tenant_id, _, nonce, _peer, attacker = await _setup(client, sc)
+    as_auth(tenant_id, attacker)
+
+    seen: dict = {}
+
+    async def _capture(*args, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(memory_service, "search_memories", _capture)
+
+    resp = await client.post(
+        "/api/v1/recall",
+        json={"tenant_id": tenant_id, "query": nonce},  # no filter, no caller
+    )
+    assert resp.status_code == 200, resp.text
+    assert seen, "search_memories was never reached — test is vacuous"
+    assert seen.get("caller_agent_id") == attacker, (
+        "an omitted filter did not bind to the authenticated agent: "
+        f"caller_agent_id={seen.get('caller_agent_id')!r}, expected {attacker!r}"
+    )
+    # The filter itself must stay absent — binding the identity must not
+    # silently narrow the result set to the agent's own rows.
+    assert seen.get("filter_agent_id") is None, (
+        f"identity binding leaked into the filter: {seen.get('filter_agent_id')!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # M-30 — caller_agent_id is honoured, not dropped
 # ---------------------------------------------------------------------------
