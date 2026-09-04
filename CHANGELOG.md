@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.47.2](https://github.com/caura-ai/caura/compare/backend-v2.47.1...backend-v2.47.2) (2026-09-04)
+
+
+### Bug Fixes
+
+* **autochunk:** degrade a failed child embed instead of 500ing a persisted write ([#1278](https://github.com/caura-ai/caura/issues/1278)) ([2342f86](https://github.com/caura-ai/caura/commit/2342f869f0f358da4ac1ea4f542e463db1f67037))
+* **bulk:** key per-item idempotency on content, not on position ([#1283](https://github.com/caura-ai/caura/issues/1283)) ([fa779e5](https://github.com/caura-ai/caura/commit/fa779e59174639ff2dfab73c28aa112a5d53a217))
+* **core-api:** stamp provenance on bulk re-embed fallbacks ([#1281](https://github.com/caura-ai/caura/issues/1281)) ([46eb44a](https://github.com/caura-ai/caura/commit/46eb44abe2cd376d89d57b5973313bfe104f1235))
+
 ## [2.47.1](https://github.com/caura-ai/caura/compare/backend-v2.47.0...backend-v2.47.1) (2026-09-04)
 
 
