@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from common import permanent_failure
 from common.events.factory import get_event_bus
-from core_api.clients.storage_client import get_storage_client
+from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
 from core_api.constants import VERSION, is_mcp_path
 from core_api.consumer import register_consumers
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
@@ -909,6 +910,39 @@ async def global_exception_handler(request: Request, exc: Exception):
     if app_settings.environment != "production":
         content["error_type"] = type(exc).__name__
     return JSONResponse(status_code=500, content=content)
+
+
+@app.exception_handler(PermanentStorageWriteError)
+async def permanent_storage_write_handler(request: Request, exc: PermanentStorageWriteError) -> JSONResponse:
+    """A write storage refused permanently: 500, and explicitly not retryable.
+
+    The counterpart to ``upstream_http_error_handler`` below, and the reason
+    this exists as its own type. That handler answers every unhandled upstream
+    5xx with "503, retry" — correct for a dependency blip, and exactly inverted
+    for a failure that reproduces byte-for-byte. Three bulk callers (the MCP
+    write tool, ``ingest_service``, ``_insert_children_or_degrade``) do not
+    catch storage errors themselves, so without this they would land there and
+    be told to retry something that can never succeed.
+
+    500 rather than 503: there is nothing to wait for. The routes that own an
+    HTTP contract may still answer more specifically — ``/memories/bulk`` adds
+    the ``X-Bulk-Attempt-Id`` advice — and this is the floor under everyone
+    else.
+    """
+    from core_api.errors import make_error_payload
+
+    logger.error(
+        "permanent storage write refusal on %s %s: %s",
+        request.method,
+        request.url.path,
+        exc,
+    )
+    message = f"{exc}. Retrying this write unchanged cannot succeed."
+    body = {
+        "detail": message,
+        **make_error_payload(permanent_failure.PERMANENT_WRITE_FAILURE_CODE, message, exc.fields or None),
+    }
+    return JSONResponse(status_code=500, content=body)
 
 
 @app.exception_handler(httpx.HTTPStatusError)

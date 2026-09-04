@@ -11,9 +11,13 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from common import permanent_failure
 from common.structlog_config import configure_logging
 from core_storage_api.config import settings
-from core_storage_api.services.postgres_service import DuplicateContentHashError
+from core_storage_api.services.postgres_service import (
+    BulkRowShapeError,
+    DuplicateContentHashError,
+)
 
 # Must run before any other module-level import emits a log record —
 # database.init and the routers below pull in SQLAlchemy, httpx, etc., all
@@ -115,6 +119,37 @@ def create_app() -> FastAPI:
         return JSONResponse(
             status_code=409,
             content={"detail": str(exc), **exc.fields},
+        )
+
+    @app.exception_handler(BulkRowShapeError)
+    async def _bulk_row_shape_handler(request: Request, exc: BulkRowShapeError) -> JSONResponse:
+        # App-wide for the same reason ``_duplicate_content_hash_handler`` above
+        # is: a route-local ``except`` can only serve the one route that writes
+        # it, and the answer here has to hold for every caller of the bulk
+        # insert. The first draft of this fix DID catch it in the route, and
+        # that is a trap — a second entry point (or an in-process caller) would
+        # have raised an unmarked 500, and core-api answers an unmarked
+        # upstream 5xx with "503, retry" from ``upstream_http_error_handler``.
+        # The advice would have been exactly inverted on the path nobody tested.
+        #
+        # ``retryable: false`` is the whole payload of this branch. 500 is
+        # honest — the caller's items were checked uniform before this raised,
+        # so the divergence is ours — but a bare 500 is indistinguishable from
+        # a transient one, and this failure reproduces byte-for-byte forever.
+        #
+        # Logged here because nothing else will say which column diverged: the
+        # response names it as data, but only an operator reading storage's own
+        # logs gets it attached to the request that produced it.
+        logger.error("Bulk insert rejected on mapped row shape: %s %s", exc, exc.fields)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": permanent_failure.permanent_detail(
+                    cause=permanent_failure.CAUSE_BULK_ROW_SHAPE,
+                    message=str(exc),
+                    **exc.fields,
+                )
+            },
         )
 
     @app.exception_handler(json.JSONDecodeError)
