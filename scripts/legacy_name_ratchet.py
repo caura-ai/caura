@@ -138,6 +138,14 @@ from urllib.parse import urlsplit
 # a hole in the scan.
 LEGACY_NAME = "memclaw"  # legacy-name-ok: the pattern this gate searches for
 
+# The current brand, never gated on and never excluded or counted — the only
+# use is as a positive control in main(), proving a scan that finds zero
+# LEGACY_NAME can still find something, rather than finding nothing at all.
+# A finished migration cannot have removed it: the fleet is Caura-branded
+# software, so the name is load-bearing in package names and imports, not
+# merely present in prose that a sweep could plausibly have missed.
+NEW_NAME = "caura"
+
 # Kept deliberately ugly so they are never typed by accident and always read as a
 # decision rather than a formatting artifact.
 EXEMPT_MARKER = "legacy-name-ok"
@@ -836,6 +844,7 @@ def _grep(
     pathspec: str | list[str] = ":/",
     *,
     exclusions: bool = True,
+    pattern: str = LEGACY_NAME,
 ) -> list[tuple[str, str, str, str | None, _Deferred | None]]:
     """``(path, lineno, text, kind, deferred)`` for every matching line.
 
@@ -858,8 +867,15 @@ def _grep(
     the fields are NUL-separated and only the ``<tree>:`` prefix is colon-joined —
     and that one is a string this function passed in, so it can be stripped by
     length instead of by searching.
+
+    ``pattern`` defaults to the one thing this whole module counts, but is a
+    parameter rather than baked in so :func:`_pathspec_is_live` can run the
+    exact same tree/pathspec/exclusions through a different, known-present
+    string — the positive control ``main`` needs to trust a search that found
+    nothing, rather than a second definition of this function that could drift
+    from the first.
     """
-    args = ["git", "grep", "-I", "-i", "-n", "-z", "--full-name", "-e", LEGACY_NAME]
+    args = ["git", "grep", "-I", "-i", "-n", "-z", "--full-name", "-e", pattern]
     if tree is not None:
         args.append(tree)
     args.append("--")
@@ -1145,6 +1161,23 @@ def scan(
         deferred_by_file,
         tuple(deferred_problems),
     )
+
+
+def _pathspec_is_live(tree: str | None) -> bool:
+    """Whether a scan of this tree, exclusions and all, can find anything.
+
+    The positive control for the one ambiguity ``_grep`` cannot resolve on its
+    own: a pathspec matching nothing exits with an empty result, indistinguishable
+    from a genuinely clean tree. Searching for ``NEW_NAME`` through the exact same
+    pathspec and exclusions the real scan just used is what tells the two apart —
+    a hit proves the scan reached real content; a second miss proves only that
+    this configuration finds nothing, old name or new.
+
+    Exclusions stay on, matching the scan this checks: a mirror or CHANGELOG.md is
+    excluded everywhere else in this gate, and this is not the place to start
+    treating content living only there as evidence of anything.
+    """
+    return bool(_grep(tree, pattern=NEW_NAME))
 
 
 def _excluded_inventory() -> Counter[str]:
@@ -2424,19 +2457,50 @@ def main() -> int:
     if not head and not base:
         # A pathspec that matches nothing exits 1 with an empty stderr, exactly
         # like a clean tree — so a broken scan reads as "nothing to report" and
-        # the gate passes every PR from then on, silently, for the rest of the
-        # programme. Both trees empty is either that or a finished migration,
-        # and both want a human.
+        # the gate would otherwise pass every PR from then on, silently, for
+        # the rest of the programme. Both trees empty is either that or a
+        # finished migration, and the two used to be indistinguishable from
+        # here — so this used to fail either way and ask a human to tell them
+        # apart.
+        #
+        # It no longer has to guess: a positive control. The same scan, same
+        # tree, same exclusions — the exact configuration that just returned
+        # zero for LEGACY_NAME — run again for NEW_NAME, a name a finished
+        # migration cannot have removed. A hit proves this scan can reach real
+        # content through this pathspec, on this tree, right now, which is
+        # what makes the LEGACY_NAME zero next to it trustworthy instead of
+        # equivocal. A second zero proves nothing changed about the ambiguity:
+        # the scan found nothing at all, old name or new, and that is exactly
+        # the "matches nothing" failure mode this gate has always had to
+        # assume rather than rule out.
+        #
+        # Deliberately the SAME exclusions the real scan used, not a wider,
+        # unscoped one: a mirror or CHANGELOG.md is excluded by design
+        # everywhere else in this gate (see test_the_gate_says_nothing_about_
+        # mirrors) and content living only there has never been this gate's
+        # business. Widening the control to look past those exclusions would
+        # make this the one branch where an intentionally-hidden mirror
+        # suddenly counted again — a new inconsistency, not a fix for one.
         #
         # Unless a marker report above already named the precise problem, in
         # which case this would talk the reader out of the accurate diagnosis
         # they have just been given.
         if not head_scan.deferred_problems:
+            if _pathspec_is_live(None) and _pathspec_is_live(base_ref):
+                print(
+                    f"No '{LEGACY_NAME}' lines anywhere in either tree, and the "
+                    f"same scan finds '{NEW_NAME}' just fine in both — the "
+                    "pathspec works, the search is real, and the migration is "
+                    "complete. Delete this gate along with the last of the old "
+                    "name."
+                )
+                return 0
             print(
-                f"Found no '{LEGACY_NAME}' lines in either tree.\n"
-                "Either the pattern or the pathspec is broken — in which case this gate has\n"
-                "been passing without checking anything — or the migration is complete and\n"
-                "this gate should be deleted along with the last of the old names."
+                f"Found no '{LEGACY_NAME}' lines in either tree, and no "
+                f"'{NEW_NAME}' either: the same scan cannot find a name that has "
+                "to be there, so it is not finding anything, anywhere, and the "
+                "empty result above proves nothing. This needs a human, not a "
+                "green check."
             )
         return 1
 
