@@ -2000,13 +2000,57 @@ def test_a_failing_working_tree_scan_also_exits_two(tmp_path: Path) -> None:
     assert "Traceback" not in result.stderr
 
 
-def test_finding_nothing_at_all_fails_rather_than_passing(tmp_path: Path) -> None:
-    """The silent-pass hole, and the reason it needs its own guard.
+def test_a_repo_with_nothing_to_migrate_reads_as_finished(tmp_path: Path) -> None:
+    """The completion case: no legacy-name line anywhere, and the positive
+    control finds the current brand right where it should be.
 
-    A pathspec matching nothing exits 1 with an empty stderr — indistinguishable
-    from a clean tree. Without this, breaking the pattern or the pathspec turns
-    the gate into a no-op that reports success on every PR for the rest of the
-    programme, which is the worst possible failure for a gate.
+    Used to fail here, deliberately: a pathspec matching nothing exits 1 with an
+    empty stderr, indistinguishable from a clean tree by output alone, and this
+    fixture cannot tell "the pattern or the pathspec broke" from "there was
+    never anything here" any more than the gate itself once could — it is
+    exactly the same zero either way. The control is what tells them apart: this
+    tree still has to say "caura" somewhere, same as every real repo in the
+    fleet, so a scan that finds it proves the pathspec is live and the
+    legacy-name zero next to it is real. See
+    ``test_a_dead_control_still_fails_rather_than_passing`` below for the
+    case this fixture never could be: a scan too broken to find either name.
+    """
+    r = tmp_path / "empty"
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    _git(r, "config", "user.email", "t@example.com")
+    _git(r, "config", "user.name", "t")
+    (r / "clean.py").write_text("# built by Caura\nVALUE = 1\n")
+    _write_config(r)
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "base")
+
+    result = _run(r)
+
+    assert result.returncode == 0, result.stdout
+    assert "migration is complete" in result.stdout
+
+
+def test_a_dead_control_still_fails_rather_than_passing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The other half of the ambiguity the control exists to resolve.
+
+    If the control ALSO comes back empty, the gate must not read that as two
+    confirmations of a clean tree — it is one scan finding nothing, asked
+    twice with different bait.
+
+    A pathspec dead enough to swallow ``NEW_NAME`` too is not otherwise
+    constructible through this script's own config validation, which already
+    rejects the one way ``mirror_paths`` could do it this bluntly — an empty
+    entry nukes the whole tree, not just one path, and ``_load_config`` refuses
+    it outright. So the control's own answer is forced directly here, the same
+    way ``test_change_summary_falls_back_when_replay_cannot_spawn_git``
+    elsewhere in this file forces a git failure: by replacing the function
+    under monkeypatch, not by trying to make git agree to something its own
+    input validation already refuses.
     """
     r = tmp_path / "empty"
     r.mkdir()
@@ -2018,11 +2062,16 @@ def test_finding_nothing_at_all_fails_rather_than_passing(tmp_path: Path) -> Non
     _git(r, "add", "-A")
     _git(r, "commit", "-qm", "base")
 
-    result = _run(r)
+    namespace = runpy.run_path(str(SCRIPT))
+    main = namespace["main"]
+    monkeypatch.setitem(main.__globals__, "_pathspec_is_live", lambda _tree: False)
+    monkeypatch.chdir(r)
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--base", "HEAD"])
 
-    assert result.returncode == 1
-    assert "no-op" not in result.stdout  # it should explain, not merely fail
-    assert "passing without checking" in result.stdout
+    assert main() == 1
+    out = capsys.readouterr().out
+    assert "proves nothing" in out
+    assert "migration is complete" not in out
 
 
 def test_report_mode_never_fails(repo: Path) -> None:

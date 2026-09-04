@@ -1,0 +1,140 @@
+name: Legacy-name ratchet
+
+# The central copy of hard rule 7's gate, run as an org-required workflow
+# against every consumer repo's PRs directly -- see docs/plans/rebrand-sunset-plan.md.
+#
+# Nine repos used to each vendor scripts/legacy_name_ratchet.py byte-for-byte
+# and run it locally, with a SEPARATE required workflow (legacy-name-engine-
+# parity.yml, hosted in caura-onprem-installer) doing nothing but confirming
+# the eight copies stayed byte-identical to this one. That parity check is
+# what failed with no bypass actor and blocked unrelated PRs org-wide the day
+# this file was written -- and every consumer's own vendored engine still had
+# a bug this file's own two commits fix, discovered because ONE of the nine
+# copies (caura-bus) finally reached a state the bug could no longer hide in.
+#
+# This workflow replaces both: point an org ruleset at THIS file instead of
+# the parity checker, and there is nothing left to vendor, diverge, or
+# byte-compare. A consumer repo needs zero local YAML for this -- required
+# workflows run in the target repository, the same way the parity check
+# always has, so this file's only audience is the org ruleset that names it.
+#
+# It is NOT wired into this repo's own on-PR checks: see ci.yml's own
+# "legacy-name-ratchet" job for that. This file exists to be pointed at by
+# other repos' required-workflow rulesets, pinned by tag, never by branch.
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  ratchet:
+    name: Legacy-name ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the candidate revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
+          fetch-depth: 2
+          persist-credentials: false
+
+      # Required workflows run in the TARGET repository, so the checkout
+      # above correctly gets the candidate but not this workflow's own
+      # sibling files (the engine script and its tests) -- ported verbatim
+      # from legacy-name-engine-parity.yml's "Identify the parity gate
+      # source" step, which solves the identical problem: prove the workflow
+      # actually executing is the one sourced from this repo at a real
+      # commit, not something a candidate PR substituted, before trusting
+      # anything it reads from "itself".
+      #
+      # Read through toJSON(job) because actionlint 1.7.12 predates GitHub's
+      # two workflow-identity fields and otherwise reports them as
+      # nonexistent (rhysd/actionlint#705). The explicit repository and SHA
+      # checks keep this compatibility shim fail-closed.
+      - name: Identify the ratchet gate source
+        id: ratchet-source
+        env:
+          JOB_CONTEXT: ${{ toJSON(job) }}
+        run: |
+          set -euo pipefail
+          repository=$(jq -r '.workflow_repository // empty' <<< "$JOB_CONTEXT")
+          sha=$(jq -r '.workflow_sha // empty' <<< "$JOB_CONTEXT")
+          if [[ "$repository" != "caura-ai/caura" ]]; then
+            echo "::error::unexpected ratchet workflow source repository: ${repository:-missing}"
+            exit 1
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::invalid ratchet workflow source SHA: ${sha:-missing}"
+            exit 1
+          fi
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the ratchet engine source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ steps.ratchet-source.outputs.repository }}
+          ref: ${{ steps.ratchet-source.outputs.sha }}
+          path: engine-source
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/legacy_name_ratchet.py
+            tests/test_legacy_name_ratchet.py
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # The gate's own tests run before the gate does, against the exact copy
+      # about to judge the candidate -- a ratchet that has silently stopped
+      # matching reports a clean tree and passes every PR from then on, which
+      # is the one failure mode that hides itself. Mirrors the "gate's own
+      # tests" step several of the (soon to be former) vendoring repos already
+      # ran locally for the same reason.
+      - name: The gate's own tests
+        working-directory: engine-source
+        run: |
+          python -m pip install --disable-pip-version-check --quiet 'pytest>=9.1.1,<10.0'
+          python -m pytest tests/test_legacy_name_ratchet.py -q
+
+      # Run from INSIDE the candidate's checkout, not the engine source's --
+      # legacy_name_ratchet.py resolves its own repo root (and therefore
+      # scripts/legacy_name_ratchet.json) via `git rev-parse --show-toplevel`
+      # against the current working directory, not against its own file
+      # location. Running it from the candidate is what makes it read the
+      # CANDIDATE's config -- default_base, mirror_paths, and the rest stay
+      # genuinely per-repo data, never vendored, never touched by this file.
+      - name: No new old-brand names
+        working-directory: candidate
+        run: |
+          # Assert the merge shape before trusting HEAD^1. If a PR is not
+          # mergeable GitHub may serve a stale merge ref or none at all, and a
+          # single-parent HEAD would silently make "the base" this branch's
+          # own previous commit -- a comparison that passes while checking
+          # nothing.
+          #
+          # merge_group is a second, separate reason this can fail: a merge
+          # queue's temporary commit is not guaranteed to have the same
+          # 2-parent PR-merge shape this check assumes, and nobody has
+          # verified what shape it actually has, because no repo in this
+          # fleet runs a merge queue today. Both failure modes hit the same
+          # assertion, so the message names which one applies rather than
+          # reporting a bare assertion failure -- a fail-closed gate that
+          # cannot say what it is closed against just moves the diagnosis
+          # cost onto whoever hits it next.
+          PARENTS=$(git rev-list --parents -n1 HEAD | wc -w)
+          if [ "$PARENTS" -ne 3 ]; then
+            if [ "${GITHUB_EVENT_NAME:-}" = "merge_group" ]; then
+              echo "::error::This repo has a merge queue enabled, and the legacy-name ratchet has no merge_group base-detection yet -- HEAD^1 assumes a 2-parent PR-merge commit, and a merge-queue commit is not guaranteed to have that shape. Nothing about your change failed; this gate simply does not support this trigger yet. See caura-ai/caura's legacy-name-ratchet.yml for the assumption, and file an issue there rather than reworking your PR."
+            else
+              echo "::error::Expected a 2-parent merge commit at HEAD; found $((PARENTS - 1)) parent(s)."
+              echo "The ratchet's base would be wrong, so it is not run. Re-run once the PR is mergeable."
+            fi
+            exit 1
+          fi
+          python3 "$GITHUB_WORKSPACE/engine-source/scripts/legacy_name_ratchet.py" --base HEAD^1
