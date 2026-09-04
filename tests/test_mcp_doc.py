@@ -17,6 +17,7 @@ ORM-row / tuple shapes.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -827,7 +828,9 @@ async def test_skill_write_rejects_caller_active_status_when_flag_on(
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    sc = stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
     out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
@@ -852,7 +855,9 @@ async def test_skill_write_rejects_forge_source_when_flag_on(mcp_env, monkeypatc
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    sc = stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
     out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
@@ -874,7 +879,9 @@ async def test_skill_write_defaults_to_staged_when_flag_on(mcp_env, monkeypatch)
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    sc = stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
     out = await mcp_server.caura_doc(
         op="write",
         collection="skills",
@@ -891,6 +898,71 @@ async def test_skill_write_defaults_to_staged_when_flag_on(mcp_env, monkeypatch)
     assert sent_data["content_hash"].startswith("sha256:")
 
 
+async def test_skill_write_fails_closed_when_the_live_doc_fetch_errors(
+    mcp_env, monkeypatch
+):
+    """The CREATE-path counterpart to the update-path test below.
+
+    ``test_skill_update_write_fails_closed_on_live_doc_fetch_error`` already
+    pinned this for ``kind='update'``, which was the only kind that fetched.
+    This change makes ``kind='create'`` fetch too, so there is now a second
+    place to fail closed — and it is the security-relevant one: the fetch
+    feeds the stored-status overwrite gate, so falling through with
+    ``live_doc=None`` hands the validator exactly the ``None`` that made
+    ``kind='create'`` the way around that gate, turning a transient DB blip
+    into an open window on every active skill.
+    """
+    _patch_flag(monkeypatch, True)
+    _patch_sf_settings(monkeypatch)
+    monkeypatch.setattr(
+        "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
+    )
+    sc = stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
+    sc.get_document = AsyncMock(side_effect=RuntimeError("storage unreachable"))
+    out = await mcp_server.caura_doc(
+        op="write",
+        collection="skills",
+        doc_id="forge-x",
+        data=_valid_skill_data(),
+    )
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "INTERNAL_ERROR"
+    # The decisive assertion: nothing was written.
+    sc.upsert_document_xmax.assert_not_awaited()
+
+
+async def test_skill_write_gate_fetch_reads_the_primary(mcp_env, monkeypatch):
+    """The live-doc fetch must pin the PRIMARY, not the read replica.
+
+    ``get_document`` defaults to ``read=True``. That default is fine for an
+    ordinary read, but this fetch backs an authorization decision: on a
+    replica, a ``staged`` row an admin has just approved to ``active`` still
+    reads as ``staged``, the gate authorises the overwrite the transition was
+    meant to forbid, and the upsert that follows does no CAS on status, so
+    nothing downstream catches it. Pinning the kwarg here because the failure
+    is invisible in any test that stubs storage — the stub answers the same
+    either way.
+    """
+    _patch_flag(monkeypatch, True)
+    _patch_sf_settings(monkeypatch)
+    monkeypatch.setattr(
+        "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
+    )
+    sc = stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
+    out = await mcp_server.caura_doc(
+        op="write",
+        collection="skills",
+        doc_id="forge-x",
+        data=_valid_skill_data(),
+    )
+    assert parse_envelope(out)["ok"] is True
+    assert sc.get_document.await_args.kwargs["read"] is False
+
+
 async def test_skill_write_tolerates_misconfigured_byte_caps(mcp_env, monkeypatch):
     # A null / non-numeric per-tenant byte cap is a realistic admin
     # misconfiguration. It must degrade to the documented default via
@@ -904,7 +976,9 @@ async def test_skill_write_tolerates_misconfigured_byte_caps(mcp_env, monkeypatc
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
-    stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})
+    stub_storage_client(
+        monkeypatch, upsert_document_xmax={"xmax": 0}, get_document=None
+    )
     out = await mcp_server.caura_doc(
         op="write",
         collection="skills",

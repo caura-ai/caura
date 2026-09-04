@@ -274,3 +274,131 @@ async def test_skills_unshare_route_is_gone(client):
     assert resp.status_code == 404, (
         f"/api/v1/skills/<name> should be removed, got {resp.status_code}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Live-doc fetch: reads the primary, and fails closed
+# ---------------------------------------------------------------------------
+
+
+async def test_skills_write_gate_fetch_reads_the_primary(client, monkeypatch):
+    """The live-doc fetch must pin the PRIMARY, not the read replica.
+
+    ``get_document`` defaults to ``read=True``. Fine for an ordinary read, but
+    this fetch backs an authorization decision: on a replica, a ``staged`` row
+    an admin has just approved to ``active`` still reads as ``staged``, the
+    gate authorises the overwrite the transition was meant to forbid, and the
+    upsert that follows does no CAS on status — nothing downstream catches it.
+    Pinned here because the failure is invisible to any test that stubs
+    storage: the stub answers the same either way.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from core_api.routes import documents as docs
+
+    async def _raw(tenant_id):
+        return {"skills_factory": {"enabled": True}}
+
+    async def _display(tenant_id):
+        return {
+            "skills_factory": {
+                "enabled": True,
+                "body_max_bytes": 40_000,
+                "description_max_bytes": 160,
+            }
+        }
+
+    monkeypatch.setattr(docs, "get_raw_settings", _raw)
+    monkeypatch.setattr(docs, "get_settings_for_display", _display)
+
+    # The fetch aborts the request, so the assertion below is about the call
+    # that was made and nothing downstream needs stubbing. What is under test
+    # is the kwarg, not the outcome — the fail-closed behaviour has its own
+    # test.
+    sc = MagicMock(name="storage_client")
+    sc.get_document = AsyncMock(side_effect=RuntimeError("stop here"))
+    monkeypatch.setattr(docs, "get_storage_client", lambda: sc)
+
+    tenant_id, headers = get_test_auth()
+    await client.post(
+        "/api/v1/documents",
+        json={
+            "tenant_id": tenant_id,
+            "collection": "skills",
+            "doc_id": f"primary-read-{_uid()[:6]}",
+            "data": {
+                "name": "Primary read probe",
+                "slug": "primary-read-probe",
+                "description": "Short trigger description.",
+                "domain": "dev",
+                "kind": "create",
+                "source": "agent",
+                "content": "## When to use\nStep 1.\n",
+            },
+        },
+        headers=headers,
+    )
+    assert sc.get_document.await_args.kwargs["read"] is False
+
+
+async def test_skills_write_fails_closed_when_the_live_doc_fetch_errors(
+    client, monkeypatch
+):
+    """A storage error fetching the live skill must ABORT the write.
+
+    The fetch feeds the stored-status overwrite gate (H-11), so falling
+    through with ``live_doc=None`` would hand the validator exactly the
+    ``None`` that made ``kind='create'`` the way around that gate — a
+    transient DB blip would reopen an overwrite window on every active
+    skill. This pins the REST path to the same fail-closed behaviour its
+    MCP sibling has, rather than the bare unhandled 500 it had before.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from core_api.routes import documents as docs
+
+    async def _raw(tenant_id):
+        return {"skills_factory": {"enabled": True}}
+
+    async def _display(tenant_id):
+        return {
+            "skills_factory": {
+                "enabled": True,
+                "body_max_bytes": 40_000,
+                "description_max_bytes": 160,
+            }
+        }
+
+    monkeypatch.setattr(docs, "get_raw_settings", _raw)
+    monkeypatch.setattr(docs, "get_settings_for_display", _display)
+
+    sc = MagicMock(name="storage_client")
+    sc.get_document = AsyncMock(side_effect=RuntimeError("storage unreachable"))
+    sc.upsert_document_xmax = AsyncMock(return_value={"xmax": 0})
+    monkeypatch.setattr(docs, "get_storage_client", lambda: sc)
+
+    tenant_id, headers = get_test_auth()
+    resp = await client.post(
+        "/api/v1/documents",
+        json={
+            "tenant_id": tenant_id,
+            "collection": "skills",
+            "doc_id": f"fail-closed-{_uid()[:6]}",
+            "data": {
+                "name": "Fail closed probe",
+                "slug": "fail-closed-probe",
+                "description": "Short trigger description.",
+                "domain": "dev",
+                "kind": "create",
+                "source": "agent",
+                "content": "## When to use\nStep 1.\n",
+            },
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 503, (
+        f"expected 503 fail-closed, got {resp.status_code}: {resp.text}"
+    )
+    assert "unavailable" in resp.text.lower()
+    # The decisive assertion: nothing was written.
+    sc.upsert_document_xmax.assert_not_awaited()
