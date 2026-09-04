@@ -10,6 +10,20 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.47.3](https://github.com/caura-ai/caura/compare/backend-v2.47.2...backend-v2.47.3) (2026-09-04)
+
+
+### Bug Fixes
+
+* **clients:** retire the MemClaw/MemClawError/MemClawAPIError class aliases ([#1284](https://github.com/caura-ai/caura/issues/1284)) ([c96a6b8](https://github.com/caura-ai/caura/commit/c96a6b8e5986f189f22af73a34a0380f143648f9))
+* **ingest:** batch a commit larger than one bulk request instead of 500ing ([#1286](https://github.com/caura-ai/caura/issues/1286)) ([58ddd72](https://github.com/caura-ai/caura/commit/58ddd72cf249d76092a4305906242fdd5a344edc))
+* **storage:** refuse a negative tenant usage counter ([#1285](https://github.com/caura-ai/caura/issues/1285)) ([8355f66](https://github.com/caura-ai/caura/commit/8355f66efb456b0cbf6a227b2baf45b449fd75f3))
+
+
+### Documentation
+
+* **core-api:** correct the stale claim that MCP cannot see plan-limit mode ([#1288](https://github.com/caura-ai/caura/issues/1288)) ([1a07324](https://github.com/caura-ai/caura/commit/1a0732471dba74902d64a18cb54dd16907c09aa9))
+
 ## [2.47.2](https://github.com/caura-ai/caura/compare/backend-v2.47.1...backend-v2.47.2) (2026-09-04)
 
 
