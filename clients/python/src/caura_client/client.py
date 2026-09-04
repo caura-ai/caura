@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from .exceptions import AuthError, CauraAPIError, NotFoundError
+from .exceptions import AuthError, CauraAPIError, NotFoundError, RateLimitError
 from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
@@ -206,6 +206,13 @@ class Caura:
             raise AuthError(response.status_code, message or "authentication failed", details=details)
         if response.status_code == 404:
             raise NotFoundError(response.status_code, message or "not found", details=details)
+        if response.status_code == 429:
+            try:
+                retry_after = float(response.headers["Retry-After"])
+            except (KeyError, ValueError):
+                retry_after = None
+            raise RateLimitError(response.status_code, message or "rate limit exceeded",
+                                 details=details, retry_after=retry_after)
         raise CauraAPIError(response.status_code, message or "request failed", details=details)
 
     # ------------------------------------------------------------- lifecycle

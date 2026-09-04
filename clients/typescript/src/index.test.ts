@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { Caura, CauraApiError, AuthError, NotFoundError } from "./index.js";
+import { Caura, CauraApiError, AuthError, NotFoundError, RateLimitError } from "./index.js";
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -154,6 +154,22 @@ test("403 maps to AuthError and parses the error envelope", async () => {
 test("404 maps to NotFoundError", async () => {
   const client = makeClient(() => jsonResponse(404, { detail: "nope" }));
   await assert.rejects(client.search("q"), NotFoundError);
+});
+
+test("429 maps to RateLimitError and parses retry-after", async () => {
+  const client = makeClient(async () => new Response(JSON.stringify({ detail: "slow down" }), {
+    status: 429, headers: { "content-type": "application/json", "retry-after": "2.5" },
+  }));
+  await assert.rejects(client.search("q"), (err: unknown) =>
+    err instanceof RateLimitError && err.retryAfter === 2.5);
+});
+
+test("429 without retry-after has null retryAfter", async () => {
+  const client = makeClient(async () => new Response(JSON.stringify({ detail: "slow down" }), {
+    status: 429, headers: { "content-type": "application/json" },
+  }));
+  await assert.rejects(client.search("q"), (err: unknown) =>
+    err instanceof RateLimitError && err.retryAfter === null);
 });
 
 test("500 maps to CauraApiError", async () => {

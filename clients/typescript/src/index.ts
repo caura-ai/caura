@@ -27,6 +27,15 @@ export class AuthError extends CauraApiError {}
 /** Raised on 404. */
 export class NotFoundError extends CauraApiError {}
 
+/** Raised on 429, with the optional retry delay in seconds. */
+export class RateLimitError extends CauraApiError {
+  readonly retryAfter: number | null;
+  constructor(statusCode: number, message: string, details?: unknown, retryAfter: number | null = null) {
+    super(statusCode, message, details);
+    this.retryAfter = retryAfter;
+  }
+}
+
 export interface Memory {
   id: string | null;
   content: string;
@@ -211,6 +220,12 @@ async function raiseForStatus(res: Response): Promise<void> {
   }
   if (res.status === 404) {
     throw new NotFoundError(res.status, message || "not found", details);
+  }
+  if (res.status === 429) {
+    const retryAfter = res.headers.get("retry-after");
+    const parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
+    throw new RateLimitError(res.status, message || "rate limit exceeded", details,
+      Number.isFinite(parsed) ? parsed : null);
   }
   throw new CauraApiError(res.status, message || "request failed", details);
 }

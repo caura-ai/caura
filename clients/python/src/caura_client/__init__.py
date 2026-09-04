@@ -18,6 +18,7 @@ from .exceptions import (
     MemClawAPIError,  # legacy-name-ok: rule 3 permanent exception alias
     MemClawError,  # legacy-name-ok: rule 3 permanent exception alias
     NotFoundError,
+    RateLimitError,
 )
 from .models import Memory, RecallResult
 
@@ -32,6 +33,7 @@ __all__ = [
     "MemClawAPIError",  # legacy-name-ok: rule 3 permanent exception alias
     "AuthError",
     "NotFoundError",
+    "RateLimitError",
     "DEFAULT_BASE_URL",
 ]
 

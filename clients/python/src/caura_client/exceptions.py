@@ -30,6 +30,15 @@ class NotFoundError(CauraAPIError):
     """Raised on 404."""
 
 
+class RateLimitError(CauraAPIError):
+    """Raised on 429, with the optional retry delay in seconds."""
+
+    def __init__(self, status_code: int, message: str, *, details: Any = None,
+                 retry_after: float | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(status_code, message, details=details)
+
+
 # Permanent legacy aliases (2026-08 rename): existing code catches these
 # names, and published 0.4.x examples teach them. Same objects, not copies —
 # ``except MemClawError`` keeps catching everything ``CauraError`` raises.  # legacy-name-ok: rule 3 permanent exception alias

@@ -13,6 +13,7 @@ from caura_client import (
     CauraAPIError,
     Memory,
     NotFoundError,
+    RateLimitError,
     RecallResult,
 )
 
@@ -179,6 +180,24 @@ def test_not_found_error():
 
     with pytest.raises(NotFoundError):
         make_client(handler).search("q")
+
+
+def test_rate_limit_error_parses_retry_after():
+    def handler(request):
+        return httpx.Response(429, headers={"Retry-After": "2.5"}, json={"detail": "slow down"})
+
+    with pytest.raises(RateLimitError) as exc:
+        make_client(handler).search("q")
+    assert exc.value.retry_after == 2.5
+
+
+def test_rate_limit_error_without_retry_after():
+    def handler(request):
+        return httpx.Response(429, json={"detail": "slow down"})
+
+    with pytest.raises(RateLimitError) as exc:
+        make_client(handler).search("q")
+    assert exc.value.retry_after is None
 
 
 def test_generic_api_error():
