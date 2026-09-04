@@ -827,6 +827,143 @@ async def test_unmarked_storage_500_still_advises_retry(client, monkeypatch):
     assert "X-Bulk-Attempt-Id" in resp.json()["detail"]
 
 
+# ── A batch that wrote nothing must not be metered ──
+#
+# Charging up front is round-trip-neutral for a one-off failure but compounds
+# under the retry contract: core-api answers a storage failure by telling the
+# client to retry with the same X-Bulk-Attempt-Id, so one un-writable batch was
+# charged once per attempt, indefinitely. On the 2026-09-02 incident that ran at
+# ~648 attempts/hour for 41 hours against a 100-item batch that never wrote a
+# row.
+
+
+def _as_tenant(monkeypatch, tenant_id):
+    """Run the route under a TENANT-scoped credential rather than the admin key.
+
+    Load-bearing for every metering assertion below. ``get_test_auth()`` returns
+    the ADMIN key, which yields ``AuthContext(tenant_id=None)``, and the bulk
+    route guards metering with ``if auth.tenant_id:`` — so under the default
+    fixture the meter is never called at all and a "was not metered" assertion
+    passes no matter what the code does. The first draft of these tests did
+    exactly that: two of them went green against the unfixed route.
+
+    ``monkeypatch.setitem`` so the override is torn down with the test.
+    """
+    from core_api.app import app
+    from core_api.auth import AuthContext, get_auth_context
+
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_auth_context,
+        lambda: AuthContext(tenant_id=tenant_id, org_role="admin"),
+    )
+
+
+def _metering_recorder(monkeypatch):
+    """Record calls to the route's metering call, returning the call list.
+
+    Patches the ROUTE module's binding, not ``usage_service``'s: the route does
+    ``from ... import bulk_check_and_increment`` at module load, so rebinding
+    the source module would leave the route holding the original — the same trap
+    ``test_bulk_budget_burn_returns_504_with_retry_hint`` documents for
+    ``create_memories_bulk``.
+    """
+    from core_api.routes import memories as routes_mem
+
+    calls: list[tuple[str, int]] = []
+
+    async def recorder(tenant_id, count):
+        calls.append((tenant_id, count))
+        return None
+
+    monkeypatch.setattr(routes_mem, "bulk_check_and_increment", recorder)
+    return calls
+
+
+async def test_a_permanently_failed_bulk_write_is_not_metered(client, monkeypatch):
+    """Nothing was written, so nothing may be charged."""
+    _as_tenant(monkeypatch, "default")
+    calls = _metering_recorder(monkeypatch)
+    _serving(_permanent_response(), monkeypatch)
+
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"meter-perm-{uid()}",
+        "items": [{"content": f"meter-perm-content-{uid()}"}],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("meter-perm")},
+    )
+
+    assert resp.status_code == 500
+    assert calls == [], f"a batch that wrote nothing was metered: {calls}"
+
+
+async def test_a_bulk_write_that_504s_is_not_metered(client, monkeypatch):
+    """The incident's own shape: storage 5xx mapped to a retryable 504.
+
+    This is the one that compounded — the client is told to retry, so charging
+    here bills the same never-written batch once per attempt.
+    """
+    import httpx
+
+    _as_tenant(monkeypatch, "default")
+    calls = _metering_recorder(monkeypatch)
+    request = httpx.Request("POST", "https://storage.local/memories/bulk")
+    _serving(
+        httpx.Response(500, request=request, json={"detail": "Internal Server Error"}),
+        monkeypatch,
+    )
+
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"meter-504-{uid()}",
+        "items": [{"content": f"meter-504-content-{uid()}"}],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("meter-504")},
+    )
+
+    assert resp.status_code == 504
+    assert calls == [], f"a batch that wrote nothing was metered: {calls}"
+
+
+async def test_a_successful_bulk_write_is_still_metered_per_item(client, monkeypatch):
+    """The control, and the one that stops this becoming a free-writes bug.
+
+    Deleting the charge would satisfy both tests above. This asserts the
+    successful path still bills, and still bills ``len(items)`` — the amount is
+    unchanged, so the fix is about charging on failure and not a repricing.
+    """
+    _as_tenant(monkeypatch, "default")
+    calls = _metering_recorder(monkeypatch)
+
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"meter-ok-{uid()}",
+        "items": [
+            {"content": f"meter-ok-alpha-{uid()}"},
+            {"content": f"meter-ok-beta-{uid()}"},
+            {"content": f"meter-ok-gamma-{uid()}"},
+        ],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("meter-ok")},
+    )
+
+    assert resp.status_code == 200
+    assert calls == [(tenant_id, 3)]
+
+
 async def test_storage_network_error_returns_503_with_retry_after(client, monkeypatch):
     """A network-level error reaching storage (DNS, connect refused, broken
     pipe) maps to 503 + ``Retry-After`` for clean client backoff."""
