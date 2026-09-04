@@ -52,7 +52,7 @@ from core_api.schemas import (
 from core_api.services.agent_service import (
     authorize_memory_access,
     enforce_delete,
-    enforce_fleet_read,
+    enforce_fleet_read_many,
     enforce_fleet_write,
     get_or_create_agent,
     resolve_write_agent,
@@ -969,8 +969,11 @@ async def caura_recall(
             ag_trust = _ag.get("trust_level", 0)
             if ag_fleet and ag_trust < 2:
                 fleet_ids = [ag_fleet]
-        if fleet_ids and len(fleet_ids) == 1:
-            await enforce_fleet_read(tenant_id, agent_id, fleet_ids[0])
+        # EVERY requested fleet — gating only the single-fleet case let a
+        # trust-1 agent widen its read by naming a second fleet (parity with
+        # REST /search and /recall).
+        if fleet_ids:
+            await enforce_fleet_read_many(tenant_id, agent_id, fleet_ids)
         # Cross-tenant recall widens via readable_tenant_ids when the caller
         # authenticated with a cross-tenant credential (kind=cross_tenant) — the
         # gateway plumbs ``X-Readable-Tenant-IDs`` and the MCP middleware parks
