@@ -2392,7 +2392,13 @@ def test_multi_commit_summary_avoids_full_tree_replay(
         "0 excused moves (-1 net)." in result.stdout
     )
     assert len(grep_calls) == expected_greps
-    assert sum(line.endswith(" -- :/") for line in grep_calls) == 2
+    assert (
+        sum(
+            line.endswith(" -- :/ ':(exclude,glob,top,icase)**/CHANGELOG.md'")
+            for line in grep_calls
+        )
+        == 2
+    )
     assert len(root_calls) == 1
 
 
@@ -2672,15 +2678,33 @@ def test_an_untouched_exemption_is_not_reported(repo: Path) -> None:
     assert "exempt line(s) removed" not in result.stdout
 
 
-# ── authenticated release-please pull requests: CHANGELOGs are exempt ───────
+# ── CHANGELOG.md: unconditionally excluded from the gate ────────────────────
 #
-# release-please regenerates per-package CHANGELOGs by quoting merged PR titles
-# verbatim, so a title that legitimately carried the old brand (history — rule 2
-# says never edit it) resurfaces as a line the tally cannot tell from fresh
-# minting. The exemption is gated on GITHUB_HEAD_REF naming the bot's own
-# branch, its immutable GitHub author id and a same-repository head. It remains
-# scoped to CHANGELOG files — nothing else on that branch, and no CHANGELOG in
-# an unauthenticated pull request, is excused.
+# Eldad's explicit decision, not a rename-sweep cleanup. release-please
+# regenerates per-package CHANGELOGs by quoting merged PR titles verbatim, and
+# the fleet's convention names whatever a commit removes — including,
+# when that is the change, the old brand itself — so every release shipping
+# rename work minted at least one gated line describing it, on a line no
+# human wrote.
+#
+# The authenticated-pull-request exemption below (``_release_please_pull_
+# request`` / ``release_please_changelogs``) predates this and is kept in
+# place, redundant rather than load-bearing: it only ever fired inside that
+# one CI event, correct at that PR's own merge and blind the moment anything
+# re-measured outside it — a status audit, a local run, another PR's base
+# diff — where the same line read as a fresh mint because the mechanism was
+# scoped to an event, not to a fact about the file. A CHANGELOG is a dated
+# historical record in every context, not only in one CI event, so the
+# exclusion is now unconditional and by basename, independent of CI/PR
+# context entirely — a policy about what the file IS, not a widened
+# authentication check.
+#
+# Known gap: the pathspec exclusion below runs inside ``_grep`` itself, so a
+# CHANGELOG.md line is invisible to the scan before ``_release_please_pull_
+# request`` ever runs — its fail-closed / fork-proofing correctness (a
+# malformed event identity, an untrusted author, a forked head repo) can no
+# longer be observed through this file's CHANGELOG-staging tests, and is no
+# longer covered by any test in this file.
 
 _RELEASE_PLEASE_AUTHOR_ID = 265395343
 
@@ -2714,121 +2738,61 @@ def _release_env(
     }
 
 
-def test_a_changelog_passes_on_an_authenticated_release_please_pr(repo: Path) -> None:
+def test_a_changelog_line_is_excluded_with_no_special_context(repo: Path) -> None:
+    """The case this exclusion exists for: no bot, no PR, no branch-naming
+    convention — an ordinary local run, which is exactly what a status audit
+    or any other PR's base diff also is. The old, event-scoped exemption
+    could never reach this case; this is the one that broke it."""
     _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
 
-    result = _run(repo, env=_release_env(repo))
+    result = _run(repo)
 
     assert result.returncode == 0, result.stdout
-    assert "1 CHANGELOG file(s) exempt on this" in result.stdout
-    assert "CHANGELOG.md" in result.stdout
+    assert "CHANGELOG.md" not in result.stdout
 
 
-def test_a_release_changelog_addition_is_not_hidden_from_the_net(repo: Path) -> None:
-    _stage(repo, "existing.py", 'URL = "https://caura.ai"\n')
-    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
-
-    result = _run(repo, env=_release_env(repo))
-
-    assert result.returncode == 0
-    assert (
-        "Gate passes: no new lines currently fail it. Range history: "
-        "1 added, 0 annotated, 1 removed, 0 excused moves (+0 net)." in result.stdout
-    )
-
-
-def test_the_same_changelog_fails_off_the_bot_branch(repo: Path) -> None:
-    """The exemption is the bot's, not the file's: a human minting the name in a
-    CHANGELOG on an ordinary branch — or locally, where GITHUB_HEAD_REF is
-    absent — still answers to the gate."""
-    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
-
-    result = _run(repo, env=_release_env(repo, head_ref="human-change"))
-
-    assert result.returncode == 1
-    assert "CHANGELOG.md" in result.stdout
-
-
-def test_the_branch_name_does_not_authenticate_an_untrusted_author(repo: Path) -> None:
-    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
-
-    result = _run(repo, env=_release_env(repo, author_id=12345))
-
-    assert result.returncode == 1
-    assert "CHANGELOG.md" in result.stdout
-
-
-def test_the_release_bot_does_not_authenticate_a_fork_branch(repo: Path) -> None:
-    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
-
-    result = _run(repo, env=_release_env(repo, head_repo_id=2))
-
-    assert result.returncode == 1
-    assert "CHANGELOG.md" in result.stdout
-
-
-def test_the_exemption_is_pull_request_only(repo: Path) -> None:
-    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
-
-    result = _run(repo, env=_release_env(repo, event_name="pull_request_target"))
-
-    assert result.returncode == 1
-    assert "CHANGELOG.md" in result.stdout
-
-
-def test_the_exemption_requires_github_event_context(repo: Path) -> None:
-    _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
-
-    result = _run(
-        repo,
-        env={
-            "GITHUB_EVENT_NAME": "pull_request",
-            "GITHUB_HEAD_REF": "release-please--branches--main",
-        },
-    )
-
-    assert result.returncode == 1
-    assert "CHANGELOG.md" in result.stdout
-
-
-@pytest.mark.parametrize(
-    ("author_id", "head_repo_id", "base_repo_id"),
-    [
-        pytest.param(float(_RELEASE_PLEASE_AUTHOR_ID), 1, 1, id="author-float"),
-        pytest.param(_RELEASE_PLEASE_AUTHOR_ID, 1.0, 1, id="head-repository-float"),
-        pytest.param(_RELEASE_PLEASE_AUTHOR_ID, 1, 1.0, id="base-repository-float"),
-        pytest.param(_RELEASE_PLEASE_AUTHOR_ID, True, True, id="repository-booleans"),
-    ],
-)
-def test_malformed_event_identity_values_fail_closed(
-    repo: Path,
-    author_id: object,
-    head_repo_id: object,
-    base_repo_id: object,
-) -> None:
+def test_the_exemption_survives_an_untrusted_author_and_branch(repo: Path) -> None:
+    """Simulating every condition the old mechanism was built to refuse at
+    once — the wrong author id, a forked head repo, an ordinary branch name,
+    and a non-PR event — the line is still excluded, because none of that
+    context is consulted any more. Deliberate: the widened scope is the
+    point of this change, not an oversight — see _excluded_changelogs's
+    docstring."""
     _stage(repo, "CHANGELOG.md", f"* add the {LEGACY} gateway\n")
 
     result = _run(
         repo,
         env=_release_env(
             repo,
-            author_id=author_id,
-            head_repo_id=head_repo_id,
-            base_repo_id=base_repo_id,
+            author_id=12345,
+            head_repo_id=2,
+            head_ref="human-change",
+            event_name="pull_request_target",
         ),
     )
 
-    assert result.returncode == 1
-    assert "CHANGELOG.md" in result.stdout
+    assert result.returncode == 0, result.stdout
+
+
+def test_a_changelog_passes_on_an_authenticated_release_please_pr(repo: Path) -> None:
+    """Non-regression: the case the old mechanism was built for still passes
+    — now via the unconditional exclusion rather than the authenticated
+    path, which never gets a chance to run."""
+    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
+
+    result = _run(repo, env=_release_env(repo))
+
+    assert result.returncode == 0, result.stdout
 
 
 def test_the_exemption_is_path_scoped_to_changelogs(repo: Path) -> None:
-    """The bot's branch buys no headroom outside the files the bot generates: a
-    non-CHANGELOG mint on that branch fails exactly as it would anywhere."""
+    """The exclusion is by filename, not a blanket bypass: a non-CHANGELOG
+    mint fails exactly as it would anywhere, with no special context at
+    all."""
     _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
     _stage(repo, "new.py", f'KEY = "{LEGACY}-new-service"\n')
 
-    result = _run(repo, env=_release_env(repo))
+    result = _run(repo)
 
     assert result.returncode == 1
     offenders = result.stdout.split("adds the legacy name in", 1)[1]
@@ -2836,14 +2800,16 @@ def test_the_exemption_is_path_scoped_to_changelogs(repo: Path) -> None:
     assert "CHANGELOG.md" not in offenders
 
 
-def test_release_please_changelogs_can_be_disabled(repo: Path) -> None:
-    _write_config(repo, release_please_changelogs=False)
-    _stage(repo, "CHANGELOG.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
+def test_the_exemption_matches_the_basename_case_insensitively(repo: Path) -> None:
+    """release-please has always emitted the canonical casing in this fleet,
+    but nothing enforces that — the exclusion matches the way the old
+    authenticated check did (case-insensitive), not the exact byte string,
+    so a differently-cased CHANGELOG is not a silent gap."""
+    _stage(repo, "changelog.md", f"* fix: retire the {LEGACY} gateway (#123)\n")
 
-    result = _run(repo, env=_release_env(repo))
+    result = _run(repo)
 
-    assert result.returncode == 1
-    assert "CHANGELOG.md" in result.stdout
+    assert result.returncode == 0, result.stdout
 
 
 # ── canonical per-repository configuration and inventory contract ───────────
