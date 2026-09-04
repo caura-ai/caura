@@ -138,9 +138,10 @@ _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 # Plan-limit read-only mode, computed by the platform from the persisted usage
 # counters and stamped as X-Org-Read-Only (see ``usage_service``'s module
-# docstring). REST reads it via ``AuthContext.is_read_only``; until now the MCP
-# middleware never read it at all, so no MCP tool could see plan-limit mode
-# (caura-ai/caura#1205).
+# docstring). REST reads it via ``AuthContext.is_read_only``. This middleware
+# reads it too, as of the commit that introduced this var — BEFORE that it did
+# not, which is the state caura-ai/caura#1205 describes and the reason that
+# issue reads as if the signal were still missing. It is not; the refusal is.
 #
 # OBSERVED, NOT ENFORCED, for now. Nothing refuses on this yet — see
 # ``_observe_plan_limit`` below for why that sequencing is deliberate.
