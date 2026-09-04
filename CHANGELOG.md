@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.47.5](https://github.com/caura-ai/caura/compare/backend-v2.47.4...backend-v2.47.5) (2026-09-04)
+
+
+### Documentation
+
+* **core-api:** finish correcting the stale MCP plan-limit claims ([#1290](https://github.com/caura-ai/caura/issues/1290)) ([a1b0a4c](https://github.com/caura-ai/caura/commit/a1b0a4c74b165e4cac6690a1c57590523e1d6d80))
+
 ## [2.47.4](https://github.com/caura-ai/caura/compare/backend-v2.47.3...backend-v2.47.4) (2026-09-04)
 
 
