@@ -1,0 +1,308 @@
+"""The embedding backfill must record which text each vector came from.
+
+Writing the vector alone does not leave the row where it was found — it moves
+it. Both embedding backfills scan ``embedding IS NULL``; a row written without
+``embedded_content_hash`` lands in ``embedding IS NOT NULL AND
+embedded_content_hash IS NULL``, and nothing anywhere scans that. So the repair
+tool's own write was what removed rows from the reach of every repair path and
+from the staleness detector, in one statement, with no error.
+
+That is not theoretical: the same omission on core-api's bulk re-embed
+fallbacks (caura#1281) put 241 production rows in that bucket before anyone
+noticed, and this script would have quietly done the same to any row it
+touched.
+
+The sharp test here is ``test_stamps_the_hash_it_embedded_not_the_row_s_current_hash``.
+Stamping provenance at all is the easy half; stamping the RIGHT hash is what
+separates this fix from the obvious one. A SQL-side ``SET embedded_content_hash
+= content_hash`` also makes the column non-NULL and also passes every other
+test in this file — while recording a row as freshly embedded at the exact
+moment it went stale.
+
+Integration: these need a real PostgreSQL with pgvector, because the defect is
+in emitted SQL and a mocked connection would assert against the mock.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from sqlalchemy import text
+
+from core_storage_api.scripts import backfill_embeddings as bf
+
+VECTOR_DIM_FAKE = 1024
+
+
+@pytest.fixture
+async def engine(_ensure_schema):
+    """The engine the script itself uses.
+
+    ``run_backfill`` calls ``database.init.get_engine()``, whose pool settings
+    (size, overflow, recycle, ``pool_pre_ping``) come from config. Building a
+    second engine here would test a pool the script never runs on. It is a
+    module-level singleton, so this deliberately does NOT dispose it.
+    """
+    from core_storage_api.database.init import get_engine
+
+    return get_engine()
+
+
+def _memories_spec() -> bf._TableSpec:
+    """The real production spec for ``memories``, not a hand-built stand-in.
+
+    Taken from ``_TARGETS`` so a spec that stops declaring its provenance
+    columns fails these tests rather than passing against a local copy that
+    still declares them.
+    """
+    return next(s for s in bf._TARGETS if s.table == "memories")
+
+
+def _entities_spec() -> bf._TableSpec:
+    return next(s for s in bf._TARGETS if s.table == "entities")
+
+
+async def _seed_memory(engine, tenant_id: str, *, content: str, content_hash: str | None) -> uuid.UUID:
+    mid = uuid.uuid4()
+    async with engine.connect() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO memories (id, tenant_id, agent_id, memory_type, content, content_hash, embedding) "
+                "VALUES (:id, :t, 'agent-bf', 'fact', :c, :ch, NULL)"
+            ),
+            {"id": mid, "t": tenant_id, "c": content, "ch": content_hash},
+        )
+        await conn.commit()
+    return mid
+
+
+async def _read_memory(engine, mid: uuid.UUID) -> tuple[bool, str | None, str | None]:
+    """Return (has_embedding, content_hash, embedded_content_hash)."""
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT embedding IS NOT NULL, content_hash, embedded_content_hash "
+                    "FROM memories WHERE id = :id"
+                ),
+                {"id": mid},
+            )
+        ).one()
+    return bool(row[0]), row[1], row[2]
+
+
+def _patch_embedding(monkeypatch, *, on_call=None):
+    """Stub the provider. ``_backfill_one_table`` imports it inside the function
+    body, so patch the module attribute the import resolves against."""
+    import common.embedding
+
+    async def _fake(content, *_a, **_kw):
+        if on_call is not None:
+            await on_call(content)
+        return [0.125] * VECTOR_DIM_FAKE
+
+    monkeypatch.setattr(common.embedding, "get_embedding", _fake)
+
+
+async def _run(engine, spec, tenant_id, *, rewrite_hint_prefixed: bool = False):
+    return await bf._backfill_one_table(
+        engine,
+        spec,
+        tenant_id=tenant_id,
+        batch_size=100,
+        max_inflight=4,
+        dry_run=False,
+        rewrite_hint_prefixed=rewrite_hint_prefixed,
+    )
+
+
+@pytest.mark.integration
+async def test_stamps_provenance_alongside_the_vector(engine, tenant_id, monkeypatch):
+    """The whole point: after the sweep, the row says which text it embedded."""
+    _patch_embedding(monkeypatch)
+    ch = "a" * 64
+    mid = await _seed_memory(engine, tenant_id, content="a body to embed", content_hash=ch)
+
+    report = await _run(engine, _memories_spec(), tenant_id)
+
+    assert report.embedded == 1
+    has_emb, content_hash, provenance = await _read_memory(engine, mid)
+    assert has_emb, "the sweep did not write a vector at all"
+    assert provenance == ch, (
+        f"vector written with embedded_content_hash={provenance!r}; a row embedded "
+        "without provenance leaves every repair path and the staleness detector"
+    )
+    assert provenance == content_hash
+
+
+@pytest.mark.integration
+async def test_row_does_not_land_in_the_unswept_population(engine, monkeypatch):
+    """Stated as the invariant that matters, and counted the way ops counts it.
+
+    ``embedding IS NOT NULL AND embedded_content_hash IS NULL`` is the
+    population no sweep selects on. Rather than re-writing that predicate here
+    — the service's own docstring already warns that its three copies must be
+    kept in step, and a fourth drifted immediately, omitting the
+    ``LIVE_MEMORY_STATUSES`` filter — this asserts through
+    ``memory_embedding_coverage_for_tenant``, whose ``unknown_provenance``
+    bucket IS that predicate and is what the operator dashboard reports. So
+    this fails if the backfill regresses, and equally if the metric stops
+    measuring what it claims.
+
+    Its own tenant, deliberately. The ``tenant_id`` fixture returns one
+    session-constant string, and ``test_null_content_hash_stays_null`` below
+    creates a row matching this very predicate under it — legitimately, since
+    a row with no content hash has nothing to attest. Sharing the tenant would
+    make this assertion depend on which test ran first.
+    """
+    from core_storage_api.services.postgres_service import PostgresService
+
+    isolated_tenant = f"test-unswept-{uuid.uuid4().hex[:8]}"
+    _patch_embedding(monkeypatch)
+    await _seed_memory(engine, isolated_tenant, content="body", content_hash="b" * 64)
+
+    await _run(engine, _memories_spec(), isolated_tenant)
+
+    _total, _missing, _stale, unknown = await PostgresService().memory_embedding_coverage_for_tenant(
+        isolated_tenant
+    )
+    assert unknown == 0, f"{unknown} row(s) moved into the population nothing sweeps"
+
+
+@pytest.mark.integration
+async def test_stamps_the_hash_it_embedded_not_the_row_s_current_hash(engine, tenant_id, monkeypatch):
+    """A content update mid-embed must not be recorded as freshly embedded.
+
+    The window is real: fetch -> embed (a network call) -> write. If the row's
+    content changes inside it, the vector describes the OLD text while
+    ``content_hash`` now describes the NEW text. Stamping the value read with
+    the content keeps the column's promise true and leaves the row visibly
+    stale. A SQL-side ``SET embedded_content_hash = content_hash`` would
+    instead stamp the NEW hash onto the OLD vector and mark the row fresh —
+    the precise failure ``memory_update_embedding`` refuses the same re-read
+    to avoid.
+
+    This is the test that distinguishes the fix from the obvious one.
+    """
+    old_hash, new_hash = "c" * 64, "d" * 64
+    mid = await _seed_memory(engine, tenant_id, content="original body", content_hash=old_hash)
+
+    async def _concurrent_content_update(_content):
+        async with engine.connect() as conn:
+            await conn.execute(
+                text("UPDATE memories SET content = :c, content_hash = :ch WHERE id = :id"),
+                {"c": "edited body", "ch": new_hash, "id": mid},
+            )
+            await conn.commit()
+
+    _patch_embedding(monkeypatch, on_call=_concurrent_content_update)
+
+    await _run(engine, _memories_spec(), tenant_id)
+
+    _has_emb, content_hash, provenance = await _read_memory(engine, mid)
+    assert content_hash == new_hash, "fixture did not actually simulate the concurrent edit"
+    assert provenance == old_hash, (
+        f"stamped {provenance!r}; the vector was built from the text hashing to "
+        f"{old_hash!r}, so recording anything else asserts a freshness that is not true"
+    )
+    assert provenance != content_hash, (
+        "row reads as freshly embedded despite its content having changed since; "
+        "the staleness detector can no longer see it"
+    )
+
+
+@pytest.mark.integration
+async def test_null_content_hash_stays_null(engine, tenant_id, monkeypatch):
+    """No hash to copy means unknown provenance, which is the honest record.
+
+    A guessed or derived value would be worse than the NULL it replaced: NULL
+    reads as "unknown", while a wrong hash reads as verified freshness. The
+    embedding is still written — the row is repaired, just not attested.
+    """
+    _patch_embedding(monkeypatch)
+    mid = await _seed_memory(engine, tenant_id, content="body without a hash", content_hash=None)
+
+    report = await _run(engine, _memories_spec(), tenant_id)
+
+    assert report.embedded == 1
+    has_emb, content_hash, provenance = await _read_memory(engine, mid)
+    assert has_emb, "the row should still get its vector"
+    assert content_hash is None
+    assert provenance is None, f"invented provenance {provenance!r} for a row with no content hash"
+
+
+@pytest.mark.integration
+async def test_entities_backfill_still_works(engine, tenant_id, monkeypatch):
+    """``entities`` has neither column, so the stamp must not be emitted there.
+
+    Migration 037 added ``embedded_content_hash`` to ``memories`` alone. A
+    table-blind fix compiles fine and fails at runtime on every entity write
+    with an undefined-column error — turning a provenance bug into an outage
+    of the other half of the same script.
+    """
+    _patch_embedding(monkeypatch)
+    eid = uuid.uuid4()
+    async with engine.connect() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO entities (id, tenant_id, entity_type, canonical_name, name_embedding) "
+                "VALUES (:id, :t, 'person', 'Ada Lovelace', NULL)"
+            ),
+            {"id": eid, "t": tenant_id},
+        )
+        await conn.commit()
+
+    report = await _run(engine, _entities_spec(), tenant_id)
+
+    assert report.embedded == 1
+    async with engine.connect() as conn:
+        has_emb = (
+            await conn.execute(
+                text("SELECT name_embedding IS NOT NULL FROM entities WHERE id = :id"), {"id": eid}
+            )
+        ).scalar()
+    assert has_emb, "entities backfill wrote no vector"
+
+
+@pytest.mark.integration
+async def test_hint_rewrite_replaces_stale_provenance(engine, tenant_id, monkeypatch):
+    """``--rewrite-hint-prefixed`` overwrites an existing vector, so it owns the stamp.
+
+    These rows already carry a vector and may already carry provenance for it.
+    The rewrite replaces the vector, which makes any existing stamp describe
+    something that no longer exists. Writing the current hash in the same
+    statement keeps the two in step.
+    """
+    _patch_embedding(monkeypatch)
+    stale_stamp, current_hash = "e" * 64, "f" * 64
+    mid = uuid.uuid4()
+    async with engine.connect() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO memories "
+                "(id, tenant_id, agent_id, memory_type, content, content_hash, "
+                " embedded_content_hash, embedding, metadata) "
+                "VALUES (:id, :t, 'agent-bf', 'fact', :c, :ch, :stale, "
+                '        (:emb)::vector, \'{"retrieval_hint": "a hint"}\'::jsonb)'
+            ),
+            {
+                "id": mid,
+                "t": tenant_id,
+                "c": "hint-prefixed body",
+                "ch": current_hash,
+                "stale": stale_stamp,
+                "emb": str([0.5] * VECTOR_DIM_FAKE),
+            },
+        )
+        await conn.commit()
+
+    report = await _run(engine, _memories_spec(), tenant_id, rewrite_hint_prefixed=True)
+
+    assert report.embedded == 1, "hint-rewrite mode did not select the seeded row"
+    _has_emb, _content_hash, provenance = await _read_memory(engine, mid)
+    assert provenance == current_hash, (
+        f"stamp is {provenance!r}; after replacing the vector the row must attest the "
+        "text the NEW vector was built from, not whatever the old one claimed"
+    )
+    assert provenance != stale_stamp

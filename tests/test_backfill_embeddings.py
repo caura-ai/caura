@@ -70,8 +70,8 @@ async def test_backfill_re_embeds_memories_and_entities(
 
     rows = {
         "from memories": [
-            (uuid.uuid4(), "memory content one"),
-            (uuid.uuid4(), "memory content two"),
+            (uuid.uuid4(), "memory content one", "hash-one"),
+            (uuid.uuid4(), "memory content two", "hash-two"),
         ],
         "from entities": [
             (uuid.uuid4(), "Acme Corp"),
@@ -113,7 +113,7 @@ async def test_backfill_dry_run_skips_provider_and_writes(
     from core_storage_api.scripts.backfill_embeddings import run_backfill
 
     rows = {
-        "from memories": [(uuid.uuid4(), "x"), (uuid.uuid4(), "y")],
+        "from memories": [(uuid.uuid4(), "x", "hx"), (uuid.uuid4(), "y", "hy")],
         "from entities": [],
     }
     monkeypatch.setattr(
@@ -145,9 +145,9 @@ async def test_backfill_skips_empty_content_rows(
 
     rows = {
         "from memories": [
-            (uuid.uuid4(), ""),
-            (uuid.uuid4(), "real content"),
-            (uuid.uuid4(), None),
+            (uuid.uuid4(), "", "h-empty"),
+            (uuid.uuid4(), "real content", "h-real"),
+            (uuid.uuid4(), None, "h-none"),
         ],
         "from entities": [],
     }
@@ -181,7 +181,9 @@ async def test_backfill_aborts_on_consecutive_provider_failures(
 
     n_rows = backfill_embeddings._MAX_CONSECUTIVE_NONES + 5
     rows = {
-        "from memories": [(uuid.uuid4(), f"content {i}") for i in range(n_rows)],
+        "from memories": [
+            (uuid.uuid4(), f"content {i}", f"h{i}") for i in range(n_rows)
+        ],
         "from entities": [],
     }
     monkeypatch.setattr(
@@ -207,7 +209,7 @@ async def test_backfill_only_table_filter(
     from core_storage_api.scripts.backfill_embeddings import run_backfill
 
     rows = {
-        "from memories": [(uuid.uuid4(), "m1")],
+        "from memories": [(uuid.uuid4(), "m1", "h-m1")],
         "from entities": [(uuid.uuid4(), "ENTITY-SHOULD-NOT-BE-PROCESSED")],
     }
     monkeypatch.setattr(
@@ -347,7 +349,7 @@ async def test_rewrite_hint_prefixed_targets_memories_with_hint_metadata(
 
     rows = {
         "from memories": [
-            (uuid.uuid4(), "memory previously embedded with a hint prefix"),
+            (uuid.uuid4(), "memory previously embedded with a hint prefix", "h-hint"),
         ],
     }
     engine, captured_sql = _capturing_engine(rows)
@@ -378,8 +380,22 @@ async def test_rewrite_hint_prefixed_targets_memories_with_hint_metadata(
     assert select_against_memories, "no SELECT against memories was emitted"
     sql = select_against_memories[0].lower()
     assert "embedding is not null" in sql
-    assert "metadata_ ? 'retrieval_hint'" in sql
-    assert "metadata_->>'retrieval_hint'" in sql
+    # MODE DISPATCH ONLY — deliberately not the SQL's exact shape.
+    #
+    # This engine is a mock; it never parses SQL, so it cannot tell a valid
+    # column name from an invalid one. That is precisely how this scan shipped
+    # naming a column that does not exist (``metadata_``, the ORM attribute,
+    # where the database column is ``metadata``) and using a jsonb-only ``?``
+    # operator against a ``json`` column — raising on its first statement, in
+    # every run, while an assertion here pinned the broken string in place and
+    # reported green.
+    #
+    # Substituting corrected strings would repeat that mistake with better
+    # spelling. SQL correctness now belongs to
+    # ``core-storage-api/tests/test_backfill_embeddings_provenance.py``, which
+    # executes against real PostgreSQL and therefore fails on SQL that cannot
+    # run. What a mock can honestly assert is which selector this mode chose.
+    assert "retrieval_hint" in sql
     # Default-mode selector must NOT be present.
     assert "embedding is null" not in sql
 
@@ -395,7 +411,7 @@ async def test_rewrite_hint_prefixed_skips_entities(
     from core_storage_api.scripts.backfill_embeddings import run_backfill
 
     rows = {
-        "from memories": [(uuid.uuid4(), "memory with hint")],
+        "from memories": [(uuid.uuid4(), "memory with hint", "h-hint")],
         "from entities": [(uuid.uuid4(), "Acme Corp")],
     }
     engine, captured_sql = _capturing_engine(rows)
@@ -428,7 +444,7 @@ async def test_default_mode_uses_null_embedding_filter(
     from core_storage_api.scripts.backfill_embeddings import run_backfill
 
     rows = {
-        "from memories": [(uuid.uuid4(), "x")],
+        "from memories": [(uuid.uuid4(), "x", "hx")],
         "from entities": [],
     }
     engine, captured_sql = _capturing_engine(rows)
@@ -573,3 +589,82 @@ async def test_amain_no_warning_on_default_mode(
     assert code == 0
     assert "NOT idempotent" not in captured.err
     assert sleeps == []
+
+
+# ---------------------------------------------------------------------------
+# Embedding provenance: which text each written vector was built from
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_production_specs_declare_provenance_where_the_columns_exist():
+    """Pins the two specs to the schema they actually run against.
+
+    ``memories`` has ``embedded_content_hash`` (migration 037) and must stamp
+    it; ``entities`` has neither that column nor a content hash and must not,
+    or every entity write fails with an undefined-column error.
+
+    Without this, a spec quietly losing its provenance columns would leave the
+    behavioural tests in ``core-storage-api/tests/`` passing against a table
+    that had stopped recording anything — the same silent-success shape the
+    provenance column exists to make impossible.
+    """
+    from core_storage_api.scripts.backfill_embeddings import _TARGETS
+
+    by_table = {s.table: s for s in _TARGETS}
+
+    memories = by_table["memories"]
+    assert memories.provenance is not None, (
+        "memories must stamp provenance; without it the sweep moves rows into "
+        "embedding IS NOT NULL AND embedded_content_hash IS NULL, which nothing scans"
+    )
+    assert memories.provenance.source_hash_column == "content_hash"
+    assert memories.provenance.stamp_column == "embedded_content_hash"
+
+    assert by_table["entities"].provenance is None, (
+        "entities has neither column; declaring provenance would emit an "
+        "undefined-column assignment on every entity write"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_provenance_rides_the_same_update_as_the_vector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One statement, not two.
+
+    A follow-up UPDATE could commit the vector and then fail before the stamp,
+    leaving exactly the un-provenanced row this guards against — and leaving it
+    on the error path, where it is least likely to be noticed. Asserting on the
+    emitted SQL rather than on a written row because the coupling being pinned
+    is "same statement", which a row read cannot distinguish.
+    """
+    from core_storage_api.scripts.backfill_embeddings import (
+        _TARGETS,
+        _backfill_one_table,
+    )
+
+    rows = {"from memories": [(uuid.uuid4(), "content", "the-hash")]}
+    engine, captured_sql = _capturing_engine(rows)
+    monkeypatch.setattr(
+        "common.embedding.get_embedding", AsyncMock(return_value=[0.1] * 1024)
+    )
+
+    await _backfill_one_table(
+        engine,
+        next(s for s in _TARGETS if s.table == "memories"),
+        tenant_id=None,
+        batch_size=10,
+        max_inflight=1,
+        dry_run=False,
+        rewrite_hint_prefixed=False,
+    )
+
+    updates = [s for s in captured_sql if s.lower().startswith("update")]
+    assert len(updates) == 1, f"expected exactly one UPDATE, got {len(updates)}"
+    sql = updates[0].lower()
+    assert "embedding = (:emb)::vector" in sql
+    assert "embedded_content_hash = :ch" in sql, (
+        "provenance is not written by the same statement as the vector"
+    )
