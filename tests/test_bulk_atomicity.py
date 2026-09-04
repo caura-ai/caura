@@ -33,6 +33,29 @@ def _attempt_id(prefix: str) -> str:
     return f"{prefix}-{uid()}"
 
 
+def _assert_per_item_attempt_ids(data: dict, attempt_id: str) -> None:
+    """Every result carries a distinct per-item attempt id, scoped to this attempt.
+
+    That is the property a caller actually depends on: one stable token per
+    item, correlatable across retries.
+
+    Deliberately NOT a check on the token's shape. These assertions used to
+    read ``endswith(f":{index}")``, which pinned the positional derivation —
+    and positional was H-08: a retry carrying only the items that failed
+    shifted every survivor onto a key an earlier item's row already owned,
+    and the resent content was silently never written. The ids are derived
+    from content now, so an index-shaped assertion would pin the defect.
+
+    Distinctness holds here because these batches carry distinct content; two
+    items with identical content share a key by design, and the second never
+    reaches the write path.
+    """
+    crids = [r["client_request_id"] for r in data["results"]]
+    assert all(crids), crids
+    assert all(c.startswith(f"{attempt_id}:") for c in crids), crids
+    assert len(set(crids)) == len(crids), f"per-item ids must be distinct: {crids}"
+
+
 # ── Per-item validation ──
 
 
@@ -47,10 +70,11 @@ async def test_short_content_in_mixed_batch_returns_207(client):
             {"content": f"well-formed content two {uid()}"},
         ],
     }
+    attempt_id = _attempt_id("mixed")
     resp = await client.post(
         "/api/v1/memories/bulk",
         json=body,
-        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("mixed")},
+        headers={**headers, "X-Bulk-Attempt-Id": attempt_id},
     )
     # 207 Multi-Status: at least one created + at least one error.
     assert resp.status_code == 207
@@ -64,11 +88,7 @@ async def test_short_content_in_mixed_batch_returns_207(client):
     assert by_index[1]["status"] == "error"
     assert "too short" in by_index[1]["error"]
     assert by_index[2]["status"] == "created"
-    # Every result carries its server-derived per-item attempt id —
-    # callers can use this to correlate with retries.
-    for r in data["results"]:
-        assert r["client_request_id"]
-        assert r["client_request_id"].endswith(f":{r['index']}")
+    _assert_per_item_attempt_ids(data, attempt_id)
 
 
 async def test_all_short_content_batch_returns_200(client):
@@ -114,10 +134,11 @@ async def test_oversized_content_in_mixed_batch_returns_207(client):
             {"content": f"well-formed content two {uid()}"},
         ],
     }
+    attempt_id = _attempt_id("oversized")
     resp = await client.post(
         "/api/v1/memories/bulk",
         json=body,
-        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("oversized")},
+        headers={**headers, "X-Bulk-Attempt-Id": attempt_id},
     )
     # 207 Multi-Status: two created + one error — NOT a whole-batch 422.
     assert resp.status_code == 207
@@ -136,10 +157,7 @@ async def test_oversized_content_in_mixed_batch_returns_207(client):
     assert by_index[1]["id"] is None
     assert by_index[2]["status"] == "created"
     assert by_index[2]["id"]
-    # Server-derived per-item attempt id is present on every row.
-    for r in data["results"]:
-        assert r["client_request_id"]
-        assert r["client_request_id"].endswith(f":{r['index']}")
+    _assert_per_item_attempt_ids(data, attempt_id)
 
 
 async def test_all_valid_batch_returns_200(client):
@@ -392,6 +410,81 @@ async def test_retry_same_attempt_id_returns_duplicate_attempt(client):
     assert second_ids == first_ids
     for r in second_data["results"]:
         assert r["status"] == "duplicate_attempt"
+
+
+async def test_partial_retry_with_the_same_attempt_id_writes_the_missing_rows(client):
+    """H-08. A retry that carries only the items which did NOT succeed.
+
+    This is the shape the 207 contract invites: the response names exactly
+    which items failed, so a client resends those and drops the rest —
+    keeping the same attempt id, because it is the same logical batch.
+
+    Under positional per-item keys that was silent, total data loss. The
+    survivors slid down onto indices the first attempt's rows already
+    owned, storage's ``ON CONFLICT DO NOTHING`` skipped the inserts, the
+    re-query resolved those keys to the FOREIGN rows, and the response came
+    back ``created=0 duplicates=2 errors=0`` — indistinguishable from a
+    clean retry, while the resent content was never written and never would
+    be, on any number of further retries.
+
+    The last assertion is the one that matters: it reads the rows back and
+    checks their CONTENT. Asserting only ``status == "created"`` would pass
+    on a relabelling that still wrote nothing.
+    """
+    tenant_id, headers = get_test_auth()
+    attempt_id = _attempt_id("partial")
+    agent_id = f"h08-{uid()}"
+    contents = [f"h08 partial retry fact number {uid()}-{i}" for i in range(4)]
+
+    def _body(items):
+        return {
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "items": [{"content": c} for c in items],
+        }
+
+    first = await client.post(
+        "/api/v1/memories/bulk",
+        json=_body(contents[:2]),
+        headers={**headers, "X-Bulk-Attempt-Id": attempt_id},
+    )
+    assert first.status_code == 200
+    first_data = first.json()
+    assert first_data["created"] == 2, first_data
+    first_ids = {r["id"] for r in first_data["results"]}
+
+    # Same attempt id, different items — the remainder of the same batch.
+    second = await client.post(
+        "/api/v1/memories/bulk",
+        json=_body(contents[2:]),
+        headers={**headers, "X-Bulk-Attempt-Id": attempt_id},
+    )
+    assert second.status_code == 200
+    second_data = second.json()
+    assert second_data["created"] == 2, (
+        f"the resent items were not written: {second_data}"
+    )
+    assert second_data["duplicates"] == 0
+    assert second_data["errors"] == 0
+
+    by_index = {r["index"]: r for r in second_data["results"]}
+    second_ids = [r["id"] for r in second_data["results"]]
+    assert all(second_ids)
+    # Not the first attempt's rows. The defect handed back exactly those.
+    assert first_ids.isdisjoint(second_ids), (
+        "a resent item resolved to a row belonging to a different item"
+    )
+
+    # The rows exist AND hold the resent content. Paired through the result's
+    # own ``index`` rather than list order, so this asserts the mapping the
+    # response claims rather than assuming the two lists line up.
+    for idx, expected in enumerate(contents[2:]):
+        mem_id = by_index[idx]["id"]
+        got = await client.get(
+            f"/api/v1/memories/{mem_id}?tenant_id={tenant_id}", headers=headers
+        )
+        assert got.status_code == 200, got.text
+        assert got.json()["content"] == expected
 
 
 async def test_different_attempt_id_same_content_is_duplicate_content(client):

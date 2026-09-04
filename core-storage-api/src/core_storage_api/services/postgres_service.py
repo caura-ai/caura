@@ -1012,8 +1012,12 @@ class PostgresService:
         """Insert with per-attempt idempotency (CAURA-602).
 
         Every item must carry a non-empty ``client_request_id``. Callers
-        on the bulk-write path derive it from the
-        ``X-Bulk-Attempt-Id`` header (``f"{attempt_id}:{index}"``);
+        on the bulk-write path derive it from the ``X-Bulk-Attempt-Id``
+        header and the item's own content hash
+        (``f"{attempt_id}:{content_hash[:16]}"`` — positional indices were
+        H-08: a retry carrying only the failed items shifted every survivor
+        onto another item's key, and this method's ``ON CONFLICT DO NOTHING``
+        then answered ``was_inserted=False`` with the FOREIGN row's id);
         server-internal callers (auto-chunk, atomic-facts) generate a
         UUID per item. Partial unique
         ``ix_memories_attempt_unique`` makes a retry of the same logical

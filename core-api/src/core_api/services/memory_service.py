@@ -165,7 +165,8 @@ def _auto_chunk_request_id() -> str:
     (auto-chunk, atomic-facts) that have no ``X-Bulk-Attempt-Id`` from
     a client (CAURA-602). The ``auto-chunk:`` prefix keeps these rows
     visually distinguishable in the partial unique index from
-    real client-side bulk attempts (``f"{X-Bulk-Attempt-Id}:{idx}"``).
+    real client-side bulk attempts
+    (``f"{X-Bulk-Attempt-Id}:{content_hash[:16]}"``).
     """
     return f"auto-chunk:{uuid4()}"
 
@@ -1849,14 +1850,19 @@ async def create_memories_bulk(
 ) -> BulkMemoryResponse:
     """Create multiple memories with per-attempt idempotency (CAURA-602).
 
-    The route binds each item to a stable ``client_request_id`` of the
-    form ``f"{bulk_attempt_id}:{index}"``. Storage's per-item unique
+    Each item is bound to a stable ``client_request_id`` of the form
+    ``f"{bulk_attempt_id}:{content_hash[:16]}"``. Storage's per-item unique
     constraint then turns retries into deterministic outcomes:
 
     - first attempt → ``status="created"`` per item.
     - retry of the same ``X-Bulk-Attempt-Id`` after a lost response →
       every previously-committed row resolves to ``duplicate_attempt``
       with the canonical id, so no row is ever silently committed.
+    - retry that carries only the items which did NOT succeed → those
+      items are written, and the ones left out are simply absent. Keyed
+      on content rather than position, a partial retry is just a smaller
+      batch; see H-08 at the derivation site for what positional keys did
+      to it instead.
     - same content already exists from an earlier *different* attempt →
       ``duplicate_content``, matching today's content-hash dedup
       semantics.
@@ -2148,11 +2154,43 @@ async def create_memories_bulk(
     error_count = 0
 
     for i, item in enumerate(items):
-        # Server-derived per-item attempt id. Stable across retries
-        # because ``bulk_attempt_id`` is the client-supplied
-        # ``X-Bulk-Attempt-Id`` and the index is positional within the
-        # request body — same body + same attempt id ⇒ same per-item id.
-        item_request_id = f"{bulk_attempt_id}:{i}"
+        # Server-derived per-item attempt id, keyed on the item's CONTENT
+        # rather than its position in the request body.
+        #
+        # Audit H-08. This used to be ``f"{bulk_attempt_id}:{i}"``, whose
+        # stability rested on a precondition the caller had to uphold and
+        # could not see: same body + same attempt id ⇒ same per-item id. A
+        # retry that drops the items which already succeeded is a DIFFERENT
+        # body, so every surviving item shifts down into an index another
+        # item's row already claimed — and the failure is silent and total:
+        #
+        #   1. the survivor's content is new, so it clears the dedup above
+        #      and goes to the write path;
+        #   2. storage's ``ON CONFLICT DO NOTHING`` on
+        #      ``ix_memories_attempt_unique`` sees the id already taken and
+        #      SKIPS the insert;
+        #   3. the follow-up re-query resolves that id to the FOREIGN row,
+        #      which comes back ``was_inserted=False``;
+        #   4. that reads as ``duplicate_attempt`` carrying the foreign
+        #      row's id, so the response says created=0, errors=0 — fully
+        #      successful — while the retried content was never written.
+        #
+        # And this is not an exotic caller mistake. The route answers 207
+        # with per-item results naming exactly which items failed, and tells
+        # clients to retry "the same logical batch" with the same attempt id;
+        # trimming the succeeded items is the obvious reading. ``ingest_commit``
+        # does it structurally, via a pre-dedup filter that removes
+        # already-created facts before building the body.
+        #
+        # Content is what the key was always trying to name — "this logical
+        # row within this attempt" — so keying on it removes the precondition
+        # instead of documenting it harder. ``hashes`` is already computed
+        # above for the dedup gate, so this costs nothing and keeps the two
+        # keyed on the same value. 16 hex chars is 64 bits over a batch capped
+        # at 100 items; identical content within one batch never reaches the
+        # write path anyway (``seen_hashes`` collapses it first), so the only
+        # collisions this has to rule out are accidental ones.
+        item_request_id = f"{bulk_attempt_id}:{hashes[i][:16]}"
 
         # Input-validation errors surface as per-item error rows (never embedded,
         # enriched, deduped, or written — they're excluded from valid_indices):

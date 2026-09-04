@@ -1019,6 +1019,18 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
     # already-committed rows from the previous attempt (the same contract
     # the dashboard's bulk-write path already relies on).
     #
+    # This is only safe because ``create_memories_bulk`` keys each item on
+    # its CONTENT (H-08). The pre-loop dedup above removes facts that a
+    # previous attempt already committed, so the body a retry sends is
+    # SHORTER than the first attempt's while carrying the same ``run_id``.
+    # Under the old positional keys every survivor slid down onto an index
+    # an earlier fact's row already owned, the insert was skipped as a
+    # conflict, and the response reported ``duplicate_attempt`` against a
+    # row holding entirely different content — a fully successful-looking
+    # commit that persisted nothing. The pre-dedup is what makes retries
+    # cheap and it is also what shifts the indices; keying on content is
+    # what lets both be true at once.
+    #
     # Behavior tradeoff: ``create_memories_bulk`` performs content-hash
     # dedup but skips the per-write semantic-duplicate check that
     # individual ``create_memory`` calls run via ``CheckSemanticDuplicate``.

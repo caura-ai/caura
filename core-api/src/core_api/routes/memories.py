@@ -1196,8 +1196,18 @@ async def write_memories_bulk(
     Required header ``X-Bulk-Attempt-Id`` identifies the *attempt*. A
     retry of the same logical batch reuses the same value; storage's
     per-item unique constraint then converts each row into either
-    ``created`` or ``duplicate_attempt`` deterministically. The route
-    returns:
+    ``created`` or ``duplicate_attempt`` deterministically.
+
+    A retry may carry the WHOLE batch or only the items that did not
+    succeed — both are safe, because the per-item key is derived from the
+    item's content rather than its position in the body (H-08; the
+    derivation in ``create_memories_bulk`` records what positional keys did
+    to a trimmed retry). Since the 207 below hands back per-item results
+    naming exactly which items failed, trimming is the obvious thing for a
+    client to do, and it now behaves as a smaller batch rather than as a
+    body whose every index means something else.
+
+    The route returns:
 
     - ``200`` when every item resolved as ``created``,
       ``duplicate_attempt``, or ``duplicate_content``.
