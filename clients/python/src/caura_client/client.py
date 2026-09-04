@@ -217,8 +217,3 @@ class Caura:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
-
-
-# Permanent legacy alias (2026-08 rename) — same class, not a subclass, so
-# isinstance checks and type() comparisons agree across old and new code.
-MemClaw = Caura  # legacy-name-ok: rule 3 permanent class alias
