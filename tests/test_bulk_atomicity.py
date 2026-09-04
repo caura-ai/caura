@@ -642,6 +642,191 @@ async def test_storage_4xx_does_not_get_5xx_recovery_hint(client, monkeypatch):
     assert exc_info.value.response.status_code == 404
 
 
+# ── A 5xx storage marks permanent must not be advertised as retryable ──
+#
+# The 504-with-retry-hint contract above rests on the failure being able to
+# clear: a lost response, a restart mid-commit, a slow upstream. When storage
+# reports a failure that reproduces identically on every attempt, that contract
+# inverts — a compliant client retries forever. Production ran exactly that:
+# ~680 requests/hour for 29 hours against a batch that could never compile,
+# because nothing at this layer separated "might have committed" from "will
+# never commit".
+
+
+def _permanent_response():
+    """A storage response carrying the explicit non-retryable marker.
+
+    Built literally rather than through ``common.permanent_failure`` on purpose:
+    this is the WIRE shape, and a test that constructs it with the same helper
+    the producer uses would keep passing if that helper renamed a key. The
+    storage side's own tests cover the builder.
+
+    Unannotated return, matching this module's convention of importing httpx
+    inside the functions that need it rather than at module scope.
+    """
+    import httpx
+
+    request = httpx.Request("POST", "https://storage.local/memories/bulk")
+    return httpx.Response(
+        500,
+        request=request,
+        json={
+            "detail": {
+                "error": "bulk_row_shape",
+                "retryable": False,
+                "message": "bulk write failed on an internal row-shape invariant",
+                "columns": ["embedded_content_hash"],
+            }
+        },
+    )
+
+
+def _serving(response, monkeypatch):
+    """Make the BULK INSERT call — and only that one — return *response*.
+
+    Patches ``_execute``, which sits BELOW ``_post``, so ``_post``'s real
+    ``raise_for_status`` and permanence translation both run. Patching
+    ``create_memories`` instead would stub out the very code under test, and
+    the tests would pass against a client that never learned to classify
+    anything.
+
+    Scoped by ``label`` rather than replacing ``_execute`` wholesale, because a
+    single bulk request makes several storage calls before the insert (tenant
+    config, dedup, agent upsert). Failing all of them raises from OUTSIDE the
+    route's ``try``, so the answer comes from ``upstream_http_error_handler``
+    instead of the branch under test — which is how the first draft of these
+    tests read 503 where it expected 504, and would just as happily have read
+    the right status for the wrong reason.
+    """
+    from core_api.clients import storage_client as sc_mod
+
+    real_execute = sc_mod.CoreStorageClient._execute
+
+    async def fake_execute(self, do_request, *, retry, label):
+        if label == "POST /memories/bulk":
+            return response
+        return await real_execute(self, do_request, retry=retry, label=label)
+
+    monkeypatch.setattr(sc_mod.CoreStorageClient, "_execute", fake_execute)
+
+
+async def test_the_marker_is_opt_in_and_only_the_literal_false_counts():
+    """Every shape that is not an explicit permanence claim stays retryable.
+
+    Fail-open is deliberate: a 5xx really may have committed rows, and
+    suppressing the retry on a guess would strand them with nothing to recover
+    them — whereas a needless retry is a no-op, because the per-attempt unique
+    index resolves an already-committed row to ``duplicate_attempt``. The
+    empty-body case is the one ``test_storage_5xx_returns_504_not_500`` above
+    constructs, so this doubles as a regression guard on that test's contract.
+
+    ``async`` purely to satisfy this module's ``pytest.mark.asyncio``
+    pytestmark; the function awaits nothing.
+    """
+    import httpx
+
+    from core_api.clients.storage_client import _storage_permanent
+
+    req = httpx.Request("POST", "https://storage.local/memories/bulk")
+
+    message, fields = _storage_permanent(_permanent_response())
+    assert message == "bulk write failed on an internal row-shape invariant"
+    # The cause and the divergent columns arrive as data, not as prose.
+    assert fields["error"] == "bulk_row_shape"
+    assert fields["columns"] == ["embedded_content_hash"]
+
+    for label, response in [
+        ("empty body", httpx.Response(503, request=req)),
+        (
+            "FastAPI's default string detail",
+            httpx.Response(500, request=req, json={"detail": "Internal Server Error"}),
+        ),
+        (
+            "dict detail without the key",
+            httpx.Response(500, request=req, json={"detail": {"error": "other"}}),
+        ),
+        (
+            "explicitly retryable",
+            httpx.Response(500, request=req, json={"detail": {"retryable": True}}),
+        ),
+        # ``None`` must not read as a permanence claim — the reason the check
+        # is ``is False`` rather than a falsy test.
+        (
+            "null",
+            httpx.Response(500, request=req, json={"detail": {"retryable": None}}),
+        ),
+        (
+            "a proxy's HTML error page",
+            httpx.Response(502, request=req, text="<html>bad gateway</html>"),
+        ),
+        ("a body that parses to a list", httpx.Response(500, request=req, json=[1, 2])),
+    ]:
+        assert _storage_permanent(response) is None, label
+
+
+async def test_permanent_storage_5xx_does_not_advise_retry(client, monkeypatch):
+    """A marked-permanent storage 5xx must break the retry loop, not feed it.
+
+    Asserts the three things a client acts on: a machine-readable code rather
+    than an English substring, plain "do not retry" prose, and — critically —
+    the ABSENCE of the ``X-Bulk-Attempt-Id`` hint the 504 branch emits, since
+    that string is what a complying client keys its retry off.
+    """
+    _serving(_permanent_response(), monkeypatch)
+
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"perm-{uid()}",
+        "items": [{"content": f"perm-content-{uid()}"}],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("perm")},
+    )
+
+    assert resp.status_code == 500
+    payload = resp.json()
+    assert payload["error"]["code"] == "PERMANENT_WRITE_FAILURE"
+    assert payload["error"]["details"]["columns"] == ["embedded_content_hash"]
+    detail = payload["detail"]
+    assert "Do NOT retry" in detail
+    assert "recover any committed items" not in detail
+
+
+async def test_unmarked_storage_500_still_advises_retry(client, monkeypatch):
+    """The default stays retryable, so this fix cannot strand committed rows.
+
+    Distinct from ``test_storage_5xx_returns_504_not_500``, which uses 503 with
+    an empty body: this is a 500 carrying FastAPI's ordinary string ``detail``,
+    the shape an unhandled storage exception actually produces. It is the case
+    that must NOT be caught by the permanence branch.
+    """
+    import httpx
+
+    request = httpx.Request("POST", "https://storage.local/memories/bulk")
+    _serving(
+        httpx.Response(500, request=request, json={"detail": "Internal Server Error"}),
+        monkeypatch,
+    )
+
+    tenant_id, headers = get_test_auth()
+    body = {
+        "tenant_id": tenant_id,
+        "agent_id": f"unmarked-{uid()}",
+        "items": [{"content": f"unmarked-content-{uid()}"}],
+    }
+    resp = await client.post(
+        "/api/v1/memories/bulk",
+        json=body,
+        headers={**headers, "X-Bulk-Attempt-Id": _attempt_id("unmarked")},
+    )
+
+    assert resp.status_code == 504
+    assert "X-Bulk-Attempt-Id" in resp.json()["detail"]
+
+
 async def test_storage_network_error_returns_503_with_retry_after(client, monkeypatch):
     """A network-level error reaching storage (DNS, connect refused, broken
     pipe) maps to 503 + ``Retry-After`` for clean client backoff."""

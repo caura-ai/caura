@@ -11,6 +11,7 @@ from uuid import UUID
 
 import httpx
 
+from common import permanent_failure
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS, with_connect_phase_retry, with_retry
 from common.storage_auth import is_storage_shared_secret_rejection
@@ -21,6 +22,10 @@ from core_api.config import settings
 logger = logging.getLogger(__name__)
 
 _DUPLICATE_FALLBACK_DETAIL = "Duplicate memory exists"
+# Its own fallback rather than ``_storage_detail``'s: that one says "Duplicate
+# memory exists", which would be an actively wrong description of a failure that
+# has nothing to do with duplicates.
+_PERMANENT_FALLBACK_DETAIL = "storage refused the write; a retry cannot clear it"
 
 
 class DuplicateMemoryError(Exception):
@@ -46,6 +51,37 @@ class DuplicateMemoryError(Exception):
     def __init__(self, detail: str, fields: dict | None = None) -> None:
         super().__init__(detail)
         self.fields: dict = fields or {}
+
+
+class PermanentStorageWriteError(permanent_failure.PermanentWriteFailure):
+    """Storage refused a write and said a retry cannot clear it.
+
+    Translated here, at the client boundary, rather than in the route that
+    happened to notice first — the same reason ``DuplicateMemoryError`` is: every
+    memory insert funnels through this client, so no caller has to know that a
+    5xx carrying ``retryable: false`` is a thing this endpoint does.
+
+    Placement is load-bearing, not tidiness. While this stayed an
+    ``httpx.HTTPStatusError``, ``app.upstream_http_error_handler`` answered it
+    with ``503 "Upstream dependency unavailable; retry."`` for every caller that
+    does not catch that type — the MCP bulk tool, ``ingest_service``, and
+    ``_insert_children_or_degrade`` — so a failure storage had explicitly marked
+    permanent came back as an instruction to retry. Raising a type that handler
+    does not recognise is what stops the advice being inverted on the paths
+    nobody exercised. The bulk route's own answer is then just one more caller
+    of the same classification.
+
+    ``fields`` (inherited) carries storage's structured half — for the row-shape
+    cause, the divergent column names. Empty when talking to a storage that
+    predates the marker, which is the only reason this stays additive: an old
+    storage sends no marker, so nothing is classified permanent and every 5xx
+    keeps the retry advice it has today.
+
+    Inherited rather than redeclared, like ``BulkRowShapeError`` on the storage
+    side: a second hand-written ``__init__`` in this module would take
+    ``scripts/tenant_scope_gate.py`` offline, since it resolves functions by
+    bare name and refuses to run when one is defined twice.
+    """
 
 
 def _storage_detail(response: httpx.Response) -> str:
@@ -82,6 +118,35 @@ def _storage_duplicate_fields(response: httpx.Response) -> dict:
     if not isinstance(body, dict):
         return {}
     return {k: body[k] for k in ("reason", "existing_id", "existing_status") if k in body}
+
+
+def _storage_permanent(response: httpx.Response) -> tuple[str, dict] | None:
+    """Storage's permanence marker as ``(message, fields)``, or ``None``.
+
+    ``None`` means storage did not claim permanence — which is the answer for a
+    storage that predates the marker, and the reason this whole mechanism is
+    additive: no marker, no classification, and every 5xx keeps the retry advice
+    it has today. Fail-open is the right direction here, because the costs are
+    not symmetric: a wrong "retry" is a no-op (the per-attempt unique index
+    resolves an already-committed row to ``duplicate_attempt``), while a wrong
+    "do not retry" strands committed rows with nothing to recover them.
+
+    Same defensiveness as ``_storage_detail`` and for the same reason — this
+    runs on an error path, so a non-JSON body must not turn a clean failure into
+    a JSONDecodeError raised from inside the translation.
+    """
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not permanent_failure.is_permanent(detail):
+        return None
+    message = detail.get("message")
+    # Everything except the prose travels as fields, ``error`` (the cause)
+    # included — a consumer branching on WHICH permanent failure this was needs
+    # it as data, not as a substring of the message.
+    fields = {k: v for k, v in detail.items() if k != "message"}
+    return (message if isinstance(message, str) and message else _PERMANENT_FALLBACK_DETAIL), fields
 
 
 def _reject_reserved_write_id(agent_id: str | None) -> None:
@@ -451,7 +516,29 @@ class CoreStorageClient:
         retry = with_retry if idempotent else with_connect_phase_retry
         resp = await self._execute(_do, retry=retry, label=f"POST {path}")
         self._maybe_evict_on_auth_error(resp, read=read)
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Translated here rather than in the two insert methods, because a
+            # ``retryable: false`` marker means the same thing on every path —
+            # unlike the 409 above, which those methods interpret per endpoint.
+            # Every write that goes through ``_post`` inherits the answer.
+            #
+            # It has to stop being an ``httpx.HTTPStatusError`` at this
+            # boundary. While it was one, ``app.upstream_http_error_handler``
+            # turned any 5xx no caller caught into ``503 "Upstream dependency
+            # unavailable; retry."`` — so the three bulk callers that do not
+            # catch that type (the MCP tool, ``ingest_service``,
+            # ``_insert_children_or_degrade``) were told to retry a failure
+            # storage had explicitly marked permanent.
+            #
+            # NOTE ``idempotent=True`` callers still burn their 5xx retries
+            # inside ``with_retry`` before reaching here. Bounded, so not the
+            # unbounded-loop defect, but wasted; the bulk insert is
+            # ``idempotent=False`` and is unaffected.
+            if (permanent := _storage_permanent(resp)) is None:
+                raise
+            raise PermanentStorageWriteError(*permanent) from exc
         return resp.json()
 
     async def _patch(self, path: str, data: dict) -> dict | None:

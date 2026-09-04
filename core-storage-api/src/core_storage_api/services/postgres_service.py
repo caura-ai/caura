@@ -47,7 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
 from sqlalchemy.sql.dml import ReturningInsert
 
-from common import duplicate_memory
+from common import duplicate_memory, permanent_failure
 from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
@@ -721,6 +721,26 @@ def _content_hash_fleet_scope(fleet_id: str | None):
     return func.coalesce(Memory.fleet_id, "") == (fleet_id or "")
 
 
+def _divergent_keys(key_sets: list[frozenset[str]]) -> list[str]:
+    """The keys not set by every one of *key_sets*, sorted. For messages only.
+
+    Callers detect divergence with a short-circuiting ``any`` and call this only
+    once they have found some, so the cost lands on the failure path.
+
+    Compares each set against the first rather than computing
+    ``union - intersection`` over all of them. The two agree — a key missing
+    from some set necessarily differs from the first set's membership in at
+    least one set, so the symmetric differences against the first cover exactly
+    the keys absent from the intersection (checked over 20,000 randomised
+    batches). And ``set().union(...) - set().intersection(...)`` is a trap
+    worth naming: ``set().intersection(*key_sets)`` starts from an EMPTY set
+    and so always returns empty, which reports every key as divergent — naming
+    the whole row instead of the one column that differs.
+    """
+    first = key_sets[0]
+    return sorted({k for ks in key_sets for k in first.symmetric_difference(ks)})
+
+
 class BulkValidationError(ValueError):
     """A bulk batch violated its input contract before any DB work started.
 
@@ -730,6 +750,34 @@ class BulkValidationError(ValueError):
     future in-session failure got mislabelled as a client error — the inverse
     of the bug that motivated the 422 in the first place. Subclasses
     ``ValueError`` so existing callers that catch it broadly still work.
+    """
+
+
+class BulkRowShapeError(permanent_failure.PermanentWriteFailure):
+    """A bulk batch's MAPPED rows disagreed on which columns they set.
+
+    Raised only after the items have been checked and found uniform, so the
+    divergence was introduced between the request and the statement. That is
+    what makes it a server fault rather than the 422 ``BulkValidationError``
+    answers, and the two must stay distinct: a validation failure is fixed by
+    changing the request, and this one is not fixed by anything the caller can
+    do. It does not subclass ``BulkValidationError`` for exactly that reason.
+
+    Which matters because of what the answer costs. A batch whose rows disagree
+    fails identically on every attempt, so any answer that invites a retry
+    invites an infinite one — core-api's bulk route maps storage 5xx to "504,
+    retry with the same ``X-Bulk-Attempt-Id``", and ``upstream_http_error_handler``
+    maps every unhandled upstream 5xx to "503, retry". A compliant client obeys
+    either one forever. Raising a distinct class is what lets storage mark the
+    answer permanent instead.
+
+    Inherits ``fields`` from the shared base rather than redeclaring
+    ``DuplicateContentHashError``'s ``__init__``, so the divergent column names
+    reach the wire as data. Writing that ``__init__`` out a second time here
+    does more than duplicate three lines — ``scripts/tenant_scope_gate.py``
+    resolves functions by bare name and refuses to run on a module defining one
+    twice, so it silently took the tenancy invariant offline until the base was
+    factored out.
     """
 
 
@@ -837,6 +885,40 @@ class PostgresService:
             and not out.get("embedded_content_hash")
         ):
             out["embedded_content_hash"] = out["content_hash"]
+        # The key must exist even when the stamp does not apply, because
+        # ``memory_add_all`` feeds these dicts to a multi-values INSERT and
+        # SQLAlchemy derives ONE column list for the whole statement. A batch
+        # mixing stamped and unstamped rows is not a batch with a missing
+        # value — it is two different statements, and which one you get
+        # depends on row order:
+        #
+        #   row 0 stamped, a later row not -> CompileError at execute time
+        #       ("explicitly rendered as a boundparameter"), the statement
+        #       never reaches Postgres, the whole batch fails.
+        #   row 0 unstamped, a later row stamped -> compiles, and the column
+        #       is dropped from the INSERT entirely, with no warning. The
+        #       stamped row's provenance is silently written NULL.
+        #
+        # Both were live: deferred deployments embed only ``write_mode=
+        # "strong"`` items (``memory_service`` bulk path), so a mixed batch
+        # hits one or the other purely on ordering. The second is the worse
+        # one — a NULL here reads as "written before migration 037" to
+        # ``memory_quality_metrics``, a bucket nothing re-embeds, so the row
+        # leaves the staleness detector's reach permanently.
+        #
+        # ``None`` is exactly what omission meant: the column is nullable
+        # with no default, so an explicit NULL and an absent key persist
+        # identically on the single-row path.
+        #
+        # It is not free, and the cost is worth stating because it is paid on
+        # every write rather than only on the mixed batches that used to fail.
+        # A fully-deferred batch previously omitted this column from the
+        # statement entirely; now it always carries it, which measures at
+        # roughly +8% on multi-values statement construction and one extra bind
+        # parameter per row (100 of asyncpg's ~32k ceiling, at the bulk path's
+        # 100-item cap). That buys uniformity unconditionally, which is the only
+        # form of it that cannot be defeated by row ordering.
+        out.setdefault("embedded_content_hash", None)
         return out
 
     async def memory_add(self, data: dict) -> Memory:
@@ -979,8 +1061,62 @@ class PostgresService:
         if any(d.get("fleet_id") != fleet_id for d in items):
             raise BulkValidationError("memory_add_all: all items must share the same fleet_id")
 
+        # A multi-values INSERT compiles ONE column list for the whole
+        # statement, so every row must set the same columns. A batch that
+        # disagrees is not a batch with a missing value — it is two different
+        # statements, and which one you get depends on row order:
+        #
+        #   row 0 sets the column, a later row does not -> CompileError at
+        #       execute time; the statement never reaches Postgres and the
+        #       whole batch fails.
+        #   row 0 does not, a later row does -> compiles, and SQLAlchemy drops
+        #       the column from the INSERT entirely, with no warning. That
+        #       row's value is silently discarded.
+        #
+        # Checked in two places because the two causes need opposite answers,
+        # and telling them apart requires looking at both lists. Guessing is
+        # what makes an answer wrong here: a caller told "permanent" about
+        # something it could fix will stop trying, and a caller told "retry"
+        # about something it cannot fix will never stop.
+        #
+        # Cause 1 — the ITEMS disagree. Caller-fixable, so it belongs with the
+        # tenant_id/fleet_id contract checks above and answers the same 422.
+        # Reachable today: the route hands ``request.json()`` straight here, and
+        # ``_filter_memory_fields`` passes each item's own subset of valid
+        # columns through, so two items differing on any optional column
+        # (``title``, ``run_id``, ``source_uri``, ``predicate``…) land here.
+        # core-api's own writers build fixed-key dict literals and never do,
+        # but they are not the only door.
+        #
+        # Intersected with ``_MEMORY_VALID_FIELDS`` rather than comparing raw
+        # keys, because the mapper drops everything else: two items differing
+        # only on an unrecognised key produce identical rows, and rejecting
+        # those would be a 422 for a batch that would have written correctly.
+        item_keys = [frozenset(d.keys() & _MEMORY_VALID_FIELDS) for d in items]
+        if any(ks != item_keys[0] for ks in item_keys[1:]):
+            raise BulkValidationError(
+                "memory_add_all: all items must set the same fields "
+                f"({', '.join(_divergent_keys(item_keys))} differ); a bulk "
+                "insert writes one column list for the whole batch"
+            )
+
+        rows = [self._filter_memory_fields(d) for d in items]
+        # Cause 2 — the items agreed and the MAPPER diverged. Nothing the
+        # caller sent explains it and re-sending cannot help, so this is a
+        # server fault and answers a permanent 5xx rather than a 422. That is
+        # the incident this guard exists for: ``_filter_memory_fields`` used to
+        # invent ``embedded_content_hash`` only for rows carrying a vector, and
+        # a deferred deployment embeds only ``write_mode="strong"`` items — so
+        # any mixed batch diverged here and surfaced three services away as a
+        # gateway 504 that named neither the batch nor the column.
+        row_keys = [frozenset(r) for r in rows]
+        if any(ks != row_keys[0] for ks in row_keys[1:]):
+            raise BulkRowShapeError(
+                "memory_add_all: mapped rows disagree on which columns they set",
+                {"columns": _divergent_keys(row_keys)},
+            )
+
         async with get_session() as session:
-            rows = [self._filter_memory_fields(d) for d in items]
             # The conflict target must mirror ``ix_memories_attempt_unique``
             # *expression-for-expression* — the planner only treats the
             # ON CONFLICT and the partial-unique index as matched if every

@@ -22,17 +22,19 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from common import permanent_failure
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
 from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import AuthContext, get_auth_context
-from core_api.clients.storage_client import get_storage_client
+from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
 from core_api.config import settings as app_settings
 from core_api.constants import (
     DEFAULT_LIST_LIMIT,
     MAX_LIST_LIMIT,
     MEMORY_STATUSES_PATTERN,
 )
+from core_api.errors import coded_detail
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
     IdempotencyGuard,
@@ -1425,6 +1427,34 @@ async def _write_memories_bulk_inner(
                 "committed items."
             ),
         )
+    except PermanentStorageWriteError as exc:
+        # Storage said this failure cannot clear, so the 504 branch below is
+        # exactly the wrong answer: its retry contract rests on the failure
+        # being transient, and a compliant client obeying it against a
+        # deterministic fault retries forever. That ran in prod at ~680
+        # requests/hour for 29 hours against a batch that could never compile.
+        #
+        # ``coded_detail`` rather than a bare string, because the entire point
+        # of this branch is that the caller's next action differs from every
+        # other 500 — and a bare detail collapses into the status-derived
+        # ``INTERNAL_ERROR``, leaving a client to tell them apart by grepping
+        # English. The code and storage's fields ride alongside; top-level
+        # ``detail`` stays the plain message for anyone already reading it.
+        #
+        # Deliberately silent on what was committed. The marker claims "will
+        # not clear", which is a different claim from "nothing was written" —
+        # only storage knows the latter for its own failure, and guessing here
+        # is exactly the kind of assertion a client would act on.
+        logger.error("bulk write permanently refused by storage; NOT advising retry: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=coded_detail(
+                permanent_failure.PERMANENT_WRITE_FAILURE_CODE,
+                f"{exc}. Do NOT retry with the same {BULK_ATTEMPT_ID_HEADER}; "
+                "this batch cannot succeed unchanged.",
+                **exc.fields,
+            ),
+        ) from exc
     except httpx.HTTPStatusError as exc:
         # Storage 5xx (raised by ``resp.raise_for_status()`` in the storage
         # client) may have committed rows before failing — same shape as
