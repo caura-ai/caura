@@ -78,6 +78,36 @@ INTERNAL_ONLY_STATUSES: frozenset[str] = frozenset({"candidate"})
 # silently retire an active skill or hide a candidate from review.
 SYSTEM_ONLY_STATUSES: frozenset[str] = frozenset({"quarantined", "rejected", "stale", "deprecated"})
 
+# The same three sets, applied to the STORED status instead of the
+# incoming one. The invariant: a status a caller could not have
+# WRITTEN is a status that caller may not silently OVERWRITE.
+#
+# Without this the RBAC above gated only the string in the request
+# body, never the state of the row being replaced — so retiring an
+# active skill needed no privileged status at all, just the default
+# ``staged`` on a write aimed at an existing doc_id. The comment on
+# SYSTEM_ONLY_STATUSES named that exact threat ("silently retire an
+# active skill or hide a candidate from review") while the check it
+# annotates could not see the row it was protecting.
+#
+# Derived rather than spelled out so it cannot drift: adding a status
+# to any RBAC set above protects it here on the same commit.
+#
+# ``staged`` is deliberately absent, because an agent iterating on its
+# OWN not-yet-approved skill is the ordinary authoring loop. Note what
+# that sentence does and does not license: it is an exemption for the
+# author, not for everyone. Status alone cannot tell those apart, so
+# the ownership half is enforced separately at the gate — see
+# ``_live_owner`` below. Leaving it to this comment alone is how the
+# original bug read: a comment asserting a property no check enforced.
+PROTECTED_LIVE_STATUSES: frozenset[str] = ADMIN_ONLY_STATUSES | INTERNAL_ONLY_STATUSES | SYSTEM_ONLY_STATUSES
+
+# The value ``origin.agent_id`` carries when there was no caller
+# identity to stamp. Defined once and used by BOTH the stamping site
+# and the ownership check, so "unattributed" cannot come to mean two
+# different things in the two places.
+UNATTRIBUTED_AGENT_ID = "unknown"
+
 REQUIRED_TOP_LEVEL_KEYS: tuple[str, ...] = ("name", "slug", "description", "domain", "kind", "source")
 
 # ``slug`` regex mirrors the existing ``_SKILL_SLUG_RE`` in
@@ -269,6 +299,124 @@ async def validate_and_normalize_skill_write(
             "deprecation flow — not via caura_doc.",
         )
 
+    # ── Adjustment 5b: the STORED row is gated too ───────────────
+    #
+    # ACCEPTED LIMITATION: the fetch that produced ``live_skill_doc``
+    # and the upsert that follows are not in one transaction, so a
+    # status or owner change landing between them is not seen here.
+    # That is the same optimistic-concurrency model ``kind='update'``'s
+    # hash-binding already runs on, and the window is a single
+    # in-process hop on a HITL-gated authoring path. Worth knowing
+    # before treating this gate as serialization: it is authorization.
+    # Everything above inspects only the incoming body. A write aimed
+    # at an existing doc_id is a full replace (``document_upsert`` is
+    # ``on_conflict_do_update`` over the whole blob), so without this a
+    # caller with a writable key could point ``kind='create'`` at a
+    # live ACTIVE skill, let ``status`` default to ``staged``, and
+    # replace the row outright — dropping it from every
+    # ``status='active'`` surface and destroying its curated content,
+    # while its own content sat in the inbox looking like a routine
+    # submission. No privileged status was needed to retire a skill;
+    # the default one did it.
+    #
+    # Admin and the internal Forge worker are exempt: they are the
+    # legitimate writers of these states, and the Inbox edit path is
+    # already admin-gated by ``_require_inbox_admin`` before it gets
+    # here.
+    #
+    # ``kind='update'`` is deliberately NOT exempt, and this gate runs
+    # BEFORE Adjustment 7a's hash-binding on purpose. Hash-binding is
+    # optimistic concurrency, not authorization: it proves the caller
+    # read the current content, and reads are open to any tenant agent.
+    # So a caller can GET the live skill, copy its ``content_hash``,
+    # and submit ``kind='update'`` — ``status`` still defaults to
+    # ``staged`` (a non-admin cannot write ``active``; that arm is
+    # admin-only above) and the write still lands on the same ``doc_id``
+    # as a full replace. Exempting update to let hash-binding "handle
+    # it" therefore reopens this exact hole for the price of one extra
+    # read. Agent-driven revision of a live skill needs the Phase 4
+    # update-proposal flow, where a revision lands somewhere other than
+    # on top of the live row; until that exists an admin makes the
+    # change. Keep the message below in step with that — do not point
+    # callers at a remedy that is either blocked or unsafe.
+    if live_skill_doc is not None and not (ctx.is_admin or ctx.is_internal_forge):
+        live_data = live_skill_doc.get("data") if isinstance(live_skill_doc, dict) else None
+        live_status = (live_data or {}).get("status")
+        if live_status in PROTECTED_LIVE_STATUSES:
+            # The status is deliberately NOT echoed, for the same reason
+            # the owner is not named below. ``op=read``/``query``/
+            # ``search`` all treat a non-active row as non-existent to a
+            # non-admin caller (``_skill_hidden_from_agent``), so naming
+            # the status here would undo that: repeated writes against
+            # guessed slugs would enumerate which are quarantined,
+            # rejected, or under Forge review. The caller needs to know
+            # the slug is occupied by something they may not replace,
+            # which is what a refusal necessarily reveals; which state it
+            # is in is a separate fact and not theirs.
+            _raise(
+                403,
+                f"skills write: slug={out['slug']!r} already exists and cannot "
+                "be overwritten by a non-admin caller — a write to an existing "
+                "slug replaces the live row outright, whatever its kind. Ask an "
+                "admin to make the change, or to retire the existing skill first.",
+            )
+
+        # The ownership half. ``staged`` is exempt from the status set
+        # above so the authoring loop keeps working, but "iterating on
+        # its own draft" is a claim about WHO is writing, and status
+        # cannot express that. Without this, the exemption reads as
+        # "anyone may overwrite any staged draft": agent B points a
+        # write at agent A's slug and A's unreviewed work is gone, with
+        # no history and nothing in the inbox to show it happened.
+        #
+        # SCOPE — read this before relying on it as a boundary. The
+        # check is only as strong as ``ctx.caller_agent_id``, and that
+        # is an authenticated identity ONLY where agent identity is
+        # authenticated: the gateway-verified path, where
+        # ``_get_agent_id()`` returns the ``X-Agent-ID`` the gateway
+        # signed and it wins over anything the caller passes. On the
+        # standalone / shared-key surfaces there is no verified agent
+        # identity, so ``agent_id`` falls back to the caller's own
+        # self-declared tool parameter — and a caller who can declare an
+        # id can declare the victim's. There, this is protection against
+        # cooperative agents colliding on a slug, NOT a boundary against
+        # a hostile co-tenant. That is not a gap to patch here: it is the
+        # standing ruling that the trust ladder governs AGENT
+        # credentials while tenant scope governs TENANT keys, so on a
+        # shared tenant credential the tenant IS the boundary. Any
+        # attempt to harden this in the validator would be theatre —
+        # every input it could check is supplied by the same caller.
+        #
+        # Refuse only when the live row names a DIFFERENT owner. An
+        # unattributed draft (no origin, or the ``unknown`` stamp) is
+        # left writable on purpose: deployments with no agent identity
+        # stamp every draft that way, and gating on it would 403 the
+        # ordinary loop for all of them. Where the row does name an
+        # owner, a caller who cannot show that identity — including one
+        # with no agent_id at all — is not it.
+        live_origin = (live_data or {}).get("origin")
+        live_owner = (live_origin or {}).get("agent_id") if isinstance(live_origin, dict) else None
+        if live_owner == UNATTRIBUTED_AGENT_ID:
+            live_owner = None
+        if live_owner is not None and live_owner != ctx.caller_agent_id:
+            # The owner is deliberately NOT named. A refusal has to admit
+            # the slug is occupied — otherwise it could not refuse — but
+            # who owns it is a separate fact, and the read path already
+            # treats it as one: ``op=read`` on a non-active skill answers
+            # "Not found" rather than confirm it exists, expressly so
+            # there is no existence leak. Naming the author here would
+            # hand an unauthorized caller more than a permitted read
+            # gives them, and agent ids are not opaque — deployments use
+            # human names in them. Resist adding it back for debugging;
+            # the admin who fields the request can see the row.
+            _raise(
+                403,
+                f"skills write: slug={out['slug']!r} is taken by another "
+                "agent's unreviewed draft and cannot be overwritten. Author "
+                "the skill under a slug of your own, or ask an admin to "
+                "reassign this one.",
+            )
+
     # ── Adjustment 2: description cap ────────────────────────────
     desc_bytes = _bytes_len(out["description"])
     if desc_bytes > ctx.description_max_bytes:
@@ -318,7 +466,7 @@ async def validate_and_normalize_skill_write(
     # message_id) ride through unchanged — the client may legitimately
     # set them.
     origin = dict(out.get("origin") or {})
-    origin["agent_id"] = ctx.caller_agent_id or "unknown"
+    origin["agent_id"] = ctx.caller_agent_id or UNATTRIBUTED_AGENT_ID
     out["origin"] = origin
 
     # ── Adjustment 7a: kind='update' hash-binding ────────────────

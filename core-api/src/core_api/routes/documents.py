@@ -289,24 +289,65 @@ async def upsert_document(
                 body_max_bytes=int(sf_settings.get("body_max_bytes", 40_000)),
             )
 
-            # For ``kind='update'`` we must fetch the live skill so the
-            # hash-binding check can compare against the current
-            # content_hash. Read-through storage; the validator handles
-            # the not-found case.
+            # Fetch the live skill for EVERY skills write, not just
+            # ``kind='update'``. Two checks need it and they need it for
+            # different reasons:
+            #
+            #   - ``kind='update'`` binds to the current content_hash;
+            #   - ANY kind aimed at an existing doc_id is a full replace,
+            #     so the validator has to see the stored status before
+            #     letting a non-admin overwrite it. Fetching only on
+            #     update meant ``kind='create'`` was the way around the
+            #     status RBAC: the validator was handed ``None`` and
+            #     judged the request purely on what the caller claimed.
+            #
+            # One extra read on skill creates, on a HITL-gated authoring
+            # path — not the hot path.
             #
             # Guarded by ``isinstance(body.data, dict)`` — a non-dict
             # body.data is a legitimate input (the validator below
             # rejects it with 422), but calling ``.get`` on it would
             # AttributeError into a 500 first. Cleanly punt that
             # rejection to the validator instead of crashing.
+            #
+            # Fail CLOSED, matching the MCP path: the fetch now feeds a
+            # security gate, so a transient storage error must abort with
+            # a curated message rather than fall through with
+            # ``live_doc=None`` and skip the check. An unhandled error
+            # here would already abort the write with a bare 500 — this
+            # keeps the two write paths identical and gets the failure
+            # into the log with the tenant and doc that hit it.
             live_doc: dict | None = None
-            if isinstance(body.data, dict) and body.data.get("kind") == "update":
-                sc_live = get_storage_client()
-                live_doc = await sc_live.get_document(
-                    tenant_id=body.tenant_id,
-                    collection=SKILLS_COLLECTION,
-                    doc_id=body.doc_id,
-                )
+            if isinstance(body.data, dict):
+                try:
+                    sc_live = get_storage_client()
+                    live_doc = await sc_live.get_document(
+                        tenant_id=body.tenant_id,
+                        collection=SKILLS_COLLECTION,
+                        doc_id=body.doc_id,
+                        # PRIMARY, not the replica. ``get_document``
+                        # defaults to ``read=True``; this fetch now backs
+                        # an authorization decision, so replica lag would
+                        # not be a benign stale read — it would show the
+                        # PRE-transition status (a staged row an admin
+                        # just approved to active) and the gate would
+                        # authorise the overwrite the transition was
+                        # meant to forbid. The upsert that follows does
+                        # no CAS on status, so nothing downstream catches
+                        # it. Same reason the inline dedup lookups pin
+                        # the primary.
+                        read=False,
+                    )
+                except Exception:
+                    logger.exception(
+                        "skills live-doc fetch failed for %s/%s; cannot gate skills write",
+                        body.tenant_id,
+                        body.doc_id,
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail="skill lifecycle gate unavailable",
+                    ) from None
 
             normalized, _scan = await validate_and_normalize_skill_write(
                 body.data,

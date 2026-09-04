@@ -42,6 +42,7 @@ from core_api.services.skill_lifecycle import (
     ALLOWED_STATUSES,
     INTERNAL_ONLY_SOURCES,
     INTERNAL_ONLY_STATUSES,
+    PROTECTED_LIVE_STATUSES,
     REQUIRED_TOP_LEVEL_KEYS,
     SYSTEM_ONLY_STATUSES,
     SkillWriteContext,
@@ -594,6 +595,351 @@ class TestHashBindingAndScan:
         assert out["scan"]["state"] == "clean"
         assert out["scan"]["critical"] == 0
         assert scan.state == "clean"
+
+
+# --- H-11: the STORED status is gated, not just the written one -----------
+
+
+def _live(
+    status: str,
+    *,
+    content_hash: str = "sha256:live",
+    owner: str | None = None,
+) -> dict:
+    """A live skills doc in the shape storage returns it.
+
+    ``owner`` stamps ``origin.agent_id``. Left absent by default so the
+    status-gate tests exercise the status axis alone — an unattributed row,
+    which the ownership half deliberately leaves writable.
+    """
+    data = {"slug": "test-skill", "status": status, "content_hash": content_hash}
+    if owner is not None:
+        data["origin"] = {"agent_id": owner}
+    return {"data": data}
+
+
+@pytest.mark.unit
+class TestLiveStatusOverwriteGuard:
+    """H-11 — status RBAC gated the written value, never the stored row.
+
+    ``document_upsert`` is ``on_conflict_do_update`` over the whole blob, so a
+    write aimed at an existing ``doc_id`` replaces it outright. Because the
+    validator only ever inspected the incoming body, a caller with a writable
+    key could point ``kind='create'`` at a live ACTIVE skill, let ``status``
+    default to ``staged``, and retire it — dropping it from every
+    ``status='active'`` surface and destroying its curated content, with the
+    replacement sitting in the inbox looking like a routine submission.
+
+    No privileged status was needed. The DEFAULT one did it. That is the exact
+    threat ``SYSTEM_ONLY_STATUSES``' comment claims to defend against, and the
+    check it annotates could not see the row it was protecting.
+    """
+
+    @pytest.mark.asyncio
+    async def test_agent_cannot_overwrite_a_live_active_skill(self):
+        """THE ATTACK. Fails without the fix — the write was accepted."""
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(),  # kind='create', source='agent', status defaults to staged
+                ctx=_agent_ctx(),
+                live_skill_doc=_live("active"),
+            )
+        assert exc.value.status_code == 403
+        detail = str(exc.value.detail).lower()
+        assert "already exists" in detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("live_status", sorted(SYSTEM_ONLY_STATUSES))
+    async def test_agent_cannot_resurrect_a_system_managed_doc(self, live_status):
+        """Rejected / quarantined / stale / deprecated are equally resurrectable.
+
+        A rejected skill that a non-admin can overwrite is a rejection that
+        does not hold. Parametrized off the constant so a new system status is
+        covered the day it is added.
+        """
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(),
+                ctx=_agent_ctx(),
+                live_skill_doc=_live(live_status),
+            )
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_agent_cannot_clobber_a_candidate_under_review(self):
+        """``candidate`` is internal-only to write, so it is protected to overwrite.
+
+        The same comment names this half of the threat — "hide a candidate from
+        review". The finding listed only active/rejected/quarantined/stale/
+        deprecated; deriving the set from the RBAC constants covers this too.
+        """
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(),
+                ctx=_agent_ctx(),
+                live_skill_doc=_live("candidate"),
+            )
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_agent_may_still_overwrite_its_own_staged_skill(self):
+        """OVER-REFUSAL GUARD. Iterating on a not-yet-approved skill is the
+        ordinary authoring loop and must keep working — a gate that blocked it
+        would trade a security bug for a usability one."""
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(),
+            ctx=_agent_ctx(),
+            live_skill_doc=_live("staged"),
+        )
+        assert out["status"] == "staged"
+
+    @pytest.mark.asyncio
+    async def test_first_write_of_a_new_slug_is_unaffected(self):
+        """OVER-REFUSAL GUARD. No live doc → nothing to protect."""
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(), ctx=_agent_ctx(), live_skill_doc=None
+        )
+        assert out["status"] == "staged"
+
+    @pytest.mark.asyncio
+    async def test_admin_may_overwrite_an_active_skill(self):
+        """OVER-REFUSAL GUARD. Admin is the legitimate writer of these states —
+        the HITL Inbox edit path is admin-gated and routes through here."""
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(),
+            ctx=_admin_ctx(),
+            live_skill_doc=_live("active"),
+        )
+        assert out["status"] == "staged"
+
+    @pytest.mark.asyncio
+    async def test_internal_forge_may_overwrite_an_active_skill(self):
+        """OVER-REFUSAL GUARD. The lifecycle worker owns these transitions."""
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(source="forge"),
+            ctx=_forge_ctx(),
+            live_skill_doc=_live("active"),
+        )
+        assert out["status"] == "candidate"
+
+    @pytest.mark.asyncio
+    async def test_correct_hash_binding_does_not_buy_an_overwrite(self):
+        """A well-formed ``kind='update'`` with the RIGHT hash is still refused.
+
+        Hash-binding is optimistic concurrency, not authorization. Reads are
+        open to any tenant agent, so ``target_content_hash`` proves only that
+        the caller GET the live skill first — which an attacker can do. The
+        write still lands on the same ``doc_id`` as a full replace, and
+        ``status`` still defaults to ``staged`` because a non-admin cannot
+        write ``active``. Exempting update from the gate on the grounds that
+        7a "already checks it" would reopen H-11 for the price of one extra
+        read, so this test exists to make that regression loud.
+        """
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(
+                    kind="update",
+                    target={"target_content_hash": "sha256:live"},  # the CORRECT hash
+                ),
+                ctx=_agent_ctx(),
+                live_skill_doc=_live("active", content_hash="sha256:live"),
+            )
+        assert exc.value.status_code == 403
+        assert "already exists" in str(exc.value.detail).lower()
+
+    @pytest.mark.asyncio
+    async def test_refusal_does_not_advertise_an_unreachable_remedy(self):
+        """The 403 must not send callers to a door this gate holds shut.
+
+        An earlier revision of the message told the caller to "propose a
+        revision with kind='update'" — advice that is both blocked here and,
+        were it not, the vulnerability itself. Keep the message honest: an
+        admin is the remedy until the Phase 4 proposal flow lands.
+        """
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(), ctx=_agent_ctx(), live_skill_doc=_live("active")
+            )
+        detail = str(exc.value.detail).lower()
+        assert "kind='update'" not in detail
+        assert "admin" in detail
+
+    @pytest.mark.asyncio
+    async def test_agent_may_still_update_its_own_staged_skill(self):
+        """OVER-REFUSAL GUARD. ``kind='update'`` is not blocked as such — only
+        against a PROTECTED live status. Revising one's own staged draft, hash
+        bound, is the ordinary authoring loop and still works."""
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(
+                kind="update",
+                target={"target_content_hash": "sha256:live"},
+            ),
+            ctx=_agent_ctx(),
+            live_skill_doc=_live("staged", content_hash="sha256:live"),
+        )
+        assert out["status"] == "staged"
+
+    @pytest.mark.asyncio
+    async def test_agent_cannot_clobber_another_agents_staged_draft(self):
+        """The `staged` exemption is for the AUTHOR, not for everyone.
+
+        Excluding ``staged`` from the protected set keeps the authoring loop
+        working, but "iterating on its own draft" is a claim about who is
+        writing, and status cannot express it. Without the ownership half,
+        one agent points a write at another's slug and that unreviewed work is
+        gone — no history, nothing in the inbox to show it happened.
+
+        SCOPE: this is a boundary only where agent identity is authenticated
+        (the gateway-verified path, where the signed ``X-Agent-ID`` wins over
+        anything the caller passes). On standalone / shared-key surfaces
+        ``agent_id`` is the caller's own self-declared parameter, so a caller
+        who can declare an id can declare the victim's — there this prevents
+        cooperative agents colliding on a slug, and nothing more. See the
+        SCOPE note at the gate; do not read this test as proving more than it
+        does.
+        """
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(),
+                ctx=_agent_ctx(caller_agent_id="bob"),
+                live_skill_doc=_live("staged", owner="alice"),
+            )
+        assert exc.value.status_code == 403
+        assert "draft" in str(exc.value.detail).lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("live_status", sorted(PROTECTED_LIVE_STATUSES))
+    async def test_status_refusal_does_not_echo_the_protected_status(self, live_status):
+        """The refusal must not name WHICH protected state the row is in.
+
+        ``op=read``/``query``/``search`` all treat a non-active row as
+        non-existent to a non-admin caller, so echoing the status here would
+        undo that: repeated writes against guessed slugs would enumerate which
+        slugs are quarantined, rejected, or under Forge review. A refusal
+        necessarily reveals the slug is occupied; which state it is in is a
+        separate fact. Parametrized so a status added to the set is covered.
+        """
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(), ctx=_agent_ctx(), live_skill_doc=_live(live_status)
+            )
+        assert exc.value.status_code == 403
+        assert live_status not in str(exc.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_ownership_refusal_does_not_name_the_other_agent(self):
+        """The refusal must not disclose WHO owns the draft.
+
+        A write refusal has to admit the slug is occupied — it could not
+        refuse otherwise — but authorship is a separate fact, and the read
+        path already treats it as one: ``op=read`` on a non-active skill
+        answers "Not found" rather than confirm it exists, expressly to avoid
+        an existence leak. Naming the author in this 403 would hand an
+        unauthorized caller strictly more than a permitted read gives them,
+        and agent ids are not opaque — real deployments put human names in
+        them. This guards the obvious debugging regression of putting it back.
+        """
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(),
+                ctx=_agent_ctx(caller_agent_id="bob"),
+                live_skill_doc=_live("staged", owner="alice-surname"),
+            )
+        assert exc.value.status_code == 403
+        assert "alice-surname" not in str(exc.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_unidentified_caller_cannot_clobber_an_attributed_draft(self):
+        """A caller with no agent_id cannot BE the named owner.
+
+        The looser reading — refuse only when both sides are attributed —
+        would let a tenant key with no agent identity overwrite any named
+        author's draft. Where the row names an owner, a caller who cannot
+        show that identity is not it.
+        """
+        with pytest.raises(HTTPException) as exc:
+            await validate_and_normalize_skill_write(
+                _valid_doc(),
+                ctx=_agent_ctx(caller_agent_id=None),
+                live_skill_doc=_live("staged", owner="alice"),
+            )
+        assert exc.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_author_may_still_overwrite_their_own_staged_draft(self):
+        """OVER-REFUSAL GUARD. The authoring loop, which is the whole point
+        of exempting ``staged``, must survive the ownership check."""
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(),
+            ctx=_agent_ctx(caller_agent_id="alice"),
+            live_skill_doc=_live("staged", owner="alice"),
+        )
+        assert out["status"] == "staged"
+
+    @pytest.mark.asyncio
+    async def test_unattributed_draft_stays_writable(self):
+        """OVER-REFUSAL GUARD. A deployment with no agent identity stamps
+        every draft ``unknown``; gating on that would 403 the ordinary loop
+        for all of them. Both the missing-origin and explicit-``unknown``
+        shapes must stay writable."""
+        from core_api.services.skill_lifecycle import UNATTRIBUTED_AGENT_ID
+
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(), ctx=_agent_ctx(), live_skill_doc=_live("staged")
+        )
+        assert out["status"] == "staged"
+
+        out2, _ = await validate_and_normalize_skill_write(
+            _valid_doc(),
+            ctx=_agent_ctx(caller_agent_id="bob"),
+            live_skill_doc=_live("staged", owner=UNATTRIBUTED_AGENT_ID),
+        )
+        assert out2["status"] == "staged"
+
+    @pytest.mark.asyncio
+    async def test_admin_may_overwrite_another_agents_staged_draft(self):
+        """OVER-REFUSAL GUARD. Admin is exempt from the whole gate, both
+        halves — the Inbox edit path is admin-gated and routes through here."""
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(),
+            ctx=_admin_ctx(),
+            live_skill_doc=_live("staged", owner="alice"),
+        )
+        assert out["status"] == "staged"
+
+    @pytest.mark.asyncio
+    async def test_unattributed_sentinel_is_shared_with_the_stamping_site(self):
+        """The constant must be the one the stamp actually writes.
+
+        If the check and the stamp spelled "unattributed" separately, a change
+        to one would silently turn every unattributed draft into an owned one
+        (or the reverse) — two places that have to agree, which is the shape
+        of the original bug.
+        """
+        from core_api.services.skill_lifecycle import UNATTRIBUTED_AGENT_ID
+
+        out, _ = await validate_and_normalize_skill_write(
+            _valid_doc(), ctx=_agent_ctx(caller_agent_id=None), live_skill_doc=None
+        )
+        assert out["origin"]["agent_id"] == UNATTRIBUTED_AGENT_ID
+
+    def test_protected_set_is_derived_from_the_rbac_constants(self):
+        """The set must not be a hand-maintained copy.
+
+        Spelling it out would let a status added to an RBAC set above go
+        unprotected here until someone noticed — which is the shape of the
+        original bug, two places that had to agree and did not.
+        """
+        from core_api.services.skill_lifecycle import (
+            ADMIN_ONLY_STATUSES,
+            PROTECTED_LIVE_STATUSES,
+        )
+
+        assert PROTECTED_LIVE_STATUSES == (
+            ADMIN_ONLY_STATUSES | INTERNAL_ONLY_STATUSES | SYSTEM_ONLY_STATUSES
+        )
+        # ``staged`` must stay out of it, or the authoring loop breaks.
+        assert "staged" not in PROTECTED_LIVE_STATUSES
 
 
 # --- Migration chain integrity --------------------------------------------

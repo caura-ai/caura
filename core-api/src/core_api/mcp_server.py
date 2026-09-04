@@ -2216,23 +2216,39 @@ async def caura_doc(
                         # validator 422s it cleanly rather than us
                         # AttributeError-ing into a 500 here).
                         live_doc: dict | None = None
-                        if isinstance(data, dict) and data.get("kind") == "update":
+                        if isinstance(data, dict):
+                            # Fetched for EVERY skills write, not just
+                            # ``kind='update'``. The validator needs it for two
+                            # separate checks: update's hash-binding, and the
+                            # stored-status gate that stops a non-admin
+                            # replacing a live ACTIVE skill. Fetching only on
+                            # update made ``kind='create'`` the way around that
+                            # gate — the validator saw ``None`` and judged the
+                            # write purely on what the caller claimed.
+                            #
                             # Fail CLOSED, like the settings/flag gates: the
-                            # live-doc fetch feeds the validator's hash-
-                            # binding check, so a transient DB/network error
-                            # must abort with a curated message rather than
-                            # fall through to the outer handler (which would
-                            # leak the raw exception string).
+                            # live-doc fetch now feeds a security gate, so a
+                            # transient DB/network error must abort with a
+                            # curated message rather than fall through with
+                            # ``live_doc=None`` and skip the check.
                             try:
                                 sc_live = get_storage_client()
                                 live_doc = await sc_live.get_document(
                                     tenant_id=tenant_id,
                                     collection=SKILLS_COLLECTION,
                                     doc_id=doc_id,
+                                    # PRIMARY, not the replica — see the
+                                    # matching note on the REST fetch.
+                                    # This read backs an authorization
+                                    # decision, so replica lag would show
+                                    # the pre-transition status and the
+                                    # gate would authorise the overwrite
+                                    # the transition was meant to forbid.
+                                    read=False,
                                 )
                             except Exception:
                                 logger.exception(
-                                    "skills live-doc fetch failed for %s/%s; cannot gate update write",
+                                    "skills live-doc fetch failed for %s/%s; cannot gate skills write",
                                     tenant_id,
                                     doc_id,
                                 )
