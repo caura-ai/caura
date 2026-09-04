@@ -116,12 +116,27 @@ OperationType = Literal["write", "search", "recall", "insights", "evolve"]
 WRITE_QUOTA_OPS: frozenset[str] = frozenset({"create", "bulk_create", "update", "redistribute"})
 
 # Ops refused when the org is over its plan limit. A subset of the above minus
-# ``update`` — see the note on it. REST-ONLY IN PRACTICE: the MCP surface
-# cannot consult this because it has no read-only signal at all — the MCP
-# middleware never reads the gateway's ``x-org-read-only`` header, so no MCP
-# tool can see plan-limit mode (caura-ai/caura#1205). Until that is closed, any
-# op listed here is gated on REST and ungated on MCP, which is exactly why
-# ``transition`` is deliberately NOT listed.
+# ``update`` — see the note on it.
+#
+# STILL REST-ONLY IN PRACTICE, BUT NO LONGER FOR THE REASON THIS COMMENT USED TO
+# GIVE. It said the MCP surface "has no read-only signal at all — the MCP
+# middleware never reads the gateway's ``x-org-read-only`` header". That was
+# true when written and is now false: ``MCPAuthMiddleware`` reads the header on
+# the gateway-verified path and ``mcp_server._is_org_read_only()`` exposes it.
+#
+# What remains true is the part that matters for this table: no MCP tool
+# REFUSES on the signal yet. ``_observe_plan_limit`` consults this set and logs
+# ``mcp_plan_limit_would_refuse`` at WARNING without blocking, which is step one
+# of caura-ai/caura#1205 — deliberately staged that way, because enforcing takes
+# capability away from tenants who have it today and the blast radius should be
+# read off the logs rather than the support queue. So an op listed here is still
+# gated on REST and ungated on MCP, and ``transition`` is still deliberately NOT
+# listed.
+#
+# The distinction is worth keeping straight because the stale version of this
+# comment is what #1205 was written from: it describes a missing signal, and the
+# work left is a missing refusal. ``redistribute`` is not exposed as an MCP tool,
+# so the observation covers every op on this list that MCP can actually reach.
 PLAN_LIMIT_GATED_OPS: frozenset[str] = frozenset({"create", "bulk_create", "redistribute"})
 
 # Typed so a mistyped verb is a mypy error at the call site rather than a
