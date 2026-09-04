@@ -654,6 +654,39 @@ async def heartbeat(
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Plugin pushes status; receives pending commands in response."""
+    # The heartbeat is a WRITE, despite reading like telemetry, and it was
+    # the only mutating route in this module without the gate — its five
+    # siblings (create/delete/purge fleet, create_command, command_result)
+    # all have it. What it mutates:
+    #
+    #   - ``upsert_node`` replaces the node row (hostname, versions, the
+    #     whole metadata blob);
+    #   - ``get_or_create_agent`` materialises agent rows per heartbeat;
+    #   - ``_maybe_queue_auto_upgrade`` can queue a deploy command;
+    #   - ``ack_commands`` DRAINS the node's pending queue and returns the
+    #     payloads in the response.
+    #
+    # That last one is why this is not merely an unwanted write. A
+    # read-only or demo credential naming an existing node could claim
+    # that node's queued commands — receiving payloads meant for it, and
+    # leaving nothing for the real node to collect, since acked commands
+    # are not redelivered. One request, unrecoverable: an operator sees a
+    # dispatched command that was acknowledged and never ran.
+    #
+    # Gate order matches the siblings (``create_fleet``,
+    # ``create_command``): the credential's own capability is judged
+    # first, then the target tenant. Nothing here depends on the order —
+    # ``enforce_read_only`` reads only the caller's own credential — so
+    # consistency is the whole argument.
+    #
+    # ``enforce_usage_limits`` is deliberately NOT added, though the
+    # write-shaped siblings carry it. This call recurs every ~60s from
+    # every node and is how a node stays live and commandable; gating it
+    # on plan limits would take a tenant that merely exceeded its quota
+    # and make its entire fleet go stale and uncommandable — including
+    # the commands an operator would use to reduce usage. ``create_command``
+    # sets the same precedent on this path: read-only gate, no usage gate.
+    auth.enforce_read_only()
     auth.enforce_tenant(body.tenant_id)
 
     if is_plugin_outdated(body.plugin_version) and _should_log_outdated_plugin(

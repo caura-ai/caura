@@ -761,3 +761,154 @@ async def test_promote_refuses_a_quarantined_agent(client, as_auth, sc, _stm_ena
     )
     assert resp.status_code == 403, resp.text
     assert "not approved" in resp.text
+
+
+# ---------------------------------------------------------------------------
+# H-04 — POST /fleet/heartbeat had no enforce_read_only
+#
+# The heartbeat reads like telemetry but is the most write-heavy route in the
+# fleet module, and it was the only mutating one in it without the gate. Its
+# five siblings all have it.
+# ---------------------------------------------------------------------------
+
+
+async def _queue_command_for(client, as_auth, tenant: str) -> tuple[str, str]:
+    """Register a node and queue one command for it. Returns (node_name, command_id)."""
+    node_name = f"node-{_uid()}"
+    as_auth(tenant)
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={
+            "tenant_id": tenant,
+            "node_name": node_name,
+            "fleet_id": f"fleet-{_uid()}",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    node_id = resp.json()["node_id"]
+
+    resp = await client.post(
+        "/api/v1/fleet/commands",
+        json={
+            "tenant_id": tenant,
+            "node_id": node_id,
+            "command": "ping",
+            "payload": {"k": "v"},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return node_name, resp.json()["id"]
+
+
+@pytest.mark.parametrize(
+    "cred",
+    [
+        pytest.param({"capabilities": {"read"}}, id="read-only-key"),
+        pytest.param({"is_demo": True}, id="demo-sandbox"),
+    ],
+)
+async def test_heartbeat_refuses_a_non_writing_credential(client, as_auth, cred):
+    """A credential that cannot write must not be able to heartbeat.
+
+    ``upsert_node`` replaces the whole node row — hostname, versions, the
+    metadata blob — so a read-only or demo credential could rewrite another
+    node's identity, or register nodes that do not exist.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, **cred)
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={
+            "tenant_id": tenant,
+            "node_name": f"node-{_uid()}",
+            "fleet_id": f"fleet-{_uid()}",
+        },
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_read_only_credential_cannot_drain_a_nodes_command_queue(client, as_auth):
+    """THE ATTACK, and the reason this is not merely an unwanted write.
+
+    The heartbeat response carries the node's pending commands and then
+    ``ack_commands`` them. Acked commands are not redelivered, so a caller
+    who names an existing node both RECEIVES payloads intended for it and
+    leaves nothing for the real node to collect. One request, unrecoverable:
+    the operator sees a command that was acknowledged and never ran.
+
+    Asserts both halves — the payload must not come back, and the command
+    must still be pending afterwards.
+    """
+    tenant = f"tenant-{_uid()}"
+    node_name, command_id = await _queue_command_for(client, as_auth, tenant)
+
+    as_auth(tenant, capabilities={"read"})
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={"tenant_id": tenant, "node_name": node_name},
+    )
+    assert resp.status_code == 403, resp.text
+    # The command payload must not have been handed over.
+    assert "ping" not in resp.text
+
+    # And the queue must be intact: still pending, never acked.
+    as_auth(tenant)
+    listed = await client.get(f"/api/v1/fleet/commands?tenant_id={tenant}")
+    assert listed.status_code == 200, listed.text
+    mine = [c for c in listed.json() if c["id"] == command_id]
+    assert mine, f"command {command_id} vanished from the queue"
+    assert mine[0]["status"] == "pending", (
+        f"command was drained by a read-only caller: status={mine[0]['status']!r}, "
+        f"acked_at={mine[0]['acked_at']!r}"
+    )
+    assert mine[0]["acked_at"] is None
+
+
+@pytest.mark.parametrize(
+    "cred",
+    [
+        pytest.param({}, id="legacy-key-no-capabilities"),
+        pytest.param({"capabilities": {"read", "write"}}, id="read-write-key"),
+    ],
+)
+async def test_heartbeat_still_works_for_a_writing_credential(client, as_auth, cred):
+    """OVER-REFUSAL GUARD, and the one that matters most here.
+
+    The heartbeat is how every node stays live and commandable, on a ~60s
+    tick. Breaking it for legitimate plugins would take the fleet offline —
+    a worse outage than the bug being fixed. Legacy credentials carry
+    ``capabilities=None`` and must pass untouched.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, **cred)
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={
+            "tenant_id": tenant,
+            "node_name": f"node-{_uid()}",
+            "fleet_id": f"fleet-{_uid()}",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+
+
+async def test_heartbeat_delivers_commands_to_a_writing_credential(client, as_auth):
+    """OVER-REFUSAL GUARD. The command channel itself must still work.
+
+    Pairs with the drain test above: the same sequence, with a credential
+    that may write, must return the payload and ack it. Without this, a gate
+    that refused every caller would satisfy the refusal tests.
+    """
+    tenant = f"tenant-{_uid()}"
+    node_name, command_id = await _queue_command_for(client, as_auth, tenant)
+
+    as_auth(tenant)
+    resp = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={"tenant_id": tenant, "node_name": node_name},
+    )
+    assert resp.status_code == 200, resp.text
+    delivered = [c for c in resp.json()["commands"] if c["id"] == command_id]
+    assert delivered, f"command {command_id} was not delivered: {resp.text}"
+    assert delivered[0]["command"] == "ping"
