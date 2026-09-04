@@ -16,7 +16,7 @@ from fastapi import HTTPException
 
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.constants import MEMORY_TYPES
+from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES
 from core_api.providers._retry import call_with_fallback
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -1067,45 +1067,94 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                     metadata=metadata,
                 )
             )
-        bulk_data = BulkMemoryCreate(
-            tenant_id=request.tenant_id,
-            fleet_id=request.fleet_id,
-            agent_id=request.agent_id,
-            items=bulk_items,
-        )
-        try:
-            bulk_response = await create_memories_bulk(bulk_data, bulk_attempt_id=run_id)
-            created = bulk_response.created
-            skipped_in_loop = bulk_response.duplicates
-            errored = bulk_response.errors
-            # Surface per-item error reasons in the logs so the cleanup
-            # message at the bottom of this function still points at the
-            # offending facts.
-            for item in bulk_response.results:
-                if item.status == "error":
-                    # Mirror the legacy "fact[N]" log format the
-                    # P1.C-lite runbook + operator greps depend on.
-                    logger.warning(
-                        "ingest_commit: fact[%d] write failed (run_id=%s): %s",
-                        item.index,
-                        run_id,
-                        item.error,
-                    )
-        except HTTPException as e:
-            # A 4xx/5xx from the bulk endpoint aborts the whole batch
-            # (e.g. 504 from the bulk-embedding timeout). Mirror the
-            # prior behaviour where a non-409 escape raised through
-            # gather and aborted the run — but now the run_id is still
-            # logged so the operator can locate any partial rows.
-            logger.exception(
-                "ingest_commit: bulk write failed with HTTP %d (run_id=%s) — "
-                "0 facts persisted on this attempt; safe to retry",
-                e.status_code,
-                run_id,
+        # H-07: chunked, because ``BulkMemoryCreate.items`` carries
+        # ``max_length=BULK_MAX_ITEMS`` (100) and nothing upstream caps the
+        # fact count — not ``IngestCommitRequest.facts``, not preview. Preview
+        # accepts documents up to 100k tokens, sections them at ~2k tokens, and
+        # asks the extractor for 5-20 facts per section, so a ~40k-token
+        # document routinely clears 100 facts.
+        #
+        # Building one oversized model raised ``pydantic.ValidationError`` —
+        # and it was constructed OUTSIDE the try below, which catches only
+        # ``HTTPException`` anyway. core-api registers no handler for the raw
+        # pydantic error (``RequestValidationError`` is FastAPI's request-body
+        # wrapper and a hand-built model does not raise it), so it reached the
+        # global handler as an opaque 500. Every fact was lost, the retry
+        # re-extracted the same over-100 set and 500'd again, and the user's
+        # only recourse was a smaller document.
+        #
+        # Batches share ONE ``bulk_attempt_id`` — ``run_id``, unchanged. That
+        # is only correct because H-08 made the per-item key content-derived:
+        # batch boundaries no longer enter the key at all. Per-batch attempt
+        # ids (``f"{run_id}:batch{n}"``) would actively hurt, because the
+        # pre-dedup above shrinks the survivor list between attempts, so a
+        # retry re-cuts the boundaries and the same fact lands in a different
+        # batch — computing a different key and losing the
+        # ``duplicate_attempt`` resolution that reusing ``run_id`` exists for.
+        #
+        # Sequential, not gathered: each batch already fans out its own
+        # embed/enrich internally and takes a per-tenant storage slot, so
+        # concurrency here would multiply pressure on the same bulkhead. It
+        # also keeps the abort-on-failure semantics below honest.
+        created = 0
+        skipped_in_loop = 0
+        errored = 0
+        for batch_start in range(0, len(bulk_items), BULK_MAX_ITEMS):
+            batch = bulk_items[batch_start : batch_start + BULK_MAX_ITEMS]
+            bulk_data = BulkMemoryCreate(
+                tenant_id=request.tenant_id,
+                fleet_id=request.fleet_id,
+                agent_id=request.agent_id,
+                items=batch,
             )
-            created = 0
-            skipped_in_loop = 0
-            errored = len(survivors)
+            try:
+                bulk_response = await create_memories_bulk(bulk_data, bulk_attempt_id=run_id)
+                created += bulk_response.created
+                skipped_in_loop += bulk_response.duplicates
+                errored += bulk_response.errors
+                # Surface per-item error reasons in the logs so the cleanup
+                # message at the bottom of this function still points at the
+                # offending facts.
+                for item in bulk_response.results:
+                    if item.status == "error":
+                        # Mirror the legacy "fact[N]" log format the
+                        # P1.C-lite runbook + operator greps depend on.
+                        # ``item.index`` is batch-relative, so it is offset back
+                        # into the survivor list the format has always counted
+                        # in — otherwise every batch would restart at fact[0]
+                        # and point an operator at the wrong fact.
+                        logger.warning(
+                            "ingest_commit: fact[%d] write failed (run_id=%s): %s",
+                            batch_start + item.index,
+                            run_id,
+                            item.error,
+                        )
+            except HTTPException as e:
+                # A 4xx/5xx from the bulk endpoint aborts this batch (e.g. 504
+                # from the bulk-embedding timeout). Stop rather than carry on:
+                # these failures are overwhelmingly systemic (storage down,
+                # budget burned), so the remaining batches would queue behind
+                # the same wall and turn one failure into N.
+                #
+                # Counts accumulated by EARLIER batches are kept. This used to
+                # log "0 facts persisted on this attempt" and zero them, which
+                # was true when there was only ever one batch and would now be
+                # a false statement to an operator deciding whether to clean
+                # up. Everything from this batch onward is reported errored.
+                unattempted = len(bulk_items) - batch_start
+                logger.exception(
+                    "ingest_commit: bulk write failed with HTTP %d (run_id=%s) on the "
+                    "batch starting at fact[%d] — %d fact(s) persisted before it, "
+                    "%d not attempted; safe to retry, which re-sends every fact and "
+                    "resolves the committed ones as duplicates",
+                    e.status_code,
+                    run_id,
+                    batch_start,
+                    created,
+                    unattempted,
+                )
+                errored += unattempted
+                break
     else:
         # All facts pre-deduped by the content-hash sweep above; nothing
         # to do here.
