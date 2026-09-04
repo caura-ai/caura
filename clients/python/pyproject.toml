@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "caura-client"
 version = "1.0.2"
-description = "Official Python client for Caura (formerly MemClaw; the MemClaw class remains a permanent alias) — governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native)."  # legacy-name-ok: rule 3 permanent class alias
+description = "Official Python client for Caura (formerly MemClaw) — governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native)."  # legacy-name-ok: taught as legacy alias
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }

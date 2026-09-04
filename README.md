@@ -3,7 +3,7 @@
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
 <p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-ok: taught as legacy alias -->
-Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env vars and URLs keep working unchanged. The <code>memclaw-client</code>/<code>@caura/memclaw-client</code> package names were retired; the <code>MemClaw</code> class remains a permanent alias inside <code>caura-client</code>.</p> <!-- legacy-name-ok: taught as legacy alias -->
+Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env vars and URLs keep working unchanged. The <code>memclaw-client</code>/<code>@caura/memclaw-client</code> package names and the <code>MemClaw</code> class alias inside <code>caura-client</code> were all retired.</p> <!-- legacy-name-ok: taught as legacy alias -->
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>

@@ -229,30 +229,6 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     # -- Published channel names. Renaming these strands installed users. ------
     Sentinel(
-        path="clients/python/src/caura_client/client.py",
-        text="MemClaw = Caura",  # legacy-name-floor: pinned floor assignment
-        kind=LITERAL,
-        breaks="existing legacy imports stop resolving to the canonical client class",
-    ),
-    Sentinel(
-        path="clients/python/src/caura_client/exceptions.py",
-        text="MemClawError = CauraError",  # legacy-name-floor: pinned floor assignment
-        kind=LITERAL,
-        breaks="existing legacy error handlers stop catching canonical client errors",
-    ),
-    Sentinel(
-        path="clients/python/src/caura_client/exceptions.py",
-        text="MemClawAPIError = CauraAPIError",  # legacy-name-floor: pinned floor assignment
-        kind=LITERAL,
-        breaks="existing legacy API-error handlers stop catching canonical API errors",
-    ),
-    Sentinel(
-        path="clients/python/tests/test_legacy_alias.py",
-        text="assert caura_client.MemClaw is caura_client.Caura",  # legacy-name-ok: rule 3 permanent class alias, sentinel pin
-        kind=LITERAL,
-        breaks="the class-level legacy identity contract can disappear with its test",
-    ),
-    Sentinel(
         path="clients/python/src/caura_client/interviewer/installer.py",
         text='".config" / "memclaw-interviewer"',  # legacy-name-floor: floor
         kind=LITERAL,
