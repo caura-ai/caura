@@ -10,6 +10,23 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.47.1](https://github.com/caura-ai/caura/compare/backend-v2.47.0...backend-v2.47.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **fleet:** gate the heartbeat behind enforce_read_only ([#1272](https://github.com/caura-ai/caura/issues/1272)) ([352a4bc](https://github.com/caura-ai/caura/commit/352a4bc65cd438cd934cb14f635a60cf58dde8a2))
+* **graph:** apply the evidence-visibility filter on GET /graph ([#1273](https://github.com/caura-ai/caura/issues/1273)) ([04ad172](https://github.com/caura-ai/caura/commit/04ad1720077fed36e0f72a1d07672fc07f4b6123))
+* **ratchet:** resolve the permanent-red completion case, add the central workflow ([#1275](https://github.com/caura-ai/caura/issues/1275)) ([fb64377](https://github.com/caura-ai/caura/commit/fb64377f3b27a3e6b79e339eb3a51ab3889a934a))
+* **skills:** gate the STORED status, not just the written one ([#1269](https://github.com/caura-ai/caura/issues/1269)) ([b0a576a](https://github.com/caura-ai/caura/commit/b0a576a51586fd1e2d0f44e3d22991cd2f089a8b))
+* **storage:** give a bulk batch one column list ([#1274](https://github.com/caura-ai/caura/issues/1274)) ([7c94e1d](https://github.com/caura-ai/caura/commit/7c94e1dbe46716038f2dc47449a38162b38dd58c))
+
+
+### Documentation
+
+* **ratchet:** note that release_please_changelogs is now inert ([#1270](https://github.com/caura-ai/caura/issues/1270)) ([f1d7b90](https://github.com/caura-ai/caura/commit/f1d7b909085865f14c0737b15b933196bf478536))
+* **ruff:** correct do_not_touch_sentinel.py's false byte-identity claim ([#1279](https://github.com/caura-ai/caura/issues/1279)) ([b186759](https://github.com/caura-ai/caura/commit/b18675965977aa376b054d090f5dcc6005539e70))
+
 ## [2.47.0](https://github.com/caura-ai/caura/compare/backend-v2.46.2...backend-v2.47.0) (2026-09-04)
 
 
