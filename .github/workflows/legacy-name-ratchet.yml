@@ -20,7 +20,9 @@ name: Legacy-name ratchet
 #
 # It is NOT wired into this repo's own on-PR checks: see ci.yml's own
 # "legacy-name-ratchet" job for that. This file exists to be pointed at by
-# other repos' required-workflow rulesets, pinned by tag, never by branch.
+# other repos' required-workflow rulesets, pinned by branch (ratchet-stable),
+# never by tag -- confirmed empirically that tag refs never fire for this
+# ruleset rule type, despite GitHub's docs saying both are supported.
 on:
   pull_request:
   merge_group:
@@ -86,7 +88,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
