@@ -173,6 +173,12 @@ class Config(NamedTuple):
     """The complete per-repository surface of the canonical engine."""
 
     default_base: str
+    # No longer has any effect: _excluded_changelogs excludes every
+    # CHANGELOG.md unconditionally, before this flag (or the authenticated
+    # check it used to gate) is ever consulted. Kept in the schema rather
+    # than removed -- a schema change across every repo's config file is a
+    # separate, larger change than this one -- so a repo can still set it
+    # to either value with no observable difference in gate behavior.
     release_please_changelogs: bool
     mirror_paths: tuple[str, ...]
     mirror_manifest: str | None
