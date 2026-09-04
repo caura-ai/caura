@@ -225,6 +225,27 @@ _ADMIN_ERROR = _as_error_result(
 )
 
 
+async def _send_401(send: Send, message: str) -> None:
+    """Refuse the request outright with a JSON error envelope.
+
+    Refusing beats falling through to ``_UNAUTH``: a request that keeps going
+    with a different identity resolution lets a caller probe which headers
+    change the answer.
+    """
+    body = _error_response("UNAUTHORIZED", message).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
 class MCPAuthMiddleware:
     """ASGI middleware that resolves X-API-Key to tenant_id before MCP handlers run."""
 
@@ -237,18 +258,81 @@ class MCPAuthMiddleware:
 
             headers = dict(scope.get("headers", []))
 
-            # Preferred path: enterprise nginx has already validated the
-            # session cookie / JWT / API key via auth_request and injected
-            # X-Tenant-ID. Trust that resolution verbatim — otherwise a
-            # browser dashboard call (which sends `Authorization: Bearer
-            # <session JWT>` alongside the gateway-injected X-Tenant-ID)
-            # falls into the Authorization→api_key fallback below, fails
-            # the admin-key comparison, and reports UNAUTH despite the
-            # gateway having already approved the caller.
             tenant_header = headers.get(b"x-tenant-id", b"").decode()
-            if tenant_header:
-                # Perimeter check (mirrors REST ``get_auth_context`` Path 4):
-                # the header-trust path accepts X-Tenant-ID / X-Agent-ID /
+            api_key = headers.get(b"x-api-key", b"").decode()
+            if not api_key:
+                auth_header = headers.get(b"authorization", b"").decode()
+                if auth_header.lower().startswith("bearer "):
+                    api_key = auth_header[7:]
+            admin_key = get_admin_key()
+            # CAURA_API_KEY. Read here for the first time: this middleware used
+            # to resolve identity without ever consulting it, so a deployment
+            # that set it as its ONLY perimeter — the configuration
+            # ``app.py``'s production boot guard explicitly blesses, on the
+            # grounds that REST's Path 2 "either authenticates the request
+            # against that key or raises 401 ... so Path 4 below it is
+            # UNREACHABLE" — got that guarantee on REST and not on ``/mcp``,
+            # which is a separate ASGI mount this middleware alone protects.
+            # Reads the RESOLVED dual-read field (``CAURA_API_KEY`` falling back
+            # to the legacy env var, merged in config.py) — the same one
+            # ``auth.py`` Path 2 reads. Reading ``caura_api_key`` directly would
+            # silently skip the gate for a deployment still setting the old
+            # variable, which is the population this most needs to protect.
+            shared_key = settings.memclaw_api_key  # legacy-name-ok: rule 3 dual-read field
+
+            via_gateway = False
+            if admin_key and api_key and _hmac.compare_digest(api_key, admin_key):
+                # ── Path 1: admin API key (REST ``auth.py`` Path 1) ──
+                _tenant_id_var.set(_ADMIN)
+            elif shared_key:
+                # ── Path 2: CAURA_API_KEY shared gate (REST Path 2) ──
+                #
+                # ORDER IS THE FIX, not merely the comparison. This runs BEFORE
+                # the header-trust path below for the same reason REST runs it
+                # before its Path 4: with the key configured, an unauthenticated
+                # caller must not be able to reach a path that accepts
+                # self-asserted identity headers. Previously ``X-Tenant-ID``
+                # was honored first, so on a shared-key deployment with no
+                # gateway secret anyone could name a tenant and be believed.
+                if not (api_key and _hmac.compare_digest(api_key, shared_key)):
+                    await _send_401(
+                        send,
+                        "Missing or invalid API key. This deployment sets "
+                        "CAURA_API_KEY; send it as X-API-Key (or a Bearer "
+                        "token) on every request, including MCP.",
+                    )
+                    return
+                # Key verified. Resolve the tenant exactly as REST does on this
+                # path: standalone's fixed tenant, else the caller's
+                # ``X-Tenant-ID``, else no tenant at all.
+                if settings.is_standalone:
+                    from core_api.standalone import get_standalone_tenant_id
+
+                    _tenant_id_var.set(get_standalone_tenant_id())
+                elif tenant_header:
+                    _tenant_id_var.set(tenant_header)
+                else:
+                    _tenant_id_var.set(_UNAUTH)
+                # ``via_gateway`` stays False: possessing the shared key proves
+                # the caller may reach this deployment, NOT which agent it is.
+                # The key is tenant-wide and binds no agent identity, so the
+                # gateway-injected attributes below (X-Agent-ID above all, which
+                # is the authorization principal for scope checks and the delete
+                # trust gate) are deliberately not honored here. Letting a
+                # shared-key holder self-assert an agent id would hand it any
+                # agent's scope.
+            elif tenant_header:
+                # ── Path 4: gateway header-trust (REST Path 4) ──
+                # Preferred path: enterprise nginx has already validated the
+                # session cookie / JWT / API key via auth_request and injected
+                # X-Tenant-ID. Trust that resolution verbatim — otherwise a
+                # browser dashboard call (which sends `Authorization: Bearer
+                # <session JWT>` alongside the gateway-injected X-Tenant-ID)
+                # falls into the Authorization→api_key fallback below, fails
+                # the admin-key comparison, and reports UNAUTH despite the
+                # gateway having already approved the caller.
+                #
+                # Perimeter check: this path accepts X-Tenant-ID / X-Agent-ID /
                 # X-Readable-Tenant-IDs / X-Capabilities with no credential of
                 # its own, so when a shared secret is configured the request
                 # must prove it came through the gateway. A caller reaching
@@ -261,43 +345,20 @@ class MCPAuthMiddleware:
                 if gw_secret and not _hmac.compare_digest(
                     headers.get(b"x-gateway-secret", b"").decode(), gw_secret
                 ):
-                    body = _error_response(
-                        "UNAUTHORIZED",
-                        "Direct access to this service is not permitted.",
-                    ).encode()
-                    await send(
-                        {
-                            "type": "http.response.start",
-                            "status": 401,
-                            "headers": [
-                                (b"content-type", b"application/json"),
-                                (b"content-length", str(len(body)).encode()),
-                            ],
-                        }
-                    )
-                    await send({"type": "http.response.body", "body": body})
+                    await _send_401(send, "Direct access to this service is not permitted.")
                     return
                 _tenant_id_var.set(tenant_header)
-                _via_gateway_var.set(True)
+                via_gateway = True
+            elif settings.is_standalone:
+                # ── Path 3: standalone, no key required (REST Path 3) ──
+                from core_api.standalone import get_standalone_tenant_id
+
+                _tenant_id_var.set(get_standalone_tenant_id())
+            elif not api_key:
+                _tenant_id_var.set(_UNAUTH if admin_key else _NO_AUTH)
             else:
-                _via_gateway_var.set(False)
-                api_key = headers.get(b"x-api-key", b"").decode()
-                if not api_key:
-                    auth_header = headers.get(b"authorization", b"").decode()
-                    if auth_header.lower().startswith("bearer "):
-                        api_key = auth_header[7:]
-                admin_key = get_admin_key()
-
-                if admin_key and api_key and _hmac.compare_digest(api_key, admin_key):
-                    _tenant_id_var.set(_ADMIN)
-                elif settings.is_standalone:
-                    from core_api.standalone import get_standalone_tenant_id
-
-                    _tenant_id_var.set(get_standalone_tenant_id())
-                elif not api_key:
-                    _tenant_id_var.set(_UNAUTH if admin_key else _NO_AUTH)
-                else:
-                    _tenant_id_var.set(_UNAUTH)
+                _tenant_id_var.set(_UNAUTH)
+            _via_gateway_var.set(via_gateway)
 
             # X-Agent-ID / X-Readable-Tenant-IDs / X-Capabilities are
             # gateway-injected identity attributes — only honor them on the
@@ -313,7 +374,14 @@ class MCPAuthMiddleware:
             # "single-tenant / full-scope" — make that explicit so a previous
             # request's cross-tenant read-set or read-only scope cannot bleed
             # through.
-            via_gateway = bool(tenant_header)
+            # NOT ``bool(tenant_header)``. The presence of X-Tenant-ID is not
+            # the same question as "did this request arrive gateway-verified":
+            # a shared-key (Path 2) caller may send X-Tenant-ID too, and
+            # deriving the flag from the header would silently re-honor
+            # X-Agent-ID for it — handing a tenant-wide key any agent's
+            # identity, which is the authorization principal for scope checks
+            # and the delete trust gate. Use the value the resolution above
+            # decided; only Path 4 sets it True.
             agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
             _agent_id_var.set(agent_header or None)
 
