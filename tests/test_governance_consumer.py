@@ -20,6 +20,7 @@ import pytest
 from common.events.base import Event
 from common.events.topics import Topics
 from core_api import consumer
+from core_api.services import governance_remediation
 from core_api.services.organization_settings import ResolvedConfig
 
 pytestmark = pytest.mark.asyncio
@@ -144,3 +145,32 @@ async def test_clean_signal_runs_detection_with_no_governance_action(
     sc.soft_delete_memory.assert_not_awaited()
     sc.update_memory.assert_not_awaited()
     detect.assert_awaited_once()
+
+
+async def test_a_failed_child_cascade_does_not_nack_the_event(sc, detect, monkeypatch):
+    """A raise out of this handler nacks, and the dispatcher redelivers on nack.
+
+    Redelivery re-runs the whole drop branch and emits a SECOND
+    ``critical=True`` audit for a memory that was already dropped — every
+    redelivery, forever, for a row nothing further can be done to.
+
+    The parent's verdict still has to be honoured, which is why the outcome
+    rides on the exception rather than being lost with it. Contradiction
+    detection stays skipped: the row IS dropped.
+    """
+    mid = uuid.uuid4()
+    sc.get_memory.return_value = _memory(mid, business_relevance="personal")
+    _patch_config(monkeypatch, non_business={"enabled": True, "disposition": "drop"})
+
+    async def _boom(*_a, **_k):
+        raise governance_remediation.GovernanceCascadeError(
+            "one child could not be dropped",
+            governance_remediation.RemediationOutcome(dropped=True),
+        )
+
+    monkeypatch.setattr(consumer, "remediate_after_enrichment", _boom)
+
+    # Must not raise — a raise here is the nack.
+    await consumer.handle_memory_enriched(_event(mid))
+
+    detect.assert_not_awaited()

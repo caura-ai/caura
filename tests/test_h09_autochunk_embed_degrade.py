@@ -87,6 +87,7 @@ async def _noop() -> None:
 class _Run:
     def __init__(self) -> None:
         self.parent_id = ""
+        self.parent_payload: dict = {}
         self.children: list[dict] = []
         self.tasks: list[tuple[str, str]] = []
         self.raised: BaseException | None = None
@@ -273,6 +274,8 @@ async def _run(
 
     if sc.create_memories.await_args_list:
         run.children = sc.create_memories.await_args_list[0].args[0]
+    if sc.create_memory.await_args_list:
+        run.parent_payload = sc.create_memory.await_args_list[0].args[0]
     return run
 
 
@@ -588,3 +591,40 @@ async def test_the_no_id_log_carries_no_memory_content(caplog) -> None:
     joined = " ".join(r.getMessage() for r in caplog.records)
     for chunk in CHUNKS:
         assert chunk not in joined, f"memory content leaked into a log: {chunk!r}"
+
+
+# ---------------------------------------------------------------------------
+# The two markers H-10's governance cascade reads
+# ---------------------------------------------------------------------------
+
+
+async def test_the_auto_chunk_write_records_the_parent_child_link() -> None:
+    """Pins the contract ``governance_remediation`` depends on (H-10).
+
+    On a deferred deployment these children are committed before any governance
+    verdict exists, so the verdict — which arrives later naming only the parent
+    — has to find them afterwards. It does that with exactly two things written
+    here:
+
+    * ``auto_chunked`` on the PARENT, which gates the lookup. Gating keeps a
+      JSON-key query with no supporting index off every ordinary drop, and a
+      compliance tenant configured ``drop`` remediates constantly. If this
+      marker ever stops being written, the cascade silently stops running and
+      the leak returns with no test failing anywhere near it — which is why the
+      assertion lives here, beside the write, rather than only in the
+      remediation tests where it would be a stub asserting itself.
+    * ``parent_memory_id`` on each CHILD, which is what the lookup matches on.
+
+    Deliberately asserted on the payloads sent to storage, not on a return
+    value: what the row carries is what a later remediation can read.
+    """
+    run = await _run(embed_raises=False)
+
+    assert run.parent_payload, "no parent was written — the test is vacuous"
+    parent_meta = run.parent_payload.get("metadata_") or {}
+    assert parent_meta.get("auto_chunked") is True, parent_meta
+    assert parent_meta.get("child_count") == len(CHUNKS), parent_meta
+
+    assert len(run.children) == len(CHUNKS)
+    for child in run.children:
+        assert (child.get("metadata_") or {}).get("parent_memory_id") == run.parent_id
