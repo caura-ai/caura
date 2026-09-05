@@ -310,6 +310,8 @@ async def embedding_coverage_all_tenants(
             "tenants_with_missing": coverage.get("tenants_with_missing"),
             "stale_embeddings": coverage.get("stale_embeddings"),
             "unknown_provenance": coverage.get("unknown_provenance"),
+            # Should be 0. See ``run_embedding_coverage_tick``, which alerts.
+            "missing_provenance": coverage.get("missing_provenance"),
         },
     )
     return coverage

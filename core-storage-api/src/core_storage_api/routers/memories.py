@@ -23,6 +23,7 @@ from core_storage_api.observability import bind_timer, log_request
 from core_storage_api.routers._validation import _require, _require_dict
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
+    MISSING_PROVENANCE_PREDICATE_SQL,
     BulkValidationError,
     PostgresService,
 )
@@ -846,12 +847,18 @@ async def get_embedding_coverage(
     # The provenance counts are reported here as well as in the cross-tenant
     # view: omitting them would make this route read as "no stale rows" for a
     # tenant the aggregate flags, and absence is indistinguishable from zero.
-    total, missing, stale, unknown = await _svc.memory_embedding_coverage_for_tenant(tenant_id, fleet_id)
+    total, missing, stale, unknown, missing_prov = await _svc.memory_embedding_coverage_for_tenant(
+        tenant_id, fleet_id
+    )
     return {
         "total_active": total,
         "missing_embeddings": missing,
         "stale_embeddings": stale,
         "unknown_provenance": unknown,
+        # The alertable subset of ``unknown_provenance``: rows written after
+        # provenance existed, with a hash to attest, that attest nothing.
+        # Expected to be 0; any other value names a live writer dropping it.
+        "missing_provenance": missing_prov,
         "coverage_pct": round((total - missing) / total * 100, 1) if total > 0 else 0.0,
     }
 
@@ -882,6 +889,18 @@ async def get_embedding_coverage_all() -> dict:
         "tenants_with_stale": sum(1 for r in rows if r["stale_embeddings"]),
         # Embedded before provenance was recorded — undetermined, not damaged.
         "unknown_provenance": sum(r["unknown_provenance"] for r in rows),
+        # The subset of the above with no innocent explanation: written after
+        # migration 037, carrying a content hash, yet attesting nothing. Unlike
+        # every other bucket here this one has a correct value — zero — so it
+        # can be alerted on directly instead of trended.
+        "missing_provenance": sum(r["missing_provenance"] for r in rows),
+        "tenants_with_missing_provenance": sum(1 for r in rows if r["missing_provenance"]),
+        # The query that reproduces the count above. Served rather than
+        # composed by the caller: core-operations, which alerts on this, is a
+        # separate deployable and a literal there would drift the first time
+        # the cutoff moved — naming a query that no longer matches the number
+        # beside it.
+        "missing_provenance_predicate": MISSING_PROVENANCE_PREDICATE_SQL,
     }
 
 

@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import (
@@ -371,6 +371,105 @@ _ENTITY_UPDATABLE_FIELDS = frozenset({"canonical_name", "entity_type", "attribut
 # wire — two copies could drift apart and reintroduce the existence oracle one
 # word at a time. The true cause is logged, never returned.
 _LINK_REJECTED = "entity link rejected: memory_id or entity_id does not exist, or the link already exists"
+
+
+# Migration 037 added ``embedded_content_hash`` on 2026-08-16, and every writer
+# has recorded provenance since. Dated a day later so a row written during the
+# deploy itself is not held to a guarantee that was still rolling out.
+#
+# This is what separates a live defect from historical silence: before this
+# instant a NULL means "written before provenance existed"; after it, on a row
+# that HAS a hash to attest, it means a writer dropped it.
+PROVENANCE_REQUIRED_FROM = datetime(2026, 8, 17, tzinfo=UTC)
+
+# The same rule as SQL, for an operator to paste. These rows are reachable by
+# no sweep and no endpoint, so whatever alerts on the count has to hand over a
+# query or the number is unactionable.
+#
+# Built from the constant above rather than written out, and shipped in the
+# coverage response rather than composed by the consumer. core-operations is a
+# separate deployable with no import path into this module, so a literal there
+# could not be kept honest by anything: the date would drift the first time
+# this constant moved, and the alert would name a query that no longer matches
+# what it counted. Deriving it here means there is one date in one place, and
+# ``test_predicate_string_is_derived_from_the_constant`` fails if this string
+# stops agreeing with the filter it describes.
+MISSING_PROVENANCE_PREDICATE_SQL = (
+    "embedding IS NOT NULL AND embedded_content_hash IS NULL "
+    "AND content_hash IS NOT NULL "
+    f"AND created_at >= '{PROVENANCE_REQUIRED_FROM.date().isoformat()}'"
+)
+
+
+class _CoverageCounts(NamedTuple):
+    """The four embedding-coverage buckets, as FILTER'd count expressions.
+
+    Built once and used by both coverage queries. They previously inlined the
+    same predicates separately, under a docstring warning to "keep the three in
+    sync" — a warning is not a mechanism, and the buckets disagreeing is
+    precisely what sends someone hunting a phantom bug when the aggregate and
+    the per-tenant route report different numbers for one tenant.
+    """
+
+    missing: ColumnElement[int]
+    stale: ColumnElement[int]
+    unknown: ColumnElement[int]
+    missing_provenance: ColumnElement[int]
+
+
+def _coverage_counts() -> _CoverageCounts:
+    """The four buckets. See ``memory_embedding_coverage_by_tenant`` for meaning."""
+    return _CoverageCounts(
+        missing=func.count().filter(Memory.embedding.is_(None)),
+        stale=func.count().filter(
+            Memory.embedding.isnot(None),
+            Memory.embedded_content_hash.isnot(None),
+            # ``is_distinct_from``, NOT ``!=``. SQLAlchemy's ``!=`` compiles to
+            # plain ``<>``, which yields NULL when ``content_hash`` is NULL (it
+            # is a nullable column) — and ``COUNT(*) FILTER`` drops NULL. Such a
+            # row has a KNOWN provenance hash, so it is not ``unknown``; it has
+            # an embedding, so it is not ``missing``; and the NULL comparison
+            # kept it out of ``stale``. It counted in ``total_active`` and in no
+            # defect bucket at all — silently unaccounted for by the very
+            # detector this column exists to provide.
+            #
+            # This also keeps the ORM in step with the migration's partial index
+            # predicate, which uses IS DISTINCT FROM. The two encode one rule in
+            # two languages and nothing checks they agree, so they must be read
+            # together whenever either changes.
+            Memory.embedded_content_hash.is_distinct_from(Memory.content_hash),
+        ),
+        unknown=func.count().filter(
+            Memory.embedding.isnot(None),
+            Memory.embedded_content_hash.is_(None),
+        ),
+        # A STRICT SUBSET of ``unknown``, and the only one of the four that
+        # should ever be zero.
+        #
+        # ``unknown`` cannot be alerted on: it legitimately holds ~95,000
+        # pre-037 rows that will never acquire provenance, so any threshold on
+        # its level is either always breached or useless. That is why the
+        # operations tick was told not to alert on it — on the premise that it
+        # only ever drains. A defect that GROWS it falsifies that premise, and
+        # in 2026-09 one did: 241 rows accumulated for over a week inside a
+        # number nobody was watching, because the only signal was a level that
+        # legitimately sat in the tens of thousands.
+        #
+        # These three extra terms carve out the population where NULL has no
+        # innocent explanation, so the alertable quantity is an exact invariant
+        # rather than a tuned threshold, and needs no stored history to compare
+        # against:
+        #   created_at        — after provenance existed, so not pre-037 silence
+        #   content_hash NOT NULL — something to attest TO; a row without one
+        #                     honestly records NULL, per core-worker's backfill
+        #   embedding NOT NULL    — a vector exists, so something did embed it
+        missing_provenance=func.count().filter(
+            Memory.embedding.isnot(None),
+            Memory.embedded_content_hash.is_(None),
+            Memory.content_hash.isnot(None),
+            Memory.created_at >= PROVENANCE_REQUIRED_FROM,
+        ),
+    )
 
 
 def _link_within_tenant(tenant_id: str) -> ColumnElement[bool]:
@@ -3353,8 +3452,8 @@ class PostgresService:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
-    ) -> tuple[int, int, int, int]:
-        """``(total_active, missing, stale, unknown_provenance)`` for one tenant.
+    ) -> tuple[int, int, int, int, int]:
+        """``(total_active, missing, stale, unknown_provenance, missing_provenance)``.
 
         The per-tenant twin of ``memory_embedding_coverage_by_tenant``, and the
         single source for ``GET /embedding-coverage``. Without the provenance
@@ -3371,20 +3470,15 @@ class PostgresService:
         Same population predicate and the same ``is_distinct_from`` NULL
         handling as the aggregate; keep the two in step.
         """
+        counts = _coverage_counts()
         async with get_read_session() as session:
             stmt = (
                 select(
                     func.count(),
-                    func.count().filter(Memory.embedding.is_(None)),
-                    func.count().filter(
-                        Memory.embedding.isnot(None),
-                        Memory.embedded_content_hash.isnot(None),
-                        Memory.embedded_content_hash.is_distinct_from(Memory.content_hash),
-                    ),
-                    func.count().filter(
-                        Memory.embedding.isnot(None),
-                        Memory.embedded_content_hash.is_(None),
-                    ),
+                    counts.missing,
+                    counts.stale,
+                    counts.unknown,
+                    counts.missing_provenance,
                 )
                 .select_from(Memory)
                 .where(
@@ -3396,7 +3490,13 @@ class PostgresService:
             if fleet_id:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             row = (await session.execute(stmt)).one()
-        return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)
+        return (
+            int(row[0] or 0),
+            int(row[1] or 0),
+            int(row[2] or 0),
+            int(row[3] or 0),
+            int(row[4] or 0),
+        )
 
     async def memory_embedding_coverage_by_tenant(self) -> list[dict]:
         """Embedding coverage for EVERY tenant, in one pass.
@@ -3434,37 +3534,16 @@ class PostgresService:
           damaged; reporting it as fresh would assert a correctness nobody
           verified. It drains as rows are rewritten or re-embedded.
         """
-        missing = func.count().filter(Memory.embedding.is_(None))
-        stale = func.count().filter(
-            Memory.embedding.isnot(None),
-            Memory.embedded_content_hash.isnot(None),
-            # ``is_distinct_from``, NOT ``!=``. SQLAlchemy's ``!=`` compiles to
-            # plain ``<>``, which yields NULL when ``content_hash`` is NULL (it
-            # is a nullable column) — and ``COUNT(*) FILTER`` drops NULL. Such a
-            # row has a KNOWN provenance hash, so it is not ``unknown``; it has
-            # an embedding, so it is not ``missing``; and the NULL comparison
-            # kept it out of ``stale``. It counted in ``total_active`` and in no
-            # defect bucket at all — silently unaccounted for by the very
-            # detector this column exists to provide.
-            #
-            # This also keeps the ORM in step with the migration's partial index
-            # predicate, which uses IS DISTINCT FROM. The two encode one rule in
-            # two languages and nothing checks they agree, so they must be read
-            # together whenever either changes.
-            Memory.embedded_content_hash.is_distinct_from(Memory.content_hash),
-        )
-        unknown = func.count().filter(
-            Memory.embedding.isnot(None),
-            Memory.embedded_content_hash.is_(None),
-        )
+        counts = _coverage_counts()
         async with get_read_session() as session:
             stmt = (
                 select(
                     Memory.tenant_id,
                     func.count().label("total_active"),
-                    missing.label("missing_embeddings"),
-                    stale.label("stale_embeddings"),
-                    unknown.label("unknown_provenance"),
+                    counts.missing.label("missing_embeddings"),
+                    counts.stale.label("stale_embeddings"),
+                    counts.unknown.label("unknown_provenance"),
+                    counts.missing_provenance.label("missing_provenance"),
                 )
                 .select_from(Memory)
                 .where(
@@ -3477,7 +3556,7 @@ class PostgresService:
                 # leads. Unknown is not ranked — it is a measurement gap, not
                 # a defect, and letting it sort the list would bury real
                 # damage under untriaged history.
-                .order_by((stale + missing).desc())
+                .order_by((counts.stale + counts.missing).desc())
             )
             rows = (await session.execute(stmt)).all()
         return [
@@ -3487,6 +3566,7 @@ class PostgresService:
                 "missing_embeddings": int(row.missing_embeddings or 0),
                 "stale_embeddings": int(row.stale_embeddings or 0),
                 "unknown_provenance": int(row.unknown_provenance or 0),
+                "missing_provenance": int(row.missing_provenance or 0),
                 "coverage_pct": (
                     round((row.total_active - row.missing_embeddings) / row.total_active * 100, 1)
                     if row.total_active

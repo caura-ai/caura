@@ -117,6 +117,63 @@ async def run_embed_backfill_tick() -> None:
     await _fire_fanout("embed-backfill")
 
 
+def _alert_on_missing_provenance(coverage: dict, tenants: list[dict]) -> None:
+    """Escalate rows that record no provenance and have no excuse for it.
+
+    Alerting on a LEVEL is what the other buckets cannot do.
+    ``unknown_provenance`` sits in the tens of thousands of legitimate pre-037
+    rows, so a threshold on it is either permanently breached or useless — and
+    the conclusion drawn from that was to stop watching the number entirely,
+    on the premise that it only ever drains. In 2026-09 a defect grew it by 241
+    rows over a week inside that blind spot.
+
+    ``missing_provenance`` is the same predicate with the innocent explanations
+    removed: written after migration 037, holding a content hash to attest,
+    with a vector that something computed. Its correct value is zero, so this
+    needs no stored history, no baseline and no tuned threshold — the three
+    things a delta-based alert would need, in a service that keeps no state
+    between ticks.
+
+    ERROR rather than WARNING: every such row is invisible to both embedding
+    backfills (they select ``embedding IS NULL``) and to the staleness detector
+    (which needs a hash to compare), so it is permanent until someone
+    intervenes. Nothing drains this on its own.
+    """
+    total = coverage.get("missing_provenance") or 0
+    if not total:
+        return
+    worst = sorted(
+        (t for t in tenants if t.get("missing_provenance")),
+        key=lambda t: t.get("missing_provenance") or 0,
+        reverse=True,
+    )[:_COVERAGE_TENANT_LOG_CAP]
+    logger.error(
+        "memories embedded without provenance; a writer is dropping content_hash",
+        extra={
+            "missing_provenance": total,
+            "tenants_affected": coverage.get("tenants_with_missing_provenance"),
+            "worst_tenants": [
+                {"tenant_id": t.get("tenant_id"), "missing_provenance": t.get("missing_provenance")}
+                for t in worst
+            ],
+            # The query an operator should run — these rows are reachable by no
+            # existing sweep or endpoint, so the count alone is unactionable.
+            #
+            # Echoed from the response, never composed here. This service is a
+            # separate deployable with no import path into core-storage-api, so
+            # a literal would be kept honest by nothing: it would drift the
+            # first time the cutoff date moved, and the alert would then name a
+            # query that does not reproduce the number printed beside it.
+            #
+            # ``None`` if the storage service predates the field — which is the
+            # honest degradation during a rolling deploy. A missing hint costs
+            # an operator one lookup; a confidently wrong one costs them the
+            # investigation.
+            "predicate": coverage.get("missing_provenance_predicate"),
+        },
+    )
+
+
 async def run_embedding_coverage_tick() -> None:
     """Log embedding coverage per tenant so the backlog is observable.
 
@@ -182,18 +239,33 @@ async def run_embedding_coverage_tick() -> None:
             "stale_embeddings": coverage.get("stale_embeddings"),
             "tenants_with_stale": coverage.get("tenants_with_stale"),
             # Embedded before provenance existed: undetermined, not damaged.
-            # Expected to fall over time; it is a measurement gap closing, so
-            # do not alert on it.
+            # Still not alertable — it legitimately holds tens of thousands of
+            # pre-037 rows, so any threshold on its LEVEL is either permanently
+            # breached or meaningless. What was wrong was concluding from that
+            # that the number needs no watching at all: the old note here said
+            # it was "a measurement gap closing", which assumed it only ever
+            # drains. See ``missing_provenance`` below for what replaced that
+            # assumption with a measurement.
             "unknown_provenance": coverage.get("unknown_provenance"),
+            # The alertable subset, and the one number here with a correct
+            # value: zero. Rows written after migration 037, carrying a content
+            # hash, that record no provenance — so NULL has no innocent reading
+            # and some live writer dropped it.
+            "missing_provenance": coverage.get("missing_provenance"),
             "tenant_count": len(tenants),
         },
     )
-    # A tenant is worth a line if it has EITHER defect. Filtering on missing
-    # alone would hide a tenant whose rows are all embedded but wrong — the
-    # exact case this release makes visible.
-    reported = [t for t in tenants if t.get("missing_embeddings") or t.get("stale_embeddings")][
-        :_COVERAGE_TENANT_LOG_CAP
-    ]
+    _alert_on_missing_provenance(coverage, tenants)
+    # A tenant is worth a line if it has ANY defect. Filtering on missing alone
+    # would hide a tenant whose rows are all embedded but wrong — the exact case
+    # this release makes visible — and omitting ``missing_provenance`` would hide
+    # the tenant the alert above just fired for, leaving an alert with no
+    # per-tenant line to act on.
+    reported = [
+        t
+        for t in tenants
+        if t.get("missing_embeddings") or t.get("stale_embeddings") or t.get("missing_provenance")
+    ][:_COVERAGE_TENANT_LOG_CAP]
     for tenant in reported:
         logger.info(
             "embedding coverage tenant",
@@ -203,10 +275,15 @@ async def run_embedding_coverage_tick() -> None:
                 "missing_embeddings": tenant.get("missing_embeddings"),
                 "stale_embeddings": tenant.get("stale_embeddings"),
                 "unknown_provenance": tenant.get("unknown_provenance"),
+                "missing_provenance": tenant.get("missing_provenance"),
                 "coverage_pct": tenant.get("coverage_pct"),
             },
         )
-    affected = sum(1 for t in tenants if t.get("missing_embeddings") or t.get("stale_embeddings"))
+    affected = sum(
+        1
+        for t in tenants
+        if t.get("missing_embeddings") or t.get("stale_embeddings") or t.get("missing_provenance")
+    )
     if affected > len(reported):
         logger.info(
             "embedding coverage per-tenant lines truncated",
