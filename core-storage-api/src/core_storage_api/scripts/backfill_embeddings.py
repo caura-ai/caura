@@ -14,7 +14,10 @@ backfill task in core-worker (see ``local_emb_res/specs/C-backfill-task-pr.md``)
 
 Idempotent and restartable: the WHERE clauses filter to rows with NULL
 embeddings, so a partial run can be resumed by simply re-running the
-command — already-embedded rows are skipped naturally.
+command — already-embedded rows are skipped naturally. ``--repair-provenance``
+is idempotent for the same reason: its own write flips
+``embedded_content_hash`` out of the selector. ``--rewrite-hint-prefixed`` is
+the exception, and says so at the point of use.
 
 ⚠ **Single-provider only — does NOT honour per-tenant embedding configs.**
 
@@ -65,6 +68,20 @@ Usage:
     python -m core_storage_api.scripts.backfill_embeddings \\
         --rewrite-hint-prefixed --tenant-id tenant-abc --dry-run
 
+    # Repair rows that carry a vector but record nothing about the text it
+    # came from. NO OTHER SWEEP CAN REACH THESE: every other backfill,
+    # core-worker's included, selects ``embedding IS NULL`` and these rows
+    # have one. Defaults to rows created after provenance existed, which is
+    # the population that should always be empty.
+    python -m core_storage_api.scripts.backfill_embeddings \\
+        --repair-provenance --dry-run
+
+    # Widen to rows predating migration 037: tens of thousands of them, one
+    # provider call each, undetermined rather than known-damaged. Size it
+    # with --dry-run before spending it.
+    python -m core_storage_api.scripts.backfill_embeddings \\
+        --repair-provenance --include-legacy --dry-run
+
 Scope:
 - ``memories.embedding`` — re-embedded from ``memories.content``, and
   ``memories.embedded_content_hash`` stamped in the same statement with the
@@ -95,6 +112,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import enum
 import logging
 import os
 import sys
@@ -112,6 +130,26 @@ logger = logging.getLogger(__name__)
 # rather than blipping. Better to halt and let the operator escalate
 # than to spend the next hour writing nothing.
 _MAX_CONSECUTIVE_NONES = 20
+
+
+class _ScanMode(enum.StrEnum):
+    """Which population a run targets. Exactly one, by construction.
+
+    A pair of booleans once the third mode arrived, and that admits a state
+    ("rewrite the hint prefix AND repair provenance") with no meaning and no
+    branch. The values double as the log and CLI spelling, which is what the
+    mode was already being rendered as by hand.
+    """
+
+    #: Rows with no vector. The post-migration-012 recovery path, and the
+    #: catch-all for any other source of missing embeddings.
+    NULL_EMBEDDING = "null-embedding"
+    #: Rows embedded under the pre-CAURA-222 hint-prefixed write path.
+    REWRITE_HINT_PREFIXED = "rewrite-hint-prefixed"
+    #: Rows carrying a vector that records nothing about the text it came
+    #: from. Invisible to every other sweep precisely because they HAVE an
+    #: embedding, which is what makes this mode the only way to reach them.
+    REPAIR_PROVENANCE = "repair-provenance"
 
 
 class _Provenance(NamedTuple):
@@ -194,7 +232,8 @@ async def _iter_rows(
     *,
     tenant_id: str | None,
     batch_size: int,
-    rewrite_hint_prefixed: bool,
+    mode: _ScanMode,
+    include_legacy: bool = False,
 ) -> AsyncIterator[list[tuple[uuid.UUID, str, str | None]]]:
     """Yield batches of (id, content, content_hash) for rows that need (re-)embedding.
 
@@ -204,15 +243,15 @@ async def _iter_rows(
     ``_embed_and_write`` for why the value must travel with the text rather
     than being re-read at write time.
 
-    Two scan modes:
-      - Default: rows where the embedding is NULL (post-12 backfill,
-        also covers any other source of missing vectors).
-      - ``rewrite_hint_prefixed=True``: rows whose stored vector was
-        produced under the pre-CAURA-222 hint-prefixed write path
-        (``"[Retrieval hint]: <hint>\\n\\n<content>"``). Selector is
-        ``embedding IS NOT NULL AND metadata_->>'retrieval_hint'`` is
-        non-empty. Only ``memories`` carries hint metadata; the
-        ``entities`` table is skipped at the call site.
+    Three scan modes, one selector each — see :class:`_ScanMode`.
+
+    ``REPAIR_PROVENANCE`` requires ``content_hash IS NOT NULL``, and that term
+    is load-bearing rather than tidy. The repair writes
+    ``embedded_content_hash`` FROM the row's ``content_hash``, so a row without
+    one is stamped NULL again and still matches the selector on the next run —
+    the sweep would re-embed it forever, spending a provider call each time to
+    change nothing. Every other mode is self-terminating because its own write
+    flips the row out of its predicate; this is the one that has to be told.
 
     Cursor-style pagination on ``id`` for stable resumability — the
     consumer's writes flip the row's match condition (NULL → non-NULL,
@@ -226,6 +265,16 @@ async def _iter_rows(
     """
     from sqlalchemy import text
 
+    # Deferred like every other import in this module — the CLI keeps its
+    # startup light and avoids importing the service layer it deliberately
+    # does not depend on — but hoisted out of the pagination loop below, which
+    # would otherwise re-resolve it once per page.
+    #
+    # Imported rather than restated: the alert in core-operations counts the
+    # population this sweep repairs, and a second copy of the cutoff would let
+    # the two disagree about which rows are a defect.
+    from core_storage_api.services.postgres_service import PROVENANCE_REQUIRED_FROM
+
     after: uuid.UUID | None = None
     while True:
         params: dict = {"limit": batch_size}
@@ -233,7 +282,7 @@ async def _iter_rows(
         if spec.provenance:
             selected += f", {spec.provenance.source_hash_column}"
         sql = f"SELECT {selected} FROM {spec.table} WHERE "
-        if rewrite_hint_prefixed:
+        if mode is _ScanMode.REWRITE_HINT_PREFIXED:
             # Rewrite mode: target rows that were embedded with the
             # pre-CAURA-222 hint prefix. The metadata key is preserved
             # as auditability ground truth — we use it as the selector
@@ -255,6 +304,29 @@ async def _iter_rows(
                 f"{spec.embedding_column} IS NOT NULL "
                 f"AND COALESCE({spec.metadata_column}->>'retrieval_hint', '') <> '' "
             )
+        elif mode is _ScanMode.REPAIR_PROVENANCE:
+            # Reachable by no other sweep: both embedding backfills and
+            # core-worker's event-driven task select ``embedding IS NULL``,
+            # and these rows have one. That is why 241 of them sat unrepaired
+            # for a week while three repair paths ran over the same table.
+            if spec.provenance is None:
+                raise ValueError(
+                    f"repair_provenance scan requires provenance columns on "
+                    f"_TableSpec.table={spec.table!r}; got provenance=None"
+                )
+            sql += (
+                f"{spec.embedding_column} IS NOT NULL "
+                f"AND {spec.provenance.stamp_column} IS NULL "
+                # Idempotency, not tidiness — see the docstring.
+                f"AND {spec.provenance.source_hash_column} IS NOT NULL "
+            )
+            if not include_legacy:
+                # Default to the population that should be empty. Older rows
+                # predate provenance entirely: repairing them is a provider
+                # spend decision about tens of thousands of rows, not a defect
+                # being cleaned up, so it takes an explicit flag.
+                sql += "AND created_at >= :provenance_cutoff "
+                params["provenance_cutoff"] = PROVENANCE_REQUIRED_FROM
         else:
             sql += f"{spec.embedding_column} IS NULL "
         # Skip soft-deleted rows on tables that have ``deleted_at`` —
@@ -287,7 +359,8 @@ async def _backfill_one_table(
     batch_size: int,
     max_inflight: int,
     dry_run: bool,
-    rewrite_hint_prefixed: bool,
+    mode: _ScanMode,
+    include_legacy: bool = False,
 ) -> BackfillReport:
     from sqlalchemy import text
 
@@ -398,7 +471,8 @@ async def _backfill_one_table(
         spec,
         tenant_id=tenant_id,
         batch_size=batch_size,
-        rewrite_hint_prefixed=rewrite_hint_prefixed,
+        mode=mode,
+        include_legacy=include_legacy,
     ):
         scanned += len(batch)
         await asyncio.gather(*(_embed_and_write(rid, c, ch) for rid, c, ch in batch))
@@ -428,26 +502,44 @@ async def run_backfill(
     max_inflight: int,
     dry_run: bool,
     only_table: str | None = None,
-    rewrite_hint_prefixed: bool = False,
+    mode: _ScanMode = _ScanMode.NULL_EMBEDDING,
+    include_legacy: bool = False,
 ) -> list[BackfillReport]:
     """Walk targeted rows and (re-)embed them according to the selected scan mode.
 
-    Two modes:
+    Three modes:
 
-    - Default (``rewrite_hint_prefixed=False``): scan rows where
-      ``embedding IS NULL`` and embed them from ``content`` /
-      ``canonical_name``. This is the post-migration-012 recovery
-      path for OSS docker-compose users, and also covers any other
-      source of missing vectors (failed inline embeds, etc.).
+    - ``NULL_EMBEDDING`` (default): rows where ``embedding IS NULL``,
+      embedded from ``content`` / ``canonical_name``. The
+      post-migration-012 recovery path, and the catch-all for any other
+      source of missing vectors.
 
-    - Hint-prefixed rewrite (``rewrite_hint_prefixed=True``): scan
-      rows where ``embedding IS NOT NULL`` AND
-      ``metadata.retrieval_hint`` is non-empty — rows written under
-      the pre-CAURA-222 hint-prefixed write path — and re-embed them
-      from raw ``content`` to align with the search-side surface.
-      One-off recall recovery after CAURA-222 has deployed; new
-      writes already land on the raw-content surface. Entities are
-      skipped in this mode (no hint metadata exists there).
+    - ``REWRITE_HINT_PREFIXED``: rows where ``embedding IS NOT NULL`` AND
+      ``metadata.retrieval_hint`` is non-empty — written under the
+      pre-CAURA-222 hint-prefixed path — re-embedded from raw ``content``
+      to match the search-side surface. Entities are skipped (no hint
+      metadata there).
+
+    - ``REPAIR_PROVENANCE``: rows carrying a vector that records nothing
+      about the text it came from. **The only sweep that can see them.**
+      The other two, and core-worker's event-driven backfill, all select
+      ``embedding IS NULL``; these rows have an embedding, which is why 241
+      of them sat unrepaired for a week in 2026-09 while three separate
+      repair paths ran over the same table.
+
+      The repair is a genuine re-embed, never a stamp. Writing
+      ``embedded_content_hash = content_hash`` here would assert that the
+      EXISTING vector describes the current text — which is exactly what
+      nothing knows, because that is the state being repaired. It happened
+      to be true for those 241 rows (each verified first against a
+      recomputed hash) and is not true in general; a wrong hash reads
+      downstream as verified freshness, worse than the NULL it replaced.
+      Re-embedding makes the assertion true rather than assuming it.
+
+      ``include_legacy`` widens the scan past ``PROVENANCE_REQUIRED_FROM``
+      to rows predating provenance entirely. Off by default: those are
+      undetermined rather than damaged, there are tens of thousands of
+      them, and each costs a provider call.
 
     Returns one ``BackfillReport`` per table processed.
 
@@ -465,7 +557,16 @@ async def run_backfill(
     for spec in _TARGETS:
         if only_table is not None and spec.table != only_table:
             continue
-        if rewrite_hint_prefixed and spec.table != "memories":
+        if mode is _ScanMode.REPAIR_PROVENANCE and spec.provenance is None:
+            # Nothing to repair where nothing can be recorded: migration 037
+            # gave ``embedded_content_hash`` to ``memories`` alone. Skipped
+            # rather than raised so the CLI stays one command over both tables.
+            logger.info(
+                "backfill[%s] skipped under --repair-provenance (table records no provenance)",
+                spec.table,
+            )
+            continue
+        if mode is _ScanMode.REWRITE_HINT_PREFIXED and spec.table != "memories":
             # Only memories carry ``metadata.retrieval_hint``; skip
             # other tables silently to keep the CLI a single command.
             logger.info(
@@ -480,7 +581,7 @@ async def run_backfill(
             batch_size,
             max_inflight,
             dry_run,
-            "rewrite-hint-prefixed" if rewrite_hint_prefixed else "null-embedding",
+            mode.value,
         )
         report = await _backfill_one_table(
             engine,
@@ -489,7 +590,8 @@ async def run_backfill(
             batch_size=batch_size,
             max_inflight=max_inflight,
             dry_run=dry_run,
-            rewrite_hint_prefixed=rewrite_hint_prefixed,
+            mode=mode,
+            include_legacy=include_legacy,
         )
         reports.append(report)
         logger.info(
@@ -535,7 +637,8 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Count rows that would be re-embedded; don't call the embedding provider or write to the DB.",
     )
-    p.add_argument(
+    modes = p.add_mutually_exclusive_group()
+    modes.add_argument(
         "--rewrite-hint-prefixed",
         action="store_true",
         help=(
@@ -546,6 +649,32 @@ def _build_parser() -> argparse.ArgumentParser:
             "the CAURA-222 fix has deployed to recover recall on existing "
             "rows. Combine with --tenant-id and --dry-run for a phased "
             "rollout."
+        ),
+    )
+    modes.add_argument(
+        "--repair-provenance",
+        action="store_true",
+        help=(
+            "Re-embed memories that carry a vector but record nothing about "
+            "the text it came from (embedding IS NOT NULL AND "
+            "embedded_content_hash IS NULL). No other sweep can reach these "
+            "rows: every other backfill selects embedding IS NULL and these "
+            "have one. Entities are skipped (no provenance columns). Rows with "
+            "no content_hash are skipped too — there is nothing to record for "
+            "them, and including them would re-embed the same rows on every "
+            "run forever. Defaults to rows created after provenance existed; "
+            "see --include-legacy."
+        ),
+    )
+    p.add_argument(
+        "--include-legacy",
+        action="store_true",
+        help=(
+            "With --repair-provenance, also scan rows predating migration 037 "
+            "(2026-08-16). Those are undetermined rather than damaged, there "
+            "are tens of thousands of them, and each costs a provider call to "
+            "re-embed — so widening the scan is a spend decision. Size it with "
+            "--dry-run first."
         ),
     )
     p.add_argument(
@@ -584,6 +713,33 @@ async def _amain(argv: list[str]) -> int:
     # so an operator who re-invokes the command doesn't silently burn
     # provider quota on a no-op rewrite. Dry-run is fine — no provider
     # call, no DB write.
+    if args.rewrite_hint_prefixed:
+        mode = _ScanMode.REWRITE_HINT_PREFIXED
+    elif args.repair_provenance:
+        mode = _ScanMode.REPAIR_PROVENANCE
+    else:
+        mode = _ScanMode.NULL_EMBEDDING
+
+    if args.include_legacy and mode is not _ScanMode.REPAIR_PROVENANCE:
+        # Ignoring it silently would let an operator believe they had widened
+        # a scan that never reads the flag.
+        logger.error("--include-legacy only applies to --repair-provenance")
+        return 1
+
+    # Widening past migration 037 is a spend decision, not a bug fix: those
+    # rows are undetermined rather than damaged, there are tens of thousands
+    # of them, and each costs a provider call. Say so before spending it.
+    if args.repair_provenance and args.include_legacy and not args.dry_run:
+        print(
+            "WARNING: --include-legacy re-embeds rows that predate provenance "
+            "(migration 037, 2026-08-16). These are UNDETERMINED, not known to "
+            "be damaged, and there are tens of thousands of them — one provider "
+            "call each. Run with --dry-run first to size it.",
+            file=sys.stderr,
+        )
+        print("Starting in 5 s — press Ctrl-C to abort.", file=sys.stderr)
+        await asyncio.sleep(5)
+
     if args.rewrite_hint_prefixed and not args.dry_run:
         print(
             "WARNING: --rewrite-hint-prefixed is NOT idempotent. "
@@ -608,7 +764,8 @@ async def _amain(argv: list[str]) -> int:
             max_inflight=args.max_inflight,
             dry_run=args.dry_run,
             only_table=args.only_table,
-            rewrite_hint_prefixed=args.rewrite_hint_prefixed,
+            mode=mode,
+            include_legacy=args.include_legacy,
         )
     except RuntimeError as e:
         # Reserved for the "degraded provider" abort path (20 consecutive

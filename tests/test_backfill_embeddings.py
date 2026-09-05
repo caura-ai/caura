@@ -345,7 +345,7 @@ async def test_rewrite_hint_prefixed_targets_memories_with_hint_metadata(
     """--rewrite-hint-prefixed scans rows where embedding IS NOT NULL
     and metadata.retrieval_hint is non-empty. The default mode's
     embedding-IS-NULL filter must NOT appear in this scan."""
-    from core_storage_api.scripts.backfill_embeddings import run_backfill
+    from core_storage_api.scripts.backfill_embeddings import _ScanMode, run_backfill
 
     rows = {
         "from memories": [
@@ -362,7 +362,7 @@ async def test_rewrite_hint_prefixed_targets_memories_with_hint_metadata(
         batch_size=500,
         max_inflight=10,
         dry_run=False,
-        rewrite_hint_prefixed=True,
+        mode=_ScanMode.REWRITE_HINT_PREFIXED,
     )
 
     by_table = {r.table: r for r in reports}
@@ -408,7 +408,7 @@ async def test_rewrite_hint_prefixed_skips_entities(
     """Entities don't carry retrieval_hint metadata, so the hint-rewrite
     mode skips them — even if rows exist on that table, they shouldn't
     produce a report or burn embed calls."""
-    from core_storage_api.scripts.backfill_embeddings import run_backfill
+    from core_storage_api.scripts.backfill_embeddings import _ScanMode, run_backfill
 
     rows = {
         "from memories": [(uuid.uuid4(), "memory with hint", "h-hint")],
@@ -424,7 +424,7 @@ async def test_rewrite_hint_prefixed_skips_entities(
         batch_size=500,
         max_inflight=10,
         dry_run=False,
-        rewrite_hint_prefixed=True,
+        mode=_ScanMode.REWRITE_HINT_PREFIXED,
     )
 
     by_table = {r.table: r for r in reports}
@@ -643,6 +643,7 @@ async def test_provenance_rides_the_same_update_as_the_vector(
     from core_storage_api.scripts.backfill_embeddings import (
         _TARGETS,
         _backfill_one_table,
+        _ScanMode,
     )
 
     rows = {"from memories": [(uuid.uuid4(), "content", "the-hash")]}
@@ -658,7 +659,7 @@ async def test_provenance_rides_the_same_update_as_the_vector(
         batch_size=10,
         max_inflight=1,
         dry_run=False,
-        rewrite_hint_prefixed=False,
+        mode=_ScanMode.NULL_EMBEDDING,
     )
 
     updates = [s for s in captured_sql if s.lower().startswith("update")]
