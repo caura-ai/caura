@@ -47,6 +47,20 @@ export interface RecallResult {
   raw: Record<string, unknown>;
 }
 
+/**
+ * Public deployment counters, as returned by `stats()`. These are
+ * deployment-wide totals, **not** scoped to your `tenantId` — the server
+ * counts across every tenant. The endpoint degrades rather than fails: if a
+ * storage query stalls or errors, that counter comes back `0` rather than
+ * throwing, so a zero may mean "none" or "unavailable".
+ */
+export interface Stats {
+  tenantCount: number;
+  memoryCount: number;
+  agentCount: number;
+  raw: Record<string, unknown>;
+}
+
 export interface CauraOptions {
   tenantId: string;
   baseUrl?: string;
@@ -167,6 +181,24 @@ export class Caura {
   /** Liveness probe. GET /api/v1/health */
   async health(): Promise<Record<string, unknown>> {
     return this.request("GET", "/api/v1/health");
+  }
+
+  /**
+   * Deployment-wide counters for the landing-page status bar.
+   * GET /api/v1/stats
+   *
+   * These counts span the whole deployment — they are **not** scoped to
+   * `this.tenantId`. The endpoint is unauthenticated, but the API key header
+   * is still sent for consistency with every other call this client makes.
+   */
+  async stats(): Promise<Stats> {
+    const data = await this.request("GET", "/api/v1/stats");
+    return {
+      tenantCount: data?.tenant_count ?? 0,
+      memoryCount: data?.memory_count ?? 0,
+      agentCount: data?.agent_count ?? 0,
+      raw: data ?? {},
+    };
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<any> {

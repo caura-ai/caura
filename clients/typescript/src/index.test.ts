@@ -141,6 +141,33 @@ test("health hits /health", async () => {
   assert.equal((await client.health()).status, "ok");
 });
 
+test("stats hits /stats and parses deployment totals", async () => {
+  const client = makeClient((url, init) => {
+    assert.equal(new URL(url).pathname, "/api/v1/stats");
+    assert.equal(new URL(url).search, "");
+    assert.equal((init.headers as Record<string, string>)["X-API-Key"], "mc_test");
+    return jsonResponse(200, { tenant_count: 12, memory_count: 345, agent_count: 7 });
+  });
+
+  const stats = await client.stats();
+  assert.equal(stats.tenantCount, 12);
+  assert.equal(stats.memoryCount, 345);
+  assert.equal(stats.agentCount, 7);
+});
+
+test("stats defaults missing keys to zero", async () => {
+  const client = makeClient(() => jsonResponse(200, {}));
+  const stats = await client.stats();
+  assert.equal(stats.tenantCount, 0);
+  assert.equal(stats.memoryCount, 0);
+  assert.equal(stats.agentCount, 0);
+});
+
+test("stats raises on 503", async () => {
+  const client = makeClient(() => jsonResponse(503, { message: "degraded" }));
+  await assert.rejects(client.stats(), CauraApiError);
+});
+
 test("403 maps to AuthError and parses the error envelope", async () => {
   const client = makeClient(() => jsonResponse(403, { error: { message: "cross-fleet", details: { x: 1 } } }));
   await assert.rejects(client.write("x"), (err: unknown) => {

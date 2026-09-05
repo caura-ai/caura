@@ -17,12 +17,13 @@ from .exceptions import (
     CauraError,
     NotFoundError,
 )
-from .models import Memory, RecallResult
+from .models import Memory, RecallResult, Stats
 
 __all__ = [
     "Caura",
     "Memory",
     "RecallResult",
+    "Stats",
     "CauraError",
     "CauraAPIError",
     "AuthError",
