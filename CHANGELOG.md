@@ -10,6 +10,28 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.48.0](https://github.com/caura-ai/caura/compare/backend-v2.47.5...backend-v2.48.0) (2026-09-05)
+
+
+### Features
+
+* **mcp:** refuse an over-plan write, behind a flag ([#1296](https://github.com/caura-ai/caura/issues/1296)) ([4d81241](https://github.com/caura-ai/caura/commit/4d812419459bcf42e582dffe552be8da554f00fc))
+* **ops:** alert on embeddings written without provenance ([#1294](https://github.com/caura-ai/caura/issues/1294)) ([491dd15](https://github.com/caura-ai/caura/commit/491dd152b62de61544d1feac065e89d25afab431))
+* **storage:** add a repair sweep for un-provenanced embeddings ([#1298](https://github.com/caura-ai/caura/issues/1298)) ([76def6a](https://github.com/caura-ai/caura/commit/76def6a11cdd48cea8302c971815163bf0117dac))
+
+
+### Bug Fixes
+
+* **client-python:** raise health check HTTP errors ([#1027](https://github.com/caura-ai/caura/issues/1027)) ([831920c](https://github.com/caura-ai/caura/commit/831920c3cd0857940ce985fdad18831f94aa2dac))
+* **docs:** remove stale MCP tool count ([#571](https://github.com/caura-ai/caura/issues/571)) ([e32d4ad](https://github.com/caura-ai/caura/commit/e32d4ad6c9efc6956bd6442bd2b30936f6f9e3b8))
+* **governance:** cascade a drop or keep_private to rows derived before the verdict ([#1292](https://github.com/caura-ai/caura/issues/1292)) ([f453002](https://github.com/caura-ai/caura/commit/f453002fc6766385c9da8ebc7f80b0154f66624b))
+* **health:** give the storage probe a budget bigger than one connect ([#1303](https://github.com/caura-ai/caura/issues/1303)) ([e52c2a2](https://github.com/caura-ai/caura/commit/e52c2a2c1f5cef75addb5eece621ae3fc20075f5))
+
+
+### Documentation
+
+* **env:** add JWT_SECRET and SETTINGS_ENCRYPTION_KEY to .env.example ([#1299](https://github.com/caura-ai/caura/issues/1299)) ([390f857](https://github.com/caura-ai/caura/commit/390f8573b2769e9767a33aff56005305903bc0b6))
+
 ## [2.47.5](https://github.com/caura-ai/caura/compare/backend-v2.47.4...backend-v2.47.5) (2026-09-04)
 
 
