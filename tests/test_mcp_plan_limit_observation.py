@@ -1,14 +1,18 @@
-"""MCP plan-limit observation — step one of caura-ai/caura#1205.
+"""MCP plan-limit observation — the DEFAULT half of caura-ai/caura#1205.
 
 An org over its plan limit is refused a write on REST and allowed the same
-write on MCP, because the MCP middleware never read ``x-org-read-only``. This
-change plumbs the signal and reports what WOULD be refused; it deliberately
-does not refuse yet.
+write on MCP, because the MCP middleware never read ``x-org-read-only``. Step
+one plumbed the signal and reported what WOULD be refused without refusing.
 
-The tests below pin both halves of that, and the second half is the one that
-matters most right now: **the write must still succeed**. A test suite that
-only proved the logging works would go green on an accidental enforcement,
-which is precisely the outcome the observe-first sequencing exists to avoid.
+The refusal now exists, behind ``settings.enforce_mcp_plan_limits`` — see
+``test_mcp_plan_limit_enforcement.py``. This file did NOT become historical
+when that landed: the flag is off by default, so observe-and-allow is still the
+SHIPPED behaviour, and these tests are what stop it changing by accident.
+
+The second half below is the load-bearing one: **the write must still
+succeed**. A suite that only proved the logging works would go green on an
+accidental enforcement — including one caused by flipping the flag's default,
+which is exactly what it catches.
 """
 
 from __future__ import annotations
@@ -48,7 +52,7 @@ def _warnings(caplog) -> list[logging.LogRecord]:
 def test_a_gated_op_over_plan_is_reported(caplog, op):
     mcp_server._org_read_only_var.set(True)
     with caplog.at_level(logging.WARNING, logger="core_api.mcp_server"):
-        mcp_server._observe_plan_limit(op, "tenant-over-plan")
+        mcp_server._check_plan_limit(op, "tenant-over-plan")
     records = _warnings(caplog)
     assert len(records) == 1
     assert records[0].tenant_id == "tenant-over-plan"
@@ -61,7 +65,7 @@ def test_a_gated_op_over_plan_is_reported(caplog, op):
 def test_nothing_is_reported_when_the_org_is_within_plan(caplog):
     mcp_server._org_read_only_var.set(False)
     with caplog.at_level(logging.WARNING, logger="core_api.mcp_server"):
-        mcp_server._observe_plan_limit("create", "tenant-ok")
+        mcp_server._check_plan_limit("create", "tenant-ok")
     assert _warnings(caplog) == []
 
 
@@ -73,7 +77,7 @@ def test_an_ungated_op_is_not_reported_even_over_plan(caplog, op):
     ``update`` rewrites a row rather than adding one."""
     mcp_server._org_read_only_var.set(True)
     with caplog.at_level(logging.WARNING, logger="core_api.mcp_server"):
-        mcp_server._observe_plan_limit(op, "tenant-over-plan")
+        mcp_server._check_plan_limit(op, "tenant-over-plan")
     assert _warnings(caplog) == []
 
 

@@ -40,7 +40,7 @@ from core_api.constants import (
     VALID_SCOPES,
     VERSION,
 )
-from core_api.errors import code_for_status
+from core_api.errors import AUTH_PLAN_LIMIT, code_for_status
 from core_api.pagination import decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -97,6 +97,7 @@ from core_api.services.usage_service import (
     MutatingOp,
     bulk_check_and_increment,
     charges_write_quota,
+    enforces_mcp_plan_limits,
     meters_mcp_bulk_write,
     plan_limit_gated,
     recall_operation,
@@ -141,10 +142,13 @@ _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # docstring). REST reads it via ``AuthContext.is_read_only``. This middleware
 # reads it too, as of the commit that introduced this var — BEFORE that it did
 # not, which is the state caura-ai/caura#1205 describes and the reason that
-# issue reads as if the signal were still missing. It is not; the refusal is.
+# issue reads as if the signal were still missing. It never was; the refusal
+# was, and it now exists behind a flag.
 #
-# OBSERVED, NOT ENFORCED, for now. Nothing refuses on this yet — see
-# ``_observe_plan_limit`` below for why that sequencing is deliberate.
+# ENFORCED ONLY WHEN ``enforce_mcp_plan_limits`` IS ON — off by default, in
+# which case ``_check_plan_limit`` logs and lets the write through exactly as
+# before. See that function and the setting's comment for why the capability is
+# available without being automatic.
 _org_read_only_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_org_read_only", default=False)
 
 _UNAUTH = "__unauthenticated__"
@@ -473,15 +477,32 @@ def _is_org_read_only() -> bool:
     """True when the platform stamped this org over its plan limit.
 
     The MCP twin of ``AuthContext.is_read_only``. Read only by
-    ``_observe_plan_limit`` today — nothing refuses on it yet.
+    ``_check_plan_limit``, which refuses on it when
+    ``enforce_mcp_plan_limits`` is on and logs without refusing when it is off.
     """
     return _org_read_only_var.get(False)
 
 
-def _observe_plan_limit(op: MutatingOp, tenant_id: str) -> None:
-    """Record that ``op`` ran while the org was over its plan limit.
+def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
+    """Refuse ``op`` when the org is over its plan limit — or just record it.
 
-    DELIBERATELY DOES NOT REFUSE. This is step one of caura-ai/caura#1205,
+    Returns the canonical MCP error envelope when the write must be refused,
+    and ``None`` when it may proceed. Callers MUST return the envelope rather
+    than discard it; a dropped return here is a silent un-enforcement, which is
+    the failure this whole area keeps producing.
+
+    WHICH IT DOES IS A FLAG. ``enforces_mcp_plan_limits()`` is off by default,
+    and while it is off this behaves exactly as it did before — log and let the
+    write through. That preserves the staging described below rather than
+    discarding it: enforcement becomes available without becoming automatic.
+
+    The refusal mirrors REST's ``AuthContext.enforce_usage_limits`` — same
+    error code (``PLAN_LIMIT_READ_ONLY``), same message, same carve-out that
+    deletes stay permitted so a tenant can get back under the limit. It cannot
+    reuse that method directly: it raises ``HTTPException``, and MCP tools
+    return envelopes.
+
+    Step one of caura-ai/caura#1205 was to observe rather than refuse,
     which closes a real divergence — an over-plan org is refused a write on
     REST and allowed the same write on MCP — but closes it in a direction that
     takes capability AWAY from tenants who have it today. Enforcing in the same
@@ -518,16 +539,33 @@ def _observe_plan_limit(op: MutatingOp, tenant_id: str) -> None:
 
     Logged at WARNING rather than INFO because a firing line means real money:
     a write that the plan says should not have happened.
+
+    TWO EVENT NAMES, deliberately. Observing keeps emitting
+    ``mcp_plan_limit_would_refuse``; enforcing emits
+    ``mcp_plan_limit_refused``. Reusing one name and flipping the ``enforced``
+    field would leave every existing query silently counting refusals as
+    observations, and "did we actually refuse anyone" is the question the
+    rollout turns on. The ``enforced`` field is kept on both so a query written
+    against either name still resolves it.
     """
     if not _is_org_read_only() or not plan_limit_gated(op):
-        return
+        return None
+    enforcing = enforces_mcp_plan_limits()
     logger.warning(
-        "mcp_plan_limit_would_refuse",
+        "mcp_plan_limit_refused" if enforcing else "mcp_plan_limit_would_refuse",
         extra={
             "tenant_id": tenant_id,
             "mcp_operation": op,
-            "enforced": False,
+            "enforced": enforcing,
         },
+    )
+    if not enforcing:
+        return None
+    return _error_response(
+        AUTH_PLAN_LIMIT,
+        "Organization is in read-only mode: usage exceeds plan limits. "
+        "Upgrade your plan or delete data to restore write access.",
+        remediation="Deletes stay permitted so you can get back under the limit.",
     )
 
 
@@ -1237,11 +1275,19 @@ async def caura_write(
             if not fleet_id and agent.get("fleet_id"):
                 fleet_id = agent["fleet_id"]
             if content is not None:
-                # Observation only; the write proceeds. The batch path below
-                # carries the ``bulk_create`` twin — between them they cover
-                # every op on this surface that ``PLAN_LIMIT_GATED_OPS``
-                # names (MCP exposes no ``redistribute``).
-                _observe_plan_limit("create", tenant_id)
+                # Refuses when ``enforce_mcp_plan_limits`` is on, observes
+                # otherwise. The batch path below carries the ``bulk_create``
+                # twin — between them they cover every op on this surface that
+                # ``PLAN_LIMIT_GATED_OPS`` names (MCP exposes no
+                # ``redistribute``).
+                #
+                # BEFORE the quota charge, mirroring REST: a refused write must
+                # not consume the budget it was refused for. The order matters
+                # more here than it looks, because the counter this charges is
+                # the one over-plan mode is computed FROM — charging first
+                # would let a refused write push the tenant further over.
+                if refuse := _check_plan_limit("create", tenant_id):
+                    return _with_latency(refuse, t0)
                 if charges_write_quota("create"):
                     await check_and_increment(tenant_id, "write")
                 result = await create_memory(
@@ -1295,11 +1341,18 @@ async def caura_write(
             for _idx, _item in enumerate(bulk_items):
                 if refuse := _refuse_reserved_memory_type(_item.memory_type, index=_idx):
                     return _with_latency(refuse, t0)
-            # The batch twin of the single-write observation above. This is the
-            # path where an over-plan tenant can add the most rows per call, so
+            # The batch twin of the single-write gate above. This is the path
+            # where an over-plan tenant can add the most rows per call, so
             # leaving it out would have made the numbers read low in exactly
-            # the direction that matters.
-            _observe_plan_limit("bulk_create", tenant_id)
+            # the direction that matters — and, now that it can refuse, would
+            # leave the largest writes as the ones that got through.
+            #
+            # Refuses the WHOLE batch rather than trimming it to what fits.
+            # A partial batch would report success for a call that did not do
+            # what it was asked, and the caller has no way to tell which items
+            # landed; REST's bulk route refuses whole for the same reason.
+            if refuse := _check_plan_limit("bulk_create", tenant_id):
+                return _with_latency(refuse, t0)
             # One unit per item, mirroring REST's ``POST /memories/bulk``, which
             # charges ``len(body.items)`` before the write. Before this the path
             # charged nothing at all (caura-ai/caura#1220).
@@ -1312,10 +1365,15 @@ async def caura_write(
             #
             # ``meters_mcp_bulk_write()`` is off by default. It is a billing
             # switch, not a correctness one — see its docstring. While it is
-            # off, the caveat on ``_observe_plan_limit`` still stands: the
+            # off, the caveat on ``_check_plan_limit`` still stands: the
             # counters this would move are the ones over-plan mode is computed
             # from, so a quiet observation log is not evidence that nothing
-            # would be refused.
+            # would be refused — and now not evidence that nothing WILL be,
+            # since the gate above can refuse on a verdict this path never
+            # contributed to.
+            #
+            # Unreachable while the plan-limit gate refuses, which is the point:
+            # a refused batch charges nothing.
             if charges_write_quota("bulk_create") and meters_mcp_bulk_write():
                 await bulk_check_and_increment(tenant_id, len(bulk_items))
             bulk_data = BulkMemoryCreate(

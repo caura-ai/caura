@@ -98,12 +98,14 @@ OperationType = Literal["write", "search", "recall", "insights", "evolve"]
 # would reduce usage and reactivating really would raise it, and this verb stops
 # being safe to treat as one thing — it would need to discriminate on the
 # ``old_status -> new_status`` pair. Note that such a fix is only implementable
-# on REST today — but not for the reason this comment used to give. It said MCP
-# "cannot see plan-limit mode at all"; MCP can see it now and simply does not
-# refuse on it (see below). The conclusion is unchanged and the reason is not:
-# gating one direction there would still rebuild the exact surface drift this
-# table exists to close, because a gate MCP observes but never enforces is not
-# a gate.
+# on REST today, and the reason has now moved twice. It first said MCP "cannot
+# see plan-limit mode at all" (false since the middleware started reading the
+# header), then that MCP sees it but never refuses (false since
+# ``enforce_mcp_plan_limits`` landed). What is left is narrower and flag-shaped:
+# MCP refuses only when that setting is ON, so a direction-discriminating gate
+# added here would hold on both surfaces with it on, and rebuild the exact
+# surface drift this table exists to close with it off. Until the flag is the
+# default, treat such a gate as REST-only.
 #
 # ``enforce_read_only()`` is NEITHER axis. That is the demo-mode gate, a
 # separate question, and it stays on the transition route.
@@ -121,25 +123,26 @@ WRITE_QUOTA_OPS: frozenset[str] = frozenset({"create", "bulk_create", "update", 
 # Ops refused when the org is over its plan limit. A subset of the above minus
 # ``update`` — see the note on it.
 #
-# STILL REST-ONLY IN PRACTICE, BUT NO LONGER FOR THE REASON THIS COMMENT USED TO
-# GIVE. It said the MCP surface "has no read-only signal at all — the MCP
-# middleware never reads the gateway's ``x-org-read-only`` header". That was
-# true when written and is now false: ``MCPAuthMiddleware`` reads the header on
-# the gateway-verified path and ``mcp_server._is_org_read_only()`` exposes it.
+# ENFORCED ON BOTH SURFACES NOW, BUT NOT BY DEFAULT ON MCP. This comment has
+# been wrong twice in the same direction, so it is worth stating the history:
+# it first said MCP "has no read-only signal at all" (false once
+# ``MCPAuthMiddleware`` started reading ``x-org-read-only``), then that MCP sees
+# the signal but never refuses (false once ``enforce_mcp_plan_limits`` landed).
 #
-# What remains true is the part that matters for this table: no MCP tool
-# REFUSES on the signal yet. ``_observe_plan_limit`` consults this set and logs
-# ``mcp_plan_limit_would_refuse`` at WARNING without blocking, which is step one
-# of caura-ai/caura#1205 — deliberately staged that way, because enforcing takes
-# capability away from tenants who have it today and the blast radius should be
-# read off the logs rather than the support queue. So an op listed here is still
-# gated on REST and ungated on MCP, and ``transition`` is still deliberately NOT
-# listed.
+# Current state: ``mcp_server._check_plan_limit`` consults this set and returns
+# a refusal envelope when ``enforces_mcp_plan_limits()`` is on, or logs
+# ``mcp_plan_limit_would_refuse`` and allows the write when it is off — the
+# default. So an op listed here is gated on REST unconditionally and on MCP only
+# where that setting is enabled. ``transition`` is still deliberately NOT
+# listed, and while the flag is off the old asymmetry is still the shipped
+# behaviour for everything that is.
 #
-# The distinction is worth keeping straight because the stale version of this
-# comment is what #1205 was written from: it describes a missing signal, and the
-# work left is a missing refusal. ``redistribute`` is not exposed as an MCP tool,
-# so the observation covers every op on this list that MCP can actually reach.
+# ``redistribute`` is not exposed as an MCP tool, so this list's MCP-reachable
+# members are ``create`` and ``bulk_create``; both are wired.
+#
+# IF YOU EDIT THIS SET, the MCP side follows automatically — the call sites
+# consult ``plan_limit_gated`` rather than naming ops, so this stays the single
+# policy record.
 PLAN_LIMIT_GATED_OPS: frozenset[str] = frozenset({"create", "bulk_create", "redistribute"})
 
 # Typed so a mistyped verb is a mypy error at the call site rather than a
@@ -264,6 +267,36 @@ def recall_operation() -> OperationType:
     from core_api.config import settings
 
     return "recall" if settings.meter_recall_as_recall else "search"
+
+
+def enforces_mcp_plan_limits() -> bool:
+    """Whether the MCP surface REFUSES an over-plan write (caura-ai/caura#1205).
+
+    The signal has been readable on this surface since the middleware started
+    honouring ``x-org-read-only``; what was missing is the refusal.
+    ``_check_plan_limit`` logs what it would have refused and lets the write
+    through. This flag turns that observation into enforcement.
+
+    Gated for the same reason as the two flags above, and more sharply: those
+    change what is COUNTED, this changes what is ALLOWED. An over-plan tenant
+    that can write over MCP today stops being able to. That is the intended end
+    state — the same tenant is already refused on REST, and answering
+    differently per transport is the drift #1205 exists to close — but it takes
+    capability away, so it is a decision rather than a deploy side effect.
+
+    ``plan_limit_gated(op)`` is still consulted at the call site. This flag is
+    the deploy-time gate; that table remains the policy record.
+
+    INTERACTS WITH ``meters_mcp_bulk_write``. Over-plan mode is computed from
+    counters the MCP batch path does not move while that flag is off, so
+    enabling this one alone enforces a limit against counters this surface
+    barely contributes to. Enforcement will still fire — the counters are
+    per-org and REST moves them — but a quiet ``mcp_plan_limit_would_refuse``
+    log beforehand is not evidence the blast radius is small.
+    """
+    from core_api.config import settings
+
+    return settings.enforce_mcp_plan_limits
 
 
 def meters_mcp_bulk_write() -> bool:

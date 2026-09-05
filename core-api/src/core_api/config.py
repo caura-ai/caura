@@ -416,11 +416,32 @@ class Settings(BaseSettings):
     # Crossing it bites on REST FIRST. Over-plan mode is computed from these
     # counters and stamped as ``x-org-read-only``, which core-api turns into a
     # 403 on ~22 REST write routes — while the MCP surface only OBSERVES it
-    # (see ``_observe_plan_limit``). So enabling this can refuse a tenant's
+    # (see ``_check_plan_limit``). So enabling this can refuse a tenant's
     # REST writes because of what it wrote over MCP. That is the intended end
     # state, but it is not a deploy side effect. Off = the historical (unbilled)
     # behavior. See caura-ai/caura#1220.
     meter_mcp_bulk_writes: bool = False
+    # Refuse MCP writes when the org is over its plan limit, as the ~22 REST
+    # write routes already do. Off by default, and this is the sharpest of the
+    # three flags above it: the other two change what is COUNTED, this one
+    # changes what is ALLOWED. Flipping it takes away a capability tenants have
+    # today — an over-plan org that can currently write over MCP stops being
+    # able to — so it is a deliberate, announced change, not a deploy side
+    # effect. Off = observe and log only (``_check_plan_limit``).
+    #
+    # It is a flag rather than a straight code change so the rollout is
+    # reversible without a redeploy: enable it, watch
+    # ``mcp_plan_limit_refused``, and turn it off again if the blast radius is
+    # wrong. A code-only change would need a rollback to undo.
+    #
+    # Read ``_check_plan_limit``'s docstring before enabling. A quiet
+    # observation log is NOT evidence that nothing will be refused — the
+    # counters over-plan mode is computed from barely move for MCP-first
+    # tenants while ``meter_mcp_bulk_writes`` is off, which is the population
+    # this refusal is aimed at. The two flags interact: turning THIS on while
+    # that one is off enforces a limit against counters the MCP surface hardly
+    # contributes to. See caura-ai/caura#1205.
+    enforce_mcp_plan_limits: bool = False
     stm_backend: str = "memory"  # memory | redis
     stm_notes_ttl: int = 86400  # 24h
     stm_bulletin_ttl: int = 172800  # 48h
