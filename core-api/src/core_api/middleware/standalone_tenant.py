@@ -154,11 +154,25 @@ def _body_model_accepts_tenant_id(scope) -> bool:
         return True
     method = scope.get("method", "").lower()
     path = scope.get("path", "")
-    return not any(methods and method in methods and pattern.match(path) for pattern, methods in skip)
+    # Two passes. A placeholder is one path segment first, which is what
+    # the template says. The schema cannot say that a parameter was declared
+    # ``{slug:path}`` and so carries slashes (the skills-inbox actions take a
+    # Forge slug, ``forge/<name>``), so a path no template matched one
+    # segment at a time is matched again with placeholders spanning slashes.
+    # The second pass is bounded by the literal segments around each
+    # placeholder and by the anchors, and it runs only when the first found
+    # nothing, so a route the first pass resolves keeps its answer.
+    for across_slashes in (False, True):
+        for strict, loose, methods in skip:
+            pattern = loose if across_slashes else strict
+            if methods and method in methods and pattern.match(path):
+                return False
+    return True
 
 
-# ``id(app)`` -> tuple of (compiled path regex, frozenset of lowercase methods)
-# for the operations whose JSON body schema has no ``tenant_id`` property.
+# ``id(app)`` -> tuple of (one-segment path regex, across-slashes path regex,
+# frozenset of lowercase methods) for the operations whose JSON body schema
+# has no ``tenant_id`` property.
 # Memoised because it is derived from a schema that cannot change after
 # startup; keyed by app identity so a test that builds a second app is correct
 # rather than merely fast.
@@ -192,7 +206,13 @@ def _no_tenant_id_body_routes(app) -> tuple | None:
                 if "tenant_id" not in resolved["properties"]:
                     methods.add(method.lower())
             if methods:
-                entries.append((_path_template_to_regex(raw_path), frozenset(methods)))
+                entries.append(
+                    (
+                        _path_template_to_regex(raw_path),
+                        _path_template_to_regex(raw_path, across_slashes=True),
+                        frozenset(methods),
+                    )
+                )
         result: tuple | None = tuple(entries)
     except Exception:  # pragma: no cover — never break requests over this
         result = None
@@ -218,10 +238,17 @@ def _resolve_schema(node: dict, components: dict) -> dict | None:
     return node
 
 
-def _path_template_to_regex(template: str):
-    """``/api/v1/memories/{memory_id}`` -> a pattern matching one concrete path."""
+def _path_template_to_regex(template: str, *, across_slashes: bool = False):
+    """``/api/v1/memories/{memory_id}`` -> a pattern matching one concrete path.
+
+    A placeholder matches one segment, or, with ``across_slashes``, any
+    non-empty run of characters including slashes: the shape of a parameter
+    declared with the ``:path`` converter, which the OpenAPI template renders
+    as a plain ``{name}``.
+    """
     parts = re.split(r"(\{[^/}]*\})", template)
-    pattern = "".join("[^/]+" if p.startswith("{") and p.endswith("}") else re.escape(p) for p in parts)
+    placeholder = ".+" if across_slashes else "[^/]+"
+    pattern = "".join(placeholder if p.startswith("{") and p.endswith("}") else re.escape(p) for p in parts)
     return re.compile(f"^{pattern}$")
 
 
