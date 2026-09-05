@@ -101,9 +101,22 @@ async def _write_private(client, headers, tenant_id, *, content, agent_id, fleet
 
 
 async def _setup(client, sc):
-    """Peer B holds a private memory; attacker A is trust-1 in another fleet."""
+    """Peer B holds a private memory; attacker A is trust-1 in another fleet.
+
+    Returns the seeded content as the query, NOT the bare nonce. Under the fake
+    embedding provider a vector is the sum of its words' hashes, so a one-word
+    query against six-word content scores a fresh random cosine on every
+    ``uuid4()`` — spanning -0.25 to 0.73, with 35% of draws below the 0.3
+    relevance floor. That made the row unretrievable at random and the parity
+    test below a coin flip (#1301). Querying the whole content pins the cosine
+    at 1.0; the nonce still isolates the row within the shared tenant.
+
+    These tests are about WHO may read a row, so retrieval must not be the
+    variable. Anything asserting a rank or a floor belongs in a search test.
+    """
     tenant_id, headers = get_test_auth()
     nonce = f"h06-{uuid.uuid4().hex}"
+    content = f"{nonce} peer B private scope_agent memory"
     peer = f"peer-b-{_uid()}"
     attacker = f"agent-a-{_uid()}"
     await _seed_agent(sc, tenant_id, peer, fleet_id=f"fleet-f2-{_uid()}", trust=3)
@@ -112,11 +125,11 @@ async def _setup(client, sc):
         client,
         headers,
         tenant_id,
-        content=f"{nonce} peer B private scope_agent memory",
+        content=content,
         agent_id=peer,
         fleet_id=None,
     )
-    return tenant_id, headers, nonce, peer, attacker
+    return tenant_id, headers, content, peer, attacker
 
 
 # ---------------------------------------------------------------------------
@@ -132,12 +145,12 @@ async def test_recall_refuses_a_filter_agent_id_that_is_not_the_caller(
     Agent A names peer B. Pre-fix that made B the visibility identity, so B's
     ``scope_agent`` content came back to A.
     """
-    tenant_id, _, nonce, peer, attacker = await _setup(client, sc)
+    tenant_id, _, query, peer, attacker = await _setup(client, sc)
     as_auth(tenant_id, attacker)
 
     resp = await client.post(
         "/api/v1/recall",
-        json={"tenant_id": tenant_id, "query": nonce, "filter_agent_id": peer},
+        json={"tenant_id": tenant_id, "query": query, "filter_agent_id": peer},
     )
     assert resp.status_code == 403, (
         f"recall let an agent name a peer; body={resp.text[:400]}"
@@ -157,12 +170,12 @@ async def test_recall_refuses_a_caller_agent_id_that_is_not_the_caller(
     ``filter_agent_id`` would have left the hole open under a different field
     name. Fails without the fix.
     """
-    tenant_id, _, nonce, peer, attacker = await _setup(client, sc)
+    tenant_id, _, query, peer, attacker = await _setup(client, sc)
     as_auth(tenant_id, attacker)
 
     resp = await client.post(
         "/api/v1/recall",
-        json={"tenant_id": tenant_id, "query": nonce, "caller_agent_id": peer},
+        json={"tenant_id": tenant_id, "query": query, "caller_agent_id": peer},
     )
     assert resp.status_code == 403, resp.text
     assert "does not match the authenticated agent identity" in resp.text
@@ -170,12 +183,12 @@ async def test_recall_refuses_a_caller_agent_id_that_is_not_the_caller(
 
 async def test_recall_allows_an_agent_naming_itself(client, sc, as_auth):
     """The gate must not over-refuse: naming yourself is the normal case."""
-    tenant_id, _, nonce, _peer, attacker = await _setup(client, sc)
+    tenant_id, _, query, _peer, attacker = await _setup(client, sc)
     as_auth(tenant_id, attacker)
 
     resp = await client.post(
         "/api/v1/recall",
-        json={"tenant_id": tenant_id, "query": nonce, "filter_agent_id": attacker},
+        json={"tenant_id": tenant_id, "query": query, "filter_agent_id": attacker},
     )
     assert resp.status_code == 200, resp.text
 
@@ -186,12 +199,12 @@ async def test_recall_tenant_key_may_still_name_any_agent(client, sc, as_auth):
     Pins the scope of the guard. Closing the hole by refusing every named agent
     would break the dashboard and every tenant-key integration.
     """
-    tenant_id, _, nonce, peer, _attacker = await _setup(client, sc)
+    tenant_id, _, query, peer, _attacker = await _setup(client, sc)
     as_auth(tenant_id, None)  # tenant-scoped: no agent identity
 
     resp = await client.post(
         "/api/v1/recall",
-        json={"tenant_id": tenant_id, "query": nonce, "filter_agent_id": peer},
+        json={"tenant_id": tenant_id, "query": query, "filter_agent_id": peer},
     )
     assert resp.status_code == 200, resp.text
 
@@ -230,7 +243,7 @@ async def test_recall_binds_an_omitted_filter_to_the_authenticated_agent(
     # call happened to leave. #995 patched this seam for this reason.
     from core_api.services import memory_service
 
-    tenant_id, _, nonce, _peer, attacker = await _setup(client, sc)
+    tenant_id, _, query, _peer, attacker = await _setup(client, sc)
     as_auth(tenant_id, attacker)
 
     seen: dict = {}
@@ -243,7 +256,7 @@ async def test_recall_binds_an_omitted_filter_to_the_authenticated_agent(
 
     resp = await client.post(
         "/api/v1/recall",
-        json={"tenant_id": tenant_id, "query": nonce},  # no filter, no caller
+        json={"tenant_id": tenant_id, "query": query},  # no filter, no caller
     )
     assert resp.status_code == 200, resp.text
     assert seen, "search_memories was never reached — test is vacuous"
@@ -277,10 +290,10 @@ async def test_recall_honours_caller_agent_id_as_the_visibility_identity(
     hardcoded expectation, so the test states the contract the findings are
     actually about.
     """
-    tenant_id, _headers, nonce, peer, _attacker = await _setup(client, sc)
+    tenant_id, _headers, query, peer, _attacker = await _setup(client, sc)
     as_auth(tenant_id, None)
 
-    body = {"tenant_id": tenant_id, "query": nonce, "caller_agent_id": peer}
+    body = {"tenant_id": tenant_id, "query": query, "caller_agent_id": peer}
 
     search = await client.post("/api/v1/search", json=body)
     assert search.status_code == 200, search.text
