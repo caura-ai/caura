@@ -382,6 +382,24 @@ _LINK_REJECTED = "entity link rejected: memory_id or entity_id does not exist, o
 # that HAS a hash to attest, it means a writer dropped it.
 PROVENANCE_REQUIRED_FROM = datetime(2026, 8, 17, tzinfo=UTC)
 
+# The same rule as SQL, for an operator to paste. These rows are reachable by
+# no sweep and no endpoint, so whatever alerts on the count has to hand over a
+# query or the number is unactionable.
+#
+# Built from the constant above rather than written out, and shipped in the
+# coverage response rather than composed by the consumer. core-operations is a
+# separate deployable with no import path into this module, so a literal there
+# could not be kept honest by anything: the date would drift the first time
+# this constant moved, and the alert would name a query that no longer matches
+# what it counted. Deriving it here means there is one date in one place, and
+# ``test_predicate_string_is_derived_from_the_constant`` fails if this string
+# stops agreeing with the filter it describes.
+MISSING_PROVENANCE_PREDICATE_SQL = (
+    "embedding IS NOT NULL AND embedded_content_hash IS NULL "
+    "AND content_hash IS NOT NULL "
+    f"AND created_at >= '{PROVENANCE_REQUIRED_FROM.date().isoformat()}'"
+)
+
 
 class _CoverageCounts(NamedTuple):
     """The four embedding-coverage buckets, as FILTER'd count expressions.

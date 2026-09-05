@@ -379,3 +379,33 @@ async def test_missing_provenance_excludes_the_innocent_cases(engine):
         "with no content_hash, or the alert fires on a healthy deployment"
     )
     assert missing == 1, "row 4 has no vector at all"
+
+
+def test_predicate_string_is_derived_from_the_constant():
+    """The operator-facing query must describe the filter that produced the count.
+
+    ``MISSING_PROVENANCE_PREDICATE_SQL`` is handed to whoever alerts on
+    ``missing_provenance`` so a human can reproduce the number. It is a string,
+    so nothing makes it agree with the ORM filter beside it — and the two live
+    ten lines apart today but are consumed by different services.
+
+    No database: this asserts the string is built FROM the constant rather than
+    restating it, which is the only property that keeps them from drifting when
+    the cutoff moves.
+    """
+    from core_storage_api.services import postgres_service as ps
+
+    assert ps.PROVENANCE_REQUIRED_FROM.date().isoformat() in ps.MISSING_PROVENANCE_PREDICATE_SQL, (
+        "the predicate string does not name the cutoff it is built from; an "
+        "operator pasting it would count a different population than the alert did"
+    )
+    # The three carve-outs that make this bucket alertable at all must each be
+    # visible in the query an operator is handed, or they will reproduce the
+    # broad ``unknown_provenance`` count and conclude the alert was wrong.
+    for term in (
+        "embedding IS NOT NULL",
+        "embedded_content_hash IS NULL",
+        "content_hash IS NOT NULL",
+        "created_at >=",
+    ):
+        assert term in ps.MISSING_PROVENANCE_PREDICATE_SQL, f"predicate omits {term!r}"

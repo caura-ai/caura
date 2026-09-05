@@ -156,12 +156,20 @@ def _alert_on_missing_provenance(coverage: dict, tenants: list[dict]) -> None:
                 {"tenant_id": t.get("tenant_id"), "missing_provenance": t.get("missing_provenance")}
                 for t in worst
             ],
-            # Names the query an operator should run, since these rows are
-            # reachable by no existing sweep or endpoint.
-            "predicate": (
-                "embedding IS NOT NULL AND embedded_content_hash IS NULL "
-                "AND content_hash IS NOT NULL AND created_at >= '2026-08-17'"
-            ),
+            # The query an operator should run — these rows are reachable by no
+            # existing sweep or endpoint, so the count alone is unactionable.
+            #
+            # Echoed from the response, never composed here. This service is a
+            # separate deployable with no import path into core-storage-api, so
+            # a literal would be kept honest by nothing: it would drift the
+            # first time the cutoff date moved, and the alert would then name a
+            # query that does not reproduce the number printed beside it.
+            #
+            # ``None`` if the storage service predates the field — which is the
+            # honest degradation during a rolling deploy. A missing hint costs
+            # an operator one lookup; a confidently wrong one costs them the
+            # investigation.
+            "predicate": coverage.get("missing_provenance_predicate"),
         },
     )
 

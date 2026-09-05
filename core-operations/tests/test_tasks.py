@@ -248,6 +248,12 @@ def _coverage_body(tenants: list[dict]) -> dict:
         "tenants_with_missing": sum(1 for t in tenants if t["missing_embeddings"]),
         "missing_provenance": sum(t.get("missing_provenance", 0) for t in tenants),
         "tenants_with_missing_provenance": sum(1 for t in tenants if t.get("missing_provenance", 0)),
+        # The real endpoint always serves this. Tests that care about its
+        # absence pop it explicitly rather than relying on a default.
+        "missing_provenance_predicate": (
+            "embedding IS NOT NULL AND embedded_content_hash IS NULL "
+            "AND content_hash IS NOT NULL AND created_at >= '2026-08-17'"
+        ),
     }
 
 
@@ -523,3 +529,73 @@ async def test_missing_provenance_tenant_gets_a_per_tenant_line(monkeypatch, cap
     per_tenant = _records(caplog, "embedding coverage tenant")
     assert [r.tenant_id for r in per_tenant] == ["t-prov-only"]
     assert per_tenant[0].missing_provenance == 3
+
+
+@pytest.mark.asyncio
+async def test_alert_echoes_the_served_predicate_rather_than_a_local_literal(monkeypatch, caplog):
+    """The query in the alert must come from whoever ran it.
+
+    core-operations is a separate deployable with no import path into
+    core-storage-api, so a predicate literal here would be kept honest by
+    nothing — it would drift silently the first time the cutoff date moved, and
+    the alert would name a query that does not reproduce the count beside it.
+
+    Asserted with a deliberately unreal predicate: a hardcoded implementation
+    would emit its own plausible-looking string and pass a laxer check.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    served = "SERVED BY STORAGE: created_at >= '2099-01-01'"
+    body = _coverage_body(
+        [
+            {
+                "tenant_id": "t-x",
+                "total_active": 5,
+                "missing_embeddings": 0,
+                "missing_provenance": 2,
+                "coverage_pct": 100.0,
+            },
+        ]
+    )
+    body["missing_provenance_predicate"] = served
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_embedding_coverage_tick()
+
+    alerts = _records(caplog, "memories embedded without provenance; a writer is dropping content_hash")
+    assert alerts[0].predicate == served
+
+
+@pytest.mark.asyncio
+async def test_alert_survives_a_storage_service_without_the_predicate(monkeypatch, caplog):
+    """A rolling deploy must not cost the alert.
+
+    An older storage service omits the field. The count is still correct and
+    still worth escalating, so the alert fires with no query attached rather
+    than being suppressed or crashing the tick. A missing hint costs an
+    operator one lookup; suppressing the alert costs them the incident.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    body = _coverage_body(
+        [
+            {
+                "tenant_id": "t-x",
+                "total_active": 5,
+                "missing_embeddings": 0,
+                "missing_provenance": 2,
+                "coverage_pct": 100.0,
+            },
+        ]
+    )
+    body.pop("missing_provenance_predicate", None)
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_embedding_coverage_tick()
+
+    alerts = _records(caplog, "memories embedded without provenance; a writer is dropping content_hash")
+    assert len(alerts) == 1, "the alert must still fire without the predicate field"
+    assert alerts[0].missing_provenance == 2
+    assert alerts[0].predicate is None

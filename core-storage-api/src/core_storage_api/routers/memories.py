@@ -23,6 +23,7 @@ from core_storage_api.observability import bind_timer, log_request
 from core_storage_api.routers._validation import _require, _require_dict
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
+    MISSING_PROVENANCE_PREDICATE_SQL,
     BulkValidationError,
     PostgresService,
 )
@@ -894,6 +895,12 @@ async def get_embedding_coverage_all() -> dict:
         # can be alerted on directly instead of trended.
         "missing_provenance": sum(r["missing_provenance"] for r in rows),
         "tenants_with_missing_provenance": sum(1 for r in rows if r["missing_provenance"]),
+        # The query that reproduces the count above. Served rather than
+        # composed by the caller: core-operations, which alerts on this, is a
+        # separate deployable and a literal there would drift the first time
+        # the cutoff moved — naming a query that no longer matches the number
+        # beside it.
+        "missing_provenance_predicate": MISSING_PROVENANCE_PREDICATE_SQL,
     }
 
 
