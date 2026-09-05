@@ -163,6 +163,26 @@ def test_health():
     assert make_client(handler).health()["status"] == "ok"
 
 
+def test_health_raises_auth_error_on_401():
+    def handler(request):
+        assert request.url.path == "/api/v1/health"
+        return httpx.Response(401, json={"detail": "invalid api key"})
+
+    with pytest.raises(AuthError) as exc:
+        make_client(handler).health()
+    assert exc.value.status_code == 401
+
+
+def test_health_raises_api_error_on_503():
+    def handler(request):
+        assert request.url.path == "/api/v1/health"
+        return httpx.Response(503, json={"detail": "database unavailable"})
+
+    with pytest.raises(CauraAPIError) as exc:
+        make_client(handler).health()
+    assert exc.value.status_code == 503
+
+
 def test_auth_error_parses_envelope():
     def handler(request):
         return httpx.Response(403, json={"error": {"message": "cross-fleet", "details": {"x": 1}}})
