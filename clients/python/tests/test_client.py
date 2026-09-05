@@ -163,6 +163,14 @@ def test_health():
     assert make_client(handler).health()["status"] == "ok"
 
 
+def test_health_raises_on_http_error():
+    def handler(request):
+        return httpx.Response(503, json={"message": "unavailable"})
+
+    with pytest.raises(CauraAPIError):
+        make_client(handler).health()
+
+
 def test_auth_error_parses_envelope():
     def handler(request):
         return httpx.Response(403, json={"error": {"message": "cross-fleet", "details": {"x": 1}}})
