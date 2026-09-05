@@ -55,6 +55,21 @@ def _env_key(provider: str) -> str:
     return ""
 
 
+def _env_base_url(provider: str) -> str:
+    """Return an env-var override for a provider's base URL, or '' if unset.
+
+    Lets the chat LLM path target any OpenAI-compatible endpoint without code
+    changes; the module constant is the fallback when no override is set.
+    """
+    if provider == ProviderName.OPENAI:
+        return os.environ.get("OPENAI_BASE_URL", "")
+    if provider == ProviderName.ANTHROPIC:
+        return os.environ.get("ANTHROPIC_BASE_URL", "")
+    if provider == ProviderName.OPENROUTER:
+        return os.environ.get("OPENROUTER_BASE_URL", "")
+    return ""
+
+
 def has_credentials(provider: str, tenant_config: object | None = None) -> bool:
     """Check whether credentials are available for *provider*.
 
@@ -87,7 +102,7 @@ def resolve_openai_compatible(
             or _env_key(ProviderName.OPENAI)
             or ""
         )
-        return key, OPENAI_CHAT_BASE_URL, LLM_FALLBACK_MODEL_OPENAI
+        return key, _env_base_url(ProviderName.OPENAI) or OPENAI_CHAT_BASE_URL, LLM_FALLBACK_MODEL_OPENAI
 
     if provider == ProviderName.ANTHROPIC:
         key = (
@@ -99,7 +114,7 @@ def resolve_openai_compatible(
             or _env_key(ProviderName.ANTHROPIC)
             or ""
         )
-        return key, ANTHROPIC_CHAT_BASE_URL, ANTHROPIC_DEFAULT_MODEL
+        return key, _env_base_url(ProviderName.ANTHROPIC) or ANTHROPIC_CHAT_BASE_URL, ANTHROPIC_DEFAULT_MODEL
 
     if provider == ProviderName.OPENROUTER:
         key = (
@@ -111,7 +126,7 @@ def resolve_openai_compatible(
             or _env_key(ProviderName.OPENROUTER)
             or ""
         )
-        return key, OPENROUTER_CHAT_BASE_URL, OPENROUTER_DEFAULT_MODEL
+        return key, _env_base_url(ProviderName.OPENROUTER) or OPENROUTER_CHAT_BASE_URL, OPENROUTER_DEFAULT_MODEL
 
     return "", "", ""
 
