@@ -212,8 +212,11 @@ async def test_identity_headers_ignored_without_tenant_header(monkeypatch):
 #
 # The gateway computes "over plan" from the persisted counters and stamps this
 # header; REST turns it into a 403 via ``AuthContext.is_read_only``. The MCP
-# middleware never read it, so no MCP tool could see plan-limit mode at all
-# (caura-ai/caura#1205).
+# middleware did not read it at all before caura-ai/caura#1205, which is why
+# these tests exist; it does now, and refuses on it when
+# ``enforce_mcp_plan_limits`` is on. What is tested HERE is only that the value
+# is trusted on the gateway path and not off it — the refusal itself lives in
+# ``test_mcp_plan_limit_enforcement.py``.
 #
 # The risk here runs the OPPOSITE way to the identity headers above. There,
 # self-assertion buys access; here, a direct caller simply OMITTING the header
