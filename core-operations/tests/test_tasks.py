@@ -234,11 +234,20 @@ async def test_embed_backfill_tick_posts_to_fanout(monkeypatch: pytest.MonkeyPat
 
 
 def _coverage_body(tenants: list[dict]) -> dict:
+    """Mirror the aggregate endpoint's shape, including the derived totals.
+
+    Summed here rather than passed in so a test cannot state a total that
+    disagrees with its own per-tenant rows — the endpoint derives both from one
+    query, and a fixture that let them diverge could assert behaviour the
+    service can never actually see.
+    """
     return {
         "tenants": tenants,
         "total_active": sum(t["total_active"] for t in tenants),
         "missing_embeddings": sum(t["missing_embeddings"] for t in tenants),
         "tenants_with_missing": sum(1 for t in tenants if t["missing_embeddings"]),
+        "missing_provenance": sum(t.get("missing_provenance", 0) for t in tenants),
+        "tenants_with_missing_provenance": sum(1 for t in tenants if t.get("missing_provenance", 0)),
     }
 
 
@@ -394,3 +403,123 @@ async def test_embedding_coverage_tick_reports_stale_separately(monkeypatch, cap
     per_tenant = _records(caplog, "embedding coverage tenant")
     assert [r.tenant_id for r in per_tenant] == ["t-stale"]
     assert per_tenant[0].stale_embeddings == 7
+
+
+# ---------------------------------------------------------------------------
+# missing_provenance — the one coverage bucket with a correct value (zero)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_missing_provenance_raises_an_error_line(monkeypatch, caplog):
+    """A single un-provenanced row must escalate, with no threshold to cross.
+
+    This is the signal that was absent when 241 production rows accumulated
+    over a week in 2026-09. The bucket that held them was logged at INFO and
+    explicitly documented as not worth alerting on, because its level
+    legitimately sits in the tens of thousands of pre-037 rows.
+    ``missing_provenance`` removes the innocent explanations, so its correct
+    value is zero and one row is already a defect.
+
+    ERROR, not WARNING: no sweep can reach these rows — both embedding
+    backfills select ``embedding IS NULL`` and these have a vector — so nothing
+    drains them without a person.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    body = _coverage_body(
+        [
+            {
+                "tenant_id": "t-dropping",
+                "total_active": 100,
+                "missing_embeddings": 0,
+                "missing_provenance": 1,
+                "coverage_pct": 100.0,
+            },
+        ]
+    )
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_embedding_coverage_tick()
+
+    alerts = _records(caplog, "memories embedded without provenance; a writer is dropping content_hash")
+    assert len(alerts) == 1, "one un-provenanced row must raise an alert"
+    assert alerts[0].levelname == "ERROR"
+    assert alerts[0].missing_provenance == 1
+    assert alerts[0].tenants_affected == 1
+    assert alerts[0].worst_tenants == [{"tenant_id": "t-dropping", "missing_provenance": 1}]
+    # The rows are reachable by no sweep or endpoint, so the alert has to carry
+    # the query an operator would otherwise have to reconstruct.
+    assert "embedded_content_hash IS NULL" in alerts[0].predicate
+
+
+@pytest.mark.asyncio
+async def test_no_alert_when_provenance_is_complete(monkeypatch, caplog):
+    """A deployment full of legitimate pre-037 rows must stay quiet.
+
+    The distinction the whole change rests on: ``unknown_provenance`` in the
+    tens of thousands is normal and must not alert, while ``missing_provenance``
+    of one must. A fixture with a large ``unknown_provenance`` and zero
+    ``missing_provenance`` is exactly the shape of a healthy production
+    deployment today, and an alert here would be the false positive that gets
+    the alert switched off.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    body = _coverage_body(
+        [
+            {
+                "tenant_id": "t-legacy",
+                "total_active": 100_000,
+                "missing_embeddings": 0,
+                "missing_provenance": 0,
+                "coverage_pct": 100.0,
+            },
+        ]
+    )
+    body["unknown_provenance"] = 95_070
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_embedding_coverage_tick()
+
+    assert not _records(caplog, "memories embedded without provenance; a writer is dropping content_hash"), (
+        "95k legitimate pre-037 rows must not alert"
+    )
+    total = _records(caplog, "embedding coverage total")
+    assert total[0].unknown_provenance == 95_070
+    assert total[0].missing_provenance == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_provenance_tenant_gets_a_per_tenant_line(monkeypatch, caplog):
+    """An alert with no per-tenant line would name a number and no owner.
+
+    The per-tenant filter previously keyed on ``missing_embeddings or
+    stale_embeddings``. A tenant whose only defect is dropped provenance has
+    neither, so it would have been filtered out — leaving the alert above
+    firing with nothing underneath it to act on.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    body = _coverage_body(
+        [
+            {
+                "tenant_id": "t-prov-only",
+                "total_active": 10,
+                "missing_embeddings": 0,
+                "stale_embeddings": 0,
+                "missing_provenance": 3,
+                "coverage_pct": 100.0,
+            },
+        ]
+    )
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_embedding_coverage_tick()
+
+    per_tenant = _records(caplog, "embedding coverage tenant")
+    assert [r.tenant_id for r in per_tenant] == ["t-prov-only"]
+    assert per_tenant[0].missing_provenance == 3

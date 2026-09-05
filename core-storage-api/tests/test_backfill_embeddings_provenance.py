@@ -164,9 +164,13 @@ async def test_row_does_not_land_in_the_unswept_population(engine, monkeypatch):
 
     await _run(engine, _memories_spec(), isolated_tenant)
 
-    _total, _missing, _stale, unknown = await PostgresService().memory_embedding_coverage_for_tenant(
-        isolated_tenant
-    )
+    (
+        _total,
+        _missing,
+        _stale,
+        unknown,
+        _missing_prov,
+    ) = await PostgresService().memory_embedding_coverage_for_tenant(isolated_tenant)
     assert unknown == 0, f"{unknown} row(s) moved into the population nothing sweeps"
 
 
@@ -306,3 +310,72 @@ async def test_hint_rewrite_replaces_stale_provenance(engine, tenant_id, monkeyp
         "text the NEW vector was built from, not whatever the old one claimed"
     )
     assert provenance != stale_stamp
+
+
+@pytest.mark.integration
+async def test_missing_provenance_excludes_the_innocent_cases(engine):
+    """The alertable bucket must hold only rows with no honest explanation.
+
+    ``unknown_provenance`` cannot be alerted on: its level legitimately sits in
+    the tens of thousands of pre-037 rows. ``missing_provenance`` is the same
+    predicate with three carve-outs, and every one has to hold or the alert
+    becomes a false positive on a healthy deployment — which is how an alert
+    gets switched off and the next defect goes unseen.
+
+    * a row created BEFORE migration 037 predates provenance entirely
+    * a row with no ``content_hash`` has nothing to attest TO, so NULL is the
+      honest value — core-worker's backfill legitimately publishes None
+    * a row with no embedding has nothing to attest ABOUT
+
+    Seeds one of each beside a genuine defect and asserts the buckets split.
+    """
+    from datetime import UTC, datetime
+
+    from core_storage_api.services.postgres_service import PostgresService
+
+    t = f"test-prov-buckets-{uuid.uuid4().hex[:8]}"
+    async with engine.connect() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO memories "
+                "(id, tenant_id, agent_id, memory_type, content, content_hash, "
+                " embedded_content_hash, embedding, created_at) VALUES "
+                # 1. genuine defect: post-037, has a hash, has a vector, attests nothing
+                "(:i1, :t, 'a', 'fact', 'defect', 'h1', NULL, (:emb)::vector, :recent), "
+                # 2. pre-037: provenance did not exist yet
+                "(:i2, :t, 'a', 'fact', 'legacy', 'h2', NULL, (:emb)::vector, :old), "
+                # 3. no content_hash: nothing to attest TO
+                "(:i3, :t, 'a', 'fact', 'nohash', NULL, NULL, (:emb)::vector, :recent), "
+                # 4. no embedding: nothing to attest ABOUT
+                "(:i4, :t, 'a', 'fact', 'novec', 'h4', NULL, NULL, :recent)"
+            ),
+            {
+                "i1": uuid.uuid4(),
+                "i2": uuid.uuid4(),
+                "i3": uuid.uuid4(),
+                "i4": uuid.uuid4(),
+                "t": t,
+                "emb": str([0.3] * VECTOR_DIM_FAKE),
+                "recent": datetime(2026, 9, 1, tzinfo=UTC),
+                "old": datetime(2026, 8, 1, tzinfo=UTC),
+            },
+        )
+        await conn.commit()
+
+    (
+        _total,
+        missing,
+        _stale,
+        unknown,
+        missing_prov,
+    ) = await PostgresService().memory_embedding_coverage_for_tenant(t)
+
+    # All three embedded-but-unattested rows land in ``unknown`` — that bucket
+    # is deliberately broad, which is exactly why it cannot be alerted on.
+    assert unknown == 3, f"expected rows 1-3 in unknown_provenance, got {unknown}"
+    # Only row 1 has no innocent reading.
+    assert missing_prov == 1, (
+        f"missing_provenance={missing_prov}; it must exclude pre-037 rows and rows "
+        "with no content_hash, or the alert fires on a healthy deployment"
+    )
+    assert missing == 1, "row 4 has no vector at all"
