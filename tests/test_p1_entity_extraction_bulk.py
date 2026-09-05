@@ -74,6 +74,10 @@ def _build_sc_mock(
     links_returns: list[dict] | None = None,
 ) -> MagicMock:
     sc = MagicMock()
+    # H-02: the worker re-reads the memory before persisting, so nothing is
+    # written to the graph of a row governance dropped mid-extraction. These
+    # tests exercise a live row.
+    sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     sc.bulk_resolve_entities = AsyncMock(return_value=resolve_returns)
     sc.bulk_upsert_entities = AsyncMock(return_value=upsert_returns)
     sc.bulk_upsert_entity_links = AsyncMock(

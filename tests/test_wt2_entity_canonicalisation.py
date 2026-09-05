@@ -82,6 +82,10 @@ def _build_sc_mock(
     upsert_returns: list[dict],
 ) -> MagicMock:
     sc = MagicMock()
+    # H-02: the worker re-reads the memory before persisting, so a row dropped
+    # by governance while extraction was running gets nothing written to its
+    # graph. These tests are about canonicalisation, so the row is live.
+    sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     sc.bulk_resolve_entities = AsyncMock(return_value=resolve_returns)
     sc.bulk_upsert_entities = AsyncMock(return_value=upsert_returns)
     sc.bulk_upsert_entity_links = AsyncMock(
