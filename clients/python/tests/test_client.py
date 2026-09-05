@@ -155,6 +155,26 @@ def test_recall_ignores_the_key_the_server_never_sends():
     assert result.supporting_memories == []
 
 
+def test_recall_raises_on_non_dict_body():
+    def handler(request):
+        return httpx.Response(200, json=["not", "a", "dict"])
+
+    with pytest.raises(CauraAPIError) as exc:
+        make_client(handler).recall("q")
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] recall response must be a JSON object"
+
+
+def test_recall_raises_on_non_object_body():
+    def handler(request):
+        return httpx.Response(200, json="a plain string, not an object")
+
+    with pytest.raises(CauraAPIError) as exc:
+        make_client(handler).recall("q")
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] recall response must be a JSON object"
+
+
 def test_health():
     def handler(request):
         assert request.url.path == "/api/v1/health"

@@ -108,7 +108,10 @@ class Caura:
         """Search + LLM summary. Returns a ``RecallResult`` context brief (POST /api/v1/recall)."""
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "query": query, "top_k": top_k}
         body.update(extra)
-        return RecallResult.from_dict(self._post("/api/v1/recall", body))
+        data = self._post("/api/v1/recall", body)
+        if not isinstance(data, dict):
+            raise CauraAPIError(200, "recall response must be a JSON object")
+        return RecallResult.from_dict(data)
 
     def health(self) -> dict[str, Any]:
         """Liveness probe (GET /api/v1/health)."""

@@ -133,6 +133,26 @@ test("recall ignores the key the server never sends", async () => {
   assert.deepEqual(result.supportingMemories, []);
 });
 
+test("recall throws when 200 body is not an object", async () => {
+  const client = makeClient(() => jsonResponse(200, ["not", "a", "dict"]));
+  await assert.rejects(client.recall("q"), (err: unknown) => {
+    assert.ok(err instanceof CauraApiError);
+    assert.equal((err as CauraApiError).statusCode, 200);
+    assert.equal((err as CauraApiError).message, "[200] recall response must be a JSON object");
+    return true;
+  });
+});
+
+test("recall throws when 200 body is a bare scalar", async () => {
+  const client = makeClient(() => jsonResponse(200, "not an object"));
+  await assert.rejects(client.recall("q"), (err: unknown) => {
+    assert.ok(err instanceof CauraApiError);
+    assert.equal((err as CauraApiError).statusCode, 200);
+    assert.equal((err as CauraApiError).message, "[200] recall response must be a JSON object");
+    return true;
+  });
+});
+
 test("health hits /health", async () => {
   const client = makeClient((url) => {
     assert.equal(new URL(url).pathname, "/api/v1/health");

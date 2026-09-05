@@ -145,6 +145,9 @@ export class Caura {
   async recall(query: string, options: { topK?: number } = {}): Promise<RecallResult> {
     const body = { tenant_id: this.tenantId, query, top_k: options.topK ?? 5 };
     const data = await this.request("POST", "/api/v1/recall", body);
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new CauraApiError(200, "recall response must be a JSON object");
+    }
     // Wire key is `memories`; the server aliases the identical list under
     // `items` too, for consumers written against /search's shape.
     //
@@ -154,9 +157,10 @@ export class Caura {
     // test below mocked the invented shape so CI stayed green. The RESULT FIELD
     // keeps its name (`supportingMemories`) since that is published API; only
     // the wire key was wrong.
-    const supporting: unknown = data?.memories ?? data?.items;
+    const payload = data as Record<string, unknown>;
+    const supporting: unknown = payload.memories ?? payload.items;
     return {
-      summary: data?.summary ?? null,
+      summary: payload.summary ?? null,
       supportingMemories: Array.isArray(supporting)
         ? supporting.map((m) => toMemory(m as Record<string, any>))
         : [],
