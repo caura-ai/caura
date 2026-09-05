@@ -146,13 +146,47 @@ MEMORY_STATUSES_PATTERN = (
 )
 
 # ── Health / status probe timeouts ──
+# The storage pool's per-attempt connect ceiling (``storage_client._make_pool``
+# reads it from here). Named rather than inlined because PROBE_TIMEOUT_SECONDS
+# below has to stay ordered against it, and an ordering between two literals in
+# different modules is one nobody can see. It lives in this file, not beside the
+# pool, because ``storage_client`` imports ``config.settings`` at module scope —
+# so the validator that enforces the ordering cannot import from there without a
+# cycle (``config`` builds ``Settings()`` at import).
+#
+# NB both sibling HTTP clients sit at 15.0 (``OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS``,
+# ``EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS``), each raised from 5.0 after Cloud Run
+# VPC-connector cold connects overran it — the same failure class as the probe
+# flapping below. Whether storage should follow is deliberately NOT settled here:
+# this value governs every storage call, not just the probe.
+STORAGE_CONNECT_TIMEOUT_SECONDS = 5.0
+
 # Upper bound on a single dependency probe (storage / redis / event_bus).
-# Cloud Run typically gives health checks 10-30s before marking a revision
-# unhealthy; we want to fail-fast well before that so a stalled backend
-# can't hang the whole probe. Shared between ``/health`` (binary 503 deploy
-# gate) and ``/stats`` / ``/status`` (public endpoints with the same posture
-# — return ``0`` / "unreachable" rather than block landing-page hits).
-PROBE_TIMEOUT_SECONDS = 5.0
+# Shared between ``/health`` (binary 503 deploy gate) and ``/stats`` /
+# ``/status`` (public endpoints with the same posture — return ``0`` /
+# "unreachable" rather than block landing-page hits).
+#
+# MUST stay strictly above STORAGE_CONNECT_TIMEOUT_SECONDS, enforced at startup
+# by ``Settings._validate_timeout_ordering``. At 5.0 the two were EQUAL, so the
+# probe could absorb none of the five connect retries ``CONNECT_PHASE_MAX_ATTEMPTS``
+# deliberately grants — one slow connection setup and ``wait_for`` lost the race
+# by construction. In prod that reported ``storage: unreachable`` on ~0.8% of
+# probes while storage was healthy: the abandoned request, kept alive by
+# ``_cancel_safe``'s shield, completed 200 in ~30ms about 10ms after the probe
+# had already given up.
+#
+# 12.0 clears one connect attempt, a backoff and a second attempt (5.0 + ~0.22
+# + 5.0), so the probe reflects the resilience the client actually has instead
+# of failing ahead of its own first retry. That is above the 10s edge of the
+# "Cloud Run gives health checks 10-30s" window this comment used to cite as a
+# reason to stay well below it — which was never the operative constraint here:
+# this deployment configures no Cloud Run liveness or readiness probe at all
+# (TCP startupProbe only), so the consumers are the deploy gate, the compose
+# healthcheck (whose own ``timeout`` must exceed this — see docker-compose.yml)
+# and an external uptime monitor. The two I/O probes run concurrently, so this
+# is the ceiling for the whole call rather than a per-dependency budget to be
+# summed.
+PROBE_TIMEOUT_SECONDS = 12.0
 
 # Probe route paths, declared here rather than inline in ``routes/health.py``
 # so that exactly one string backs both the route decorator and the

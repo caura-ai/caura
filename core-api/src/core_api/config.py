@@ -506,6 +506,8 @@ class Settings(BaseSettings):
             BULK_EMBEDDING_TIMEOUT_SECONDS,
             BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
             BULK_STRONG_EMBED_TIMEOUT_SECONDS,
+            PROBE_TIMEOUT_SECONDS,
+            STORAGE_CONNECT_TIMEOUT_SECONDS,
         )
 
         if self.request_timeout_seconds < BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS:
@@ -622,6 +624,29 @@ class Settings(BaseSettings):
                 f"BULK_EMBEDDING_TIMEOUT_SECONDS ({BULK_EMBEDDING_TIMEOUT_SECONDS}s): the "
                 "opportunistic bulk strong-embed budget cannot exceed the required embed cap, "
                 "which the storage-phase ordering check above is proved against."
+            )
+        if PROBE_TIMEOUT_SECONDS <= STORAGE_CONNECT_TIMEOUT_SECONDS:
+            # A dependency probe must outlive ONE attempt of the call it makes,
+            # or it reports a healthy dependency as unreachable. These were both
+            # 5.0: equal, so the probe's ``wait_for`` and the transport's connect
+            # ceiling raced, and the probe could absorb none of the five connect
+            # retries ``CONNECT_PHASE_MAX_ATTEMPTS`` grants it. In prod that
+            # returned ``storage: unreachable`` on ~0.8% of probes while storage
+            # was answering the very same call in ~30ms — the abandoned request,
+            # shielded by ``_cancel_safe``, completed 200 about 10ms after the
+            # probe had already given up. A third party (Better Stack Uptime)
+            # polls this endpoint, so the false alarms left the estate.
+            #
+            # Checked here rather than only in a test because the probe's callers
+            # are operator-facing surfaces and this ordering is the kind that gets
+            # broken by tuning one number in isolation — the same rationale as the
+            # gate ordering above.
+            raise ValueError(
+                f"PROBE_TIMEOUT_SECONDS ({PROBE_TIMEOUT_SECONDS}s) must be > "
+                f"STORAGE_CONNECT_TIMEOUT_SECONDS ({STORAGE_CONNECT_TIMEOUT_SECONDS}s), or the "
+                "/health storage probe times out before its own transport has finished a "
+                "single connect attempt and reports a healthy dependency as unreachable. "
+                "Raise PROBE_TIMEOUT_SECONDS, or lower the storage connect ceiling."
             )
         return self
 
