@@ -265,6 +265,16 @@ async def _iter_rows(
     """
     from sqlalchemy import text
 
+    # Deferred like every other import in this module — the CLI keeps its
+    # startup light and avoids importing the service layer it deliberately
+    # does not depend on — but hoisted out of the pagination loop below, which
+    # would otherwise re-resolve it once per page.
+    #
+    # Imported rather than restated: the alert in core-operations counts the
+    # population this sweep repairs, and a second copy of the cutoff would let
+    # the two disagree about which rows are a defect.
+    from core_storage_api.services.postgres_service import PROVENANCE_REQUIRED_FROM
+
     after: uuid.UUID | None = None
     while True:
         params: dict = {"limit": batch_size}
@@ -315,10 +325,6 @@ async def _iter_rows(
                 # predate provenance entirely: repairing them is a provider
                 # spend decision about tens of thousands of rows, not a defect
                 # being cleaned up, so it takes an explicit flag.
-                from core_storage_api.services.postgres_service import (
-                    PROVENANCE_REQUIRED_FROM,
-                )
-
                 sql += "AND created_at >= :provenance_cutoff "
                 params["provenance_cutoff"] = PROVENANCE_REQUIRED_FROM
         else:
@@ -501,7 +507,7 @@ async def run_backfill(
 ) -> list[BackfillReport]:
     """Walk targeted rows and (re-)embed them according to the selected scan mode.
 
-    Two modes:
+    Three modes:
 
     - ``NULL_EMBEDDING`` (default): rows where ``embedding IS NULL``,
       embedded from ``content`` / ``canonical_name``. The
