@@ -105,7 +105,7 @@ def _patch_embedding(monkeypatch, *, on_call=None):
     monkeypatch.setattr(common.embedding, "get_embedding", _fake)
 
 
-async def _run(engine, spec, tenant_id, *, rewrite_hint_prefixed: bool = False):
+async def _run(engine, spec, tenant_id, *, mode: bf._ScanMode = bf._ScanMode.NULL_EMBEDDING):
     return await bf._backfill_one_table(
         engine,
         spec,
@@ -113,7 +113,7 @@ async def _run(engine, spec, tenant_id, *, rewrite_hint_prefixed: bool = False):
         batch_size=100,
         max_inflight=4,
         dry_run=False,
-        rewrite_hint_prefixed=rewrite_hint_prefixed,
+        mode=mode,
     )
 
 
@@ -301,7 +301,7 @@ async def test_hint_rewrite_replaces_stale_provenance(engine, tenant_id, monkeyp
         )
         await conn.commit()
 
-    report = await _run(engine, _memories_spec(), tenant_id, rewrite_hint_prefixed=True)
+    report = await _run(engine, _memories_spec(), tenant_id, mode=bf._ScanMode.REWRITE_HINT_PREFIXED)
 
     assert report.embedded == 1, "hint-rewrite mode did not select the seeded row"
     _has_emb, _content_hash, provenance = await _read_memory(engine, mid)
@@ -409,3 +409,225 @@ def test_predicate_string_is_derived_from_the_constant():
         "created_at >=",
     ):
         assert term in ps.MISSING_PROVENANCE_PREDICATE_SQL, f"predicate omits {term!r}"
+
+
+# ---------------------------------------------------------------------------
+# --repair-provenance: the only sweep that can see these rows
+# ---------------------------------------------------------------------------
+
+
+async def _seed_embedded(
+    engine,
+    tenant_id: str,
+    *,
+    content: str,
+    content_hash: str | None,
+    created_at,
+    stamp: str | None = None,
+) -> uuid.UUID:
+    """A row that already carries a vector — the population under repair."""
+    mid = uuid.uuid4()
+    async with engine.connect() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO memories (id, tenant_id, agent_id, memory_type, content, "
+                " content_hash, embedded_content_hash, embedding, created_at) "
+                "VALUES (:id, :t, 'agent-bf', 'fact', :c, :ch, :stamp, (:emb)::vector, :ts)"
+            ),
+            {
+                "id": mid,
+                "t": tenant_id,
+                "c": content,
+                "ch": content_hash,
+                "stamp": stamp,
+                "emb": str([0.9] * VECTOR_DIM_FAKE),
+                "ts": created_at,
+            },
+        )
+        await conn.commit()
+    return mid
+
+
+@pytest.mark.integration
+async def test_repair_provenance_reaches_rows_no_other_sweep_can(engine, monkeypatch):
+    """The point of the mode: these rows are invisible to every other scan.
+
+    Both embedding backfills and core-worker's event-driven task select
+    ``embedding IS NULL``. These rows HAVE an embedding, which is exactly why
+    241 of them sat unrepaired for a week while three separate repair paths ran
+    over the same table.
+    """
+    from datetime import UTC, datetime
+
+    _patch_embedding(monkeypatch)
+    t = f"test-repair-{uuid.uuid4().hex[:8]}"
+    ch = "a" * 64
+    mid = await _seed_embedded(
+        engine, t, content="body", content_hash=ch, created_at=datetime(2026, 9, 1, tzinfo=UTC)
+    )
+
+    # The default mode cannot see it — that is the gap being closed.
+    before = await _run(engine, _memories_spec(), t)
+    assert before.scanned == 0, "default mode should not match an already-embedded row"
+
+    report = await _run(engine, _memories_spec(), t, mode=bf._ScanMode.REPAIR_PROVENANCE)
+
+    assert report.embedded == 1
+    _has_emb, content_hash, provenance = await _read_memory(engine, mid)
+    assert provenance == ch
+    assert provenance == content_hash
+
+
+@pytest.mark.integration
+async def test_repair_provenance_is_idempotent(engine, monkeypatch):
+    """A second pass must find nothing.
+
+    The repair flips ``embedded_content_hash`` from NULL to non-NULL, which
+    takes the row out of its own selector. Worth pinning: the hint-rewrite mode
+    next door is deliberately NOT idempotent, so "re-running is safe" is not a
+    property this file can assume.
+    """
+    from datetime import UTC, datetime
+
+    _patch_embedding(monkeypatch)
+    t = f"test-repair-idem-{uuid.uuid4().hex[:8]}"
+    await _seed_embedded(
+        engine, t, content="body", content_hash="b" * 64, created_at=datetime(2026, 9, 1, tzinfo=UTC)
+    )
+
+    first = await _run(engine, _memories_spec(), t, mode=bf._ScanMode.REPAIR_PROVENANCE)
+    second = await _run(engine, _memories_spec(), t, mode=bf._ScanMode.REPAIR_PROVENANCE)
+
+    assert first.embedded == 1
+    assert second.scanned == 0, "the repair did not take the row out of its own selector"
+
+
+@pytest.mark.integration
+async def test_repair_provenance_skips_rows_with_no_content_hash(engine, monkeypatch):
+    """A row with nothing to attest to must not be scanned at all.
+
+    Not a tidiness filter — an infinite-work guard. The repair stamps
+    ``embedded_content_hash`` FROM ``content_hash``, so a row without one is
+    stamped NULL again and still matches the selector. Including it would spend
+    one provider call per row per run, forever, changing nothing.
+    """
+    from datetime import UTC, datetime
+
+    _patch_embedding(monkeypatch)
+    t = f"test-repair-nohash-{uuid.uuid4().hex[:8]}"
+    await _seed_embedded(
+        engine, t, content="body", content_hash=None, created_at=datetime(2026, 9, 1, tzinfo=UTC)
+    )
+
+    report = await _run(engine, _memories_spec(), t, mode=bf._ScanMode.REPAIR_PROVENANCE)
+
+    assert report.scanned == 0, (
+        "a row with no content_hash was scanned; the repair cannot make progress "
+        "on it, so every run would re-embed it and change nothing"
+    )
+
+
+@pytest.mark.integration
+async def test_repair_provenance_leaves_legacy_rows_alone_by_default(engine, monkeypatch):
+    """Pre-037 rows cost money and are not known to be damaged.
+
+    ``unknown_provenance`` holds tens of thousands of them. Sweeping them by
+    default would turn a defect cleanup into an unbounded provider spend that
+    nobody approved, so the default scan stops at the cutoff and
+    ``--include-legacy`` opts in.
+    """
+    from datetime import UTC, datetime
+
+    _patch_embedding(monkeypatch)
+    t = f"test-repair-legacy-{uuid.uuid4().hex[:8]}"
+    legacy = await _seed_embedded(
+        engine, t, content="old", content_hash="c" * 64, created_at=datetime(2026, 8, 1, tzinfo=UTC)
+    )
+
+    default_run = await _run(engine, _memories_spec(), t, mode=bf._ScanMode.REPAIR_PROVENANCE)
+    assert default_run.scanned == 0, "a pre-037 row was swept without --include-legacy"
+    _e, _ch, provenance = await _read_memory(engine, legacy)
+    assert provenance is None
+
+    widened = await bf._backfill_one_table(
+        engine,
+        _memories_spec(),
+        tenant_id=t,
+        batch_size=100,
+        max_inflight=4,
+        dry_run=False,
+        mode=bf._ScanMode.REPAIR_PROVENANCE,
+        include_legacy=True,
+    )
+    assert widened.embedded == 1
+    _e2, _ch2, provenance2 = await _read_memory(engine, legacy)
+    assert provenance2 == "c" * 64
+
+
+@pytest.mark.integration
+async def test_repair_provenance_re_embeds_rather_than_stamping(engine, monkeypatch):
+    """The vector must be recomputed, not just attested.
+
+    Stamping ``embedded_content_hash = content_hash`` on the existing vector
+    would assert that vector describes the current text — which is precisely
+    what nothing knows here, since that is the state being repaired. It happened
+    to hold for the 241 production rows (each verified first against a
+    recomputed hash) and does not hold in general; a wrong hash reads downstream
+    as verified freshness, worse than the NULL it replaced.
+
+    The seeded vector is all 0.9 and the provider returns all 0.125, so a
+    changed vector proves a real embed rather than a bare UPDATE of the hash.
+    """
+    from datetime import UTC, datetime
+
+    _patch_embedding(monkeypatch)
+    t = f"test-repair-reembed-{uuid.uuid4().hex[:8]}"
+    mid = await _seed_embedded(
+        engine, t, content="body", content_hash="d" * 64, created_at=datetime(2026, 9, 1, tzinfo=UTC)
+    )
+
+    await _run(engine, _memories_spec(), t, mode=bf._ScanMode.REPAIR_PROVENANCE)
+
+    async with engine.connect() as conn:
+        vec = (
+            await conn.execute(text("SELECT embedding::text FROM memories WHERE id = :id"), {"id": mid})
+        ).scalar()
+    assert vec is not None
+    assert vec.startswith("[0.125"), (
+        "the stored vector was not recomputed; the repair stamped provenance onto "
+        "whatever was already there, asserting a freshness it never verified"
+    )
+
+
+@pytest.mark.integration
+async def test_repair_provenance_drives_the_alert_metric_to_zero(engine, monkeypatch):
+    """End to end: the sweep empties the bucket the alert fires on.
+
+    Asserted through ``memory_embedding_coverage_for_tenant`` rather than a
+    hand-written predicate, so this fails if the sweep regresses OR if the
+    metric stops measuring the population the sweep targets. Those two must
+    agree, and nothing but this ties them together.
+    """
+    from datetime import UTC, datetime
+
+    from core_storage_api.services.postgres_service import PostgresService
+
+    _patch_embedding(monkeypatch)
+    t = f"test-repair-metric-{uuid.uuid4().hex[:8]}"
+    for i in range(3):
+        await _seed_embedded(
+            engine,
+            t,
+            content=f"body-{i}",
+            content_hash=f"{i}" * 64,
+            created_at=datetime(2026, 9, 1, tzinfo=UTC),
+        )
+
+    svc = PostgresService()
+    *_, before = await svc.memory_embedding_coverage_for_tenant(t)
+    assert before == 3, "fixture did not create the alertable population"
+
+    await _run(engine, _memories_spec(), t, mode=bf._ScanMode.REPAIR_PROVENANCE)
+
+    *_, after = await svc.memory_embedding_coverage_for_tenant(t)
+    assert after == 0, f"sweep left {after} row(s) in the population the alert fires on"
