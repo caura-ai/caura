@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from urllib.parse import urlsplit
 
 import httpx
 import openai
@@ -27,6 +28,7 @@ from common.llm.constants import (
     LLM_JSON_MAX_OUTPUT_TOKENS,
     LLM_PROVIDER_MAX_RETRIES,
     OPENAI_CHAT_BASE_URL,
+    OPENAI_HOSTED_CHAT_BASE_URL,
     OPENAI_HTTPX_CONNECT_TIMEOUT_SECONDS,
     OPENAI_HTTPX_MAX_CONNECTIONS,
     OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS,
@@ -88,6 +90,161 @@ def _usage_tokens(response) -> tuple[int, int, int]:
     )
 
 
+_HOSTED_OPENAI_HOST = urlsplit(OPENAI_HOSTED_CHAT_BASE_URL).hostname or ""
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_hosted_openai(base_url: str) -> bool:
+    """True when ``base_url`` points at api.openai.com, whatever the scheme.
+
+    The decision is by host, not by string: ``http://api.openai.com/v1`` or
+    a trailing slash still count as hosted. A proxy or regional alias on
+    another host does not, on purpose: the request shapes below are chosen
+    for what the *server* accepts, and a proxy that is not api.openai.com
+    has to be assumed to take the strict shapes every compatible server
+    takes. Pointing ``OPENAI_CHAT_BASE_URL`` at such a proxy therefore
+    gives it the non-hosted shapes, which hosted OpenAI accepts as well.
+    """
+    return (urlsplit(base_url).hostname or "").lower() == _HOSTED_OPENAI_HOST
+
+
+def _is_plaintext_off_host(base_url: str) -> bool:
+    """True when ``base_url`` is plain ``http`` to a host that is not loopback."""
+    parts = urlsplit(base_url)
+    return (
+        parts.scheme == "http" and (parts.hostname or "").lower() not in _LOOPBACK_HOSTS
+    )
+
+
+def _allows_null(schema: dict) -> bool:
+    """True when ``schema`` already admits ``null``."""
+    t = schema.get("type")
+    if t == "null" or (isinstance(t, list) and "null" in t):
+        return True
+    return any(
+        isinstance(opt, dict) and opt.get("type") == "null"
+        for opt in schema.get("anyOf", []) + schema.get("oneOf", [])
+    )
+
+
+def _strict_schema(schema: dict) -> dict:
+    """Return a copy of ``schema`` that strict JSON mode accepts.
+
+    Strict mode, as OpenAI defines it and as Anthropic's OpenAI-compatible
+    endpoint enforces it, wants every object closed
+    (``additionalProperties: false``) with every property listed under
+    ``required``. Pydantic-generated schemas leave both open for fields
+    with defaults. This walks the schema (``properties``, ``items``,
+    ``anyOf``/``oneOf``/``allOf``, ``$defs``) and closes each object.
+
+    Marking a property required changes what the model must emit, so a
+    property the source schema left optional is made nullable as well:
+    the model answers ``null`` where it would have omitted the key, and
+    ``_drop_optional_nulls`` removes those keys after parsing, so callers
+    see the same absent-or-present shape they saw before. A property that
+    already admits ``null`` is left as it is.
+
+    ``default`` and ``title`` are dropped: strict mode rejects or ignores
+    them and they carry no meaning for the model. The input is not
+    modified.
+    """
+    if isinstance(schema, list):
+        return [_strict_schema(s) for s in schema]  # type: ignore[return-value]
+    if not isinstance(schema, dict):
+        return schema
+    out: dict = {}
+    for key, value in schema.items():
+        if key in ("default", "title"):
+            continue
+        if key in ("properties", "$defs"):
+            out[key] = {k: _strict_schema(v) for k, v in value.items()}
+        elif key in ("items", "anyOf", "oneOf", "allOf"):
+            out[key] = _strict_schema(value)
+        else:
+            out[key] = value
+    if out.get("type") == "object" or "properties" in out:
+        was_required = set(schema.get("required", []))
+        props = out.get("properties", {})
+        for name, prop in props.items():
+            if (
+                name not in was_required
+                and isinstance(prop, dict)
+                and not _allows_null(prop)
+            ):
+                props[name] = {"anyOf": [prop, {"type": "null"}]}
+        out["additionalProperties"] = False
+        out["required"] = list(props.keys())
+    return out
+
+
+def _resolve_ref(schema: dict, root: dict) -> dict:
+    """Follow a local ``$ref`` into ``root["$defs"]``; other schemas pass through."""
+    ref = schema.get("$ref", "")
+    if ref.startswith("#/$defs/"):
+        return root.get("$defs", {}).get(ref[len("#/$defs/") :], {})
+    return schema
+
+
+def _drop_optional_nulls(value, schema: dict, root: dict | None = None):
+    """Remove ``null`` values for keys the source schema left optional.
+
+    The counterpart of ``_strict_schema``: it walks the parsed reply with
+    the *original* schema and deletes a key whose value is ``null`` when
+    that key was not in the object's ``required`` list. A ``null`` for a
+    required key, or for a key the source schema made nullable itself, is
+    kept as the model sent it. Arrays and local ``$ref`` definitions are
+    followed; other shapes are returned unchanged.
+    """
+    root = schema if root is None else root
+    schema = _resolve_ref(schema, root)
+    if isinstance(value, dict) and isinstance(schema.get("properties"), dict):
+        required = set(schema.get("required", []))
+        props = schema["properties"]
+        out = {}
+        for key, item in value.items():
+            prop = props.get(key)
+            if (
+                item is None
+                and prop is not None
+                and key not in required
+                and not _allows_null(prop)
+            ):
+                continue
+            out[key] = (
+                _drop_optional_nulls(item, prop, root)
+                if isinstance(prop, dict)
+                else item
+            )
+        return out
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        return [_drop_optional_nulls(item, schema["items"], root) for item in value]
+    for option in schema.get("anyOf", []) + schema.get("oneOf", []):
+        if isinstance(option, dict) and (
+            option.get("properties") or option.get("items") or "$ref" in option
+        ):
+            return _drop_optional_nulls(value, option, root)
+    return value
+
+
+def _strip_code_fence(content: str) -> str:
+    """Remove a Markdown code fence around ``content`` when there is one.
+
+    Without a ``response_format`` to constrain them, models often answer
+    with the JSON wrapped in a fence. The JSON inside is what the caller
+    asked for.
+    """
+    text = content.strip()
+    if not text.startswith("```"):
+        return content
+    first_newline = text.find("\n")
+    if first_newline == -1:
+        return content
+    body = text[first_newline + 1 :]
+    if body.rstrip().endswith("```"):
+        body = body.rstrip()[:-3]
+    return body
+
+
 class OpenAILLMProvider:
     """LLM provider using the OpenAI chat completions API.
 
@@ -107,6 +264,16 @@ class OpenAILLMProvider:
         self._model = model
         self._base_url = base_url
         self._provider_name = provider_name
+        if _is_plaintext_off_host(base_url):
+            # Operator configuration, not caller input, so this is a warning
+            # and not a refusal: a plain-http base URL off the loopback sends
+            # the provider key in the clear on every call.
+            logger.warning(
+                "%s chat base URL %s is plain http to a non-loopback host; "
+                "the API key is sent unencrypted",
+                provider_name,
+                base_url,
+            )
         # Explicit per-call timeout — without this the SDK rides httpx's
         # default and a single hung upstream call would eat the whole
         # enrichment budget silently.
@@ -193,9 +360,20 @@ class OpenAILLMProvider:
     ) -> dict:
         """Send a prompt and return a parsed JSON dict.
 
-        Without ``response_schema``, uses
-        ``response_format={"type": "json_object"}`` to enforce shape-less
-        JSON output (back-compat for enrichment and dedup callers).
+        The ``response_format`` sent depends on the endpoint, because the
+        compatible servers do not agree on what they accept:
+
+        - Hosted OpenAI (``OPENAI_HOSTED_CHAT_BASE_URL``) keeps the shapes
+          it always got: ``json_object`` without a schema, and a
+          non-strict ``json_schema`` with one.
+        - Any other base URL (a self-hosted server, Anthropic's compatible
+          endpoint, OpenRouter) gets no ``response_format`` without a
+          schema, because LM Studio and Anthropic both reject
+          ``json_object``; the prompt already asks for JSON and a code
+          fence in the reply is stripped before parsing. With a schema it
+          gets ``strict: true`` and a closed schema (see
+          ``_strict_schema``), which is the one shape Anthropic accepts and
+          which every other compatible server also takes.
 
         ``seed`` (A5a #2): when provided, forwarded to OpenAI's chat
         completions API for response determinism. ``temperature=0.0`` is
@@ -226,27 +404,29 @@ class OpenAILLMProvider:
         see the inline note at the call.
         """
         t0 = time.perf_counter()
-        if response_schema is not None:
-            response_format: dict = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "response",
-                    "schema": response_schema,
-                    "strict": False,
-                },
-            }
-        else:
-            response_format = {"type": "json_object"}
+        hosted = _is_hosted_openai(self._base_url)
         create_kwargs: dict = {
             "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
-            "response_format": response_format,
             "temperature": temperature,
             # Runaway guard — same failure mode as the Gemini-backed
             # providers: an uncapped looping generation comes back as
             # truncated JSON (finish_reason="length").
             "max_completion_tokens": LLM_JSON_MAX_OUTPUT_TOKENS,
         }
+        if response_schema is not None:
+            create_kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": (
+                        response_schema if hosted else _strict_schema(response_schema)
+                    ),
+                    "strict": not hosted,
+                },
+            }
+        elif hosted:
+            create_kwargs["response_format"] = {"type": "json_object"}
         if seed is not None:
             create_kwargs["seed"] = seed
         if reasoning_effort is not None:
@@ -281,9 +461,11 @@ class OpenAILLMProvider:
             model=self._model,
             max_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
         )
-        parsed = json.loads(content)
+        parsed = json.loads(_strip_code_fence(content))
         if not isinstance(parsed, dict):
             raise OpenAIResponseShapeError(content, type(parsed).__name__)
+        if response_schema is not None and not hosted:
+            parsed = _drop_optional_nulls(parsed, response_schema)
         return parsed
 
     async def complete_text(
