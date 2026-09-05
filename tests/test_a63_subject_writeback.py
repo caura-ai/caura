@@ -58,6 +58,10 @@ def _sc(entity_ids: list[str]) -> MagicMock:
     """Storage mock where entity i resolves as a fresh create with
     ``entity_ids[i]``."""
     sc = MagicMock()
+    # H-02: the worker re-reads the memory before persisting, so nothing is
+    # written to the graph of a row governance dropped mid-extraction. These
+    # tests exercise a live row.
+    sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     sc.bulk_resolve_entities = AsyncMock(return_value=[None] * len(entity_ids))
     sc.bulk_upsert_entities = AsyncMock(
         return_value=[
@@ -150,6 +154,10 @@ async def test_no_subject_role_skips() -> None:
 async def test_two_surface_forms_same_entity_count_as_one_subject() -> None:
     shared_id = str(uuid4())
     sc = MagicMock()
+    # H-02: the worker re-reads the memory before persisting, so nothing is
+    # written to the graph of a row governance dropped mid-extraction. These
+    # tests exercise a live row.
+    sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     sc.bulk_resolve_entities = AsyncMock(return_value=[None, None])
     # Both surface forms upsert to the SAME entity row.
     sc.bulk_upsert_entities = AsyncMock(

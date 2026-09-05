@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+from typing import Any
 from uuid import UUID
 
 from common.embedding import get_embedding
@@ -93,6 +94,58 @@ async def _discover_cross_links_for_memory(
         )
 
 
+async def _purge_written_artifacts_if_dropped(sc: Any, memory_id: UUID, tenant_id: str) -> None:
+    """Undo our own graph writes when the memory died while we were making them.
+
+    H-02. The liveness check before the persistence block narrows the window; it
+    cannot close it. Between that check and the links landing there are embedding
+    round-trips and three storage calls, and a governance drop can complete
+    inside them — including its own purge, which finds nothing because these rows
+    do not exist yet. The entities then land moments later and nothing ever
+    revisits them: the memory is gone, so no verdict names it again.
+
+    Re-checking AFTER the writes closes it, and the argument is about what is
+    observable rather than about timing:
+
+    * the drop committed before our writes — its purge found nothing, but this
+      check sees the row deleted, and we purge what we just wrote,
+    * the drop commits after our writes — its own purge sees our rows and takes
+      them,
+    * the drop commits between the two — whichever purge runs later sees the
+      rows, and both are keyed on the same ``memory_id``.
+
+    There is no ordering left in which the rows survive. The WRITER read is
+    load-bearing for the same reason as the earlier check: the whole question is
+    whether a delete that just committed is visible.
+
+    Failures are logged, not raised. This runs after the links are written, so a
+    raise would abort the subject write-back and cross-link discovery below over
+    a cleanup concern — and the rows it failed to remove are exactly the rows
+    governance's own purge would still reach on any later drop of the same row.
+    """
+    try:
+        live = await sc.get_memory(str(memory_id), tenant_id, read=False)
+        if live is not None and live.get("deleted_at") is None:
+            return
+        counts = await sc.purge_entity_artifacts(tenant_id, str(memory_id))
+    except Exception:
+        logger.exception(
+            "entity extraction: memory %s was dropped while its entities were being "
+            "written, and the rows just written could NOT be purged; they are live in "
+            "the graph for content the policy removed",
+            memory_id,
+        )
+        return
+    logger.warning(
+        "entity extraction: memory %s was dropped mid-extraction; purged the graph "
+        "rows just written for it (links=%s relations=%s entities=%s)",
+        memory_id,
+        counts.get("links"),
+        counts.get("relations"),
+        counts.get("entities"),
+    )
+
+
 async def process_entity_extraction(
     memory_id: UUID,
     tenant_id: str,
@@ -124,6 +177,33 @@ async def process_entity_extraction(
             return
 
         sc = get_storage_client()
+
+        # H-02: is the memory still there? This is scheduled fire-and-forget at
+        # write time on both non-inline paths, in parallel with the enrichment
+        # that carries the governance verdict — so by the time the LLM call above
+        # returns, the policy may already have dropped the row. Writing entities
+        # for it would re-create the leak the drop exists to close, in a table
+        # the drop does not reach.
+        #
+        # ``read=False`` — the WRITER. The whole point is to observe a delete
+        # that just committed; a replica under lag would report the row live and
+        # this check would pass exactly when it most needed to fail.
+        #
+        # This check alone does NOT close the window, and it is not claimed to:
+        # the writes below are several round-trips away, so a drop can land after
+        # it passes. ``_purge_written_artifacts_if_dropped`` at the end of the
+        # persistence block is what closes that; this one is here to avoid doing
+        # the work at all in the common case where the row is already gone.
+        live = await sc.get_memory(str(memory_id), tenant_id, read=False)
+        if live is None or live.get("deleted_at") is not None:
+            logger.info(
+                "entity extraction: memory %s is gone by the time extraction finished; "
+                "discarding %d extracted entit(ies) rather than writing them to a "
+                "dropped row's graph",
+                memory_id,
+                len(graph.entities),
+            )
+            return
 
         blocklist = tenant_cfg.entity_blocklist
 
@@ -402,6 +482,10 @@ async def process_entity_extraction(
                 link_idx += 1
             if link_items:
                 link_result = await sc.bulk_upsert_entity_links(tenant_id, items=link_items)
+                # H-02: the rows exist NOW, so from here the leak is recoverable
+                # by the same purge governance uses. See the helper for why this
+                # is where the window actually closes.
+                await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
                 # Surface any FK violations from the per-item path
                 # (storage-side reports ``error="fk_violation"`` for rows
                 # whose memory_id or entity_id no longer exists). Same

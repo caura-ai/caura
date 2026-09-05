@@ -335,6 +335,70 @@ async def _privatise_children(
     )
 
 
+async def _purge_entity_artifacts(sc: Any, memory_id: str, tenant_id: str, action: str) -> None:
+    """Remove the graph rows mined out of a memory the policy just dropped.
+
+    H-02. #808 established that a drop must stop the derived rows too, and
+    named this case explicitly — "entities mined out of dropped content are the
+    same leak in another table". It fixed the INLINE path, by ordering:
+    ``_enrich_memory_background`` runs remediation first and its early return
+    skips the entity extraction scheduled below it.
+
+    Both non-inline paths schedule extraction independently, at write time, as
+    a task that races the verdict — and extraction is one LLM call while the
+    verdict needs enrichment plus an event round-trip, so extraction usually
+    wins. ``process_entity_extraction`` never re-checked the row, and a
+    soft-deleted memory still satisfies the link and relation foreign keys. So
+    the names survived, listable tenant-wide through ``/entities`` and
+    ``/graph``, with nothing tying them to the drop.
+
+    Not guarded by a marker, unlike the child cascade: any dropped memory may
+    have been extracted from, there is no flag on the row saying so, and the
+    purge is three targeted deletes keyed on ``memory_id`` — cheap enough to
+    run unconditionally rather than gate on something that could drift.
+
+    Failures are LOGGED, not raised, and that is the opposite of what the rest
+    of this module does — so it needs its reason stated.
+
+    An earlier draft let this propagate "matching every other unapplied-policy
+    path in this module". That was wrong about the caller. The other paths run
+    under ``_enrich_memory_background``, where a raise becomes a
+    ``BackgroundTaskLog`` row. This one also runs under
+    ``consumer.handle_memory_enriched``, which has no guard around it, and the
+    Pub/Sub dispatcher NACKS on a handler exception — a documented, load-bearing
+    invariant. So a raise here redelivers the same event, re-runs the whole drop
+    branch, and emits a SECOND ``critical=True`` audit for a memory that was
+    already dropped. Repeatedly. Duplicate destructive entries in a
+    tamper-evident log, for a row nothing further can be done to.
+
+    The trade the other way is bounded: the memory itself is already gone, so
+    the content is not live. What remains is graph rows, and an ERROR naming the
+    memory is enough to purge them by hand. A transient failure does not even
+    reach here — ``purge_entity_artifacts`` is marked idempotent, so the client
+    retries 5xx and timeouts on its own.
+    """
+    try:
+        counts = await sc.purge_entity_artifacts(tenant_id, memory_id)
+    except Exception:
+        logger.exception(
+            "governance: %s dropped memory %s but its entity/relation rows were NOT "
+            "removed; the names mined from that content are still listable and need "
+            "purging by hand",
+            action,
+            memory_id,
+        )
+        return
+    if any(counts.get(k) for k in ("links", "relations", "entities")):
+        logger.info(
+            "governance: %s purged graph rows for %s (links=%s relations=%s entities=%s)",
+            action,
+            memory_id,
+            counts.get("links"),
+            counts.get("relations"),
+            counts.get("entities"),
+        )
+
+
 async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutcome:
     """Apply LLM-signal governance to a fast-mode row after enrichment landed.
 
@@ -392,6 +456,11 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutco
             )
             await sc.soft_delete_memory(memory_id, tenant_id)
             logger.info("governance: dropped fast-mode memory %s (pii)", memory_id)
+            # Purge BEFORE the cascade, not after. ``_drop_children`` raises once
+            # any child fails, so ordering it first would skip this parent's own
+            # graph rows on exactly the runs where something already went wrong.
+            # The purge cannot raise (it logs), so it never blocks the cascade.
+            await _purge_entity_artifacts(sc, memory_id, tenant_id, ACTION_PII_DROP)
             await _drop_children(
                 sc,
                 children,
@@ -437,6 +506,8 @@ async def remediate_after_enrichment(memory: dict, cfg: Any) -> RemediationOutco
             )
             await sc.soft_delete_memory(memory_id, tenant_id)
             logger.info("governance: dropped fast-mode memory %s (non-business)", memory_id)
+            # Purge before the cascade — see the PII-drop branch above.
+            await _purge_entity_artifacts(sc, memory_id, tenant_id, ACTION_NB_DROP)
             await _drop_children(
                 sc,
                 children,

@@ -948,6 +948,32 @@ class CoreStorageClient:
             "/memories/by-parent-id", read=False, tenant_id=tenant_id, parent_id=parent_id
         )
 
+    async def purge_entity_artifacts(self, tenant_id: str, memory_id: str) -> dict:
+        """H-02 — remove the graph rows mined out of a dropped memory.
+
+        Returns per-table counts (``links``, ``relations``, ``entities``) so the
+        caller can audit what a governance drop actually removed.
+
+        Un-tagged POST, so it lands on the WRITER — it deletes.
+
+        ``idempotent=True``, which this client reserves for endpoints where a
+        replay is harmless. The usual justification is a storage-side dedup key;
+        this one qualifies for a different reason — a replay finds the rows
+        already gone and deletes nothing more. Worth opting in explicitly
+        because the caller lets failures propagate: without it a transient 5xx
+        aborts a remediation whose soft-delete has ALREADY committed, leaving
+        the graph rows behind until someone notices the failed task.
+
+        The one cost of a replay is cosmetic: a lost response followed by a
+        successful retry logs zero counts for a purge that did remove rows. A
+        wrong number in an INFO line, against leaving forbidden content live.
+        """
+        return await self._post(  # type: ignore[return-value]
+            "/memories/purge-entity-artifacts",
+            {"tenant_id": tenant_id, "memory_id": memory_id},
+            idempotent=True,
+        )
+
     async def find_successors(self, data: dict) -> list[dict]:
         return await self._post("/memories/find-successors", data, read=True)  # type: ignore[return-value]
 
