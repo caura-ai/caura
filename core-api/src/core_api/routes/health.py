@@ -254,6 +254,43 @@ async def tool_descriptions(enriched: bool = False):
     return {spec.name: spec.description for spec in REGISTRY.values()}
 
 
+async def _probe_storage() -> tuple[str, bool]:
+    """Probe storage; return ``(reported_status, is_healthy)``.
+
+    Never raises: every failure mode is reported through the return value,
+    which is what lets :func:`_probe_dependencies` gather this with
+    :func:`_probe_redis` under a plain ``asyncio.gather``.
+    """
+    try:
+        sc = get_storage_client()
+        await asyncio.wait_for(
+            sc.count_all(tenant_id="__health_check__"),
+            timeout=PROBE_TIMEOUT_SECONDS,
+        )
+        return "connected", True
+    except Exception:
+        # Never surface str(exc) — httpx errors embed the target URL
+        # (and any basic-auth creds in it) into the response body.
+        logger.exception("Storage health check failed")
+        return "unreachable", False
+
+
+async def _probe_redis() -> tuple[str, bool]:
+    """Probe redis; return ``(reported_status, is_healthy)``.
+
+    An unset ``redis_url`` is the OSS in-memory-fallback default, not a
+    failure — it reports "not configured" and counts as healthy. Never
+    raises, for the same reason as :func:`_probe_storage`.
+    """
+    if not settings.redis_url:
+        return "not configured", True
+    try:
+        redis_ok = await asyncio.wait_for(redis_healthy(), timeout=PROBE_TIMEOUT_SECONDS)
+    except Exception:
+        redis_ok = False
+    return ("connected", True) if redis_ok else ("unavailable", False)
+
+
 async def _probe_dependencies() -> tuple[dict[str, Any], list[str]]:
     """Probe storage / redis / event_bus and return ``(result, unhealthy)``.
 
@@ -261,53 +298,48 @@ async def _probe_dependencies() -> tuple[dict[str, Any], list[str]]:
     ``GET /status`` (which surfaces the same shape but never fails the
     response code on it). Each probe is bounded by ``PROBE_TIMEOUT_SECONDS``
     so a stalled backend can't hang the whole call.
+
+    The two I/O probes run CONCURRENTLY, so the wall-clock ceiling for the
+    whole call is one ``PROBE_TIMEOUT_SECONDS`` rather than the sum — which is
+    what makes that budget affordable at 12s. Neither caller depends on probe
+    ordering or on partial results (both await the complete tuple), so the only
+    order that matters is the key order of ``result``: both splat it into their
+    response body, so it is the response shape.
     """
-    result: dict[str, Any] = {}
-    unhealthy: list[str] = []
-
+    # Event bus first: ``is_healthy`` is sync (no I/O) and ``get_event_bus()``
+    # is a cached singleton, so this costs nothing and must not sit behind a
+    # stalled storage probe waiting out the full budget. It can still raise
+    # (Pub/Sub env vars missing, unknown backend); catch so that surfaces as
+    # 503-shaped output rather than a bare 500.
     try:
-        sc = get_storage_client()
-        await asyncio.wait_for(
-            sc.count_all(tenant_id="__health_check__"),
-            timeout=PROBE_TIMEOUT_SECONDS,
-        )
-        result["storage"] = "connected"
-    except Exception:
-        # Never surface str(exc) — httpx errors embed the target URL
-        # (and any basic-auth creds in it) into the response body.
-        logger.exception("Storage health check failed")
-        result["storage"] = "unreachable"
-        unhealthy.append("storage")
-
-    if settings.redis_url:
-        try:
-            redis_ok = await asyncio.wait_for(redis_healthy(), timeout=PROBE_TIMEOUT_SECONDS)
-        except Exception:
-            redis_ok = False
-        if redis_ok:
-            result["redis"] = "connected"
-        else:
-            result["redis"] = "unavailable"
-            unhealthy.append("redis")
-    else:
-        result["redis"] = "not configured"
-
-    # Event bus: ``is_healthy`` is sync (no I/O), no timeout wrapper.
-    # ``get_event_bus()`` itself can raise (Pub/Sub env vars missing,
-    # unknown backend); wrap consistently so those surface as 503-shaped
-    # output rather than a bare 500.
-    try:
-        bus = get_event_bus()
-        if bus.is_healthy:
-            result["event_bus"] = "ok"
-        else:
-            result["event_bus"] = "unhealthy"
-            unhealthy.append("event_bus")
+        bus_status = "ok" if get_event_bus().is_healthy else "unhealthy"
     except Exception:
         logger.exception("Event bus health check failed")
-        result["event_bus"] = "error"
-        unhealthy.append("event_bus")
+        bus_status = "error"
 
+    # gather without ``return_exceptions``: both helpers are total, catching
+    # ``Exception`` and reporting through their return value. A ``BaseException``
+    # (the request being cancelled) should still cancel the sibling and
+    # propagate, which is the default.
+    (storage_status, storage_ok), (redis_status, redis_ok) = await asyncio.gather(
+        _probe_storage(),
+        _probe_redis(),
+    )
+
+    result: dict[str, Any] = {
+        "storage": storage_status,
+        "redis": redis_status,
+        "event_bus": bus_status,
+    }
+    unhealthy = [
+        dep
+        for dep, ok in (
+            ("storage", storage_ok),
+            ("redis", redis_ok),
+            ("event_bus", bus_status == "ok"),
+        )
+        if not ok
+    ]
     return result, unhealthy
 
 

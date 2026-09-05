@@ -165,7 +165,12 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 15s
-      timeout: 5s
+      # Must stay above core-api's PROBE_TIMEOUT_SECONDS (12s): the probe is
+      # allowed to spend that long bounding a stalled dependency, and a shorter
+      # timeout here severs the check and scores a failure before the probe can
+      # answer — the same inverted-budget defect, one layer out. At 5s a slow
+      # storage connect read as an unhealthy container.
+      timeout: 15s
       retries: 3
       start_period: 15s
 

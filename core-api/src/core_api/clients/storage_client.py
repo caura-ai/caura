@@ -18,6 +18,7 @@ from common.storage_auth import is_storage_shared_secret_rejection
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
+from core_api.constants import STORAGE_CONNECT_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +296,7 @@ class CoreStorageClient:
         fallback for the remaining 1%.
         """
         return httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5.0, read=120.0, write=120.0, pool=5.0),
+            timeout=httpx.Timeout(connect=STORAGE_CONNECT_TIMEOUT_SECONDS, read=120.0, write=120.0, pool=5.0),
             # CAURA-682: pre-fix values 100/50 caused TCP ConnectTimeout
             # retries (3x 5s ~= 13s tail per affected request) during
             # noisy-neighbor write storms — concurrent core-api → storage
@@ -439,11 +440,19 @@ class CoreStorageClient:
         plain HTTP — Cloud Run ``--no-allow-unauthenticated`` always
         uses TLS, so an ``http://`` audience is by definition local
         or in-cluster and never needs an ID token. Without this guard,
-        the metadata-server fetch's 5 s timeout races the health
-        probe's own 5 s budget; a lost race surfaces ``CancelledError``
+        the metadata-server fetch's 5 s timeout competes with the health
+        probe's own budget; a lost race surfaces ``CancelledError``
         (not ``Exception``) which the inner catch misses, and the
         health endpoint flips to ``storage: unreachable`` for the
-        duration of the failure-cache TTL."""
+        duration of the failure-cache TTL.
+
+        The two budgets are no longer equal — ``PROBE_TIMEOUT_SECONDS`` is
+        12 s against this 5 s — so on an HTTPS audience a cold token fetch
+        and a connect attempt can now both fit inside one probe rather than
+        the fetch alone consuming it. That is headroom, not a guarantee: the
+        ID token is cached for 50 min, so this cost lands only on a cache
+        miss, and the guard above still matters because it removes the race
+        entirely for HTTP audiences."""
         headers: dict[str, str] = {}
         shared_secret = settings.core_storage_shared_secret.get_secret_value()
         if shared_secret:
