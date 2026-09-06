@@ -292,13 +292,28 @@ async def get_report(
         # (totals/by_type/by_agent/quality/trend). These are real, decision-
         # bearing memories an agent kept private — excluding them made
         # durable_memories_written measure "team-visible" rather than "written",
-        # and disproportionately undercounted privacy-heavy tenants. This is a
-        # pure count; the content sections (value_highlights/learning/spotlight/
-        # working_on) still exclude scope_agent — see list_query below — so no
-        # private content is surfaced to the group. Ignored on the self path
-        # (agent_id set), which already scopes visibility to the caller.
+        # and disproportionately undercounted privacy-heavy tenants. Ignored on
+        # the self path (agent_id set), which already scopes visibility to the
+        # caller.
+        #
+        # No memory title, content or memory id crosses into the response from
+        # here — the projection is (memory_type, agent_id, status[, tenant_id],
+        # COUNT(*)). Counts ARE bucketed by agent, so on this branch, where no
+        # ``agent_id`` is set, EVERY agent's private rows are counted, not just
+        # the caller's: an agent whose whole window is private still appears in
+        # by_agent with its true volume. That is the trade the paragraph above
+        # argues for, stated rather than glossed.
+        #
+        # Whether private CONTENT surfaces is a separate decision, made by
+        # ``is_self_scope`` below — see U42/M-31 there.
         "include_scope_agent": True,
     }
+    # The audience/data-scope decision, resolved ONCE. Both the breakdown below
+    # and the visibility identity on the detail path key off it, and M-31 was
+    # exactly those two drifting apart: this branch was right and ``list_query``
+    # re-derived the predicate by hand and got it wrong. Sharing the variable is
+    # what keeps them together; a comment claiming they match is not.
+    is_self_scope = False
     if org_mode:
         # Org-wide: aggregate across every tenant the credential may read.
         # Team/org-visible only (no agent_id ⇒ excludes scope_agent); the
@@ -309,6 +324,7 @@ async def get_report(
         # Narrowest: only the caller's own contributions.
         breakdown_query["agent_id"] = caller_agent_id
         scope_label = "self"
+        is_self_scope = True
     else:
         # internal_group / external: the caller's own fleet (team/org-visible).
         # ``external`` shares the same query but its detail is stripped below.
@@ -345,24 +361,31 @@ async def get_report(
         # over-fetch: the surviving pool must still exceed the downstream
         # _LEARNING_LIMIT / _HIGHLIGHTS_LIMIT slices.
 
+        # U42/M-31. The VISIBILITY identity — self path only. Storage admits
+        # ``scope_agent`` rows authored by this agent when it is set and
+        # excludes all of them when it is not (``memory_list_by_filters``), so
+        # on a group/org report it puts the caller's OWN private titles into
+        # learning / value_highlights / working_on / the spotlight headline.
+        # It used to be passed unconditionally.
+        visibility_agent_id = caller_agent_id if is_self_scope else None
+
         # Recent-ordered fetch → LEARNING (recent insights) + working-on LANES.
         list_query: dict = {
             "tenant_id": tenant_id,
-            "caller_agent_id": caller_agent_id,
+            "caller_agent_id": visibility_agent_id,
             "created_after": window_start.isoformat(),
             "sort": "created_at",
             "order": "desc",
             "limit": _DURABLE_FETCH_LIMIT,
         }
-        # Self audiences scope to the caller's OWN authored rows, mirroring the
-        # ``agent_id`` filter applied to breakdown_query on this path — so the
+        # Self audiences scope to the caller's OWN authored rows, so the
         # list-derived sections (learning, value_highlights, working_on) stay
         # consistent with the breakdown-derived counts (durable_total, per_agent).
         # NOTE: /memories/list filters authorship via ``written_by`` (``agent_id``
-        # is not read on that path); ``caller_agent_id`` above is the visibility
-        # identity, not an author filter. Skipped in org_mode: an org-scope report
-        # aggregates the whole readable set, so it must not narrow to one author.
-        if dest in _SELF_AUDIENCES and caller_agent_id and not org_mode:
+        # is not read on that path). That is a DIFFERENT knob from the visibility
+        # identity above — a row can be visible without being authored by the
+        # caller, which is the whole group view.
+        if is_self_scope:
             list_query["written_by"] = caller_agent_id
         if org_mode:
             list_query["readable_tenant_ids"] = readable
@@ -417,7 +440,7 @@ async def get_report(
         if not org_mode:
             if dest == AUDIENCE_GROUP:
                 agent_rows = p1.get("agents") or []
-            elif dest in _SELF_AUDIENCES:
+            elif is_self_scope:
                 agent_rows = [caller] if caller else []
             else:
                 agent_rows = []
@@ -596,6 +619,12 @@ async def get_report(
                 "durable, decision-bearing memories (excl. episodic logs, the "
                 "'main' firehose, and heartbeat/health/status noise)"
             ),
+            # Deliberately NOT ``is_self_scope``: this one omits the
+            # ``caller_agent_id`` conjunct, so a human-dashboard caller (no agent
+            # identity) asking for a self destination still gets the default
+            # belonging block even though its ``scope`` reads "group". Response
+            # shape, not visibility — swapping in the shared predicate here would
+            # silently start returning null.
             "belonging": (
                 {"type": belonging_type, "owner_ref": owner_ref}
                 if dest in _SELF_AUDIENCES and not org_mode
