@@ -133,7 +133,7 @@ async def _run_auto_chunk(
     ctx = SimpleNamespace(
         data={
             # ``GovernanceDecision`` reads the request off the context, exactly
-            # as ``_create_memory_pipeline`` populates it.
+            # as ``_run_write_pipeline`` populates it.
             "input": data,
             "memory_fields": {
                 "memory_type": "fact",

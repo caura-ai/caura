@@ -98,7 +98,7 @@ async def _run_auto_chunk(
 ) -> _Run:
     """Drive the multi-fact exit with ``deployment_mode`` set for real.
 
-    ``ctx`` is built the way ``_create_memory_pipeline`` builds it, but
+    ``ctx`` is built the way ``_run_write_pipeline`` builds it, but
     ``embedding``/``enrichment`` are set to what ``ParallelEmbedEnrich`` actually
     produces in each mode — ``None`` for both when deferred, because this branch
     never sets ``resolved_write_mode`` and so takes the arm keyed on

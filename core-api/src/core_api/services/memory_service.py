@@ -231,15 +231,15 @@ async def _live_duplicate_hashes(
 ) -> set[str]:
     """Which of ``hashes`` already have a LIVE row, in dedup scope.
 
-    The server-internal write paths — auto-chunk children (both the pipeline
-    and legacy handlers) and the atomic-fact fanout — attach a ``content_hash``
-    to every child and then insert it without ever consulting a dedup lookup.
-    The public bulk path does consult one (``existing_hashes`` +
-    ``seen_hashes`` in ``create_memories_bulk``), and the single-write path has
-    ``CheckExactDuplicate``; these three had neither. That is why prod carries
-    duplicate content-hash groups with no concurrency involved at all: the same
-    document re-chunked, or an LLM emitting the same fact twice, minted a fresh
-    row every time.
+    The server-internal write paths — auto-chunk children and the atomic-fact
+    fanout — attach a ``content_hash`` to every child and then insert it
+    without ever consulting a dedup lookup. The public bulk path does consult
+    one (``existing_hashes`` + ``seen_hashes`` in ``create_memories_bulk``),
+    and the single-write path has ``CheckExactDuplicate``; those two
+    server-internal paths had neither. That is why prod carries duplicate
+    content-hash groups with no concurrency involved at all: the same document
+    re-chunked, or an LLM emitting the same fact twice, minted a fresh row
+    every time.
 
     ``_auto_chunk_request_id()`` cannot substitute for this. It mints a fresh
     UUID per item per call, so the attempt-idempotency index
@@ -460,12 +460,10 @@ async def _embed_children_or_degrade(
     the trade: refusing loses the children AND wedges every retry, while
     degrading keeps the facts and leaves a repair queued.
 
-    SHARED by the pipeline and legacy handlers on purpose. The legacy path is
-    dormant, not dead — the flag at the top of this module documents flipping
-    it as the emergency-rollback lever — and an emergency rollback is
-    plausibly happening BECAUSE something is degraded, which is the same
-    condition that trips this. Two copies of a degrade policy is how the two
-    paths diverge; one is how they cannot.
+    One caller since #1347 deleted the legacy handler this was shared with.
+    Still a named helper: two copies of this degrade decision, only one of them
+    fixed, is exactly what H-09 was. ``test_the_degrade_policy_lives_in_one_place``
+    pins one definition and one call site.
     """
     try:
         return await get_embeddings_batch(child_texts, tenant_config, background=False)
@@ -652,10 +650,11 @@ async def _create_memory_or_409(payload: dict) -> dict:
     gate answers the duplicate visible before the write, this answers the race it
     cannot see, and a caller should not have to tell the two apart.
 
-    A helper rather than a try at each site because there are three of them (the
-    auto-chunk parent on both handlers, plus the legacy single write) and each
-    passes a long inline dict; wrapping them individually would re-indent all
-    three for no gain. It fetches the client itself so the swap is call-for-call.
+    One call site since #1347 — the auto-chunk parent. Still a helper and not
+    an inline try: the translation is the part worth naming, it has its own
+    tests driving it directly, and inlining would bury it in a try wrapped
+    around a long dict literal. It fetches the client itself so the swap is
+    call-for-call.
     """
     try:
         return await get_storage_client().create_memory(payload)
@@ -837,7 +836,7 @@ async def create_memory(data: MemoryCreate) -> MemoryOut:
     # needs its own call and its own route-level test.
     if data.metadata:
         data.metadata = sanitize_caller_metadata(data.metadata)
-    return await _create_memory_pipeline(data)
+    return await _run_write_pipeline(data)
 
 
 def _memory_out_with_created_links(ctx, memory: dict) -> MemoryOut:
@@ -860,8 +859,20 @@ def _memory_out_with_created_links(ctx, memory: dict) -> MemoryOut:
     )
 
 
-async def _create_memory_pipeline(data: MemoryCreate) -> MemoryOut:
-    """Pipeline-based create_memory — same logic, decomposed into timed steps."""
+async def _run_write_pipeline(data: MemoryCreate) -> MemoryOut:
+    """Build the pipeline context and run the write pipeline this request needs.
+
+    Kept separate from ``create_memory``, which stays a short prologue of
+    pre-write checks. Not only for readability:
+    ``test_service_layer_does_not_gate_on_reserved_types`` asserts that
+    ``SERVER_RESERVED_MEMORY_TYPES`` does NOT appear in ``create_memory``'s
+    source. An absence assertion over a short prologue is a contract; over a
+    merged body it would be a tripwire for any unrelated mention anywhere in
+    the write orchestration.
+
+    Called ``_create_memory_pipeline`` while there was a legacy handler to
+    contrast with; #1347 deleted that handler.
+    """
     from core_api.pipeline.compositions.write import (
         build_enrichment_pipeline,
         build_fast_write_pipeline,
@@ -1205,7 +1216,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # parent embed, which is already background=False.
         #
         # Degrades rather than raising — the parent is already committed. See
-        # ``_embed_children_or_degrade``, shared with the legacy handler.
+        # ``_embed_children_or_degrade``.
         child_embeddings = await _embed_children_or_degrade(
             child_texts, tenant_config, parent_id=str(parent_id)
         )
@@ -1252,7 +1263,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         )
 
         # Queue a repair for any child that landed without a vector; a no-op on
-        # the healthy path. Shared with the legacy handler.
+        # the healthy path.
         _queue_child_reembeds(
             child_payloads,
             child_results,

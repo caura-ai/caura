@@ -1,9 +1,9 @@
 """The server-internal write paths must consult a dedup lookup (OSS #814).
 
-Auto-chunk children (pipeline + legacy handlers) and the atomic-fact fanout each
-attach a ``content_hash`` to every child and then inserted it unconditionally.
-The public bulk path already dedups (``existing_hashes`` + ``seen_hashes``) and
-the single-write path has ``CheckExactDuplicate``; these three had neither, which
+Auto-chunk children and the atomic-fact fanout each attach a ``content_hash`` to
+every child and then inserted it unconditionally. The public bulk path already
+dedups (``existing_hashes`` + ``seen_hashes``) and the single-write path has
+``CheckExactDuplicate``; those two server-internal paths had neither, which
 is why prod carries duplicate content-hash groups with no concurrency involved:
 18 groups / 19 surplus rows over 110k live rows, measured before this change.
 

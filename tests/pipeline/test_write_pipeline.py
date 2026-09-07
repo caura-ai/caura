@@ -325,7 +325,7 @@ async def test_pipeline_failed_result_surfaces_http_500_not_unbound_local(caplog
     from fastapi import HTTPException
 
     from core_api.pipeline.runner import Pipeline, PipelineResult
-    from core_api.services.memory_service import _create_memory_pipeline
+    from core_api.services.memory_service import _run_write_pipeline
 
     async def _failed_result(self, ctx):
         return PipelineResult(pipeline_name="write", failed=True)
@@ -343,7 +343,7 @@ async def test_pipeline_failed_result_surfaces_http_500_not_unbound_local(caplog
         patch.object(Pipeline, "run", _failed_result),
     ):
         with pytest.raises(HTTPException) as exc_info:
-            await _create_memory_pipeline(_make_input())
+            await _run_write_pipeline(_make_input())
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Memory write pipeline failed unexpectedly"
