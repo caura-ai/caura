@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.48.7](https://github.com/caura-ai/caura/compare/backend-v2.48.6...backend-v2.48.7) (2026-09-07)
+
+
+### Bug Fixes
+
+* **reports:** stop leaking the caller's own private rows into group reports ([#1325](https://github.com/caura-ai/caura/issues/1325)) ([1217bd6](https://github.com/caura-ai/caura/commit/1217bd6f86bbcffc148184c48b23f9e7c2e427a1))
+
+
+### Dependencies
+
+* **actions:** bump docker/setup-qemu-action from 4.2.0 to 4.3.0 in the actions group ([#1333](https://github.com/caura-ai/caura/issues/1333)) ([8b33bc1](https://github.com/caura-ai/caura/commit/8b33bc1ae1ce2f79f98183f9fc750aba6e6b4f71))
+
 ## [2.48.6](https://github.com/caura-ai/caura/compare/backend-v2.48.5...backend-v2.48.6) (2026-09-06)
 
 
