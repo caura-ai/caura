@@ -41,14 +41,47 @@ _LITERAL_OR_ATTR_RE = re.compile(
 )
 
 
+# A42 — parenthetical qualifiers, e.g. the "(delaware)" in "acme (delaware)".
+# Matches the discriminator vocabulary ``_reattach_subject_discriminators``
+# already established ("#NNNN" and parentheticals); deliberately NOT any
+# trailing word, because unbracketed tokens are usually harmless surface
+# variation ("acme" / "acme corp") rather than a distinguisher.
+_QUALIFIER_RE = re.compile(r"[(\[]([^)\]]{1,64})[)\]]")
+
+
+def _qualifier_signature(name: str) -> frozenset[str]:
+    """Bracketed qualifiers in ``name``, normalised for comparison."""
+    return frozenset(" ".join(m.strip().lower().split()) for m in _QUALIFIER_RE.findall(name) if m.strip())
+
+
 def _same_identifier_signature(a: str, b: str) -> bool:
-    """CAURA graph-build fix (B): two names may only merge if they carry the SAME set
-    of digit-bearing identifier tokens. Synthetic suffix-distinct names like
-    'comet #0002' vs 'comet #0012' embed near-identically and trip the 0.85 similarity
-    merge, collapsing distinct entities into one contaminated mega-node."""
+    """Two names may only merge if nothing in them says they are different things.
+
+    CAURA graph-build fix (B): same set of digit-bearing identifier tokens.
+    Synthetic suffix-distinct names like 'comet #0002' vs 'comet #0012' embed
+    near-identically and trip the 0.85 similarity merge, collapsing distinct
+    entities into one contaminated mega-node.
+
+    A42 (A33 mechanism ②): digits alone are too narrow. Two genuinely distinct
+    entities distinguished by a NON-digit qualifier — 'acme (delaware)' vs
+    'acme (ohio)' — both yield an empty digit set, compare equal, and merge.
+    Downstream that reads as same_subject=true and produces a false
+    contradiction between two different things.
+
+    Asymmetry is deliberate: a name with NO qualifier merges freely with a
+    qualified one ('acme' vs 'acme (ohio)' -> allowed). An absent qualifier
+    means "unspecified", not "different", and blocking it would strand every
+    qualified mention from its own plain surface form. The chosen failure
+    direction favours coalescence — an over-merge is visible and recoverable,
+    whereas an entity that never coalesces fragments the graph silently.
+    """
     ta = set(re.findall(r"\d[\w.\-]*", a.lower()))
     tb = set(re.findall(r"\d[\w.\-]*", b.lower()))
-    return ta == tb
+    if ta != tb:
+        return False
+    qa, qb = _qualifier_signature(a), _qualifier_signature(b)
+    # Only a CONFLICT between two present qualifiers blocks the merge.
+    return not qa or not qb or qa == qb
 
 
 def _is_valid_entity(name: str, blocklist: frozenset[str] | None = None) -> bool:
