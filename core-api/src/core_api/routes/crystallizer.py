@@ -56,7 +56,36 @@ async def trigger_crystallization(
     body: CrystallizeRequest,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Trigger crystallization for a tenant (analysis + auto-curate)."""
+    """Trigger crystallization for a tenant (analysis + auto-curate).
+
+    Auth: a write-capable credential for the target tenant.
+    """
+    # Found by ``tests/test_authz_gate_inventory.py`` on its first run — the
+    # same class as H-12/H-13/M-25/#1335/#1337, and the reason that file exists.
+    #
+    # ``enforce_tenant`` alone says WHICH tenant, never whether this credential
+    # may write to it. A run is not read-shaped despite the response being a
+    # bare report id: ``start_crystallization`` reserves a report row and then
+    # does "a create per extracted fact, each with its own embedding and dedup
+    # lookups" (see its docstring), so a demo-sandbox or capabilities={'read'}
+    # credential could author memories across the tenant.
+    #
+    # ``enforce_usage_limits`` is NOT added, and this one IS settled — do not
+    # "finish" it by adding the gate. The gate's set is
+    # ``PLAN_LIMIT_GATED_OPS`` (create / bulk_create / redistribute), not
+    # ``WRITE_QUOTA_OPS``, and this route performs none of those: it reserves a
+    # report row and publishes a request to the event bus, so the creates
+    # happen later in a worker that holds no ``AuthContext``. Gating here would
+    # gate the TRIGGER, not the writes.
+    #
+    # And a run is a reduction path, which is the case ``enforce_usage_limits``
+    # explicitly carves out ("users in read-only mode must be able to delete
+    # data to get back under limits"): each cluster archives its members —
+    # ``batch_update_status`` to ``archived``, a status change, not a delete —
+    # and emits fewer crystallized facts than the ``CRYSTALLIZER_MIN_CLUSTER_SIZE``
+    # (3) rows it consumed. Blocking an over-quota org here would deny it the
+    # operation that shrinks its live set.
+    auth.enforce_read_only()
     auth.enforce_tenant(body.tenant_id)
     from core_api.services.organization_settings import resolve_config
 

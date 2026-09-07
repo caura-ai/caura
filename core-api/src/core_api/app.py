@@ -1116,16 +1116,46 @@ app.router.routes.append(
 # paths are no longer top-level ``APIRoute.path`` entries — which is exactly what
 # silently broke this guard when 0.137 shipped. ``app.openapi()`` is the stable,
 # public surface and lists the prefixed paths under both old (flatten) and new
-# (mount) FastAPI. Every core-api route is ``include_in_schema=True``, so none is
-# hidden from this check.
+# (mount) FastAPI.
+#
+# The schema is NOT the whole served surface, though, so this guard constrains
+# what may go in the opt-out set: an opt-out path must be schema-visible. Four
+# operations are served and undocumented — the PERMANENT legacy keystones
+# alias, registered with ``include_in_schema=False`` immediately after the
+# canonical ``keystones_router`` above (three operations), and the trailing-slash
+# ``GET /api/v1/skills-inbox/`` in ``routes/skills_inbox.py``. Naming any of
+# them here would raise below even though the route exists.
+#
+# (An earlier revision of this comment claimed "every core-api route is
+# include_in_schema=True, so none is hidden from this check". It was true when
+# written in #364, 2026-06-15, and stopped being true twice: #582 on
+# 2026-07-20 added the trailing-slash inbox route, then #782 on 2026-08-14
+# added the alias. Worth noting which way that went — the first falsification
+# came from a different file, so nothing a reviewer of #582 was looking at
+# would have pointed here. That is the argument for the claim being narrow
+# enough to check, which is what the paragraph above now aims at.)
+#
+# DELIBERATELY not fixed by unioning the schema with a walk of ``app.routes``.
+# The walk needs the private ``_IncludedRouter`` internals this comment exists
+# to warn about, and putting them in import-time app construction trades a
+# false RuntimeError for a service that will not boot on the next FastAPI
+# upgrade — a worse failure for a case with no live bug: all three current
+# entries are documented. The realistic way to reach it is a timeout opt-out on
+# ``/keystones``, since ``_is_opted_out`` matches exactly and the alias is a
+# distinct path that would need its own entry. If that day comes, exempt the
+# canonical path and handle the alias in ``_is_opted_out`` rather than widening
+# this guard.
 _registered_paths = set(app.openapi().get("paths", {}))
 for _opt_out in _TIMEOUT_OPT_OUT_PATHS:
     if _opt_out not in _registered_paths:
         raise RuntimeError(
-            f"RequestTimeoutMiddleware opt-out path {_opt_out!r} is not "
-            "registered on the FastAPI app. Either the route was renamed/"
-            "removed or _TIMEOUT_OPT_OUT_PATHS in middleware/request_timeout.py "
-            "is stale; both are silent-create regressions waiting to happen."
+            f"RequestTimeoutMiddleware opt-out path {_opt_out!r} is not in the "
+            "OpenAPI schema. Either the route was renamed/removed or "
+            "_TIMEOUT_OPT_OUT_PATHS in middleware/request_timeout.py is stale — "
+            "both are silent-create regressions waiting to happen. If instead "
+            "the route exists but is registered include_in_schema=False (the "
+            "legacy keystones alias, or GET /api/v1/skills-inbox/), this guard "
+            "cannot see it: opt out of the canonical path instead."
         )
 
 

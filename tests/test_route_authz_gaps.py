@@ -660,6 +660,44 @@ async def test_agent_tune_still_works_when_over_usage_limits(
     assert await _tuned_top_k(client, as_auth, tenant, agent) == attempt["expect"]
 
 
+# ---------------------------------------------------------------------------
+# POST /crystallize had no write gate.
+#
+# Found by tests/test_authz_gate_inventory.py on its first run, which is the
+# argument for that file existing. ``enforce_tenant`` says WHICH tenant, never
+# whether this credential may write to it.
+#
+# These are behavioural, and they are not redundant with the inventory: the
+# static check proves the CALL is present, not that the route refuses. That
+# distinction matters more here than usual — ``start_crystallization`` reserves
+# a report row and then publishes to the event bus, so the memory creates
+# happen in a worker holding no ``AuthContext``. Nothing downstream re-checks;
+# this gate is the whole of it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cred", NON_WRITING_CREDS)
+async def test_crystallize_refuses_a_non_writing_credential(client, as_auth, cred):
+    """A credential that cannot write must not be able to start a run."""
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, **cred)
+    resp = await client.post("/api/v1/crystallize", json={"tenant_id": tenant})
+    assert resp.status_code == 403, resp.text
+
+
+async def test_a_write_capable_credential_can_still_crystallize(client, as_auth):
+    """OVER-REFUSAL GUARD. Refusing every caller would satisfy the test above.
+
+    Asserts the run was actually accepted — a report id comes back — rather
+    than only that the status was not 403.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)
+    resp = await client.post("/api/v1/crystallize", json={"tenant_id": tenant})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["report_id"], resp.text
+
+
 async def test_settings_rejects_a_read_only_credential(client, as_auth):
     """H-15: the hand-rolled ``is_demo`` check missed read-only credentials.
 
