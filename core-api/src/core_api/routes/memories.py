@@ -2003,6 +2003,10 @@ async def _search_inner(
                 for k, v in (diagnostic_ctx.get("search_params", {}) or {}).items()
             },
             all_candidates=diagnostic_ctx.get("all_candidates", []) or [],
+            # CAURA-722 — no `or` fallback on the count: `0` is a real,
+            # different answer from `None` here (see SearchDiagnostic).
+            entity_matches=diagnostic_ctx.get("entity_matches"),
+            entity_match_declined=diagnostic_ctx.get("entity_match_declined", False),
         ),
     )
 

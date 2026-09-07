@@ -185,6 +185,14 @@ async def summarize_memories(
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
                 "top_k_used": top_k,
                 "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
+                # CAURA-722 — this block already reports
+                # ``retrieval_strategy``, which is the field that reads as
+                # "entity retrieval did nothing" whenever the ENTITY_LOOKUP
+                # short-circuit did not fire. Surfacing these two beside it is
+                # what makes that reading falsifiable. Documented on
+                # ``SearchDiagnostic``; same ``diagnostic_ctx`` keys.
+                "entity_matches": diagnostic_ctx.get("entity_matches"),
+                "entity_match_declined": diagnostic_ctx.get("entity_match_declined", False),
                 "search_params": {
                     k: (float(v) if isinstance(v, (int, float)) else v)
                     for k, v in diagnostic_ctx.get("search_params", {}).items()
@@ -227,6 +235,14 @@ async def summarize_memories(
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
                 "top_k_used": top_k,
                 "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
+                # CAURA-722 — this block already reports
+                # ``retrieval_strategy``, which is the field that reads as
+                # "entity retrieval did nothing" whenever the ENTITY_LOOKUP
+                # short-circuit did not fire. Surfacing these two beside it is
+                # what makes that reading falsifiable. Documented on
+                # ``SearchDiagnostic``; same ``diagnostic_ctx`` keys.
+                "entity_matches": diagnostic_ctx.get("entity_matches"),
+                "entity_match_declined": diagnostic_ctx.get("entity_match_declined", False),
                 "search_params": {
                     k: (float(v) if isinstance(v, (int, float)) else v)
                     for k, v in diagnostic_ctx.get("search_params", {}).items()
@@ -322,6 +338,9 @@ async def summarize_memories(
             "all_candidates": diagnostic_ctx.get("all_candidates", []),
             "top_k_used": top_k,
             "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
+            # CAURA-722 — see SearchDiagnostic for what the pair means.
+            "entity_matches": diagnostic_ctx.get("entity_matches"),
+            "entity_match_declined": diagnostic_ctx.get("entity_match_declined", False),
             "search_params": {
                 k: (float(v) if isinstance(v, (int, float)) else v)
                 for k, v in diagnostic_ctx.get("search_params", {}).items()

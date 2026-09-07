@@ -2632,6 +2632,71 @@ class PostgresService:
                 fts_match,
                 has_embedding,
                 status_penalty,
+                # CAURA-722 — the score's own ingredients, carried out of the
+                # CTE rather than discarded at its boundary.
+                #
+                # These are the five factors ``SearchDiagnostic.all_candidates``
+                # has always declared per row and always reported as ``None``:
+                # each was computed here, multiplied (or added, under the A50
+                # formula) into ``score``, and then left behind because the CTE
+                # select list did not name it. core-api reads all five by name
+                # in ``execute_scored_search`` and the diagnostic rounds each
+                # through ``_f()``, so three layers were built to receive values
+                # the query never sent. Nothing was wrong with ranking — only
+                # with explaining it, which is what made a null read as "this
+                # signal did not apply" and cost a benchmark the conclusion that
+                # entity retrieval contributed nothing.
+                #
+                # No new computation: every expression below already exists
+                # above because ``score`` needs it. ``reserved_stmt`` even
+                # ORDER BYs ``fts_score`` already.
+                #
+                # Always selected, not gated on a diagnostic flag: storage takes
+                # no such flag, and plumbing one through the route to save five
+                # floats per row — on a response already carrying each row's
+                # full content — costs more than it saves.
+                #
+                # Both union branches derive from this statement, so they stay
+                # column-compatible. Dedup behaviour is unchanged too: the
+                # factors are deterministic per ``mem_id``, so rows that
+                # collapsed before still collapse.
+                #
+                # ``fts_score`` is the one with a price, and it is paid
+                # deliberately. The four below are CASE or literal expressions
+                # over the row, so naming them costs nothing. ``fts_score`` is
+                # ``ts_rank_cd``, and SQLAlchemy inlines an expression at every
+                # site that names it, so one more reference takes the compiled
+                # statement from 9 renders to 10 and ``plainto_tsquery`` from 20
+                # to 21 — the ratchet ``test_fts_score_single_render`` guards,
+                # and whose constants move with this change.
+                #
+                # Only +1 rather than +2 because ``reserved_stmt`` already
+                # ORDER BYs ``fts_score``; once it is a real column that clause
+                # references the label instead of re-pasting the expression.
+                #
+                # The cost, from the measurement recorded on ``_saturate_rank``
+                # (halving 18 -> 9 renders bought 92.0ms -> 56.4ms at 11,505
+                # matching rows on a 31,446-memory corpus): about 4ms per
+                # render at that worst case, less on smaller matches, and
+                # diluted again end-to-end because the same query pays six
+                # pgvector distance computations per row. Against a ~1,300ms
+                # search p50 that is well under a percent, in exchange for the
+                # fifth factor ``SearchDiagnostic`` declares actually arriving.
+                #
+                # It also lands inside this CTE rather than after the
+                # entity-link fanout in the outer query, so it is evaluated per
+                # candidate row and not per joined row.
+                #
+                # The real fix is the inner-projection work ``_saturate_rank``
+                # describes, which takes renders to 1 and makes every factor
+                # free to project; that needs an optimisation barrier and its
+                # own plan-shape review. When it lands, the constant drops and
+                # this reference costs nothing.
+                fts_score,
+                freshness,
+                entity_boost,
+                recall_boost_expr,
+                temporal_boost,
             )
             # Multi-tenant read predicate: when ``readable_tenant_ids``
             # is provided (cross-tenant agent key), reads widen across
@@ -2804,6 +2869,12 @@ class PostgresService:
                 scored_cte.c.fts_match,
                 scored_cte.c.has_embedding,
                 scored_cte.c.status_penalty,
+                # CAURA-722 — see the CTE select list above.
+                scored_cte.c.fts_score,
+                scored_cte.c.freshness,
+                scored_cte.c.entity_boost,
+                scored_cte.c.recall_boost,
+                scored_cte.c.temporal_boost,
                 MemoryEntityLink.entity_id,
                 MemoryEntityLink.role,
                 Agent.display_name.label("agent_display_name"),
@@ -2836,6 +2907,12 @@ class PostgresService:
                     fts_match=row.fts_match,
                     has_embedding=row.has_embedding,
                     status_penalty=row.status_penalty,
+                    # CAURA-722 — see the CTE select list above.
+                    fts_score=row.fts_score,
+                    freshness=row.freshness,
+                    entity_boost=row.entity_boost,
+                    recall_boost=row.recall_boost,
+                    temporal_boost=row.temporal_boost,
                     entity_links=[],
                 )
             if row.entity_id is not None:

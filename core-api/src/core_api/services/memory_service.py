@@ -4572,6 +4572,11 @@ async def _search_memories_pipeline(
         diagnostic_ctx["counts"] = ctx.data.get("diagnostic_counts", {})
         sp_applied = ctx.data.get("search_params") or {}
         diagnostic_ctx["min_similarity_applied"] = sp_applied.get("min_similarity")
+        # CAURA-722 — why entity retrieval stayed out of this query.
+        # ``.get`` with no default for the count: absent means the FTS never
+        # ran, and that must survive as None rather than collapsing to 0.
+        diagnostic_ctx["entity_matches"] = ctx.data.get("entity_matches")
+        diagnostic_ctx["entity_match_declined"] = bool(ctx.data.get("entity_match_declined"))
 
     if recall_ctx is not None:
         # Written by TrackRecalls on every path it takes. Defaulting to False

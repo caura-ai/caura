@@ -31,11 +31,37 @@ from core_storage_api.services.postgres_service import _saturate_rank
 # directions matter: a rise means someone added a reference and put the per-row
 # cost back, a fall means the inner-projection work landed. Either way,
 # re-measure and move the number deliberately rather than loosening the check.
-_EXPECTED_TS_RANK_CD_RENDERS = 9
+#
+# CAURA-722 moved these 9 -> 10 and 20 -> 21, deliberately and with the trade
+# measured. ``fts_score`` is now projected out of the scored CTE so
+# ``SearchDiagnostic.all_candidates`` can report it: it declares the factor per
+# row and had returned ``None`` for it on every row of every query, because the
+# CTE computed it, folded it into ``score`` and then did not name it in its
+# select list.
+#
+# Why the rise is only +1 and not +2, with the statement appearing in two union
+# branches: ``reserved_stmt`` already ordered by ``fts_score``, and once the
+# factor is a real column that ORDER BY references the label instead of
+# re-pasting the expression.
+#
+# The price, scaled from the measurement on ``_saturate_rank`` (18 -> 9 renders
+# bought 92.0ms -> 56.4ms at 11,505 matching rows on a 31,446-memory corpus):
+# roughly 4ms per render at that worst case, less on smaller matches, and
+# smaller again end-to-end since the same query also pays six pgvector distance
+# computations per row. Against a search p50 near 1,300ms that is well under a
+# percent. The render lands inside the candidate CTE, not in the outer query
+# past the entity-link fanout, so it is per candidate row rather than per
+# joined row.
+#
+# This does not concede the ratchet. The inner-projection work
+# ``_saturate_rank`` describes still takes renders to 1 and would make every
+# factor free to project — at which point this constant drops and CAURA-722's
+# reference costs nothing. Guard both directions as before.
+_EXPECTED_TS_RANK_CD_RENDERS = 10
 # The main and reserved candidate branches each carry ``fts_match`` into the
 # candidate CTE. Projecting it there keeps the expression ahead of entity-link
 # fanout, where an outer render would evaluate it once per joined row.
-_EXPECTED_TSQUERY_RENDERS = 20
+_EXPECTED_TSQUERY_RENDERS = 21
 
 
 def _scaled_rank():

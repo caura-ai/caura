@@ -97,6 +97,19 @@ class ClassifyQuery:
                 sc = get_storage_client()
                 matched_ids = await self._entity_fts(sc, tokens, tenant_id, fleet_ids)
 
+                # CAURA-722 — record the count HERE, before the over-broad
+                # branch below empties ``matched_ids``. Reading it later would
+                # report 0 for the decline, which is the one value that must
+                # not be confused with "FTS matched nothing" — those two send
+                # the follow-up work to different teams (threshold tuning vs
+                # entity extraction/linking).
+                #
+                # Set unconditionally rather than under ``if diagnostic``: it
+                # is one ``len()``, and gating it would put a second
+                # diagnostic-only branch in a hot path for no measurable gain.
+                # Exposure stays gated at the route.
+                ctx.data["entity_matches"] = len(matched_ids)
+
                 # CAURA-698: over-broad match → not a "name a specific entity"
                 # query. The precision argument for entity_lookup breaks down
                 # at high match counts: graph expansion + memory linking

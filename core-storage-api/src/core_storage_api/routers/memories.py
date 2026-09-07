@@ -236,6 +236,19 @@ async def scored_search(request: Request) -> list[dict]:
             row["status_penalty"] = (
                 float(r.status_penalty) if getattr(r, "status_penalty", None) is not None else 1.0
             )
+            # CAURA-722 — the score's ingredients, for
+            # ``SearchDiagnostic.all_candidates``, which declared all five per
+            # row and reported None for every one of them.
+            #
+            # Left as ``None`` when absent rather than defaulted to the
+            # identity (1.0): the query above always produces a value, so a
+            # missing attribute means something upstream changed shape, and
+            # saying "no boost applied" on that basis is the precise failure
+            # this change exists to end. A null now means "not reported",
+            # which is the truth, and the diagnostic documents it as such.
+            for _factor in ("fts_score", "freshness", "entity_boost", "recall_boost", "temporal_boost"):
+                _v = getattr(r, _factor, None)
+                row[_factor] = float(_v) if _v is not None else None
             row["entity_links"] = r.entity_links or []
             out.append(row)
     except Exception:

@@ -616,7 +616,72 @@ class SearchDiagnostic(BaseModel):
     search_params: dict = {}
     # One entry per widened candidate: id/title/type/status + score + factors +
     # ``excluded`` (None | "below_min_similarity" | "trimmed_by_top_k").
+    #
+    #
+    # KNOWN GAP (CAURA-722, not fixed here): five of these factors —
+    # ``entity_boost``, ``freshness``, ``recall_boost``, ``temporal_boost``,
+    # ``fts_score`` — are ``None`` on every row of the scored-search path.
+    # Storage computes them in the scored CTE, uses them to build ``score``,
+    # and then omits them from the outer ``select()``, so the route never
+    # serializes them (``postgres_service.memory_scored_search``). Only
+    # ``score``, ``vec_sim``, ``fts_match`` and ``status_penalty`` are real
+    # today. Do not read a null factor as "this signal did not apply" — it
+    # applied to ``score`` and was simply not reported.
+    #
+    # This matters most for ``entity_boost``, because it is the ONLY place the
+    # entity *boost* is observable. ``retrieval_strategy`` reports only the
+    # ENTITY_LOOKUP *short-circuit*, which fires solely when the entity-linked
+    # pool fills ``top_k`` unaided — so a run that reads the strategy alone and
+    # concludes "entity retrieval contributed nothing" has measured the
+    # short-circuit, not the subsystem, and the field that would settle it is
+    # currently null.
     all_candidates: list[dict] = []
+    # CAURA-722 — the two facts that separate the reasons entity retrieval
+    # stayed out of a query. Before these, ``retrieval_strategy`` said only
+    # that it was not ENTITY_LOOKUP, and the three causes below were
+    # indistinguishable from outside the server; they belong to different
+    # owners, so the ambiguity blocked the follow-up.
+    #
+    #   entity_matches | declined | meaning
+    #   ---------------|----------|----------------------------------------
+    #   None           |  false   | entity FTS never ran — retrieval disabled
+    #                  |          | by org setting, no entity-shaped tokens in
+    #                  |          | the query, or the lookup raised and was
+    #                  |          | swallowed
+    #   0              |  false   | FTS ran and matched nothing → extraction /
+    #                  |          | linking question
+    #   > MAX_MATCHES  |  TRUE    | over-broad, declined by CAURA-698 → the
+    #                  |          | entity boost is SUPPRESSED for this query,
+    #                  |          | so entity really did contribute nothing
+    #   1..MAX_MATCHES |  false   | matched; if the strategy is not
+    #                  |          | ENTITY_LOOKUP the pool under-filled top_k
+    #                  |          | and the boost WAS still applied
+    #
+    # The last two rows are the pair worth the field: they have opposite
+    # answers to "did the entity signal affect this result?" and looked
+    # identical before.
+    #
+    # ``None`` vs ``0`` is load-bearing — "never asked" against "asked, got
+    # nothing" — so this is deliberately nullable rather than defaulting to 0.
+    entity_matches: int | None = Field(
+        default=None,
+        description=(
+            "Entities the query's tokens matched in entity FTS, counted "
+            "before the over-broad decline empties the set. None means the "
+            "lookup never ran (entity retrieval off, no entity-shaped tokens, "
+            "or a swallowed failure) — distinct from 0, which means it ran and "
+            "matched nothing."
+        ),
+    )
+    entity_match_declined: bool = Field(
+        default=False,
+        description=(
+            "True when the entity match was refused as over-broad "
+            "(> ENTITY_LOOKUP_MAX_MATCHES). This is the only decline that also "
+            "suppresses the per-row entity boost; an under-filled pool falls "
+            "through with the boost still applied and reports False here."
+        ),
+    )
 
 
 class ConflictOut(BaseModel):

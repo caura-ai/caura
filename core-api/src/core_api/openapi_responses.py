@@ -93,6 +93,10 @@ class RecallDiagnostic(BaseModel):
     top_k_used: int | None
     retrieval_strategy: str | None
     search_params: dict
+    # CAURA-722 — documented on ``SearchDiagnostic``. ``None`` on the count
+    # means entity FTS never ran, which is a different answer from ``0``.
+    entity_matches: int | None = None
+    entity_match_declined: bool = False
 
 
 class RecallResponse(BaseModel):
