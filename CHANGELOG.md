@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.0.4](https://github.com/caura-ai/caura/compare/backend-v3.0.3...backend-v3.0.4) (2026-09-07)
+
+
+### Bug Fixes
+
+* **auth:** name the identity-precedence policy so the self-plane rule works ([#1369](https://github.com/caura-ai/caura/issues/1369)) ([57bf64b](https://github.com/caura-ai/caura/commit/57bf64b366b1d6bd7e8022c6a16d37bc75a8823b))
+
+
+### Documentation
+
+* **tools:** correct four stale claims, and share the route walk they hid behind ([#1371](https://github.com/caura-ai/caura/issues/1371)) ([df099f4](https://github.com/caura-ai/caura/commit/df099f42dd6a9a5261d77f43a34024cf8f16abc8))
+
 ## [3.0.3](https://github.com/caura-ai/caura/compare/backend-v3.0.2...backend-v3.0.3) (2026-09-07)
 
 
