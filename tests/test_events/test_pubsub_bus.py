@@ -1925,6 +1925,15 @@ async def test_start_survives_an_unreadable_instance_token(
     assert len(bus._broadcast_slot_id) == 12  # the random fallback, not a slot
     bus._stopping = True  # keep teardown of the fake client quiet
 
+    # ``start()`` above launched the pull loop, and this test used to end
+    # without stopping it: the task then ran for the remaining 652 tests in
+    # the session, on the shared session-scoped loop. Every other test here
+    # that starts the bus already calls ``stop()``; this one was the outlier.
+    # The assertion is what keeps it that way — dropping the ``stop()`` leaves
+    # ``_pull_tasks`` populated.
+    await bus.stop()
+    assert bus._pull_tasks == []
+
 
 def test_identity_survives_an_unexpected_error_in_the_claim(
     monkeypatch: pytest.MonkeyPatch,
