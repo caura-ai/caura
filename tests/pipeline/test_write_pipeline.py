@@ -1,7 +1,9 @@
-"""Integration tests: pipeline path vs legacy path produce equivalent output.
+"""Integration tests for the write pipeline.
 
-These tests require a running PostgreSQL instance (same as other integration tests).
-They exercise both paths with identical inputs and compare the MemoryOut results.
+These tests require a running PostgreSQL instance (same as other integration
+tests). They used to run each case twice, once through the pipeline and once
+through ``_create_memory_legacy``, and compare the two ``MemoryOut`` results;
+that handler is gone, so there is one path and no comparison to make.
 """
 
 import uuid
@@ -13,9 +15,6 @@ from sqlalchemy import select
 from common.models.memory import Memory
 from core_api.constants import VECTOR_DIM
 from core_api.schemas import MemoryCreate, MemoryOut
-
-# Ensure pipeline flag is off for legacy path tests
-# (individual tests toggle it as needed)
 
 TENANT_ID = f"test-pipeline-{uuid.uuid4().hex[:8]}"
 FLEET_ID = "test-fleet"
@@ -367,24 +366,18 @@ async def test_pipeline_failed_result_surfaces_http_500_not_unbound_local(caplog
 @pytest.mark.asyncio
 async def test_pipeline_path_creates_memory():
     """Pipeline path creates a memory and returns valid MemoryOut."""
-    from core_api.services import memory_service
 
     # Temporarily enable pipeline
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    from core_api.services.memory_service import create_memory
 
-        data = _make_input()
-        result = await create_memory(data)
+    data = _make_input()
+    result = await create_memory(data)
 
-        assert isinstance(result, MemoryOut)
-        assert result.tenant_id == TENANT_ID
-        assert result.content == data.content
-        assert result.memory_type is not None
-        assert result.status is not None
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert isinstance(result, MemoryOut)
+    assert result.tenant_id == TENANT_ID
+    assert result.content == data.content
+    assert result.memory_type is not None
+    assert result.status is not None
 
 
 @pytest.mark.asyncio
@@ -398,57 +391,50 @@ async def test_pipeline_emits_memory_write_latency_log(caplog):
     """
     import logging
 
-    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    data = _make_input(
+        content="CAURA-682 Phase 1 latency log emission test — unique content for hash dedup."
+    )
+    with caplog.at_level(logging.INFO, logger="core_api.services.memory_service"):
+        await create_memory(data)
 
-        data = _make_input(
-            content="CAURA-682 Phase 1 latency log emission test — unique content for hash dedup."
-        )
-        with caplog.at_level(logging.INFO, logger="core_api.services.memory_service"):
-            await create_memory(data)
-
-        latency_records = [
-            r for r in caplog.records if r.getMessage() == "memory_write_latency"
-        ]
-        assert len(latency_records) == 1, (
-            f"expected exactly one memory_write_latency log, got {len(latency_records)}"
-        )
-        record = latency_records[0]
-        # Pin the field surface so the GCP log query stays stable.
-        for key in (
-            "path",
-            "tenant_id",
-            "agent_id",
-            "fleet_id",
-            "write_mode",
-            "total_ms",
-            "embedding_pending",
-            "enrichment_pending",
-            "cached_embedding",
-        ):
-            assert hasattr(record, key), f"missing field: {key}"
-        assert record.path == "memory-write"
-        assert record.tenant_id == TENANT_ID
-        assert record.agent_id == AGENT_ID
-        assert record.fleet_id == FLEET_ID
-        assert record.write_mode in ("fast", "strong")
-        assert isinstance(record.total_ms, int)
-        assert record.total_ms >= 0
-        # Storage call always runs; per-phase keys present when the
-        # phase ran inline (may be None if deferred to core-worker).
-        assert hasattr(record, "storage_ms")
-        assert hasattr(record, "entity_links_ms")
-        assert hasattr(record, "embedding_ms")
-        assert hasattr(record, "enrichment_ms")
-        # Success path: ``success`` must be True so failed-vs-successful
-        # write filters in GCP work.
-        assert record.success is True
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    latency_records = [
+        r for r in caplog.records if r.getMessage() == "memory_write_latency"
+    ]
+    assert len(latency_records) == 1, (
+        f"expected exactly one memory_write_latency log, got {len(latency_records)}"
+    )
+    record = latency_records[0]
+    # Pin the field surface so the GCP log query stays stable.
+    for key in (
+        "path",
+        "tenant_id",
+        "agent_id",
+        "fleet_id",
+        "write_mode",
+        "total_ms",
+        "embedding_pending",
+        "enrichment_pending",
+        "cached_embedding",
+    ):
+        assert hasattr(record, key), f"missing field: {key}"
+    assert record.path == "memory-write"
+    assert record.tenant_id == TENANT_ID
+    assert record.agent_id == AGENT_ID
+    assert record.fleet_id == FLEET_ID
+    assert record.write_mode in ("fast", "strong")
+    assert isinstance(record.total_ms, int)
+    assert record.total_ms >= 0
+    # Storage call always runs; per-phase keys present when the
+    # phase ran inline (may be None if deferred to core-worker).
+    assert hasattr(record, "storage_ms")
+    assert hasattr(record, "entity_links_ms")
+    assert hasattr(record, "embedding_ms")
+    assert hasattr(record, "enrichment_ms")
+    # Success path: ``success`` must be True so failed-vs-successful
+    # write filters in GCP work.
+    assert record.success is True
 
 
 @pytest.mark.asyncio
@@ -467,10 +453,6 @@ async def test_pipeline_emits_latency_log_on_pipeline_failure(caplog):
     from fastapi import HTTPException
 
     from core_api.pipeline.runner import Pipeline
-    from core_api.services import memory_service
-
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
 
     async def _boom(self, ctx):
         # Mirrors parallel_embed_enrich's timeout shape exactly.
@@ -478,85 +460,54 @@ async def test_pipeline_emits_latency_log_on_pipeline_failure(caplog):
             status_code=504, detail="Memory write timed out (embedding/enrichment)"
         )
 
-    try:
-        from core_api.services.memory_service import create_memory
+    from core_api.services.memory_service import create_memory
 
-        data = _make_input(
-            content="CAURA-682 Phase 1 timeout-emits-log path — distinct content for hash uniqueness."
-        )
-        with (
-            caplog.at_level(logging.INFO, logger="core_api.services.memory_service"),
-            patch.object(Pipeline, "run", _boom),
-        ):
-            with pytest.raises(HTTPException) as exc_info:
-                await create_memory(data)
-            assert exc_info.value.status_code == 504
+    data = _make_input(
+        content="CAURA-682 Phase 1 timeout-emits-log path — distinct content for hash uniqueness."
+    )
+    with (
+        caplog.at_level(logging.INFO, logger="core_api.services.memory_service"),
+        patch.object(Pipeline, "run", _boom),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await create_memory(data)
+        assert exc_info.value.status_code == 504
 
-        latency_records = [
-            r for r in caplog.records if r.getMessage() == "memory_write_latency"
-        ]
-        assert len(latency_records) == 1, (
-            f"expected exactly one memory_write_latency log on failure, got {len(latency_records)}"
-        )
-        record = latency_records[0]
-        assert record.success is False
-        assert record.tenant_id == TENANT_ID
-        # ``total_ms`` is computed in finally → must be present even when
-        # the pipeline raised before populating ``ctx.data["memory"]``.
-        assert isinstance(record.total_ms, int)
-        assert record.embedding_pending is False
-        assert record.enrichment_pending is False
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
-
-
-@pytest.mark.asyncio
-async def test_legacy_path_creates_memory():
-    """Legacy path creates a memory and returns valid MemoryOut (baseline)."""
-    from core_api.services import memory_service
-
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = False
-    try:
-        from core_api.services.memory_service import create_memory
-
-        data = _make_input(
-            content="Legacy path baseline test memory — unique content to avoid hash collision with pipeline path test."
-        )
-        result = await create_memory(data)
-
-        assert isinstance(result, MemoryOut)
-        assert result.tenant_id == TENANT_ID
-        assert result.content == data.content
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    latency_records = [
+        r for r in caplog.records if r.getMessage() == "memory_write_latency"
+    ]
+    assert len(latency_records) == 1, (
+        f"expected exactly one memory_write_latency log on failure, got {len(latency_records)}"
+    )
+    record = latency_records[0]
+    assert record.success is False
+    assert record.tenant_id == TENANT_ID
+    # ``total_ms`` is computed in finally → must be present even when
+    # the pipeline raised before populating ``ctx.data["memory"]``.
+    assert isinstance(record.total_ms, int)
+    assert record.embedding_pending is False
+    assert record.enrichment_pending is False
 
 
 @pytest.mark.asyncio
 async def test_pipeline_extract_only(db):
     """Pipeline path returns preview MemoryOut when persist=False."""
-    from core_api.services import memory_service
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    from core_api.services.memory_service import create_memory
 
-        extract_content = f"Pipeline extract-only test memory — unique {uuid.uuid4().hex[:8]} — should NOT be persisted."
-        data = _make_input(content=extract_content, persist=False)
-        result = await create_memory(data)
+    extract_content = f"Pipeline extract-only test memory — unique {uuid.uuid4().hex[:8]} — should NOT be persisted."
+    data = _make_input(content=extract_content, persist=False)
+    result = await create_memory(data)
 
-        assert isinstance(result, MemoryOut)
-        assert result.content == data.content
-        # Extract-only should not persist — verify no row in DB
-        stmt = select(Memory).where(
-            Memory.tenant_id == TENANT_ID,
-            Memory.content == extract_content,
-        )
-        rows = (await db.execute(stmt)).scalars().all()
-        assert len(rows) == 0
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert isinstance(result, MemoryOut)
+    assert result.content == data.content
+    # Extract-only should not persist — verify no row in DB
+    stmt = select(Memory).where(
+        Memory.tenant_id == TENANT_ID,
+        Memory.content == extract_content,
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    assert len(rows) == 0
 
 
 @pytest.mark.asyncio
@@ -564,24 +515,17 @@ async def test_pipeline_hash_dedup():
     """Pipeline path raises 409 on duplicate content_hash."""
     from fastapi import HTTPException
 
-    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    data = _make_input(
+        content="Unique content for hash dedup test in pipeline write refactor."
+    )
+    await create_memory(data)
 
-        data = _make_input(
-            content="Unique content for hash dedup test in pipeline write refactor."
-        )
+    # Second write with same content should 409
+    with pytest.raises(HTTPException) as exc_info:
         await create_memory(data)
-
-        # Second write with same content should 409
-        with pytest.raises(HTTPException) as exc_info:
-            await create_memory(data)
-        assert exc_info.value.status_code == 409
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert exc_info.value.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -589,60 +533,12 @@ async def test_pipeline_quality_gate():
     """Pipeline path rejects short content with 422."""
     from fastapi import HTTPException
 
-    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
-
-        data = _make_input(content="hi")
-        with pytest.raises(HTTPException) as exc_info:
-            await create_memory(data)
-        assert exc_info.value.status_code == 422
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
-
-
-@pytest.mark.asyncio
-async def test_pipeline_equivalence():
-    """Pipeline and legacy paths produce equivalent MemoryOut fields."""
-    from core_api.services import memory_service
-    from core_api.services.memory_service import (
-        _create_memory_legacy,
-        _create_memory_pipeline,
-    )
-
-    content_a = "Pipeline equivalence test memory content A — testing that both paths produce the same output fields."
-    content_b = "Pipeline equivalence test memory content B — testing that both paths produce the same output fields."
-
-    # Restored in ``finally`` rather than assigned a literal at the end, which
-    # is what this test used to do — and it assigned ``False``, under a comment
-    # reading "Reset", against a module default of ``True``. Nothing failed
-    # here, so it went unnoticed while every later write in the session took
-    # the deprecated legacy path.
-    original = memory_service._USE_PIPELINE_WRITE
-    try:
-        # Legacy path
-        memory_service._USE_PIPELINE_WRITE = False
-        data_legacy = _make_input(content=content_a)
-        result_legacy = await _create_memory_legacy(data_legacy)
-
-        # Pipeline path
-        memory_service._USE_PIPELINE_WRITE = True
-        data_pipeline = _make_input(content=content_b)
-        result_pipeline = await _create_memory_pipeline(data_pipeline)
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
-
-    # Compare key fields (IDs and timestamps will differ)
-    assert result_legacy.tenant_id == result_pipeline.tenant_id
-    assert result_legacy.fleet_id == result_pipeline.fleet_id
-    assert result_legacy.agent_id == result_pipeline.agent_id
-    assert result_legacy.memory_type == result_pipeline.memory_type
-    assert result_legacy.weight == result_pipeline.weight
-    assert result_legacy.status == result_pipeline.status
-    assert result_legacy.visibility == result_pipeline.visibility
+    data = _make_input(content="hi")
+    with pytest.raises(HTTPException) as exc_info:
+        await create_memory(data)
+    assert exc_info.value.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -846,75 +742,57 @@ async def test_schedule_background_tasks_strong_mode_fires_entity_and_contradict
 @pytest.mark.asyncio
 async def test_fast_mode_creates_memory_with_pending_enrichment():
     """Fast mode creates memory with enrichment_pending=True and write_mode=fast."""
-    from core_api.services import memory_service
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    from core_api.services.memory_service import create_memory
 
-        data = _make_input(
-            content="Fast mode test memory — should store quickly with deferred enrichment for the write mode dial.",
-            write_mode="fast",
-        )
-        result = await create_memory(data)
+    data = _make_input(
+        content="Fast mode test memory — should store quickly with deferred enrichment for the write mode dial.",
+        write_mode="fast",
+    )
+    result = await create_memory(data)
 
-        assert isinstance(result, MemoryOut)
-        assert result.tenant_id == TENANT_ID
-        assert result.metadata is not None
-        assert result.metadata.get("enrichment_pending") is True
-        assert result.metadata.get("write_mode") == "fast"
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert isinstance(result, MemoryOut)
+    assert result.tenant_id == TENANT_ID
+    assert result.metadata is not None
+    assert result.metadata.get("enrichment_pending") is True
+    assert result.metadata.get("write_mode") == "fast"
 
 
 @pytest.mark.asyncio
 async def test_strong_mode_creates_memory_same_as_today():
     """Strong mode produces same result as today's pipeline (full enrichment inline)."""
-    from core_api.services import memory_service
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    from core_api.services.memory_service import create_memory
 
-        data = _make_input(
-            content="Strong mode test memory — should run full enrichment inline for the write mode dial test.",
-            write_mode="strong",
-        )
-        result = await create_memory(data)
+    data = _make_input(
+        content="Strong mode test memory — should run full enrichment inline for the write mode dial test.",
+        write_mode="strong",
+    )
+    result = await create_memory(data)
 
-        assert isinstance(result, MemoryOut)
-        assert result.metadata is not None
-        assert result.metadata.get("write_mode") == "strong"
-        # Strong mode should NOT have enrichment_pending
-        assert result.metadata.get("enrichment_pending") is None
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert isinstance(result, MemoryOut)
+    assert result.metadata is not None
+    assert result.metadata.get("write_mode") == "strong"
+    # Strong mode should NOT have enrichment_pending
+    assert result.metadata.get("enrichment_pending") is None
 
 
 @pytest.mark.asyncio
 async def test_auto_mode_decision_type_routes_to_strong():
     """Auto mode with memory_type=decision routes to strong path."""
-    from core_api.services import memory_service
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    from core_api.services.memory_service import create_memory
 
-        data = _make_input(
-            content="We decided to use PostgreSQL for the primary database — auto mode should route this to strong path.",
-            write_mode="auto",
-            memory_type="decision",
-        )
-        result = await create_memory(data)
+    data = _make_input(
+        content="We decided to use PostgreSQL for the primary database — auto mode should route this to strong path.",
+        write_mode="auto",
+        memory_type="decision",
+    )
+    result = await create_memory(data)
 
-        assert isinstance(result, MemoryOut)
-        assert result.metadata is not None
-        assert result.metadata.get("write_mode") == "strong"
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert isinstance(result, MemoryOut)
+    assert result.metadata is not None
+    assert result.metadata.get("write_mode") == "strong"
 
 
 # ---------------------------------------------------------------------------
@@ -939,75 +817,59 @@ async def test_bad_entity_link_does_not_abandon_the_committed_row(caplog):
     import logging
 
     from core_api.schemas import EntityLinkIn
-    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    ghost = uuid.uuid4()  # no such entity row
+    data = _make_input(
+        content="H-05 probe: a memory whose entity link cannot resolve, at length.",
+        entity_links=[EntityLinkIn(entity_id=ghost, role="subject")],
+    )
 
-        ghost = uuid.uuid4()  # no such entity row
-        data = _make_input(
-            content="H-05 probe: a memory whose entity link cannot resolve, at length.",
-            entity_links=[EntityLinkIn(entity_id=ghost, role="subject")],
-        )
+    with caplog.at_level(
+        logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
+    ):
+        result = await create_memory(data)
 
-        with caplog.at_level(
-            logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
-        ):
-            result = await create_memory(data)
+    # 1. The write stands. Previously a 500.
+    assert isinstance(result, MemoryOut)
+    assert result.id
 
-        # 1. The write stands. Previously a 500.
-        assert isinstance(result, MemoryOut)
-        assert result.id
+    # 2. The response is TRUTHFUL: it reports the link as absent rather than
+    #    echoing the request, which would claim a link that does not exist.
+    assert result.entity_links == [], result.entity_links
 
-        # 2. The response is TRUTHFUL: it reports the link as absent rather than
-        #    echoing the request, which would claim a link that does not exist.
-        assert result.entity_links == [], result.entity_links
-
-        # 3. The drop is loud — this is user-visible data loss, unlike the audit
-        #    hook next to it which is genuinely non-critical.
-        errors = [r for r in caplog.records if "entity link failed" in r.getMessage()]
-        assert errors, "a dropped entity link left no trace"
-        assert getattr(errors[0], "entity_id", None) == str(ghost)
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    # 3. The drop is loud — this is user-visible data loss, unlike the audit
+    #    hook next to it which is genuinely non-critical.
+    errors = [r for r in caplog.records if "entity link failed" in r.getMessage()]
+    assert errors, "a dropped entity link left no trace"
+    assert getattr(errors[0], "entity_id", None) == str(ghost)
 
 
 @pytest.mark.asyncio
 async def test_good_entity_links_are_still_reported():
     """The truthful-echo change must not under-report a link that DID persist —
     otherwise the fix would trade a loud failure for a quiet one."""
+    from core_api.clients.storage_client import get_storage_client
     from core_api.schemas import EntityLinkIn
-    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.clients.storage_client import get_storage_client
-        from core_api.services.memory_service import create_memory
+    sc = get_storage_client()
+    entity = await sc.create_entity(
+        {
+            "tenant_id": TENANT_ID,
+            "fleet_id": FLEET_ID,
+            "canonical_name": f"h05-entity-{uuid.uuid4().hex[:8]}",
+            "entity_type": "other",
+        }
+    )
+    data = _make_input(
+        content="H-05 probe: a memory whose entity link resolves cleanly, at length.",
+        entity_links=[EntityLinkIn(entity_id=uuid.UUID(entity["id"]), role="subject")],
+    )
 
-        sc = get_storage_client()
-        entity = await sc.create_entity(
-            {
-                "tenant_id": TENANT_ID,
-                "fleet_id": FLEET_ID,
-                "canonical_name": f"h05-entity-{uuid.uuid4().hex[:8]}",
-                "entity_type": "other",
-            }
-        )
-        data = _make_input(
-            content="H-05 probe: a memory whose entity link resolves cleanly, at length.",
-            entity_links=[
-                EntityLinkIn(entity_id=uuid.UUID(entity["id"]), role="subject")
-            ],
-        )
+    result = await create_memory(data)
 
-        result = await create_memory(data)
-
-        assert [str(link.entity_id) for link in result.entity_links] == [entity["id"]]
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert [str(link.entity_id) for link in result.entity_links] == [entity["id"]]
 
 
 @pytest.mark.asyncio
@@ -1019,42 +881,35 @@ async def test_one_bad_link_does_not_discard_the_good_ones():
     batch call that aborts on first violation — passes every other test in this
     file while silently dropping valid links beside a bad one.
     """
+    from core_api.clients.storage_client import get_storage_client
     from core_api.schemas import EntityLinkIn
-    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.clients.storage_client import get_storage_client
-        from core_api.services.memory_service import create_memory
+    sc = get_storage_client()
+    real = await sc.create_entity(
+        {
+            "tenant_id": TENANT_ID,
+            "fleet_id": FLEET_ID,
+            "canonical_name": f"h05-mixed-{uuid.uuid4().hex[:8]}",
+            "entity_type": "other",
+        }
+    )
+    ghost = uuid.uuid4()
 
-        sc = get_storage_client()
-        real = await sc.create_entity(
-            {
-                "tenant_id": TENANT_ID,
-                "fleet_id": FLEET_ID,
-                "canonical_name": f"h05-mixed-{uuid.uuid4().hex[:8]}",
-                "entity_type": "other",
-            }
-        )
-        ghost = uuid.uuid4()
+    # Ghost FIRST, so a loop that aborts on the first failure loses the real one.
+    data = _make_input(
+        content="H-05 probe: one resolvable link and one ghost, mixed together.",
+        entity_links=[
+            EntityLinkIn(entity_id=ghost, role="subject"),
+            EntityLinkIn(entity_id=uuid.UUID(real["id"]), role="object"),
+        ],
+    )
 
-        # Ghost FIRST, so a loop that aborts on the first failure loses the real one.
-        data = _make_input(
-            content="H-05 probe: one resolvable link and one ghost, mixed together.",
-            entity_links=[
-                EntityLinkIn(entity_id=ghost, role="subject"),
-                EntityLinkIn(entity_id=uuid.UUID(real["id"]), role="object"),
-            ],
-        )
+    result = await create_memory(data)
 
-        result = await create_memory(data)
-
-        assert [str(link.entity_id) for link in result.entity_links] == [real["id"]], (
-            "the valid link beside a bad one was discarded"
-        )
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert [str(link.entity_id) for link in result.entity_links] == [real["id"]], (
+        "the valid link beside a bad one was discarded"
+    )
 
 
 @pytest.mark.asyncio
@@ -1077,7 +932,6 @@ async def test_bad_link_still_runs_the_post_write_step(monkeypatch):
         ScheduleBackgroundTasks,
     )
     from core_api.schemas import EntityLinkIn
-    from core_api.services import memory_service
 
     ran: list[bool] = []
     original_execute = ScheduleBackgroundTasks.execute
@@ -1088,25 +942,20 @@ async def test_bad_link_still_runs_the_post_write_step(monkeypatch):
 
     monkeypatch.setattr(ScheduleBackgroundTasks, "execute", _spy)
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
+    from core_api.services.memory_service import create_memory
 
-        data = _make_input(
-            content=f"H-05 probe {uuid.uuid4().hex}: post-write step must still run.",
-            entity_links=[EntityLinkIn(entity_id=uuid.uuid4(), role="subject")],
-        )
+    data = _make_input(
+        content=f"H-05 probe {uuid.uuid4().hex}: post-write step must still run.",
+        entity_links=[EntityLinkIn(entity_id=uuid.uuid4(), role="subject")],
+    )
 
-        result = await create_memory(data)
+    result = await create_memory(data)
 
-        assert isinstance(result, MemoryOut)
-        assert ran, (
-            "ScheduleBackgroundTasks was skipped — the embed/enrich backfill would "
-            "never be scheduled, which is the real H-05 damage"
-        )
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+    assert isinstance(result, MemoryOut)
+    assert ran, (
+        "ScheduleBackgroundTasks was skipped — the embed/enrich backfill would "
+        "never be scheduled, which is the real H-05 damage"
+    )
 
 
 @pytest.mark.asyncio
@@ -1121,32 +970,25 @@ async def test_a_bad_id_is_classified_permanent_not_transient(caplog):
     import logging
 
     from core_api.schemas import EntityLinkIn
-    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.services.memory_service import create_memory
-
-        with caplog.at_level(
-            logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
-        ):
-            await create_memory(
-                _make_input(
-                    content=f"H-05 probe {uuid.uuid4().hex}: a ghost id is the caller's fault.",
-                    entity_links=[EntityLinkIn(entity_id=uuid.uuid4(), role="subject")],
-                )
+    with caplog.at_level(
+        logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
+    ):
+        await create_memory(
+            _make_input(
+                content=f"H-05 probe {uuid.uuid4().hex}: a ghost id is the caller's fault.",
+                entity_links=[EntityLinkIn(entity_id=uuid.uuid4(), role="subject")],
             )
-
-        dropped = [r for r in caplog.records if "entity link failed" in r.getMessage()]
-        assert dropped, "the dropped link left no trace"
-        assert dropped[0].permanent is True, (
-            "a nonexistent entity_id is the caller's input, not a storage outage — "
-            "misclassifying it sends on-call after the wrong system"
         )
-        assert dropped[0].status_code == 409
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+
+    dropped = [r for r in caplog.records if "entity link failed" in r.getMessage()]
+    assert dropped, "the dropped link left no trace"
+    assert dropped[0].permanent is True, (
+        "a nonexistent entity_id is the caller's input, not a storage outage — "
+        "misclassifying it sends on-call after the wrong system"
+    )
+    assert dropped[0].status_code == 409
 
 
 @pytest.mark.asyncio
@@ -1160,54 +1002,45 @@ async def test_a_storage_outage_is_classified_transient_and_summarised(caplog):
 
     import httpx
 
+    from core_api.clients.storage_client import get_storage_client
     from core_api.schemas import EntityLinkIn
-    from core_api.services import memory_service
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.clients.storage_client import get_storage_client
-        from core_api.services.memory_service import create_memory
+    sc = get_storage_client()
+    # More links than the per-link log cap, so the cap and the summary both
+    # get exercised.
+    links = [EntityLinkIn(entity_id=uuid.uuid4(), role="subject") for _ in range(7)]
+    outage = httpx.HTTPStatusError(
+        "storage down",
+        request=httpx.Request("POST", "http://storage/entities/links"),
+        response=httpx.Response(503),
+    )
 
-        sc = get_storage_client()
-        # More links than the per-link log cap, so the cap and the summary both
-        # get exercised.
-        links = [EntityLinkIn(entity_id=uuid.uuid4(), role="subject") for _ in range(7)]
-        outage = httpx.HTTPStatusError(
-            "storage down",
-            request=httpx.Request("POST", "http://storage/entities/links"),
-            response=httpx.Response(503),
-        )
-
-        with (
-            patch.object(sc, "create_entity_link", new=AsyncMock(side_effect=outage)),
-            caplog.at_level(
-                logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
-            ),
-        ):
-            result = await create_memory(
-                _make_input(
-                    content=f"H-05 probe {uuid.uuid4().hex}: storage links endpoint is down.",
-                    entity_links=links,
-                )
+    with (
+        patch.object(sc, "create_entity_link", new=AsyncMock(side_effect=outage)),
+        caplog.at_level(
+            logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
+        ),
+    ):
+        result = await create_memory(
+            _make_input(
+                content=f"H-05 probe {uuid.uuid4().hex}: storage links endpoint is down.",
+                entity_links=links,
             )
-
-        # The write still stands — degrading is not negotiable.
-        assert isinstance(result, MemoryOut)
-        assert result.entity_links == []
-
-        per_link = [r for r in caplog.records if "entity link failed" in r.getMessage()]
-        assert all(r.permanent is False for r in per_link), (
-            "a 503 is storage's problem, not the caller's"
         )
-        # Capped, so log volume does not track caller input.
-        assert len(per_link) == 5, f"expected the cap to hold, got {len(per_link)}"
-        # ...and the cap does not hide the outage.
-        summary = [
-            r for r in caplog.records if "entity links dropped" in r.getMessage()
-        ]
-        assert summary, "the cap swallowed the outage signal"
-        assert summary[0].transient == 7
-        assert summary[0].dropped == 7
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+
+    # The write still stands — degrading is not negotiable.
+    assert isinstance(result, MemoryOut)
+    assert result.entity_links == []
+
+    per_link = [r for r in caplog.records if "entity link failed" in r.getMessage()]
+    assert all(r.permanent is False for r in per_link), (
+        "a 503 is storage's problem, not the caller's"
+    )
+    # Capped, so log volume does not track caller input.
+    assert len(per_link) == 5, f"expected the cap to hold, got {len(per_link)}"
+    # ...and the cap does not hide the outage.
+    summary = [r for r in caplog.records if "entity links dropped" in r.getMessage()]
+    assert summary, "the cap swallowed the outage signal"
+    assert summary[0].transient == 7
+    assert summary[0].dropped == 7

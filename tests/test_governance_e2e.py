@@ -28,7 +28,6 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import text
 
-import core_api.services.memory_service as memory_service
 import core_api.services.organization_settings as ts_svc
 from common.enrichment.schema import EnrichmentResult
 from core_api.clients.storage_client import get_storage_client
@@ -43,15 +42,6 @@ pytestmark = pytest.mark.asyncio
 _PADDING = (
     " This memory carries enough surrounding context to pass the content-length gate."
 )
-
-
-@pytest.fixture(autouse=True)
-def _use_pipeline_write():
-    """These tests assert pipeline behavior; pin the pipeline write path on."""
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    yield
-    memory_service._USE_PIPELINE_WRITE = original
 
 
 @pytest.fixture(autouse=True)

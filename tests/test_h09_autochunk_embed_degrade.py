@@ -111,7 +111,6 @@ async def _run(
     embed_raises: bool,
     return_ids: bool = True,
     inline: bool = True,
-    legacy: bool = False,
     rotate_results: bool = False,
     duplicate_refusal: bool = False,
     bad_id_index: int | None = None,
@@ -121,9 +120,7 @@ async def _run(
     ``embed_raises`` makes the CHILD batch embed fail the way a degraded
     provider does. ``return_ids`` controls whether the bulk insert reports a
     usable id per row, which is the difference between a queued repair and the
-    loud no-id log. ``legacy`` flips ``_USE_PIPELINE_WRITE`` and enters through
-    ``create_memory``, so the rollback path is exercised through the real
-    dispatch rather than by calling its private handler.
+    loud no-id log.
 
     ``rotate_results`` returns the bulk-insert results in an order that matches
     no payload position, to pin the payload-to-result join. Storage guarantees
@@ -146,10 +143,10 @@ async def _run(
     sc = AsyncMock(name="storage_client")
     sc.create_memory = AsyncMock(return_value=parent_row)
     sc.bulk_find_by_content_hashes = AsyncMock(return_value={})
-    # The legacy path runs a dedup pre-check the pipeline path does not. A bare
-    # AsyncMock answers it with a truthy mock, which the handler reads as "this
-    # content already exists" and 409s before ever reaching the embed — so
-    # without this the legacy tests fail on a duplicate that does not exist.
+    # Explicitly ``None`` because a bare AsyncMock answers the exact-duplicate
+    # pre-check with a truthy mock, which reads as "this content already
+    # exists" and 409s before ever reaching the embed — a duplicate that does
+    # not exist, failing the run for the wrong reason.
     sc.find_by_content_hash = AsyncMock(return_value=None)
 
     async def _create_memories(payloads):
@@ -244,28 +241,17 @@ async def _run(
         patch.object(memory_service, "get_embeddings_batch", new=_embeddings),
         patch.object(memory_service, "_schedule_embed_or_reembed", new=_schedule),
         patch("core_api.services.ingest_service._chunk_content", new=_chunk_content),
-        patch.object(memory_service, "_USE_PIPELINE_WRITE", not legacy),
-        # Both dedup pre-checks are legacy-path-only and answer truthy off a
-        # bare AsyncMock, which the handler reads as "already exists" and 409s
-        # before reaching the embed. Neither is what these tests are about.
-        patch.object(
-            memory_service, "_find_semantic_duplicate", AsyncMock(return_value=None)
-        ),
-        # The legacy handler resolves its OWN config rather than taking the
-        # ctx one, so ``auto_chunk_enabled`` has to be supplied here or the
-        # branch under test is never entered and the run looks like a pass.
+        # ``auto_chunk_enabled`` has to be supplied here or the branch under
+        # test is never entered and the run looks like a pass. The pipeline
+        # handler imports ``resolve_config`` inside the function, so patching
+        # the module attribute reaches it.
         patch(
             "core_api.services.organization_settings.resolve_config",
             AsyncMock(return_value=config),
         ),
     ):
         try:
-            if legacy:
-                # Through the public entry point, so the dispatch that selects
-                # the rollback handler is part of what is under test.
-                await memory_service.create_memory(data)
-            else:
-                await memory_service._handle_auto_chunk_from_ctx(data, ctx)
+            await memory_service._handle_auto_chunk_from_ctx(data, ctx)
         except Exception as exc:
             # Captured rather than propagated: the escape IS the defect, so the
             # tests assert on ``run.raised`` instead of wrapping each call in
@@ -521,46 +507,19 @@ async def test_a_child_with_no_returned_id_is_logged_not_silently_dropped(
     )
 
 
-async def test_the_legacy_handler_degrades_too(caplog) -> None:
-    """The rollback path carries the same fix, driven through the real handler.
-
-    ``_create_memory_legacy`` had the identical shape and I first left it alone
-    on the grounds that it was dead behind ``_USE_PIPELINE_WRITE=True``. That
-    was wrong: the flag's own comment documents flipping it as the
-    emergency-rollback lever, so the path is DORMANT, not dead. And the
-    correlation is adverse — an emergency rollback is plausibly happening
-    BECAUSE something is degraded, which is the same condition that trips this
-    bug. The defect would have resurfaced during exactly the incident the lever
-    exists for.
-
-    Driven with the flag flipped, so this exercises the dispatch too rather
-    than calling the private handler directly.
-    """
-    run = await _run(embed_raises=True, legacy=True)
-    assert run.raised is None, (
-        f"legacy child embed failure escaped as {type(run.raised).__name__}: {run.raised}"
-    )
-    assert len(run.children) == len(CHUNKS), "legacy path wrote no children"
-    assert all(c["embedding"] is None for c in run.children)
-    assert all(c["metadata_"].get("embedding_pending") is True for c in run.children)
-    assert len(run.scheduled_for("embed_or_publish")) == len(CHUNKS)
-
-
-async def test_the_legacy_healthy_path_schedules_nothing() -> None:
-    """OVER-REFUSAL GUARD for the rollback path, same as the pipeline one."""
-    run = await _run(embed_raises=False, legacy=True)
-    assert run.raised is None
-    assert all(c["embedding"] is not None for c in run.children)
-    assert run.scheduled_for("embed_or_publish") == set()
-
-
-async def test_both_paths_share_one_degrade_policy() -> None:
-    """Anti-drift: the two handlers must not grow separate copies.
+async def test_the_degrade_policy_lives_in_one_place() -> None:
+    """Anti-drift: the auto-chunk degrade logic must not be written twice again.
 
     H-09 existed in two places at once because the auto-chunk logic was
-    written twice. The embed-degrade, the pending flag and the repair
-    scheduling now live in one helper each; this pins that both handlers route
-    through them, so a change to one cannot silently miss the other.
+    written twice — once in the pipeline handler and once in
+    ``_create_memory_legacy``. Deleting the legacy handler removed that pair
+    structurally, so this no longer checks that BOTH handlers route through
+    the shared helpers, as it did while there were two.
+
+    What is still worth pinning is the shape that made the fix hold: the raw
+    child batch embed appears in exactly one place, and each helper has
+    exactly one caller. Re-inlining the raw call, or growing a second caller
+    that skips the degrade handling, is how H-09 would come back.
     """
     import inspect
 
@@ -571,13 +530,19 @@ async def test_both_paths_share_one_degrade_policy() -> None:
         f"expected the child batch embed to be called in exactly one place "
         f"(the shared helper); found {raw}"
     )
-    assert src.count("_embed_children_or_degrade(") >= 3, (
-        "both handlers must call the helper"
-    )
-    assert src.count("_queue_child_reembeds(") >= 3, "both handlers must queue repairs"
-    assert src.count("_mark_child_embedding_pending(") >= 3, (
-        "both handlers must mark pending"
-    )
+    for helper in (
+        "_embed_children_or_degrade",
+        "_queue_child_reembeds",
+        "_mark_child_embedding_pending",
+    ):
+        defs = src.count(f"def {helper}(")
+        calls = src.count(f"{helper}(") - defs
+        assert defs == 1, f"{helper} is defined {defs} times, expected 1"
+        assert calls == 1, (
+            f"{helper} has {calls} call sites, expected exactly 1. A second "
+            f"caller is the H-09 shape: two copies of the auto-chunk path, one "
+            f"of which gets fixed."
+        )
 
 
 async def test_the_no_id_log_carries_no_memory_content(caplog) -> None:

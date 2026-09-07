@@ -51,19 +51,9 @@ _PADDING = (
 )
 
 
-@pytest.fixture
-def _use_pipeline_write():
-    import core_api.services.memory_service as memory_service
-
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    yield
-    memory_service._USE_PIPELINE_WRITE = original
-
-
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_memory_write_audit_hook_does_not_fail(caplog, _use_pipeline_write):
+async def test_memory_write_audit_hook_does_not_fail(caplog):
     """A memory create must invoke the audit hook WITHOUT the swallowed
     TypeError. Captures ``write_memory_row``'s logger: if the hook raises
     (the #491 regression — positional ``ctx.db`` into keyword-only
