@@ -35,6 +35,8 @@ committed, which inverts the trade.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -53,6 +55,35 @@ TENANT = "t-h09"
 FLEET = "f1"
 AGENT = "a"
 CHUNKS = ("chunk one", "chunk two", "chunk three")
+
+
+def _errors_from_this_task(caplog) -> list[logging.LogRecord]:
+    """ERROR records emitted by the work this test awaited.
+
+    ``caplog.records`` is the root handler's capture, so it also holds records
+    from background tasks an EARLIER test scheduled: this suite runs on a
+    session-scoped event loop, so those tasks outlive the test that started
+    them and surface in whichever test is running when they complete.
+
+    Filtering by logger name cannot separate them here. The observed intruder
+    is ``core_api.services.contradiction_detector``, and the code under test
+    logs from both ``core_api.services.memory_service`` and
+    ``core_api.pipeline.runner`` — a shared prefix, so any name-based rule
+    either lets the intruder through or drops a real ERROR from the runner.
+
+    ``taskName`` (3.12+) names the asyncio task that emitted the record, which
+    is the question actually being asked: was this logged by the work I
+    awaited? The awaited path spawns no task of its own — ``tracked_task`` is
+    patched to close the coroutine unawaited — so every legitimate record
+    carries this task's name.
+
+    ``r.taskName`` is read directly rather than through
+    ``getattr(r, "taskName", None)``. On a runtime without the attribute an
+    AttributeError is far better than an absence assertion that passes because
+    every record was silently dropped.
+    """
+    me = asyncio.current_task().get_name()
+    return [r for r in caplog.records if r.levelname == "ERROR" and r.taskName == me]
 
 
 class EmbedDown(RuntimeError):
@@ -387,7 +418,7 @@ async def test_a_duplicate_refusal_reports_no_unrepairable_rows(caplog) -> None:
     assert run.raised is None
     assert run.reembeds == [], "a repair was queued for a row that was never written"
 
-    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    errors = _errors_from_this_task(caplog)
     assert errors == [], (
         "a duplicate refusal is a fully-explained WARNING-level outcome; "
         f"it must not raise ERRORs: {[r.getMessage()[:90] for r in errors]}"
@@ -398,6 +429,42 @@ async def test_a_duplicate_refusal_reports_no_unrepairable_rows(caplog) -> None:
     assert any("refused as duplicates" in r.getMessage() for r in caplog.records), (
         f"the refusal itself went unlogged: {[r.getMessage()[:60] for r in caplog.records]}"
     )
+
+
+async def test_the_error_absence_ignores_another_tasks_record(caplog) -> None:
+    """An absence claim must not be breakable by an unrelated background task.
+
+    The assertion above is ``errors == []``, so unlike an ``any(<substring>)``
+    check a foreign ERROR does not merely weaken it — it turns it RED. That is
+    how a test which is right about the code becomes a red build nobody can
+    reproduce: the same shape took CI down on #1349, from
+    ``detect_contradictions_async``'s fire-and-forget ``logger.exception``.
+
+    The stand-in is scheduled as its own task, because that is what makes it
+    distinguishable from the awaited work — and what makes this test fail
+    without the fix.
+    """
+
+    async def _leak() -> None:
+        logging.getLogger("core_api.services.contradiction_detector").error(
+            "Async contradiction detection failed for memory %s", "some-uuid"
+        )
+
+    with caplog.at_level("DEBUG"):
+        run = await _run(embed_raises=True, duplicate_refusal=True)
+        await asyncio.create_task(_leak())
+
+    assert run.raised is None
+    mine = _errors_from_this_task(caplog)
+    assert mine == [], (
+        "another task's ERROR was attributed to this one: "
+        f"{[(r.name, r.taskName) for r in mine]}"
+    )
+    # Anti-vacuity: the stand-in really did reach the capture, so the filter is
+    # what excluded it rather than a foreign record that never arrived.
+    assert [r.name for r in caplog.records if r.levelname == "ERROR"] == [
+        "core_api.services.contradiction_detector"
+    ], "the stand-in intruder was not captured, so this proves nothing"
 
 
 async def test_an_unparseable_child_id_does_not_escape_the_request(caplog) -> None:
