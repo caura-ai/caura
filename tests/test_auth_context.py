@@ -265,3 +265,49 @@ async def test_the_real_admin_branch_leaves_agent_id_unset(monkeypatch):
     assert ctx.is_admin is True
     assert ctx.agent_id is None
     ctx.enforce_self_agent("someone-else")  # no raise
+
+
+# ---------------------------------------------------------------------------
+# effective_agent_id — the precedence half of the self plane
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("authenticated", "requested", "expected"),
+    [
+        # An agent credential keeps its own identity whatever it was asked for.
+        ("agent-a", "agent-b", "agent-a"),
+        ("agent-a", None, "agent-a"),
+        ("agent-a", "agent-a", "agent-a"),
+        # A credential that authenticates no agent may name one — the tenant
+        # and user credentials a dashboard uses.
+        (None, "agent-b", "agent-b"),
+        (None, None, None),
+        # ``""`` is falsy on both sides, so it neither wins nor is preserved
+        # over a real identity. Pinned because ``enforce_self_agent`` treats an
+        # explicit ``""`` as an ASSERTION and refuses it, and the two methods
+        # answering the same input differently is a real thing to know.
+        ("agent-a", "", "agent-a"),
+        (None, "", ""),
+    ],
+)
+def test_effective_agent_id_prefers_the_authenticated_identity(
+    authenticated, requested, expected
+):
+    ctx = AuthContext(tenant_id="t1", agent_id=authenticated)
+    assert ctx.effective_agent_id(requested) == expected
+
+
+def test_effective_agent_id_does_not_refuse_a_mismatch():
+    """It binds; it does not gate. ``enforce_self_agent`` is the refusing half.
+
+    A route that wants a peer-naming caller REFUSED must call that one — this
+    method silently discards the name instead, which is what the routes behind
+    it want and is exactly the distinction the two docstrings draw.
+    """
+    ctx = AuthContext(tenant_id="t1", agent_id="agent-a")
+    assert ctx.effective_agent_id("agent-b") == "agent-a"  # no raise
+    with pytest.raises(HTTPException) as exc:
+        ctx.enforce_self_agent("agent-b")
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == errors.AUTH_AGENT_IDENTITY_MISMATCH

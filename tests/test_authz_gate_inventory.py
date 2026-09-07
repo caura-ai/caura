@@ -122,6 +122,10 @@ SETTINGS_OBJECTS = frozenset({"settings", "app_settings"})
 WRITE_GATE = "enforce_read_only"
 PLANE_GATE = "enforce_not_agent_credential"
 SELF_GATE = "enforce_self_agent"
+# The precedence half of the same plane. Not a gate — it refuses nothing —
+# but it settles the same question, so ``_classify`` records it alongside
+# the ``enforce_*`` names and ``_unguarded_for_self`` accepts either.
+SELF_BINDER = "effective_agent_id"
 
 # Parameter names that carry a caller's ASSERTION about which agent it is. The
 # set is a judgement and the membership is the whole content of the invariant,
@@ -148,11 +152,11 @@ SELF_ID_PARAMS_EXCLUDED: dict[str, str] = {
 # without claiming that peer's identity. It contains no "agent" substring, so
 # it never reaches the scan; the note is for the reader who goes looking.
 
-# There is NO substitute rule, and the first draft of this file had one. It
-# credited any handler containing ``auth.agent_id or <param>`` — the precedence
-# idiom, where the authenticated identity wins — as binding the identity
-# without needing a line. Four routes were exempted by it, and one of the four
-# should not have been.
+# THE SUBSTITUTE RULE, and the story of why it is a call and not a shape.
+#
+# The first draft credited any handler containing ``auth.agent_id or <param>``
+# — the precedence idiom, where the authenticated identity wins. Four routes
+# were exempted by it, and one of the four should not have been.
 #
 # ``delete_memory`` decides authorization with ``caller_agent_id =
 # auth.agent_id`` (``routes/memories.py``, plain attribute, no fallback). The
@@ -163,21 +167,41 @@ SELF_ID_PARAMS_EXCLUDED: dict[str, str] = {
 # principal to ``agent_id or auth.agent_id`` — the escalation — and the route
 # still counted as bound, because the attribution line satisfies the shape on
 # its own. A false negative in the one check that is supposed to catch exactly
-# that. ``tests/test_memory_byid_authz.py`` records the 2026-09-03 ruling that
-# this very expression, used as a principal, WAS the bug on that route.
+# that. An ``any()`` over a function body cannot tell the deciding expression
+# from a bystander.
 #
-# An ``any()`` over a function body cannot tell the deciding expression from a
-# bystander. The four routes carry allowlist lines instead, each naming what
-# it actually decides with — which is how the reader learns that ``delete``
-# binds more strictly than the other three, not less.
+# So the rule was deleted, and the fix named in its place has now been made:
+# ``AuthContext.effective_agent_id(requested)`` is that expression behind a
+# name, and a NAMED CALL IS DECIDABLE WHERE A SHAPE IS NOT. ``delete_memory``
+# is the proof that the new rule does not over-credit — its audit line still
+# spells itself out, the handler calls nothing, and it keeps the allowlist
+# entry below saying it binds more strictly than precedence, not less.
 #
-# The deeper fix, if this idiom spreads: give ``AuthContext`` an
-# ``effective_agent_id(requested)`` method, convert the call sites, and detect
-# it by NAME like every other gate. Then the exemption is bound to the
-# expression that governs. Not done here — it is production-code surgery on
-# five handlers, and this file should not be the reason for it.
+# ``tests/test_memory_byid_authz.py`` records the 2026-09-03 ruling that this
+# very expression, used as a principal, WAS the bug on that route.
 #
-# ``resolve_write_agent`` is not a substitute either, though it looks like the
+# The claim the rule makes is narrower than "this route is safe", and worth
+# stating: the handler consults the effective-identity helper. It does not
+# prove the result is what the route then authorizes with. What it buys over
+# the shape is that a reviewer reading a call to a method whose docstring says
+# "for the visibility or authorization identity ONLY" can see a misuse, which
+# a bare ``or`` gave nobody a reason to look at. The one case that would
+# reinstate the false negative — pointing the helper at an audit value — is
+# pinned by ``test_the_audit_attribution_is_not_bound_by_the_helper``.
+#
+# WHY THIS IS WEAKER THAN THE MCP SIBLING'S RULE, since a reader comparing the
+# two files will ask. ``test_mcp_authz_gate_inventory._rebound_params`` credits
+# a binding only when EVERY load of the parameter sits inside it, which is a
+# property of the whole body rather than of one line. That is strictly
+# stronger, and it does not port: measured on this surface it reports 2 of the
+# 4 routes as unbound that are not. ``GET /memories`` reads the raw ``agent_id``
+# again at ``author_filter`` and ``GET /memories/stats`` twice more, because
+# here one parameter is deliberately BOTH the visibility identity and the
+# author filter — which is the divergence this file's own preamble opens with.
+# On MCP each name means one thing, so the stricter rule is free there and
+# costs false positives here.
+#
+# ``resolve_write_agent`` is still not a substitute, though it looks like the
 # obvious candidate. It enforces the BROKER ownership boundary (degrade an
 # install's write that names another install's agent) and documents that
 # "non-broker callers pass straight through". Binding a write to the credential
@@ -344,24 +368,6 @@ PLANE_GATE_ALLOWLIST: dict[str, str] = {
 # parameter (``GET /memories/stats``'s knob was both author filter and
 # visibility identity; ``/recall``'s ``filter_agent_id`` was both).
 SELF_GATE_ALLOWLIST: dict[str, str] = {
-    # PRECEDENCE: the handler builds its identity as ``auth.agent_id or
-    # <param>``, so an authenticated agent always wins and a caller-supplied
-    # name is used only by a credential that asserts none. Read individually
-    # rather than exempted by a rule, because an ``any()`` over the body cannot
-    # tell this expression from an audit-log line with the same shape — see the
-    # note above ``SELF_ID_PARAMS``.
-    "GET /api/v1/memories": (
-        "precedence: caller_agent_id = auth.agent_id or agent_id is the "
-        "visibility identity, so an agent credential cannot borrow a peer's"
-    ),
-    "PATCH /api/v1/memories/{memory_id}": (
-        "precedence: the update's agent_id is auth.agent_id or agent_id, and "
-        "enforce_tenant bounds the row"
-    ),
-    "GET /api/v1/reports": (
-        "precedence: asserted_agent = auth.agent_id or agent_id, then handed "
-        "to resolve_caller_and_gate, which applies the same rule again"
-    ),
     # STRICTER than precedence, and the reason it is worth its own line. The
     # authorization principal here is ``auth.agent_id`` alone — the query param
     # is never promoted — and ``enforce_delete`` then gates that principal at
@@ -647,10 +653,19 @@ def _refuses(tree: ast.AST) -> bool:
     )
 
 
+@functools.cache
 def _classify(
     fn, _depth: int = 0
-) -> tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str]]:
-    """``(enforce_* names, guard helpers, imported call names, settings flags)``.
+) -> tuple[
+    frozenset[str], frozenset[str], frozenset[str], frozenset[str], frozenset[str]
+]:
+    """``(enforce_* names, guard helpers, imported calls, settings flags, binders)``.
+
+    Cached on the same grounds as ``_parse``, and for a larger win: fifteen
+    tests each rebuild the same rows, so this re-walked already-parsed trees
+    about eight times per run — 825k ``ast.walk`` visits, 1.3s of a 3.8s
+    profiled run. The arguments are its full signature, the four returned sets
+    are frozen, and nothing mutates a registered handler mid-run.
 
     Two levels of module-local indirection are resolved. What that buys is
     narrower than it first appears, and worth stating precisely: all five
@@ -701,9 +716,10 @@ def _classify(
     """
     tree = _parse(fn)
     if tree is None:
-        return frozenset(), frozenset(), frozenset(), frozenset()
+        return frozenset(), frozenset(), frozenset(), frozenset(), frozenset()
     gates: set[str] = set()
     helpers: set[str] = set()
+    binders: set[str] = set()
     imported: set[str] = set()
     flags: set[str] = {
         node.attr
@@ -717,10 +733,20 @@ def _classify(
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        if isinstance(node.func, ast.Attribute) and node.func.attr.startswith(
-            "enforce_"
-        ):
-            gates.add(node.func.attr)
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr.startswith("enforce_"):
+                gates.add(node.func.attr)
+            elif node.func.attr == SELF_BINDER:
+                # Its OWN channel, deliberately. Folding it into ``gates`` was
+                # the smaller edit and quietly falsified three things: the
+                # failure report prints that set under the label "enforce_*
+                # called", the helper-promotion below reads a non-empty
+                # ``sub_gates`` as evidence that a helper GUARDS, and
+                # ``test_allowlist_reasons_that_name_a_mechanism_are_corroborated``
+                # then accepts that helper as corroboration. A binder refuses
+                # nothing; it must not be able to stand in for something that
+                # does.
+                binders.add(node.func.attr)
         elif isinstance(node.func, ast.Name) and _depth < 2:
             if node.func.id == fn.__name__:
                 continue  # decorator returns fn unchanged; do not self-credit
@@ -734,7 +760,7 @@ def _classify(
             sub_tree = _parse(target)
             if sub_tree is None:
                 continue
-            sub_gates, sub_helpers, sub_imported, sub_flags = _classify(
+            sub_gates, sub_helpers, sub_imported, sub_flags, sub_binders = _classify(
                 target, _depth + 1
             )
             # Imported names merge unconditionally while gates merge only from a
@@ -746,16 +772,26 @@ def _classify(
             # gate of its own.
             imported |= sub_imported
             flags |= sub_flags
+            # Binders propagate like imports and flags — unconditionally, and
+            # WITHOUT promoting the helper to ``helpers``. A helper that only
+            # computes an identity is not a guard.
+            binders |= sub_binders
             if sub_gates or _refuses(sub_tree):
                 helpers.add(node.func.id)
                 gates |= sub_gates
                 helpers |= sub_helpers
-    return frozenset(gates), frozenset(helpers), frozenset(imported), frozenset(flags)
+    return (
+        frozenset(gates),
+        frozenset(helpers),
+        frozenset(imported),
+        frozenset(flags),
+        frozenset(binders),
+    )
 
 
 def _row(verb: str, path: str, route) -> dict:
     endpoint = route.endpoint
-    gates, helpers, imported, flags = _classify(endpoint)
+    gates, helpers, imported, flags, binders = _classify(endpoint)
     return {
         "key": f"{verb} {path}",
         "router": endpoint.__module__.rsplit(".", 1)[-1],
@@ -764,6 +800,7 @@ def _row(verb: str, path: str, route) -> dict:
         "helpers": helpers,
         "imported_calls": imported,
         "settings_flags": flags,
+        "binders": binders,
         "identity_params": _identity_params(route),
     }
 
@@ -807,6 +844,7 @@ def _report(row: dict) -> str:
         f"    {row['key']}",
         f"        handler: {row['router']}.{row['handler']}",
         f"        enforce_* called: {sorted(row['gates']) or 'NONE'}",
+        f"        identity binders: {sorted(row['binders']) or 'none'}",
         f"        refusing helpers: {sorted(row['helpers']) or 'none'}",
     ]
     if row["identity_params"]:
@@ -840,6 +878,7 @@ def _unguarded_for_self(row: dict) -> bool:
     return (
         bool(row["identity_params"])
         and SELF_GATE not in row["gates"]
+        and SELF_BINDER not in row["binders"]
         and not (row["gates"] & SELF_GATE_EXEMPT)
     )
 
@@ -952,12 +991,13 @@ def test_routes_taking_an_agent_identity_gate_the_self_plane() -> None:
     still carries the note), and H-06 was the ``/recall`` half. #1364 is what
     gave the rule one name to look for.
 
-    A route satisfies it three ways: call ``enforce_self_agent``; refuse agent
-    credentials outright, so the question has no subject (``SELF_GATE_EXEMPT``);
-    or carry a line in ``SELF_GATE_ALLOWLIST`` saying what the parameter means
-    instead. There is deliberately no fourth, mechanism-shaped exemption — the
-    note above ``SELF_ID_PARAMS`` records the one that was tried and what it
-    let through.
+    A route satisfies it three ways: call ``enforce_self_agent`` or
+    ``auth.effective_agent_id``; refuse agent credentials outright, so the
+    question has no subject (``SELF_GATE_EXEMPT``); or carry a line in
+    ``SELF_GATE_ALLOWLIST`` saying what the parameter means instead. The
+    binder counts because it is a NAMED call — the note above
+    ``SELF_ID_PARAMS`` records the shape-matching version that was tried
+    first and what it let through.
     """
     offenders = [
         row
@@ -971,6 +1011,45 @@ def test_routes_taking_an_agent_identity_gate_the_self_plane() -> None:
         + "\n".join(_report(r) for r in offenders)
         + f"\n\nAdd the gate, or add a line to SELF_GATE_ALLOWLIST in {__file__} "
         "saying what this route's agent_id means if not 'act as this agent'."
+    )
+
+
+def test_the_audit_attribution_is_not_bound_by_the_helper() -> None:
+    """``delete_memory`` must keep spelling its audit attribution out.
+
+    That handler holds both values at once: ``caller_agent_id = auth.agent_id``
+    is what it authorizes with, and ``attribution_agent_id = auth.agent_id or
+    agent_id`` is what the audit row records, under a comment reading
+    "Authorization must not trust this value". The second is why the
+    shape-matching rule was a false negative, and it is the one line on this
+    surface that must NOT become ``auth.effective_agent_id``.
+
+    Without this, ``AuthContext.effective_agent_id``'s docstring asserts that
+    property and nothing checks it. Worse, the check that WOULD eventually fire
+    is ``test_allowlists_have_no_unnecessary_entries``, whose message says
+    "Delete the entries" — the exact wrong move at the exact moment the false
+    negative returns. This fires first and says the right thing.
+    """
+    key = "DELETE /api/v1/memories/{memory_id}"
+    rows = {row["key"]: row for row in _self_plane_routes()}
+    row = rows.get(key)
+    assert row is not None, (
+        f"{key} is no longer a self-plane route, so this test guards nothing. "
+        "Re-point it or delete it — do not leave it passing vacuously."
+    )
+    assert SELF_BINDER not in row["binders"], (
+        f"{key} now calls {SELF_BINDER}, which the self-plane rule reads as "
+        "'the identity is bound'. That handler authorizes with auth.agent_id "
+        "alone; the only same-shaped expression in it is the AUDIT "
+        "attribution, whose own comment says authorization must not trust "
+        "it.\n\n"
+        "If the AUDIT line was converted: revert it. Binding the audit value "
+        "makes the route look bound without changing what it authorizes with, "
+        "which is exactly the 2026-09-03 false negative returning.\n"
+        "If the PRINCIPAL genuinely changed to precedence: that is a real "
+        "authorization change, and tests/test_memory_byid_authz.py is where it "
+        "has to be argued, not here.\n\n"
+        "Do NOT resolve this by deleting the SELF_GATE_ALLOWLIST entry."
     )
 
 
@@ -1203,6 +1282,7 @@ def test_allowlist_reasons_that_name_a_mechanism_are_corroborated() -> None:
                 | row["helpers"]
                 | row["imported_calls"]
                 | row["settings_flags"]
+                | row["binders"]
             )
             for claimed in re.findall(_MECHANISM_NAMES, reason):
                 if claimed not in observed:

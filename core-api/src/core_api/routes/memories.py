@@ -353,7 +353,7 @@ async def list_memories(
     # or by omitting it. The query param stays the AUTHOR filter (written_by).
     # A tenant/user credential (auth.agent_id None) keeps using the param, as the
     # dashboard intends.
-    caller_agent_id = auth.agent_id or agent_id
+    caller_agent_id = auth.effective_agent_id(agent_id)
     # ``written_by`` is the author filter; ``agent_id`` keeps serving as that
     # filter when ``written_by`` is omitted, so existing callers are unaffected.
     author_filter = written_by if written_by is not None else agent_id
@@ -1775,7 +1775,7 @@ async def update_memory_endpoint(
         memory_id,
         tenant_id,
         body,
-        agent_id=(auth.agent_id or agent_id) if auth.tenant_id else None,
+        agent_id=auth.effective_agent_id(agent_id) if auth.tenant_id else None,
     )
 
 

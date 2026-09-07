@@ -313,6 +313,36 @@ class AuthContext:
                 ),
             )
 
+    def effective_agent_id(self, requested_agent_id: str | None) -> str | None:
+        """The agent this request ACTS AS: the authenticated identity, or the
+        caller's assertion only when the credential authenticates none.
+
+        The precedence half of the self plane, where ``enforce_self_agent`` is
+        the refusing half. Routes that must not 403 a legitimate caller use
+        this instead: an agent credential silently keeps its own identity, and
+        a tenant or user credential — which authenticates no agent — may still
+        name one, which is what a dashboard listing a fleet does.
+
+        WHY THIS IS A METHOD AND NOT ``self.agent_id or requested``. It is
+        exactly that expression; the value is entirely in the name. The bare
+        form could not be told from an audit-log line of the same shape, so
+        ``tests/test_authz_gate_inventory.py`` had to delete the rule that
+        credited it — the block above ``SELF_ID_PARAMS`` there has the case in
+        full, and is the copy to keep current.
+
+        SCOPE, because the name is broader than the guarantee. This returns the
+        identity; it does not decide what the caller may do with it, and
+        calling it is not authorization. It is for the visibility or
+        authorization identity ONLY — an audit attribution that must record
+        what the request carried, even when authorization ignored it, is a
+        different value and must keep spelling itself out. ``delete_memory`` is
+        the live example of both in one handler, and is deliberately not
+        converted — pinned by
+        ``test_the_audit_attribution_is_not_bound_by_the_helper``, so this
+        paragraph is a rule rather than a request.
+        """
+        return self.agent_id or requested_agent_id
+
     def enforce_tenant(self, requested_tenant: str | None) -> None:
         """Raise if the caller may not write to ``requested_tenant``.
 

@@ -259,7 +259,7 @@ async def get_report(
     # breakdown's own visibility scoping excludes ``scope_agent`` when no agent
     # is set). This avoids 403-ing a logged-in human on the unregistered default
     # agent id.
-    asserted_agent = auth.agent_id or agent_id
+    asserted_agent = auth.effective_agent_id(agent_id)
     caller_agent_id: str | None = None
     if asserted_agent:
         caller_agent_id = await resolve_caller_and_gate(
