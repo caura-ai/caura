@@ -115,9 +115,22 @@ async def _make_command(client, as_auth, tenant_id: str) -> str:
     return resp.json()["id"]
 
 
-async def _seed_agent(sc, tenant_id: str, agent_id: str, trust_level: int):
+async def _seed_agent(sc, tenant_id: str, agent_id: str, trust_level: int, **extra):
+    """Create an agent row. ``extra`` sets any other ``Agent`` column directly.
+
+    Storage inserts the dict as given (``agent_add`` is
+    ``pg_insert(Agent).values(**data)``) and ``search_profile`` is a real
+    column in ``AGENT_FIELDS`` — so a fixture needing a pre-existing profile
+    does not have to write one through the route under test, where a bug in
+    the route would surface as a setup failure inside a gate test.
+    """
     await sc.create_or_update_agent(
-        {"tenant_id": tenant_id, "agent_id": agent_id, "trust_level": trust_level}
+        {
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "trust_level": trust_level,
+            **extra,
+        }
     )
 
 
@@ -330,6 +343,15 @@ async def test_delete_audit_attributes_gateway_agent(client, as_auth, sc):
 
 READ_ONLY = {"read"}
 
+# The two credentials that may never write, whatever route they reach:
+# ``enforce_read_only`` refuses exactly these and nothing else. Shared so the
+# parametrized users of the pair cannot drift apart — they already had, one
+# spelling the capability set as a literal.
+NON_WRITING_CREDS = [
+    pytest.param({"capabilities": READ_ONLY}, id="read-only-key"),
+    pytest.param({"is_demo": True}, id="demo-sandbox"),
+]
+
 
 async def test_fleet_command_cannot_be_queued_into_another_tenant(client, as_auth):
     """H-13: the queued command's tenant came from ``body.tenant_id``, unchecked.
@@ -500,6 +522,142 @@ async def test_agent_trust_still_works_when_over_usage_limits(client, as_auth, s
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["trust_level"] == 0
+
+
+# ---------------------------------------------------------------------------
+# PATCH /agents/{agent_id}/tune had neither write gate.
+#
+# H-12 again, on the sibling route that sweep did not reach. Of the four
+# mutating routes in ``routes/agents.py`` it was the only one without
+# ``enforce_read_only`` — trust, fleet reassignment and agent deletion all call
+# it. ``enforce_tenant`` and the self-plane check it does have say WHOSE
+# profile may be written, never whether this credential may write at all.
+#
+# The tuning knobs reached through MCP ``caura_tune`` are guarded by
+# ``_check_write_scope``, which is exactly ``enforce_read_only``'s
+# write-capability half — so the capability was required of an MCP caller and
+# not of a REST one. The two are not equivalent gates: ``enforce_read_only``
+# also refuses ``is_demo``, which the MCP path never checks.
+#
+# NOT ``enforce_not_agent_credential``: an agent tuning its OWN profile is
+# documented product behaviour, and the over-refusal guard below pins it.
+# ---------------------------------------------------------------------------
+
+
+async def _tuned_top_k(client, as_auth, tenant: str, agent: str):
+    """The agent's stored ``top_k``, read back with a credential that may read it.
+
+    RE-ARMS a plain tenant credential, so calling this mid-test replaces
+    whatever narrow credential the test had installed. Read back AFTER the
+    call under test, never before it.
+    """
+    as_auth(tenant)
+    resp = await client.get(f"/api/v1/agents/{agent}/tune?tenant_id={tenant}")
+    assert resp.status_code == 200, resp.text
+    return (resp.json().get("search_profile") or {}).get("top_k")
+
+
+@pytest.mark.parametrize("cred", NON_WRITING_CREDS)
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        pytest.param({"json": {"top_k": 19}}, id="merge"),
+        pytest.param({"json": {}, "query": "&reset=true"}, id="reset"),
+    ],
+)
+async def test_agent_tune_rejects_a_non_writing_credential(
+    client, as_auth, sc, cred, attempt
+):
+    """Both halves of ``enforce_read_only``, against both write branches.
+
+    ``reset=true`` is parametrized because it is a second, separate storage
+    write (``reset_search_profile``). A gate added inside the merge branch
+    alone would leave it reachable, and that mutant fails only here.
+
+    The profile is seeded through storage rather than through the route, so a
+    bug in the route cannot masquerade as a setup failure in a gate test.
+    """
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1, search_profile={"top_k": 7})
+
+    as_auth(tenant, **cred)
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant}{attempt.get('query', '')}",
+        json=attempt["json"],
+    )
+    assert resp.status_code == 403, resp.text
+
+    # The refusal has to mean the write never happened, not that it was
+    # reported as refused afterwards. This is also the only check that the
+    # seed landed, so a mismatch is not necessarily a gate bypass.
+    assert await _tuned_top_k(client, as_auth, tenant, agent) == 7, (
+        "expected the seeded profile to be intact: either the gate ran after "
+        "the storage call, or the fixture never seeded"
+    )
+
+
+async def test_a_write_capable_agent_can_still_tune_itself(client, as_auth, sc):
+    """OVER-REFUSAL GUARD, and the one that matters.
+
+    Self-tune is the documented behaviour behind MCP ``caura_tune``, and this
+    route is what the plugin's own tool PATCHes. Adding a write gate must not
+    take it away from an agent credential that carries 'write' — which is the
+    shape the enterprise gateway mints. ``test_agent_tune_self_allowed_peer_blocked``
+    reaches the same path with a legacy ``capabilities=None`` key, though it
+    only asserts ``!= 403`` on a self-tune that 404s — a weaker check than the
+    200-plus-read-back here.
+    """
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1)
+
+    as_auth(tenant, agent_id=agent, capabilities={"read", "write"})
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant}", json={"top_k": 11}
+    )
+    assert resp.status_code == 200, resp.text
+    assert await _tuned_top_k(client, as_auth, tenant, agent) == 11
+
+
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        pytest.param({"json": {"top_k": 3}, "expect": 3}, id="merge"),
+        pytest.param({"json": {}, "query": "&reset=true", "expect": None}, id="reset"),
+    ],
+)
+async def test_agent_tune_still_works_when_over_usage_limits(
+    client, as_auth, sc, attempt
+):
+    """Pins a deliberate omission, so nobody "fixes" it by adding the gate.
+
+    ``enforce_usage_limits`` is NOT applied here. The principle is the one
+    stated on ``WRITE_QUOTA_OPS`` in ``usage_service``: an update that rewrites
+    a row rather than adding one does not grow the store, and this writes a
+    single column on a row that must already exist. Lowering ``top_k`` is also
+    how an over-quota tenant reduces retrieval cost, so gating it would put
+    plan state between them and the knob that gets them back under.
+
+    The omission ships whether or not this test exists — the omission IS the
+    decision. What the test buys is legibility: it is the difference between a
+    choice and the oversight it would otherwise be indistinguishable from,
+    which is the distinction ``usage_service`` draws about the same gate on the
+    memory update route. Deleting this test is the whole cost of reversing the
+    call.
+    """
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1, search_profile={"top_k": 7})
+
+    as_auth(tenant, is_read_only=True)
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant}{attempt.get('query', '')}",
+        json=attempt["json"],
+    )
+    assert resp.status_code == 200, resp.text
+    # Not merely un-refused — the write has to have landed.
+    assert await _tuned_top_k(client, as_auth, tenant, agent) == attempt["expect"]
 
 
 async def test_settings_rejects_a_read_only_credential(client, as_auth):
@@ -780,13 +938,7 @@ async def _queue_command_for(client, as_auth, tenant: str) -> tuple[str, str]:
     return node_name, resp.json()["id"]
 
 
-@pytest.mark.parametrize(
-    "cred",
-    [
-        pytest.param({"capabilities": {"read"}}, id="read-only-key"),
-        pytest.param({"is_demo": True}, id="demo-sandbox"),
-    ],
-)
+@pytest.mark.parametrize("cred", NON_WRITING_CREDS)
 async def test_heartbeat_refuses_a_non_writing_credential(client, as_auth, cred):
     """A credential that cannot write must not be able to heartbeat.
 

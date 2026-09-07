@@ -124,7 +124,22 @@ async def patch_agent_tune(
     reset: bool = Query(default=False),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Update an agent's search profile (per-agent retrieval tuning). Pass ?reset=true to clear."""
+    """Update an agent's search profile (per-agent retrieval tuning). Pass ?reset=true to clear.
+
+    Auth: any write-capable credential for the tenant, agent-scoped included —
+    self-tune is the point of the route. The two gates answer different
+    questions: ``enforce_read_only`` whether this credential may write at all,
+    the identity check below whose profile it may write.
+    """
+    # ``enforce_usage_limits`` is deliberately NOT applied, and pinned that way
+    # by ``test_agent_tune_still_works_when_over_usage_limits``. The principle
+    # is the one stated on ``WRITE_QUOTA_OPS`` in ``usage_service``: an update
+    # that rewrites a row rather than adding one does not grow the store, and
+    # this writes a single column on a row that must already exist. Lowering
+    # ``top_k``/``graph_max_hops`` is also how an over-quota tenant reduces
+    # retrieval cost — ``?reset=true`` is not part of that half, since it
+    # restores defaults and a default can exceed the value it replaces.
+    auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
     # An agent may tune ITS OWN profile (also exposed via MCP caura_tune), but
     # not a peer's — block cross-agent tamper while leaving self-tune + admin keys.
@@ -136,10 +151,18 @@ async def patch_agent_tune(
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
     if reset:
-        updated = await sc.reset_search_profile(agent_id, tenant_id)
-        if not updated:
+        cleared = await sc.reset_search_profile(agent_id, tenant_id)
+        if not cleared:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
-        return AgentOut.model_validate(updated)
+        # Storage answers the reset with ``{"ok": true}``, not the agent row, so
+        # the response has to come from a re-read. The merge branch below
+        # re-reads too but falls back to the stale pre-write row on a miss,
+        # where this answers 404 — a reset must not hand back the profile it
+        # just cleared.
+        refreshed = await sc.get_agent(agent_id, tenant_id)
+        if not refreshed:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        return AgentOut.model_validate(refreshed)
 
     # Merge: only set non-None fields, preserve existing profile values
     current = agent.get("search_profile") or {}
