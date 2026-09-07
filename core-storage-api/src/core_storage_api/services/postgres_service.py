@@ -139,6 +139,37 @@ def _get_read_session_factory() -> async_sessionmaker[AsyncSession]:
     return _read_session_factory
 
 
+def _ordered_link_rows(rows: list[dict]) -> list[dict]:
+    """Dedup ``memory_entity_links`` rows by key and fix one global insert order.
+
+    A statement carrying several pairs takes its row locks in the order it is
+    given them. Two concurrent statements covering an overlapping set in
+    different orders each take one key and then wait on the other's
+    transaction — a cycle Postgres resolves by killing one of them, which
+    reaches the caller as a 500 on an ordinary write rather than as anything
+    about locking.
+
+    ``ON CONFLICT`` does not help with that, which an earlier comment on
+    ``memory_add_entity_links`` claimed it did. The clause decides what happens
+    once the wait resolves, not whether there is a wait: an inserter whose key
+    is held by an in-flight transaction blocks until that transaction ends,
+    measured at the shape used here. Sorting is the whole mitigation, and it is
+    the one ``evolve_service`` already applies to ``related_ids`` before its
+    multi-row UPDATE.
+
+    Sorted on the STRING form of each id so the order is the same for callers
+    that pass ``UUID`` objects and callers that pass strings; a mixed batch
+    would otherwise order by object identity and defeat the point.
+
+    First occurrence of a repeated key wins — the row a single ``DO NOTHING``
+    statement would have kept anyway, so deduping here changes no result.
+    """
+    by_key: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        by_key.setdefault((str(row["memory_id"]), str(row["entity_id"])), row)
+    return [by_key[key] for key in sorted(by_key)]
+
+
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
     """Transactional writer session; commits on success, rolls back on error."""
@@ -4478,19 +4509,25 @@ class PostgresService:
         the same way and a fix to one cannot miss the others.
         """
         # Bulk-insert with ``ON CONFLICT (memory_id, entity_id) DO NOTHING``
-        # so two concurrent writes targeting the same ``(memory_id,
-        # entity_id)`` pair don't serialise on ``Lock/transactionid``
-        # (CAURA-686). Each ``link`` dict carries ``entity_id`` (UUID) and
-        # ``role`` (str).
+        # so a pair another writer already committed is skipped instead of
+        # raising a unique violation (CAURA-686). Each ``link`` dict carries
+        # ``entity_id`` (UUID) and ``role`` (str).
+        #
+        # It does NOT keep concurrent writers off ``Lock/transactionid``, which
+        # is what an earlier version of this comment claimed and why nothing
+        # here was ordered; ``_ordered_link_rows`` carries the correction and
+        # the measurement.
         if not links:
             # Nothing is written, so there is nothing to scope. Reported as
             # success rather than checked-then-succeeded: the answer is the
             # same for every tenant, so it discloses nothing either way.
             return True
         entity_ids = {link["entity_id"] for link in links}
-        rows = [
-            {"memory_id": memory_id, "entity_id": link["entity_id"], "role": link["role"]} for link in links
-        ]
+        # Ordered + deduped so two concurrent statements over an overlapping
+        # set cannot form a lock cycle.
+        rows = _ordered_link_rows(
+            [{"memory_id": memory_id, "entity_id": link["entity_id"], "role": link["role"]} for link in links]
+        )
         async with get_session() as session:
             owned_memories, owned_entities = await self._owned_link_endpoints(
                 session, tenant_id, {memory_id}, entity_ids
@@ -7433,7 +7470,11 @@ class PostgresService:
                 # and no surrogate ``id`` column, so RETURNING must reference
                 # real columns; with ON CONFLICT DO NOTHING only actually-
                 # inserted rows return, keeping the count accurate.
-                rows = [{**row, "role": "mentioned"} for row in to_insert]
+                # Ordered for the same reason as ``memory_add_entity_links``:
+                # this statement carries many pairs, and ``to_insert`` is built
+                # by iterating candidates, so without this its order is
+                # whatever the scan returned.
+                rows = _ordered_link_rows([{**row, "role": "mentioned"} for row in to_insert])
                 insert_link_returning = (
                     pg_insert(MemoryEntityLink)
                     .values(rows)
