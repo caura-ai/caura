@@ -333,12 +333,6 @@ async def _patch_storage_client(_engine, _setup_schema):
         sc_mod._client = old_client
 
 
-# How long a leaked task gets to finish on its own before it is cancelled.
-# Small on purpose: this is a courtesy to work that is nearly done, not a
-# promise that background work completes.
-_DRAIN_GRACE_SECONDS = 0.25
-
-
 @pytest.fixture(autouse=True)
 async def _drain_background_tasks(_patch_storage_client):
     """Stop one test's fire-and-forget work from running during a later test.
@@ -367,10 +361,14 @@ async def _drain_background_tasks(_patch_storage_client):
     so tasks drained here still see the in-process ASGI bridge instead of
     reaching for a real client.
 
-    Grace, then cancel — 2 of those 207 tasks never finished at all, so an
-    unconditional await would hang the run. A test that needs its background
-    work to complete must await it itself; this promises isolation, not
-    completion.
+    Cancelled outright, with no grace period. Waiting was never an option —
+    2 of those 207 tasks never finished at all, so an unconditional await
+    hangs the run — and a bounded wait was worse than either: it spends real
+    time to make completion *likely* for whichever tasks happen to be nearly
+    done, which is a race dressed up as a courtesy. A test that needs its
+    background work to complete must await it itself, as
+    ``test_governance_bulk_inline_remediation`` does. This fixture promises
+    isolation, not completion.
     """
     yield
 
@@ -380,13 +378,13 @@ async def _drain_background_tasks(_patch_storage_client):
     if not pending:
         return
 
-    _, still_running = await asyncio.wait(pending, timeout=_DRAIN_GRACE_SECONDS)
-    for task in still_running:
+    for task in pending:
         task.cancel()
-    if still_running:
-        # ``return_exceptions`` so a task that fails, or refuses to die
-        # politely, cannot turn an unrelated test's teardown into an error.
-        await asyncio.gather(*still_running, return_exceptions=True)
+    # Awaited so cancellation has actually landed before the next test starts;
+    # ``Task.cancel()`` only requests it. ``return_exceptions`` so a task that
+    # fails, or refuses to die politely, cannot turn an unrelated test's
+    # teardown into an error.
+    await asyncio.gather(*pending, return_exceptions=True)
 
 
 @pytest.fixture
