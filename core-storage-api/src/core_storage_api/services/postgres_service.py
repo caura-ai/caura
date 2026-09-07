@@ -46,6 +46,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
 from sqlalchemy.sql.dml import ReturningInsert
+from sqlalchemy.sql.selectable import Select
 
 from common import duplicate_memory, permanent_failure
 from common.constants import (
@@ -168,6 +169,35 @@ def _ordered_link_rows(rows: list[dict]) -> list[dict]:
     for row in rows:
         by_key.setdefault((str(row["memory_id"]), str(row["entity_id"])), row)
     return [by_key[key] for key in sorted(by_key)]
+
+
+def _ordered_memory_lock_select(memory_ids: list[UUID], tenant_id: str) -> Select[tuple[Memory]]:
+    """``SELECT ... FOR UPDATE`` over ``memories``, locked in one global order.
+
+    Same hazard as ``_ordered_link_rows`` one table up. A multi-row
+    ``FOR UPDATE`` takes its row locks in the order the executor produces
+    them, and ``WHERE id IN (...)`` fixes no order at all — so this statement
+    and a concurrent link insert can take the same two parent memories in
+    opposite orders and cycle. Measured: with the orders crossed, Postgres
+    kills one side; with them agreed, the later writer only waits.
+
+    ``ORDER BY id`` is the whole mitigation, and it has to be THIS key to be
+    worth anything: the link path sorts on the string form of the id
+    (``_ordered_link_rows``), and Postgres orders the ``uuid`` type by its 16
+    bytes. Those two agree — checked over 500 random v4 ids, both against
+    ``sorted(str(...))`` and against ``sorted(key=.int)`` — which is what makes
+    the two paths agree rather than merely each being internally consistent.
+    """
+    return (
+        select(Memory)
+        .where(
+            Memory.id.in_(memory_ids),
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+        )
+        .order_by(Memory.id)
+        .with_for_update()
+    )
 
 
 @asynccontextmanager
@@ -4932,7 +4962,9 @@ class PostgresService:
     ) -> dict:
         """Bulk-reassign memories to ``target_agent_id`` in ONE transaction.
 
-        Locks the matching live rows ``FOR UPDATE``, loops computing
+        Locks the matching live rows ``FOR UPDATE`` in ``id`` order (see
+        ``_ordered_memory_lock_select`` — unordered, this cycles against a
+        concurrent entity-link insert), loops computing
         moved/promoted/skipped/from_agents, sets ``agent_id`` and auto-promotes
         ``scope_agent`` → ``scope_team`` to prevent data loss, and computes
         ``not_found`` for ids that didn't match (deleted, wrong tenant, or
@@ -4941,19 +4973,7 @@ class PostgresService:
         """
         async with get_session() as session:
             memories = (
-                (
-                    await session.execute(
-                        select(Memory)
-                        .where(
-                            Memory.id.in_(memory_ids),
-                            Memory.tenant_id == tenant_id,
-                            Memory.deleted_at.is_(None),
-                        )
-                        .with_for_update()
-                    )
-                )
-                .scalars()
-                .all()
+                (await session.execute(_ordered_memory_lock_select(memory_ids, tenant_id))).scalars().all()
             )
 
             found_ids = {mem.id for mem in memories}
