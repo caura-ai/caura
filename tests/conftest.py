@@ -7,9 +7,11 @@ or the defaults below.
 """
 
 import asyncio
+import inspect
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import DEFAULT
 
 # Set test-friendly defaults before any backend imports read settings.
 # These can be overridden by the caller via environment variables.
@@ -114,6 +116,58 @@ def get_admin_headers() -> dict:
 def uid() -> str:
     """Short unique suffix — for distinct content (409s) and distinct tenant ids."""
     return uuid.uuid4().hex[:8]
+
+
+def close_scheduled_coro(coro, *_args, **_kwargs):
+    """``side_effect`` for a mocked scheduler: dispose of the coroutine it is handed.
+
+    ``track_task(coro)`` receives an already-created coroutine, so a plain
+    ``MagicMock`` in its place leaves that coroutine unstarted — which the
+    ``filterwarnings`` gate in ``pytest.ini`` fails the run for, and whose
+    comment carries the reasoning.
+
+    Using an ``AsyncMock`` instead does NOT help: the object being dropped is
+    the argument, not the mock's return value.
+
+    Closing walks the nest rather than only the outermost coroutine, because
+    the real call is
+    ``track_task(tracked_task(detect_contradictions_async(...)))`` — closing
+    just the wrapper leaves the inner one unstarted, trading one dropped
+    coroutine for another.
+
+    ``iscoroutine`` guards the ``None`` case, which is live: several tests stub
+    ``tracked_task`` with something that returns ``None``, so this is reached
+    as ``track_task(None)``.
+
+    Returns ``mock.DEFAULT`` so the patched mock keeps its ordinary
+    ``return_value`` rather than returning ``None``. Call recording —
+    ``call_count``, ``assert_called_*``, ``call_args`` — is unaffected either
+    way, so that is not what ``DEFAULT`` is buying.
+    """
+    if inspect.iscoroutine(coro):
+        _close_coroutine_tree(coro)
+    return DEFAULT
+
+
+def _close_coroutine_tree(coro) -> None:
+    """Close ``coro``, and first any coroutine it holds as an argument.
+
+    An unstarted coroutine still has its ``cr_frame``, whose ``f_locals`` are
+    its arguments. A closed one has ``cr_frame is None``, which is what keeps
+    this from revisiting anything — and ``close()`` is idempotent besides.
+
+    Known limit, measured: only coroutines held *directly* as arguments are
+    found. One inside a tuple or list local is missed and still leaks. That is
+    fine for every scheduler in this codebase today — ``tracked_task``'s first
+    parameter is the coroutine itself — but a future wrapper taking ``*coros``
+    would need this widened rather than trusted.
+    """
+    frame = coro.cr_frame
+    if frame is not None:
+        for value in frame.f_locals.values():
+            if inspect.iscoroutine(value):
+                _close_coroutine_tree(value)
+    coro.close()
 
 
 def new_tenant_id() -> str:

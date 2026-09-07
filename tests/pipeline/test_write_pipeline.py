@@ -15,6 +15,7 @@ from sqlalchemy import select
 from common.models.memory import Memory
 from core_api.constants import VECTOR_DIM
 from core_api.schemas import MemoryCreate, MemoryOut
+from tests.conftest import close_scheduled_coro
 
 TENANT_ID = f"test-pipeline-{uuid.uuid4().hex[:8]}"
 FLEET_ID = "test-fleet"
@@ -685,7 +686,8 @@ async def test_schedule_background_tasks_fast_mode_fires_full_fan_out():
     )
 
     with patch(
-        "core_api.pipeline.steps.write.schedule_background_tasks.track_task"
+        "core_api.pipeline.steps.write.schedule_background_tasks.track_task",
+        side_effect=close_scheduled_coro,
     ) as mock_track:
         step = ScheduleBackgroundTasks()
         await step.execute(ctx)
@@ -725,7 +727,8 @@ async def test_schedule_background_tasks_strong_mode_fires_entity_and_contradict
     )
 
     with patch(
-        "core_api.pipeline.steps.write.schedule_background_tasks.track_task"
+        "core_api.pipeline.steps.write.schedule_background_tasks.track_task",
+        side_effect=close_scheduled_coro,
     ) as mock_track:
         step = ScheduleBackgroundTasks()
         await step.execute(ctx)

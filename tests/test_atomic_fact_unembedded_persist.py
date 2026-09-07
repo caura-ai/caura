@@ -16,6 +16,7 @@ import pytest
 
 from core_api.services import memory_service
 from core_api.services.memory_enrichment import AtomicFact
+from tests.conftest import close_scheduled_coro
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -96,7 +97,9 @@ async def _run_fanout(embed_stub):
 
     with (
         patch.object(memory_service, "get_storage_client", lambda: sc),
-        patch.object(memory_service, "track_task", MagicMock()),
+        patch.object(
+            memory_service, "track_task", MagicMock(side_effect=close_scheduled_coro)
+        ),
         patch.object(memory_service, "tracked_task", new=_stub_tracked_task),
         patch.object(
             memory_service, "_schedule_embed_or_reembed", new=_capture_schedule
@@ -227,7 +230,9 @@ async def test_missing_child_id_is_reported_not_counted_as_scheduled() -> None:
 
     with (
         patch.object(memory_service, "get_storage_client", lambda: sc),
-        patch.object(memory_service, "track_task", MagicMock()),
+        patch.object(
+            memory_service, "track_task", MagicMock(side_effect=close_scheduled_coro)
+        ),
         patch.object(memory_service, "tracked_task", new=MagicMock()),
         patch.object(
             memory_service,

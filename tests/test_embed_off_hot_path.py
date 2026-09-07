@@ -31,6 +31,7 @@ from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.write.parallel_embed_enrich import ParallelEmbedEnrich
 from core_api.schemas import MemoryCreate
 from tests._scoped_module import scoped
+from tests.conftest import close_scheduled_coro
 
 pytestmark = pytest.mark.asyncio
 
@@ -219,7 +220,7 @@ async def test_reembed_skips_initial_sleep_when_flag_off() -> None:
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch(
             "core_api.services.organization_settings.resolve_config",
             new=AsyncMock(return_value=None),
@@ -258,7 +259,7 @@ async def test_reembed_sleeps_on_failure_path_when_flag_on() -> None:
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch(
             "core_api.services.organization_settings.resolve_config",
             new=AsyncMock(return_value=None),
@@ -284,13 +285,9 @@ async def test_reembed_schedules_contradiction_after_success() -> None:
     )
     sc.update_embedding = AsyncMock()
 
-    # Stubbing ``tracked_task`` lets us read the scheduled task name
-    # from its 2nd positional arg and close the inline coroutine to
-    # avoid leaked-coroutine warnings at GC time.
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
+    # Stubbing ``tracked_task`` lets us read the scheduled task name from its
+    # 2nd positional arg. Disposal of the coroutine is ``close_scheduled_coro``'s
+    # job, shared with every other stand-in in the suite.
     async def _noop_sleep(_secs: float) -> None:
         return None
 
@@ -303,11 +300,11 @@ async def test_reembed_schedules_contradiction_after_success() -> None:
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_noop_sleep)),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ) as tracked,
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -344,10 +341,6 @@ async def test_reembed_race_guard_fires_with_flag_on_too() -> None:
     async def _noop_sleep(_secs: float) -> None:
         return None
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     with (
         # Flag ON — the configuration where the earlier guard was broken.
         patch.object(memory_service.settings, "deployment_mode", "inline"),
@@ -358,11 +351,11 @@ async def test_reembed_race_guard_fires_with_flag_on_too() -> None:
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_noop_sleep)),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ) as tracked,
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -409,10 +402,6 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
 
         return _noop()
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     async def _noop_sleep(_secs: float) -> None:
         return None
 
@@ -429,11 +418,11 @@ async def test_reembed_respects_existing_embedding_from_enrich_race() -> None:
             "core_api.services.contradiction_detector.detect_contradictions_async",
             new=_fake_detect,
         ),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ) as tracked,
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -476,20 +465,16 @@ async def test_bulk_reembed_preserves_batching() -> None:
         batch_calls.append(len(texts))
         return [[0.1] * VECTOR_DIM for _ in texts]
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     items = [(uuid.uuid4(), f"memory {i} body") for i in range(5)]
 
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_fake_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ) as tracked,
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -574,10 +559,6 @@ async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
         atomic_facts=None,
     )
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     with (
         patch.object(memory_service.settings, "deployment_mode", "deferred"),
         patch.object(
@@ -588,10 +569,10 @@ async def test_enrich_no_contradiction_when_no_prior_embedding() -> None:
             "core_api.services.memory_enrichment.enrich_memory",
             new=AsyncMock(return_value=enrichment),
         ),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch(
             "core_api.services.task_tracker.tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ) as tracked,
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -648,7 +629,7 @@ async def test_reembed_is_failure_fallback_triggers_backoff() -> None:
         ),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch.object(memory_service, "asyncio", scoped(asyncio, sleep=_fake_sleep)),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch(
             "core_api.services.organization_settings.resolve_config",
             new=AsyncMock(return_value=None),
@@ -676,8 +657,8 @@ async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
 
     def _capture(*args, **kwargs):
         # Sync wrapper so args are recorded at CALL time (not await time
-        # — the tracked_task stub below closes the coroutine without
-        # awaiting, so an async-def body would never run).
+        # — the tracked_task stand-in closes the coroutine without awaiting,
+        # so an async-def body would never run).
         called_with.append({"args": args, "kwargs": kwargs})
 
         async def _noop() -> None:
@@ -688,18 +669,14 @@ async def test_bulk_reembed_fallback_passes_is_failure_fallback() -> None:
     async def _failing_batch(_texts, _cfg, *, budget_s=None, **_kwargs):
         raise RuntimeError("simulated provider outage")
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_failing_batch),
         patch.object(memory_service, "_schedule_embed_or_reembed", new=_capture),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -841,10 +818,6 @@ async def _provenance_harness(
 
         return _noop()
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
@@ -855,11 +828,11 @@ async def _provenance_harness(
             "core_api.services.contradiction_detector.detect_contradictions_async",
             new=_fake_detect,
         ),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -895,18 +868,14 @@ async def test_bulk_reembed_fallback_catches_unexpected_exception_types() -> Non
 
         return _noop()
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_failing_batch),
         patch.object(memory_service, "_schedule_embed_or_reembed", new=_capture),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -951,10 +920,6 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
 
         return _noop()
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
@@ -962,14 +927,14 @@ async def test_bulk_reembed_reschedules_items_whose_get_memory_failed() -> None:
             "core_api.services.contradiction_detector.detect_contradictions_async",
             new=_fake_detect,
         ),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         # _reembed_memories_bulk uses the module-level tracked_task
         # binding (not a local re-import like _enrich_memory_background),
         # so we patch memory_service.tracked_task directly.
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ) as tracked,
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -1028,10 +993,6 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
 
         return _noop()
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
@@ -1039,11 +1000,11 @@ async def test_bulk_reembed_patch_failure_reschedules_item() -> None:
             "core_api.services.contradiction_detector.detect_contradictions_async",
             new=_fake_detect,
         ),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ) as tracked,
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -1105,10 +1066,6 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
 
         return _noop()
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
@@ -1116,11 +1073,11 @@ async def test_bulk_reembed_respects_existing_embedding_per_item() -> None:
             "core_api.services.contradiction_detector.detect_contradictions_async",
             new=_fake_detect,
         ),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ),
         patch(
             "core_api.services.organization_settings.resolve_config",
@@ -1161,20 +1118,16 @@ async def test_bulk_reembed_falls_back_on_length_mismatch() -> None:
     )
     sc.update_embedding = AsyncMock()
 
-    def _stub_tracked_task(coro, _name, *_a, **_k):
-        coro.close()
-        return None
-
     items = [(uuid.uuid4(), f"m{i}") for i in range(5)]
 
     with (
         patch.object(memory_service, "get_embeddings_batch", new=_short_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
-        patch.object(memory_service, "track_task"),
+        patch.object(memory_service, "track_task", side_effect=close_scheduled_coro),
         patch.object(
             memory_service,
             "tracked_task",
-            new=MagicMock(side_effect=_stub_tracked_task),
+            new=MagicMock(side_effect=close_scheduled_coro),
         ) as tracked,
         patch(
             "core_api.services.organization_settings.resolve_config",
