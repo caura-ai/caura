@@ -347,6 +347,11 @@ async def find_semantic_duplicate(request: Request) -> dict:
         exclude_id=UUID(body["exclude_id"]) if body.get("exclude_id") else None,
         visibility=body.get("visibility"),
         min_similarity=body.get("min_similarity"),
+        # CAURA-721 — owner identity, so another agent's row in the same fleet
+        # cannot refuse this write. Optional for the same reason A54's is on
+        # ``/entity-overlap-candidates`` below: an older core-api sends no
+        # ``agent_id`` and keeps the pre-CAURA-721 behaviour.
+        agent_id=body.get("agent_id"),
     )
     if result is None:
         raise HTTPException(status_code=404, detail="No semantic duplicate found")

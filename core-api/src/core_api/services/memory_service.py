@@ -676,6 +676,7 @@ async def _find_semantic_duplicate(
     exclude_id: UUID | None = None,
     visibility: str | None = None,
     min_similarity: float | None = None,
+    agent_id: str | None = None,
 ) -> dict | None:
     """Find a near-duplicate memory via cosine similarity.
 
@@ -687,6 +688,14 @@ async def _find_semantic_duplicate(
     via the storage layer for back-compat. A1 #16's
     ``CheckSemanticDuplicate`` pipeline step passes
     ``SEMANTIC_DEDUP_JUDGE_THRESHOLD`` to surface the judge band.
+
+    ``agent_id`` (CAURA-721): the write's owner. Pass it on every write
+    path — without it this dedups on ``(tenant, fleet)`` and another
+    agent's row in the same fleet refuses a write whose author can then
+    never read the row that replaced it. The exact-hash gate is already
+    scoped ``(tenant, fleet, agent, content_hash)``; this makes the
+    semantic tier agree. Omitted only where there is no single owner to
+    pin.
     """
     sc = get_storage_client()
     payload: dict = {
@@ -698,6 +707,10 @@ async def _find_semantic_duplicate(
     }
     if min_similarity is not None:
         payload["min_similarity"] = min_similarity
+    # Sent only when set, so the wire body from a caller that does not pin an
+    # owner stays byte-identical to the pre-CAURA-721 one.
+    if agent_id:
+        payload["agent_id"] = agent_id
     return await sc.find_semantic_duplicate(payload)
 
 
@@ -3482,6 +3495,11 @@ async def update_memory(
                 mem.get("fleet_id"),
                 new_embedding,
                 exclude_id=memory_id,
+                # CAURA-721 — the row being edited owns the comparison, so an
+                # edit is refused only by its own author's other rows. Read off
+                # the stored row rather than the request: an update body has no
+                # ``agent_id``, and the owner is not something an edit changes.
+                agent_id=mem.get("agent_id"),
             )
             if sem_dup:
                 raise HTTPException(

@@ -90,6 +90,12 @@ class DetectNearDuplicate:
                 embedding,
                 visibility=data.visibility or "scope_team",
                 min_similarity=SEMANTIC_DEDUP_JUDGE_THRESHOLD,
+                # CAURA-721 — advisory here, never a 409, but the owner still
+                # has to be pinned: ``near_duplicate_of`` is handed to the
+                # caller as "you already recorded this", and pointing it at
+                # another agent's row makes that claim false (and, for a
+                # ``scope_agent`` candidate, names a row the caller cannot read).
+                agent_id=getattr(data, "agent_id", None),
             )
         )
         metadata["near_dup_check_ms"] = round((time.perf_counter() - t_dedup) * 1000, 1)

@@ -1852,6 +1852,7 @@ class PostgresService:
         exclude_id: UUID | None = None,
         visibility: str | None = None,
         min_similarity: float | None = None,
+        agent_id: str | None = None,
     ) -> tuple[Memory, float] | None:
         """Find the closest memory above ``min_similarity``.
 
@@ -1860,6 +1861,33 @@ class PostgresService:
         back-compat with single-tier callers; A1 #16's tier-dispatching
         pipeline step passes ``SEMANTIC_DEDUP_JUDGE_THRESHOLD`` (0.85)
         so candidates in the judge band become visible.
+
+        ``agent_id`` (CAURA-721): pins the write's owner, so a candidate
+        belonging to a DIFFERENT agent in the same fleet cannot refuse
+        it. Without it this lookup dedups on ``(tenant, fleet)`` while
+        the exact-hash gate beside it dedups on
+        ``(tenant, fleet, agent, content_hash)`` — see
+        ``uq_memories_live_content_hash``, whose own comment gives the
+        rule both gates are meant to share: "two agents recording
+        identical content are two independent observations". Only the
+        semantic tier disagreed, so an exact cross-agent duplicate was
+        admitted while a mere paraphrase of it was refused.
+
+        The refusal was not a deduplication: reads can be narrowed with
+        ``filter_agent_id``, so the refused agent could not retrieve the
+        row that replaced its write — for ``scope_agent`` candidates the
+        409 also returned the id of a row the caller cannot read.
+
+        Same fix, same reason, as A54 on
+        ``memory_find_entity_overlap_candidates`` below; that one is
+        gated on the ``scope_agent`` tier only because visibility there
+        selects a chain to link INTO, whereas a write gate has to be no
+        wider than the narrowest scope a reader may ask for.
+
+        Defaults to ``None`` — meaning "do not pin" — so existing
+        callers keep the pre-CAURA-721 behaviour until they pass it, and
+        a core-api newer than its storage degrades to over-rejection
+        rather than failing.
 
         Returns ``(memory, similarity)`` or ``None``. The similarity
         field is what callers use to decide auto-reject vs judge-dispatch
@@ -1891,6 +1919,14 @@ class PostgresService:
                 stmt = stmt.where(Memory.visibility == visibility)
             if exclude_id is not None:
                 stmt = stmt.where(Memory.id != exclude_id)
+            # CAURA-721. Plain equality, not ``_content_hash_fleet_scope``'s
+            # COALESCE dance: ``Memory.agent_id`` is ``nullable=False``, so
+            # there is no NULL-vs-empty-string group to reconcile the way
+            # ``fleet_id`` needs. Falsy (``""``) is treated as absent, which
+            # matches every other optional predicate here — an unowned write
+            # has no owner to pin.
+            if agent_id:
+                stmt = stmt.where(Memory.agent_id == agent_id)
 
             result = await session.execute(stmt)
             row = result.first()

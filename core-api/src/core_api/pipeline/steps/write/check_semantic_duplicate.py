@@ -133,6 +133,12 @@ class CheckSemanticDuplicate:
                 embedding,
                 visibility=data.visibility or "scope_team",
                 min_similarity=SEMANTIC_DEDUP_JUDGE_THRESHOLD,
+                # CAURA-721 — this is the step that 409s, so it is the one the
+                # missing owner actually cost: a candidate from another agent
+                # in the same fleet rejected a write whose author could not
+                # then read the surviving row. The same ``agent_id`` already
+                # goes to ``_enqueue_dedup_review`` further down this method.
+                agent_id=getattr(data, "agent_id", None),
             )
         )
         set_system_value(metadata, "semantic_dedup_ms", round((time.perf_counter() - t_dedup) * 1000, 1))
