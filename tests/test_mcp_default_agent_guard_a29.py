@@ -45,7 +45,10 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
         # caura_stats: every param optional.
         ("caura_stats", {}),
         # caura_insights: focus is required and must be one of the allowed
-        # slugs to clear pre-validation before the guard fires.
+        # slugs to clear pre-validation before the guard fires. Not a read
+        # tool — it takes the write-scope gate too — but it still reaches the
+        # identity guard here, because setting no capabilities leaves
+        # ``_get_scopes()`` None and that gate passes on the legacy path.
         ("caura_insights", {"focus": "contradictions"}),
         # caura_keystones: every param optional.
         ("caura_keystones", {}),

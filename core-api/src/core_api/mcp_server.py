@@ -3123,6 +3123,11 @@ async def caura_insights(
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    # Write tool despite the name: Phase 3's ``_persist_findings`` creates and
+    # supersedes ``insight`` memories. REST gates the same work —
+    # ``POST /insights/generate`` calls ``auth.enforce_read_only()``.
+    if err := _check_write_scope():
+        return err
     tenant_id = _get_tenant()
     agent_id = _get_agent_id() or agent_id
     if refuse := _refuse_default_agent_on_gateway(agent_id):
