@@ -10,6 +10,25 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.0.3](https://github.com/caura-ai/caura/compare/backend-v3.0.2...backend-v3.0.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **auth:** give the self plane its own error code, and make its docstring true ([#1365](https://github.com/caura-ai/caura/issues/1365)) ([cf96569](https://github.com/caura-ai/caura/commit/cf96569e3f158f28119c2be60672fb57702937a1))
+* **entities:** block a merge when two bracketed qualifiers conflict (A42) ([#1366](https://github.com/caura-ai/caura/issues/1366)) ([d301525](https://github.com/caura-ai/caura/commit/d3015254be04121fb475ac95b850c00a4e734a05))
+* **storage:** lock parent memories in one order, and correct the deadlock note ([#1362](https://github.com/caura-ai/caura/issues/1362)) ([fc09833](https://github.com/caura-ai/caura/commit/fc09833204b4840b39f1b3faf93df8b6572ec30c))
+
+
+### Documentation
+
+* **observability:** the query contract for contradiction quality (D4) ([#1359](https://github.com/caura-ai/caura/issues/1359)) ([9711fac](https://github.com/caura-ai/caura/commit/9711facd28efa8b1f9dcb21f01781c5425a70523))
+
+
+### Code Refactoring
+
+* **auth:** give the self plane one gate instead of eight hand-written ifs ([#1364](https://github.com/caura-ai/caura/issues/1364)) ([98ed5f8](https://github.com/caura-ai/caura/commit/98ed5f8094adb5a9d71356679494ff730f8afd79))
+
 ## [3.0.2](https://github.com/caura-ai/caura/compare/backend-v3.0.1...backend-v3.0.2) (2026-09-07)
 
 
