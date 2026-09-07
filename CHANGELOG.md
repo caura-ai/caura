@@ -10,6 +10,17 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.0.0](https://github.com/caura-ai/caura/compare/backend-v2.48.11...backend-v3.0.0) (2026-09-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core-api:** delete the legacy write path ([#1347](https://github.com/caura-ai/caura/issues/1347))
+
+### Code Refactoring
+
+* **core-api:** delete the legacy write path ([#1347](https://github.com/caura-ai/caura/issues/1347)) ([f79e52e](https://github.com/caura-ai/caura/commit/f79e52e0c8eb043282fa2a0a05652b9744f5bdbe))
+
 ## [2.48.11](https://github.com/caura-ai/caura/compare/backend-v2.48.10...backend-v2.48.11) (2026-09-07)
 
 
