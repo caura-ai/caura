@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.48.8](https://github.com/caura-ai/caura/compare/backend-v2.48.7...backend-v2.48.8) (2026-09-07)
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.4.0 to 26.4.1 in /plugin in the npm-minor-patch group ([#1327](https://github.com/caura-ai/caura/issues/1327)) ([93d9974](https://github.com/caura-ai/caura/commit/93d9974fb60d9a9168252443ee31dc321a8f0d02))
+* update google-genai requirement from &gt;=2.17.0 to &gt;=2.22.0 ([#1329](https://github.com/caura-ai/caura/issues/1329)) ([ba6150a](https://github.com/caura-ai/caura/commit/ba6150a6ff459ac6cf41d1b3a9d79398d825d67b))
+* update pyotp requirement from &gt;=2.9 to &gt;=2.10.0 ([#1328](https://github.com/caura-ai/caura/issues/1328)) ([8ddeb95](https://github.com/caura-ai/caura/commit/8ddeb956c37ac31eb4fd0dfecdeeb839bbcb898c))
+
 ## [2.48.7](https://github.com/caura-ai/caura/compare/backend-v2.48.6...backend-v2.48.7) (2026-09-07)
 
 
