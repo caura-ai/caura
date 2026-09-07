@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.48.11](https://github.com/caura-ai/caura/compare/backend-v2.48.10...backend-v2.48.11) (2026-09-07)
+
+
+### Bug Fixes
+
+* **skills-inbox:** add the missing write gate on the five inbox actions ([#1343](https://github.com/caura-ai/caura/issues/1343)) ([3239f84](https://github.com/caura-ai/caura/commit/3239f84292eba2dd6f5b5e7bcff41da3f6c3a828))
+* **storage:** insert entity links in one global lock order ([#1346](https://github.com/caura-ai/caura/issues/1346)) ([d7f4cb7](https://github.com/caura-ai/caura/commit/d7f4cb701d7303e354dc6cdec8dc405d52910e8c))
+* **tests:** stop test_pipeline_equivalence leaking the legacy write path ([#1345](https://github.com/caura-ai/caura/issues/1345)) ([887c67a](https://github.com/caura-ai/caura/commit/887c67a912f77d781e53eacbff2c09babf904db7))
+
 ## [2.48.10](https://github.com/caura-ai/caura/compare/backend-v2.48.9...backend-v2.48.10) (2026-09-07)
 
 
