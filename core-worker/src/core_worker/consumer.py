@@ -307,13 +307,19 @@ _ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset({"atomic_facts"})
 #
 # * ``contains_pii`` / ``pii_types`` — non-deterministic LLM output;
 #   an earlier ``contains_pii=True`` must be clearable.
-# * ``retrieval_hint`` — the prompt explicitly instructs the LLM to
-#   return ``""`` for content that's already query-aligned; without
-#   always-write a re-enrichment that drops the hint would leave
-#   metadata stale AND the embedding still prefix-augmented.
-# * ``tags`` — the prompt instructs the LLM to always populate 2-6
-#   tags. ``tags=[]`` from a real LLM run means "no tags" intentionally
-#   and must overwrite a prior non-empty list.
+# * ``retrieval_hint`` — CAURA-720 retired it from the prompt, so a
+#   real LLM run now always yields ``""``. Always-write is what CLEARS
+#   a hint left on a row by a pre-CAURA-720 enrichment, which matters
+#   because ``scripts/backfill_embeddings.py`` selects on a non-empty
+#   ``metadata.retrieval_hint``. (The older justification here cited
+#   keeping the row in step with a "prefix-augmented" embedding — that
+#   stopped being true at CAURA-222, which disabled hint-based
+#   embedding entirely.)
+# * ``tags`` — CAURA-719 retired it from the prompt too, so the same
+#   reasoning applies: always-write clears a list a pre-CAURA-719
+#   enrichment left behind. A caller-supplied list is protected by
+#   ``CALLER_OWNABLE_KEYS`` at the ``set_system_value`` boundary, not
+#   here.
 # * ``summary`` — without the guard, a heuristic-fallback redelivery
 #   would write ``fake_enrich``'s ``summary=content[:200]`` over a
 #   prior quality LLM summary. The truncation is a non-empty string,

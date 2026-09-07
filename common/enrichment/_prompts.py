@@ -34,6 +34,57 @@ CAURA-719 — ``tags`` and ``status`` are no longer asked of the LLM, so
 Both fields keep their schema entry, default, and validator so
 historical rows, caller-supplied values, and the deferred worker's
 patch path all continue to deserialise unchanged.
+
+CAURA-720 — ``retrieval_hint`` joins them, and ``weight`` gains its
+missing band:
+
+* ``retrieval_hint`` (and the per-fact copy inside ``atomic_facts``) is
+  no longer asked for. Its only purpose was to augment the embedding —
+  writes embedded ``"[Retrieval hint]: …\\n\\n<content>"`` while queries
+  embedded raw text — and CAURA-222 DISABLED that after the asymmetry
+  capped recall: identical content↔query scored cosine ~0.69 instead of
+  ~1.0 across dedup, entity-lookup, and search ranking. The
+  ``compose_embedding_text`` helper was deleted as dead code, and both
+  the hot path and the background re-embed now embed raw ``content``.
+  The per-fact hint was equally inert: ``memory_service``'s fan-out
+  embeds raw ``fact_content`` for the same CAURA-222 reason.
+  What remains reads it: ``scripts/backfill_embeddings.py`` selects on a
+  non-empty ``metadata.retrieval_hint`` to find rows whose stored vector
+  still holds the old prefixed text, and preserves the value as
+  "auditability ground". That selector is unaffected — stored hints on
+  historical rows are untouched, and rows written from here on simply
+  stop matching it, which they should, since they were never prefixed.
+  ``MemoryEnriched.retrieval_hint`` and the worker's routing entry stay
+  for the same reason the two fields above do.
+* ``weight`` — the field is declared ``0.0-1.0`` but the rubric only
+  described ``0.3-1.0``, leaving 14.3% of the eToro corpus (``0.1`` at
+  9.3%, ``0.2`` at 4.9%) in a range the prompt never defined. That range
+  is not spare: FOUR consumers read ``weight < 0.3`` as "low salience"
+  — insights patterns, insights stale, ``CRYSTALLIZER_STALE_MAX_WEIGHT``,
+  and ``LIFECYCLE_STALE_ARCHIVE_WEIGHT`` — so the band is documented
+  rather than clamped. Clamping the floor to 0.3 would make ``< 0.3``
+  unsatisfiable and silently starve all four. The band is worded by its
+  CONSEQUENCE (auto-archival) so the model's choice is informed by what
+  the system does with the number.
+  The JSON template's ``"weight": 0.0`` moves to ``0.5``: ``0.0`` sat
+  outside every band the rubric described, and 32 rows landed on exactly
+  that value — below even ``EVOLVE_WEIGHT_FLOOR`` (0.05), so evolve
+  cannot have produced them. ``0.5`` is the mid-range neutral and sits
+  inside a described band; that is the whole claim.
+  Deliberately NOT claimed: that it matches "the" default weight. There
+  are TWO, on two different paths, and they do not agree:
+    * this path (the LLM answered) falls back to a hardcoded ``0.7`` —
+      in ``_validate_enrichment`` and again as ``EnrichmentResult.weight``'s
+      pydantic default;
+    * ``DEFAULT_MEMORY_WEIGHT`` (0.5) applies only when NO enrichment
+      value exists at all — ``merge_enrichment_fields`` / ``memory_service``
+      reach for it when ``weight is None``, which #1207 records as
+      ``weight_source="default"``.
+  So the exemplar is not tied to either constant, and no test should pin
+  it to one: a change to ``DEFAULT_MEMORY_WEIGHT`` must not drag the
+  prompt with it. Unifying the 0.7 fallback onto ``DEFAULT_MEMORY_WEIGHT``
+  would make the two paths agree, but that is a behaviour change to
+  ranking (weight is 15% of base score) and belongs in its own PR.
 """
 
 from __future__ import annotations
@@ -132,6 +183,8 @@ Analyze the following memory content and return a JSON object with these fields:
    - 0.7-0.8: solid facts, meaningful events, clear preferences
    - 0.5-0.6: routine observations, minor events, uncertain information
    - 0.3-0.4: trivial, speculative, or low-confidence information
+   - 0.0-0.2: negligible — content you would be comfortable having
+     auto-archived after six months
 
 3. "title": short label (max 80 chars) summarizing the memory for display in lists
 
@@ -166,26 +219,7 @@ Analyze the following memory content and return a JSON object with these fields:
 8. "pii_types": array of strings (optional, empty if no PII)
     - Types of PII detected, e.g. ["email", "phone", "address", "ssn", "credit_card", "date_of_birth"]
 
-9. "retrieval_hint": short clause (max ~15 words, may be empty) capturing the
-    memory's SEMANTIC ESSENCE in vocabulary a reader would use when asking
-    about it LATER. Used to augment the embedding so queries that reference
-    the significance/category of the memory can find it, not just ones that
-    share surface vocabulary with the content.
-    - Focus on the WHY-THIS-IS-NOTEWORTHY: milestones, decisions, changes,
-      categories, roles, events — not a restatement of the content.
-    - Examples:
-      content "I signed a contract with my first client today"
-        → "business milestone: signed first client, first paying customer"
-      content "I learned about Petra at a History Museum lecture this month"
-        → "museum visit, History Museum lecture, learning about Petra"
-      content "We decided to go with Postgres over MongoDB"
-        → "database technology decision: chose Postgres over MongoDB"
-      content "Ran the nightly deploy at 03:00"
-        → "deployment event, nightly release"
-    - Leave as an empty string "" if the content is already highly query-aligned
-      (common nouns + verbs of the thing itself) and no extra framing helps.
-
-10. "atomic_facts": OPTIONAL — null in almost all cases. Populate only when
+9. "atomic_facts": OPTIONAL — null in almost all cases. Populate only when
     the content carries 2+ DISTINCT atomic claims that would be searched by
     DIFFERENT query vocabulary. Each entry becomes its own child memory with
     its own embedding.
@@ -202,10 +236,9 @@ Analyze the following memory content and return a JSON object with these fields:
     - Each fact object has:
         "content"        : self-contained claim (include names, dates, values)
         "suggested_type" : same vocabulary as field 1
-        "retrieval_hint" : same guidance as field 9 — short, query-aligned
     - When in doubt, leave atomic_facts as null.
 
-11. "business_relevance": one of "business" | "personal" (default "business")
+10. "business_relevance": one of "business" | "personal" (default "business")
     - "personal": private life unrelated to work — health, family, personal
       finance, relationships, errands, vacation planning, casual chat, idle ideas.
     - "business": work / professional / operational content (the default).
@@ -213,7 +246,7 @@ Analyze the following memory content and return a JSON object with these fields:
       confident the content is non-work.
 
 Return ONLY valid JSON (no markdown fences):
-{{"memory_type": "...", "weight": 0.0, "title": "...", "summary": "...", "ts_valid_start": null, "ts_valid_end": null, "contains_pii": false, "pii_types": [], "retrieval_hint": "", "atomic_facts": null, "business_relevance": "business"}}
+{{"memory_type": "...", "weight": 0.5, "title": "...", "summary": "...", "ts_valid_start": null, "ts_valid_end": null, "contains_pii": false, "pii_types": [], "atomic_facts": null, "business_relevance": "business"}}
 
 Content:
 {content}

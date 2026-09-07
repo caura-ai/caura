@@ -77,10 +77,17 @@ class TestEnrichmentPromptSignalPhrases:
         caller-owned now and no longer asked of the LLM), so this pins the
         keys that remain rather than the retired one. ``test_caura719_
         tags_status_off_prompt.py`` owns the negative assertion.
+
+        CAURA-720 moved the ``weight`` exemplar from ``0.0`` to ``0.5``:
+        ``0.0`` sat outside every band the rubric described and was being
+        copied verbatim. ``0.5`` is simply the mid-range neutral, inside a
+        described band — NOT a match for a default-weight constant. This
+        path's fallback is a hardcoded ``0.7``; see
+        ``test_caura720_weight_band.py``.
         """
         prompt = self._get_prompt()
         assert '"memory_type": "..."' in prompt
-        assert '"weight": 0.0' in prompt
+        assert '"weight": 0.5' in prompt
         assert '"summary": "..."' in prompt
         assert "Content:" in prompt
 

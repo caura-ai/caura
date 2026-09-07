@@ -2,11 +2,17 @@
 
 Covers:
   - Validator round-trips retrieval_hint; trims whitespace; caps length.
-  - Prompt contains the retrieval_hint rule + concrete examples.
+  - The prompt no longer ASKS for it (CAURA-720).
 
-The hint is persisted in metadata (debugging / auditability) but no
-longer participates in embedding composition — see CAURA-222 and the
-follow-up that removed ``compose_embedding_text`` entirely.
+The hint never participates in embedding composition — CAURA-222
+disabled that and the follow-up removed ``compose_embedding_text``
+entirely. CAURA-720 then retired the prompt field, since the only
+remaining reader is ``scripts/backfill_embeddings.py``, which selects on
+a non-empty ``metadata.retrieval_hint`` to find rows whose stored vector
+still holds the old prefixed text.
+
+The validator tests stay: historical rows carry hint values, and the
+deferred worker replays stored enrichment payloads.
 """
 
 from __future__ import annotations
@@ -76,18 +82,39 @@ class TestValidatorRetrievalHint:
 
 
 # ---------------------------------------------------------------------------
-# Prompt: new rule is present and anchored with examples
+# Prompt: the rule is RETIRED (CAURA-720)
 # ---------------------------------------------------------------------------
 
 
-class TestPromptContainsHintRule:
-    def test_prompt_has_retrieval_hint_field(self):
-        assert '"retrieval_hint"' in ENRICHMENT_PROMPT
+class TestPromptNoLongerAsksForHint:
+    """CAURA-720 removed the field from the prompt.
 
-    def test_prompt_describes_purpose(self):
-        # Key phrase from the rule so drift in the prompt is obvious
-        assert "SEMANTIC ESSENCE" in ENRICHMENT_PROMPT
+    The rule existed to augment the embedding, and CAURA-222 disabled that
+    — writes embedded ``"[Retrieval hint]: …\\n\\n<content>"`` while queries
+    embedded raw text, so identical content↔query scored cosine ~0.69
+    instead of ~1.0. With no consumer left, the prompt stopped asking.
 
-    def test_prompt_includes_business_milestone_example(self):
-        # This is the example modeled after the eac54add failure case.
-        assert "business milestone" in ENRICHMENT_PROMPT
+    The validator section above still applies: historical rows and the
+    deferred worker's replay path both still carry hint values.
+    """
+
+    def test_prompt_does_not_request_retrieval_hint(self):
+        assert '"retrieval_hint"' not in ENRICHMENT_PROMPT
+
+    def test_hint_guidance_is_gone(self):
+        # The phrases that only ever existed to shape hint output.
+        for phrase in (
+            "SEMANTIC ESSENCE",
+            "business milestone",
+            "WHY-THIS-IS-NOTEWORTHY",
+        ):
+            assert phrase not in ENRICHMENT_PROMPT, (
+                f"leftover hint guidance: {phrase!r}"
+            )
+
+    def test_atomic_facts_no_longer_carries_a_per_fact_hint(self):
+        """The sub-schema listed its own ``retrieval_hint`` per fact. Children
+        embed raw ``fact_content`` for the same CAURA-222 reason, so that copy
+        was equally inert."""
+        facts_block = ENRICHMENT_PROMPT.split('"atomic_facts"', 1)[-1]
+        assert "retrieval_hint" not in facts_block
