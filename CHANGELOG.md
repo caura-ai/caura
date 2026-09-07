@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.48.9](https://github.com/caura-ai/caura/compare/backend-v2.48.8...backend-v2.48.9) (2026-09-07)
+
+
+### Bug Fixes
+
+* **agents:** add the missing write gate on PATCH /agents/{id}/tune ([#1337](https://github.com/caura-ai/caura/issues/1337)) ([d055f6a](https://github.com/caura-ai/caura/commit/d055f6aa8ceb99b0f70c048ec38b6abfc437c37b))
+* **fleet:** refuse an agent-scoped credential at POST /fleet/commands ([#1335](https://github.com/caura-ai/caura/issues/1335)) ([685a31f](https://github.com/caura-ai/caura/commit/685a31f264c154b666f91f69f050d54f9fe305c8))
+
 ## [2.48.8](https://github.com/caura-ai/caura/compare/backend-v2.48.7...backend-v2.48.8) (2026-09-07)
 
 
