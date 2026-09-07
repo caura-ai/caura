@@ -6,6 +6,7 @@ PostgreSQL instance with pgvector — configure via TEST_DATABASE_URL env var
 or the defaults below.
 """
 
+import asyncio
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -330,6 +331,62 @@ async def _patch_storage_client(_engine, _setup_schema):
         yield
     finally:
         sc_mod._client = old_client
+
+
+# How long a leaked task gets to finish on its own before it is cancelled.
+# Small on purpose: this is a courtesy to work that is nearly done, not a
+# promise that background work completes.
+_DRAIN_GRACE_SECONDS = 0.25
+
+
+@pytest.fixture(autouse=True)
+async def _drain_background_tasks(_patch_storage_client):
+    """Stop one test's fire-and-forget work from running during a later test.
+
+    ``track_task`` registers every background task in
+    ``core_api.tasks._background_tasks`` and nothing awaits them, while
+    ``asyncio_default_test_loop_scope = session`` keeps one loop for the whole
+    run — so a task scheduled by one test keeps running through the tests that
+    follow it. Measured on this suite before this fixture existed: 207 distinct
+    tasks outlived the test that created them, and one of them was still
+    pending 746 tests later.
+
+    The damage is not theoretical:
+
+    * Log records land in a later test's ``caplog``. #1349 went red exactly
+      this way, and #1352 and #1353 had to teach four assertions to ignore
+      records they never emitted.
+    * ``tracked_task``'s failure path calls ``get_storage_client()``. Fire
+      that after ``_patch_storage_client`` has restored the original client
+      and it memoises a REAL client into the module singleton, pointed at a
+      storage server no test is running — which every later test then pays
+      for in connection errors and retries.
+
+    The dependency on ``_patch_storage_client`` is for ORDERING, not for a
+    value: it makes this fixture set up second and therefore tear down FIRST,
+    so tasks drained here still see the in-process ASGI bridge instead of
+    reaching for a real client.
+
+    Grace, then cancel — 2 of those 207 tasks never finished at all, so an
+    unconditional await would hang the run. A test that needs its background
+    work to complete must await it itself; this promises isolation, not
+    completion.
+    """
+    yield
+
+    from core_api.tasks import _background_tasks
+
+    pending = [task for task in _background_tasks if not task.done()]
+    if not pending:
+        return
+
+    _, still_running = await asyncio.wait(pending, timeout=_DRAIN_GRACE_SECONDS)
+    for task in still_running:
+        task.cancel()
+    if still_running:
+        # ``return_exceptions`` so a task that fails, or refuses to die
+        # politely, cannot turn an unrelated test's teardown into an error.
+        await asyncio.gather(*still_running, return_exceptions=True)
 
 
 @pytest.fixture
