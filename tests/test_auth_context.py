@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 # C32 / API-05: ``detail`` on an auth refusal is now
@@ -13,7 +15,8 @@ import pytest
 from fastapi import HTTPException
 
 from core_api import errors
-from core_api.auth import AuthContext
+from core_api.auth import AuthContext, get_auth_context
+from core_api.config import settings
 
 
 def test_enforce_read_only_allows_non_demo():
@@ -168,12 +171,6 @@ def test_enforce_read_only_passes_when_scopes_unset():
 
 
 # ── enforce_self_agent ───────────────────────────────────────────────
-#
-# The self plane. Unlike its neighbours here the refusal carries a plain-string
-# ``detail`` rather than the C32 ``{"code", "message", "details"}`` shape, so
-# these assertions read ``detail`` directly — that is what all eight call sites
-# raised before the condition moved onto the helper, and changing the body for
-# existing clients is not something a consolidation should do quietly.
 
 
 def test_enforce_self_agent_noop_without_an_agent_credential():
@@ -195,8 +192,12 @@ def test_enforce_self_agent_blocks_a_peer():
     assert exc_info.value.status_code == 403
     # Pinned as a substring by test_route_authz_gaps and
     # test_h06_m30_recall_identity, so it is part of the contract.
-    assert "does not match the authenticated agent identity" in exc_info.value.detail
-    assert "agent-b" in exc_info.value.detail
+    assert (
+        "does not match the authenticated agent identity"
+        in exc_info.value.detail["message"]
+    )
+    assert "agent-b" in exc_info.value.detail["message"]
+    assert exc_info.value.detail["code"] == errors.AUTH_AGENT_IDENTITY_MISMATCH
 
 
 def test_enforce_self_agent_allows_an_unasserted_identity():
@@ -222,27 +223,45 @@ def test_enforce_self_agent_refuses_an_explicitly_empty_agent_id():
 
 
 def test_enforce_self_agent_names_the_field_it_was_given():
-    """``/recall`` refuses two different knobs and the message has to say which
-    — the two used to be separate hand-written raises."""
+    """``/recall`` takes two of these knobs, so the refusal has to say which one
+    it refused. No route test asserts the field name, which is why it is pinned
+    here."""
     ctx = AuthContext(tenant_id="t1", agent_id="agent-a")
     with pytest.raises(HTTPException) as exc_info:
         ctx.enforce_self_agent("agent-b", field="filter_agent_id")
-    assert exc_info.value.detail.startswith("filter_agent_id 'agent-b'")
+    assert exc_info.value.detail["message"].startswith("filter_agent_id 'agent-b'")
+    assert exc_info.value.detail["details"]["field"] == "filter_agent_id"
 
 
-def test_enforce_self_agent_keeps_a_route_specific_detail():
+def test_enforce_self_agent_keeps_a_route_specific_message_without_losing_the_field():
+    """``message`` and ``field`` are independent: overriding the sentence must
+    not cost the caller the machine-readable name of the knob."""
     ctx = AuthContext(tenant_id="t1", agent_id="agent-a")
     with pytest.raises(HTTPException) as exc_info:
         ctx.enforce_self_agent(
-            "agent-b", detail="Agents can only tune their own search profile."
+            "agent-b", message="Agents can only tune their own search profile."
         )
-    assert exc_info.value.detail == "Agents can only tune their own search profile."
+    detail = exc_info.value.detail
+    assert detail["message"] == "Agents can only tune their own search profile."
+    assert detail["code"] == errors.AUTH_AGENT_IDENTITY_MISMATCH
+    assert detail["details"]["field"] == "agent_id"
 
 
-def test_enforce_self_agent_exempts_admin_without_a_special_case():
+async def test_the_real_admin_branch_leaves_agent_id_unset(monkeypatch):
     """Admin is exempt because the admin context carries no ``agent_id``, not
-    because the gate tests ``is_admin``. Pinned so that if an admin context ever
-    grows an agent id, this fails and the exemption gets stated deliberately."""
-    ctx = AuthContext(tenant_id=None, is_admin=True)
+    because the gate tests ``is_admin``.
+
+    Built by the real ``get_auth_context`` rather than by hand. A test that
+    constructs ``AuthContext(is_admin=True)`` itself pins the constructor
+    default and would keep passing however the admin branch changed — which is
+    what the first version of this test did. Sending ``X-Agent-ID`` alongside
+    the admin key also pins the discard that the exemption rests on.
+    """
+    monkeypatch.setattr(settings, "admin_api_key", "admin-key-for-this-test")
+    request = SimpleNamespace(headers={"x-agent-id": "someone-else"})
+
+    ctx = await get_auth_context(request, key="admin-key-for-this-test")
+
+    assert ctx.is_admin is True
     assert ctx.agent_id is None
-    ctx.enforce_self_agent("any-agent")  # no raise
+    ctx.enforce_self_agent("someone-else")  # no raise

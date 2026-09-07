@@ -186,14 +186,19 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
     mismatch rejection + the verified-floor bump) than that resolver provides.
     """
     verified_id = getattr(auth, "agent_id", None)
-    if verified_id and x_agent_id and verified_id != x_agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "X-Agent-ID header does not match authenticated identity. "
-                "Refusing to act on behalf of a different agent."
-            ),
-        )
+    # The self plane, asked of a header rather than a body or query parameter:
+    # ``AuthContext.enforce_self_agent`` owns that question for the whole REST
+    # surface. ``or None`` keeps an empty ``X-Agent-ID:`` an omission here — the
+    # helper refuses an explicit ``""`` and this site has always let it fall
+    # through to the unverified-identity path below.
+    auth.enforce_self_agent(
+        x_agent_id or None,
+        field="X-Agent-ID",
+        message=(
+            "X-Agent-ID header does not match authenticated identity. "
+            "Refusing to act on behalf of a different agent."
+        ),
+    )
     if verified_id:
         return verified_id, True
     if x_agent_id:

@@ -512,10 +512,12 @@ async def memory_stats(
     # Stats cannot borrow that fix as-is: with one knob doing both jobs, forcing
     # it to the caller would silently narrow the historical "no agent_id →
     # team/org-wide" aggregate. Rejecting the conflict closes the leak and
-    # leaves every legitimate call (omitted, or naming yourself) untouched.
+    # leaves every legitimate call untouched: omit it for the wider aggregate,
+    # or name yourself. An explicit ``?agent_id=`` is an assertion, not an
+    # omission, and is refused with the rest — see ``enforce_self_agent``.
     auth.enforce_self_agent(
         agent_id,
-        detail=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
+        message=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
     )
     caller_agent_id = auth.agent_id or agent_id
     effective_agent_id = agent_id
@@ -1809,10 +1811,9 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[str 
     implementation is the only way that stays true.
     """
     auth.enforce_self_agent(body.filter_agent_id, field="filter_agent_id")
-    # Same rule for the identity knob. ``caller_agent_id`` feeds exactly the two
-    # things ``filter_agent_id`` used to smuggle in — the visibility identity and
-    # the subject of the trust<2 fleet forcing — so leaving it unguarded would
-    # reopen the escalation the check above closes, by a new spelling.
+    # Same rule for the identity knob: ``caller_agent_id`` feeds the visibility
+    # identity directly, so leaving it unguarded reopens the same escalation
+    # under a different field name.
     auth.enforce_self_agent(body.caller_agent_id, field="caller_agent_id")
     # Identity, in precedence order: an authenticated agent always wins, then an
     # explicit assertion, then the legacy derivation from the filter so existing
@@ -2272,11 +2273,10 @@ async def redistribute_memories(
     auth.enforce_usage_limits()
     auth.enforce_tenant(tenant_id)
 
-    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
-    # the caller-supplied query param: running the trust gate against a
-    # caller-asserted ``agent_id`` would let a low-trust agent credential
-    # clear it by naming some trust-3 agent in the query string (privilege
-    # escalation). Mirrors the precedence pattern in delete/update_memory.
+    # The query param must MATCH the authenticated agent identity (gateway
+    # X-Agent-ID): running the trust gate below against a caller-asserted
+    # ``agent_id`` would let a low-trust agent credential clear it by naming
+    # some trust-3 agent in the query string (privilege escalation).
     auth.enforce_self_agent(agent_id)
 
     # Verify requesting agent is admin

@@ -194,17 +194,15 @@ async def get_notes(
 ):
     _check_stm_enabled()
     tenant_id = _require_tenant(auth, tenant_id)
-    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over the
-    # caller-supplied query param. Notes are per-agent PRIVATE (see the section
-    # header), so an agent credential must not read a peer's by naming it.
+    # The caller-supplied query param must MATCH the authenticated agent identity
+    # (gateway X-Agent-ID) — this refuses a mismatch rather than overriding it.
+    # Notes are per-agent PRIVATE (see the section header), so an agent credential
+    # must not read a peer's by naming it.
     #
     # The DELETE twin directly below has enforced this since the 2026-06-11
     # audit, which left the pair lopsided: a peer's notes could not be cleared,
     # only read. Disclosure was the half still open.
-    auth.enforce_self_agent(
-        agent_id,
-        detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
-    )
+    auth.enforce_self_agent(agent_id)
     from core_api.services.stm_service import read_notes
 
     notes = await read_notes(tenant_id, agent_id, limit=limit)
@@ -226,12 +224,9 @@ async def clear_notes(
     _check_stm_enabled()
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
-    # Authenticated agent identity (gateway X-Agent-ID) takes precedence —
-    # an agent credential must not clear a peer agent's notes by naming it.
-    auth.enforce_self_agent(
-        agent_id,
-        detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
-    )
+    # The query param must MATCH the authenticated agent identity — an agent
+    # credential must not clear a peer agent's notes by naming it.
+    auth.enforce_self_agent(agent_id)
     from core_api.services.stm_service import clear_notes
 
     await clear_notes(tenant_id, agent_id)
@@ -318,13 +313,9 @@ async def promote_stm(
     # It reached LTM having paid only the two above, which meant the STM door
     # into long-term memory was cheaper than the front door.
     _reject_reserved_memory_type(body.memory_type)
-    # Bind the promoted memory to the authenticated agent identity when the
-    # credential carries one — a caller must not promote into LTM on behalf
-    # of an arbitrary peer agent.
-    auth.enforce_self_agent(
-        body.agent_id,
-        detail=f"agent_id '{body.agent_id}' does not match the authenticated agent identity.",
-    )
+    # Refuse a promote on behalf of a peer agent. This only REFUSES: the binding
+    # to the caller's own identity happens below, in ``resolve_write_agent``.
+    auth.enforce_self_agent(body.agent_id)
 
     from core_api.services.organization_settings import resolve_config
 

@@ -258,61 +258,58 @@ class AuthContext:
         requested_agent_id: str | None,
         *,
         field: str = "agent_id",
-        detail: str | None = None,
+        message: str | None = None,
     ) -> None:
         """Raise 403 if an agent credential named an agent other than itself.
 
-        The self plane, which is a third question from the two gates above it:
+        The self plane, a third question from the two gates above it:
         ``enforce_read_only`` asks whether this credential may write at all,
         ``enforce_not_agent_credential`` refuses agent credentials outright, and
-        this one admits an agent credential but only as ITSELF. Routes that are
-        meant to be self-service — tune your own profile, read your own notes,
-        promote your own STM — are exactly the ones that must NOT take
-        ``enforce_not_agent_credential``, since it would refuse the callers they
-        exist for, and none of the eight sites here does.
+        this one admits an agent credential but only as ITSELF. Self-service
+        routes — tune your own profile, read your own notes — are exactly the
+        ones that must NOT take ``enforce_not_agent_credential``, since it would
+        refuse the callers they exist for, and no caller of this one does. It is
+        orthogonal to the write gate rather than paired with it: the write paths
+        among them also call ``enforce_read_only``, the read paths do not.
 
-        It is orthogonal to the write gate rather than paired with it: the four
-        write paths among them (tune, redistribute, clear notes, promote) also
-        call ``enforce_read_only``, and the read paths (stats, read notes, the
-        two ``/recall`` knobs) do not. Whether a caller may write and which
-        identity it may act as are independent questions.
+        ``field`` names the offending parameter in the default message and rides
+        along in ``error.details`` either way, so a caller that sent two of them
+        can tell which one was refused. ``message`` replaces the whole sentence
+        where a route has something more specific to say; the two are
+        independent, since ``field`` reaches the caller regardless.
 
-        ``None`` passes, and only ``None``. It means the caller asserted no
-        identity, which every route that can receive one treats as "use the
-        authenticated identity" or as a deliberately wider aggregate
-        (``GET /memories/stats`` documents the second); each of those
-        parameters defaults to ``None``, so an omitted one lands here.
+        ``None`` passes, and only ``None`` — an omission means the caller
+        asserted no identity, which each route treats as "use the authenticated
+        identity" or as a deliberately wider aggregate. An explicit empty string
+        is an assertion and is refused. Both spellings that can produce one bind
+        ``""`` rather than ``None`` (measured: ``?agent_id=`` on a required or
+        optional ``Query``, and ``{"filter_agent_id": ""}`` in a JSON body — the
+        body is the likelier source, from a serializer that emits empty strings
+        for unset fields).
 
-        An explicit empty string does NOT pass, and that is the one place the
-        eight call sites this replaces genuinely disagreed. Five compared
-        unconditionally, so ``?agent_id=`` was a 403; three guarded on
-        truthiness, so it was treated as omitted. Since the two groups had to
-        be reconciled, this takes the stricter reading: an empty agent id is a
-        client error, and answering it 403 is better than the alternative,
-        which on ``GET /stm/notes`` would have turned that 403 into a 200 with
-        an empty body. The three relaxed sites all take an optional parameter,
-        so nothing that omits it is affected.
+        Admin credentials are exempt with no special case: ``get_auth_context``
+        returns ``AuthContext(tenant_id=None, is_admin=True)`` on the admin-key
+        branch and never plumbs ``X-Agent-ID`` into it, so the first clause
+        declines to fire. Pinned in ``tests/test_auth_context.py`` against that
+        real branch rather than a hand-built context, which would only have
+        pinned the constructor default.
 
-        Admin credentials are exempt without a special case: the only
-        ``is_admin=True`` context is built at ``auth.py``'s admin branch as
-        ``AuthContext(tenant_id=None, is_admin=True)``, leaving ``agent_id``
-        None, so the first clause already declines to fire. Checked rather than
-        assumed — an explicit ``if self.is_admin: return`` would imply an admin
-        context could carry an agent id, which none does.
-
-        The refusal is a plain-string ``detail`` rather than ``coded_detail``,
-        unlike its neighbours here, because that is what all eight call sites
-        raised before this helper existed. Giving the self plane an error code
-        changes the response body for existing clients, which is a deliberate
-        change and not a side effect of moving the condition.
+        ``services/caller_identity.py`` spells the same predicate and
+        deliberately answers it the other way — it logs the mismatch and lets
+        the verified identity win instead of refusing. It is not a missing
+        caller of this gate; the routes behind it want an override.
         """
         if self.agent_id and requested_agent_id is not None and requested_agent_id != self.agent_id:
             raise HTTPException(
                 status_code=403,
-                detail=detail
-                or (
-                    f"{field} '{requested_agent_id}' does not match the "
-                    f"authenticated agent identity '{self.agent_id}'."
+                detail=coded_detail(
+                    errors.AUTH_AGENT_IDENTITY_MISMATCH,
+                    message
+                    or (
+                        f"{field} '{requested_agent_id}' does not match the "
+                        f"authenticated agent identity '{self.agent_id}'."
+                    ),
+                    field=field,
                 ),
             )
 
