@@ -5,11 +5,14 @@ covers ``APIRoute`` entries on the core-api app. It does NOT cover the MCP
 surface. ``app.py`` does ``app.mount("/mcp", ...)``, which the walk below sees
 as a ``Mount`` with no ``.routes`` and a plain Starlette ``Route`` — neither an
 ``APIRoute`` — and ``/mcp`` is absent from ``app.openapi()``, so the
-self-check cannot see it either. Every mutating MCP tool (``caura_write``,
-``caura_manage``, ``caura_keystones_set``) guards itself with
-``_check_write_scope`` instead; that surface wants its own inventory and does
-not have one. A plain Starlette ``Route`` added with a mutating method would be
-invisible here for the same reason.
+self-check cannot see it either. Mutating MCP tools guard themselves with
+``_check_write_scope`` instead — seven of them, not the three an earlier
+revision of this paragraph named: ``caura_doc``, ``caura_evolve``,
+``caura_insights``, ``caura_keystones_set``, ``caura_manage``, ``caura_tune``
+and ``caura_write``. That surface now has its own inventory, in
+``tests/test_mcp_authz_gate_inventory.py``, which enumerates it from the tool
+registry so the count above cannot silently go stale again. A plain Starlette
+``Route`` added with a mutating method would still be invisible here.
 
 This class of gap has been fixed one route at a time, repeatedly:
 
