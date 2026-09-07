@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.0.2](https://github.com/caura-ai/caura/compare/backend-v3.0.1...backend-v3.0.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* **embedding:** make the local provider's model configurable and refuse a width mismatch (C38) ([#1342](https://github.com/caura-ai/caura/issues/1342)) ([888292e](https://github.com/caura-ai/caura/commit/888292e370cb699cfe5b8d71f44b478f731fed9e))
+* **mcp:** gate caura_insights on write scope ([#1361](https://github.com/caura-ai/caura/issues/1361)) ([aecd1a2](https://github.com/caura-ai/caura/commit/aecd1a2527afa320ed01250e5e68509cec665cf2))
+
 ## [3.0.1](https://github.com/caura-ai/caura/compare/backend-v3.0.0...backend-v3.0.1) (2026-09-07)
 
 
