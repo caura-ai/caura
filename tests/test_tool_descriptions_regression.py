@@ -1,10 +1,17 @@
 """Phase 4 regression — `/tool-descriptions` and MCP `tools/list` derived
 from the SoT registry must produce the captured v1.0 baselines.
 
-Locks the post-consolidation 13-tool surface (10 user-facing LTM tools —
-of which 7 are live and 3 are knowledge-layer placeholders — plus 3
-STM tools). The pre-consolidation `*_16tools.json` baselines are kept
-in `tests/fixtures/` for token-budget delta measurement.
+Locks the post-consolidation surface at `EXPECTED_TOOL_COUNT` below, which is
+the one place the number lives: every tool is live, none is a placeholder
+(`test_tools_registry.EXPECTED_PLACEHOLDERS` is empty), and there are no
+separate STM tools.
+
+The header said otherwise until 2026-09 — "13-tool surface (10 user-facing LTM
+tools — of which 7 are live and 3 are knowledge-layer placeholders — plus 3 STM
+tools)" — while `EXPECTED_TOOL_COUNT` twelve lines below said 12. It also
+pointed at `*_16tools.json` baselines in `tests/fixtures/`, which do not exist;
+the directory holds `tools_list_baseline_v1.json` and the two
+`tool_descriptions_*_baseline_v1.json` files this module actually reads.
 """
 
 from __future__ import annotations

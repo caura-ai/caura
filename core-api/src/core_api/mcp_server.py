@@ -3934,9 +3934,12 @@ async def mcp_lifespan():
 # ── SoT registration ──────────────────────────────────────────────────────
 # Triggers loading of every `core_api.tools.caura_*.py` spec module. Each
 # spec module registers itself in the REGISTRY and calls `mcp_register(mcp, spec)`
-# to wire the handler to FastMCP. This import must run AFTER the 16 handler
-# functions above are defined — spec modules reference them via
-# `core_api.mcp_server.caura_X` attribute lookup.
+# to wire the handler to FastMCP. This import must run AFTER the `caura_*`
+# handler functions above are defined — spec modules reference them via
+# `core_api.mcp_server.caura_X` attribute lookup. Deliberately no count here:
+# this said "the 16 handler functions" from the initial release until 2026-09,
+# which was the PRE-consolidation figure and never matched the 12 that exist.
+# `test_tools_registry` pins the real number; prose beside it only drifts.
 # The `noqa: E402,F401` silences "module-level import not at top" and
 # "imported but unused" — both are intentional.
 from core_api import tools  # noqa: F401

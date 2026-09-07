@@ -22,8 +22,10 @@ from ._types import ToolSpec
 def mcp_register(mcp, spec: ToolSpec) -> None:
     """Register `spec.handler` with the FastMCP instance, using `spec.description`.
 
-    No-op when `spec.handler is None` (Phase 1 of the refactor — handlers
-    still live in `mcp_server.py`'s `@mcp.tool` decorators).
+    No-op when `spec.handler is None`, which no registered spec is — see
+    `ToolSpec.handler`. The guard is kept for the dataclass default, not for a
+    migration; `mcp_server.py` has held zero `@mcp.tool` decorators since the
+    consolidation, and this function is how every tool reaches FastMCP.
 
     Handlers are annotated `-> str` but their error paths return
     `CallToolResult` via `_as_error_result` to preserve the unified

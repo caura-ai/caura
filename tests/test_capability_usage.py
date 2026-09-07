@@ -248,9 +248,8 @@ async def test_every_capability_key_matches_a_real_route():
     entry is left behind, silently switching that capability off.
 
     Deliberately a test rather than an import-time check in ``app.py``.
-    Recovering the label space means descending through FastAPI's
-    ``_IncludedRouter`` via the private ``original_router``, because
-    ``include_router(prefix=...)`` mounts opaquely; the existing
+    Recovering the label space means descending through a private FastAPI
+    attribute — see ``tests/_route_table`` — and the existing
     ``_TIMEOUT_OPT_OUT_PATHS`` guard can live at import time only because
     ``app.openapi()`` is public and prefixed. Wiring a private attribute
     into startup would turn a dependency bump into a production boot
@@ -263,20 +262,12 @@ async def test_every_capability_key_matches_a_real_route():
 
     from core_api.app import app
     from core_api.middleware.request_observation import _REST_CAPABILITY
+    from tests._route_table import iter_route_declarations
 
     real: dict[str, set[str]] = collections.defaultdict(set)
-
-    def walk(routes):
-        for r in routes:
-            inner = getattr(r, "original_router", None)
-            if inner is not None:
-                walk(inner.routes)
-                continue
-            path, methods = getattr(r, "path", None), getattr(r, "methods", None)
-            if path is not None and methods:
-                real[path] |= set(methods)
-
-    walk(app.routes)
+    for path, methods in iter_route_declarations(app.routes):
+        if methods:
+            real[path] |= set(methods)
 
     missing = sorted((m, p) for (m, p) in _REST_CAPABILITY if m not in real.get(p, ()))
     assert not missing, (
