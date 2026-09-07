@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # tenant by setting identity headers itself. Unset (OSS/standalone/dev) = no-op.
     gateway_shared_secret: str | None = None
     embedding_provider: str = "openai"  # fake | openai | local
+    # C38 — model for ``embedding_provider="local"`` (sentence-transformers).
+    # MUST emit VECTOR_DIM dimensions; the provider now refuses a mismatch at
+    # load rather than failing later at INSERT. Maps to LOCAL_EMBEDDING_MODEL,
+    # which is what common/embedding/_registry.py reads.
+    local_embedding_model: str = "BAAI/bge-large-en-v1.5"
     # Per-deploy control for where embedding + LLM enrichment run.
     #
     # - ``"inline"`` (default): both embed + enrich run on the request

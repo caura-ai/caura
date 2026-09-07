@@ -76,11 +76,20 @@ class LocalEmbedding:
             )
             test_dim = model.get_sentence_embedding_dimension()
             if test_dim != VECTOR_DIM:
-                logger.warning(
-                    "Model %s produces %d-dim vectors, expected %d (VECTOR_DIM)",
-                    self._model_name,
-                    test_dim,
-                    VECTOR_DIM,
+                # C38 — refuse, don't warn. ``memories.embedding`` is
+                # vector(VECTOR_DIM), so a mismatched model cannot produce a
+                # storable vector: every write fails at INSERT and every search
+                # fails at query-encode, with a Postgres dimension error that
+                # names neither the model nor the setting that chose it.
+                # Failing at model load points straight at the cause. The old
+                # warn-and-continue is how the default sat on a 768-dim model
+                # against a 1024-dim column without anyone noticing.
+                raise ValueError(
+                    f"Local embedding model {self._model_name!r} produces "
+                    f"{test_dim}-dim vectors, but the schema requires "
+                    f"{VECTOR_DIM} (memories.embedding is vector({VECTOR_DIM})). "
+                    f"Set LOCAL_EMBEDDING_MODEL to a {VECTOR_DIM}-dim model — "
+                    f"e.g. BAAI/bge-large-en-v1.5."
                 )
             self._model = model
 
