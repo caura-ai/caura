@@ -513,11 +513,10 @@ async def memory_stats(
     # it to the caller would silently narrow the historical "no agent_id →
     # team/org-wide" aggregate. Rejecting the conflict closes the leak and
     # leaves every legitimate call (omitted, or naming yourself) untouched.
-    if auth.agent_id and agent_id and agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
-        )
+    auth.enforce_self_agent(
+        agent_id,
+        detail=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
+    )
     caller_agent_id = auth.agent_id or agent_id
     effective_agent_id = agent_id
     if scope is not None:
@@ -1809,26 +1808,12 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[str 
     ``SearchRequest`` must not disagree about what the fields mean; one
     implementation is the only way that stays true.
     """
-    if auth.agent_id and body.filter_agent_id and body.filter_agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"filter_agent_id '{body.filter_agent_id}' does not match the "
-                f"authenticated agent identity '{auth.agent_id}'."
-            ),
-        )
+    auth.enforce_self_agent(body.filter_agent_id, field="filter_agent_id")
     # Same rule for the identity knob. ``caller_agent_id`` feeds exactly the two
     # things ``filter_agent_id`` used to smuggle in — the visibility identity and
     # the subject of the trust<2 fleet forcing — so leaving it unguarded would
     # reopen the escalation the check above closes, by a new spelling.
-    if auth.agent_id and body.caller_agent_id and body.caller_agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"caller_agent_id '{body.caller_agent_id}' does not match the "
-                f"authenticated agent identity '{auth.agent_id}'."
-            ),
-        )
+    auth.enforce_self_agent(body.caller_agent_id, field="caller_agent_id")
     # Identity, in precedence order: an authenticated agent always wins, then an
     # explicit assertion, then the legacy derivation from the filter so existing
     # callers are untouched. The filter itself is passed separately at the
@@ -2292,13 +2277,7 @@ async def redistribute_memories(
     # caller-asserted ``agent_id`` would let a low-trust agent credential
     # clear it by naming some trust-3 agent in the query string (privilege
     # escalation). Mirrors the precedence pattern in delete/update_memory.
-    if auth.agent_id and agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"agent_id '{agent_id}' does not match the authenticated agent identity '{auth.agent_id}'."
-            ),
-        )
+    auth.enforce_self_agent(agent_id)
 
     # Verify requesting agent is admin
     caller = await lookup_agent(tenant_id, agent_id)

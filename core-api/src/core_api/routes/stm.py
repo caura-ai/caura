@@ -201,11 +201,10 @@ async def get_notes(
     # The DELETE twin directly below has enforced this since the 2026-06-11
     # audit, which left the pair lopsided: a peer's notes could not be cleared,
     # only read. Disclosure was the half still open.
-    if auth.agent_id and agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
-        )
+    auth.enforce_self_agent(
+        agent_id,
+        detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
+    )
     from core_api.services.stm_service import read_notes
 
     notes = await read_notes(tenant_id, agent_id, limit=limit)
@@ -229,11 +228,10 @@ async def clear_notes(
     tenant_id = _require_tenant(auth, tenant_id)
     # Authenticated agent identity (gateway X-Agent-ID) takes precedence —
     # an agent credential must not clear a peer agent's notes by naming it.
-    if auth.agent_id and agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
-        )
+    auth.enforce_self_agent(
+        agent_id,
+        detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
+    )
     from core_api.services.stm_service import clear_notes
 
     await clear_notes(tenant_id, agent_id)
@@ -323,11 +321,10 @@ async def promote_stm(
     # Bind the promoted memory to the authenticated agent identity when the
     # credential carries one — a caller must not promote into LTM on behalf
     # of an arbitrary peer agent.
-    if auth.agent_id and body.agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"agent_id '{body.agent_id}' does not match the authenticated agent identity.",
-        )
+    auth.enforce_self_agent(
+        body.agent_id,
+        detail=f"agent_id '{body.agent_id}' does not match the authenticated agent identity.",
+    )
 
     from core_api.services.organization_settings import resolve_config
 
