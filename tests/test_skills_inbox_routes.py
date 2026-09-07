@@ -25,6 +25,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from core_api import errors
 from core_api.auth import AuthContext, get_auth_context
 from core_api.routes import skills_inbox as si
 from core_api.services.forge.sentinel_scan import ScanResult
@@ -252,10 +253,21 @@ def make_client(
     # ``tenant_id=None`` + ``is_admin=True`` reproduces the OSS admin
     # credential (auth Path 1) — the WT-4 shape.
     tenant_id: str | None = TENANT,
+    # The two axes ``enforce_read_only`` tests, independent of org role.
+    # Default ``None`` is a legacy full-scope key, which passes that gate — so
+    # every pre-existing test in this file keeps exercising the same caller.
+    capabilities: set[str] | None = None,
+    is_demo: bool = False,
 ) -> AsyncClient:
     app = FastAPI()
     app.include_router(si.router, prefix="/api/v1")
-    auth = AuthContext(tenant_id=tenant_id, org_role=org_role, is_admin=is_admin)
+    auth = AuthContext(
+        tenant_id=tenant_id,
+        org_role=org_role,
+        is_admin=is_admin,
+        capabilities=capabilities,
+        is_demo=is_demo,
+    )
 
     async def _auth_dep():
         return auth
@@ -266,6 +278,17 @@ def make_client(
 
 BASE = "/api/v1/skills-inbox"
 SLUG = "forge/summarize-oncall-handoff"
+
+# The five mutating actions and a minimal valid body for each. Shared by
+# every parametrized action test — admin-plane, write-gate, and
+# over-refusal — so a sixth action is added in one place.
+_ACTIONS = [
+    ("approve", None),
+    ("defer", None),
+    ("edit", {"summary": "x"}),
+    ("quarantine", {"reason": "r"}),
+    ("reject", {"reason": "r"}),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -439,16 +462,7 @@ async def test_list_open_to_non_admin_members(storage, settings):
     assert r.status_code == 200, r.text
 
 
-@pytest.mark.parametrize(
-    ("action", "body"),
-    [
-        ("approve", None),
-        ("defer", None),
-        ("edit", {"summary": "x"}),
-        ("quarantine", {"reason": "r"}),
-        ("reject", {"reason": "r"}),
-    ],
-)
+@pytest.mark.parametrize(("action", "body"), _ACTIONS)
 async def test_actions_are_admin_only(storage, settings, side_effects, action, body):
     storage.seed(forge_doc())
     async with make_client(org_role="member") as client:
@@ -465,6 +479,109 @@ async def test_legacy_is_admin_flag_also_grants_actions(
     async with make_client(org_role=None, is_admin=True) as client:
         r = await client.post(f"{BASE}/{SLUG}/defer", json=None)
     assert r.status_code == 200, r.text
+
+
+# ---------------------------------------------------------------------------
+# The five actions had no WRITE gate — only an admin-plane one.
+#
+# ``_require_inbox_admin`` passes on ``is_admin or org_role == "admin"`` and
+# nothing else, and the actions called no ``auth.enforce_*`` at all, so these
+# were the only mutating routes in the app with no write gate. Found by
+# ``tests/test_authz_gate_inventory.py``, which recorded it as a KNOWN GAP
+# because closing it is five behaviour changes.
+#
+# DEFENCE IN DEPTH, not a closed hole — worth being exact, because the first
+# draft of this comment claimed a live escalation. No gateway-minted credential
+# is currently both an org admin and non-writing: the auth service emits
+# ``X-Org-Role`` only for user principals and deletes it on the API-key path,
+# which is the only path emitting ``X-Capabilities``. What these tests pin is
+# that core-api enforces the two axes itself rather than inheriting the
+# guarantee from another repo's convention — see ``_require_inbox_admin``.
+#
+# So the credential shapes below are constructed, not observed. That is the
+# point: they are what a direct caller or a future ingress could present, and
+# the gate has to hold for them.
+#
+# These assert the ERROR CODE, not just 403. Three other refusals on this path
+# also answer 403 — ``SKILLS_FACTORY_DISABLED`` from the settings gate is the
+# reachable collision for these callers, since a caller with
+# ``org_role="admin"`` never trips the admin gate — so a status-only test would
+# pass against a version that refused for the wrong reason.
+# ---------------------------------------------------------------------------
+
+_NON_WRITING = [
+    pytest.param(
+        {"capabilities": {"read"}}, errors.AUTH_READ_ONLY_KEY, id="read-only-key"
+    ),
+    pytest.param({"is_demo": True}, errors.AUTH_DEMO_SANDBOX, id="demo-sandbox"),
+]
+
+
+@pytest.mark.parametrize(("action", "body"), _ACTIONS)
+@pytest.mark.parametrize(("cred", "code"), _NON_WRITING)
+async def test_actions_refuse_a_non_writing_credential(
+    storage, settings, side_effects, action, body, cred, code
+):
+    """The finding. The caller IS an org admin, and must still be refused."""
+    storage.seed(forge_doc())
+    async with make_client(org_role="admin", **cred) as client:
+        r = await client.post(f"{BASE}/{SLUG}/{action}", json=body)
+
+    assert r.status_code == 403, f"{action}: {r.text}"
+    # ``make_client`` mounts the router on a bare app, so core-api's
+    # ``http_exception_handler`` — which lifts a ``coded_detail`` into a
+    # top-level ``error`` key — is not installed and the dict stays under
+    # ``detail``. Clients read ``error.code``; this is the harness's shape, and
+    # the reason every other coded-error assertion in the suite differs.
+    assert r.json()["detail"]["code"] == code, f"{action}: {r.text}"
+    # Status alone would pass against a gate placed after the write.
+    assert storage.upserts == [], f"{action} mutated the doc despite the refusal"
+
+
+@pytest.mark.parametrize(("action", "body"), _ACTIONS)
+async def test_a_write_capable_org_admin_can_still_act(
+    storage, settings, side_effects, action, body
+):
+    """OVER-REFUSAL GUARD.
+
+    ``org_role="admin"`` with ``write`` among its capabilities. Note this is a
+    CONSTRUCTED shape, not the one the gateway mints: a human operator arrives
+    on the session/JWT path with ``capabilities=None``, which is
+    ``make_client``'s default and therefore what every other test in this file
+    already exercises against these actions. This case covers the branch that
+    default skips — ``enforce_read_only`` only inspects the set when it is not
+    ``None``.
+
+    Spread per action for symmetry with the refusal test above, not because a
+    mutant demands it: the gate is one identical expression in all five
+    handlers and no handler carries a second capability-sensitive check, so
+    over-refusing exactly one would take separately-wrong code.
+    """
+    storage.seed(forge_doc())
+    async with make_client(org_role="admin", capabilities={"read", "write"}) as client:
+        r = await client.post(f"{BASE}/{SLUG}/{action}", json=body)
+    assert r.status_code == 200, f"{action}: {r.text}"
+
+
+async def test_the_list_stays_readable_for_a_read_only_credential(storage, settings):
+    """The write gate must go on the ACTIONS only, not the router.
+
+    ``GET /skills-inbox`` is deliberately open to any tenant member so a
+    non-admin operator can see what is in flight (``test_list_open_to_non_admin_members``,
+    which passes ``org_role=None``; this is the first case here to use a real
+    ``member``). A read-only credential is exactly who that is for, so gating
+    the list would be a straightforward regression — and it is the mistake a
+    router-level dependency would have made.
+
+    Seeds ``query_rows``, not ``docs``: ``list_inbox`` reads through
+    ``query_documents``, so a ``storage.seed()`` here would leave the listing
+    empty and the test would assert 200 on nothing.
+    """
+    storage.query_rows = [forge_doc()]
+    async with make_client(org_role="member", capabilities={"read"}) as client:
+        r = await client.get(BASE)
+    assert r.status_code == 200, r.text
+    assert r.json()["count"] == 1, r.text
 
 
 async def test_action_on_missing_doc_404(storage, settings, side_effects):

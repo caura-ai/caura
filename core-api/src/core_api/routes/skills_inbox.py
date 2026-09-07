@@ -138,6 +138,35 @@ def _require_inbox_admin(auth: AuthContext) -> None:
 
     Centralized so the check stays consistent across all five action
     handlers — a missed handler is a privilege-escalation bug.
+
+    THIS IS THE ADMIN AXIS ONLY: it says WHO the caller is, never
+    whether their credential may write. Each handler calls
+    ``auth.enforce_read_only()`` for that second axis, and the two are
+    not substitutes in either direction.
+
+    That is defence in depth rather than a closed hole, and the
+    distinction is worth stating precisely. Today no gateway-minted
+    credential is both an org admin and non-writing: the auth service
+    emits ``X-Org-Role`` only for user principals and DELETES it on the
+    API-key path, which is the only path that emits ``X-Capabilities``
+    ("keys carry no org membership, and admin surfaces stay human-only").
+    So an admin arrives with ``capabilities=None``, for which
+    ``enforce_read_only`` is a no-op.
+
+    What the gate buys is that core-api stops depending on that. It
+    reads the two axes as independent fields, so "admin implies may
+    write" held only by a convention enforced in another repo and
+    asserted in a docstring there — with nothing here to notice if an
+    ingress, an on-prem deployment, or a caller reaching core-api
+    directly (``gateway_shared_secret`` unset, where both headers are
+    client-supplied) ever presented the combination.
+
+    This is how the authz inventory found them: of the routes it counts
+    as mutating, these five were the only ones that write tenant state
+    and reached no write gate at all. Its other exemptions are
+    POST-bodied reads, gated by ``enforce_readable_tenant``, and the
+    unauthenticated bootstrap routes, which take no ``auth`` and write
+    nothing tenant-scoped.
     """
     # Mirror documents.py:215-216 — admin status may come from either
     # the legacy ``is_admin`` flag OR ``org_role == "admin"``. Keeping
@@ -646,6 +675,7 @@ async def approve(
     blocks the transition if the doc became unsafe between propose
     and apply.
     """
+    auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
     settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
@@ -788,6 +818,7 @@ async def reject(
     depends on ``get_db`` (the settings gate + audit log already ignore
     their ``db`` arg and route through storage).
     """
+    auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
     settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
@@ -940,6 +971,7 @@ async def quarantine(
     poison table — quarantine is reversible by a security admin; only
     Reject crystallizes a poison row.
     """
+    auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
     await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
@@ -1000,6 +1032,7 @@ async def defer(
     the next run. Stamps ``deferred_at`` so the inbox can sort
     deferred items to the bottom + show "deferred N days ago".
     """
+    auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
     await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)
@@ -1072,6 +1105,7 @@ async def edit(
 
     Raw markdown only (per OQ-D — no WYSIWYG in MVP).
     """
+    auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
     settings = await _require_skills_factory_enabled(tenant_id)
     _require_inbox_admin(auth)

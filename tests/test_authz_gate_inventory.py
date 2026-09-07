@@ -169,24 +169,13 @@ WRITE_GATE_ALLOWLIST: dict[str, str] = {
     # yet, which is the whole point. Nothing tenant-scoped is written.
     "POST /api/v1/install-plugin": "bootstrap: no auth context by design, renders a script",
     "POST /api/install-plugin": "bootstrap: no auth context by design, renders a script",
-    # KNOWN GAP, not a justification — see test_known_gaps_do_not_grow.
-    #
-    # These five call ``_require_inbox_admin``, which raises 403 unless
-    # ``is_admin`` or ``org_role == "admin"``. The first draft of this file
-    # called that "strictly narrower than the write gate". It is not, for the
-    # same reason ``enforce_org_admin`` is excluded from WRITE_GATE_EXEMPT
-    # above: ``org_role`` and ``capabilities`` are independent gateway headers,
-    # so an ORG ADMIN holding a capabilities={'read'} key clears
-    # ``_require_inbox_admin`` and then meets no write gate — and can approve,
-    # reject, quarantine, defer or edit a skill. Writing the reason down is what
-    # exposed it; it is recorded here rather than fixed because five behaviour
-    # changes each want their own over-refusal test, which is a security PR of
-    # its own and not this one.
-    "POST /api/v1/skills-inbox/{slug:path}/approve": "KNOWN GAP: _require_inbox_admin admits a read-only org admin",
-    "POST /api/v1/skills-inbox/{slug:path}/reject": "KNOWN GAP: _require_inbox_admin admits a read-only org admin",
-    "POST /api/v1/skills-inbox/{slug:path}/quarantine": "KNOWN GAP: _require_inbox_admin admits a read-only org admin",
-    "POST /api/v1/skills-inbox/{slug:path}/defer": "KNOWN GAP: _require_inbox_admin admits a read-only org admin",
-    "POST /api/v1/skills-inbox/{slug:path}/edit": "KNOWN GAP: _require_inbox_admin admits a read-only org admin",
+    # The five ``skills-inbox`` actions were here as KNOWN GAPs — guarded on
+    # the admin axis by ``_require_inbox_admin``, which admits an org admin
+    # whose key may be read-only. Closed: each handler now calls
+    # ``enforce_read_only`` itself, so they need no entry at all, and
+    # ``test_allowlists_have_no_unnecessary_entries`` is what said so rather
+    # than someone remembering. Their PLANE entries below stay — only the
+    # write axis moved.
 }
 
 # A reason starting with this is NOT a justification — it is an unfixed gap
@@ -195,7 +184,7 @@ WRITE_GATE_ALLOWLIST: dict[str, str] = {
 # for the same purpose: the alternative is a list where "excused" and "not yet
 # fixed" look identical, and then neither gets read.
 KNOWN_GAP_PREFIX = "KNOWN GAP:"
-KNOWN_GAP_CEILING = 5
+KNOWN_GAP_CEILING = 0
 
 PLANE_GATE_ALLOWLIST: dict[str, str] = {
     # NODE-plane, not admin-plane. The plugin holds whatever credential the
@@ -433,6 +422,30 @@ def _report(row: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _unguarded_for_write(row: dict) -> bool:
+    """Would this route fail the write invariant without an allowlist entry?"""
+    return WRITE_GATE not in row["gates"] and not (row["gates"] & WRITE_GATE_EXEMPT)
+
+
+def _unguarded_for_plane(row: dict) -> bool:
+    """Would this route fail the plane invariant without an allowlist entry?"""
+    return (
+        row["router"] in ADMIN_PLANE_ROUTERS
+        and PLANE_GATE not in row["gates"]
+        and not (row["gates"] & PLANE_GATE_EXEMPT)
+    )
+
+
+# ``(name, allowlist, predicate)`` — the pairing the entry-hygiene checks walk.
+# Sharing the predicates with the invariant tests is the point: an entry is
+# "needed" exactly when the invariant would flag the route, by one definition
+# rather than two that can drift.
+_ALLOWLISTS = (
+    ("WRITE_GATE_ALLOWLIST", WRITE_GATE_ALLOWLIST, _unguarded_for_write),
+    ("PLANE_GATE_ALLOWLIST", PLANE_GATE_ALLOWLIST, _unguarded_for_plane),
+)
+
+
 def test_every_mutating_route_has_a_write_gate() -> None:
     """A route that mutates must refuse a credential that may not write.
 
@@ -444,9 +457,7 @@ def test_every_mutating_route_has_a_write_gate() -> None:
     offenders = [
         row
         for row in _mutating_routes()
-        if WRITE_GATE not in row["gates"]
-        and not (row["gates"] & WRITE_GATE_EXEMPT)
-        and row["key"] not in WRITE_GATE_ALLOWLIST
+        if _unguarded_for_write(row) and row["key"] not in WRITE_GATE_ALLOWLIST
     ]
     assert not offenders, (
         f"{len(offenders)} mutating route(s) neither call {WRITE_GATE}, nor are "
@@ -468,10 +479,7 @@ def test_admin_plane_mutating_routes_refuse_agent_credentials() -> None:
     offenders = [
         row
         for row in _mutating_routes()
-        if row["router"] in ADMIN_PLANE_ROUTERS
-        and PLANE_GATE not in row["gates"]
-        and not (row["gates"] & PLANE_GATE_EXEMPT)
-        and row["key"] not in PLANE_GATE_ALLOWLIST
+        if _unguarded_for_plane(row) and row["key"] not in PLANE_GATE_ALLOWLIST
     ]
     assert not offenders, (
         f"{len(offenders)} admin-plane mutating route(s) neither call "
@@ -480,6 +488,41 @@ def test_admin_plane_mutating_routes_refuse_agent_credentials() -> None:
         + "\n".join(_report(r) for r in offenders)
         + f"\n\nAdd the gate, or add a line to PLANE_GATE_ALLOWLIST in {__file__} "
         "saying which plane this route belongs to."
+    )
+
+
+def test_allowlists_have_no_unnecessary_entries() -> None:
+    """An entry excusing a route that now passes on its own is dead.
+
+    ``test_allowlists_have_no_stale_entries`` only catches an entry naming a
+    route that no longer exists. It does not catch the commoner case: the gap
+    gets FIXED and the line stays, still reading as though someone decided the
+    route did not need the gate. That is worse than untidy — a future reader
+    takes the line at face value, and a genuinely unguarded route can later be
+    added under the same key and be excused by a reason written about
+    something else.
+
+    This was not hypothetical for one commit: closing the five ``skills_inbox``
+    write gaps left their ``KNOWN GAP`` entries excusing five routes that had
+    just been gated, and every check in this file still passed. Hence this one.
+    """
+    rows = {row["key"]: row for row in _mutating_routes()}
+    unnecessary: dict[str, str] = {}
+    for name, allowlist, needs_entry in _ALLOWLISTS:
+        for key, reason in allowlist.items():
+            row = rows.get(key)
+            if row is None:
+                continue  # test_allowlists_have_no_stale_entries owns this
+            if not needs_entry(row):
+                unnecessary[f"{name}[{key}]"] = (
+                    f"route now satisfies the invariant on its own "
+                    f"(gates: {sorted(row['gates'])}) — reason still says {reason!r}"
+                )
+    assert not unnecessary, (
+        "allowlist entries excuse routes that no longer need excusing:\n"
+        + "\n".join(f"    {k}: {v}" for k, v in sorted(unnecessary.items()))
+        + "\n\nDelete the entries. If one was a KNOWN GAP, lower "
+        "KNOWN_GAP_CEILING to match."
     )
 
 
