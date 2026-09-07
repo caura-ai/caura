@@ -31,8 +31,11 @@ fixture, so the in-process storage app can see them.
 from __future__ import annotations
 
 import uuid
+from typing import NamedTuple
 
 import pytest
+
+from core_api import errors
 
 pytestmark = pytest.mark.asyncio
 
@@ -71,19 +74,33 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-async def _make_command(client, as_auth, tenant_id: str) -> str:
-    """Heartbeat a node and dispatch a command for ``tenant_id``; return command id."""
+class _Node(NamedTuple):
+    fleet_id: str
+    node_name: str
+    node_id: str
+
+
+async def _seed_node(client, as_auth, tenant_id: str) -> _Node:
+    """Register one node in a fresh fleet, and hand back all three identifiers.
+
+    Arms a plain tenant credential to do it, so a caller under test that holds
+    a narrower one (read-only, or agent-scoped) starts from a node it did not
+    create itself.
+    """
+    fleet_id = f"fleet-{_uid()}"
+    node_name = f"node-{_uid()}"
     as_auth(tenant_id)
     resp = await client.post(
         "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": tenant_id,
-            "node_name": f"node-{_uid()}",
-            "fleet_id": f"fleet-{_uid()}",
-        },
+        json={"tenant_id": tenant_id, "node_name": node_name, "fleet_id": fleet_id},
     )
     assert resp.status_code == 200, resp.text
-    node_id = resp.json()["node_id"]
+    return _Node(fleet_id, node_name, resp.json()["node_id"])
+
+
+async def _make_command(client, as_auth, tenant_id: str) -> str:
+    """Heartbeat a node and dispatch a command for ``tenant_id``; return command id."""
+    node_id = (await _seed_node(client, as_auth, tenant_id)).node_id
 
     resp = await client.post(
         "/api/v1/fleet/commands",
@@ -324,17 +341,7 @@ async def test_fleet_command_cannot_be_queued_into_another_tenant(client, as_aut
     attacker = f"attacker-{_uid()}"
 
     # A real node in the victim's fleet, created by the victim.
-    as_auth(victim)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": victim,
-            "node_name": f"node-{_uid()}",
-            "fleet_id": f"fleet-{_uid()}",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    node_id = resp.json()["node_id"]
+    node_id = (await _seed_node(client, as_auth, victim)).node_id
 
     as_auth(attacker)
     resp = await client.post(
@@ -360,10 +367,14 @@ async def test_fleet_command_cannot_target_another_tenants_node(client, as_auth)
 
     ``enforce_tenant`` only checks ``body.tenant_id``, so a caller naming its OWN
     tenant clears it — while still pointing ``body.node_id`` at somebody else's
-    node. Nothing downstream re-checks the pair: the insert satisfies the FK to
-    ``fleet_nodes.id`` on its own, and the pending-command query the heartbeat
-    runs is keyed on ``node_id`` alone. The row is therefore handed to the other
-    tenant's node on its next heartbeat.
+    node. The insert satisfies the FK to ``fleet_nodes.id`` on its own, so
+    nothing about the write itself objects.
+
+    Two independent gates stop it, and this test covers the write half — the
+    404 below. Delivery is gated separately and was closed later, by #1173:
+    ``fleet_get_pending_commands`` filters the (node, tenant, status) triple
+    rather than ``node_id`` alone, so a row written before either fix is not
+    handed over either.
 
     Queueing into a node you do not own is a 404, not a 403 — the same
     non-disclosing answer ``POST /fleet/commands/{id}/result`` gives for a
@@ -372,20 +383,9 @@ async def test_fleet_command_cannot_target_another_tenants_node(client, as_auth)
     """
     victim = f"victim-{_uid()}"
     attacker = f"attacker-{_uid()}"
-    victim_node_name = f"node-{_uid()}"
 
     # A real node in the victim's fleet, created by the victim.
-    as_auth(victim)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": victim,
-            "node_name": victim_node_name,
-            "fleet_id": f"fleet-{_uid()}",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    victim_node_id = resp.json()["node_id"]
+    _, victim_node_name, victim_node_id = await _seed_node(client, as_auth, victim)
 
     # The attacker queues into its own tenant — the tenant gate passes cleanly —
     # but aims the command at the victim's node.
@@ -402,8 +402,9 @@ async def test_fleet_command_cannot_target_another_tenants_node(client, as_auth)
     assert resp.status_code == 404, resp.text
 
     # The whole point: the victim's node must not be handed the command when it
-    # next checks in. Asserting on the queue alone would miss a row that is
-    # filed under the attacker's tenant but still delivered on node_id.
+    # next checks in. The victim's own queue listing cannot settle that — a row
+    # filed under the ATTACKER's tenant never appears in it — so this heartbeat
+    # is the assertion that spans both gates at once.
     as_auth(victim)
     resp = await client.post(
         "/api/v1/fleet/heartbeat",
@@ -443,17 +444,7 @@ async def test_fleet_command_for_an_unknown_node_is_404_not_500(client, as_auth)
 async def test_fleet_command_rejects_a_read_only_credential(client, as_auth):
     """H-13, second half: queueing a command is a write."""
     tenant = f"tenant-{_uid()}"
-
-    as_auth(tenant)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": tenant,
-            "node_name": f"node-{_uid()}",
-            "fleet_id": f"fleet-{_uid()}",
-        },
-    )
-    node_id = resp.json()["node_id"]
+    node_id = (await _seed_node(client, as_auth, tenant)).node_id
 
     as_auth(tenant, capabilities=READ_ONLY)
     resp = await client.post(
@@ -774,18 +765,7 @@ async def test_promote_refuses_a_quarantined_agent(client, as_auth, sc, _stm_ena
 
 async def _queue_command_for(client, as_auth, tenant: str) -> tuple[str, str]:
     """Register a node and queue one command for it. Returns (node_name, command_id)."""
-    node_name = f"node-{_uid()}"
-    as_auth(tenant)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": tenant,
-            "node_name": node_name,
-            "fleet_id": f"fleet-{_uid()}",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    node_id = resp.json()["node_id"]
+    _, node_name, node_id = await _seed_node(client, as_auth, tenant)
 
     resp = await client.post(
         "/api/v1/fleet/commands",
@@ -930,14 +910,7 @@ async def test_heartbeat_delivers_commands_to_a_writing_credential(client, as_au
 
 async def _seed_fleet(client, as_auth, tenant: str) -> str:
     """Heartbeat one node into a fresh fleet; return the fleet_id."""
-    fleet_id = f"fleet-{_uid()}"
-    as_auth(tenant)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={"tenant_id": tenant, "node_name": f"node-{_uid()}", "fleet_id": fleet_id},
-    )
-    assert resp.status_code == 200, resp.text
-    return fleet_id
+    return (await _seed_node(client, as_auth, tenant)).fleet_id
 
 
 async def _node_count(client, as_auth, tenant: str, fleet_id: str) -> int:
@@ -980,4 +953,81 @@ async def test_a_tenant_credential_can_still_delete_a_fleet(client, as_auth):
 
     assert await _node_count(client, as_auth, tenant, fleet_id) == 0, (
         "the fleet's node survived a delete by a credential that may delete it"
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /fleet/commands accepted an agent-scoped credential.
+#
+# Same missing gate as M-25 above, on the route that dispatches TO a node
+# rather than deleting one. Why the other two gates do not narrow this caller,
+# and what a ``deploy`` payload reaches on the node, is on ``create_command``
+# in ``core_api/routes/fleet.py`` — not restated here.
+#
+# These assert the ERROR CODE, not just the status. All three of this route's
+# gates answer 403 (bar ``enforce_tenant``'s no-tenant 400), so a status-only
+# test would pass against a version that refused for the wrong reason — or one
+# that refuses every caller.
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_credential_cannot_queue_a_fleet_command(client, as_auth):
+    """The finding. The payload is the code the node would go on to run."""
+    tenant = f"tenant-{_uid()}"
+    node_id = (await _seed_node(client, as_auth, tenant)).node_id
+
+    as_auth(tenant, agent_id=f"agent-{_uid()}")
+    resp = await client.post(
+        "/api/v1/fleet/commands",
+        json={
+            "tenant_id": tenant,
+            "node_id": node_id,
+            "command": "deploy",
+            "payload": {"source": "export const injected = 1;"},
+        },
+    )
+    assert resp.status_code == 403, resp.text
+    code = resp.json()["error"]["code"]
+    assert code == errors.AUTH_AGENT_CREDENTIAL_FORBIDDEN, resp.text
+
+    # The status is not the property that matters — assert the row was never
+    # written, so a gate placed AFTER the storage call still fails here.
+    #
+    # This listing settles delivery too, without a second heartbeat.
+    # ``fleet_list_commands`` filters on ``tenant_id`` alone (no status, limit
+    # 50), while ``fleet_get_pending_commands`` filters the (node, tenant,
+    # status='pending') triple — so an empty listing for a fresh tenant is the
+    # strict superset of what any node in it could be handed.
+    as_auth(tenant)
+    listed = await client.get(f"/api/v1/fleet/commands?tenant_id={tenant}")
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == [], f"the refused command was queued anyway: {listed.text}"
+
+
+async def test_a_tenant_credential_can_still_queue_a_fleet_command(client, as_auth):
+    """OVER-REFUSAL GUARD, and it is load-bearing.
+
+    This is the dashboard's own dispatch path — an operator restarting a node
+    or pushing a deploy. Refusing every caller would satisfy the test above and
+    leave the fleet uncommandable, which is worse than the bug being fixed.
+    """
+    tenant = f"tenant-{_uid()}"
+    node_id = (await _seed_node(client, as_auth, tenant)).node_id
+
+    as_auth(tenant)
+    resp = await client.post(
+        "/api/v1/fleet/commands",
+        json={
+            "tenant_id": tenant,
+            "node_id": node_id,
+            "command": "deploy",
+            "payload": {"source": "export const legitimate = 1;"},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+
+    listed = await client.get(f"/api/v1/fleet/commands?tenant_id={tenant}")
+    assert listed.status_code == 200, listed.text
+    assert [c["id"] for c in listed.json()] == [resp.json()["id"]], (
+        f"a legitimate command did not reach the queue: {listed.text}"
     )

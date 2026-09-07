@@ -1034,20 +1034,51 @@ async def create_command(
     body: CommandIn,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Queue a command for a fleet node."""
-    sc = get_storage_client()
+    """Queue a command for a fleet node.
+
+    Auth: a write-capable tenant-owner key. Agent-scoped credentials are
+    blocked (BFLA) — dispatching to a node is admin-plane, the same call
+    ``DELETE /fleet/{fleet_id}`` and ``POST /fleet/{fleet_id}/purge`` make.
+    """
     # Queueing a command is a write, and the tenant it lands in comes from the
-    # REQUEST BODY. Both gates are required, and the order matters: resolve the
-    # target tenant first, then enforce against the resolved value.
+    # REQUEST BODY. All three gates are required, and the order matters: resolve
+    # the target tenant first, then enforce against the resolved value.
     #
     # Without ``enforce_tenant`` any authenticated caller could set
     # ``body.tenant_id`` to a victim tenant and queue commands into their fleet
     # — the GET sibling immediately below has always enforced this, so the write
     # was the weaker of the pair. Without ``enforce_read_only`` a
     # capabilities={'read'} credential could do the same.
+    #
+    # Neither of those constrains an agent-scoped credential naming its OWN
+    # tenant, and ``body.node_id`` is not bound to the caller's scope —
+    # ``GET /fleet/nodes`` hands out every node id in the tenant behind
+    # ``enforce_tenant`` alone. What lands on the node is not abstract: a
+    # ``deploy``/``update_plugin`` payload carrying ``source`` takes the plugin
+    # down ``deployPlugin`` (``plugin/src/deploy.ts``), which writes it over the
+    # plugin's own source tree, merges ``env_vars`` into its ``.env`` for any
+    # key with the plugin env prefix — ``CAURA_API_URL`` and ``CAURA_API_KEY``
+    # included — and builds; the caller's code goes live on the gateway restart
+    # that same branch then asks for (``plugin/src/heartbeat.ts``). So an
+    # agent-scoped key that cannot raise its own trust_level
+    # (``PATCH /agents/{id}/trust`` refuses it) could instead run code on the
+    # host answering for it.
+    #
+    # The plugin's HMAC check is not a second line of defence: nothing in
+    # core-api or core-storage-api ever puts a ``signature`` on a command — the
+    # heartbeat response above emits ``id``/``command``/``payload`` and no more
+    # — so every command arrives unsigned, which the plugin accepts by default.
+    #
+    # No internal producer loses a channel: both bypass this route. The
+    # auto-upgrade calls ``sc.create_command`` from inside the heartbeat
+    # handler, and the interview scheduler does the same behind
+    # ``enforce_admin`` on ``POST /admin/interview/schedule/run``.
     auth.enforce_read_only()
     tenant_id = body.tenant_id or auth.tenant_id
     auth.enforce_tenant(tenant_id)
+    auth.enforce_not_agent_credential("queue fleet commands")
+
+    sc = get_storage_client()
     try:
         cmd = await sc.create_command(
             {
