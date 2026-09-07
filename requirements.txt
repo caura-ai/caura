@@ -19,7 +19,7 @@ google-cloud-aiplatform>=2.0.1,<3
 # services do. (Not a feature floor: ``HttpOptions(base_url=...)``,
 # which VertexLLMProvider's multi-region handling uses, predates even
 # 1.74.0 — verified by constructing it there.)
-google-genai>=2.17.0
+google-genai>=2.22.0
 # Used directly by core_api.clients.identity_token (Cloud Run ID-token
 # fetch) — explicit here instead of relying on google-cloud-aiplatform's
 # transitive pull, so a future GCP-SDK cleanup can't silently break it.
