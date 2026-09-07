@@ -493,6 +493,47 @@ def _reset_hooks():
     reset_hooks()
 
 
+@pytest.fixture(autouse=True)
+def _write_path_flag_is_not_leaked():
+    """Fail the test that leaves ``_USE_PIPELINE_WRITE`` flipped, not its victims.
+
+    Several tests flip this module flag to exercise the deprecated legacy write
+    path, and it is a plain module global, so a missed restore silently
+    redirects EVERY later write in the session. That is not a small blast
+    radius: ``_USE_PIPELINE_WRITE`` is ``True`` in production, so a leak means
+    thousands of tests stop covering the path that ships and start covering the
+    one scheduled for removal — with nothing failing to say so.
+
+    It surfaces instead as an unrelated flake, because the two paths do not
+    answer alike. The legacy path 409s on a semantic near-duplicate where the
+    pipeline path records the same candidate as advisory metadata and returns
+    201, so any later test that needs a write to SUCCEED starts failing once
+    the shared ``default`` tenant has accumulated enough near-identical
+    content — and which test that is depends on which content happens to cross
+    the similarity threshold, so it moves between runs. That is how it read as
+    flakiness in three separate tests before it read as a leak.
+
+    Checked after each test, so the report lands on the test that caused it,
+    and the flag is put back BEFORE asserting so it lands there only. Leaving
+    it flipped would fail every test that followed too, which is a worse
+    version of the same problem: a wall of identical failures whose first
+    entry is the only informative one.
+    """
+    yield
+    from core_api.services import memory_service
+
+    leaked = memory_service._USE_PIPELINE_WRITE is not True
+    memory_service._USE_PIPELINE_WRITE = True
+    assert not leaked, (
+        "this test left core_api.services.memory_service._USE_PIPELINE_WRITE "
+        "set to False. Every write after it would have taken the deprecated "
+        "legacy path; this fixture has put it back, so the failure you are "
+        "reading is the cause and not a consequence. Restore it in a "
+        "``finally`` (see test_pipeline_equivalence) rather than assigning a "
+        "literal at the end of the test body."
+    )
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _disable_rate_limiter():
     """Disable the slowapi rate limiter for the whole test suite.

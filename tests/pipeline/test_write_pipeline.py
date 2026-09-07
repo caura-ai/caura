@@ -616,18 +616,24 @@ async def test_pipeline_equivalence():
     content_a = "Pipeline equivalence test memory content A — testing that both paths produce the same output fields."
     content_b = "Pipeline equivalence test memory content B — testing that both paths produce the same output fields."
 
-    # Legacy path
-    memory_service._USE_PIPELINE_WRITE = False
-    data_legacy = _make_input(content=content_a)
-    result_legacy = await _create_memory_legacy(data_legacy)
+    # Restored in ``finally`` rather than assigned a literal at the end, which
+    # is what this test used to do — and it assigned ``False``, under a comment
+    # reading "Reset", against a module default of ``True``. Nothing failed
+    # here, so it went unnoticed while every later write in the session took
+    # the deprecated legacy path.
+    original = memory_service._USE_PIPELINE_WRITE
+    try:
+        # Legacy path
+        memory_service._USE_PIPELINE_WRITE = False
+        data_legacy = _make_input(content=content_a)
+        result_legacy = await _create_memory_legacy(data_legacy)
 
-    # Pipeline path
-    memory_service._USE_PIPELINE_WRITE = True
-    data_pipeline = _make_input(content=content_b)
-    result_pipeline = await _create_memory_pipeline(data_pipeline)
-
-    # Reset
-    memory_service._USE_PIPELINE_WRITE = False
+        # Pipeline path
+        memory_service._USE_PIPELINE_WRITE = True
+        data_pipeline = _make_input(content=content_b)
+        result_pipeline = await _create_memory_pipeline(data_pipeline)
+    finally:
+        memory_service._USE_PIPELINE_WRITE = original
 
     # Compare key fields (IDs and timestamps will differ)
     assert result_legacy.tenant_id == result_pipeline.tenant_id
