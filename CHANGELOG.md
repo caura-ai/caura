@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.48.10](https://github.com/caura-ai/caura/compare/backend-v2.48.9...backend-v2.48.10) (2026-09-07)
+
+
+### Dependencies
+
+* update alembic requirement from &lt;2,&gt;=1.14 to &gt;=1.19.1,&lt;2 ([#1331](https://github.com/caura-ai/caura/issues/1331)) ([ce008da](https://github.com/caura-ai/caura/commit/ce008daaa6cd010ebb9e4710c815464b61f6cd06))
+* update cachetools requirement from &gt;=7.1.7 to &gt;=7.1.8 ([#1332](https://github.com/caura-ai/caura/issues/1332)) ([06e1744](https://github.com/caura-ai/caura/commit/06e1744a025d8f36d0a74da433c8b8a97cf0d387))
+* update python-jose requirement from &gt;=3.3 to &gt;=3.5.0 ([#1330](https://github.com/caura-ai/caura/issues/1330)) ([be76b1e](https://github.com/caura-ai/caura/commit/be76b1e61c4d17ae8f98aca16ce03f4c2636d994))
+
 ## [2.48.9](https://github.com/caura-ai/caura/compare/backend-v2.48.8...backend-v2.48.9) (2026-09-07)
 
 
