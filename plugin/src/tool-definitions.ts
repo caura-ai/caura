@@ -154,6 +154,11 @@ const DOC_OPS = [
   "write", "read", "query", "delete", "search", "list_collections",
 ] as const;
 
+// Derived, so the dispatcher below is checked against the same tuple the
+// inputSchema publishes rather than against a second hand-written list.
+type ManageOp = (typeof MANAGE_OPS)[number];
+type DocOp = (typeof DOC_OPS)[number];
+
 const MEMORY_TYPE_SCHEMA = {
   type: "string",
   enum: [...MEMORY_TYPES],
@@ -432,8 +437,18 @@ const SINGLE_WRITE_ONLY_FIELDS = [
  * Not a no-op. Until this existed the last branch doubled as the else, and an
  * unrecognised op became a write — see `tool-op-dispatch.test.ts`, which
  * records what that cost and pins it.
+ *
+ * `op` is typed `never` so that adding an op to MANAGE_OPS/DOC_OPS without a
+ * branch fails `tsc` here rather than reaching this line at runtime — the
+ * callers cast `op` to the derived union, so an exhausted chain narrows it to
+ * `never` and a leftover member does not.
+ *
+ * The throw is still load-bearing, and deleting it as unreachable would
+ * restore the original defect: that cast is a runtime lie. Nothing in this
+ * package validates `op` — the enum in `PARAM_SCHEMAS` is enforced by the
+ * host, so any string can arrive here.
  */
-function unsupportedOp(tool: string, op: unknown, offered: readonly string[]): never {
+function unsupportedOp(tool: string, op: never, offered: readonly string[]): never {
   throw new Error(
     `[caura] ${tool}: unsupported op ${JSON.stringify(op)}. ` +
       `Expected one of: ${offered.join(", ")}`,
@@ -490,7 +505,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_manage: async (params, signal) => {
     // op=update sends ``agent_id`` as a query param; the other ops ignore it.
     const enriched = await enrichBody(params, { resolveIdentity: true });
-    const op = enriched.op as string;
+    const op = enriched.op as ManageOp;
     const memory_id = enriched.memory_id as string;
     assertSafePathSegment(memory_id, "memory_id");
     const tenant_id = enriched.tenant_id as string;
@@ -531,7 +546,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
 
   caura_doc: async (params, signal) => {
     const enriched = await enrichBody(params);
-    const op = enriched.op as string;
+    const op = enriched.op as DocOp;
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {

@@ -136,11 +136,93 @@ describe("an unrecognised op is refused, not dispatched as a write", () => {
   });
 });
 
-// `caura_doc op=delete` was the fall-through, and nothing else in the suite
-// issues a caura_doc request at all — so a bad conversion of that branch would
-// otherwise go unnoticed. `caura_manage op=update` needs no twin here:
-// tool-identity.test.ts already drives it and asserts the PATCH.
-test("caura_doc op=delete still DELETEs the document", async () => {
-  await outcomeOf("caura_doc", { op: "delete", doc_id: "doc-1", collection: "c-1" });
-  assert.deepEqual(mutations(), ["DELETE /api/v1/documents/doc-1"]);
+/**
+ * Every op both surfaces offer, and the one request each is supposed to make.
+ *
+ * The guard above only proves an UNRECOGNISED op is refused. It says nothing
+ * about a recognised one going to the wrong place, which is the same class of
+ * defect one branch further in: `transition` and `update` are both PATCH on
+ * neighbouring paths, and `read` and `delete` differ only by method on an
+ * identical path. Two ops of caura_doc reach `/documents/query` and
+ * `/documents/search` while `read` reaches `/documents/{doc_id}`, so a
+ * doc_id of "query" is a legal read that differs from the query op by method
+ * alone.
+ *
+ * Table-driven because the point is COVERAGE of the enum, and the meta-test
+ * below fails when an op is added to a surface without a row here — the
+ * test-level twin of the `never`-typed fall-through, which fails the build
+ * when an op is added without a branch.
+ */
+const ROUTES: {
+  tool: string;
+  op: string;
+  params: Record<string, unknown>;
+  expect: string;
+}[] = [
+  // caura_manage
+  { tool: "caura_manage", op: "read", params: { memory_id: MEMORY_ID },
+    expect: `GET /api/v1/memories/${MEMORY_ID}` },
+  { tool: "caura_manage", op: "transition", params: { memory_id: MEMORY_ID, status: "archived" },
+    expect: `PATCH /api/v1/memories/${MEMORY_ID}/status` },
+  { tool: "caura_manage", op: "delete", params: { memory_id: MEMORY_ID },
+    expect: `DELETE /api/v1/memories/${MEMORY_ID}` },
+  { tool: "caura_manage", op: "update", params: { memory_id: MEMORY_ID, content: "x" },
+    expect: `PATCH /api/v1/memories/${MEMORY_ID}` },
+  // caura_doc
+  { tool: "caura_doc", op: "write", params: { collection: "c-1", doc_id: "doc-1", data: { a: 1 } },
+    expect: "POST /api/v1/documents" },
+  { tool: "caura_doc", op: "read", params: { collection: "c-1", doc_id: "doc-1" },
+    expect: "GET /api/v1/documents/doc-1" },
+  { tool: "caura_doc", op: "query", params: { collection: "c-1", where: {} },
+    expect: "POST /api/v1/documents/query" },
+  { tool: "caura_doc", op: "search", params: { collection: "c-1", query: "q" },
+    expect: "POST /api/v1/documents/search" },
+  { tool: "caura_doc", op: "list_collections", params: {},
+    expect: "GET /api/v1/documents/collections" },
+  { tool: "caura_doc", op: "delete", params: { collection: "c-1", doc_id: "doc-1" },
+    expect: "DELETE /api/v1/documents/doc-1" },
+];
+
+/**
+ * Requests against the resource routes, reads included.
+ *
+ * `mutations()` cannot serve here — half these ops are GETs. Same path filter
+ * and the same reason: `apiCall` provisions an agent-scoped credential with
+ * its own request when a call carries an `agent_id`, and that route is
+ * neither `/memories` nor `/documents`.
+ */
+function resourceCalls(): string[] {
+  return captured
+    .filter(
+      (c) =>
+        c.url.pathname.includes("/memories") || c.url.pathname.includes("/documents"),
+    )
+    .map((c) => `${c.method} ${c.url.pathname}`);
+}
+
+describe("each offered op reaches its own route", () => {
+  for (const { tool, op, params, expect } of ROUTES) {
+    test(`${tool} op=${op} -> ${expect}`, async () => {
+      const outcome = await outcomeOf(tool, { op, ...params });
+      assert.ok(
+        !(outcome instanceof Error),
+        `a legitimate op was refused: ${String(outcome)}`,
+      );
+      assert.deepEqual(resourceCalls(), [expect]);
+    });
+  }
+
+  test("the table covers every op each surface offers", () => {
+    for (const tool of ["caura_manage", "caura_doc"]) {
+      const schema = createToolFromSpec(tool).parameters as {
+        properties: { op: { enum: string[] } };
+      };
+      const covered = ROUTES.filter((r) => r.tool === tool).map((r) => r.op);
+      assert.deepEqual(
+        [...covered].sort(),
+        [...schema.properties.op.enum].sort(),
+        `${tool}: the table and the published op enum disagree`,
+      );
+    }
+  });
 });
