@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.3.0](https://github.com/caura-ai/caura/compare/backend-v3.2.1...backend-v3.3.0) (2026-09-08)
+
+
+### Features
+
+* **auth:** give the caller identity its own type so stored data can't become one ([#1395](https://github.com/caura-ai/caura/issues/1395)) ([d8b5cf7](https://github.com/caura-ai/caura/commit/d8b5cf7cfa7f570a0300564a92e8e701af464159))
+
+
+### Bug Fixes
+
+* **extraction:** keep bracketed qualifiers in canonical_name (A67) ([#1392](https://github.com/caura-ai/caura/issues/1392)) ([eb84cf4](https://github.com/caura-ai/caura/commit/eb84cf4b6dd3a2885f07d0d4b5213f92ea857661))
+
 ## [3.2.1](https://github.com/caura-ai/caura/compare/backend-v3.2.0...backend-v3.2.1) (2026-09-08)
 
 
