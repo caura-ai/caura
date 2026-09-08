@@ -60,14 +60,37 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # spent 12 without writing itself down. Measure the fixture, do not trust the
 # running total in this list.
 #
-# The trim generalises and is worth someone's afternoon: four other specs still
-# repeat their own enum in their description, verbatim against the parameter
-# that already carries it: caura_insights, caura_doc, caura_evolve and
-# caura_keystones_set. Removing all four measures 5341 -> 5293 — a 48-token
-# saving, six times what this change spent. (Per-tool figures are not quoted
-# because they sum to 52: dropping text moves tokenization boundaries, so the
-# parts do not add up to the whole. Measure the total, not the fragments.)
-CEILING_TOKENS = 5350
+# 2026-09-08 (carrying out the trim the entry above proposed): 5269 cl100k
+# (-72) after removing five verbatim roll-calls — ``op`` from caura_doc and
+# caura_keystones_set, ``focus`` from caura_insights, ``outcome_type`` from
+# caura_evolve, and ``scope ∈ {...}; weight ∈ {...}`` from caura_keystones_set.
+# Each is reproduced word for word by that parameter's own description in the
+# same payload, so the list was being bought twice.
+#
+# CORRECTION to the prediction above, which said 48 (5341 -> 5293). 5293 is
+# exactly what FOUR removals give: the note counted specs, and
+# caura_keystones_set had two roll-calls, so it missed the 24-token
+# scope+weight fragment. Both figures are honest measurements of different
+# edits. If you budget from this ledger, count the edits, not the files.
+# (Per-tool figures are still not quoted: dropping text moves tokenization
+# boundaries, so the parts do not sum to the whole.)
+#
+# NOT trimmed, deliberately. The ``scope:`` clauses in caura_insights and
+# caura_evolve look like roll-calls but carry trust thresholds and the
+# "divergence requires fleet/all" / "fleet_id required" constraints, which no
+# parameter description holds. And caura_keystones_set's TARGET-agent
+# explanation, INVALID_ARGUMENTS consequence and trust-gating paragraph are
+# what the 2026-05-14 and 2026-08-26 entries above bought, each after a real
+# reader misread the shorter text. A parameter description repeats some of
+# that wording — there, the duplication IS the fix, and removing it here
+# would quietly reverse those two decisions.
+#
+# Ceiling 5350 -> 5320. The 2026-08-25 entry chose 5350 to keep ~50 tokens of
+# headroom "so the next accidental description bloat still trips this guard";
+# at 5269 that headroom is 81 and the guard is looser than it was designed to
+# be. Lowering it banks the saving instead of spending it on slack, and the
+# next addition still only has to state its reason, as that entry asked.
+CEILING_TOKENS = 5320
 
 
 def _count(path: Path) -> int:

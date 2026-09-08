@@ -14,8 +14,8 @@ from ._registry import register
 from ._types import ToolSpec
 
 _DESCRIPTION = (
-    "Reflect over your memory store. focus: contradictions|failures|stale|divergence|"
-    "patterns|discover. scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; "
+    "Reflect over your memory store. "
+    "scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; "
     "divergence requires fleet/all). "
     "Findings are saved as insight-type memories for future runs to build on."
 )

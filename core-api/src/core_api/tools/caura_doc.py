@@ -12,7 +12,6 @@ from ._types import OpSpec, ToolSpec
 
 _DESCRIPTION = (
     "Structured-document CRUD in named collections. "
-    "op: write|read|query|delete|list_collections|search. "
     "write upserts by collection+doc_id — include data['summary'] (1-3 dense "
     "sentences, intent-focused) to make the doc semantically searchable; "
     "omit it to store without indexing. query filters by where dict; "

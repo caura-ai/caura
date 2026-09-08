@@ -26,9 +26,8 @@ from ._registry import register
 from ._types import OpSpec, ToolSpec
 
 _DESCRIPTION = (
-    "Author or remove keystone rules. op: set|delete. "
+    "Author or remove keystone rules. "
     "set requires {doc_id, title, content, scope, weight}; "
-    "scope ∈ {tenant, fleet, agent}; weight ∈ {low, med, high}. "
     "scope=fleet|agent requires fleet_id; scope=agent additionally requires "
     "agent_id — and ``agent_id`` here names the TARGET agent the rule binds "
     "to, NOT the caller (caller identity comes from the API key / gateway "
