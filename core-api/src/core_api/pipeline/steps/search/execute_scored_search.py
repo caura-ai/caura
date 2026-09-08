@@ -126,6 +126,10 @@ class ExecuteScoredSearch:
         fleet_ids = data.get("fleet_ids")
         if fleet_ids:
             search_data["fleet_ids"] = fleet_ids
+            # C27 — only meaningful alongside fleet_ids; the storage predicate
+            # is built only when a fleet scope was requested.
+            if data.get("strict_fleet_scoping"):
+                search_data["strict_fleet_scoping"] = True
         if data.get("filter_agent_id"):
             search_data["filter_agent_id"] = data["filter_agent_id"]
         if data.get("caller_agent_id"):

@@ -211,6 +211,7 @@ async def scored_search(request: Request) -> list[dict]:
                 search_params=search_params,
                 temporal_window=temporal_window,
                 recall_boost_enabled=body.get("recall_boost_enabled", True),
+                strict_fleet_scoping=body.get("strict_fleet_scoping", False),
                 top_k=body.get("top_k", 10),
                 date_range_start=date_range_start,
                 date_range_end=date_range_end,
@@ -327,6 +328,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 status_filter=body.get("status_filter"),
                 valid_at=valid_at,
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
+                strict_fleet_scoping=body.get("strict_fleet_scoping", False),
             )
         out = [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
     except Exception:
@@ -458,6 +460,7 @@ async def find_successors(request: Request) -> list[dict]:
         filter_agent_id=body.get("filter_agent_id"),
         memory_type_filter=body.get("memory_type_filter"),
         valid_at=valid_at,
+        strict_fleet_scoping=body.get("strict_fleet_scoping", False),
     )
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 

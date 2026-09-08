@@ -99,6 +99,16 @@ DEFAULT_SETTINGS: dict = {
         "retention_days": 90,
     },
     "search": {
+        # C27 — opt-in STRICT fleet scoping. Wire contract D4 (RATIFIED) defines
+        # a NULL ``fleet_id`` as tenant-shared BY DESIGN, so a fleet-scoped read
+        # returns null-fleet rows too. That is deliberate and stays the default;
+        # ``True`` drops the null-fleet disjunct for a tenant that wants hard
+        # fleet isolation. Off by default for the same reason as
+        # ``recall_for_asserted_identity`` below: turning it on HIDES rows that
+        # are visible today, so it is a decision a tenant makes, never one
+        # inherited. ``scope_org`` rows stay visible in both modes — that is an
+        # explicit visibility tier, not an accident of a missing fleet.
+        "strict_fleet_scoping": None,
         "recall_boost": None,
         # Whether a caller-ASSERTED identity (SearchRequest.caller_agent_id from
         # a tenant-scoped key) may move recall_count, and so ranking. Off by
@@ -579,6 +589,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "security_audit.alert_score_below": (int, float),
     "security_audit.alert_critical_findings_min": int,
     "security_audit.alert_score_drop_delta": (int, float),
+    "search.strict_fleet_scoping": bool,
     "search.recall_boost": bool,
     "search.recall_for_asserted_identity": bool,
     "search.graph_retrieval": bool,
@@ -900,6 +911,18 @@ class ResolvedConfig:
         return self._ts.get("api_keys", {}).get("gemini_api_key") or global_settings.gemini_api_key
 
     # Search
+    @property
+    def strict_fleet_scoping(self) -> bool:
+        """Drop the null-fleet disjunct from fleet-scoped reads (default OFF).
+
+        Defaults FALSE like ``recall_for_asserted_identity``, and for a stronger
+        reason: every other search knob changes what RANKS, while this one
+        changes what is VISIBLE. Defaulting it on would retroactively hide rows
+        a tenant deliberately wrote fleet-less under contract D4.
+        """
+        val = self._ts.get("search", {}).get("strict_fleet_scoping")
+        return val if val is not None else False
+
     @property
     def recall_boost(self) -> bool:
         val = self._ts.get("search", {}).get("recall_boost")

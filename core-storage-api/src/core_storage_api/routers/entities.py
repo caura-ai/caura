@@ -109,6 +109,7 @@ async def fts_search_entities(request: Request) -> list[str]:
         tokens=body["tokens"],
         tenant_id=body["tenant_id"],
         fleet_ids=body.get("fleet_ids"),
+        strict_fleet_scoping=body.get("strict_fleet_scoping", False),
     )
     return [str(eid) for eid in ids]
 

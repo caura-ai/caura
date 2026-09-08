@@ -44,6 +44,7 @@ async def _entity_boost_via_storage(
     graph_max_hops: int,
     use_union: bool = False,
     precomputed_hops: dict[UUID, tuple[int, float]] | None = None,
+    strict_fleet_scoping: bool = False,
 ) -> tuple[set[UUID], dict[UUID, float]]:
     """Entity FTS → graph expansion → link collection via storage client.
 
@@ -65,6 +66,8 @@ async def _entity_boost_via_storage(
             fts_data: dict = {"tokens": tokens, "tenant_id": tenant_id}
             if fleet_ids:
                 fts_data["fleet_ids"] = fleet_ids
+                if strict_fleet_scoping:
+                    fts_data["strict_fleet_scoping"] = True
             matched_id_strs = await sc.fts_search_entities(fts_data)
             matched_entity_ids = [UUID(eid) for eid in matched_id_strs]
 
@@ -210,6 +213,7 @@ class ParallelEmbedAndEntityBoost:
                     sp["graph_max_hops"],
                     use_union=True,
                     precomputed_hops=data.pop("_classified_entity_hops", None),
+                    strict_fleet_scoping=bool(data.get("strict_fleet_scoping")),
                 )
             )
         )

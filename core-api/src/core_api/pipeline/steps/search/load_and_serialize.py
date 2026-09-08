@@ -140,6 +140,10 @@ class LoadAndSerialize:
                         "supersedes_ids": [str(oid) for oid in outdated_ids],
                         "tenant_id": tenant_id,
                         "fleet_ids": data.get("fleet_ids"),
+                        # C27 — a successor is injected straight into the result
+                        # set, so an unscoped lookup here would reintroduce
+                        # exactly what the scored query just excluded.
+                        "strict_fleet_scoping": bool(data.get("strict_fleet_scoping")),
                         "caller_agent_id": data.get("caller_agent_id"),
                         "filter_agent_id": data.get("filter_agent_id"),
                         "memory_type_filter": data.get("memory_type_filter"),

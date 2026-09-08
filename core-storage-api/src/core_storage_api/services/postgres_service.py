@@ -230,6 +230,40 @@ async def get_read_session() -> AsyncIterator[AsyncSession]:
 # ---------------------------------------------------------------------------
 
 
+def _fleet_scope_clause(
+    model,
+    fleet_ids: Sequence[str],
+    *,
+    strict: bool,
+    include_org_visibility: bool = True,
+):
+    """The fleet predicate for a read, in one place (C27).
+
+    Wire contract D4 (RATIFIED) defines a NULL ``fleet_id`` as tenant-shared BY
+    DESIGN: a row written without a fleet is readable by every fleet in the
+    tenant. That is the default here and stays the default — this is an opt-in
+    strict mode, not a bug fix, and flipping the default would silently hide
+    rows that tenants deliberately wrote as shared.
+
+    ``strict=True`` drops ONLY the null-fleet disjunct. ``scope_org`` survives
+    in both modes: it is an explicit visibility TIER a writer chose, not an
+    accident of a missing fleet, so a tenant asking for fleet isolation is not
+    asking to revoke it. Narrowing that too would make the switch mean two
+    things at once.
+
+    Centralised because A54 established what happens otherwise — the identical
+    predicate lived in several queries, one was fixed, and the leak simply moved
+    to the next copy. Every fleet-scoped read builds its clause here so "strict"
+    cannot mean different things in different queries.
+    """
+    disjuncts = [model.fleet_id.in_(fleet_ids)]
+    if not strict:
+        disjuncts.append(model.fleet_id.is_(None))
+    if include_org_visibility:
+        disjuncts.append(model.visibility == "scope_org")
+    return or_(*disjuncts)
+
+
 def _scope_sql(
     tenant_id: str,
     fleet_id: str | None,
@@ -2318,6 +2352,7 @@ class PostgresService:
         date_range_end: str | None = None,
         readable_tenant_ids: list[str] | None = None,
         history_query: bool = False,
+        strict_fleet_scoping: bool = False,
     ) -> list[SimpleNamespace]:
         """Execute the full CTE-based scored search with entity-link JOIN.
 
@@ -2719,11 +2754,7 @@ class PostgresService:
 
         if fleet_ids:
             scored_stmt = scored_stmt.where(
-                or_(
-                    Memory.fleet_id.in_(fleet_ids),
-                    Memory.fleet_id.is_(None),
-                    Memory.visibility == "scope_org",
-                )
+                _fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping)
             )
 
         if caller_agent_id:
@@ -2935,6 +2966,7 @@ class PostgresService:
         status_filter: str | None = None,
         valid_at: datetime | None = None,
         readable_tenant_ids: list[str] | None = None,
+        strict_fleet_scoping: bool = False,
     ) -> list[Memory]:
         """Load memories by ID with visibility/fleet/agent filters applied.
 
@@ -2975,13 +3007,7 @@ class PostgresService:
                 )
             )
             if fleet_ids:
-                stmt = stmt.where(
-                    or_(
-                        Memory.fleet_id.in_(fleet_ids),
-                        Memory.fleet_id.is_(None),
-                        Memory.visibility == "scope_org",
-                    )
-                )
+                stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
             if caller_agent_id:
                 stmt = stmt.where(
                     or_(
@@ -3109,6 +3135,7 @@ class PostgresService:
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         valid_at: datetime | None = None,
+        strict_fleet_scoping: bool = False,
     ) -> list[Memory]:
         """Find active/confirmed memories that supersede the given memory IDs."""
         async with get_session() as session:
@@ -3123,13 +3150,7 @@ class PostgresService:
                 )
             )
             if fleet_ids:
-                stmt = stmt.where(
-                    or_(
-                        Memory.fleet_id.in_(fleet_ids),
-                        Memory.fleet_id.is_(None),
-                        Memory.visibility == "scope_org",
-                    )
-                )
+                stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
             if caller_agent_id:
                 stmt = stmt.where(
                     or_(
@@ -6334,6 +6355,7 @@ class PostgresService:
         tokens: list[str],
         tenant_id: str,
         fleet_ids: list[str] | None = None,
+        strict_fleet_scoping: bool = False,
     ) -> list[UUID]:
         """Full-text search against the entity tsvector index.
 
@@ -6365,7 +6387,11 @@ class PostgresService:
                 or_(*per_token),
             )
             if fleet_ids:
-                stmt = stmt.where(or_(Entity.fleet_id.in_(fleet_ids), Entity.fleet_id.is_(None)))
+                stmt = stmt.where(
+                    _fleet_scope_clause(
+                        Entity, fleet_ids, strict=strict_fleet_scoping, include_org_visibility=False
+                    )
+                )
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]
 

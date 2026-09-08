@@ -4105,6 +4105,7 @@ async def _entity_boost_pipeline(
     graph_max_hops: int,
     use_union: bool = False,
     precomputed_hops: dict[UUID, tuple[int, float]] | None = None,
+    strict_fleet_scoping: bool = False,
 ) -> tuple[set[UUID], dict[UUID, float]]:
     """Run entity FTS matching -> graph expansion -> link collection.
 
@@ -4133,6 +4134,7 @@ async def _entity_boost_pipeline(
                     "tenant_id": tenant_id,
                     "tokens": tokens,
                     "fleet_ids": fleet_ids,
+                    "strict_fleet_scoping": strict_fleet_scoping,
                 }
             )
             matched_entity_ids = [UUID(eid) for eid in matched_entity_ids_raw]
@@ -4534,6 +4536,11 @@ async def _search_memories_pipeline(
             # (skips hop-boosting). False ⇒ keyword/semantic reads only.
             "entity_retrieval": entity_retrieval,
             "tenant_config": tenant_config,
+            # C27 — resolved ONCE here rather than read off ``tenant_config`` in
+            # each step, so every fleet-scoped read in this request agrees. A
+            # step that forgot to look would silently fall back to permissive
+            # scoping, which is the failure A54 already paid for.
+            "strict_fleet_scoping": bool(getattr(tenant_config, "strict_fleet_scoping", False)),
             "search_profile": search_profile,
             "diagnostic": diagnostic,
             # D12 — per-request cosine floor; ResolveSearchProfile applies it
@@ -4649,7 +4656,14 @@ async def _search_memories_legacy(
     # deprecated legacy search honours the org switch exactly like the pipeline.
     emb_task = asyncio.ensure_future(_get_or_cache_embedding(query, tenant_id, tenant_config))
     ent_task = asyncio.ensure_future(
-        _entity_boost_pipeline(query, tenant_id, fleet_ids, graph_expand, sp["graph_max_hops"])
+        _entity_boost_pipeline(
+            query,
+            tenant_id,
+            fleet_ids,
+            graph_expand,
+            sp["graph_max_hops"],
+            strict_fleet_scoping=bool(getattr(tenant_config, "strict_fleet_scoping", False)),
+        )
         if entity_retrieval
         else _no_entity_boost()
     )
@@ -4691,6 +4705,10 @@ async def _search_memories_legacy(
         "embedding": embedding,
         "query": query,
         "fleet_ids": fleet_ids,
+        # C27 — the legacy path scopes fleets with the same storage predicate as
+        # the pipeline, so it takes the same switch. Leaving it out would make
+        # strict mode depend on which search implementation served the request.
+        "strict_fleet_scoping": bool(getattr(tenant_config, "strict_fleet_scoping", False)),
         "filter_agent_id": filter_agent_id,
         "caller_agent_id": caller_agent_id,
         "memory_type_filter": memory_type_filter,

@@ -157,6 +157,7 @@ class ClassifyQuery:
                         status_filter=status_filter,
                         valid_at=valid_at,
                         readable_tenant_ids=readable_tenant_ids,
+                        strict_fleet_scoping=bool(ctx.data.get("strict_fleet_scoping")),
                         slot_acquired_marker=ctx.data,
                     )
 
@@ -379,6 +380,7 @@ class ClassifyQuery:
         valid_at: datetime | None = None,
         readable_tenant_ids: list[str] | None = None,
         slot_acquired_marker: dict | None = None,
+        strict_fleet_scoping: bool = False,
     ) -> list[types.SimpleNamespace]:
         """Load memories linked to graph-expanded entities, scored by hop distance."""
         all_entity_ids = list(entity_hops.keys())
@@ -487,6 +489,10 @@ class ClassifyQuery:
             "filter_agent_id": filter_agent_id,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
+            # C27 — the ENTITY_LOOKUP short-circuit bypasses scored search
+            # entirely, so it needs the scope flag in its own right; inheriting
+            # it only on the scored path would leave this route permissive.
+            "strict_fleet_scoping": strict_fleet_scoping,
         }
         if valid_at is not None:
             search_data["valid_at"] = str(valid_at)

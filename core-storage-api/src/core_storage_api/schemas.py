@@ -282,6 +282,12 @@ class ScoredSearchRequest(BaseModel):
     search_params: dict
     temporal_window_seconds: float | None = None
     recall_boost_enabled: bool = True
+    # C27 — opt-in strict fleet scoping. Default False keeps wire contract D4
+    # (null fleet_id = tenant-shared BY DESIGN); True drops the null-fleet
+    # disjunct for tenants that want hard fleet isolation. Optional so a storage
+    # instance deployed ahead of core-api keeps serving callers that don't send
+    # it, the same independence A54's params were given.
+    strict_fleet_scoping: bool = False
     top_k: int = 10
 
 
