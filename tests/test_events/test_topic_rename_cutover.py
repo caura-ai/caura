@@ -22,14 +22,22 @@ described:
 The rest is about which way each default points, because the two backends need
 opposite ones and a missing twin fails differently in each.
 
-EVERY FLIPPED FAMILY IS NOW CONTRACTED, WHICH CHANGES WHAT THESE TESTS CAN USE.
-``lifecycle`` and ``memory`` both stay in ``FLIPPED_FAMILIES`` while carrying the
-current names, so ``renamed`` is the identity for them and a default-constructed
-bus is legal again. That also means the silent-failure state this file exists to
-pin can no longer be reached through any real declaration: a test that reaches
-for a real family to demonstrate it goes VACUOUS. Those tests use ``PRE_CONTRACT``
-instead. Tests about *the flag's parse rule* still take the ``nothing_flipped``
-fixture so their precondition cannot depend on cutover state.
+CONTRACTION, NOT FLIPPING, IS WHAT CHANGES WHAT THESE TESTS CAN USE.
+``lifecycle`` and ``memory`` are flipped AND contracted: they stay in
+``FLIPPED_FAMILIES`` while carrying the current names, so ``renamed`` is the
+identity for them and neither can demonstrate a mismatch. A test that reaches
+for a real family to show the silent-failure state this file exists to pin would
+therefore go VACUOUS on those two, which is why such tests use ``PRE_CONTRACT``.
+
+``org`` flipped 2026-09-08 and is NOT yet contracted, so it is currently the one
+real family for which ``publish_name`` and ``subscribe_names(dual=False)``
+disagree. That makes a default-constructed (``dual=False``) Pub/Sub bus illegal
+again until ``org`` contracts — the same window memory passed through between
+2026-09-01 and 2026-09-05. ``PRE_CONTRACT`` stays regardless: it must not depend
+on a real family happening to be mid-cutover.
+
+Tests about *the flag's parse rule* still take the ``nothing_flipped`` fixture so
+their precondition cannot depend on cutover state.
 """
 
 from __future__ import annotations
@@ -145,7 +153,7 @@ def test_subscribe_names_dual_returns_both_without_duplicates() -> None:
 # has to be stated in exactly two places — the module, and this literal — and the
 # equality in ``test_exactly_the_flipped_families_are_flipped`` is what turns the
 # second one into a deliberate stop rather than a chore.
-FLIPPED = frozenset({"lifecycle", "memory"})
+FLIPPED = frozenset({"lifecycle", "memory", "org"})
 
 # A synthetic flipped-but-NOT-contracted topic, for the tests that need the
 # silent-failure state to exist. Every real family here is now either unflipped
@@ -210,6 +218,11 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     the worst outcome available in this cutover, because it also looks like
     progress.
 
+    ``org`` joined on 2026-09-08 — the third SHARED family, mirrored into
+    caura-enterprise in the same cycle. It is flipped but NOT yet contracted, so
+    it is the family that currently makes ``unbound_publish_topics(dual=False)``
+    non-empty; see the module docstring.
+
     ``memory`` joined on 2026-09-01 — the second SHARED family, mirrored into
     caura-enterprise in the same cycle. Its absent ``.created`` declaration had
     already been removed. The live re-measurement found 12/12 running Pub/Sub
@@ -221,7 +234,6 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     assert topics_mod.FLIPPED_FAMILIES == FLIPPED
     assert "audit" not in topics_mod.FLIPPED_FAMILIES
     assert "pipeline" not in topics_mod.FLIPPED_FAMILIES
-    assert "org" not in topics_mod.FLIPPED_FAMILIES
 
 
 def test_known_families_are_derived_from_the_enums() -> None:

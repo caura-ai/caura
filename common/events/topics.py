@@ -213,14 +213,39 @@ def family(topic: str) -> str:
 # a no-op once ``renamed`` is the identity — and comes out with the final sweep,
 # after the legacy topics are deleted.
 #
+# ``org`` flipped 2026-09-08 — the fifth programme family and third SHARED one,
+# mirrored into caura-enterprise in the same cycle. Live remeasurement
+# immediately before the edit: 17/17 running Pub/Sub deployables dual-on, and
+# every prod twin topic and durable subscription present (32/32 stable prod
+# durables matched, zero unmatched).
+#
+# The check this family needed that the others did not: ``org.settings-changed``
+# is the only BROADCAST topic here, so each process creates its own ephemeral
+# subscription at runtime and there is no durable twin for a gate to compare. A
+# twin topic is a distinct resource with its own empty IAM policy, so what had to
+# be confirmed by hand is the per-topic attach binding ON THE TWIN — verified
+# present: ``prod--caura.org.settings-changed`` grants the custom
+# ``coreApiPubsubTopicAttacher`` role to the publishing core-api SA, matching the
+# legacy topic. Without it the flip is silent: publishing succeeds and every
+# subscriber fails to attach.
+#
+# The suspected staging ephemeral leak that held this family back did not
+# reproduce as a leak. ``expirationPolicy.ttl`` is 86,400s on every ephemeral
+# sampled across both brands and environments, and the pool size tracks one
+# TTL-window of instance churn rather than growing — 26 distinct instance hashes
+# behind the 47 subscriptions on the legacy prod topic, two per instance.
+# Bounded and reaping. Recorded as measured, not as an investigation
+# closed: that pool is still the reason the OLD topic cannot be deleted here.
+#
 # ``pipeline`` must NOT enter this set while it has zero live topics in either
 # environment: publishing to a topic that does not exist is silent loss, so
-# flipping it would move nothing and report success. ``org`` is shared AND its
-# staging ephemeral pool was under investigation as a suspected subscription
-# leak. ``audit`` LAST, unconditionally — those rows are hash-chained, and a
-# lost or reordered audit event is the one failure here that replay cannot
-# repair.
-FLIPPED_FAMILIES: frozenset[str] = frozenset({"lifecycle", "memory"})
+# flipping it would move nothing and report success. Re-confirmed 2026-09-08
+# against the live project — ``pubsub topics list`` matches no ``pipeline``
+# topic under either brand, in either environment.
+#
+# ``audit`` LAST, unconditionally — those rows are hash-chained, and a lost or
+# reordered audit event is the one failure here that replay cannot repair.
+FLIPPED_FAMILIES: frozenset[str] = frozenset({"lifecycle", "memory", "org"})
 
 
 def all_topics() -> tuple[str, ...]:
