@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.2.1](https://github.com/caura-ai/caura/compare/backend-v3.2.0...backend-v3.2.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **routes:** type-check routes.memories and drop it from the ignore_errors list ([#1387](https://github.com/caura-ai/caura/issues/1387)) ([1d2120b](https://github.com/caura-ai/caura/commit/1d2120b905d25a045232b241399b2d3e0cd0d7da))
+
 ## [3.2.0](https://github.com/caura-ai/caura/compare/backend-v3.1.1...backend-v3.2.0) (2026-09-08)
 
 
