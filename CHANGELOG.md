@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.1.0](https://github.com/caura-ai/caura/compare/backend-v3.0.4...backend-v3.1.0) (2026-09-08)
+
+
+### Features
+
+* **events:** flip the org family's publishers to the caura twin ([#1372](https://github.com/caura-ai/caura/issues/1372)) ([5457776](https://github.com/caura-ai/caura/commit/5457776023d4b5ef737c50ad5296095b97c82655))
+
 ## [3.0.4](https://github.com/caura-ai/caura/compare/backend-v3.0.3...backend-v3.0.4) (2026-09-07)
 
 
