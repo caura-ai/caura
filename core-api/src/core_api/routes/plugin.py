@@ -504,10 +504,10 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
 if (!config.plugins) config.plugins = {{}};
 if (!Array.isArray(config.plugins.allow)) config.plugins.allow = [];
-if (!config.plugins.allow.includes('memclaw')) config.plugins.allow.push('memclaw');
+if (!config.plugins.allow.includes('memclaw')) config.plugins.allow.push('memclaw'); // legacy-name-ok: frozen plugin id; changing it makes restrictive allowlists refuse to load the plugin
 
 if (!config.plugins.entries) config.plugins.entries = {{}};
-config.plugins.entries.memclaw = {{ enabled: true, config: {{}} }};
+config.plugins.entries.memclaw = {{ enabled: true, config: {{}} }}; // legacy-name-ok: frozen plugin id; changing it leaves the manifest-id plugin disabled
 
 // Disable memory-core — OpenClaw only loads one kind:"memory" plugin at a time.
 // Without this, the memory slot stays with memory-core and register() is never called.
@@ -524,8 +524,8 @@ if (config.plugins.entries['memory-core']) {{
 // even though the tool surface is registered. Confirmed against
 // OpenClaw 2026.5.4 dist/registry-DFFgCbcm.js:241 resolveContextEngine.
 if (!config.plugins.slots) config.plugins.slots = {{}};
-config.plugins.slots.memory = 'memclaw';
-config.plugins.slots.contextEngine = 'memclaw';
+config.plugins.slots.memory = 'memclaw'; // legacy-name-ok: frozen plugin id; changing it loses the memory slot
+config.plugins.slots.contextEngine = 'memclaw'; // legacy-name-ok: frozen plugin id; changing it stops keystone injection
 
 if (!config.plugins.load) config.plugins.load = {{}};
 if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];
