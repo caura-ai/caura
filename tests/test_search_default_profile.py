@@ -306,3 +306,40 @@ def test_the_three_ab_knobs_are_not_agent_tunable():
         "candidate_pool_size",
         "score_formula",
     }
+
+
+def test_top_k_cap_has_one_source_of_truth():
+    """REST (schemas.py le=), MCP (clamp) and the profile bounds all read one constant.
+
+    The cap was a literal 20 in two places until 2026-09-09; this pins the three
+    surfaces to ``common.constants.MAX_SEARCH_TOP_K`` so they cannot drift again.
+    """
+    import inspect
+
+    from common import constants as common_constants
+    from core_api import constants as core_constants
+    from core_api.mcp_server import caura_recall
+    from core_api.schemas import SearchRequest
+
+    assert core_constants.MAX_SEARCH_TOP_K is common_constants.MAX_SEARCH_TOP_K
+    assert (
+        common_constants.SEARCH_KNOBS["top_k"].bounds[1]
+        == common_constants.MAX_SEARCH_TOP_K
+    )
+    assert SearchRequest.model_fields["top_k"].metadata, "top_k must carry a bound"
+    le = [
+        m
+        for m in SearchRequest.model_fields["top_k"].metadata
+        if getattr(m, "le", None) is not None
+    ]
+    assert le and le[0].le == common_constants.MAX_SEARCH_TOP_K
+    recall_top_k = inspect.get_annotations(caura_recall, eval_str=True)["top_k"]
+    recall_top_k_desc = next(
+        getattr(item, "description", "") for item in recall_top_k.__metadata__
+    )
+    assert recall_top_k_desc == (
+        f"Max results, default {core_constants.DEFAULT_SEARCH_TOP_K}. "
+        f"Values above {common_constants.MAX_SEARCH_TOP_K} are capped to "
+        f"{common_constants.MAX_SEARCH_TOP_K}."
+    )
+    assert common_constants.MAX_SEARCH_TOP_K == 200

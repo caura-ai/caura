@@ -500,9 +500,25 @@ class SearchKnob(NamedTuple):
     agent_tunable: bool = False
 
 
+# Ceiling on ``top_k`` for every search surface — REST ``/search`` (422 above it),
+# MCP ``caura_recall`` (clamped, with a warning) and the tunable profile below.
+# One constant so the three cannot drift: it used to be a literal 20 here AND a
+# ``MAX_SEARCH_TOP_K = 20`` in ``core_api.constants``. Raised 20 -> 200 on
+# 2026-09-09: 20 was the only slot count on the AMB leaderboard set by the
+# server rather than the caller (hybrid-search and cognee retrieve 50; Hindsight
+# uses a token budget), and it forced the harness into 8k-character chunks to
+# reach comparable context — the most tokens of any entry with the coarsest
+# selection. This is a CEILING, not a value: the default stays
+# DEFAULT_SEARCH_TOP_K (5) and every Caura surface asks for 5 unless told
+# otherwise. Larger requests are intentionally opt-in: they increase the scored
+# query's overfetch, local result processing, and response payload. Recall
+# tracking is already one fire-and-forget batched update, and successor
+# enrichment is already one batched lookup rather than one call per result.
+MAX_SEARCH_TOP_K = 200
+
 SEARCH_KNOBS: dict[str, SearchKnob] = {
     # ── core-api-local: resolved here, never sent to storage ──
-    "top_k": SearchKnob(int, (1, 20), agent_tunable=True),
+    "top_k": SearchKnob(int, (1, MAX_SEARCH_TOP_K), agent_tunable=True),
     "min_similarity": SearchKnob(float, (0.1, 0.9), agent_tunable=True),
     # Ceiling 3, matching the agent-facing ingress (``SearchProfileUpdate`` and
     # the ``caura_tune`` MCP signature). It read 5 here until 2026-08-07 while

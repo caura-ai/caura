@@ -344,7 +344,9 @@ async def test_openapi_docs_lock(client):
 
     # top_k bounds must stay documented for SearchRequest.
     top_k_desc = schemas["SearchRequest"]["properties"]["top_k"].get("description", "")
-    assert "1" in top_k_desc and "20" in top_k_desc, (
+    from core_api.constants import MAX_SEARCH_TOP_K
+
+    assert "1" in top_k_desc and str(MAX_SEARCH_TOP_K) in top_k_desc, (
         f"SearchRequest.top_k description lost bounds: {top_k_desc!r}"
     )
 

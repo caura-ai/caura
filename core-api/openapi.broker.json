@@ -1684,8 +1684,8 @@
           },
           "top_k": {
             "default": 5,
-            "description": "Maximum results to return (1-20, default 5).",
-            "maximum": 20.0,
+            "description": "Maximum results to return (1-200, default 5).",
+            "maximum": 200.0,
             "minimum": 1.0,
             "title": "Top K",
             "type": "integer"

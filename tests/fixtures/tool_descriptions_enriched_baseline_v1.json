@@ -40,7 +40,7 @@
     "stm_only": false
   },
   "caura_tune": {
-    "description": "Tune YOUR retrieval parameters for caura_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields → returns current profile.",
+    "description": "Persistently tune YOUR standing retrieval defaults for caura_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields → returns current profile.",
     "stm_only": false
   },
   "caura_write": {

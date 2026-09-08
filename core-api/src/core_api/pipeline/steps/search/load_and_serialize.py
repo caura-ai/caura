@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # so ten ids and a thousand cost the same round-trip. The bound survives only to
 # keep a pathological array parameter away from Postgres' bind limits, and is set
 # far above anything the public contract can produce: ``top_k`` is capped at
-# MAX_SEARCH_TOP_K (20), so ``outdated_ids`` cannot approach this from the API.
+# MAX_SEARCH_TOP_K (200), so ``outdated_ids`` cannot approach this from the API.
 # If it ever does engage, the caller is TOLD (see SUCCESSOR_ENRICHMENT_INCOMPLETE
 # below) rather than silently handed stale rows.
 MAX_SUCCESSOR_LOOKUPS = 1000

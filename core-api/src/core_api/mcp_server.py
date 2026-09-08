@@ -932,7 +932,11 @@ async def caura_recall(
     fleet_ids: Annotated[list[str] | None, Field(description="Restrict fleets.")] = None,
     include_brief: Annotated[bool, Field(description="Add LLM summary.")] = False,
     top_k: Annotated[
-        int, Field(description="Max results, default 5. Values above 20 are capped to 20.")
+        int,
+        Field(
+            description=f"Max results, default {DEFAULT_SEARCH_TOP_K}. "
+            f"Values above {MAX_SEARCH_TOP_K} are capped to {MAX_SEARCH_TOP_K}."
+        ),
     ] = DEFAULT_SEARCH_TOP_K,
     valid_at: Annotated[
         str | None,
@@ -1910,7 +1914,7 @@ async def caura_entity_get(
 
 async def caura_tune(
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
-    top_k: Annotated[int | None, Field(description="1-20.")] = None,
+    top_k: Annotated[int | None, Field(description=f"1-{MAX_SEARCH_TOP_K}.")] = None,
     min_similarity: Annotated[float | None, Field(description="0.1-0.9.")] = None,
     fts_weight: Annotated[float | None, Field(description="0=semantic, 1=keyword.")] = None,
     freshness_floor: Annotated[float | None, Field(description="0-1.")] = None,

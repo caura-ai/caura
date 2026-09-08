@@ -14,6 +14,7 @@ from common.constants import (  # noqa: F401
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
     LIFECYCLE_STALE_ARCHIVE_WEIGHT,
+    MAX_SEARCH_TOP_K,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
@@ -276,7 +277,8 @@ assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
 
 # ── Search / ranking ──
 DEFAULT_SEARCH_TOP_K = 5
-MAX_SEARCH_TOP_K = 20
+# MAX_SEARCH_TOP_K is imported from common.constants (single source of truth,
+# shared with the SEARCH_KNOBS bounds) and re-exported here for existing imports.
 MIN_SEARCH_SIMILARITY = 0.3
 # A49: cosine-dominant candidate selection. 0 = OFF (the first-stage candidate pool
 # is selected by the boost-distorted ``score`` — current behaviour). >0 = select the

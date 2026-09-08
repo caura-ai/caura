@@ -839,7 +839,7 @@
         },
         "top_k": {
           "default": 5,
-          "description": "Max results, default 5. Values above 20 are capped to 20.",
+          "description": "Max results, default 5. Values above 200 are capped to 200.",
           "title": "Top K",
           "type": "integer"
         },
@@ -964,7 +964,7 @@
   {
     "name": "caura_tune",
     "title": null,
-    "description": "Tune YOUR retrieval parameters for caura_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields → returns current profile.",
+    "description": "Persistently tune YOUR standing retrieval defaults for caura_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields → returns current profile.",
     "inputSchema": {
       "properties": {
         "agent_id": {
@@ -983,7 +983,7 @@
             }
           ],
           "default": null,
-          "description": "1-20.",
+          "description": "1-200.",
           "title": "Top K"
         },
         "min_similarity": {

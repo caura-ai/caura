@@ -185,7 +185,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       status: STATUS_SCHEMA,
       fleet_ids: { type: "array", items: { type: "string" }, description: "Restrict to fleets" },
       include_brief: { type: "boolean", description: "Append LLM-synthesized summary paragraph" },
-      top_k: { type: "integer", description: "Max results (1-20)" },
+      top_k: { type: "integer", description: "Max results (1-200)" },
     },
   },
 
@@ -323,7 +323,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: [],
     properties: {
-      top_k: { type: "integer", description: "Max results per search (1-20)" },
+      top_k: { type: "integer", description: "Max results per search (1-200)" },
       min_similarity: { type: "number", description: "Min similarity threshold (0.1-0.9)" },
       fts_weight: { type: "number", description: "Keyword vs semantic blend (0=semantic, 1=keyword)" },
       freshness_floor: { type: "number" },

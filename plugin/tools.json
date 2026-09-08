@@ -740,7 +740,7 @@
       },
       {
         "default": 5,
-        "description": "Max results, default 5. Values above 20 are capped to 20.",
+        "description": "Max results, default 5. Values above 200 are capped to 200.",
         "name": "top_k",
         "required": false,
         "type": "int"
@@ -830,7 +830,7 @@
     "trust_required": 1
   },
   {
-    "description": "Tune YOUR retrieval parameters for caura_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields \u2192 returns current profile.",
+    "description": "Persistently tune YOUR standing retrieval defaults for caura_recall (top_k, min_similarity, fts_weight, graph_max_hops, freshness, recall_boost). Only provide fields to change; no fields \u2192 returns current profile.",
     "error_codes": [
       "FORBIDDEN",
       "INVALID_ARGUMENTS",
@@ -850,7 +850,7 @@
       },
       {
         "default": null,
-        "description": "1-20.",
+        "description": "1-200.",
         "name": "top_k",
         "required": false,
         "type": "int | None"
