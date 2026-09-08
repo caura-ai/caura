@@ -1215,7 +1215,12 @@ async def caura_write(
     # case the body-supplied id is honored so the install self-identifies
     # rather than collapsing onto "main". Reads keep `_get_agent_id() or
     # agent_id` (visibility scoping is unaffected).
-    agent_id = effective_write_agent_id(_get_agent_id(), agent_id)
+    # ``or agent_id`` keeps this ``str``: the resolver returns None only when
+    # BOTH inputs are falsy, and this parameter defaults to DEFAULT_AGENT_ID,
+    # so the fallback is unreachable here. It states that instead of asserting
+    # it — and the resolver's ``str | None`` is correct on its own terms,
+    # exercised with a None body by tests/test_effective_write_agent_id.py.
+    agent_id = effective_write_agent_id(_get_agent_id(), agent_id) or agent_id
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # C3/C8 — reject reserved memory_types at the boundary before we
@@ -1306,7 +1311,10 @@ async def caura_write(
                         tenant_id=tenant_id,
                         fleet_id=fleet_id,
                         agent_id=agent_id,
-                        memory_type=memory_type,
+                        # MemoryCreate validates this against MemoryType and
+                        # raises on anything else; the parameter stays ``str``
+                        # because FastMCP publishes it to tools/list.
+                        memory_type=memory_type,  # type: ignore[arg-type]
                         content=content,
                         weight=weight,
                         source_uri=source_uri,
@@ -1314,26 +1322,31 @@ async def caura_write(
                         metadata=metadata,
                         status=status,
                         visibility=visibility,
-                        write_mode=write_mode,
+                        write_mode=write_mode,  # type: ignore[arg-type]
                     ),
                 )
                 return _with_latency(_serialize(result), t0)
-            # Batch path
-            if len(items) > 100:
+            # Batch path. ``items`` is populated: the guard near the top of
+            # this handler admits exactly one of {content, items} and the
+            # single-write path returned above. mypy cannot follow that through
+            # the XOR, so bind a narrowed name — an ``assert`` would vanish
+            # under -O and leave the invariant merely claimed.
+            batch = items or []
+            if len(batch) > 100:
                 return _with_latency(
                     json.dumps(
                         {
                             "error": {
                                 "code": "BATCH_TOO_LARGE",
-                                "message": f"items length {len(items)} exceeds maximum of 100.",
-                                "details": {"received": len(items), "max": 100},
+                                "message": f"items length {len(batch)} exceeds maximum of 100.",
+                                "details": {"received": len(batch), "max": 100},
                             }
                         }
                     ),
                     t0,
                 )
             try:
-                bulk_items = [BulkMemoryItem(**item) for item in items]
+                bulk_items = [BulkMemoryItem(**item) for item in batch]
             except (ValidationError, TypeError) as e:
                 return _with_latency(
                     json.dumps(
@@ -1341,7 +1354,7 @@ async def caura_write(
                             "error": {
                                 "code": "INVALID_BATCH_ITEM",
                                 "message": f"Invalid items — {e}",
-                                "details": {"received_count": len(items)},
+                                "details": {"received_count": len(batch)},
                             }
                         }
                     ),
@@ -1403,8 +1416,8 @@ async def caura_write(
             # to it; the trade-off is acceptable to keep this path
             # simple. If a use case needs MCP retry idempotency, the
             # client can pass an explicit token via metadata.
-            result = await create_memories_bulk(bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
-            return _with_latency(_serialize(result), t0)
+            bulk_result = await create_memories_bulk(bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
+            return _with_latency(_serialize(bulk_result), t0)
         except HTTPException as e:
             # Idempotent retry-safe duplicate: when create_memory raises 409
             # with the "Duplicate memory exists: <uuid>" detail (Stage 5's
@@ -2453,7 +2466,9 @@ async def caura_doc(
                 # credentials (home-only when single-tenant).
                 doc = await sc.get_document(
                     tenant_id=tenant_id,
-                    collection=collection,
+                    # Non-empty: the guard at the top of this handler refuses
+                    # any op outside {list_collections, search} without one.
+                    collection=collection,  # type: ignore[arg-type]
                     doc_id=doc_id,
                     readable_tenant_ids=readable,
                 )
@@ -2725,7 +2740,7 @@ async def caura_doc(
                 )
             deleted = await sc.delete_document(
                 tenant_id,
-                collection,
+                collection,  # type: ignore[arg-type]  # guaranteed by the op guard above
                 doc_id,
                 require_status=_AGENT_VISIBLE_SKILL_STATUS if skills_gate_on else None,
             )
@@ -3213,7 +3228,11 @@ async def caura_insights(
             if terr:
                 return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
             await check_and_increment(tenant_id, "insights")
-            memories_or_clusters = await _QUERY_DISPATCH[focus](tenant_id, fleet_id, agent_id, scope)
+            # Shape varies by focus — each dispatch entry returns its own, and
+            # ``discover`` returns a wrapper unpacked just below. Every
+            # consumer downstream is shape-agnostic, so ``Any`` states that
+            # rather than a union that would need narrowing at each use.
+            memories_or_clusters: Any = await _QUERY_DISPATCH[focus](tenant_id, fleet_id, agent_id, scope)
             if focus == "discover" and isinstance(memories_or_clusters, _DiscoverResult):
                 is_clustered = memories_or_clusters.is_clustered
                 memories_or_clusters = memories_or_clusters.data
@@ -3789,8 +3808,8 @@ async def caura_keystones_set(
                 payload: KeystoneUpsertPayload = {
                     "tenant_id": tenant_id,
                     "doc_id": doc_id,
-                    "title": title,
-                    "content": content,
+                    "title": title,  # type: ignore[typeddict-item]
+                    "content": content,  # type: ignore[typeddict-item]
                     "scope": scope,  # type: ignore[typeddict-item]
                     "weight": weight,  # type: ignore[typeddict-item]
                 }
