@@ -1067,9 +1067,17 @@ async def write_memory(
     # anonymous write would collapse onto one shared identity — the same footgun
     # mcp_server._refuse_default_agent_on_gateway guards against. Keep that as an
     # explicit 422 rather than a silent default.
-    if not body.agent_id:
+    #
+    # Bound to a local so the narrowing SURVIVES: ``model_copy`` rebinds
+    # ``body`` and the field stays ``str | None`` on the model, so re-reading
+    # ``body.agent_id`` in the inner function threw the guarantee away and
+    # needed a ``type: ignore`` there. Passed down instead — see
+    # ``_write_memory_inner``'s ``chosen_agent_id``.
+    chosen_agent_id = body.agent_id
+    if not chosen_agent_id:
         if app_settings.is_standalone:
-            body = body.model_copy(update={"agent_id": DEFAULT_AGENT_ID})
+            chosen_agent_id = DEFAULT_AGENT_ID
+            body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
             raise _missing_agent_id_error()
     # Idempotency replay is short-circuited BEFORE the per-tenant slot —
@@ -1101,7 +1109,7 @@ async def write_memory(
     # queueing requests until they time out at the worker layer. Only
     # the new-write path is gated; replays returned above bypass it.
     async with per_tenant_slot("write", body.tenant_id):
-        return await _write_memory_inner(body, response, auth, _idem)
+        return await _write_memory_inner(body, response, auth, _idem, chosen_agent_id)
 
 
 async def _write_memory_inner(
@@ -1109,6 +1117,11 @@ async def _write_memory_inner(
     response: Response,
     auth: AuthContext,
     idem: IdempotencyGuard | None,
+    # The write identity the caller asked for, already guarded non-None by
+    # ``write_memory``. Deliberately ``str``, not ``AgentIdentity``: this is
+    # the caller's CLAIM, and ``resolve_write_agent`` is what turns a
+    # claim into an identity.
+    chosen_agent_id: str,
 ):
     from core_api.services.organization_settings import resolve_config
 
@@ -1117,22 +1130,13 @@ async def _write_memory_inner(
     # ignoring a client-supplied body override. Enable ONLY after reserved-
     # `main` creds are re-identified, else it pins them back onto `main`.
     if app_settings.bind_write_identity_to_auth and auth.agent_id:
+        chosen_agent_id = auth.agent_id
         body.agent_id = auth.agent_id
     # Ownership boundary (gate + owner stamp + post-create re-check), shared
     # with the bulk path so a broker single-write can't attribute a memory to
     # an agent owned by a different install.
-    #
-    # ``body.agent_id`` is non-None here: write_memory either filled the
-    # reserved standalone identity or raised ``_missing_agent_id_error``. The
-    # guard is in that outer function, so no narrowing reaches this one.
-    #
-    # Deliberately not ``or DEFAULT_AGENT_ID``: outside standalone that would
-    # silently attribute an anonymous write to the one shared identity, which
-    # is the exact footgun the guard raises to prevent. An ignore keeps the
-    # refusal where it belongs; the structural fix is for this function to take
-    # the resolved id as a parameter instead of re-reading a nullable field.
     agent, body.agent_id = await resolve_write_agent(
-        body.agent_id,  # type: ignore[arg-type]
+        chosen_agent_id,
         body.tenant_id,
         body.fleet_id,
         is_install_credential=auth.is_install_credential,
@@ -1282,9 +1286,17 @@ async def write_memories_bulk(
     # reserved standalone identity or must name a real agent. Defaulting
     # outside standalone would silently collapse anonymous writes onto one
     # shared identity — see mcp_server._refuse_default_agent_on_gateway.
-    if not body.agent_id:
+    #
+    # Bound to a local so the narrowing SURVIVES: ``model_copy`` rebinds
+    # ``body`` and the field stays ``str | None`` on the model, so re-reading
+    # ``body.agent_id`` in the inner function threw the guarantee away and
+    # needed a ``type: ignore`` there. Passed down instead — see
+    # ``_write_memories_bulk_inner``'s ``chosen_agent_id``.
+    chosen_agent_id = body.agent_id
+    if not chosen_agent_id:
         if app_settings.is_standalone:
-            body = body.model_copy(update={"agent_id": DEFAULT_AGENT_ID})
+            chosen_agent_id = DEFAULT_AGENT_ID
+            body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
             raise _missing_agent_id_error()
     if not bulk_attempt_id:
@@ -1312,7 +1324,7 @@ async def write_memories_bulk(
         # carry on the cached response.
         return JSONResponse(content=_body, status_code=_status)
     async with per_tenant_slot("write", body.tenant_id):
-        return await _write_memories_bulk_inner(body, response, auth, _idem, bulk_attempt_id)
+        return await _write_memories_bulk_inner(body, response, auth, _idem, bulk_attempt_id, chosen_agent_id)
 
 
 def _broker_write_agent_id(items: list[BulkMemoryItem], install_uuid: str | None) -> str:
@@ -1371,11 +1383,17 @@ async def _write_memories_bulk_inner(
     auth: AuthContext,
     idem: IdempotencyGuard | None,
     bulk_attempt_id: str,
+    # The write identity the caller asked for, already guarded non-None by
+    # ``write_memories_bulk``. Deliberately ``str``, not ``AgentIdentity``: this is
+    # the caller's CLAIM, and ``resolve_write_agent`` is what turns a
+    # claim into an identity.
+    chosen_agent_id: str,
 ):
     # Phase 2 (dark, default off): bind to the verified credential identity
     # (see _write_memory_inner). Enabled only post-re-identification. Runs
     # before resolve_write_agent so the gate/stamp apply to the bound identity.
     if app_settings.bind_write_identity_to_auth and auth.agent_id:
+        chosen_agent_id = auth.agent_id
         body.agent_id = auth.agent_id
     # Ownership boundary (gate + owner stamp + post-create re-check), shared
     # with the single-write path.
@@ -1387,18 +1405,8 @@ async def _write_memories_bulk_inner(
     # auto-registers many agents from item metadata; gating each on admin
     # approval would create trust-0 rows and 403 whole batches, breaking capture.
     # Per-agent approval is an interactive / single-agent concern.
-    #
-    # ``body.agent_id`` is non-None here: write_memories_bulk either filled the
-    # reserved standalone identity or raised ``_missing_agent_id_error``. The
-    # guard is in that outer function, so no narrowing reaches this one.
-    #
-    # Deliberately not ``or DEFAULT_AGENT_ID``: outside standalone that would
-    # silently attribute an anonymous write to the one shared identity, which
-    # is the exact footgun the guard raises to prevent. An ignore keeps the
-    # refusal where it belongs; the structural fix is for this function to take
-    # the resolved id as a parameter instead of re-reading a nullable field.
     agent, body.agent_id = await resolve_write_agent(
-        body.agent_id,  # type: ignore[arg-type]
+        chosen_agent_id,
         body.tenant_id,
         body.fleet_id,
         is_install_credential=auth.is_install_credential,

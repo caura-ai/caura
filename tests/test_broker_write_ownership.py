@@ -29,6 +29,7 @@ import pytest
 from fastapi import Response
 
 from core_api import mcp_server
+from core_api.agent_ids import AgentIdentity
 from core_api.auth import AuthContext
 from core_api.config import settings as app_settings
 from core_api.routes import memories
@@ -39,12 +40,16 @@ pytestmark = pytest.mark.unit
 
 
 def _broker_auth(
-    install_uuid: str | None = "install-1", *, is_install: bool = True
+    install_uuid: str | None = "install-1",
+    *,
+    is_install: bool = True,
+    agent_id: str | None = None,
 ) -> AuthContext:
     return AuthContext(
         tenant_id="tenant-1",
         is_install_credential=is_install,
         install_uuid=install_uuid,
+        agent_id=AgentIdentity(agent_id) if agent_id is not None else None,
     )
 
 
@@ -180,10 +185,12 @@ async def test_resolve_passes_require_approval(monkeypatch):
 # ── REST end-to-end: both routes attribute through resolve_write_agent ───
 
 
-async def _drive_single(monkeypatch, *, agent_id, auth, gate_owner, created_owner):
+async def _drive_single(
+    monkeypatch, *, agent_id, auth, gate_owner, created_owner, bind_identity=False
+):
     """Drive ``_write_memory_inner`` with storage/metering mocked; return the
     agent id that reaches ``create_memory``."""
-    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", False)
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", bind_identity)
     monkeypatch.setattr(
         "core_api.services.organization_settings.resolve_config",
         AsyncMock(return_value=SimpleNamespace(require_agent_approval=False)),
@@ -220,14 +227,16 @@ async def _drive_single(monkeypatch, *, agent_id, auth, gate_owner, created_owne
     monkeypatch.setattr(memories, "create_memory", _create)
     body = MemoryCreate(tenant_id="tenant-1", agent_id=agent_id, content="hello world")
     with pytest.raises(_Sentinel):
-        await memories._write_memory_inner(body, Response(), auth, None)
+        await memories._write_memory_inner(body, Response(), auth, None, agent_id)
     return captured["agent_id"]
 
 
-async def _drive_bulk(monkeypatch, *, agent_id, auth, gate_owner, created_owner):
+async def _drive_bulk(
+    monkeypatch, *, agent_id, auth, gate_owner, created_owner, bind_identity=False
+):
     """Drive ``_write_memories_bulk_inner`` with storage/metering mocked; return
     the agent id that reaches ``create_memories_bulk``."""
-    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", False)
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", bind_identity)
     monkeypatch.setattr(
         agent_service,
         "lookup_agent",
@@ -260,7 +269,7 @@ async def _drive_bulk(monkeypatch, *, agent_id, auth, gate_owner, created_owner)
     )
     with pytest.raises(_Sentinel):
         await memories._write_memories_bulk_inner(
-            body, Response(), auth, None, "attempt-1"
+            body, Response(), auth, None, "attempt-1", agent_id
         )
     return captured["agent_id"]
 
@@ -399,3 +408,48 @@ async def test_mcp_write_passes_credential_identity(mcp_env, monkeypatch):
         await mcp_server.caura_write(content="x", agent_id="a1")
     assert captured["is_install"] is True
     assert captured["install_uuid"] == "install-7"
+
+
+# ── Phase 2: bind_write_identity_to_auth ─────────────────────────────────────
+# The flag ships dark, and nothing exercised it ENABLED — every other reference
+# in the suite sets it False or discusses it in prose. So the override could
+# have silently become a no-op and the suite would have stayed green. It is a
+# spoof-hardening control: when on, the verified credential identity wins over
+# whatever the body named, so what these pin is that the BODY's id does not
+# reach ``resolve_write_agent``.
+
+
+async def test_phase2_binds_the_verified_identity_over_the_body_single(monkeypatch):
+    agent_id = await _drive_single(
+        monkeypatch,
+        agent_id="body-claimed-agent",
+        auth=_broker_auth(None, is_install=False, agent_id="verified-agent"),
+        gate_owner=None,
+        created_owner=None,
+        bind_identity=True,
+    )
+    assert agent_id == "verified-agent"
+
+
+async def test_phase2_binds_the_verified_identity_over_the_body_bulk(monkeypatch):
+    agent_id = await _drive_bulk(
+        monkeypatch,
+        agent_id="body-claimed-agent",
+        auth=_broker_auth(None, is_install=False, agent_id="verified-agent"),
+        gate_owner=None,
+        created_owner=None,
+        bind_identity=True,
+    )
+    assert agent_id == "verified-agent"
+
+
+async def test_phase2_off_leaves_the_body_identity_alone_single(monkeypatch):
+    """The other half of the flag: dark by default, so the body still wins."""
+    agent_id = await _drive_single(
+        monkeypatch,
+        agent_id="body-claimed-agent",
+        auth=_broker_auth(None, is_install=False, agent_id="verified-agent"),
+        gate_owner=None,
+        created_owner=None,
+    )
+    assert agent_id == "body-claimed-agent"
