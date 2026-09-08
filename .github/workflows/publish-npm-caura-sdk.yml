@@ -1,0 +1,137 @@
+name: Publish the caura-sdk alias
+
+# Publishes `clients/npm-caura-sdk` — UNSCOPED `caura-sdk`, an alias that
+# re-exports the canonical implementation package `@caura/client`.
+#
+# WHY THIS PACKAGE EXISTS. The Python client is `pip install caura-sdk`, so
+# `npm install caura-sdk` is a name people will guess — and an UNSCOPED npm
+# name is publishable by any third party, which makes an unclaimed one the
+# npm half of the supply-chain hole the PyPI aliases already closed. Owning it
+# keeps a guessed install line resolving to the canonical package instead of
+# to whoever claims it first. (The bare name `caura` needs no such defense:
+# npm's name-similarity filter blocks it against `csurf` for EVERY publisher,
+# no exception process — npm support, 2026-08-28. Recorded as not-happening;
+# `@caura/client` is canonical.)
+#
+# GATES. Same shape as publish-npm-sdk.yml: credential present, tag agrees
+# with package.json, dependencies already on the registry, publish, verify the
+# registry actually serves it. Consolidating this shape into a reusable
+# `workflow_call` remains the right end state, just not done yet.
+#
+# One-time setup by a maintainer:
+#   1. `NPM_TOKEN` repository secret — an npm automation token with publish
+#      rights. Reusing the token from `publish-npm-client.yml` satisfies this.
+#
+# Release: bump the version in clients/npm-caura-sdk/package.json, then
+# push a tag `npm-caura-sdk-v<version>` (or run this workflow manually).
+# v1.0.0 was published manually by a maintainer on 2026-09-08.
+
+on:
+  push:
+    tags:
+      - "npm-caura-sdk-v*"
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # `contents: read` is not redundant — declaring a permissions block sets
+      # every unlisted scope to `none`, which would leave `actions/checkout`
+      # unable to read the repo.
+      contents: read
+      id-token: write # npm provenance
+    defaults:
+      run:
+        working-directory: clients/npm-caura-sdk
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: The publish credential must exist
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [[ -z "${NPM_TOKEN}" ]]; then
+            echo "::error::NPM_TOKEN repository secret is not set. Add an npm automation token with publish rights to the @caura scope; nothing here can publish without it."
+            exit 1
+          fi
+
+      - name: The tag must agree with package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#npm-caura-sdk-v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "$TAG_VERSION" != "$PKG_VERSION" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} says ${TAG_VERSION} but package.json says ${PKG_VERSION}"
+            exit 1
+          fi
+          echo "publishing $(node -p "require('./package.json').name")@${PKG_VERSION}"
+
+      # npm does not resolve dependencies at publish time: publishing against a
+      # version that is not on the registry SUCCEEDS and produces a package that
+      # fails for the first person who installs it.
+      - name: Every dependency must already be on the registry
+        run: |
+          node -p "Object.entries(require('./package.json').dependencies || {}).map(([n, r]) => n + '@' + r).join('\n')" \
+            > /tmp/deps.txt
+          while read -r SPEC; do
+            [[ -z "$SPEC" ]] && continue
+            RESOLVED=""
+            for attempt in 1 2 3 4 5; do
+              # `|| true` is load-bearing: steps run under `bash -eo pipefail`,
+              # so an unresolvable spec would abort the step on attempt 1 and
+              # the retry would be decorative. The type check matters too —
+              # npm prints its E404 as valid JSON on stdout under `--json`, so
+              # a successful parse proves nothing about existence.
+              RESOLVED=$(npm view "$SPEC" version --json 2>/dev/null | node -e '
+                let s = "";
+                process.stdin.on("data", d => s += d).on("end", () => {
+                  try {
+                    const j = JSON.parse(s);
+                    const a = Array.isArray(j) ? j : [j];
+                    const last = a[a.length - 1];
+                    console.log(typeof last === "string" ? last : "");
+                  } catch { console.log(""); }
+                });' || true)
+              [[ -n "$RESOLVED" ]] && break
+              echo "attempt ${attempt}: ${SPEC} not visible yet, waiting"
+              sleep 10
+            done
+            if [[ -z "$RESOLVED" ]]; then
+              echo "::error::${SPEC} is not on the registry. Publish it first (publish-npm-client.yml) — npm would accept this package anyway and it would be uninstallable."
+              exit 1
+            fi
+            echo "${SPEC} -> ${RESOLVED}"
+          done < /tmp/deps.txt
+
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # A green publish step is not evidence the registry serves it.
+      - name: The registry must serve what we just published
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          for attempt in 1 2 3 4 5; do
+            SERVED=$(npm view "${PKG_NAME}@${PKG_VERSION}" version --json 2>/dev/null | node -e '
+              let s = "";
+              process.stdin.on("data", d => s += d).on("end", () => {
+                try {
+                  const j = JSON.parse(s);
+                  const a = Array.isArray(j) ? j : [j];
+                  const last = a[a.length - 1];
+                  console.log(typeof last === "string" ? last : "");
+                } catch { console.log(""); }
+              });' || true)
+            [[ -n "$SERVED" ]] && { echo "registry serves ${PKG_NAME}@${SERVED}"; exit 0; }
+            echo "attempt ${attempt}: not served yet, waiting"
+            sleep 10
+          done
+          echo "::error::${PKG_NAME}@${PKG_VERSION} is not being served after publish."
+          exit 1
