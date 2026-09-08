@@ -41,10 +41,10 @@ RESERVED_WRITE_ID_MESSAGE = (
     'agent_id "{agent_id}" is reserved and no longer accepts writes — it is the '
     "unset plugin default and collides across every install. Retry with a "
     "unique, STABLE agent_id for THIS install: (1) set CAURA_AGENT_ID in "
-    '~/.openclaw/plugins/memclaw/.env to a stable name (e.g. "webclaw") and '
+    '~/.openclaw/plugins/memclaw/.env to a stable name (e.g. "webclaw") and '  # legacy-name-floor: existing installed path; migrate before changing recovery guidance
     "restart the plugin; (2) or pass a unique agent_id argument on each write "
     'call now; (3) if you have no name, use "main-<install_id>" with '
-    "<install_id> from ~/.openclaw/plugins/memclaw/install.json. The id must "
+    "<install_id> from ~/.openclaw/plugins/memclaw/install.json. The id must "  # legacy-name-floor: existing installed path; migrate before changing recovery guidance
     "not be reserved and must be identical on every run. Recall and existing "
     "memories are unaffected."
 )
