@@ -27,6 +27,13 @@ _SPEC = ToolSpec(
     plugin_exposed=True,
     trust_required=1,
     impl_status="live",
+    error_codes=(
+        "FORBIDDEN",
+        "INTERNAL_ERROR",
+        "INVALID_ARGUMENTS",
+        "MISSING_AGENT_ID",
+        "UNAUTHORIZED",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

@@ -29,7 +29,12 @@ _SPEC = ToolSpec(
     handler=mcp_server.caura_keystones,
     plugin_exposed=True,
     trust_required=0,
-    error_codes=("INTERNAL_ERROR",),
+    error_codes=(
+        "FORBIDDEN",
+        "INTERNAL_ERROR",
+        "MISSING_AGENT_ID",
+        "UNAUTHORIZED",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

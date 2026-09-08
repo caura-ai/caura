@@ -84,7 +84,14 @@ _SPEC = ToolSpec(
             required_params=("query",),
         ),
     ),
-    error_codes=("INVALID_ARGUMENTS",),
+    error_codes=(
+        "FORBIDDEN",
+        "INTERNAL_ERROR",
+        "INVALID_ARGUMENTS",
+        "MISSING_AGENT_ID",
+        "UNAUTHORIZED",
+        "UPSTREAM_ERROR",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

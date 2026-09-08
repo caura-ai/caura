@@ -72,7 +72,14 @@ _SPEC = ToolSpec(
             required_params=("memory_id",),
         ),
     ),
-    error_codes=("INVALID_ARGUMENTS",),
+    error_codes=(
+        "FORBIDDEN",
+        "INVALID_ARGUMENTS",
+        "MISSING_AGENT_ID",
+        "NOT_FOUND",
+        "PERMISSION_DENIED",
+        "UNAUTHORIZED",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

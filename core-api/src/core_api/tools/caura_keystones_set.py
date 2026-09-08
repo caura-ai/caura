@@ -60,7 +60,15 @@ _SPEC = ToolSpec(
             required_params=("doc_id",),
         ),
     ),
-    error_codes=("INVALID_ARGUMENTS", "FORBIDDEN", "NOT_FOUND", "INTERNAL_ERROR"),
+    error_codes=(
+        "CONFLICT",
+        "FORBIDDEN",
+        "INTERNAL_ERROR",
+        "INVALID_ARGUMENTS",
+        "MISSING_AGENT_ID",
+        "NOT_FOUND",
+        "UNAUTHORIZED",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)
