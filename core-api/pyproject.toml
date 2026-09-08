@@ -204,7 +204,6 @@ module = [
     "core_api.pipeline.steps.write.parallel_embed_enrich",
     "core_api.pipeline.steps.write.schedule_background_tasks",
     "core_api.routes.fleet",
-    "core_api.routes.memories",
     "core_api.clients.storage_client",
     "core_api.app",
     "core_api.auth",

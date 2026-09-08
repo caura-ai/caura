@@ -1116,8 +1116,18 @@ async def _write_memory_inner(
     # Ownership boundary (gate + owner stamp + post-create re-check), shared
     # with the bulk path so a broker single-write can't attribute a memory to
     # an agent owned by a different install.
+    #
+    # ``body.agent_id`` is non-None here: write_memory either filled the
+    # reserved standalone identity or raised ``_missing_agent_id_error``. The
+    # guard is in that outer function, so no narrowing reaches this one.
+    #
+    # Deliberately not ``or DEFAULT_AGENT_ID``: outside standalone that would
+    # silently attribute an anonymous write to the one shared identity, which
+    # is the exact footgun the guard raises to prevent. An ignore keeps the
+    # refusal where it belongs; the structural fix is for this function to take
+    # the resolved id as a parameter instead of re-reading a nullable field.
     agent, body.agent_id = await resolve_write_agent(
-        body.agent_id,
+        body.agent_id,  # type: ignore[arg-type]
         body.tenant_id,
         body.fleet_id,
         is_install_credential=auth.is_install_credential,
@@ -1372,8 +1382,18 @@ async def _write_memories_bulk_inner(
     # auto-registers many agents from item metadata; gating each on admin
     # approval would create trust-0 rows and 403 whole batches, breaking capture.
     # Per-agent approval is an interactive / single-agent concern.
+    #
+    # ``body.agent_id`` is non-None here: write_memories_bulk either filled the
+    # reserved standalone identity or raised ``_missing_agent_id_error``. The
+    # guard is in that outer function, so no narrowing reaches this one.
+    #
+    # Deliberately not ``or DEFAULT_AGENT_ID``: outside standalone that would
+    # silently attribute an anonymous write to the one shared identity, which
+    # is the exact footgun the guard raises to prevent. An ignore keeps the
+    # refusal where it belongs; the structural fix is for this function to take
+    # the resolved id as a parameter instead of re-reading a nullable field.
     agent, body.agent_id = await resolve_write_agent(
-        body.agent_id,
+        body.agent_id,  # type: ignore[arg-type]
         body.tenant_id,
         body.fleet_id,
         is_install_credential=auth.is_install_credential,
