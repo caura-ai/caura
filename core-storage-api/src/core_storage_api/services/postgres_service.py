@@ -2093,7 +2093,9 @@ class PostgresService:
             )
             result = await session.execute(stmt)
             await session.commit()
-            return bool(result.rowcount)
+            # ``rowcount`` lives on CursorResult; the async ``execute`` is typed
+            # as Result. Same ignore the sibling CAS updates in this file use.
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def memory_conflict_record(self, payload: dict) -> MemoryConflict:
         """Insert an A55 ``memory_conflicts`` classification record.
