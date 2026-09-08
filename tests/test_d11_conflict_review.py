@@ -83,8 +83,13 @@ def test_resolve_is_compare_and_set_on_pending():
     from core_storage_api.services.postgres_service import PostgresService
 
     src = inspect.getsource(PostgresService.memory_conflict_resolve)
+    # the compare half: only a still-pending row may move
     assert 'MemoryConflict.review_status == "pending"' in src
-    assert "return bool(result.rowcount)" in src
+    # the set half: the caller learns whether it won, which is what lets the
+    # route answer 409 instead of pretending the write landed. Asserted on
+    # rowcount rather than an exact expression so a typing fix cannot silently
+    # look like a behaviour change.
+    assert "rowcount" in src.split("await session.commit()")[1]
 
 
 def test_every_conflict_query_is_tenant_scoped():
