@@ -28,7 +28,7 @@
     "stm_only": false
   },
   "caura_manage": {
-    "description": "Per-memory lifecycle. op: read|update|transition|delete. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete is soft (prefer transition to outdated/archived).",
+    "description": "Per-memory lifecycle. bulk_delete and lineage are MCP-only; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated/archived).",
     "stm_only": false
   },
   "caura_recall": {

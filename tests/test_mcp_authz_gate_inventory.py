@@ -78,6 +78,7 @@ import inspect
 import pathlib
 import re
 import textwrap
+from collections.abc import Callable
 from typing import NamedTuple
 
 import core_api.tools as tools
@@ -161,20 +162,10 @@ SELF_ID_EXCLUDED: dict[tuple[str, str], str] = {
 KNOWN_GAP_PREFIX = "KNOWN GAP:"
 
 
-# Invariant 1. One entry, and it is a gap rather than a justification.
-DECLARED_OPS_ALLOWLIST: dict[str, str] = {
-    "caura_manage": (
-        "KNOWN GAP: the handler accepts bulk_delete and lineage, which the "
-        "registry does not declare, so plugin/tools.json under-publishes the "
-        "tool by two ops and required_trust('caura_manage', 'bulk_delete') "
-        "resolves to the tool baseline 0 while the declared 'delete' is 3. "
-        "Enforcement is NOT affected: the bulk_delete branch calls "
-        "enforce_delete, the same trust>=3 gate as single delete, and nothing "
-        "reads required_trust. Fixing it means adding two OpSpecs and "
-        "regenerating plugin/tools.json, which changes the published manifest "
-        "and is a decision about the client contract, not a test fix."
-    ),
-}
+# Invariant 1. Empty — every tool's declared ops match what its handler
+# accepts. (Held one KNOWN GAP until caura_manage declared bulk_delete and
+# lineage, which plugin/tools.json had been under-publishing.)
+DECLARED_OPS_ALLOWLIST: dict[str, str] = {}
 
 # Invariant 2. Empty, and that is the point: every mutating op is gated today,
 # so the list records no exceptions and a new one has to be argued for here.
@@ -493,6 +484,30 @@ def _tools() -> list[_Tool]:
     return rows
 
 
+def _ops_disagree(tool: _Tool) -> bool:
+    """Invariant 1: the handler accepts a different op set than it declares."""
+    return tool.accepted_ops is not None and tool.accepted_ops != tool.declared_ops
+
+
+def _declared_trust(tool: _Tool) -> int:
+    """The threshold the manifest publishes: the tool's, else its highest op's."""
+    return tool.spec.trust_required or max(
+        (op.trust_required for op in (tool.spec.ops or ())), default=0
+    )
+
+
+def _trust_uncorroborated(tool: _Tool) -> bool:
+    """Invariant 3: publishes a threshold, reaches no gate that could refuse."""
+    return _declared_trust(tool) > 0 and not (tool.calls & TRUST_GATES)
+
+
+def _identity_unbound(tool: _Tool, param: str) -> bool:
+    """Invariant 4: a caller-supplied identity that nothing rebinds."""
+    if (tool.name, param) in SELF_ID_EXCLUDED:
+        return False
+    return param not in tool.rebound_params
+
+
 def _mutating(tool: _Tool) -> frozenset[str]:
     """Accepted ops that change state; empty for a read-only op-less tool."""
     if not tool.ops:
@@ -500,6 +515,13 @@ def _mutating(tool: _Tool) -> frozenset[str]:
             frozenset({"<whole tool>"}) if tool.name in MUTATING_TOOLS else frozenset()
         )
     return frozenset(tool.ops & MUTATING_OPS)
+
+
+def _write_scope_ungated(tool: _Tool) -> frozenset[str]:
+    """Invariant 2: mutating ops that never reach the write-scope gate."""
+    if tool.gate_unconditional:
+        return frozenset()
+    return _mutating(tool) - tool.guarded_ops
 
 
 def _report(tool: _Tool) -> str:
@@ -531,7 +553,7 @@ def test_declared_ops_match_accepted_ops() -> None:
     """
     offenders = []
     for tool in _tools():
-        if tool.accepted_ops is None or tool.accepted_ops == tool.declared_ops:
+        if not _ops_disagree(tool):
             continue
         if tool.name in DECLARED_OPS_ALLOWLIST:
             continue
@@ -554,15 +576,18 @@ def test_every_mutating_op_passes_the_write_scope_gate() -> None:
     """A read-only credential must not reach a mutating op.
 
     Enumerated from the handler's accepted ops rather than from the registry,
-    because the handler is what runs — and because ``caura_manage`` proves the
-    two differ: ``bulk_delete`` is undeclared and IS gated, so checking the
-    registry would have missed a real op that happens to be correct.
+    because the handler is what runs. The two agree today, but only because
+    invariant 1 holds them there, and they did not when this was written:
+    ``caura_manage`` accepted ``bulk_delete`` without declaring it, so a
+    registry-driven scan would have skipped a real, correctly gated op. Reading
+    the handler keeps this check independent of that one rather than downstream
+    of it.
     """
     offenders = []
     for tool in _tools():
-        if tool.name in WRITE_SCOPE_ALLOWLIST or tool.gate_unconditional:
+        if tool.name in WRITE_SCOPE_ALLOWLIST:
             continue
-        ungated = sorted(_mutating(tool) - tool.guarded_ops)
+        ungated = sorted(_write_scope_ungated(tool))
         if ungated:
             offenders.append(f"{_report(tool)}\n        UNGATED: {ungated}")
     assert not offenders, (
@@ -587,12 +612,10 @@ def test_declared_trust_is_corroborated_by_a_gate() -> None:
     for tool in _tools():
         if tool.name in TRUST_ALLOWLIST:
             continue
-        declared = tool.spec.trust_required or max(
-            (op.trust_required for op in (tool.spec.ops or ())), default=0
-        )
-        if declared > 0 and not (tool.calls & TRUST_GATES):
+        if _trust_uncorroborated(tool):
             offenders.append(
-                f"{_report(tool)}\n        DECLARES trust {declared}, reaches no gate"
+                f"{_report(tool)}\n        DECLARES trust "
+                f"{_declared_trust(tool)}, reaches no gate"
             )
     assert not offenders, (
         f"{len(offenders)} tool(s) publish a trust_required that no reachable "
@@ -614,9 +637,7 @@ def test_every_caller_supplied_identity_is_bound() -> None:
     offenders = []
     for tool in _tools():
         for param in sorted(tool.identity_params):
-            if (tool.name, param) in SELF_ID_EXCLUDED:
-                continue
-            if param in tool.rebound_params:
+            if not _identity_unbound(tool, param):
                 continue
             if f"{tool.name}.{param}" in SELF_BIND_ALLOWLIST:
                 continue
@@ -812,63 +833,100 @@ def test_the_registry_scan_is_not_silently_empty() -> None:
 
 
 class _Axis(NamedTuple):
+    """One invariant, and everything the hygiene checks need to police it.
+
+    ``needed`` returns every key the axis could legitimately hold, mapped to
+    whether its invariant would STILL flag it. That one callable is what lets
+    the two checks below be written once: a key the map does not contain is
+    stale, and a key it maps to ``False`` is unnecessary.
+
+    It also means "still needed" has ONE definition per axis, shared with the
+    invariant test itself rather than restated beside it — the REST sibling's
+    ``_Axis`` docstring records that as the original point, and this file
+    learned it the slow way. An earlier revision policed only the axes a
+    hand-kept ``_NECESSITY_CHECKED`` set happened to name, plus a meta-test to
+    guard the set; giving the axis a predicate it cannot be constructed
+    without deletes both, and the SELF_BIND key shape stops being a special
+    case that three separate call sites had to know about.
+    """
+
     name: str
     allowlist: dict[str, str]
+    needed: Callable[[], dict[str, bool]]
     gap_ceiling: int
 
 
 _ALLOWLISTS = (
-    _Axis("DECLARED_OPS_ALLOWLIST", DECLARED_OPS_ALLOWLIST, 1),
-    _Axis("WRITE_SCOPE_ALLOWLIST", WRITE_SCOPE_ALLOWLIST, 0),
-    _Axis("TRUST_ALLOWLIST", TRUST_ALLOWLIST, 0),
-    _Axis("SELF_BIND_ALLOWLIST", SELF_BIND_ALLOWLIST, 0),
+    _Axis(
+        "DECLARED_OPS_ALLOWLIST",
+        DECLARED_OPS_ALLOWLIST,
+        lambda: {t.name: _ops_disagree(t) for t in _tools()},
+        0,
+    ),
+    _Axis(
+        "WRITE_SCOPE_ALLOWLIST",
+        WRITE_SCOPE_ALLOWLIST,
+        lambda: {t.name: bool(_write_scope_ungated(t)) for t in _tools()},
+        0,
+    ),
+    _Axis(
+        "TRUST_ALLOWLIST",
+        TRUST_ALLOWLIST,
+        lambda: {t.name: _trust_uncorroborated(t) for t in _tools()},
+        0,
+    ),
+    _Axis(
+        "SELF_BIND_ALLOWLIST",
+        SELF_BIND_ALLOWLIST,
+        lambda: {
+            f"{t.name}.{p}": _identity_unbound(t, p)
+            for t in _tools()
+            for p in t.identity_params
+        },
+        0,
+    ),
 )
 
 
 def test_allowlists_have_no_stale_entries() -> None:
-    """An entry naming a tool the registry no longer has must fail rather than
-    sit there looking like a considered decision."""
-    live = {tool.name for tool in _tools()}
-    # SELF_BIND_ALLOWLIST keys are ``tool.param``, so it is checked against the
-    # pairs that actually exist rather than against bare tool names.
-    live_pairs = {
-        f"{tool.name}.{param}" for tool in _tools() for param in tool.identity_params
-    }
-    stale = {
-        axis.name: sorted(
-            set(axis.allowlist)
-            - (live_pairs if axis.name == "SELF_BIND_ALLOWLIST" else live)
-        )
-        for axis in _ALLOWLISTS
-        if set(axis.allowlist)
-        - (live_pairs if axis.name == "SELF_BIND_ALLOWLIST" else live)
-    }
+    """An entry naming something the registry no longer serves must fail rather
+    than sit there looking like a considered decision."""
+    stale = {}
+    for axis in _ALLOWLISTS:
+        gone = sorted(set(axis.allowlist) - set(axis.needed()))
+        if gone:
+            stale[axis.name] = gone
     assert not stale, (
-        f"allowlist entries name tools this registry does not serve:\n{stale}\n"
-        "Delete the entries; do not update them to match a tool you have not "
+        f"allowlist entries name things this registry does not serve:\n{stale}\n"
+        "Delete the entries; do not update them to match something you have not "
         "re-examined."
     )
 
 
 def test_allowlists_have_no_unnecessary_entries() -> None:
-    """An entry excusing a tool that now passes on its own is dead.
+    """An entry excusing something that now passes on its own is dead.
 
-    Only invariant 1 has entries, so only invariant 1 is checked here — adding
-    a second populated allowlist without extending this is exactly the silent
-    rot the REST sibling records against its own ``KNOWN GAP`` lines.
+    ``test_allowlists_have_no_stale_entries`` only catches an entry naming
+    something that no longer exists. It does not catch the commoner case: the
+    gap gets FIXED and the line stays, still reading as though someone decided
+    the excuse was warranted. A later offender can then arrive under the same
+    key and be excused by a reason written about something else.
+
+    Every axis is checked, including the empty ones — emptying an allowlist is
+    exactly when its check stops being exercised and starts rotting unnoticed.
+    That is structural rather than remembered: ``_Axis.needed`` cannot be
+    omitted when an axis is declared.
     """
     unnecessary = []
-    for tool in _tools():
-        if tool.name not in DECLARED_OPS_ALLOWLIST:
-            continue
-        if tool.accepted_ops is not None and tool.accepted_ops != tool.declared_ops:
-            continue
-        unnecessary.append(
-            f"DECLARED_OPS_ALLOWLIST[{tool.name}]: declared and accepted ops now "
-            f"agree ({sorted(tool.declared_ops)})"
-        )
+    for axis in _ALLOWLISTS:
+        needed = axis.needed()
+        for key in sorted(axis.allowlist):
+            if needed.get(key) is False:
+                unnecessary.append(
+                    f"{axis.name}[{key}]: the invariant would pass without it"
+                )
     assert not unnecessary, (
-        "allowlist entries excuse tools that no longer need excusing:\n"
+        "allowlist entries excuse things that no longer need excusing:\n"
         + "\n".join(f"    {u}" for u in unnecessary)
         + "\n\nDelete the entries. If one was a KNOWN GAP, lower that axis's "
         "gap_ceiling in _ALLOWLISTS to match."

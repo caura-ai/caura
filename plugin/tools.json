@@ -501,7 +501,7 @@
     "trust_required": 1
   },
   {
-    "description": "Per-memory lifecycle. op: read|update|transition|delete. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete is soft (prefer transition to outdated/archived).",
+    "description": "Per-memory lifecycle. bulk_delete and lineage are MCP-only; lineage returns the supersession chain. update patches fields and re-embeds if content changes. transition sets status (active|pending|confirmed|cancelled|outdated|conflicted|archived|deleted). delete and bulk_delete are soft (prefer transition to outdated/archived).",
     "error_codes": [
       "INVALID_ARGUMENTS"
     ],
@@ -540,6 +540,22 @@
           "memory_id"
         ],
         "trust_required": 3
+      },
+      {
+        "description": "Soft-delete up to 1000 memories by id.",
+        "name": "bulk_delete",
+        "required_params": [
+          "memory_ids"
+        ],
+        "trust_required": 3
+      },
+      {
+        "description": "Walk the supersession chain for a memory.",
+        "name": "lineage",
+        "required_params": [
+          "memory_id"
+        ],
+        "trust_required": 0
       }
     ],
     "params": [

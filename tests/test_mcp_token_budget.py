@@ -47,6 +47,26 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # "self" rule and filed the resulting 403 as a bug. Ceiling deliberately
 # NOT raised — but note this spends half the margin above, leaving ~29.
 # Trim before adding, or move the ceiling with a reason of your own.
+#
+# 2026-09-08: 5341 cl100k (+8) after ``caura_manage`` declared ``bulk_delete``
+# and ``lineage`` — ops its handler already accepted and plugin/tools.json
+# omitted — and disclosed that both are MCP-only, which is a real distinction
+# for plugin callers because that dispatcher implements only the other four.
+# Ceiling again NOT raised: the op ROLL-CALL came out of the description to pay
+# for it. The ``op`` parameter enumerates all six in the same inputSchema, so
+# the list was being bought twice; the surface split is the part no schema
+# carries. Note also that the entry above recorded ~29 tokens of margin from
+# 5321, and the fixture measured 5333 before this change — something in between
+# spent 12 without writing itself down. Measure the fixture, do not trust the
+# running total in this list.
+#
+# The trim generalises and is worth someone's afternoon: four other specs still
+# repeat their own enum in their description, verbatim against the parameter
+# that already carries it: caura_insights, caura_doc, caura_evolve and
+# caura_keystones_set. Removing all four measures 5341 -> 5293 — a 48-token
+# saving, six times what this change spent. (Per-tool figures are not quoted
+# because they sum to 52: dropping text moves tokenization boundaries, so the
+# parts do not add up to the whole. Measure the total, not the fragments.)
 CEILING_TOKENS = 5350
 
 
