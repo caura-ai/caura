@@ -22,7 +22,7 @@ export CAURA_INTERVIEWER=true
 # The plugin modules log progress lines to stdout; the harness's JSON is
 # always the LAST line — capture just that.
 H() { node e2e/interviewer-wet.mjs "$@" | tail -1; }
-BUF="$HOME/.openclaw/plugins/memclaw/interview-buffer.jsonl"
+BUF="$HOME/.openclaw/plugins/memclaw/interview-buffer.jsonl" # legacy-name-ok: the published plugin id fixes the installed buffer path
 PASS=0; FAIL=0
 
 say()  { echo ">>> $*"; }
