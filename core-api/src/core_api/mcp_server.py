@@ -845,6 +845,17 @@ def _serialize(obj) -> str:
     return json.dumps(obj.model_dump(mode="json"), indent=2, default=str)
 
 
+# What every ``caura_*`` handler returns. Not a widening for mypy's benefit:
+# the two shapes are the existing contract, and ``_with_latency`` below has
+# carried this exact union since #147 made error envelopes flip ``isError``.
+# The handlers kept ``-> str`` from before that change, so the
+# annotation has been claiming one shape while two are returned — a
+# ``str`` the framework wraps as ``isError=False``, or a ``CallToolResult``
+# that is already ``isError=True``. Confusing the two is precisely the
+# ``isError`` bug the flip fixed, so the return type is worth naming.
+ToolReply = str | CallToolResult
+
+
 def _with_latency(result: str, t0: float) -> str | CallToolResult:
     """Stamp the response with ``_latency_ms`` — and promote error
     envelopes to ``CallToolResult(isError=True)``.
@@ -925,7 +936,7 @@ async def caura_recall(
         bool,
         Field(description="Return retrieval trace; results unchanged, never bumps recall_count."),
     ] = False,
-) -> str:
+) -> ToolReply:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -1157,7 +1168,7 @@ async def caura_write(
         str | None,
         Field(description="fast|strong|auto (single only). 'strong' embeds inline — searchable at once."),
     ] = None,
-) -> str:
+) -> ToolReply:
     """Single OR batch write. Exactly one of {content, items} is required.
 
     Read-your-own-write: when embedding is deferred (any deployment not running it
@@ -1447,7 +1458,7 @@ async def caura_manage(
     metadata: Annotated[dict | None, Field(description="op=update.")] = None,
     source_uri: Annotated[str | None, Field(description="op=update.")] = None,
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
-) -> str:
+) -> ToolReply:
     """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage.
 
     op=lineage walks the supersession chain for `memory_id` and returns
@@ -1831,7 +1842,7 @@ async def caura_manage(
 
 async def caura_entity_get(
     entity_id: Annotated[str, Field(description="The UUID of the entity to look up.")],
-) -> str:
+) -> ToolReply:
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -1874,7 +1885,7 @@ async def caura_tune(
     recall_decay_window_days: Annotated[int | None, Field(description="7-365.")] = None,
     graph_max_hops: Annotated[int | None, Field(description="0-3.")] = None,
     similarity_blend: Annotated[float | None, Field(description="0-1.")] = None,
-) -> str:
+) -> ToolReply:
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -2072,7 +2083,7 @@ async def caura_doc(
     ] = None,
     query: Annotated[str | None, Field(description="op=search: natural-language query.")] = None,
     top_k: Annotated[int, Field(description="op=search: max results (1-50).")] = 5,
-) -> str:
+) -> ToolReply:
     """Structured-document CRUD. Op-dispatched. Replaces the 4 prior
     `caura_doc_*` tools."""
     t0 = time.perf_counter()
@@ -2762,7 +2773,7 @@ async def caura_list(
     limit: Annotated[int, Field(description="1-50.")] = 25,
     cursor: Annotated[str | None, Field(description="Pagination cursor.")] = None,
     include_deleted: Annotated[bool, Field(description="Trust-3 only.")] = False,
-) -> str:
+) -> ToolReply:
     """Non-semantic memory enumeration: filter, sort, paginate by metadata.
     scope='agent' (default) requires trust ≥ 1. scope='fleet' reads cross-agent
     within a fleet: the caller's OWN fleet requires trust ≥ 1, a different fleet
@@ -2991,7 +3002,7 @@ async def caura_stats(
             description="When true, also return 'deleted' (soft-deleted count) and 'total_including_deleted'. 'total' and breakdowns stay non-deleted regardless."
         ),
     ] = False,
-) -> str:
+) -> ToolReply:
     """Aggregate counts: total plus breakdowns by type, agent, status.
     scope='agent' (default) requires trust ≥ 1. scope='fleet' aggregates
     cross-agent within a fleet: the caller's OWN fleet requires trust ≥ 1, a
@@ -3113,7 +3124,7 @@ async def caura_insights(
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
-) -> str:
+) -> ToolReply:
     """Analyze the memory store for patterns, contradictions, stale knowledge,
     or unexpected clusters; persist findings as ``insight`` memories.
     Consolidates onto the Karpathy Loop reflection step.
@@ -3286,7 +3297,7 @@ async def caura_evolve(
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
-) -> str:
+) -> ToolReply:
     """Record a real-world outcome against the memories that influenced the
     action: adjust weights, generate preventive rules on failure. Closes the
     Karpathy Loop feedback edge.
@@ -3488,7 +3499,7 @@ async def caura_keystones(
         str | None,
         Field(description="Scope filter; supply to include fleet- and agent-scoped rules."),
     ] = None,
-) -> str:
+) -> ToolReply:
     """Retrieve the scope-merged set of keystone rules for the caller.
 
     Returns ``{"count": N, "truncated": bool, "rules": [...]}`` — the
@@ -3568,7 +3579,7 @@ async def caura_keystones_set(
     author_user_id: Annotated[
         str | None, Field(description="op=set: optional author identity for audit.")
     ] = None,
-) -> str:
+) -> ToolReply:
     """Author or remove a keystone rule.
 
     ``agent_id`` is the TARGET agent the rule binds to — not the
