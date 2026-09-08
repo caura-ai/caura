@@ -51,6 +51,20 @@ Rules:
   statement about a different subject, and the update would never supersede the
   value it replaces. Exactly one entity carries role=subject unless the content
   genuinely asserts facts about two independent subjects.
+- KEEP a bracketed qualifier the content attaches to a name. "Acme (Delaware)"
+  and "Acme (Ohio)" are two different organizations, so they are "acme
+  (delaware)" and "acme (ohio)" — never a bare "acme". Dropping the qualifier
+  collapses them into one entity, and every later statement about either is then
+  attributed to both. Each example below is a COMPLETE entity: the qualifier
+  rule changes the name, it never lets you omit entity_type or role.
+    "Acme (Delaware) filed in March."
+      {{"canonical_name": "acme (delaware)", "entity_type": "organization", "role": "subject"}}
+    "Acme (Ohio) filed in June."
+      {{"canonical_name": "acme (ohio)", "entity_type": "organization", "role": "subject"}}
+  Only qualifiers the CONTENT brackets. Do not invent one, and do not fold in
+  surrounding context that merely happens to be nearby — "Priya at AcmeCorp" is
+  still "priya", because the next mention of her may not carry the company and
+  the two must still resolve to one person.
 - relation_type: short verb phrase like works_on, uses, belongs_to, created_by, depends_on, manages, located_in
 - Extract every distinct named subject. Include identifiers (PR-2025-A, build-734), product codes (Vermillion-7), model names (gpt-5.4-nano), and version strings as entity_type=identifier or entity_type=artifact when they refer to a specific named thing.
 - Job titles (ceo, engineer, manager, director, officer) classify as entity_type=role — NOT person. Use entity_type=person only when a named individual is referenced (e.g., "Anna Bergstrom"). "the CEO" alone is a role; "Anna, the CEO" is one person entity plus one role entity.
