@@ -29,12 +29,14 @@ identity for them and neither can demonstrate a mismatch. A test that reaches
 for a real family to show the silent-failure state this file exists to pin would
 therefore go VACUOUS on those two, which is why such tests use ``PRE_CONTRACT``.
 
-``org`` flipped 2026-09-08 and is NOT yet contracted, so it is currently the one
-real family for which ``publish_name`` and ``subscribe_names(dual=False)``
-disagree. That makes a default-constructed (``dual=False``) Pub/Sub bus illegal
-again until ``org`` contracts — the same window memory passed through between
-2026-09-01 and 2026-09-05. ``PRE_CONTRACT`` stays regardless: it must not depend
-on a real family happening to be mid-cutover.
+``org`` flipped AND contracted 2026-09-08, so it joins them: every real flipped
+family now carries the current name, and a default-constructed (``dual=False``)
+Pub/Sub bus is legal again. The window where it was not — between the flip and
+the contract — is the same one memory passed through between 2026-09-01 and
+2026-09-05, and it is why ``PRE_CONTRACT`` exists at all: with no real family
+mid-cutover, a test that reached for one to demonstrate the mismatch would assert
+nothing. ``PRE_CONTRACT`` stays regardless: it must not depend on a real family
+happening to be mid-cutover.
 
 Tests about *the flag's parse rule* still take the ``nothing_flipped`` fixture so
 their precondition cannot depend on cutover state.
@@ -219,17 +221,18 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     progress.
 
     ``org`` joined on 2026-09-08 — the third SHARED family, mirrored into
-    caura-enterprise in the same cycle. It is flipped but NOT yet contracted, so
-    it is the family that currently makes ``unbound_publish_topics(dual=False)``
-    non-empty; see the module docstring.
+    caura-enterprise in the same cycle — and was contracted the same day. Its
+    publisher flip was confirmed by DELIVERY rather than configuration: the first
+    post-promote production publish landed on
+    ``prod--caura.org.suppression-changed``, with zero on the legacy name.
 
     ``memory`` joined on 2026-09-01 — the second SHARED family, mirrored into
     caura-enterprise in the same cycle. Its absent ``.created`` declaration had
     already been removed. The live re-measurement found 12/12 running Pub/Sub
     deployables dual-subscribing and 16/16 active durable twins attached to the
-    matching twin topics (8 per environment), with no ephemerals. Its enum
-    members remain on the legacy names because contraction is the next step,
-    not part of this flip.
+    matching twin topics (8 per environment), with no ephemerals. It was
+    contracted on 2026-09-05 by #1307, four days after the flip — the window in
+    which ``dual=False`` was illegal fleet-wide.
     """
     assert topics_mod.FLIPPED_FAMILIES == FLIPPED
     assert "audit" not in topics_mod.FLIPPED_FAMILIES
@@ -660,6 +663,31 @@ def test_the_guard_does_not_fire_once_lifecycle_is_fully_contracted(
     monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"lifecycle"}))
     assert topics_mod.unbound_publish_topics(dual=False) == ()
     PubSubEventBus(project_id="proj", subscription_prefix="test")
+
+
+def test_every_flipped_family_is_contracted_so_the_default_bus_is_legal() -> None:
+    """The REAL set, unmonkeypatched: no flipped family may sit uncontracted.
+
+    Every other assertion about the construction guard in this file isolates a
+    single family with ``monkeypatch``, which answers "does the guard work?" but
+    not "is the fleet currently in the state the guard permits?". Those are
+    different questions, and only the second one catches a flip that shipped
+    without its contraction.
+
+    That gap is not hypothetical. ``memory`` sat flipped-but-uncontracted from
+    2026-09-01 to 2026-09-05 and ``org`` did the same on 2026-09-08. In both
+    windows ``dual_subscribe=False`` -- the DEFAULT -- raised on construction for
+    every standalone and on-prem process, because the guard is fleet-wide by
+    design rather than scoped to the family that moved. No test failed either
+    time; the breakage was found by reading the module.
+
+    Deliberately no monkeypatch: the value under test is the shipped one.
+    """
+    unbound = topics_mod.unbound_publish_topics(dual=False)
+    assert unbound == (), (
+        "a flipped family is not contracted, so a default-constructed "
+        f"PubSubEventBus raises fleet-wide: {sorted(unbound)}"
+    )
 
 
 def test_inprocess_bus_can_never_reach_the_guarded_state(

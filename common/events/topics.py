@@ -41,14 +41,14 @@ class Org(enum.StrEnum):
     # so the OSS boundary guard (core-api) can reject reads/writes for
     # affected tenants synchronously, even while the durable mirror
     # eventually catches up.
-    SUPPRESSION_CHANGED = "memclaw.org.suppression-changed"
+    SUPPRESSION_CHANGED = "caura.org.suppression-changed"
     # CAURA-571: core-api publishes this after an org's settings are written so
     # every process drops its per-process settings cache promptly — without it,
     # a tightened governance control keeps applying its looser prior value on
     # sibling workers for up to the cache TTL (5 min). Subscribe with
     # ``broadcast=True`` (every process must receive it), not the work-queue
     # default.
-    SETTINGS_CHANGED = "memclaw.org.settings-changed"
+    SETTINGS_CHANGED = "caura.org.settings-changed"
 
 
 class Lifecycle(enum.StrEnum):
@@ -236,6 +236,24 @@ def family(topic: str) -> str:
 # behind the 47 subscriptions on the legacy prod topic, two per instance.
 # Bounded and reaping. Recorded as measured, not as an investigation
 # closed: that pool is still the reason the OLD topic cannot be deleted here.
+#
+# ``org`` CONTRACTED 2026-09-08, the same day it flipped, and the short gap was
+# not tidiness. Contraction is what repairs ``dual_subscribe=False``, which is
+# the DEFAULT: between the flip and this edit ``unbound_publish_topics(dual=False)``
+# reported both org topics, so every standalone and on-prem process constructing
+# a ``PubSubEventBus`` at the default RAISED on construction. ``memory`` sat in
+# that same state for four days (2026-09-01 to 2026-09-05, contracted by #1307);
+# this family did not have to. The guard is fleet-wide by design, so the blast
+# radius of a flip-without-contract is every deployable that never runs the
+# Terraform the flag is gated on -- not merely the family that moved.
+#
+# Contracting BEFORE the legacy topics are drained is safe and is the documented
+# order: publishers already emit only the twin (confirmed by delivery, not by
+# configuration -- first post-promote prod publish landed on
+# ``prod--caura.org.suppression-changed`` at 06:23:13Z), so nothing new arrives
+# on the legacy name. What contraction changes is that subscribers stop BINDING
+# it, which is the precondition for draining it, not a substitute for having
+# drained it. The legacy topics stay until the drain gate passes.
 #
 # ``pipeline`` must NOT enter this set while it has zero live topics in either
 # environment: publishing to a topic that does not exist is silent loss, so
