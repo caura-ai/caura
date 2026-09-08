@@ -87,7 +87,23 @@ Content:
 class ExtractedEntity(BaseModel):
     canonical_name: str
     entity_type: str
-    role: str
+    # Defaulted, not required, for the reason ``Mention.cluster_id`` is nullable
+    # (prod, 2026-08-16, #788): nothing enforces the schema ``_do_extract``
+    # sends, so ONE field the model declines to emit used to discard the entity
+    # carrying it. When the model omits ``role`` on EVERY entity the loss is
+    # total, ``_do_extract`` raises, and the chain falls through to
+    # ``_fake_extract`` — which throws away the model's canonical names and
+    # types and substitutes bare regex bigrams typed ``unknown``. Measured:
+    # a draft of the A68 prompt whose examples named a single field taught the
+    # model to stop emitting ``role``, and the resulting regex output was
+    # indistinguishable from the discriminator bug under test.
+    #
+    # "mentioned" is the honest default. It is the same value ``_fake_extract``
+    # already stamps when it cannot classify, and it is the SAFE one: the
+    # subject write-back below only fires on exactly one ``role="subject"``
+    # entity, so defaulting can never invent a subject — it can only decline to
+    # name one, which is what an absent field actually means.
+    role: str = "mentioned"
 
 
 class ExtractedRelation(BaseModel):
@@ -362,10 +378,35 @@ async def extract_entities_from_content(
         or settings.entity_extraction_model
         or None
     )
+
+    def _degraded_extract() -> ExtractedGraph:
+        """``_fake_extract`` plus the one log line that says it happened.
+
+        The chain's own "All LLM providers failed" warning names the service in
+        an interpolated message, so it cannot be filtered or counted per service
+        in log search, and NOTHING downstream can tell a heuristic graph from a
+        model one: the rows are persisted, the names embedded, and the only
+        tell is that every type is ``unknown`` and no entity claims a subject.
+        A silent degrade to regex is therefore invisible in exactly the two
+        places it matters — the dashboard, and anyone measuring extraction.
+        Structured and greppable so it is neither.
+        """
+        logger.error(
+            "entity_extraction_degraded_to_heuristic provider=%s content_len=%d",
+            provider_name,
+            len(content),
+            extra={
+                "event": "entity_extraction_degraded",
+                "provider": str(provider_name),
+                "content_len": len(content),
+            },
+        )
+        return _fake_extract(content)
+
     graph = await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_extract,
-        fake_fn=lambda: _fake_extract(content),
+        fake_fn=_degraded_extract,
         tenant_config=tenant_config,
         service_label="entity-extraction",
         model_override=extraction_model,

@@ -747,6 +747,24 @@ async def process_entity_extraction(
                     memory_id,
                     len(subject_ids),
                 )
+            else:
+                # The silent branch. "Set a subject" and "found two and refused"
+                # both logged; "no entity claimed one" logged nothing, so a row
+                # that will never take part in subject-scoped contradiction
+                # detection looked identical to a row that was never processed
+                # — the same "ran and found nothing" vs "never ran" ambiguity
+                # D3 closed for the contradiction detector.
+                #
+                # Zero subjects is the SIGNATURE of a degraded extraction:
+                # ``_fake_extract`` stamps role="mentioned" on everything it
+                # finds, so a heuristic graph never names a subject. Together
+                # with ``entity_extraction_degraded_to_heuristic`` this makes
+                # the degrade countable from the outside, per memory.
+                logger.info(
+                    "subject_writeback memory=%s outcome=skipped_no_subject n_links=%d",
+                    memory_id,
+                    len(filtered),
+                )
 
         # Upsert relations. Endpoints resolve by raw name first (today's
         # contract), then by ``canonical_match_key`` — the WT-2 dedupe above
