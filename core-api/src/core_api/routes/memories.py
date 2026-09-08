@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from common import permanent_failure
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
-from core_api.agent_ids import DEFAULT_AGENT_ID
+from core_api.agent_ids import DEFAULT_AGENT_ID, AgentIdentity
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
 from core_api.config import settings as app_settings
@@ -519,7 +519,12 @@ async def memory_stats(
         agent_id,
         message=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
     )
-    caller_agent_id = auth.agent_id or agent_id
+    # Was the bare ``auth.agent_id or agent_id``. That is exactly the
+    # expression ``effective_agent_id`` exists to name (see its docstring:
+    # the bare form is indistinguishable from an audit-attribution line of
+    # the same shape), and this is the authorization identity — it gates
+    # ``enforce_fleet_read`` below. Same value, via the audited helper.
+    caller_agent_id = auth.effective_agent_id(agent_id)
     effective_agent_id = agent_id
     if scope is not None:
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
@@ -1799,7 +1804,7 @@ async def update_memory_endpoint(
     )
 
 
-def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[str | None, bool]:
+def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[AgentIdentity | None, bool]:
     """Resolve the identity a search-shaped read runs as, refusing a spoof.
 
     Returns ``(eff_agent_id, identity_asserted)``.
@@ -1840,7 +1845,10 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[str 
     # callers are untouched. The filter itself is passed separately at the
     # callsite and is unchanged — it was already a distinct parameter all the way
     # down to the storage predicate; only the identity was derived from it.
-    eff_agent_id = auth.agent_id or body.caller_agent_id or body.filter_agent_id
+    asserted = body.caller_agent_id or body.filter_agent_id
+    # ``is not None`` keeps this an exact passthrough of the original
+    # ``auth.agent_id or body.caller_agent_id or body.filter_agent_id``.
+    eff_agent_id = auth.agent_id or (AgentIdentity(asserted) if asserted is not None else None)
     # True when the identity was ASSERTED by a tenant-scoped caller rather than
     # authenticated. Gates the recall_count bump — see the note at the callsite.
     identity_asserted = bool(not auth.agent_id and body.caller_agent_id)

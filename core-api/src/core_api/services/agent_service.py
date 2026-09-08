@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from core_api.agent_ids import AgentIdentity
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_TRUST_LEVEL
 from core_api.services.audit_service import log_action
@@ -143,7 +144,7 @@ def _owned_by_other_install(owner_install_uuid: str | None, install_uuid: str | 
     return owner_install_uuid is not None and owner_install_uuid != install_uuid
 
 
-async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id: str) -> str:
+async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id: str) -> AgentIdentity:
     """Lenient ownership gate over a broker write's chosen agent id.
 
     A broker write may be attributed to an agent named by the caller (REST item
@@ -178,10 +179,10 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
             chosen,
             tenant_id,
         )
-        return chosen
+        return AgentIdentity(chosen)
     fallback = broker_label(install_uuid)
     if chosen == fallback:
-        return chosen
+        return AgentIdentity(chosen)
     # The ``broker:<install>`` namespace is RESERVED — an install may only ever
     # write as its OWN bare-install identity. A chosen id in that namespace that
     # isn't this install's own fallback (handled above) is *another* install's
@@ -190,13 +191,13 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
     # attacker could first-touch ``broker:<victim>`` (stamping itself as owner)
     # and thereby capture the victim's later degraded writes.
     if chosen.startswith(_BROKER_LABEL_PREFIX):
-        return fallback
+        return AgentIdentity(fallback)
     owner = await lookup_agent(tenant_id, chosen)
     if owner is None:
-        return chosen
+        return AgentIdentity(chosen)
     if _owned_by_other_install(owner.get("owner_install_uuid"), install_uuid):
-        return fallback
-    return chosen
+        return AgentIdentity(fallback)
+    return AgentIdentity(chosen)
 
 
 async def resolve_write_agent(
@@ -207,7 +208,7 @@ async def resolve_write_agent(
     is_install_credential: bool,
     install_uuid: str | None,
     require_approval: bool = False,
-) -> tuple[dict, str]:
+) -> tuple[dict, AgentIdentity]:
     """Resolve the agent a write is attributed to, enforcing the broker
     ownership boundary, and return ``(agent_row, safe_agent_id)``.
 
@@ -254,7 +255,7 @@ async def resolve_write_agent(
             require_approval=require_approval,
             owner_install_uuid=install_uuid,
         )
-    return agent, chosen_agent_id
+    return agent, AgentIdentity(chosen_agent_id)
 
 
 async def enforce_fleet_write(
@@ -281,7 +282,7 @@ async def enforce_fleet_write(
 
 async def enforce_fleet_read(
     tenant_id: str,
-    agent_id: str,
+    agent_id: AgentIdentity,
     fleet_id: str | None,
 ) -> None:
     """Enforce read permissions for search/list (read-only — never creates agents)."""
@@ -290,7 +291,7 @@ async def enforce_fleet_read(
 
 async def enforce_fleet_read_many(
     tenant_id: str,
-    agent_id: str,
+    agent_id: AgentIdentity,
     fleet_ids: Sequence[str | None],
 ) -> None:
     """Enforce read permissions for EVERY requested fleet.
@@ -421,9 +422,12 @@ async def resolve_read_fleet_gate(
 
 async def authorize_memory_access(
     tenant_id: str,
-    caller_agent_id: str | None,
+    caller_agent_id: AgentIdentity | None,
     *,
     visibility: str | None,
+    # Stays ``str``: this is the row's stored owner, i.e. data. Typing it
+    # ``AgentIdentity`` would let a caller identity and a stored value be used
+    # interchangeably, which is what the type exists to prevent.
     owner_agent_id: str | None,
     fleet_id: str | None,
     write: bool = False,
@@ -477,7 +481,7 @@ async def authorize_memory_access(
 
 def memory_access_allowed_for_agent(
     agent: dict | None,
-    caller_agent_id: str,
+    caller_agent_id: AgentIdentity,
     *,
     visibility: str | None,
     owner_agent_id: str | None,
@@ -507,7 +511,7 @@ def memory_access_allowed_for_agent(
 
 async def enforce_memory_read(
     tenant_id: str,
-    caller_agent_id: str | None,
+    caller_agent_id: AgentIdentity | None,
     memory: Any,
 ) -> None:
     """Raise 404 if ``caller_agent_id`` may not read ``memory`` (an ORM row).
@@ -529,7 +533,7 @@ async def enforce_memory_read(
 
 async def enforce_delete(
     tenant_id: str,
-    agent_id: str,
+    agent_id: AgentIdentity,
 ) -> None:
     """Enforce delete permissions for an AGENT credential.
 

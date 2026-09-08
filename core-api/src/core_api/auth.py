@@ -6,6 +6,7 @@ from fastapi import HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
 from core_api import errors
+from core_api.agent_ids import AgentIdentity
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
@@ -54,7 +55,7 @@ class AuthContext:
         user_id: str | None = None,
         org_id: str | None = None,
         org_role: str | None = None,
-        agent_id: str | None = None,
+        agent_id: AgentIdentity | None = None,
         is_read_only: bool = False,
         is_install_credential: bool = False,
         install_uuid: str | None = None,
@@ -313,7 +314,7 @@ class AuthContext:
                 ),
             )
 
-    def effective_agent_id(self, requested_agent_id: str | None) -> str | None:
+    def effective_agent_id(self, requested_agent_id: str | None) -> AgentIdentity | None:
         """The agent this request ACTS AS: the authenticated identity, or the
         caller's assertion only when the credential authenticates none.
 
@@ -341,7 +342,12 @@ class AuthContext:
         ``test_the_audit_attribution_is_not_bound_by_the_helper``, so this
         paragraph is a rule rather than a request.
         """
-        return self.agent_id or requested_agent_id
+        resolved = self.agent_id or requested_agent_id
+        # ``is not None``, not truthiness: an explicit ``""`` assertion is
+        # PRESERVED here (pinned by test_auth_context.py), because
+        # ``enforce_self_agent`` treats it as an assertion and refuses it.
+        # Collapsing it to None would read as "no assertion" instead.
+        return AgentIdentity(resolved) if resolved is not None else None
 
     def enforce_tenant(self, requested_tenant: str | None) -> None:
         """Raise if the caller may not write to ``requested_tenant``.
@@ -522,8 +528,15 @@ async def get_auth_context(
 ) -> AuthContext:
     admin_key = get_admin_key()
     # Enterprise gateway injects X-Agent-ID when the caller's credential
-    # is agent-scoped (kind=agent_key).
-    agent_id = request.headers.get("x-agent-id") or None
+    # is agent-scoped (kind=agent_key). Constructed here rather than left a bare
+    # string because this header IS the REST plane's authentication boundary —
+    # the twin of ``mcp_server``'s ``_agent_id_var`` — and every ``AuthContext``
+    # built below carries this one value. This module is still on the mypy
+    # ``ignore_errors`` list, so nothing here would have forced the step; making
+    # it explicit is what keeps the boundary visible (and recorded in
+    # ``tests/test_agent_identity_construction.py``) until the exemption goes.
+    _agent_header = request.headers.get("x-agent-id") or None
+    agent_id = AgentIdentity(_agent_header) if _agent_header else None
     # Enterprise gateway injects X-Org-Read-Only: true when the org has
     # exceeded plan limits after a subscription cancellation. In standalone
     # and OSS-direct paths the header is absent, so enforcement is a no-op.

@@ -27,7 +27,12 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from common import duplicate_memory
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
-from core_api.agent_ids import DEFAULT_AGENT_ID, effective_write_agent_id
+from core_api.agent_ids import (
+    DEFAULT_AGENT_ID,
+    AgentIdentity,
+    effective_read_agent_id,
+    effective_write_agent_id,
+)
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
@@ -114,7 +119,12 @@ logger = logging.getLogger(__name__)
 # ── Auth via context vars ──
 
 _tenant_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("mcp_tenant_id")
-_agent_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_agent_id", default=None)
+# Holds the gateway-verified ``X-Agent-ID``, so this ContextVar is the MCP
+# plane's twin of ``AuthContext.agent_id`` and its single construction point
+# for ``AgentIdentity``.
+_agent_id_var: contextvars.ContextVar[AgentIdentity | None] = contextvars.ContextVar(
+    "mcp_agent_id", default=None
+)
 # True iff X-Tenant-ID arrived as a request header (gateway-routed). On that
 # path the gateway is the source of truth for identity; falling back to the
 # literal "mcp-agent" tool-param default would silently attribute every write
@@ -388,7 +398,7 @@ class MCPAuthMiddleware:
             # and the delete trust gate. Use the value the resolution above
             # decided; only Path 4 sets it True.
             agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
-            _agent_id_var.set(agent_header or None)
+            _agent_id_var.set(AgentIdentity(agent_header) if agent_header else None)
 
             readable_header = headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
             if readable_header:
@@ -447,7 +457,7 @@ def _get_tenant() -> str:
     return _tenant_id_var.get(_UNAUTH)
 
 
-def _get_agent_id() -> str | None:
+def _get_agent_id() -> AgentIdentity | None:
     """Return the verified agent_id from X-Agent-ID header, or None."""
     return _agent_id_var.get(None)
 
@@ -988,7 +998,10 @@ async def caura_recall(
             t0,
         )
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id  # prefer gateway-verified identity
+    # Gateway-verified identity wins. Routed through the shared resolver
+    # rather than inline because this one reaches ``enforce_fleet_read_many``
+    # below, so it must be an ``AgentIdentity`` and not a bare string.
+    agent_id = effective_read_agent_id(_get_agent_id(), agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     capped_top_k = min(top_k, MAX_SEARCH_TOP_K)
