@@ -532,3 +532,24 @@ class HealthResponse(BaseModel):
         default=None,
         description="Only on 503: names of failing dependencies.",
     )
+
+
+class ConflictOut(BaseModel):
+    """D11 — a detected conflict with its human-review state."""
+
+    id: str
+    tenant_id: str
+    new_memory_id: str
+    old_memory_id: str
+    relationship: str
+    diagnosis: str | None = None
+    action: str | None = Field(default=None, description="What the detector proposed.")
+    review_status: str = Field(description="pending | resolved | dismissed")
+    resolution_action: str | None = Field(default=None, description="What the reviewer chose.")
+    resolution_note: str | None = None
+    resolved_by: str | None = None
+    resolved_at: str | None = None
+
+
+class ConflictListResponse(BaseModel):
+    items: list[ConflictOut]

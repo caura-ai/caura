@@ -2008,6 +2008,95 @@ class PostgresService:
             await session.flush()
             return row
 
+    async def memory_conflicts_list(
+        self,
+        tenant_id: str,
+        review_status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryConflict]:
+        """D11 — the review queue for one tenant.
+
+        Tenant scoping is not a filter here, it is the boundary: a conflict row
+        names two memory ids and their contents are reachable from it, so an
+        unscoped read would hand one tenant another's memories. Ordered oldest
+        first — a review queue is worked front to back, and newest-first would
+        leave the oldest unreviewed rows permanently at the bottom.
+        """
+        from common.models.memory_conflict import REVIEW_STATUSES
+
+        if review_status is not None and review_status not in REVIEW_STATUSES:
+            raise ValueError(f"review_status {review_status!r} must be one of {REVIEW_STATUSES}")
+        async with get_session() as session:
+            stmt = select(MemoryConflict).where(MemoryConflict.tenant_id == tenant_id)
+            if review_status:
+                stmt = stmt.where(MemoryConflict.review_status == review_status)
+            stmt = (
+                stmt.order_by(MemoryConflict.created_at.asc())
+                .limit(max(1, min(limit, 200)))
+                .offset(max(0, offset))
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
+    async def memory_conflict_get(self, conflict_id: UUID, tenant_id: str) -> MemoryConflict | None:
+        """One conflict row, scoped to its tenant. ``None`` when absent OR owned
+        by another tenant — the caller cannot distinguish the two, which is the
+        point: a bare 404 leaks nothing about what exists elsewhere."""
+        async with get_session() as session:
+            stmt = select(MemoryConflict).where(
+                MemoryConflict.id == conflict_id,
+                MemoryConflict.tenant_id == tenant_id,
+            )
+            return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def memory_conflict_resolve(
+        self,
+        conflict_id: UUID,
+        tenant_id: str,
+        review_status: str,
+        resolution_action: str | None = None,
+        resolution_note: str | None = None,
+        resolved_by: str | None = None,
+    ) -> bool:
+        """D11 — record a reviewer's decision. Returns True iff a row moved.
+
+        CAS on ``review_status = 'pending'``. Two reviewers opening the same
+        queue is the normal case, not the edge case: without the compare the
+        second write silently overwrites the first's decision and the audit trail
+        records only the loser's disappearance. The False return is what lets the
+        route answer 409 instead of pretending it worked.
+        """
+        from common.models.memory_conflict import ACTIONS, REVIEW_STATUSES
+
+        if review_status not in REVIEW_STATUSES or review_status == "pending":
+            raise ValueError(
+                f"review_status {review_status!r} must be a terminal state "
+                f"({[s for s in REVIEW_STATUSES if s != 'pending']})"
+            )
+        if resolution_action is not None and resolution_action not in ACTIONS:
+            raise ValueError(f"resolution_action {resolution_action!r} must be one of {ACTIONS}")
+        async with get_session() as session:
+            stmt = (
+                sql_update(MemoryConflict)
+                .where(
+                    MemoryConflict.id == conflict_id,
+                    MemoryConflict.tenant_id == tenant_id,
+                    MemoryConflict.review_status == "pending",
+                )
+                .values(
+                    review_status=review_status,
+                    resolution_action=resolution_action,
+                    resolution_note=resolution_note,
+                    resolved_by=resolved_by,
+                    resolved_at=func.now(),
+                )
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            # ``rowcount`` lives on CursorResult; the async ``execute`` is typed
+            # as Result. Same ignore the sibling CAS updates in this file use.
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+
     async def memory_conflict_record(self, payload: dict) -> MemoryConflict:
         """Insert an A55 ``memory_conflicts`` classification record.
 

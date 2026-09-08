@@ -264,6 +264,12 @@ NON_ADMIN_PLANE_ROUTERS: dict[str, str] = {
     # close a hole. Named explicitly because an earlier draft omitted it from
     # both sets and nothing failed.
     "keystones": "trust-plane: agents author their own rules, gated by require_trust",
+    # Reviewing is privileged INSIDE a tenant, not super-admin-only: enforce_admin
+    # would put it out of reach of the people who run the tenant. But plain tenant
+    # scope would let any agent dismiss the contradictions it caused, and a
+    # dismissal is the only record that detection was wrong — so the resolve route
+    # gates on require_trust(min_level=2), the keystone-author bar.
+    "conflicts": "trust-plane: human review of detector output, gated by require_trust",
 }
 
 # Routers that exist ONLY under an explicit env flag, and so are not part of

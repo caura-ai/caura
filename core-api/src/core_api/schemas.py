@@ -619,6 +619,63 @@ class SearchDiagnostic(BaseModel):
     all_candidates: list[dict] = []
 
 
+class ConflictOut(BaseModel):
+    """D11 — a detected conflict plus its human-review state.
+
+    The detector's own fields (``relationship`` / ``diagnosis`` / ``action``)
+    and the reviewer's (``resolution_action`` / ``resolution_note``) are kept
+    side by side on purpose: comparing them IS the precision measurement, and
+    collapsing them into one field would destroy the only record of the
+    detector being wrong.
+    """
+
+    id: UUID
+    tenant_id: str
+    fleet_id: str | None = None
+    new_memory_id: UUID
+    old_memory_id: UUID
+    relationship: str
+    relationship_confidence: float | None = None
+    diagnosis: str | None = None
+    diagnosis_confidence: float | None = None
+    evidence_strength: str | None = None
+    action: str | None = Field(default=None, description="What the DETECTOR proposed.")
+    audit_reason: str | None = None
+    created_by: str | None = None
+    created_at: datetime | None = None
+    review_status: str = Field(description="pending | resolved | dismissed")
+    resolution_action: str | None = Field(
+        default=None, description="What the REVIEWER chose, from the same vocabulary as `action`."
+    )
+    resolution_note: str | None = None
+    resolved_by: str | None = None
+    resolved_at: datetime | None = None
+
+
+class ConflictListResponse(BaseModel):
+    """Envelope for the review queue — ``items`` per the ratified wire contract."""
+
+    items: list[ConflictOut]
+
+
+class ConflictResolveRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
+    tenant_id: str
+    review_status: Literal["resolved", "dismissed"] = Field(
+        description=(
+            "Terminal state only. 'pending' is rejected: this endpoint records a "
+            "decision, and re-opening a reviewed conflict would erase the audit trail "
+            "of who decided what."
+        )
+    )
+    resolution_action: str | None = Field(
+        default=None,
+        description="Optional; the action the reviewer chose. Validated against the shared vocabulary.",
+    )
+    resolution_note: str | None = Field(default=None, max_length=2000)
+
+
 class SearchWarning(BaseModel):
     """A28 — a coded, non-fatal caveat about the result set.
 

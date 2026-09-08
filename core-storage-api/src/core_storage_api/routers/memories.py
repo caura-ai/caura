@@ -1169,6 +1169,12 @@ _MEMORY_CONFLICT_FIELDS = [
     "created_by",
     "created_at",
     "metadata_",
+    # D11 — human review state.
+    "review_status",
+    "resolution_action",
+    "resolution_note",
+    "resolved_by",
+    "resolved_at",
 ]
 
 
@@ -1206,6 +1212,72 @@ async def record_memory_conflict(request: Request) -> dict:
         row = await _svc.memory_conflict_record(body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
+
+
+@router.get("/memory-conflicts")
+async def list_memory_conflicts(
+    tenant_id: str,
+    review_status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """D11 — the review queue. Tenant-scoped; see the service docstring for why
+    that is a boundary rather than a filter."""
+    try:
+        rows = await _svc.memory_conflicts_list(
+            tenant_id=tenant_id, review_status=review_status, limit=limit, offset=offset
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return [orm_to_dict(r, _MEMORY_CONFLICT_FIELDS) for r in rows]
+
+
+@router.get("/memory-conflicts/{conflict_id}")
+async def get_memory_conflict(conflict_id: str, tenant_id: str) -> dict:
+    try:
+        row = await _svc.memory_conflict_get(UUID(conflict_id), tenant_id)
+    except (ValueError, TypeError):
+        row = None
+    if row is None:
+        # Same 404 for "no such conflict" and "not your conflict" — the route
+        # must not answer "does this id exist?" for another tenant.
+        raise HTTPException(status_code=404, detail="Conflict not found")
+    return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
+
+
+@router.patch("/memory-conflicts/{conflict_id}/resolve")
+async def resolve_memory_conflict(conflict_id: str, request: Request) -> dict:
+    """D11 — record a reviewer's decision.
+
+    409 when the row is no longer pending. Two reviewers working the same queue
+    is the ordinary case, and the CAS in the service is what stops the second
+    write silently overwriting the first's decision.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    try:
+        moved = await _svc.memory_conflict_resolve(
+            conflict_id=UUID(str(conflict_id)),
+            tenant_id=tenant_id,
+            review_status=_require(body, "review_status"),
+            resolution_action=body.get("resolution_action"),
+            resolution_note=body.get("resolution_note"),
+            resolved_by=body.get("resolved_by"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not moved:
+        # Distinguish "gone/not yours" from "already reviewed" so the caller can
+        # tell a stale queue entry from a permissions problem.
+        existing = await _svc.memory_conflict_get(UUID(str(conflict_id)), tenant_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Conflict not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Conflict already reviewed (review_status={existing.review_status})",
+        )
+    row = await _svc.memory_conflict_get(UUID(str(conflict_id)), tenant_id)
     return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
 
 

@@ -48,6 +48,7 @@ from core_api.middleware.request_timeout import (
 )
 from core_api.routes.agents import router as agents_router
 from core_api.routes.audit import router as audit_router
+from core_api.routes.conflicts import router as conflicts_router
 from core_api.routes.crystallizer import router as crystallizer_router
 from core_api.routes.documents import router as documents_router
 from core_api.routes.entities import router as entities_router
@@ -1056,6 +1057,7 @@ app.include_router(stm_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(interview_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
+app.include_router(conflicts_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
 
