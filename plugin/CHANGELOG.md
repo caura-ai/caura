@@ -4,6 +4,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.20.3](https://github.com/caura-ai/caura/compare/plugin-v2.20.2...plugin-v2.20.3) (2026-09-08)
+
+
+### Bug Fixes
+
+* **plugin:** make a missing op branch a build error, and pin every op's route ([#1379](https://github.com/caura-ai/caura/issues/1379)) ([fbf68d0](https://github.com/caura-ai/caura/commit/fbf68d0dfdba7bc3337b04f0c25e012ddf55d3b6))
+* **plugin:** stop an unrecognised op falling through to a write ([#1376](https://github.com/caura-ai/caura/issues/1376)) ([23a9895](https://github.com/caura-ai/caura/commit/23a98953b71575c4744c1991c09ee03975c594f1))
+
+
+### Performance
+
+* **tools:** stop buying five op roll-calls twice in tools/list ([#1381](https://github.com/caura-ai/caura/issues/1381)) ([05f39e8](https://github.com/caura-ai/caura/commit/05f39e8a4d2812b7ea00ac1ac1b6089187d4187f))
+
 ## [2.20.2](https://github.com/caura-ai/caura/compare/plugin-v2.20.1...plugin-v2.20.2) (2026-09-08)
 
 

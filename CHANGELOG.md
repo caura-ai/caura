@@ -10,6 +10,28 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.2.0](https://github.com/caura-ai/caura/compare/backend-v3.1.1...backend-v3.2.0) (2026-09-08)
+
+
+### Features
+
+* **clients:** claim the unscoped npm aliases for the client ([#1386](https://github.com/caura-ai/caura/issues/1386)) ([b2eb816](https://github.com/caura-ai/caura/commit/b2eb8164a1134ae49f23ff35501bd95c11845445))
+* **conflicts:** human review of detected conflicts — backend (D11) ([#1389](https://github.com/caura-ai/caura/issues/1389)) ([c598a39](https://github.com/caura-ai/caura/commit/c598a3945d3e45c88fe633a01c996dd83b6fe754))
+* **scripts:** add ref-only legacy-name census ([#1382](https://github.com/caura-ai/caura/issues/1382)) ([8b634a9](https://github.com/caura-ai/caura/commit/8b634a96cd00ca3dfcb7fbe749d3861917de4e9d))
+
+
+### Bug Fixes
+
+* **mcp:** annotate the return type the handlers have actually had since [#147](https://github.com/caura-ai/caura/issues/147) ([#1383](https://github.com/caura-ai/caura/issues/1383)) ([244050d](https://github.com/caura-ai/caura/commit/244050d507bbc761e21d58426b5e03bb4e85b66e))
+* **mcp:** type-check mcp_server and drop it from the ignore_errors list ([#1384](https://github.com/caura-ai/caura/issues/1384)) ([822f73d](https://github.com/caura-ai/caura/commit/822f73dccb9d9eec5910a0d2f16735b5f6ef27a6))
+* **plugin:** make a missing op branch a build error, and pin every op's route ([#1379](https://github.com/caura-ai/caura/issues/1379)) ([fbf68d0](https://github.com/caura-ai/caura/commit/fbf68d0dfdba7bc3337b04f0c25e012ddf55d3b6))
+* **plugin:** stop an unrecognised op falling through to a write ([#1376](https://github.com/caura-ai/caura/issues/1376)) ([23a9895](https://github.com/caura-ai/caura/commit/23a98953b71575c4744c1991c09ee03975c594f1))
+
+
+### Performance
+
+* **tools:** stop buying five op roll-calls twice in tools/list ([#1381](https://github.com/caura-ai/caura/issues/1381)) ([05f39e8](https://github.com/caura-ai/caura/commit/05f39e8a4d2812b7ea00ac1ac1b6089187d4187f))
+
 ## [3.1.1](https://github.com/caura-ai/caura/compare/backend-v3.1.0...backend-v3.1.1) (2026-09-08)
 
 
