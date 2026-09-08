@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.3.1](https://github.com/caura-ai/caura/compare/backend-v3.3.0...backend-v3.3.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **extraction:** make a degraded extraction visible, and stop one absent field causing it (A69) ([#1397](https://github.com/caura-ai/caura/issues/1397)) ([2903c07](https://github.com/caura-ai/caura/commit/2903c07d00fd73d080e1b016288de120a22430cf))
+
+
+### Code Refactoring
+
+* **routes:** pass the write identity down instead of re-reading a nullable field ([#1396](https://github.com/caura-ai/caura/issues/1396)) ([a776c6d](https://github.com/caura-ai/caura/commit/a776c6d8f300ae8fee246df10466158fd3e94d86))
+
 ## [3.3.0](https://github.com/caura-ai/caura/compare/backend-v3.2.1...backend-v3.3.0) (2026-09-08)
 
 
