@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.1.1](https://github.com/caura-ai/caura/compare/backend-v3.1.0...backend-v3.1.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **tools:** declare the two caura_manage ops the manifest already advertised ([#1373](https://github.com/caura-ai/caura/issues/1373)) ([c14b812](https://github.com/caura-ai/caura/commit/c14b81267961e4af70d12d783f641ba4e4bc2323))
+
 ## [3.1.0](https://github.com/caura-ai/caura/compare/backend-v3.0.4...backend-v3.1.0) (2026-09-08)
 
 
