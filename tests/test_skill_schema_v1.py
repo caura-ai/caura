@@ -1084,7 +1084,7 @@ class TestMigrationChain:
         """
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"042"}, f"Expected single head '042', got {sorted(heads)}"
+        assert heads == {"043"}, f"Expected single head '043', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -1134,6 +1134,10 @@ class TestMigrationChain:
         # 042: tenant_usage_counters.count >= 0 — a negative counter reads as
         # under-limit and disables plan enforcement for the tenant
         assert chain.get("042") == "041", "042 must follow 041"
+        # 043: human review state on memory_conflicts — the detector records what
+        # it concluded, nothing recorded what a person concluded, so precision was
+        # unmeasurable (D11).
+        assert chain.get("043") == "042", "043 must follow 042"
 
     def test_no_plain_set_not_null_on_large_tables(self):
         """Tightening a column to NOT NULL on a large table must not full-scan

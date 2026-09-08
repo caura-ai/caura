@@ -974,6 +974,28 @@ class CoreStorageClient:
             idempotent=True,
         )
 
+    async def list_memory_conflicts(
+        self,
+        tenant_id: str,
+        review_status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict]:
+        """D11 — the conflict review queue for a tenant."""
+        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
+        if review_status is not None:
+            params["review_status"] = review_status
+        return await self._get_list("/memories/memory-conflicts", **params)
+
+    async def get_memory_conflict(self, conflict_id: str, tenant_id: str) -> dict | None:
+        """One conflict row. ``None`` when absent or owned by another tenant."""
+        return await self._get(f"/memories/memory-conflicts/{conflict_id}", tenant_id=tenant_id, read=True)
+
+    async def resolve_memory_conflict(self, conflict_id: str, data: dict) -> dict:
+        """D11 — record a reviewer's decision. Raises on 409 (already reviewed),
+        which the route above turns into the caller's 409."""
+        return await self._patch(f"/memories/memory-conflicts/{conflict_id}/resolve", data)
+
     async def find_successors(self, data: dict) -> list[dict]:
         return await self._post("/memories/find-successors", data, read=True)  # type: ignore[return-value]
 
