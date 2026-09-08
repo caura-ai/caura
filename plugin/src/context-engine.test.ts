@@ -19,7 +19,7 @@ import {
   MemClawContextEngine as ContextEngine,  // legacy-name-ok: references the class as currently named
   type ShouldRecallInput,
 } from "./context-engine.js";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 describe("prepareSubagentSpawn — OpenClaw's rollback contract", () => {
   // OpenClaw's contract is `Promise<SubagentSpawnPreparation | undefined>` with

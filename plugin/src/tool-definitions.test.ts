@@ -15,7 +15,7 @@ import { createToolFromSpec } from "./tool-definitions.js";
 import { TOOL_SPECS, TOOL_SPECS_BY_NAME, getSpec } from "./tool-specs.js";
 import { buildToolsMd } from "./educate.js";
 import { cauraPromptSectionText } from "./prompt-section.js";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 describe("tool-specs loader", () => {
   test("loads a non-empty ordered spec list from tools.json", () => {

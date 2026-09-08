@@ -16,7 +16,7 @@ import { MEMORY_TYPES, STATUSES } from "./tool-definitions.js";
 import {
   FROZEN_PLUGIN_ID,
   LEGACY_DISPLAY_NAME,
-} from "./legacy-contracts.test.js";
+} from "./legacy-contracts.fixture.js";
 
 const BACKUP_SUFFIX = `.${FROZEN_PLUGIN_ID}-bak`;
 

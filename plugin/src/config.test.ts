@@ -15,7 +15,7 @@ import {
   PLUGIN_ID,
 } from "./config.js";
 import { getPluginDir } from "./paths.js";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 describe("PLUGIN_ID", () => {
   // The id lives in two files that are read by different consumers:

@@ -12,7 +12,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import { getInstallId, _resetInstallIdCacheForTesting } from "./install-id.js";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 let _origHome: string | undefined;
 let _tmpHome: string | undefined;
