@@ -1514,6 +1514,24 @@
             "title": "Candidates Considered",
             "type": "integer"
           },
+          "entity_match_declined": {
+            "default": false,
+            "description": "True when the entity match was refused as over-broad (> ENTITY_LOOKUP_MAX_MATCHES). This is the only decline that also suppresses the per-row entity boost; an under-filled pool falls through with the boost still applied and reports False here.",
+            "title": "Entity Match Declined",
+            "type": "boolean"
+          },
+          "entity_matches": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Entities the query's tokens matched in entity FTS, counted before the over-broad decline empties the set. None means the lookup never ran (entity retrieval off, no entity-shaped tokens, or a swallowed failure) — distinct from 0, which means it ran and matched nothing.",
+            "title": "Entity Matches"
+          },
           "excluded_below_min_similarity": {
             "default": 0,
             "title": "Excluded Below Min Similarity",
