@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/caura-ai-caura-badge.png)](https://mseep.ai/app/caura-ai-caura)
+
 <h1 align="center">Caura &mdash; Shared governed memory for AI agents</h1>
 
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
