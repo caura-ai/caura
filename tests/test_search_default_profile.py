@@ -340,6 +340,11 @@ def test_top_k_cap_has_one_source_of_truth():
     assert recall_top_k_desc == (
         f"Max results, default {core_constants.DEFAULT_SEARCH_TOP_K}. "
         f"Values above {common_constants.MAX_SEARCH_TOP_K} are capped to "
-        f"{common_constants.MAX_SEARCH_TOP_K}."
+        f"{common_constants.MAX_SEARCH_TOP_K}. "
+        # D16 — the cap sentence stays constant-fed; the injection sentence is
+        # part of the pinned surface so a rewrite that drops the disclosure
+        # fails here, not in a user report.
+        "Superseded hits add their newest correction beyond this cap, "
+        "marked injected:true."
     )
     assert common_constants.MAX_SEARCH_TOP_K == 200

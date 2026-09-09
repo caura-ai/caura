@@ -937,7 +937,9 @@ async def caura_recall(
         int,
         Field(
             description=f"Max results, default {DEFAULT_SEARCH_TOP_K}. "
-            f"Values above {MAX_SEARCH_TOP_K} are capped to {MAX_SEARCH_TOP_K}."
+            f"Values above {MAX_SEARCH_TOP_K} are capped to {MAX_SEARCH_TOP_K}. "
+            "Superseded hits add their newest correction beyond this cap, "
+            "marked injected:true."
         ),
     ] = DEFAULT_SEARCH_TOP_K,
     valid_at: Annotated[

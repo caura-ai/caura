@@ -772,6 +772,7 @@ def _memory_to_out(
     contradictions: list[ContradictionInfo] | None = None,
     score: float | None = None,
     score_parts: ScoreParts | None = None,
+    injected: bool = False,
 ) -> MemoryOut:
     # See ``_dict_to_memory_out`` for the falsy-``{}`` trap.
     if isinstance(memory, dict):
@@ -810,6 +811,7 @@ def _memory_to_out(
         last_recalled_at=_mem_attr(memory, "last_recalled_at"),
         supersedes_id=_mem_attr(memory, "supersedes_id"),
         superseded_by=contradictions if contradictions else None,
+        injected=injected,
     )
 
 

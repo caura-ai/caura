@@ -1,4 +1,10 @@
-"""LoadAndSerialize — serialize results to MemoryOut using pre-loaded entity links."""
+"""LoadAndSerialize — serialize results to MemoryOut using pre-loaded entity links.
+
+D16 — successor injection is budgeted and labelled: at most ONE injected
+successor per stale row (so a response holds at most 2*top_k items), and every
+injected row carries ``injected: true`` on the wire so a caller can tell it
+from a row the query actually recalled.
+"""
 
 from __future__ import annotations
 
@@ -78,6 +84,16 @@ def _warn(ctx: PipelineContext, *, reason: str, stale_result_count: int, enriche
             },
         }
     )
+
+
+def _successor_recency(successor: dict) -> tuple[str, str]:
+    """Sort key for picking THE successor of a stale row: newest first.
+
+    ``created_at`` arrives as an ISO-8601 UTC string over the storage wire, so
+    lexicographic order is chronological order; the id tie-break only keeps the
+    choice deterministic if two rows share a timestamp.
+    """
+    return (str(successor.get("created_at") or ""), str(successor.get("id") or ""))
 
 
 def _score_parts(row) -> ScoreParts | None:
@@ -160,25 +176,50 @@ class LoadAndSerialize:
                 # to an un-enriched result set is the right behaviour; doing it
                 # invisibly is not.
                 _warn(ctx, reason="storage_error", stale_result_count=stale_total, enriched=0)
+            # D16 — response budget: inject at most ONE successor per stale
+            # row, the newest. ``find_successors`` is a bare ``supersedes_id
+            # IN (...)`` with no per-predecessor cap, so several rows can claim
+            # to supersede the same predecessor — and before this cap ALL of
+            # them were appended (observed live: top_k=5 answered with 53
+            # items). A34 wants the newest value ranked above the stale claim;
+            # siblings beyond it add bloat, not safety, and stay reachable via
+            # an explicit ``status_filter``. Injection is therefore bounded by
+            # the stale-row count of the already-trimmed set, so a response
+            # holds at most 2*top_k items. Deliberately NOT re-trimmed to
+            # top_k afterwards: cutting the tail would evict a successor or
+            # its predecessor and reintroduce the stale-answer failure A34
+            # exists to prevent.
+            newest_by_predecessor: dict[str, dict] = {}
             for successor in successors:
-                sid = successor.get("id")
-                if sid not in existing_ids:
-                    rows.append(
-                        SimpleNamespace(
-                            Memory=SimpleNamespace(**successor),
-                            score=None,
-                            similarity=None,
-                            vec_sim=None,
-                            fts_score=None,
-                            freshness=None,
-                            entity_boost=None,
-                            recall_boost=None,
-                            temporal_boost=None,
-                            status_penalty=None,
-                            entity_links=[],
-                        )
+                predecessor_id = str(successor.get("supersedes_id"))
+                incumbent = newest_by_predecessor.get(predecessor_id)
+                if incumbent is None or _successor_recency(successor) > _successor_recency(incumbent):
+                    newest_by_predecessor[predecessor_id] = successor
+            for successor in newest_by_predecessor.values():
+                sid = str(successor.get("id"))
+                if sid in existing_ids:
+                    # The correction was recalled on its own merit — the A34
+                    # reorder below pairs it with its predecessor; injecting a
+                    # sibling on top would spend budget on a duplicate claim.
+                    continue
+                rows.append(
+                    SimpleNamespace(
+                        Memory=SimpleNamespace(**successor),
+                        score=None,
+                        similarity=None,
+                        vec_sim=None,
+                        fts_score=None,
+                        freshness=None,
+                        entity_boost=None,
+                        recall_boost=None,
+                        temporal_boost=None,
+                        status_penalty=None,
+                        entity_links=[],
+                        # D16 — the wire label; serialized as ``injected: true``.
+                        injected=True,
                     )
-                    existing_ids.add(sid)
+                )
+                existing_ids.add(sid)
 
         # A34 — the retrieval contract for a genuine contradiction (ratified
         # 2026-08-25): whenever a result set contains both a superseded row
@@ -242,6 +283,9 @@ class LoadAndSerialize:
                 # successor-injected rows, which were never scored.
                 score=(round(float(row.score), 4) if row.score is not None else None),
                 score_parts=_score_parts(row),
+                # D16 — set only by the injection block above; a successor
+                # recalled organically stays unlabelled because it IS a result.
+                injected=bool(getattr(row, "injected", False)),
             )
             for row in rows
         ]

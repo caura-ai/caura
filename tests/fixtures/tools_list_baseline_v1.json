@@ -839,7 +839,7 @@
         },
         "top_k": {
           "default": 5,
-          "description": "Max results, default 5. Values above 200 are capped to 200.",
+          "description": "Max results, default 5. Values above 200 are capped to 200. Superseded hits add their newest correction beyond this cap, marked injected:true.",
           "title": "Top K",
           "type": "integer"
         },

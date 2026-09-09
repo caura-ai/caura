@@ -90,6 +90,12 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # at 5269 that headroom is 81 and the guard is looser than it was designed to
 # be. Lowering it banks the saving instead of spending it on slack, and the
 # next addition still only has to state its reason, as that entry asked.
+#
+# 2026-09-09 (D16): 5287 cl100k (+18) after ``caura_recall.top_k`` disclosed
+# that superseded hits pull their newest correction in BEYOND the cap, marked
+# ``injected:true``. The old text promised a maximum ("Max results") that
+# successor injection has violated since A34 — a caller reading it could not
+# explain a 10-item answer to a top_k=5 call. Ceiling NOT raised; 33 remain.
 CEILING_TOKENS = 5320
 
 

@@ -465,6 +465,16 @@ class MemoryOut(BaseModel):
     # successor-injected rows, which were never scored.
     score: float | None = None
     score_parts: ScoreParts | None = None
+    # D16 — true when the row was not matched by the query but injected as the
+    # newest successor of a returned outdated/conflicted row (hence its
+    # ``score``/``similarity`` are null — never scored). Injected rows arrive
+    # BEYOND the caller's ``top_k`` budget, at most one per stale row, ranked
+    # immediately above the row they supersede (A34). A successor the query
+    # recalled on its own merit is NOT marked — this flag says "you would not
+    # have gotten this row from ranking alone", not "this row supersedes
+    # something" (``supersedes_id`` already says that). Always false outside
+    # search responses.
+    injected: bool = False
     # RDF triple
     subject_entity_id: UUID | None = None
     predicate: str | None = None
@@ -859,7 +869,18 @@ class SearchRequest(BaseModel):
         default=DEFAULT_SEARCH_TOP_K,
         ge=1,
         le=MAX_SEARCH_TOP_K,
-        description=f"Maximum results to return (1-{MAX_SEARCH_TOP_K}, default {DEFAULT_SEARCH_TOP_K}).",
+        # D16 — top_k bounds what the query RECALLS, not the response length:
+        # successor injection is additive on purpose (suppressing a correction
+        # to honor a count would return stale claims as current), so the
+        # description states the real contract instead of promising a maximum
+        # the behavior never kept.
+        description=(
+            f"Maximum results the query returns (1-{MAX_SEARCH_TOP_K}, default "
+            f"{DEFAULT_SEARCH_TOP_K}). Not the response ceiling: each returned "
+            "outdated/conflicted row also carries its newest correction, "
+            "injected beyond this budget and marked injected: true (with "
+            "score: null), so a response holds at most 2*top_k items."
+        ),
     )
     # D12 — per-request cosine floor. Overrides the resolved profile/tenant
     # default for THIS call only (request beats profile beats tenant beats
