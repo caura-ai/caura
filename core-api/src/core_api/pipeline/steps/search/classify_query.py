@@ -87,9 +87,20 @@ class ClassifyQuery:
         # below. ``ParallelEmbedAndEntityBoost`` reads the same flag and skips
         # hop-boosting, making this the single switch for query-time entity and
         # graph retrieval. Deliberately independent of ``graph_expand``
-        # (``search.graph_retrieval``), which only bounds expansion depth once
-        # an entity has already matched.
+        # (``search.graph_retrieval``), which only bounds expansion once an
+        # entity has already matched.
         entity_retrieval: bool = ctx.data.get("entity_retrieval", True)
+
+        # ``search.graph_retrieval`` org setting (default True). Entity lookup
+        # stays on — the settings contract is that only ``entity_retrieval``
+        # can switch that off — but with this flag off the matched entities
+        # must not be graph-expanded: no ``expand_graph`` roundtrip, hop-0
+        # seeds only, mirroring ``_entity_boost_via_storage``'s gate. Both
+        # ``_expand_per_fleet`` call sites below honour it via
+        # ``_hops_for_seeds``, which also keeps the ``_classified_entity_hops``
+        # stash hop-0 so the boost step's ``precomputed_hops`` path cannot
+        # smuggle expanded hops past its own ``graph_expand`` gate.
+        graph_expand: bool = ctx.data.get("graph_expand", True)
 
         tokens = extract_entity_tokens(query) if entity_retrieval else []
 
@@ -158,13 +169,13 @@ class ClassifyQuery:
                 if matched_ids and (
                     ctx.data.get("temporal_window") is not None or ctx.data.get("date_range_filter")
                 ):
-                    entity_hops = await self._expand_per_fleet(
+                    entity_hops = await self._hops_for_seeds(
                         sc,
                         matched_ids,
                         tenant_id,
                         fleet_ids,
                         graph_max_hops,
-                        use_union=True,
+                        graph_expand=graph_expand,
                     )
                     ctx.data["_classified_entity_hops"] = entity_hops
                     # Distinct wording from the other declines — same
@@ -178,13 +189,13 @@ class ClassifyQuery:
                     matched_ids = []
 
                 if matched_ids:
-                    entity_hops = await self._expand_per_fleet(
+                    entity_hops = await self._hops_for_seeds(
                         sc,
                         matched_ids,
                         tenant_id,
                         fleet_ids,
                         graph_max_hops,
-                        use_union=True,
+                        graph_expand=graph_expand,
                     )
 
                     filtered_rows = await self._collect_memories(
@@ -340,6 +351,41 @@ class ClassifyQuery:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _hops_for_seeds(
+        self,
+        sc: object,
+        seed_ids: list[UUID],
+        tenant_id: str,
+        fleet_ids: list[str] | None,
+        graph_max_hops: int,
+        *,
+        graph_expand: bool,
+    ) -> dict[UUID, tuple[int, float]]:
+        """Expand *seed_ids* per fleet, or return them as hop-0 when expansion is off.
+
+        The gate mirrors ``_entity_boost_via_storage`` exactly
+        (``graph_expand and graph_max_hops > 0`` → expand, else hop-0 seeds
+        with neutral weight), so ``search.graph_retrieval`` means the same
+        thing on the ENTITY_LOOKUP short-circuit as it does on the hop-boost
+        path — matched entities stay retrievable, their graph neighbourhood
+        does not. The hop-0 dict also flows into
+        ``ctx.data["_classified_entity_hops"]`` on the temporal-decline path,
+        which is what keeps the boost step's ``precomputed_hops`` input honest:
+        that input bypasses the boost step's own gate by design (it exists to
+        avoid re-deriving FTS + expansion), so the gating must happen here,
+        where the hops are produced.
+        """
+        if not (graph_expand and graph_max_hops > 0):
+            return dict.fromkeys(seed_ids, (0, 1.0))
+        return await self._expand_per_fleet(
+            sc,
+            seed_ids,
+            tenant_id,
+            fleet_ids,
+            graph_max_hops,
+            use_union=True,
+        )
 
     @staticmethod
     async def _expand_per_fleet(
