@@ -15,6 +15,7 @@ from common.models.lifecycle_audit import LifecycleAudit
 from common.models.memory import Memory
 from common.models.memory_conflict import MemoryConflict
 from common.models.memory_derivation import MemoryDerivation
+from common.models.memory_relation import MemoryRelation
 from common.models.skill_factory import ForgeRejectedFingerprint, SessionTrace
 from common.models.tenant_usage_counter import TenantUsageCounter
 
@@ -37,6 +38,7 @@ __all__ = [
     "LifecycleAudit",
     "Memory",
     "MemoryConflict",
+    "MemoryRelation",
     "MemoryDerivation",
     "MemoryEntityLink",
     "Relation",
