@@ -1,7 +1,7 @@
 [project]
 name = "core-worker"
 version = "3.6.1"
-description = "Caura core async worker — subscribes to memclaw.memory.embed-requested and backfills embeddings" # legacy-name-floor: frozen topic name
+description = "Caura core async worker — consumes embedding requests and backfills embeddings"
 license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
