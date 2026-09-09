@@ -107,12 +107,35 @@ async def trigger_crystallization(
 async def trigger_crystallization_all(
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Trigger crystallization for ALL tenants (nightly batch)."""
+    """Trigger crystallization for ALL tenants (nightly batch).
+
+    Standalone-only. The fan-out needs a list of tenants and there is no tenant
+    enumeration on the storage client, so the single standalone tenant is the
+    only set this endpoint can build. On a multi-tenant deployment it therefore
+    cannot do what its name promises.
+
+    It used to say so with a 500: ``get_standalone_tenant_id()`` raises
+    ``RuntimeError`` when standalone was never initialised, nothing caught it,
+    and every hosted call returned "internal server error" — which reads as an
+    outage and sends whoever is on call looking for a broken crystallizer. The
+    condition is not a fault, it is a deployment mode, so it answers 501 with
+    the route that DOES work.
+    """
     auth.enforce_admin()
     # In OSS standalone mode, only one tenant exists
     from core_api.standalone import get_standalone_tenant_id
 
-    tenant_ids = [get_standalone_tenant_id()]
+    try:
+        tenant_ids = [get_standalone_tenant_id()]
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "POST /crystallize/all is standalone-only: there is no tenant "
+                "enumeration to fan out over on a multi-tenant deployment. "
+                "Trigger each tenant with POST /crystallize?tenant_id=..."
+            ),
+        ) from exc
     reports = []
     for tid in tenant_ids:
         from core_api.services.organization_settings import resolve_config

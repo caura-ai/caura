@@ -471,14 +471,18 @@ async def count_memories_per_entity(request: Request) -> dict:
 
 
 @router.get("/orphaned")
-async def find_orphaned_entities(tenant_id: str) -> list[dict]:
-    rows = await _svc.entity_find_orphaned(tenant_id, fleet_id=None)
+async def find_orphaned_entities(tenant_id: str, fleet_id: str | None = None) -> list[dict]:
+    # ``fleet_id`` was hardcoded None here while the service below has always
+    # taken it, so a fleet-scoped crystallizer report carried TENANT-WIDE
+    # counts. Optional with a None default, so a storage instance deployed
+    # ahead of core-api keeps serving callers that don't send it.
+    rows = await _svc.entity_find_orphaned(tenant_id, fleet_id=fleet_id)
     return [{"id": str(row[0]), "canonical_name": row[1]} for row in rows]
 
 
 @router.get("/broken-links")
-async def find_broken_entity_links(tenant_id: str) -> list[dict]:
-    rows = await _svc.entity_find_broken_links(tenant_id, fleet_id=None)
+async def find_broken_entity_links(tenant_id: str, fleet_id: str | None = None) -> list[dict]:
+    rows = await _svc.entity_find_broken_links(tenant_id, fleet_id=fleet_id)
     return [{"memory_id": str(row[0]), "entity_id": str(row[1])} for row in rows]
 
 

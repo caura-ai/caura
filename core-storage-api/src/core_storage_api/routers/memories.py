@@ -1002,7 +1002,7 @@ async def get_recent_memories(
 
 
 @router.get("/lifecycle-candidates")
-async def get_lifecycle_candidates(tenant_id: str) -> dict:
+async def get_lifecycle_candidates(tenant_id: str, fleet_id: str | None = None) -> dict:
     """Id lists for the crystallizer's lifecycle hygiene checks.
 
     Every list is bare stringified ids, not row dicts — callers index them
@@ -1010,9 +1010,12 @@ async def get_lifecycle_candidates(tenant_id: str) -> dict:
     but was never exposed, so ``_check_short_content`` read a key that was
     never returned and reported zero for every tenant.
     """
-    expired = await _svc.memory_find_expired_still_active(tenant_id, None)
-    stale = await _svc.memory_find_stale_count(tenant_id, None, stale_days=90, max_weight=0.3)
-    short = await _svc.memory_find_short_content(tenant_id, None, CRYSTALLIZER_SHORT_CONTENT_CHARS)
+    # All three service calls have always taken a fleet argument; the route
+    # passed None positionally, so every fleet-scoped lifecycle count was
+    # actually tenant-wide.
+    expired = await _svc.memory_find_expired_still_active(tenant_id, fleet_id)
+    stale = await _svc.memory_find_stale_count(tenant_id, fleet_id, stale_days=90, max_weight=0.3)
+    short = await _svc.memory_find_short_content(tenant_id, fleet_id, CRYSTALLIZER_SHORT_CONTENT_CHARS)
     return {
         "expired_still_active": [str(r[0]) for r in expired],
         "stale_low_weight": [str(r[0]) for r in stale],

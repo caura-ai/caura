@@ -293,6 +293,52 @@ async def run_crystallization(
     return report_id
 
 
+async def _type_ii_watermark(sc, tenant_id: str, fleet_id: str | None, report_id) -> str | None:
+    """The previous crystallization run's completion time, or None.
+
+    ``run_shadow`` takes a ``since`` watermark and ``select_candidates`` uses it
+    to skip any subject with nothing new since the last sweep. Nobody passed it,
+    so every nightly run re-asked the LLM about every subject with >=2 live
+    memories — re-paying, in full, for answers about subjects that had not
+    changed since the previous night.
+
+    The watermark has to come from the LAST COMPLETED run, which is why this
+    cannot just read ``get_latest_report``: the current run has ALREADY reserved
+    its own row with ``status="running"`` (see ``_reserve_report``), so the
+    "latest" report is frequently this run itself. Using that would stamp the
+    watermark at now and skip every subject — turning an overspend into a sweep
+    that silently does nothing, which is the worse failure.
+
+    Guards, in order: it must not be this run's row; it must be terminal
+    (``completed_at`` set — a crashed 'running' row from a previous attempt has
+    none); and it must be a non-empty string, because ``select_candidates``
+    compares it to ``created_at`` with ``>`` and a non-string would raise inside
+    the sweep.
+
+    Returns None on ANY doubt, and None means "scan everything" — the behaviour
+    this fix exists to reduce. That asymmetry is deliberate: paying twice is a
+    cost bug, skipping a changed subject is a correctness bug, and only one of
+    those is recoverable on the next run.
+    """
+    try:
+        latest = await sc.get_latest_report(tenant_id, fleet_id, report_type="crystallization")
+    except Exception:
+        logger.warning(
+            "type_ii watermark lookup failed for tenant %s; scanning all subjects",
+            tenant_id,
+            exc_info=True,
+        )
+        return None
+    if not isinstance(latest, dict):
+        return None
+    if str(latest.get("id", "")) == str(report_id):
+        return None
+    completed = latest.get("completed_at")
+    if not isinstance(completed, str) or not completed:
+        return None
+    return completed
+
+
 async def _execute_crystallization(
     sc,
     report_id,
@@ -417,6 +463,7 @@ async def _execute_crystallization(
                     subject_rows,
                     tenant_id,
                     await resolve_config(tenant_id),
+                    since=await _type_ii_watermark(sc, tenant_id, fleet_id, report_id),
                 )
             except Exception:
                 logger.warning("type_ii shadow phase failed for %s", tenant_id, exc_info=True)
@@ -691,12 +738,41 @@ async def _run_crystallization(
         # sweep — same isolation the per-row loop gave us, just at
         # cluster granularity (K HTTPs instead of K x M).
         archived_ids: list[str] = []
-        cluster_ids_to_archive = [
-            {"memory_id": str(mem.get("id")), "status": "archived"} for mem in cluster_memories
-        ]
+        # Archive ONLY if this cluster actually produced a replacement.
+        #
+        # The archive used to be unconditional, which quietly destroyed
+        # knowledge in the exact case the loop above treats as routine. A
+        # crystallized fact is a near-verbatim merge of cluster members that are
+        # >=0.95 similar and STILL ACTIVE at this point, so ``create_memory``'s
+        # dedup gate 409s against a cluster member — the very row the next block
+        # was about to archive. An all-409 cluster therefore ended with every
+        # source archived and nothing crystallized to stand in their place: the
+        # facts left the live corpus and no replacement entered it.
+        #
+        # ``new_ids`` is the right condition, not ``duplicate_facts == 0``: what
+        # licenses the archive is that a replacement EXISTS, not that nothing was
+        # rejected. A cluster that created one fact and skipped two duplicates is
+        # still safe to archive; a cluster that created none never is.
+        if not new_ids:
+            logger.info(
+                "Crystallizer kept %d source(s) live: cluster produced no new memory "
+                "(duplicates=%d failed=%d)",
+                len(cluster_memories),
+                duplicate_facts,
+                failed_facts,
+            )
+            cluster_ids_to_archive = []
+        else:
+            cluster_ids_to_archive = [
+                {"memory_id": str(mem.get("id")), "status": "archived"} for mem in cluster_memories
+            ]
         try:
-            batch_result = await sc.batch_update_status(
-                {"updates": cluster_ids_to_archive}, tenant_id=tenant_id
+            batch_result = (
+                await sc.batch_update_status({"updates": cluster_ids_to_archive}, tenant_id=tenant_id)
+                # No replacement was created, so there is nothing to retire and
+                # no reason to spend a storage round-trip saying so.
+                if cluster_ids_to_archive
+                else {}
             )
             skipped_set = set(batch_result.get("skipped") or [])
             for item in cluster_ids_to_archive:
@@ -853,7 +929,7 @@ async def _check_orphaned_entities(
 ) -> dict:
     """Entities with zero memory_entity_links."""
     sc = get_storage_client()
-    rows = await sc.find_orphaned_entities(tenant_id)
+    rows = await sc.find_orphaned_entities(tenant_id, fleet_id)
     ids = [str(r.get("id")) for r in rows]
     return {
         "count": len(rows),
@@ -956,7 +1032,7 @@ async def _check_expired_still_active(
     had something to report, and nothing at all when it didn't.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id)
+    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
     expired = candidates.get("expired_still_active", [])
     return {"count": len(expired), "affected_ids": [str(r) for r in expired][:MAX_AFFECTED_IDS]}
 
@@ -972,7 +1048,7 @@ async def _check_stale_memories(
     Values are bare UUID strings — see ``_check_expired_still_active``.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id)
+    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
     stale = candidates.get("stale_low_weight", [])
     return {"count": len(stale), "affected_ids": [str(r) for r in stale][:MAX_AFFECTED_IDS]}
 
@@ -989,7 +1065,7 @@ async def _check_short_content(
     ``_check_expired_still_active``.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id)
+    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
     short = candidates.get("short_content", [])
     return {"count": len(short), "affected_ids": [str(r) for r in short][:MAX_AFFECTED_IDS]}
 
@@ -1000,7 +1076,7 @@ async def _check_broken_entity_links(
 ) -> dict:
     """Entity links pointing to soft-deleted memories."""
     sc = get_storage_client()
-    rows = await sc.find_broken_entity_links(tenant_id)
+    rows = await sc.find_broken_entity_links(tenant_id, fleet_id)
     ids = [str(r.get("id")) for r in rows]
     return {"count": len(rows), "affected_ids": list(set(ids))[:MAX_AFFECTED_IDS]}
 

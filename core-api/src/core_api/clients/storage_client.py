@@ -1260,8 +1260,11 @@ class CoreStorageClient:
             params["fleet_id"] = fleet_id
         return await self._get_list("/memories/recent", **params)
 
-    async def get_lifecycle_candidates(self, tenant_id: str) -> dict:
-        return await self._get("/memories/lifecycle-candidates", tenant_id=tenant_id) or {}
+    async def get_lifecycle_candidates(self, tenant_id: str, fleet_id: str | None = None) -> dict:
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        return await self._get("/memories/lifecycle-candidates", **params) or {}
 
     async def check_near_duplicates(self, data: dict) -> dict:
         return await self._post("/memories/near-duplicates", data)  # type: ignore[return-value]
@@ -1694,11 +1697,17 @@ class CoreStorageClient:
         )
         return result  # type: ignore[return-value]
 
-    async def find_orphaned_entities(self, tenant_id: str) -> list[dict]:
-        return await self._get_list("/entities/orphaned", tenant_id=tenant_id)
+    async def find_orphaned_entities(self, tenant_id: str, fleet_id: str | None = None) -> list[dict]:
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        return await self._get_list("/entities/orphaned", **params)
 
-    async def find_broken_entity_links(self, tenant_id: str) -> list[dict]:
-        return await self._get_list("/entities/broken-links", tenant_id=tenant_id)
+    async def find_broken_entity_links(self, tenant_id: str, fleet_id: str | None = None) -> list[dict]:
+        params: dict[str, Any] = {"tenant_id": tenant_id}
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        return await self._get_list("/entities/broken-links", **params)
 
     # ---------------------------------------------------------------------
     # Entity-linking pipeline (Fix 2 Ph6) — thin wrappers over the coarse
