@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.6.1](https://github.com/caura-ai/caura/compare/backend-v3.6.0...backend-v3.6.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **search:** hold the per-tenant storage bulkhead on the entity-lookup fall-through (oss-0814-l-06) ([#1442](https://github.com/caura-ai/caura/issues/1442)) ([5ac5111](https://github.com/caura-ai/caura/commit/5ac511162f553dd7bb374eeb5e434b10370ae7e8))
+
+
+### Dependencies
+
+* bump the uv-majors group across 1 directory with 3 updates ([#1446](https://github.com/caura-ai/caura/issues/1446)) ([d0f20b2](https://github.com/caura-ai/caura/commit/d0f20b249ffca78a02f653dc8357cf94019b1606))
+
 ## [3.6.0](https://github.com/caura-ai/caura/compare/backend-v3.5.0...backend-v3.6.0) (2026-09-09)
 
 
