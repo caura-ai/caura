@@ -1,11 +1,11 @@
-"""Permanent-alias contract for the 2026-08-14 memclaw_* → caura_* rename.
+"""Permanent-alias contract for the 2026-08-14 tool rename.
 
 Three guarantees, each load-bearing forever:
 
 1. ``tools/list`` advertises ONLY ``caura_*`` names — the old names must
    never reappear in the listing (dual-listing doubles the client's
    tool-schema token budget, which is why the alias lives at dispatch).
-2. Every listed tool is callable under its legacy ``memclaw_*`` name —
+2. Every listed tool is callable under its pre-rename name —
    the ``_InstrumentedFastMCP.call_tool`` shim translates before
    dispatch, so saved prompts, keystone rules, and published tutorials
    written against the old names keep working.
@@ -72,7 +72,7 @@ async def test_listing_exposes_only_caura_names():
 
 @pytest.mark.asyncio
 async def test_every_tool_dispatches_under_its_legacy_name():
-    """memclaw_<suffix> must behave exactly like caura_<suffix>, for every
+    """Pre-rename and canonical spellings must behave identically for every
     registered tool — including tools that did not exist at rename time.
     """
     for name in await _listed_tool_names():

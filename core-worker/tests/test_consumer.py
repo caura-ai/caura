@@ -14,7 +14,7 @@ import core_worker.consumer as consumer
 from common.events.base import Event
 from core_worker.config import Settings
 
-EMBED_REQUESTED_TOPIC = "memclaw.memory.embed-requested"  # legacy-name-ok: deployed Pub/Sub topic
+EMBED_REQUESTED_TOPIC = "caura.memory.embed-requested"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
