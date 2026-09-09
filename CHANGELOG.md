@@ -10,6 +10,30 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.6.0](https://github.com/caura-ai/caura/compare/backend-v3.5.0...backend-v3.6.0) (2026-09-09)
+
+
+### Features
+
+* **mcp:** migrate core-api to MCP Python SDK v2, serving both protocol eras ([#682](https://github.com/caura-ai/caura/issues/682)) ([c021c15](https://github.com/caura-ai/caura/commit/c021c155d65cb0f8296de5eefca959f399b8bd6a))
+
+
+### Bug Fixes
+
+* **api:** rate-limit and slot-gate POST /stm/promote like POST /memories ([#1425](https://github.com/caura-ai/caura/issues/1425)) ([ce24332](https://github.com/caura-ai/caura/commit/ce2433292965c2130a13386dfe768f19552dcde7))
+* **api:** settings derive admin from is_admin; pin PUT /settings as a mitigation route ([#1426](https://github.com/caura-ai/caura/issues/1426)) ([068edd6](https://github.com/caura-ai/caura/commit/068edd6d09ec89ef8caded1bf8e8cfd8baefd3ff))
+* **search:** budget and label successor injection (D16) ([#1439](https://github.com/caura-ai/caura/issues/1439)) ([b17771f](https://github.com/caura-ai/caura/commit/b17771f5ebf65aaec3fda67533b1301ace31b094))
+
+
+### Performance
+
+* **search:** compute scored-search primitives once via a fenced ingredients CTE (HNSW plan PR1) ([#1429](https://github.com/caura-ai/caura/issues/1429)) ([fef5b3d](https://github.com/caura-ai/caura/commit/fef5b3de9c01331204e2f7bd879563b72d8f5a5a))
+
+
+### Documentation
+
+* remove safe legacy-name prose ([#1437](https://github.com/caura-ai/caura/issues/1437)) ([719121b](https://github.com/caura-ai/caura/commit/719121b85e5453b4d2933e4e44d8b8faa1c047eb))
+
 ## [3.5.0](https://github.com/caura-ai/caura/compare/backend-v3.4.1...backend-v3.5.0) (2026-09-09)
 
 

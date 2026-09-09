@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.21.1](https://github.com/caura-ai/caura/compare/plugin-v2.21.0...plugin-v2.21.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **search:** budget and label successor injection (D16) ([#1439](https://github.com/caura-ai/caura/issues/1439)) ([b17771f](https://github.com/caura-ai/caura/commit/b17771f5ebf65aaec3fda67533b1301ace31b094))
+
 ## [2.21.0](https://github.com/caura-ai/caura/compare/plugin-v2.20.3...plugin-v2.21.0) (2026-09-09)
 
 
