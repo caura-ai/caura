@@ -75,8 +75,8 @@ from _locomo_bench import (
 from core_api.constants import FTS_RANK_SCALE, FTS_WEIGHT
 
 # The "existing local benchmark database defaults" this preserved are retired:
-# the ephemeral local/CI Postgres role+db population was renamed memclaw ->  # legacy-name-floor: historical note on a completed rename
-# caura together in one sweep (see core_storage_api.config.LOCAL_DATABASE_URL).
+# the ephemeral local/CI Postgres role+db population was renamed to the Caura
+# spelling in one sweep (see core_storage_api.config.LOCAL_DATABASE_URL).
 # Not a legacy-name-ok alias — just the current default.
 DEFAULT_PG_DSN = "postgresql://caura:changeme@localhost:5433/caura"
 
