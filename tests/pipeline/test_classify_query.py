@@ -294,8 +294,15 @@ async def test_temporal_does_not_route_without_window(mock_get_sc):
 
 @pytest.mark.asyncio
 @patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
-async def test_entity_lookup_takes_priority_over_temporal(mock_get_sc):
-    """Entity match + temporal_window set → ENTITY_LOOKUP wins."""
+async def test_temporal_window_declines_entity_short_circuit(mock_get_sc):
+    """Entity match + temporal_window set → TEMPORAL wins; hops preserved.
+
+    Inverts the pre-fix pin (``ENTITY_LOOKUP wins``): the short-circuit skips
+    the scored search, which is the only place the ``date_range_filter`` hard
+    filter and the temporal freshness handling are applied — so taking it on a
+    dated query silently returned linked memories from any date. The entity
+    match survives as a hop boost via ``_classified_entity_hops``.
+    """
     entity_id = uuid.uuid4()
     memory_id = uuid.uuid4()
     eid_str = str(entity_id)
@@ -325,7 +332,85 @@ async def test_entity_lookup_takes_priority_over_temporal(mock_get_sc):
     await step.execute(ctx)
 
     plan: RetrievalPlan = ctx.data["retrieval_plan"]
-    assert plan.strategy == RetrievalStrategy.ENTITY_LOOKUP
+    assert plan.strategy == RetrievalStrategy.TEMPORAL
+    assert plan.search_param_overrides["freshness_decay_days"] == 7
+    # The decline must happen BEFORE the pool load — no wasted storage
+    # roundtrip, no per-tenant slot spent on rows that would be discarded.
+    sc.get_memory_ids_by_entity_ids.assert_not_awaited()
+    sc.load_memories_by_ids.assert_not_awaited()
+    assert "filtered_rows" not in ctx.data
+    # Entity relevance is preserved for hop-boosting, NOT suppressed: this is
+    # a good match declined for temporal correctness, unlike over-broad.
+    assert ctx.data["_classified_entity_hops"] == {entity_id: (0, 1.0)}
+    assert "entity_match_declined" not in ctx.data
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_date_range_filter_declines_entity_short_circuit(mock_get_sc):
+    """Entity match + hard date_range_filter (no soft window) → falls through.
+
+    The hard filter is applied only by the scored search, so the short-circuit
+    must decline even when no temporal_window was extracted ("two months ago"
+    style queries set only the date range). With no window the cascade lands on
+    keyword/semantic, where ExecuteScoredSearch applies the date range.
+    """
+    entity_id = uuid.uuid4()
+    memory_id = uuid.uuid4()
+    eid_str = str(entity_id)
+    mid_str = str(memory_id)
+
+    sc = _mock_sc()
+    sc.fts_search_entities = AsyncMock(return_value=[eid_str])
+    sc.expand_graph = AsyncMock(return_value={eid_str: {"hop": 0, "weight": 1.0}})
+    sc.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
+    )
+    mock_get_sc.return_value = sc
+
+    ctx = _make_ctx(
+        "Alice",
+        top_k=1,
+        date_range_filter={"start_date": "2026-07-06", "end_date": "2026-07-12"},
+    )
+
+    step = ClassifyQuery()
+    await step.execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.SEMANTIC_SEARCH
+    sc.load_memories_by_ids.assert_not_awaited()
+    assert "filtered_rows" not in ctx.data
+    assert ctx.data["_classified_entity_hops"] == {entity_id: (0, 1.0)}
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_over_broad_decline_wins_over_temporal_decline(mock_get_sc):
+    """Over-broad match + temporal hint → over-broad handling, no expansion.
+
+    Ordering pin: the over-broad decline must run first, so a dated query with
+    a >threshold match still suppresses hop-boosting (``entity_match_declined``)
+    and never pays for expanding the over-broad seed set.
+    """
+    from core_api.constants import ENTITY_LOOKUP_MAX_MATCHES
+
+    sc = _mock_sc()
+    sc.fts_search_entities = AsyncMock(
+        return_value=[str(uuid.uuid4()) for _ in range(ENTITY_LOOKUP_MAX_MATCHES + 1)]
+    )
+    mock_get_sc.return_value = sc
+
+    ctx = _make_ctx("Alice", temporal_window=timedelta(days=7))
+
+    step = ClassifyQuery()
+    await step.execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.TEMPORAL
+    assert ctx.data["entity_match_declined"] is True
+    sc.expand_graph.assert_not_awaited()
+    assert "_classified_entity_hops" not in ctx.data
 
 
 @pytest.mark.asyncio

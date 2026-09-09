@@ -6,8 +6,12 @@ matches are found the step MAY short-circuit to an *entity_lookup* strategy
 search can be skipped — but only when the linked-memory pool can fill the
 caller's ``top_k``.  That route replaces scoring rather than re-ranking it, so
 an under-filled pool falls through instead and the entity hits are applied as a
-hop boost over real scores (H-03).  Otherwise the query is routed to keyword or
-semantic search based on the adaptive FTS weight.
+hop boost over real scores (H-03).  A query carrying a temporal hint
+(``temporal_window`` / ``date_range_filter``) declines the short-circuit the
+same way: the hard date filter and freshness handling live in the scored
+search this route skips, so honouring the hint requires falling through.
+Otherwise the query is routed to keyword or semantic search based on the
+adaptive FTS weight.
 """
 
 from __future__ import annotations
@@ -132,6 +136,45 @@ class ClassifyQuery:
                     # lottery that buries rows pure scoring ranks first
                     # (S1 @K=10000: 11/25 vs rank-1 on unboosted score).
                     ctx.data["entity_match_declined"] = True
+                    matched_ids = []
+
+                # A temporal hint must not be silently dropped: the hard
+                # ``date_range_filter`` and the ``temporal_window`` freshness
+                # handling are applied only by ExecuteScoredSearch, and the
+                # entity_lookup short-circuit skips that step (and
+                # PostFilterResults) entirely — so a dated query ("what did
+                # Alice decide two weeks ago") would return linked memories
+                # from ANY date, with nothing recording that the constraint
+                # was discarded. Decline the short-circuit and fall through to
+                # the temporal / scored-search cascade, which applies both.
+                # Ordered AFTER the over-broad decline: an over-broad match on
+                # a dated query must still suppress hop-boosting (and must not
+                # pay for expanding a >threshold seed set here).
+                #
+                # Unlike over-broad, the entity match itself is good relevance
+                # signal — so ``entity_match_declined`` is NOT set; expand now
+                # and stash the hops so ParallelEmbedAndEntityBoost hop-boosts
+                # the scored results without re-deriving FTS + expansion.
+                if matched_ids and (
+                    ctx.data.get("temporal_window") is not None or ctx.data.get("date_range_filter")
+                ):
+                    entity_hops = await self._expand_per_fleet(
+                        sc,
+                        matched_ids,
+                        tenant_id,
+                        fleet_ids,
+                        graph_max_hops,
+                        use_union=True,
+                    )
+                    ctx.data["_classified_entity_hops"] = entity_hops
+                    # Distinct wording from the other declines — same
+                    # greppability contract as the fallthrough messages below.
+                    logger.info(
+                        "classify_query: entity_lookup declined — temporal hint present "
+                        "(window=%s, date_range=%s), falling through with hop boost",
+                        ctx.data.get("temporal_window"),
+                        ctx.data.get("date_range_filter"),
+                    )
                     matched_ids = []
 
                 if matched_ids:
