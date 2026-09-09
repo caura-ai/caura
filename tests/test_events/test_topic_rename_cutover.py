@@ -130,13 +130,19 @@ def test_subscribe_names_defaults_to_the_current_name_only() -> None:
 
 
 def test_subscribe_names_dual_returns_both_without_duplicates() -> None:
-    # Exercised through ``audit``, which has NOT been renamed. ``subscribe_names``
-    # never consults ``FLIPPED_FAMILIES`` — it returns two names whenever
-    # ``renamed`` moves the name — so the only requirement is a member still on
-    # the outgoing prefix. It used to be ``memory``; that member is contracted
-    # now and yields one name, which is the case asserted just below.
-    both = topics_mod.subscribe_names(Topics.Audit.EVENT_RECORDED, dual=True)
-    assert both == (str(Topics.Audit.EVENT_RECORDED), "caura.audit.event-recorded")
+    # A SYNTHETIC name, because no declared member carries the outgoing prefix
+    # any more — audit was the last and contracted on 2026-09-10. This walked
+    # from ``memory`` to ``audit`` as each contracted; there is nowhere left for
+    # it to walk, so it stops chasing the estate and states the rule directly.
+    #
+    # Any first segment other than the new prefix exercises it. ``renamed``
+    # rewrites the first dot-segment rather than matching the outgoing brand by
+    # name — that is a deliberate property of the module, and relying on it here
+    # keeps the outgoing brand out of this file rather than minting a fresh
+    # occurrence of it for the ratchet to count.
+    outgoing = "outgoing.audit.event-recorded"
+    both = topics_mod.subscribe_names(outgoing, dual=True)
+    assert both == (outgoing, "caura.audit.event-recorded")
     # An already-renamed name must yield ONE entry, not the same string twice —
     # a duplicate would register the handler twice and double-dispatch it. Read
     # off a real contracted member rather than a hand-written string, so it stays
@@ -155,7 +161,7 @@ def test_subscribe_names_dual_returns_both_without_duplicates() -> None:
 # has to be stated in exactly two places — the module, and this literal — and the
 # equality in ``test_exactly_the_flipped_families_are_flipped`` is what turns the
 # second one into a deliberate stop rather than a chore.
-FLIPPED = frozenset({"lifecycle", "memory", "org"})
+FLIPPED = frozenset({"audit", "lifecycle", "memory", "org"})
 
 # A synthetic flipped-but-NOT-contracted topic, for the tests that need the
 # silent-failure state to exist. Every real family here is now either unflipped
@@ -210,9 +216,18 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     also holds ``fleet`` and ``security``, which are declared only there; naming
     either here would raise at import in every OSS service.
 
-    ``audit`` is called out because it must be flipped LAST — those rows are
-    hash-chained, and a lost or reordered audit event is the one failure in this
-    programme that cannot be undone.
+    ``audit`` flipped 2026-09-10, last, which closes the cutover. It was held to
+    the end on a premise that did not survive checking: that these rows are
+    hash-chained and a lost or reordered audit event could not be repaired. The
+    hash-chained audit log is a SEPARATE transport and never touches this topic;
+    what rides here is an append-only notification whose consumer tolerates
+    duplicates and requires no ordering. The hazard is the opposite shape — the
+    audit publisher swallows every exception by design, so a flip onto a name
+    that did not exist would have lost every event in silence. The evidence that
+    made it safe was existence and attachment, not chain ceremony: both
+    environments carrying the twin and its ``-dlq`` with an ACTIVE subscription
+    each, the readiness gate at 17/17 with nothing unbound, and a pre-flip week
+    of 20 production publishes on the legacy name and zero on the twin.
 
     ``pipeline`` is called out for the opposite reason: it is declared in both
     repos but has no live topic in either environment, so flipping it would
@@ -235,7 +250,6 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     which ``dual=False`` was illegal fleet-wide.
     """
     assert topics_mod.FLIPPED_FAMILIES == FLIPPED
-    assert "audit" not in topics_mod.FLIPPED_FAMILIES
     assert "pipeline" not in topics_mod.FLIPPED_FAMILIES
 
 
@@ -362,13 +376,16 @@ def test_pubsub_subscribe_binds_both_names_when_enabled() -> None:
     b = PubSubEventBus(
         project_id="proj", subscription_prefix="core-api", dual_subscribe=True
     )
-    # ``audit`` is still on the outgoing prefix, so it has a twin to bind.
-    # ``memory`` is contracted and would bind exactly one name, which would make
-    # this assertion pass without testing the expansion at all.
-    b.subscribe(Topics.Audit.EVENT_RECORDED, handler)
+    # A SYNTHETIC name on the outgoing prefix. Every declared member is
+    # contracted now — audit was the last, on 2026-09-10 — and a contracted
+    # member binds exactly one name, which would make this assertion pass
+    # without testing the expansion at all. ``renamed`` rewrites whatever the
+    # first dot-segment is, so any non-``caura`` prefix exercises the twin.
+    outgoing = "outgoing.audit.event-recorded"
+    b.subscribe(outgoing, handler)
     assert sorted(b._handlers) == [
         "caura.audit.event-recorded",
-        str(Topics.Audit.EVENT_RECORDED),
+        outgoing,
     ]
     # One handler per name, not two on one name.
     assert all(len(hs) == 1 for hs in b._handlers.values())
@@ -412,12 +429,14 @@ def test_inprocess_binds_both_names_with_no_flag() -> None:
     flipped, instead of silently delivering to nobody.
     """
     b = InProcessEventBus()
-    # ``audit`` for the same reason as the Pub/Sub case above: a contracted
-    # member binds one name and would make this pass vacuously.
-    b.subscribe(Topics.Audit.EVENT_RECORDED, handler)
+    # A synthetic outgoing name for the same reason as the Pub/Sub case above:
+    # every declared member is contracted now, and a contracted member binds one
+    # name, which would make this pass vacuously.
+    outgoing = "outgoing.audit.event-recorded"
+    b.subscribe(outgoing, handler)
     assert sorted(b._handlers) == [
         "caura.audit.event-recorded",
-        str(Topics.Audit.EVENT_RECORDED),
+        outgoing,
     ]
 
 
@@ -592,8 +611,9 @@ def test_unbound_publish_topics_names_a_flipped_family_when_dual_is_off(
         assert topics_mod.publish_name(topic) not in topics_mod.subscribe_names(
             topic, dual=False
         )
-    # A family that has NOT flipped is not swept up in the report — audit above
-    # all, since it is the one that must flip last.
+    # A family that has NOT flipped is not swept up in the report. ``audit`` is
+    # the illustration because it was the last family to flip; the set is
+    # patched above, so this holds regardless of the module's real value.
     assert not any(topics_mod.family(t) == "audit" for t in unbound)
 
 

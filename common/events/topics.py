@@ -25,7 +25,20 @@ class Memory(enum.StrEnum):
 
 
 class Audit(enum.StrEnum):
-    EVENT_RECORDED = "memclaw.audit.event-recorded"
+    # CONTRACTED 2026-09-10, in the same change as its flip and NOT as a matter
+    # of taste. Flipping without contracting leaves ``publish_name`` returning
+    # the twin while ``subscribe_names(dual=False)`` -- the DEFAULT -- still
+    # returns the outgoing name, so ``unbound_publish_topics`` reports the
+    # family and every default-constructed ``PubSubEventBus`` raises FLEET-WIDE,
+    # not just in the service that moved. ``memory`` sat in that state for four
+    # days and ``org`` for hours; both were found by reading the module rather
+    # than by a failing test, which is why
+    # ``test_every_flipped_family_is_contracted_so_the_default_bus_is_legal``
+    # now exists and why these two steps ship together.
+    #
+    # This was the LAST declared topic carrying the outgoing prefix. This module
+    # now declares none.
+    EVENT_RECORDED = "caura.audit.event-recorded"
 
 
 class Pipeline(enum.StrEnum):
@@ -285,9 +298,35 @@ def family(topic: str) -> str:
 # against the live project — ``pubsub topics list`` matches no ``pipeline``
 # topic under either brand, in either environment.
 #
-# ``audit`` LAST, unconditionally — those rows are hash-chained, and a lost or
-# reordered audit event is the one failure here that replay cannot repair.
-FLIPPED_FAMILIES: frozenset[str] = frozenset({"lifecycle", "memory", "org"})
+# ``audit`` FLIPPED 2026-09-10 — last, as planned, but NOT for the reason this
+# comment used to give. It said these rows are hash-chained and that a lost or
+# reordered audit event is the one failure here replay cannot repair. That
+# conflated two unrelated paths. The hash-chained audit log is a SEPARATE
+# transport: an install batches locally-chained entries over HTTP and the
+# receiver verifies the links and refuses a discontinuity. It never travels
+# this topic. What rides here is an append-only notification whose consumer
+# tolerates duplicate delivery by design — no ordering requirement, and no
+# chain to break.
+#
+# The real hazard on this family is the opposite shape, and it is worth naming
+# because it is invisible: the audit publisher is fire-and-forget and swallows
+# every exception, deliberately, so that a bus outage cannot take down the
+# request path that produced the event. Flipping onto a name that did not exist
+# would therefore lose every audit event with NO error anywhere, into an
+# append-only store with no replay. What made this flip safe is evidence that
+# the twin exists and is attached, not chain ceremony: on 2026-09-10 both
+# environments carried ``<env>--caura.audit.event-recorded`` and its ``-dlq``
+# with an ACTIVE subscription each, the readiness gate read 17/17 with nothing
+# unbound, and the pre-flip week showed 20 production publishes on the legacy
+# name and zero on the twin.
+#
+# Nothing in THIS repo publishes or subscribes the audit topic — the member is
+# declared here and consumed downstream. Listing the family keeps the two
+# copies' flip state aligned, and means a publisher added here later inherits
+# the current name rather than the outgoing one.
+FLIPPED_FAMILIES: frozenset[str] = frozenset(
+    {"audit", "lifecycle", "memory", "org"}
+)
 
 
 def all_topics() -> tuple[str, ...]:
