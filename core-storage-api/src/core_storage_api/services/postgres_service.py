@@ -372,6 +372,75 @@ def _entity_uf_union(parent: dict[UUID, UUID], rank: dict[UUID, int], a: UUID, b
 # import core-api, so the coupling is documented here rather than enforced.
 _FTS_RESERVED_CANDIDATES = 3
 
+# ── ANN candidate pool (HNSW two-stage retrieval, PR2) ──────────────────────
+# Side-arm LIMITs for the candidate pool built when ``ann_pool_size`` > 0.
+# The ANN arm's size is the knob itself; these bound the supplementary arms
+# that keep non-cosine admission contracts intact (FTS-matching rows incl.
+# NULL-embedding ones, fresh rows, date-window rows). Constants rather than
+# knobs: they shape pool COVERAGE, not ranking, and every admitted row still
+# competes on the full score — oversizing them costs pool width, not rank.
+_ANN_POOL_SIDE_ARM_LIMIT = 50
+# ``hnsw.ef_search`` floor for the ANN arm. pgvector clamps the GUC to
+# [1, 1000]; a value below the arm's LIMIT would cap a non-iterative scan
+# below the requested pool, and tiny values hurt recall even with iterative
+# scans picking up the slack.
+_ANN_EF_SEARCH_FLOOR = 100
+# Iterative index scans (hnsw.iterative_scan) shipped in pgvector 0.8.0 —
+# the mechanism that lets a filtered ANN arm keep scanning until the LIMIT
+# is satisfied instead of post-filtering a fixed ef_search batch. Below this
+# version the GUC does not exist (SET fails), so the ANN pool declines
+# entirely and the statement keeps its pre-pool shape.
+_PGVECTOR_ITERATIVE_MIN = (0, 8)
+# Process-wide probe cache: extversion cannot change under a running service
+# (ALTER EXTENSION requires a restart window in every deployment shape we
+# ship), so one successful probe answers for the process lifetime. ``None``
+# means "not probed yet"; probe FAILURES do not populate it — a transient
+# read error must not stick the process on the fallback path forever.
+_pgvector_version: tuple[int, ...] | None = None
+
+
+async def _ann_pool_available() -> bool:
+    """True when the ANN candidate pool may run: pgvector >= 0.8 on this DB.
+
+    Called only when ``ann_pool_size`` > 0, so the default path never pays
+    the probe. First call runs one ``pg_extension`` lookup on a read session
+    and caches the parsed version; the fallback decision is logged once, at
+    WARNING, because a tenant explicitly asked for the pool and is silently
+    getting the full scan instead — on-call should be able to grep why.
+    """
+    global _pgvector_version
+    if _pgvector_version is None:
+        try:
+            async with get_read_session() as session:
+                raw = (
+                    await session.execute(
+                        text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                    )
+                ).scalar()
+        except Exception:
+            logger.warning(
+                "ann_pool: pgvector version probe failed; falling back to the "
+                "full-scan candidate window for this call (will re-probe)",
+                exc_info=True,
+            )
+            return False
+        parts: list[int] = []
+        for piece in str(raw or "0").split("."):
+            if not piece.isdigit():
+                break
+            parts.append(int(piece))
+        _pgvector_version = tuple(parts) or (0,)
+        if _pgvector_version >= _PGVECTOR_ITERATIVE_MIN:
+            logger.info("ann_pool: pgvector %s supports iterative scans; ANN pool enabled", raw)
+        else:
+            logger.warning(
+                "ann_pool: pgvector %s < 0.8 (no hnsw.iterative_scan); ann_pool_size "
+                "is set but the statement keeps the full-scan candidate window. "
+                "ALTER EXTENSION vector UPDATE to enable the two-stage path.",
+                raw,
+            )
+    return _pgvector_version >= _PGVECTOR_ITERATIVE_MIN
+
 
 def _saturate_rank(scaled_rank: Any) -> Any:
     """Map a scaled ``ts_rank_cd`` onto ``[0, 1)``, naming the rank ONCE.
@@ -2420,6 +2489,27 @@ class PostgresService:
         # A50 unified: which ranking formula computes `score`. 0 = legacy multiplicative
         # boost stack; 1 = unified relevance-dominant additive formula (see below).
         _score_formula = int(sp.get("score_formula", 0) or 0)
+        # HNSW two-stage retrieval (PR2): 0 = off (full-scan candidate window,
+        # unchanged); >0 = admit candidates through index-served pool arms and
+        # run the scoring formula over that pool only. Gated below on a
+        # pgvector >= 0.8 probe — the shape silently stays full-scan on older
+        # extensions so an on-prem box that predates iterative scans keeps
+        # byte-identical behaviour.
+        _ann_pool_size = int(sp.get("ann_pool_size", 0) or 0)
+        use_ann_pool = _ann_pool_size > 0 and await _ann_pool_available()
+        if use_ann_pool and _candidate_pool_size > 0:
+            # The two pool selectors are mutually exclusive by design —
+            # core-api's profile validation rejects the combination up front;
+            # if a payload carries both anyway (skew, hand-built params), the
+            # ANN pool wins and A49's similarity-ordered window is ignored:
+            # the pool already admits by relevance, so layering the A49
+            # ORDER BY on top would only narrow it for no benefit.
+            logger.info(
+                "memory_scored_search: ann_pool_size=%d supersedes candidate_pool_size=%d",
+                _ann_pool_size,
+                _candidate_pool_size,
+            )
+            _candidate_pool_size = 0
 
         # -- Scoring expressions --
         #
@@ -2489,37 +2579,26 @@ class PostgresService:
         _exact_lexical_match = _fts_guard
         fts_match = _fts_guard.label("fts_match")
 
-        # -- Layer 0: the ``ingredients`` CTE --
-        # Row filters are identical to the pre-split statement; only the select
-        # list changed. Raw row fields ride along so the derived layer never
-        # touches ``memories`` again before the final top_k join.
-        ingredients_stmt = (
-            select(
-                Memory.id.label("mem_id"),
-                vec_sim,
-                has_embedding,
-                fts_score,
-                fts_match,
-                Memory.created_at.label("created_at"),
-                Memory.ts_valid_start.label("ts_valid_start"),
-                Memory.ts_valid_end.label("ts_valid_end"),
-                Memory.memory_type.label("memory_type"),
-                Memory.weight.label("weight"),
-                Memory.status.label("status"),
-                Memory.recall_count.label("recall_count"),
-                Memory.last_recalled_at.label("last_recalled_at"),
-            )
+        # Row-level filters, built once and applied to BOTH the ingredients
+        # CTE and — when the ANN candidate pool is active — every pool arm.
+        # An arm that filtered less would admit rows the caller must not see
+        # (the boosted-id arm especially: entity expansion knows nothing about
+        # visibility), and an arm that filtered more would waste its LIMIT on
+        # rows the scorer then discards. One list keeps every consumer in
+        # lockstep; drift here is the same cross-tenant leak risk the
+        # ENTITY_LOOKUP short-circuit documents.
+        row_filters: list[Any] = [
             # Multi-tenant read predicate: when ``readable_tenant_ids``
             # is provided (cross-tenant agent key), reads widen across
             # the full set; otherwise we stay single-tenant for the
             # common case. Result rows still carry ``Memory.tenant_id``
             # so the caller can attribute each row to its source tenant.
-            .where(
+            (
                 Memory.tenant_id.in_(readable_tenant_ids)
                 if readable_tenant_ids
                 else Memory.tenant_id == tenant_id
-            )
-            .where(Memory.deleted_at.is_(None))
+            ),
+            Memory.deleted_at.is_(None),
             # CAURA-594: NULL-embedding rows are admitted only if they also
             # match the FTS query — otherwise they'd rank on `Memory.weight *
             # freshness * ...` alone and could fill top_k slots with rows
@@ -2531,38 +2610,35 @@ class PostgresService:
             # find_neighbors_by_embedding, compute_health_stats) keep their
             # NULL guards — vector-pure operations where a NULL operand has
             # no comparable semantics.
-            .where(
-                or_(
-                    Memory.embedding.is_not(None),
-                    _fts_guard,
-                )
-            )
-        )
+            or_(
+                Memory.embedding.is_not(None),
+                _fts_guard,
+            ),
+        ]
 
         if fleet_ids:
-            ingredients_stmt = ingredients_stmt.where(
-                _fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping)
-            )
+            row_filters.append(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
 
         if caller_agent_id:
-            visibility_filter = or_(
-                Memory.visibility == "scope_org",
-                Memory.visibility == "scope_team",
-                and_(
-                    Memory.visibility == "scope_agent",
-                    Memory.agent_id == caller_agent_id,
-                ),
+            row_filters.append(
+                or_(
+                    Memory.visibility == "scope_org",
+                    Memory.visibility == "scope_team",
+                    and_(
+                        Memory.visibility == "scope_agent",
+                        Memory.agent_id == caller_agent_id,
+                    ),
+                )
             )
-            ingredients_stmt = ingredients_stmt.where(visibility_filter)
         else:
-            ingredients_stmt = ingredients_stmt.where(Memory.visibility != "scope_agent")
+            row_filters.append(Memory.visibility != "scope_agent")
 
         if filter_agent_id:
-            ingredients_stmt = ingredients_stmt.where(Memory.agent_id == filter_agent_id)
+            row_filters.append(Memory.agent_id == filter_agent_id)
         if memory_type_filter:
-            ingredients_stmt = ingredients_stmt.where(Memory.memory_type == memory_type_filter)
+            row_filters.append(Memory.memory_type == memory_type_filter)
         if status_filter:
-            ingredients_stmt = ingredients_stmt.where(Memory.status == status_filter)
+            row_filters.append(Memory.status == status_filter)
         elif history_query:
             # A63 — a history question ("what was…", "did I switch…",
             # "how long have I been…") needs the superseded value: the
@@ -2591,7 +2667,7 @@ class PostgresService:
             # conflicted row un-demoted, and load_and_serialize still injects its
             # supersedes successor so both sides are visible. ``outdated`` stays
             # fully excluded.
-            ingredients_stmt = ingredients_stmt.where(
+            row_filters.append(
                 or_(
                     Memory.status.notin_(("outdated", "conflicted")),
                     and_(Memory.status == "conflicted", _exact_lexical_match),
@@ -2613,11 +2689,11 @@ class PostgresService:
             _valid_at_date = (
                 valid_at.date() if hasattr(valid_at, "date") else _date_type.fromisoformat(str(valid_at)[:10])
             )
-            ingredients_stmt = ingredients_stmt.where(
+            row_filters.append(
                 or_(
                     Memory.ts_valid_start.is_(None),
                     _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
-                ),
+                )
             )
             # NOTE: the END side (`ts_valid_end >= valid_at`) is NO LONGER
             # a hard filter.  A past ts_valid_end now triggers the soft
@@ -2627,6 +2703,131 @@ class PostgresService:
 
         # NOTE: date_range_start/end no longer produces a hard WHERE filter;
         # the multiplier ``date_range_boost`` below handles it softly.
+
+        # -- Layer 0: the ``ingredients`` CTE --
+        # Row filters are identical to the pre-split statement; only the select
+        # list changed. Raw row fields ride along so the derived layer never
+        # touches ``memories`` again before the final top_k join.
+        ingredients_stmt = select(
+            Memory.id.label("mem_id"),
+            vec_sim,
+            has_embedding,
+            fts_score,
+            fts_match,
+            Memory.created_at.label("created_at"),
+            Memory.ts_valid_start.label("ts_valid_start"),
+            Memory.ts_valid_end.label("ts_valid_end"),
+            Memory.memory_type.label("memory_type"),
+            Memory.weight.label("weight"),
+            Memory.status.label("status"),
+            Memory.recall_count.label("recall_count"),
+            Memory.last_recalled_at.label("last_recalled_at"),
+        ).where(*row_filters)
+
+        if use_ann_pool:
+            # -- ANN candidate pool (HNSW two-stage retrieval, PR2) --
+            # Restrict the ingredients CTE to a bounded, index-served candidate
+            # pool instead of scanning the whole tenant slice. Each admission
+            # signal gets its own arm on its own index, because the scoring
+            # formula can elevate rows above their pure-cosine rank and a
+            # single ANN cut would silently drop them:
+            #
+            #   ann     — top-N by cosine via ix_memories_embedding_hnsw; the
+            #             relevance workhorse. Explicit ``embedding IS NOT
+            #             NULL`` keeps the scan pure-ANN (`<=>` on NULL sorts
+            #             NULLS LAST but wastes scan budget).
+            #   fts     — GIN-served lexical matches, ordered by raw rank
+            #             (monotonic with the saturated fts_score, one render
+            #             cheaper). Carries the CAURA-594/679 contract: an
+            #             FTS-matching row with a NULL embedding stays
+            #             discoverable during the deferred-embed window.
+            #   recency — newest rows via ix_memories_tenant_created_active,
+            #             covering freshness/temporal elevation (legacy
+            #             formula multiplies by freshness and temporal_boost).
+            #   date    — only when the caller extracted a hard date window:
+            #             rows whose temporal anchor falls inside it, so
+            #             date_range_boost has candidates to boost.
+            #   boosted — the entity-expansion ids, verbatim: they are already
+            #             ≤ GRAPH_MAX_BOOSTED_MEMORIES and exact by
+            #             construction, and they MUST pass row_filters here
+            #             because graph expansion knows nothing about
+            #             visibility.
+            #
+            # Every arm applies the full ``row_filters`` so pool admission can
+            # never widen visibility, and UNION (not UNION ALL) dedups ids.
+            # Rows the pool misses are the two-stage trade-off: bounded,
+            # measured, and gated by the offline harness — see
+            # docs/plans/hnsw-two-stage-retrieval.md for the parity analysis.
+            #
+            # Each arm is wrapped in its own subquery so its ORDER BY/LIMIT
+            # binds before the union — same construction as the scored-CTE
+            # union below.
+            ann_arm = (
+                select(Memory.id)
+                .where(*row_filters)
+                .where(Memory.embedding.is_not(None))
+                .order_by(Memory.embedding.cosine_distance(embedding))
+                .limit(_ann_pool_size)
+            )
+            arm_selects = [select(ann_arm.subquery())]
+
+            if query and query.strip():
+                fts_arm = (
+                    select(Memory.id)
+                    .where(*row_filters)
+                    .where(_fts_guard)
+                    .order_by(raw_keyword_rank.desc(), Memory.created_at.desc())
+                    .limit(_ANN_POOL_SIDE_ARM_LIMIT)
+                )
+                arm_selects.append(select(fts_arm.subquery()))
+
+            recency_arm = (
+                select(Memory.id)
+                .where(*row_filters)
+                .order_by(Memory.created_at.desc())
+                .limit(_ANN_POOL_SIDE_ARM_LIMIT)
+            )
+            arm_selects.append(select(recency_arm.subquery()))
+
+            if date_range_start and date_range_end:
+                from datetime import date as _dr_date_type
+
+                from sqlalchemy import Date as _DrDate
+                from sqlalchemy import cast as _dr_cast
+                from sqlalchemy import literal as _dr_literal
+
+                # Parsed again in the date_range_boost block below,
+                # deliberately: the boost runs whether or not the pool is
+                # active, and threading parsed dates between the two blocks
+                # couples them for the price of two date.fromisoformat calls.
+                _arm_start = _dr_date_type.fromisoformat(date_range_start)
+                _arm_end = _dr_date_type.fromisoformat(date_range_end)
+                _arm_anchor = func.coalesce(
+                    _dr_cast(Memory.ts_valid_start, _DrDate),
+                    _dr_cast(Memory.created_at, _DrDate),
+                )
+                date_arm = (
+                    select(Memory.id)
+                    .where(*row_filters)
+                    .where(
+                        and_(
+                            _arm_anchor >= _dr_cast(_dr_literal(_arm_start), _DrDate),
+                            _arm_anchor <= _dr_cast(_dr_literal(_arm_end), _DrDate),
+                        )
+                    )
+                    .order_by(Memory.created_at.desc())
+                    .limit(_ANN_POOL_SIDE_ARM_LIMIT)
+                )
+                arm_selects.append(select(date_arm.subquery()))
+
+            if boosted_memory_ids:
+                boosted_arm = (
+                    select(Memory.id).where(*row_filters).where(Memory.id.in_(list(boosted_memory_ids)))
+                )
+                arm_selects.append(select(boosted_arm.subquery()))
+
+            pool_cte = arm_selects[0].union(*arm_selects[1:]).cte("candidate_pool")
+            ingredients_stmt = ingredients_stmt.where(Memory.id.in_(select(pool_cte.c.id)))
 
         # ``AS MATERIALIZED`` is a deliberate optimisation fence. With the
         # FTS-reserved branch present the CTE is referenced twice and
@@ -2995,6 +3196,31 @@ class PostgresService:
         # work doesn't inflate the DB timing signal.
         with db_measure():
             async with get_read_session() as session:
+                if use_ann_pool:
+                    # Pin the ANN arm's scan behaviour for THIS statement only.
+                    # ``set_config(..., is_local => true)`` is SET LOCAL —
+                    # scoped to the transaction the session's autobegin opened
+                    # with this first execute, and reset at commit/rollback on
+                    # session close, so nothing leaks to the next checkout of
+                    # the pooled connection.
+                    #
+                    # ``ef_search`` must be >= the arm's LIMIT for a one-pass
+                    # scan (pgvector clamps the GUC to [1, 1000]);
+                    # ``iterative_scan=relaxed_order`` keeps the scan walking
+                    # past ef_search until the LIMIT is satisfied when the
+                    # row_filters discard candidates — the multi-tenant case,
+                    # where a small tenant's rows are sparse in a shared
+                    # index. Bounded by pgvector's hnsw.max_scan_tuples
+                    # (default 20k), so a pathological filter degrades to an
+                    # under-filled pool, never an unbounded crawl.
+                    #
+                    # Set via set_config() rather than SET LOCAL because
+                    # utility statements can't take bind parameters.
+                    _ef_search = min(max(_ann_pool_size, _ANN_EF_SEARCH_FLOOR), 1000)
+                    await session.execute(select(func.set_config("hnsw.ef_search", str(_ef_search), True)))
+                    await session.execute(
+                        select(func.set_config("hnsw.iterative_scan", "relaxed_order", True))
+                    )
                 result = await session.execute(stmt)
                 rows = result.all()
 

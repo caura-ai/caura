@@ -319,6 +319,18 @@ CANDIDATE_POOL_SIZE = 0
 # tenant via default_search_profile.score_formula to A/B old vs new on the benchmark.
 # Rationale + offline calibration: docs/ranking/unified-ranking-formula.md.
 SCORE_FORMULA = 0
+# HNSW two-stage retrieval (PR2, docs/plans/hnsw-two-stage-retrieval.md).
+# 0 = OFF: storage keeps the full-scan candidate window (current behaviour).
+# >0 = storage admits candidates through index-served pool arms (ANN top-N by
+# cosine via the memories HNSW index, plus FTS / recency / date-window /
+# entity-boosted arms) and runs the scoring formula over that pool only —
+# O(log N + pool) instead of O(tenant rows) per search. Needs pgvector >= 0.8
+# at runtime; storage probes once and silently keeps the full scan below that.
+# Enable per-tenant via ``default_search_profile.ann_pool_size``; keep 0
+# globally until the offline harness validates result parity (see the plan
+# doc's crowding-regime analysis). Mutually exclusive with
+# ``candidate_pool_size`` — storage lets ann win if both arrive.
+ANN_POOL_SIZE = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_BOOST_FACTOR = 1.3

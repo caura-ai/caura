@@ -45,6 +45,7 @@ from common.embedding import (
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
 from common.governance import mask, scan
 from core_api.constants import (
+    ANN_POOL_SIZE,
     BULK_EMBEDDING_TIMEOUT_SECONDS,
     BULK_ENRICHMENT_CONCURRENCY,
     BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
@@ -4062,6 +4063,7 @@ def resolve_search_params(
         "fts_rank_scale": resolved.get("fts_rank_scale", FTS_RANK_SCALE),
         "candidate_pool_size": resolved.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
         "score_formula": resolved.get("score_formula", SCORE_FORMULA),
+        "ann_pool_size": resolved.get("ann_pool_size", ANN_POOL_SIZE),
     }
 
 

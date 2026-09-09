@@ -555,6 +555,15 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     "candidate_pool_size": SearchKnob(int, (0, 200), sql=True),
     # A50 unified: 0 = legacy multiplicative score; 1 = unified relevance-dominant formula.
     "score_formula": SearchKnob(int, (0, 1), sql=True),
+    # HNSW two-stage retrieval (PR2 of docs/plans/hnsw-two-stage-retrieval.md):
+    # 0 = off (full-scan candidate window, unchanged); >0 = storage admits
+    # candidates through index-served pool arms (ANN top-N by cosine via the
+    # memories HNSW index, FTS, recency, date window, entity-boosted ids) and
+    # runs the scoring formula over that pool only. Needs pgvector >= 0.8 at
+    # runtime (iterative scans); storage probes once and silently keeps the
+    # full scan below that. Mutually exclusive with ``candidate_pool_size`` —
+    # storage lets ann win if both arrive, but don't set both.
+    "ann_pool_size": SearchKnob(int, (0, 1000), sql=True),
 }
 
 # The wire contract, derived. Core-api's two search-path builders project
