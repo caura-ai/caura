@@ -87,6 +87,12 @@ class MemoryStatusPatchResponse(BaseModel):
 
 class RecallDiagnostic(BaseModel):
     recall_prompt: str | None
+    # WT-1 — ``summary`` carries only the extracted final answer; the raw
+    # completion stays inspectable here.
+    recall_raw: str | None = Field(
+        description="Unfiltered LLM completion (reasoning scaffold + answer marker) that summary "
+        "was extracted from; null when no LLM ran (no matches, or summarization disabled)."
+    )
     recall_model: str | None
     recall_provider: str | None
     all_candidates: list
