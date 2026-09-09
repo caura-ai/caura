@@ -29,8 +29,32 @@ class Audit(enum.StrEnum):
 
 
 class Pipeline(enum.StrEnum):
-    ENTITY_EXTRACT_REQUESTED = "memclaw.pipeline.entity-extract-requested"
-    ENTITY_EXTRACTED = "memclaw.pipeline.entity-extracted"
+    # CONTRACTED 2026-09-09, and the only family that could be contracted
+    # WITHOUT first being flipped -- because it is the only one with nothing to
+    # move. It declares no topic in either environment's Terraform, has never
+    # had one provisioned, and no code in either repo publishes or subscribes
+    # to these members; the two references that exist name the SYMBOL in design
+    # comments (CAURA-593/595, the planned entity-extraction worker fleet), not
+    # the string.
+    #
+    # That absence is exactly why ``pipeline`` must never enter
+    # FLIPPED_FAMILIES -- publishing into a topic that does not exist is silent
+    # loss that reports success -- and it is also why renaming the members here
+    # is safe in a way no other family's would be. Expand/flip/drain exists to
+    # keep messages from falling between two names. There are no messages.
+    #
+    # After this, ``renamed`` is the identity for both members, so
+    # ``publish_name`` and ``subscribe_names`` agree under dual=True and
+    # dual=False alike and ``unbound_publish_topics`` is unaffected. ``family``
+    # still reads ``pipeline`` -- the segment is unchanged -- so
+    # ``known_families()`` is the same set and the guard that validates
+    # FLIPPED_FAMILIES against it behaves identically.
+    #
+    # The members keep their names so the design comments that reference them
+    # stay correct. If that worker fleet is ever built, it inherits a family
+    # already carrying the current brand and needs no cutover of its own.
+    ENTITY_EXTRACT_REQUESTED = "caura.pipeline.entity-extract-requested"
+    ENTITY_EXTRACTED = "caura.pipeline.entity-extracted"
 
 
 class Org(enum.StrEnum):
