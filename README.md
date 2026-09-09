@@ -3,7 +3,7 @@
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
 <p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-ok: taught as legacy alias -->
-Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env vars and URLs keep working unchanged. The <code>memclaw-client</code>/<code>@caura/memclaw-client</code> package names and the <code>MemClaw</code> class alias inside <code>caura-client</code> were all retired.</p> <!-- legacy-name-ok: taught as legacy alias -->
+Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env vars and URLs keep working unchanged. The yanked PyPI release <code>memclaw-client==0.5.0</code> still installs <code>caura-client</code> for exact pins, but it does not provide the retired <code>memclaw_client</code> import or <code>MemClaw</code> class aliases. The npm package <code>@caura/memclaw-client</code> was never published.</p> <!-- legacy-name-ok: taught as legacy alias -->
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
@@ -656,7 +656,7 @@ API key where one is present and by remote IP otherwise. It is applied per route
 
 | Route | Default | Setting |
 |---|---|---|
-| `POST /memories`, `POST /documents`, `POST /ingest/commit` | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories`, `POST /documents`, `POST /ingest/commit`, `POST /stm/promote` | 10/second | `RATE_LIMIT_WRITE` |
 | `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
 | `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
 

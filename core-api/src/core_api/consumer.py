@@ -30,6 +30,7 @@ import logging
 
 from pydantic import ValidationError
 
+from common.enrichment import AtomicFact
 from common.events.base import Event
 from common.events.factory import get_event_bus
 from common.events.memory_embedded import MemoryEmbedded
@@ -42,9 +43,98 @@ from core_api.services.governance_remediation import (
     GovernanceCascadeError,
     remediate_after_enrichment,
 )
+from core_api.services.memory_service import fan_out_atomic_facts
 from core_api.services.organization_settings import invalidate_cache, resolve_config
 
 logger = logging.getLogger(__name__)
+
+
+async def _fan_out_persisted_atomic_facts(sc, memory: dict, payload, outcome) -> None:
+    """Create the child memories for facts the async worker persisted (A70).
+
+    The synchronous path fans out inline. The worker cannot: its storage client
+    has no create-memory call, and giving it one would also mean a second copy
+    of ``fan_out_atomic_facts`` — a block whose every guarantee traces to an
+    incident (#808, CAURA-222, OSS #814, CAURA-602, the 2026-07-27 stranded
+    embeddings). So the worker stores the facts and this consumer creates the
+    rows, through the same function the synchronous path uses.
+
+    Never raises. A fan-out failure must not nack the event: contradiction
+    detection runs after this and is the handler's primary job, and a nack would
+    redeliver the whole handler to retry work that is already idempotent.
+    """
+    md = memory.get("metadata_") or {}
+    raw_facts = md.get("atomic_facts")
+    if not raw_facts:
+        return
+    try:
+        facts = [AtomicFact.model_validate(f) for f in raw_facts]
+    except (ValidationError, TypeError):
+        # Written by us one enrichment ago, so an unparseable shape means the
+        # schema moved under a row an older build wrote. Dropping is right: no
+        # retry re-parses it, and leaving the key set would re-attempt this on
+        # every redelivery forever.
+        logger.exception(
+            "memory-enriched: unparseable persisted atomic_facts; clearing",
+            extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
+        )
+        facts = []
+
+    if facts:
+        # ``outcome.visibility`` FIRST — this is exactly why
+        # ``RemediationOutcome`` carries it. ``memory`` was read before the
+        # governance PATCH, so its ``visibility`` is the PRE-policy value, and a
+        # child inheriting that re-publishes precisely what ``keep_private`` just
+        # made private (#808).
+        parent_visibility = outcome.visibility or memory.get("visibility") or "scope_team"
+        try:
+            counts = await fan_out_atomic_facts(
+                sc,
+                atomic_facts=facts,
+                memory_id=payload.memory_id,
+                tenant_id=payload.tenant_id,
+                fleet_id=memory.get("fleet_id"),
+                agent_id=memory.get("agent_id") or "",
+                parent_metadata=md,
+                parent_visibility=parent_visibility,
+                parent_weight=memory.get("weight") or 0.5,
+                parent_ts_start=memory.get("ts_valid_start"),
+                tenant_config=await resolve_config(payload.tenant_id),
+            )
+        except Exception:
+            # Marker deliberately left in place: the facts are still stored, so a
+            # redelivery or a later re-enrichment can retry, and the fan-out's own
+            # live-hash dedup stops a retry duplicating whatever did land.
+            logger.exception(
+                "memory-enriched: atomic-fact fan-out failed; facts left in metadata for retry",
+                extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
+            )
+            return
+        logger.info(
+            "memory-enriched: atomic-fact fan-out created=%d deduped=%d unembedded=%d",
+            counts["created"],
+            counts["deduped"],
+            counts["unembedded"],
+            extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
+        )
+
+    # Mark consumed. The bus is at-least-once, so this is the CHEAP idempotency
+    # path, not the guarantee — that is the fan-out's own live-hash dedup, which
+    # already absorbs a redelivery arriving before this write lands. Merged via
+    # ``metadata_patch`` so sibling keys the worker set survive.
+    try:
+        await sc.update_memory(
+            str(payload.memory_id),
+            payload.tenant_id,
+            {"metadata_patch": {"atomic_facts": None}},
+        )
+    except Exception:
+        logger.warning(
+            "memory-enriched: could not clear the atomic_facts marker; a redelivery "
+            "will re-enter the fan-out and be absorbed by its dedup",
+            exc_info=True,
+            extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
+        )
 
 
 async def handle_memory_enriched(event: Event) -> None:
@@ -139,6 +229,15 @@ async def handle_memory_enriched(event: Event) -> None:
             extra={"memory_id": str(payload.memory_id), "tenant_id": payload.tenant_id},
         )
         return
+
+    # A70 — create the children for facts the worker persisted. Placed here
+    # deliberately:
+    #   * AFTER remediation, so a dropped row spawns nothing and children inherit
+    #     the post-policy visibility (#808);
+    #   * BEFORE the embedding check, because a parent whose vector has not landed
+    #     still has valid facts and each child embeds itself. Gating on the
+    #     parent's embedding would strand the facts behind an unrelated race.
+    await _fan_out_persisted_atomic_facts(sc, memory, payload, outcome)
 
     embedding = memory.get("embedding")
     if not embedding:

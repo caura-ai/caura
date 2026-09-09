@@ -24,6 +24,7 @@ from common.embedding.constants import (
     EMBEDDING_RETRY_DELAY_S,
 )
 from common.embedding.protocols import EmbeddingProvider, InstructionAwareEmbedder
+from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
 
 logger = logging.getLogger(__name__)
 
@@ -492,12 +493,24 @@ def is_blank_text(text: str) -> bool:
 
 
 def _resolve_provider_name(tenant_config: object | None) -> str:
-    """Tenant override first, else ``EMBEDDING_PROVIDER`` env, else ``"fake"``."""
+    """Tenant override first, else ``EMBEDDING_PROVIDER`` env, else the shared default.
+
+    The fallback is ``DEFAULT_EMBEDDING_PROVIDER`` — the same constant
+    behind core-api's ``Settings.embedding_provider`` — NOT ``"fake"``.
+    The old ``"fake"`` fallback meant a tenant-config-less caller in a
+    process without ``EMBEDDING_PROVIDER`` in its env silently persisted
+    fake vectors while tenant-aware callers in the same process used the
+    real provider (pydantic's ``env_file`` loads ``.env`` into Settings
+    only, never into ``os.environ``, so bare-metal runs hit exactly that
+    split). Falling back to the real-provider name is still safe with no
+    keys configured: the registry degrades to ``FakeEmbeddingProvider``
+    at construction, but through a path that WARNS.
+    """
     if tenant_config is not None:
         name = getattr(tenant_config, "embedding_provider", None)
         if name:
             return name
-    return os.environ.get("EMBEDDING_PROVIDER", "fake")
+    return os.environ.get("EMBEDDING_PROVIDER", DEFAULT_EMBEDDING_PROVIDER)
 
 
 async def get_embeddings_batch(

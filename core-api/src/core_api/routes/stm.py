@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import write_limit
 from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.agent_service import enforce_fleet_write, resolve_write_agent
 from core_api.services.usage_service import check_and_increment
@@ -293,8 +295,16 @@ class PromoteRequest(BaseModel):
 
 
 @router.post("/stm/promote", description=_PLUGIN_ONLY)
+@write_limit
 async def promote_stm(
+    request: Request,
     body: PromoteRequest,
+    # ``request``/``response`` are what ``@write_limit`` needs: slowapi reads
+    # both by parameter NAME (``kwargs["request"]`` / ``kwargs["response"]``)
+    # and injects X-RateLimit-* into ``response`` on the success path. Without
+    # ``response`` every call 500s, not just throttled ones — see D14 and
+    # ``tests/test_d14_rate_limited_response_param.py``.
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
     # Tenant selector for admin credentials — see get_notes / WT-4.
     # A query param rather than a ``PromoteRequest`` field on purpose:
@@ -360,12 +370,19 @@ async def promote_stm(
 
     from core_api.services.stm_service import promote
 
-    result = await promote(
-        content=body.content,
-        tenant_id=tenant_id,
-        agent_id=body.agent_id,
-        fleet_id=body.fleet_id,
-        memory_type=body.memory_type,
-        visibility=body.visibility,
-    )
-    return result
+    # The last two POST /memories gates this route was missing (2026-08-14
+    # audit H-17 residual / 2026-09-02 M-35): ``@write_limit`` above is the
+    # per-key write rate limit, and this slot is the per-tenant in-flight
+    # write cap. Both fail fast with 429 rather than queueing into the worker
+    # layer. The slot wraps only the write itself, after every authz gate has
+    # passed, exactly as ``write_memory`` does — a request refused for policy
+    # reasons must not consume a slot.
+    async with per_tenant_slot("write", tenant_id):
+        return await promote(
+            content=body.content,
+            tenant_id=tenant_id,
+            agent_id=body.agent_id,
+            fleet_id=body.fleet_id,
+            memory_type=body.memory_type,
+            visibility=body.visibility,
+        )

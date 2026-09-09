@@ -27,6 +27,7 @@ from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.organization_settings import (
     get_raw_settings,
     get_settings_for_display,
+    resolve_config,
 )
 from core_api.services.skill_lifecycle import (
     SkillWriteContext,
@@ -380,10 +381,26 @@ async def upsert_document(
 
     embedding: list[float] | None = None
     if source is not None:
+        # Tenant config so provider resolution matches the memory paths
+        # (tenant override → env → shared default) and per-tenant embedding
+        # keys/models apply — without it, resolution fell to the raw env
+        # fallback, which historically diverged from the Settings default.
+        # Resolution failure degrades to the process-level provider rather
+        # than failing the write (same idiom as memory_service re-embeds).
+        try:
+            tenant_config = await resolve_config(body.tenant_id)
+        except Exception:
+            logger.warning(
+                "doc write: failed to resolve tenant config (tenant=%s); "
+                "falling back to process-level embedding provider",
+                body.tenant_id,
+                exc_info=True,
+            )
+            tenant_config = None
         # Synchronous write: the client blocks on this and gets the 502
         # below if it returns None, so it must not sit on the reduced
         # deferred budget. See EMBEDDING_INTERACTIVE_RESERVED_SLOTS.
-        embedding = await get_embedding(source, background=False)
+        embedding = await get_embedding(source, tenant_config, background=False)
         if embedding is None:
             raise HTTPException(
                 status_code=502,
@@ -705,9 +722,22 @@ async def search_documents(
         # the search-budget cost for the widened query.
         await check_and_increment(auth.tenant_id, "search")
 
+    # Resolve for the SEARCHED tenant (body.tenant_id, not auth.tenant_id):
+    # the query vector must come from the same provider that embedded that
+    # tenant's stored documents or the spaces split and similarity is noise.
+    try:
+        tenant_config = await resolve_config(body.tenant_id)
+    except Exception:
+        logger.warning(
+            "doc search: failed to resolve tenant config (tenant=%s); "
+            "falling back to process-level embedding provider",
+            body.tenant_id,
+            exc_info=True,
+        )
+        tenant_config = None
     # A user is waiting on this search: keep it off the background budget
     # so a bulk-ingest flood can't throttle it into the 503 below.
-    query_embedding = await get_embedding(body.query, background=False)
+    query_embedding = await get_embedding(body.query, tenant_config, background=False)
     if query_embedding is None:
         raise HTTPException(
             status_code=503,

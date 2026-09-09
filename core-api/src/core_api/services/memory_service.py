@@ -2850,6 +2850,279 @@ def _resolve_write_mode(data: MemoryCreate, tenant_config) -> str:
     return tenant_config.default_write_mode
 
 
+async def fan_out_atomic_facts(
+    sc,
+    *,
+    atomic_facts: list,
+    memory_id,
+    tenant_id: str,
+    fleet_id: str | None,
+    agent_id: str,
+    parent_metadata: dict,
+    parent_visibility: str,
+    parent_weight: float,
+    parent_ts_start,
+    tenant_config,
+) -> dict[str, int]:
+    """Create one child memory per extracted atomic fact.
+
+    Lifted verbatim out of ``_enrich_memory_background`` so the ASYNC path can
+    reuse it (A70). The synchronous path was the only caller, which is why a
+    fast-mode write of multi-claim content produced fewer memories than the same
+    content in strong mode — the worker had no way to run this without a second
+    implementation of it.
+
+    Every guarantee in here was paid for by an incident, so it is shared rather
+    than reimplemented: #808 (derived rows inherit the parent's governance
+    verdict), CAURA-222 (children embed raw content, not hint-prefixed),
+    OSS #814 (dedup against live rows AND within this loop), the 2026-07-27
+    stranded-embedding postmortem (a failed embed persists the fact and queues a
+    repair rather than dropping it), and CAURA-602 (deliberately outside the
+    per-tenant storage bulkhead).
+
+    ``parent_visibility`` is passed IN, never re-read from the row: it must be
+    the post-remediation value, because a row read before the governance PATCH
+    still carries the visibility ``keep_private`` just removed (#808).
+
+    Returns ``{"created", "deduped", "unembedded"}``. Never raises for a single
+    fact — each failure mode is counted and logged, so one bad fact cannot cost
+    the others.
+    """
+    if not atomic_facts:
+        return {"created": 0, "deduped": 0, "unembedded": 0}
+    meta = parent_metadata
+    fanout_created = 0
+    fanout_unembedded = 0
+    # The fanout's dedup lookup (OSS #814), batched once for every fact
+    # rather than per-fact: this loop calls ``create_memory`` (singular)
+    # per child, so a per-fact lookup would double the roundtrips on a
+    # path that already runs one write each.
+    fanout_live_hashes = await _live_duplicate_hashes(
+        sc,
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+        hashes=[_content_hash(tenant_id, fleet_id, f.content) for f in atomic_facts],
+    )
+    # Repeats within this fanout. The live set cannot cover them: those
+    # rows do not exist yet at lookup time, and each is written by its
+    # own ``create_memory`` call, so the second one would land as a
+    # duplicate of a row this very loop just created.
+    fanout_seen_hashes: set[str] = set()
+    fanout_deduped = 0
+    for fact in atomic_facts:
+        fact_content = fact.content
+        child_ch = _content_hash(tenant_id, fleet_id, fact_content)
+        if child_ch in fanout_live_hashes or child_ch in fanout_seen_hashes:
+            # The fact is already recorded — either from an earlier
+            # enrichment of this parent, or earlier in this very loop.
+            # Writing it again is one of the two reasons prod carries
+            # duplicate content-hash groups with no concurrency.
+            #
+            # Before the embed below on purpose: a dropped fact must not
+            # cost an embedding call. This ``continue`` is unlike the two
+            # inside the embed block — those exit AFTER deciding
+            # ``child_embedding`` precisely so a failed embed still
+            # persists the fact (see below); this one decides the fact
+            # should not be persisted at all, so it is the one case where
+            # skipping ahead of the embed is correct.
+            fanout_deduped += 1
+            continue
+        fanout_seen_hashes.add(child_ch)
+        # A failed embed must NOT skip the fact. Both exits here used
+        # to ``continue`` BEFORE ``create_memory``, so the child row
+        # was never written at all and the fact was lost outright —
+        # nothing downstream could repair what does not exist. Persist
+        # unembedded instead, exactly as the auto-chunk parent insert
+        # does, and hand the vector off to the normal recovery path
+        # below.
+        #
+        # The two arms are not symmetric in how often they fire.
+        # ``get_embedding`` RETURNS None once its retry budget is
+        # exhausted rather than raising (see
+        # ``common/embedding/_service.py::_run_with_retry``), so under
+        # the gate saturation this path actually meets, the None arm is
+        # the common one. It was not silent globally — ``_run_with_retry``
+        # logs its own terminal error — but nothing here attributed the
+        # loss to a parent, a fact, or this code path.
+        child_embedding: list[float] | None = None
+        try:
+            child_embedding = await get_embedding(fact_content, tenant_config=tenant_config, background=True)
+        except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
+            logger.warning(
+                "atomic-fact embed raised for memory %s; persisting the fact unembedded",
+                memory_id,
+                exc_info=True,
+            )
+        child_meta = {
+            "parent_memory_id": str(memory_id),
+            "source": "atomic_fact_fanout",
+            "retrieval_hint": fact.retrieval_hint or "",
+        }
+        # #808: carry the parent's verdict onto the derived rows. A DROP
+        # never reaches here — the early return above — so this only
+        # ever labels rows the policy allowed to live.
+        _inherit_governance_signals(child_meta, meta)
+        if child_embedding is None:
+            # ``embedding_pending`` is public API, not bookkeeping:
+            # ``MemoryOut.metadata`` documents it, agents are told to
+            # read it, and core-worker clears it when the vector
+            # lands. Without it a fan-out child is indistinguishable
+            # from a fully-embedded row to every consumer.
+            child_meta["embedding_pending"] = True
+        # Intentionally NOT wrapped in ``per_tenant_storage_slot``
+        # (CAURA-602 follow-up): this site runs inside
+        # ``_enrich_memory_background``, a fire-and-forget task
+        # with no outer request budget. The bulkhead's
+        # unbounded-queue contract relies on an outer deadline
+        # to cap wait time; without one, a saturated tenant
+        # could pile fan-out tasks behind hot-path requests
+        # indefinitely. The fan-out is rare enough (only fires
+        # when the LLM extracts >1 atomic fact from a parent)
+        # that letting it bypass the cap is the safer trade —
+        # but if loadtest data ever shows it materially driving
+        # storage-pool occupancy, revisit by giving the task
+        # its own deadline first.
+        try:
+            child = await sc.create_memory(
+                {
+                    "tenant_id": tenant_id,
+                    "fleet_id": fleet_id,
+                    "agent_id": agent_id,
+                    "memory_type": fact.suggested_type,
+                    "content": fact_content,
+                    "embedding": child_embedding,
+                    "weight": parent_weight,
+                    "metadata_": child_meta,
+                    "content_hash": child_ch,
+                    "status": "active",
+                    "visibility": parent_visibility,
+                    "ts_valid_start": parent_ts_start,
+                }
+            )
+        except DuplicateMemoryError:
+            # NOT an error here, and deliberately not routed through
+            # ``_create_memory_or_409``: this loop has no HTTP contract to
+            # honour — it runs inside a fire-and-forget background task, so
+            # a 409 would go nowhere and abort the remaining facts.
+            #
+            # A 409 means the fact is already recorded, which is the
+            # outcome this loop wants. The dedup lookup above catches the
+            # ordinary case; reaching here means a concurrent enrichment of
+            # the same parent committed it in between. Counted with the
+            # deduped facts because that is what it is.
+            fanout_deduped += 1
+            continue
+        except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
+            logger.warning(
+                "atomic-fact create_memory failed for parent %s",
+                memory_id,
+                exc_info=True,
+            )
+            continue
+        # Everything below is post-write and deliberately OUTSIDE the
+        # try above. Folding it in would let a failure in the RECOVERY
+        # step surface as "create_memory failed" for a row that was in
+        # fact written — mislabelling the one log an operator would
+        # use to decide whether the fact exists.
+        fanout_created += 1
+        if child_embedding is None:
+            # Durable handoff rather than waiting for the nightly
+            # sweep. The sweep is the floor, not the mechanism:
+            # ``embed_backfill_enabled`` defaults to FALSE, so a
+            # deployment that has not turned it on would leave these
+            # rows stranded indefinitely — which is how ~430 memories
+            # were stranded in the 2026-07-27 incident this module
+            # already carries a postmortem for.
+            # ``_schedule_embed_or_reembed`` publishes EMBED_REQUESTED
+            # in deferred mode (Pub/Sub owns retry/backoff/DLQ, paced
+            # by the consumer's per-tenant slots) and retries
+            # in-process otherwise.
+            child_id = child.get("id") if isinstance(child, dict) else None
+            if not child_id:
+                # Loud, and NOT folded into fanout_unembedded: this
+                # row is unembedded with no repair queued, which is a
+                # strictly worse state than the counted one. The
+                # nightly sweep remains its only recovery, and only
+                # where enabled.
+                # Log the response SHAPE, never the response. ``child``
+                # is the created row, so it carries the raw fact text
+                # and its metadata; interpolating it here would put
+                # memory content — and any PII in it — into an ERROR
+                # log. The key set is what actually diagnoses this
+                # (which field the storage contract dropped) and is
+                # content-free.
+                logger.error(
+                    "atomic-fact child persisted unembedded but create_memory "
+                    "returned no usable id (response keys: %s) for parent %s; "
+                    "NO re-embed scheduled — recovery depends on the nightly sweep",
+                    sorted(child) if isinstance(child, dict) else type(child).__name__,
+                    memory_id,
+                )
+                continue
+            # Counted only once the repair is actually queued, so the
+            # summary below cannot claim a scheduled re-embed that was
+            # never issued.
+            fanout_unembedded += 1
+            child_uuid = UUID(str(child_id))
+            track_task(
+                tracked_task(
+                    _schedule_embed_or_reembed(
+                        child_uuid,
+                        fact_content,
+                        tenant_id,
+                        content_hash=child_ch,
+                        is_failure_fallback=True,
+                    ),
+                    "embed_or_publish",
+                    # The CHILD's id, not the parent's. ``tracked_task``
+                    # uses this to label the BackgroundTaskLog row and
+                    # the failure log, so passing ``memory_id`` here
+                    # would file a failed child re-embed against the
+                    # parent — leaving the row that actually needs
+                    # repair untraceable. Every other call site passes
+                    # the same id to both the coroutine and the wrapper.
+                    child_uuid,
+                    tenant_id,
+                )
+            )
+    if fanout_created:
+        logger.info(
+            "atomic-fact fan-out created %d children for parent %s",
+            fanout_created,
+            memory_id,
+        )
+    if fanout_deduped:
+        # Its own line rather than a field on the created line above,
+        # because it explains a discrepancy an operator would otherwise
+        # read as loss: the enrichment reported N atomic facts and fewer
+        # than N children exist. INFO because a re-enriched parent
+        # hitting this is the dedup working, not a fault.
+        logger.info(
+            "atomic-fact fan-out skipped %d facts already recorded for parent %s",
+            fanout_deduped,
+            memory_id,
+        )
+    if fanout_unembedded:
+        # WARNING rather than a field on the info line above, because
+        # it needs to be alertable on its own: it attributes an
+        # embedding-tier degradation to this specific path and parent,
+        # which the global coverage tick cannot do. Each of these
+        # children has a re-embed scheduled above; the count is what
+        # says how much of this fan-out is riding on that.
+        logger.warning(
+            "atomic-fact fan-out persisted %d children without embeddings "
+            "for parent %s; re-embed scheduled for each",
+            fanout_unembedded,
+            memory_id,
+        )
+    return {
+        "created": fanout_created,
+        "deduped": fanout_deduped,
+        "unembedded": fanout_unembedded,
+    }
+
+
 async def _enrich_memory_background(
     memory_id: UUID,
     content: str,
@@ -3101,7 +3374,7 @@ async def _enrich_memory_background(
         # surface as the search side — see CAURA-222. Failures here are
         # non-fatal to the parent.
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
-        if len(atomic_facts) >= 1:
+        if atomic_facts:
             parent_ts_start = mem.get("ts_valid_start")
             # ``effective_visibility`` when remediation downgraded the parent:
             # ``mem`` was read before the PATCH and still holds the pre-policy
@@ -3111,233 +3384,19 @@ async def _enrich_memory_background(
             # assembly above documents.
             parent_visibility = effective_visibility or mem.get("visibility") or "scope_team"
             parent_weight = patch.get("weight") or mem.get("weight") or 0.5
-            fanout_created = 0
-            fanout_unembedded = 0
-            # The fanout's dedup lookup (OSS #814), batched once for every fact
-            # rather than per-fact: this loop calls ``create_memory`` (singular)
-            # per child, so a per-fact lookup would double the roundtrips on a
-            # path that already runs one write each.
-            fanout_live_hashes = await _live_duplicate_hashes(
+            await fan_out_atomic_facts(
                 sc,
+                atomic_facts=atomic_facts,
+                memory_id=memory_id,
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,
                 agent_id=agent_id,
-                hashes=[_content_hash(tenant_id, fleet_id, f.content) for f in atomic_facts],
+                parent_metadata=meta,
+                parent_visibility=parent_visibility,
+                parent_weight=parent_weight,
+                parent_ts_start=parent_ts_start,
+                tenant_config=tenant_config,
             )
-            # Repeats within this fanout. The live set cannot cover them: those
-            # rows do not exist yet at lookup time, and each is written by its
-            # own ``create_memory`` call, so the second one would land as a
-            # duplicate of a row this very loop just created.
-            fanout_seen_hashes: set[str] = set()
-            fanout_deduped = 0
-            for fact in atomic_facts:
-                fact_content = fact.content
-                child_ch = _content_hash(tenant_id, fleet_id, fact_content)
-                if child_ch in fanout_live_hashes or child_ch in fanout_seen_hashes:
-                    # The fact is already recorded — either from an earlier
-                    # enrichment of this parent, or earlier in this very loop.
-                    # Writing it again is one of the two reasons prod carries
-                    # duplicate content-hash groups with no concurrency.
-                    #
-                    # Before the embed below on purpose: a dropped fact must not
-                    # cost an embedding call. This ``continue`` is unlike the two
-                    # inside the embed block — those exit AFTER deciding
-                    # ``child_embedding`` precisely so a failed embed still
-                    # persists the fact (see below); this one decides the fact
-                    # should not be persisted at all, so it is the one case where
-                    # skipping ahead of the embed is correct.
-                    fanout_deduped += 1
-                    continue
-                fanout_seen_hashes.add(child_ch)
-                # A failed embed must NOT skip the fact. Both exits here used
-                # to ``continue`` BEFORE ``create_memory``, so the child row
-                # was never written at all and the fact was lost outright —
-                # nothing downstream could repair what does not exist. Persist
-                # unembedded instead, exactly as the auto-chunk parent insert
-                # does, and hand the vector off to the normal recovery path
-                # below.
-                #
-                # The two arms are not symmetric in how often they fire.
-                # ``get_embedding`` RETURNS None once its retry budget is
-                # exhausted rather than raising (see
-                # ``common/embedding/_service.py::_run_with_retry``), so under
-                # the gate saturation this path actually meets, the None arm is
-                # the common one. It was not silent globally — ``_run_with_retry``
-                # logs its own terminal error — but nothing here attributed the
-                # loss to a parent, a fact, or this code path.
-                child_embedding: list[float] | None = None
-                try:
-                    child_embedding = await get_embedding(
-                        fact_content, tenant_config=tenant_config, background=True
-                    )
-                except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
-                    logger.warning(
-                        "atomic-fact embed raised for memory %s; persisting the fact unembedded",
-                        memory_id,
-                        exc_info=True,
-                    )
-                child_meta = {
-                    "parent_memory_id": str(memory_id),
-                    "source": "atomic_fact_fanout",
-                    "retrieval_hint": fact.retrieval_hint or "",
-                }
-                # #808: carry the parent's verdict onto the derived rows. A DROP
-                # never reaches here — the early return above — so this only
-                # ever labels rows the policy allowed to live.
-                _inherit_governance_signals(child_meta, meta)
-                if child_embedding is None:
-                    # ``embedding_pending`` is public API, not bookkeeping:
-                    # ``MemoryOut.metadata`` documents it, agents are told to
-                    # read it, and core-worker clears it when the vector
-                    # lands. Without it a fan-out child is indistinguishable
-                    # from a fully-embedded row to every consumer.
-                    child_meta["embedding_pending"] = True
-                # Intentionally NOT wrapped in ``per_tenant_storage_slot``
-                # (CAURA-602 follow-up): this site runs inside
-                # ``_enrich_memory_background``, a fire-and-forget task
-                # with no outer request budget. The bulkhead's
-                # unbounded-queue contract relies on an outer deadline
-                # to cap wait time; without one, a saturated tenant
-                # could pile fan-out tasks behind hot-path requests
-                # indefinitely. The fan-out is rare enough (only fires
-                # when the LLM extracts >1 atomic fact from a parent)
-                # that letting it bypass the cap is the safer trade —
-                # but if loadtest data ever shows it materially driving
-                # storage-pool occupancy, revisit by giving the task
-                # its own deadline first.
-                try:
-                    child = await sc.create_memory(
-                        {
-                            "tenant_id": tenant_id,
-                            "fleet_id": fleet_id,
-                            "agent_id": agent_id,
-                            "memory_type": fact.suggested_type,
-                            "content": fact_content,
-                            "embedding": child_embedding,
-                            "weight": parent_weight,
-                            "metadata_": child_meta,
-                            "content_hash": child_ch,
-                            "status": "active",
-                            "visibility": parent_visibility,
-                            "ts_valid_start": parent_ts_start,
-                        }
-                    )
-                except DuplicateMemoryError:
-                    # NOT an error here, and deliberately not routed through
-                    # ``_create_memory_or_409``: this loop has no HTTP contract to
-                    # honour — it runs inside a fire-and-forget background task, so
-                    # a 409 would go nowhere and abort the remaining facts.
-                    #
-                    # A 409 means the fact is already recorded, which is the
-                    # outcome this loop wants. The dedup lookup above catches the
-                    # ordinary case; reaching here means a concurrent enrichment of
-                    # the same parent committed it in between. Counted with the
-                    # deduped facts because that is what it is.
-                    fanout_deduped += 1
-                    continue
-                except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
-                    logger.warning(
-                        "atomic-fact create_memory failed for parent %s",
-                        memory_id,
-                        exc_info=True,
-                    )
-                    continue
-                # Everything below is post-write and deliberately OUTSIDE the
-                # try above. Folding it in would let a failure in the RECOVERY
-                # step surface as "create_memory failed" for a row that was in
-                # fact written — mislabelling the one log an operator would
-                # use to decide whether the fact exists.
-                fanout_created += 1
-                if child_embedding is None:
-                    # Durable handoff rather than waiting for the nightly
-                    # sweep. The sweep is the floor, not the mechanism:
-                    # ``embed_backfill_enabled`` defaults to FALSE, so a
-                    # deployment that has not turned it on would leave these
-                    # rows stranded indefinitely — which is how ~430 memories
-                    # were stranded in the 2026-07-27 incident this module
-                    # already carries a postmortem for.
-                    # ``_schedule_embed_or_reembed`` publishes EMBED_REQUESTED
-                    # in deferred mode (Pub/Sub owns retry/backoff/DLQ, paced
-                    # by the consumer's per-tenant slots) and retries
-                    # in-process otherwise.
-                    child_id = child.get("id") if isinstance(child, dict) else None
-                    if not child_id:
-                        # Loud, and NOT folded into fanout_unembedded: this
-                        # row is unembedded with no repair queued, which is a
-                        # strictly worse state than the counted one. The
-                        # nightly sweep remains its only recovery, and only
-                        # where enabled.
-                        # Log the response SHAPE, never the response. ``child``
-                        # is the created row, so it carries the raw fact text
-                        # and its metadata; interpolating it here would put
-                        # memory content — and any PII in it — into an ERROR
-                        # log. The key set is what actually diagnoses this
-                        # (which field the storage contract dropped) and is
-                        # content-free.
-                        logger.error(
-                            "atomic-fact child persisted unembedded but create_memory "
-                            "returned no usable id (response keys: %s) for parent %s; "
-                            "NO re-embed scheduled — recovery depends on the nightly sweep",
-                            sorted(child) if isinstance(child, dict) else type(child).__name__,
-                            memory_id,
-                        )
-                        continue
-                    # Counted only once the repair is actually queued, so the
-                    # summary below cannot claim a scheduled re-embed that was
-                    # never issued.
-                    fanout_unembedded += 1
-                    child_uuid = UUID(str(child_id))
-                    track_task(
-                        tracked_task(
-                            _schedule_embed_or_reembed(
-                                child_uuid,
-                                fact_content,
-                                tenant_id,
-                                content_hash=child_ch,
-                                is_failure_fallback=True,
-                            ),
-                            "embed_or_publish",
-                            # The CHILD's id, not the parent's. ``tracked_task``
-                            # uses this to label the BackgroundTaskLog row and
-                            # the failure log, so passing ``memory_id`` here
-                            # would file a failed child re-embed against the
-                            # parent — leaving the row that actually needs
-                            # repair untraceable. Every other call site passes
-                            # the same id to both the coroutine and the wrapper.
-                            child_uuid,
-                            tenant_id,
-                        )
-                    )
-            if fanout_created:
-                logger.info(
-                    "atomic-fact fan-out created %d children for parent %s",
-                    fanout_created,
-                    memory_id,
-                )
-            if fanout_deduped:
-                # Its own line rather than a field on the created line above,
-                # because it explains a discrepancy an operator would otherwise
-                # read as loss: the enrichment reported N atomic facts and fewer
-                # than N children exist. INFO because a re-enriched parent
-                # hitting this is the dedup working, not a fault.
-                logger.info(
-                    "atomic-fact fan-out skipped %d facts already recorded for parent %s",
-                    fanout_deduped,
-                    memory_id,
-                )
-            if fanout_unembedded:
-                # WARNING rather than a field on the info line above, because
-                # it needs to be alertable on its own: it attributes an
-                # embedding-tier degradation to this specific path and parent,
-                # which the global coverage tick cannot do. Each of these
-                # children has a re-embed scheduled above; the count is what
-                # says how much of this fan-out is riding on that.
-                logger.warning(
-                    "atomic-fact fan-out persisted %d children without embeddings "
-                    "for parent %s; re-embed scheduled for each",
-                    fanout_unembedded,
-                    memory_id,
-                )
 
         # Fire sub-tasks outside the session
         if tenant_config.entity_extraction_enabled:

@@ -2221,7 +2221,36 @@ async def _attempt_entity_retraction(
     # pre-existing candidate, and the loser is new_memory itself. Writing these
     # the canonical way round in a flipped chain would revert the wrong row and
     # leave the real edge dangling.
-    await sc.update_memory_status(str(candidate.get("id")), "active", tenant_id=cand_tenant)
+    # Revert ONLY a status detection itself set. The literal "active" used to be
+    # written unconditionally, so whatever the row held at this moment was
+    # overwritten — including a status this path never assigned. Detection marks
+    # a losing candidate "outdated" or "conflicted"; anything else means another
+    # writer has moved the row since (confirmed by a human, archived by the
+    # crystallizer, superseded by a different chain), and stamping "active" over
+    # that discards someone else's decision to undo our own.
+    #
+    # Mirrors the guard the content-edit reset already applies for exactly this
+    # reason (``memory_service``: reset to "active" only ``if mem["status"] in
+    # ("outdated", "conflicted")``); the two paths clear the same state and had
+    # no business disagreeing.
+    #
+    # NOTE this restores "active", not the status the row held BEFORE detection.
+    # A row that was "confirmed" and got marked "conflicted" comes back as
+    # "active", because nothing records what was overwritten — neither
+    # ``memories`` nor ``memory_conflicts`` has a prior-status column. Narrowing
+    # the write is the part that can be fixed without a migration; recovering the
+    # original value cannot.
+    cand_status = candidate.get("status")
+    if cand_status in ("outdated", "conflicted"):
+        await sc.update_memory_status(str(candidate.get("id")), "active", tenant_id=cand_tenant)
+    else:
+        logger.info(
+            "PATH_C_RETRACTION candidate_revert_skipped memory=%s candidate=%s status=%s "
+            "(not a status detection set; leaving it to its current owner)",
+            new_memory.get("id"),
+            candidate.get("id"),
+            cand_status,
+        )
     try:
         await sc.update_memory_status(
             str(edge_owner.get("id")),

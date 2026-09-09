@@ -51,6 +51,25 @@ async def update_tenant_settings(
 ):
     """Update tenant settings. Accepts partial updates. API keys are encrypted at rest.
 
+    **Resetting a setting.** Updates are a deep MERGE, so omitting a key leaves
+    it as it was — omission means "don't touch", never "clear". To return a
+    setting to its default, send it explicitly as ``null``:
+
+        {"search": {"recall_boost": null}}          # one leaf back to default
+        {"search": {"default_profile": null}}       # a whole section back to default
+
+    Sending ``{}`` for a section is a NO-OP, not a reset — an empty dict merges
+    nothing. That reads like a clear and is the shape operators reach for first,
+    so it is called out here rather than left to be discovered by a flip that
+    silently did not take.
+
+    **Propagation.** A write invalidates the handling worker's cache
+    immediately and broadcasts ``Org.SETTINGS_CHANGED`` so sibling workers drop
+    their copies (CAURA-571). Where the event bus is in-process — the default,
+    including local dev — that broadcast does not cross processes, and siblings
+    fall back to the 5-minute TTL. Expect propagation, not immediacy, when
+    flipping a flag and measuring the result.
+
     Audit attribution: honours ``X-Changed-By`` only when the caller is
     authenticated via the admin API key (i.e. the enterprise admin-api proxy).
     Regular user requests always use ``auth.user_id`` regardless of the header.

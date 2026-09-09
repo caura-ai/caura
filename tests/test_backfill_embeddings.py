@@ -253,6 +253,11 @@ async def test_amain_returns_2_on_runtime_error(
         "core_storage_api.scripts.backfill_embeddings.run_backfill",
         _runtime_explode,
     )
+    # A real provider name + key so the fake-provider preflight passes and
+    # the test reaches the exit-code mapping under scrutiny (the suite-wide
+    # conftest default is EMBEDDING_PROVIDER=fake, which the preflight
+    # refuses on live runs).
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     code = await _amain([])
@@ -281,6 +286,9 @@ async def test_amain_returns_1_on_unexpected_exception(
         "core_storage_api.scripts.backfill_embeddings.run_backfill",
         _value_explode,
     )
+    # See test_amain_returns_2_on_runtime_error: get past the fake-provider
+    # preflight to reach the exit-code mapping.
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     with caplog.at_level(
@@ -502,6 +510,8 @@ async def test_amain_warns_on_non_idempotent_rewrite(
         "core_storage_api.scripts.backfill_embeddings.asyncio.sleep",
         _record_sleep,
     )
+    # Past the fake-provider preflight (conftest pins EMBEDDING_PROVIDER=fake).
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     code = await _amain(["--rewrite-hint-prefixed"])
@@ -581,6 +591,8 @@ async def test_amain_no_warning_on_default_mode(
         "core_storage_api.scripts.backfill_embeddings.asyncio.sleep",
         _record_sleep,
     )
+    # Past the fake-provider preflight (conftest pins EMBEDDING_PROVIDER=fake).
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     code = await _amain([])
@@ -589,6 +601,131 @@ async def test_amain_no_warning_on_default_mode(
     assert code == 0
     assert "NOT idempotent" not in captured.err
     assert sleeps == []
+
+
+# ---------------------------------------------------------------------------
+# Fake-provider preflight
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_amain_refuses_live_run_on_fake_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """EMBEDDING_PROVIDER=fake + live run → exit 1 before any backfill
+    work. A fake 'repair' flips rows out of the NULL selector forever, so
+    the refusal must fire before ``run_backfill``."""
+    import logging
+
+    from core_storage_api.scripts.backfill_embeddings import _amain
+
+    called: list[bool] = []
+
+    async def _must_not_run(**_kw):
+        called.append(True)
+        return []
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.run_backfill", _must_not_run
+    )
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+
+    with caplog.at_level(
+        logging.ERROR, logger="core_storage_api.scripts.backfill_embeddings"
+    ):
+        code = await _amain([])
+
+    assert code == 1
+    assert called == []
+    assert "resolved to FAKE" in caplog.text
+    assert "--allow-fake-provider" in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_amain_refuses_openai_that_degrades_to_fake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Provider "openai" with no key anywhere (tenant, env, platform)
+    degrades to FakeEmbeddingProvider inside the registry — the preflight
+    must catch what actually RESOLVED, not just the name. This is the case
+    the old openai-without-OPENAI_API_KEY guard checked, now subsumed."""
+    from core_storage_api.scripts.backfill_embeddings import _amain
+
+    called: list[bool] = []
+
+    async def _must_not_run(**_kw):
+        called.append(True)
+        return []
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.run_backfill", _must_not_run
+    )
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # conftest pins PLATFORM_EMBEDDING_PROVIDER="" so the platform tier is
+    # off; make it explicit here since it is what this test is about.
+    monkeypatch.setenv("PLATFORM_EMBEDDING_PROVIDER", "")
+
+    code = await _amain([])
+
+    assert code == 1
+    assert called == []
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_amain_allow_fake_provider_overrides_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--allow-fake-provider is the dev/test escape hatch: same fake
+    environment as the refusal test, but the run proceeds."""
+    from core_storage_api.scripts.backfill_embeddings import _amain
+
+    called: list[bool] = []
+
+    async def _record_run(**_kw):
+        called.append(True)
+        return []
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.run_backfill", _record_run
+    )
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+
+    code = await _amain(["--allow-fake-provider"])
+
+    assert code == 0
+    assert called == [True]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_amain_dry_run_skips_fake_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--dry-run makes no provider calls and writes nothing, so it must
+    work in keyless/fake environments — that is the scope-estimation use
+    case."""
+    from core_storage_api.scripts.backfill_embeddings import _amain
+
+    called: list[bool] = []
+
+    async def _record_run(**_kw):
+        called.append(True)
+        return []
+
+    monkeypatch.setattr(
+        "core_storage_api.scripts.backfill_embeddings.run_backfill", _record_run
+    )
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+
+    code = await _amain(["--dry-run"])
+
+    assert code == 0
+    assert called == [True]
 
 
 # ---------------------------------------------------------------------------

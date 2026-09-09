@@ -2411,8 +2411,23 @@ async def caura_doc(
                 if source is not None:
                     from common.embedding import get_embedding
 
+                    # Tenant config so provider resolution matches the memory
+                    # paths and per-tenant embedding keys/models apply — see
+                    # routes/documents.py (same rationale, same degrade-to-
+                    # process-provider idiom on resolution failure).
+                    try:
+                        tenant_config = await resolve_config(tenant_id)
+                    except Exception:
+                        logger.warning(
+                            "caura_doc write: failed to resolve tenant config "
+                            "(tenant=%s); falling back to process-level "
+                            "embedding provider",
+                            tenant_id,
+                            exc_info=True,
+                        )
+                        tenant_config = None
                     # Synchronous write — see routes/documents.py.
-                    embedding = await get_embedding(source, background=False)
+                    embedding = await get_embedding(source, tenant_config, background=False)
                     if embedding is None:
                         return _with_latency(
                             _error_response(
@@ -2629,8 +2644,22 @@ async def caura_doc(
                     )
                 from common.embedding import get_embedding
 
+                # Same-provider query embedding — see routes/documents.py
+                # search: the query vector must come from the provider that
+                # embedded this tenant's stored documents.
+                try:
+                    tenant_config = await resolve_config(tenant_id)
+                except Exception:
+                    logger.warning(
+                        "caura_doc search: failed to resolve tenant config "
+                        "(tenant=%s); falling back to process-level embedding "
+                        "provider",
+                        tenant_id,
+                        exc_info=True,
+                    )
+                    tenant_config = None
                 # Interactive search — see documents.py: not background.
-                query_embedding = await get_embedding(query, background=False)
+                query_embedding = await get_embedding(query, tenant_config, background=False)
                 if query_embedding is None:
                     return _with_latency(
                         _error_response(
