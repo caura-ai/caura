@@ -15,6 +15,7 @@ Expects /tmp/e2e.env (written by the E2E register step) containing::
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import time
@@ -22,11 +23,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+DEFAULT_ENV_FILE = Path("/tmp/e2e.env")
+DEFAULT_CORE_API = "http://localhost:8000"
 
-def load_env() -> dict[str, str]:
-    path = Path("/tmp/e2e.env")
+
+def load_env(path: Path) -> dict[str, str]:
     if not path.exists():
-        print("ERROR: /tmp/e2e.env missing — register a tenant + API key first.")
+        print(f"ERROR: {path} missing — register a tenant + API key first.")
         sys.exit(2)
     return dict(
         line.strip().split("=", 1)
@@ -35,13 +38,9 @@ def load_env() -> dict[str, str]:
     )
 
 
-ENV = load_env()
-TENANT = ENV["TENANT_ID"]
-KEY = ENV["KEY"]
 FLEET = "smoke-fleet"
 
 GATEWAY = "http://localhost"  # nginx
-CORE_API = "http://localhost:8000"  # direct core-api (MCP lives here)
 
 
 def http(method: str, url: str, body=None, headers=None):
@@ -165,6 +164,26 @@ def seed_fleet_and_memories() -> dict:
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_CORE_API,
+        help=f"Direct core-api URL (default: {DEFAULT_CORE_API})",
+    )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=DEFAULT_ENV_FILE,
+        help=f"Credentials environment file (default: {DEFAULT_ENV_FILE})",
+    )
+    args = parser.parse_args()
+
+    global CORE_API, KEY, TENANT
+    CORE_API = args.url.rstrip("/")
+    env = load_env(args.env_file)
+    TENANT = env["TENANT_ID"]
+    KEY = env["KEY"]
+
     print(f"Tenant: {TENANT}")
     print(f"Fleet:  {FLEET}")
     print()
