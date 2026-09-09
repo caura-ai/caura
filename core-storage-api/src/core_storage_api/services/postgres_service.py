@@ -12136,6 +12136,129 @@ class PostgresService:
                 },
             }
 
+    # ------------------------------------------------------------------
+    # CAURA-723 — agent-scope probe
+    # ------------------------------------------------------------------
+
+    async def memory_agent_scope_probe(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        fleet_ids: list[str] | None = None,
+        readable_tenant_ids: list[str] | None = None,
+        include_agent_registered: bool = True,
+    ) -> dict:
+        """Can an agent-filtered search return anything, and is the agent known?
+
+        Answers both halves of CAURA-723 in ONE round trip, because core-api
+        needs them together and a second HTTP hop would cost more than the
+        queries do.
+
+        Runs only AFTER a search that came back empty, never instead of one —
+        nothing here decides whether the search executes. Both earlier drafts of
+        this docstring claimed otherwise ("makes skipping the search provably
+        safe"); that was true of the first design, which probed first and
+        short-circuited, and survived the rewrite as prose after the code
+        changed.
+
+        ``has_memories`` is a deliberate SUPERSET of what the search can see,
+        not a mirror of it:
+
+          * fleet scoping goes through ``_fleet_scope_clause(..., strict=False)``
+            — non-strict, so tenant-shared null-fleet rows and ``scope_org``
+            count even where the tenant's switch is strict;
+          * there is no visibility predicate at all, so another agent's
+            ``scope_agent`` rows count;
+          * only ``deleted_at IS NULL`` is applied, not the status set the
+            scored search uses, so an agent holding nothing but archived rows
+            still reads as in-use.
+
+        Every one of those biases the same way: toward saying "this id is in
+        use" and so toward saying LESS. A false True costs a warning we do not
+        emit; a false False would tell a caller an id is unused when its search
+        could still have matched. Only the first is acceptable, which is why
+        the predicates are loose rather than faithful.
+
+        The cost of that looseness: ``has_memories=True`` can be true of rows
+        this caller cannot read. Callers must not turn it into a claim that
+        results are reachable — see ``_deregistered`` in
+        ``core_api.services.agent_scope``, whose wording is deliberately
+        non-committal for exactly this reason. Tightening it to the search's
+        own visibility rules would make the answer faithful, and is the only
+        way to make a reachability claim honest; it is a behaviour change to
+        what this method means and has not been made.
+
+        ``agent_registered`` only chooses the wording of the warning, never
+        whether the search runs. Absence of an agent row does NOT imply absence
+        of memories: ``agent_delete`` removes the row and leaves every memory
+        behind, and rows predating agent tracking were never registered at all.
+        Returned as ``None`` when ``include_agent_registered`` is False, which
+        means "not asked" and never "not registered".
+        """
+        async with get_read_session() as session:
+            tenant_pred = (
+                Memory.tenant_id.in_(readable_tenant_ids)
+                if readable_tenant_ids
+                else Memory.tenant_id == tenant_id
+            )
+            mem_stmt = (
+                select(Memory.id)
+                .where(
+                    tenant_pred,
+                    Memory.agent_id == agent_id,
+                    Memory.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            if fleet_ids:
+                # C27 — through the helper, never a hand-rolled ``fleet_id.in_``.
+                # An inline copy is how A54 leaked: the predicate lived in
+                # several queries, one was fixed, and the leak moved to the next.
+                #
+                # ``strict=False`` deliberately, and it is the safe direction
+                # rather than an oversight. Non-strict is a SUPERSET — it also
+                # admits tenant-shared null-fleet rows and ``scope_org`` — so
+                # this probe can only ever be MORE generous than the search it
+                # explains. Over-reporting "has memories" costs a search that
+                # returns nothing; under-reporting would skip a search that had
+                # results, which is the one outcome this must never produce.
+                # (Threading the tenant's real ``strict_fleet_scoping`` here
+                # would tighten the probe and buy exactly that risk.)
+                mem_stmt = mem_stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=False))
+            has_memories = (await session.execute(mem_stmt)).scalar_one_or_none() is not None
+
+            # Skipped when core-api already knows. Its read paths call
+            # ``get_or_create_agent`` before reaching here, and that does this
+            # very lookup — so asking again would be the second of two
+            # identical queries, and worse, would answer POST-registration and
+            # report a typo as a known agent.
+            agent_registered: bool | None = None
+            if include_agent_registered:
+                # The SAME tenant set ``has_memories`` used, not the home
+                # tenant alone. An earlier version pinned this to
+                # ``tenant_id``, reasoning that an agent is registered in the
+                # tenant that owns it — true in isolation, and wrong beside the
+                # memories lookup above. For a cross-tenant reader the two
+                # halves then answered over different tenant sets: a peer
+                # tenant's legitimately registered agent came back as
+                # ``has_memories=True, agent_registered=False``, which the
+                # caller reports as deregistered. Two facts that are compared
+                # have to be gathered over the same scope.
+                agent_stmt = (
+                    select(Agent.id)
+                    .where(
+                        Agent.tenant_id.in_(readable_tenant_ids)
+                        if readable_tenant_ids
+                        else Agent.tenant_id == tenant_id,
+                        Agent.agent_id == agent_id,
+                    )
+                    .limit(1)
+                )
+                agent_registered = (await session.execute(agent_stmt)).scalar_one_or_none() is not None
+
+        return {"has_memories": has_memories, "agent_registered": agent_registered}
+
     # -- Fleet CRUD --
 
     async def fleet_exists(
