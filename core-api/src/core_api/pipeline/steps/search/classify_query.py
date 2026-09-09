@@ -212,7 +212,7 @@ class ClassifyQuery:
                         valid_at=valid_at,
                         readable_tenant_ids=readable_tenant_ids,
                         strict_fleet_scoping=bool(ctx.data.get("strict_fleet_scoping")),
-                        slot_acquired_marker=ctx.data,
+                        pool_report=ctx.data,
                     )
 
                     # H-03: the short-circuit REPLACES scoring rather than
@@ -468,7 +468,7 @@ class ClassifyQuery:
         status_filter: str | None = None,
         valid_at: datetime | None = None,
         readable_tenant_ids: list[str] | None = None,
-        slot_acquired_marker: dict | None = None,
+        pool_report: dict | None = None,
         strict_fleet_scoping: bool = False,
     ) -> list[types.SimpleNamespace]:
         """Load memories linked to graph-expanded entities, scored by hop distance."""
@@ -540,11 +540,10 @@ class ClassifyQuery:
         # produce more rows than ``memory_boost`` has entries — so an under-sized
         # pool cannot pass that gate whatever the load returns. Loading anyway
         # spent a per-tenant storage permit and pulled full rows (embedding and
-        # tsvector included) for a result the caller discards, and worse, left
-        # ``_storage_slot_acquired`` set so the scored search that does run
-        # skipped the bulkhead. Reporting the pool size lets the caller say why
-        # it declined, since ``[]`` alone cannot distinguish "under-filled" from
-        # "no linked memories at all" (the ``not memory_boost`` return above).
+        # tsvector included) for a result the caller discards. Reporting the
+        # pool size lets the caller say why it declined, since ``[]`` alone
+        # cannot distinguish "under-filled" from "no linked memories at all"
+        # (the ``not memory_boost`` return above).
         #
         # One-directional on purpose. The converse is NOT decidable here: the
         # load applies visibility filters (caller_agent_id / status / valid_at)
@@ -552,8 +551,8 @@ class ClassifyQuery:
         # looks adequate can still return short. That is why the caller re-checks
         # after the load rather than trusting this count.
         if len(memory_boost) < top_k:
-            if slot_acquired_marker is not None:
-                slot_acquired_marker["_entity_pool_size"] = len(memory_boost)
+            if pool_report is not None:
+                pool_report["_entity_pool_size"] = len(memory_boost)
             return []
 
         # CAURA-687: load memories by ID via the dedicated short-circuit
@@ -592,27 +591,28 @@ class ClassifyQuery:
         # it would degrade to home-tenant reads with no error or log.
         if readable_tenant_ids and readable_tenant_ids != [tenant_id]:
             search_data["readable_tenant_ids"] = readable_tenant_ids
-        # Per-tenant storage bulkhead (CAURA-602 follow-up). C10: when
-        # this entity-lookup short-circuit acquires + releases the slot
-        # here, we mark the pipeline context so a downstream
-        # ``execute_scored_search`` running on the rare fall-through
-        # path (entity-lookup matched but produced no filtered rows)
-        # doesn't re-acquire and charge the tenant twice for one
-        # logical search. Same key as scored-search, intentional —
-        # the bucket counts request-level storage pressure, not
-        # call-level.
         # Record that the load ran, and against what size of pool. Without this
         # the caller cannot tell "no links at all" from "links existed, the load
         # ran, and visibility filtering dropped every row" — both arrive as an
         # empty list, and reporting the second as the first would send on-call
         # looking for a graph problem when the cause is a permission filter.
-        if slot_acquired_marker is not None:
-            slot_acquired_marker["_entity_pool_size"] = len(memory_boost)
-            slot_acquired_marker["_entity_pool_loaded"] = True
+        if pool_report is not None:
+            pool_report["_entity_pool_size"] = len(memory_boost)
+            pool_report["_entity_pool_loaded"] = True
+        # Per-tenant storage bulkhead (CAURA-602 follow-up), same key as
+        # scored-search on purpose: both are storage-reader roundtrips
+        # drawing on the same per-tenant pool budget. The slot is held only
+        # across this roundtrip and released on exit, so when this path
+        # falls through, ``ExecuteScoredSearch`` takes its own slot around
+        # its own roundtrip — the two are sequential and one logical search
+        # never holds two slots at once. (C10 used to set
+        # ``_storage_slot_acquired`` on ctx here so the downstream scored
+        # search skipped its slot as a "don't charge twice" dedup; the slot
+        # is an in-flight cap, not a charge, and the skip exempted the
+        # fall-through's scored_search roundtrip from the cap entirely —
+        # retired by audit oss-0814-l-06.)
         async with per_tenant_storage_slot("storage_search", tenant_id):
             memories = await sc.load_memories_by_ids(search_data)
-        if slot_acquired_marker is not None:
-            slot_acquired_marker["_storage_slot_acquired"] = True
 
         # Build result rows with boost scores.
         memories_by_id = {m["id"]: m for m in memories}

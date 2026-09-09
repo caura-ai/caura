@@ -695,10 +695,11 @@ async def test_under_filled_entity_pool_falls_through_to_scored_search():
     # And it must not pay for rows it throws away. Pool size is knowable from the
     # link query alone, so the content load — which pulls full rows including the
     # embedding, and holds one of only four per-tenant storage permits — is
-    # skipped. It also must not set _storage_slot_acquired, or the scored search
-    # that DOES run would slip past the bulkhead unmetered.
+    # skipped. (The C10 ``_storage_slot_acquired`` sentinel this decline also
+    # had to avoid setting is retired — oss-0814-l-06 — the scored search now
+    # always takes its own slot; the key must stay unwritten everywhere.)
     sc.load_memories_by_ids.assert_not_awaited()
-    assert ctx.data.get("_storage_slot_acquired") is not True
+    assert "_storage_slot_acquired" not in ctx.data
     # The marker the decline log reads is consumed, not left for the next step.
     assert "_entity_pool_size" not in ctx.data
 

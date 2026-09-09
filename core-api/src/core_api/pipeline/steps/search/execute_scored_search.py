@@ -164,17 +164,24 @@ class ExecuteScoredSearch:
         # code only. ``data["tenant_id"]`` is set upstream by
         # ``_search_memories_pipeline`` before this step runs.
         #
-        # C10: if ``classify_query`` already entered + released the same
-        # slot for ``load_memories_by_ids`` (entity-lookup short-circuit
-        # that fell through), it sets ``_storage_slot_acquired=True`` on
-        # ctx.data. Don't re-charge — one logical search counts once
-        # against the per-tenant storage_search bucket.
+        # Unconditional on purpose — this retires C10's
+        # ``_storage_slot_acquired`` skip (audit oss-0814-l-06). The slot
+        # is an IN-FLIGHT cap held only across the storage roundtrip, not
+        # a once-per-request charge: on the entity-lookup fall-through,
+        # ``classify_query`` released its slot when its
+        # ``load_memories_by_ids`` roundtrip returned, before this step
+        # ran, so acquiring here never double-holds — the two roundtrips
+        # are sequential and one logical search occupies at most one slot
+        # at any instant either way. What the C10 skip actually did was
+        # let THIS roundtrip run outside the cap entirely: a tenant whose
+        # queries matched entity tokens but fell through (pool loaded,
+        # then thinned below top_k by visibility filtering) could park
+        # unbounded concurrent scored_search calls on the storage-reader
+        # pool — exactly the noisy-neighbor hole the bulkhead exists to
+        # close.
         sc = get_storage_client()
-        if data.get("_storage_slot_acquired"):
+        async with per_tenant_storage_slot("storage_search", data["tenant_id"]):
             rows = await sc.scored_search(search_data)
-        else:
-            async with per_tenant_storage_slot("storage_search", data["tenant_id"]):
-                rows = await sc.scored_search(search_data)
 
         # Map response dicts to SimpleNamespace rows expected by downstream steps.
         grouped: OrderedDict[str, SimpleNamespace] = OrderedDict()

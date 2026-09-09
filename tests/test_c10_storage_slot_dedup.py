@@ -1,23 +1,32 @@
-"""C10: per-tenant storage-slot deduplication across the search pipeline.
+"""Per-tenant storage_search slot coverage across the search pipeline paths.
 
-When ``ClassifyQuery``'s entity-lookup short-circuit runs ``_collect_memories``
-it acquires ``per_tenant_storage_slot("storage_search", tenant_id)`` around
-the ``storage_client.load_memories_by_ids(...)`` round-trip. If the entity
-lookup falls through (matched entities, but their linked memories all got
-filtered out), the plan still routes through ``ExecuteScoredSearch`` which
-*also* used to acquire the same slot — charging the tenant's
-``storage_search`` bucket TWICE for one logical search.
+History, because this file used to pin the opposite contract. C10 (PR #264)
+made ``ClassifyQuery``'s entity-lookup load set
+``ctx.data["_storage_slot_acquired"] = True`` so that ``ExecuteScoredSearch``,
+on the entity-lookup fall-through, SKIPPED acquiring
+``per_tenant_storage_slot("storage_search", ...)`` — framed as "don't charge
+the tenant twice for one logical search". That framing treated the slot as a
+rate-limit charge. It is not: ``per_tenant_storage_slot`` is an in-flight cap
+held only across a single storage roundtrip, and classify's slot is released
+when its ``load_memories_by_ids`` roundtrip returns — before
+``ExecuteScoredSearch`` ever runs. The two roundtrips are sequential, so
+acquiring around each holds at most ONE slot at any instant; there was never a
+double-charge to dedup. What the skip actually did was exempt the
+fall-through's ``scored_search`` roundtrip from the cap entirely, letting a
+tenant whose queries matched entity tokens but fell through park unbounded
+concurrent scored_search calls on the storage-reader pool (audit
+oss-0814-l-06).
 
-C10's fix: when classify acquires + releases the slot, it sets
-``ctx.data["_storage_slot_acquired"] = True``. ``ExecuteScoredSearch`` reads
-that key and SKIPS the slot acquisition (but still runs ``scored_search``).
-Net effect: one logical search → one slot acquired against the bucket,
-regardless of path.
+The contract pinned now: EVERY storage roundtrip on the search path runs
+inside its own ``storage_search`` slot, whatever route classification took —
+and a logical search still never holds two slots at once, because the
+roundtrips are sequential, not because one of them is exempt.
 
-These tests pin that contract without exercising the real semaphore — the
-slot context manager is replaced by a recording CM on both modules'
-import-bindings, and each test asserts the (module, key, tenant_id) tuples
-that got recorded.
+These tests do not exercise the real semaphore — the slot context manager is
+replaced on both modules' import-bindings by a recorder that logs every
+acquisition AND tracks live holds, so tests can assert the slot was held
+WHILE the storage call ran (entering-then-releasing before the call would
+also satisfy a bare acquisition log).
 """
 
 from __future__ import annotations
@@ -62,51 +71,56 @@ _DEFAULT_SEARCH_PARAMS_FULL = {
 # ---------------------------------------------------------------------------
 
 
-def _make_recorder(acquisitions: list[tuple[str, str, str]], module_label: str):
-    """Return an async CM-factory that records (module, key, tenant_id) on
-    every ``__aenter__`` and yields immediately (no blocking)."""
+class _SlotRecorder:
+    """Stand-in for ``per_tenant_storage_slot`` on both step modules.
 
-    @asynccontextmanager
-    async def _ctx(key: str, tenant_id: str):
-        acquisitions.append((module_label, key, tenant_id))
-        yield
-
-    return _ctx
-
-
-def _patch_slots(acquisitions: list[tuple[str, str, str]]):
-    """Patch ``per_tenant_storage_slot`` on BOTH step modules' import-bindings.
-
-    Returns a tuple of (patcher_classify, patcher_execute). Caller is
-    responsible for starting/stopping both — typically via the ``with``
-    helper :func:`_recording_slots` below.
+    Beyond logging ``(module, key, tenant_id)`` per acquisition, it tracks
+    live holds: ``held`` is the number of slots currently inside their
+    ``async with``, ``max_held`` the high-water mark. A storage-client mock
+    can capture ``held`` at call time to prove the roundtrip ran INSIDE the
+    slot — the property oss-0814-l-06 found missing on the entity-lookup
+    fall-through — and ``max_held == 1`` proves the sequential roundtrips
+    never overlap holds (the double-charge C10 wrongly guarded against).
     """
-    classify_recorder = _make_recorder(acquisitions, "classify_query")
-    execute_recorder = _make_recorder(acquisitions, "execute_scored_search")
-    p1 = patch(
-        "core_api.pipeline.steps.search.classify_query.per_tenant_storage_slot",
-        classify_recorder,
-    )
-    p2 = patch(
-        "core_api.pipeline.steps.search.execute_scored_search.per_tenant_storage_slot",
-        execute_recorder,
-    )
-    return p1, p2
+
+    def __init__(self) -> None:
+        self.acquisitions: list[tuple[str, str, str]] = []
+        self.held = 0
+        self.max_held = 0
+
+    def bind(self, module_label: str):
+        @asynccontextmanager
+        async def _ctx(key: str, tenant_id: str):
+            self.acquisitions.append((module_label, key, tenant_id))
+            self.held += 1
+            self.max_held = max(self.max_held, self.held)
+            try:
+                yield
+            finally:
+                self.held -= 1
+
+        return _ctx
 
 
 class _recording_slots:
-    """Context manager that installs the recording slot CMs on both modules."""
+    """Install one shared ``_SlotRecorder`` on BOTH step modules'
+    import-bindings; yields the recorder."""
 
     def __init__(self):
-        self.acquisitions: list[tuple[str, str, str]] = []
-        self._p1 = None
-        self._p2 = None
+        self.recorder = _SlotRecorder()
+        self._p1 = patch(
+            "core_api.pipeline.steps.search.classify_query.per_tenant_storage_slot",
+            self.recorder.bind("classify_query"),
+        )
+        self._p2 = patch(
+            "core_api.pipeline.steps.search.execute_scored_search.per_tenant_storage_slot",
+            self.recorder.bind("execute_scored_search"),
+        )
 
-    def __enter__(self):
-        self._p1, self._p2 = _patch_slots(self.acquisitions)
+    def __enter__(self) -> _SlotRecorder:
         self._p1.start()
         self._p2.start()
-        return self.acquisitions
+        return self.recorder
 
     def __exit__(self, exc_type, exc, tb):
         self._p2.stop()
@@ -127,9 +141,8 @@ def _make_classify_ctx(
     ``top_k`` is a seam because H-03 made _collect_memories bail BEFORE the
     load when the linked-memory pool cannot fill it. ``_entity_match_sc``
     links exactly one memory, so tests here that need the load to actually
-    happen — every test about the storage-slot sentinel does — must ask for
-    one row. Otherwise no load runs, no slot is taken, and the sentinel these
-    tests exist to police is never set.
+    happen — every fall-through test does — must ask for one row. Otherwise
+    no load runs and the fall-through under test never spent a slot.
     """
     search_params = dict(_DEFAULT_SEARCH_PARAMS_FULL)
     if top_k is not None:
@@ -165,10 +178,15 @@ def _entity_match_sc(
     mid: str,
     memories: list[dict] | None,
     raise_on_load: Exception | None = None,
+    recorder: _SlotRecorder | None = None,
 ) -> AsyncMock:
     """Storage client mock that produces a hit through every entity-lookup
     gate: fts_search_entities → expand_graph → get_memory_ids_by_entity_ids
     → load_memories_by_ids.
+
+    When ``recorder`` is given, ``scored_search`` captures ``recorder.held``
+    at call time into ``sc.scored_search_held_at_call`` so tests can assert
+    the roundtrip ran inside the slot, not merely after an acquire/release.
     """
     sc = AsyncMock()
     sc.fts_search_entities = AsyncMock(return_value=[eid])
@@ -180,11 +198,11 @@ def _entity_match_sc(
         sc.load_memories_by_ids = AsyncMock(side_effect=raise_on_load)
     else:
         sc.load_memories_by_ids = AsyncMock(return_value=memories or [])
-    sc.scored_search = AsyncMock(return_value=[])
+    _wire_scored_search(sc, recorder)
     return sc
 
 
-def _bare_sc() -> AsyncMock:
+def _bare_sc(recorder: _SlotRecorder | None = None) -> AsyncMock:
     """Storage client mock for the non-entity-lookup path: fts_search_entities
     returns no matches, so classify never enters _collect_memories."""
     sc = AsyncMock()
@@ -192,8 +210,21 @@ def _bare_sc() -> AsyncMock:
     sc.expand_graph = AsyncMock(return_value={})
     sc.get_memory_ids_by_entity_ids = AsyncMock(return_value=[])
     sc.load_memories_by_ids = AsyncMock(return_value=[])
-    sc.scored_search = AsyncMock(return_value=[])
+    _wire_scored_search(sc, recorder)
     return sc
+
+
+def _wire_scored_search(sc: AsyncMock, recorder: _SlotRecorder | None) -> None:
+    sc.scored_search_held_at_call = []
+    if recorder is None:
+        sc.scored_search = AsyncMock(return_value=[])
+        return
+
+    async def _scored_search(_search_data: dict) -> list:
+        sc.scored_search_held_at_call.append(recorder.held)
+        return []
+
+    sc.scored_search = AsyncMock(side_effect=_scored_search)
 
 
 class _shared_storage_client:
@@ -225,85 +256,95 @@ class _shared_storage_client:
 
 
 # ---------------------------------------------------------------------------
-# Case 1 — entity-lookup SUCCESS → only classify acquires, execute skips
+# Case 1 — entity-lookup SUCCESS → classify acquires once; execute is
+# plan-skipped entirely (no slot, no storage call)
 # ---------------------------------------------------------------------------
 
 
 async def test_entity_lookup_success_classify_acquires_once_execute_skips():
     eid = str(uuid.uuid4())
     mid = str(uuid.uuid4())
-    sc = _entity_match_sc(
-        eid=eid,
-        mid=mid,
-        memories=[
-            {
-                "id": mid,
-                "tenant_id": "t1",
-                "content": "Alice test memory",
-                "memory_type": "fact",
-            }
-        ],
-    )
-    ctx = _make_classify_ctx("Alice", top_k=1)
+    with _recording_slots() as rec:
+        sc = _entity_match_sc(
+            eid=eid,
+            mid=mid,
+            memories=[
+                {
+                    "id": mid,
+                    "tenant_id": "t1",
+                    "content": "Alice test memory",
+                    "memory_type": "fact",
+                }
+            ],
+            recorder=rec,
+        )
+        ctx = _make_classify_ctx("Alice", top_k=1)
 
-    with _shared_storage_client(sc), _recording_slots() as acquisitions:
-        await ClassifyQuery().execute(ctx)
+        with _shared_storage_client(sc):
+            await ClassifyQuery().execute(ctx)
 
-        assert acquisitions == [("classify_query", "storage_search", "t1")]
-        plan: RetrievalPlan = ctx.data["retrieval_plan"]
-        assert plan.strategy == RetrievalStrategy.ENTITY_LOOKUP
-        assert plan.skip_scored_search is True
-        assert ctx.data.get("_storage_slot_acquired") is True
-        assert len(ctx.data.get("filtered_rows", [])) > 0
+            assert rec.acquisitions == [("classify_query", "storage_search", "t1")]
+            plan: RetrievalPlan = ctx.data["retrieval_plan"]
+            assert plan.strategy == RetrievalStrategy.ENTITY_LOOKUP
+            assert plan.skip_scored_search is True
+            assert len(ctx.data.get("filtered_rows", [])) > 0
 
-        # ExecuteScoredSearch must SKIP — no slot, no scored_search call.
-        _prime_for_execute(ctx)
-        result = await ExecuteScoredSearch().execute(ctx)
+            # ExecuteScoredSearch must SKIP — no slot, no scored_search call.
+            _prime_for_execute(ctx)
+            result = await ExecuteScoredSearch().execute(ctx)
 
-        assert isinstance(result, StepResult)
-        assert result.outcome == StepOutcome.SKIPPED
-        sc.scored_search.assert_not_awaited()
-        # Still exactly one acquisition recorded.
-        assert acquisitions == [("classify_query", "storage_search", "t1")]
+            assert isinstance(result, StepResult)
+            assert result.outcome == StepOutcome.SKIPPED
+            sc.scored_search.assert_not_awaited()
+            # Still exactly one acquisition recorded.
+            assert rec.acquisitions == [("classify_query", "storage_search", "t1")]
 
 
 # ---------------------------------------------------------------------------
-# Case 2 — entity-lookup FALL-THROUGH → classify acquires, execute does not
-# re-acquire but still calls scored_search
+# Case 2 — entity-lookup FALL-THROUGH → scored_search runs INSIDE its own
+# slot (oss-0814-l-06: this roundtrip used to run outside the cap)
 # ---------------------------------------------------------------------------
 
 
-async def test_entity_lookup_fallthrough_execute_skips_slot_but_calls_scored_search():
+async def test_entity_lookup_fallthrough_scored_search_runs_inside_the_slot():
     eid = str(uuid.uuid4())
     mid = str(uuid.uuid4())
-    # load_memories_by_ids returns []: _collect_memories runs the load, marks
-    # the sentinel, then returns [] → classify falls through past the
-    # ENTITY_LOOKUP plan-emission.
-    sc = _entity_match_sc(eid=eid, mid=mid, memories=[])
-    ctx = _make_classify_ctx("Alice", top_k=1)
+    with _recording_slots() as rec:
+        # load_memories_by_ids returns []: the pool looked adequate, the load
+        # ran (spending classify's slot), then visibility filtering dropped
+        # every row → classify falls through past the ENTITY_LOOKUP
+        # plan-emission. This is the exact path the audit flagged.
+        sc = _entity_match_sc(eid=eid, mid=mid, memories=[], recorder=rec)
+        ctx = _make_classify_ctx("Alice", top_k=1)
 
-    with _shared_storage_client(sc), _recording_slots() as acquisitions:
-        await ClassifyQuery().execute(ctx)
+        with _shared_storage_client(sc):
+            await ClassifyQuery().execute(ctx)
 
-        # Classify acquired once during the load.
-        assert acquisitions == [("classify_query", "storage_search", "t1")]
-        plan: RetrievalPlan = ctx.data["retrieval_plan"]
-        assert plan.strategy != RetrievalStrategy.ENTITY_LOOKUP
-        assert plan.skip_scored_search is False
-        # Sentinel is set even though no entity-lookup rows were emitted.
-        assert ctx.data.get("_storage_slot_acquired") is True
-        sc.load_memories_by_ids.assert_awaited_once()
+            # Classify acquired once, around the load, and released it.
+            assert rec.acquisitions == [("classify_query", "storage_search", "t1")]
+            assert rec.held == 0
+            plan: RetrievalPlan = ctx.data["retrieval_plan"]
+            assert plan.strategy != RetrievalStrategy.ENTITY_LOOKUP
+            assert plan.skip_scored_search is False
+            sc.load_memories_by_ids.assert_awaited_once()
 
-        # Now ExecuteScoredSearch must run scored_search WITHOUT re-acquiring.
-        _prime_for_execute(ctx)
-        sc.scored_search.reset_mock()
-        sc.scored_search.return_value = []
-        await ExecuteScoredSearch().execute(ctx)
+            _prime_for_execute(ctx)
+            await ExecuteScoredSearch().execute(ctx)
 
-        # Still exactly one acquisition — execute did NOT re-take the slot.
-        assert acquisitions == [("classify_query", "storage_search", "t1")]
-        # But scored_search WAS called (the storage call still happens).
-        sc.scored_search.assert_awaited_once()
+            # Execute took its own slot for its own roundtrip.
+            assert rec.acquisitions == [
+                ("classify_query", "storage_search", "t1"),
+                ("execute_scored_search", "storage_search", "t1"),
+            ]
+            # And the roundtrip ran INSIDE it — held == 1 at call time, not 0
+            # (which is what the retired C10 skip produced here).
+            sc.scored_search.assert_awaited_once()
+            assert sc.scored_search_held_at_call == [1]
+            # Sequential roundtrips never overlap holds: one logical search
+            # occupies at most one slot at any instant, so there was no
+            # double-charge for the skip to dedup in the first place.
+            assert rec.max_held == 1
+            assert rec.held == 0
 
 
 # ---------------------------------------------------------------------------
@@ -312,156 +353,103 @@ async def test_entity_lookup_fallthrough_execute_skips_slot_but_calls_scored_sea
 
 
 async def test_non_entity_lookup_path_execute_acquires_normally():
-    sc = _bare_sc()
-    # A query with no entity tokens — classify routes via SEMANTIC_SEARCH
-    # without ever running _collect_memories.
-    ctx = _make_classify_ctx("what do we know about pricing strategy next quarter")
+    with _recording_slots() as rec:
+        sc = _bare_sc(recorder=rec)
+        # A query with no entity tokens — classify routes via SEMANTIC_SEARCH
+        # without ever running _collect_memories.
+        ctx = _make_classify_ctx("what do we know about pricing strategy next quarter")
 
-    with _shared_storage_client(sc), _recording_slots() as acquisitions:
-        await ClassifyQuery().execute(ctx)
+        with _shared_storage_client(sc):
+            await ClassifyQuery().execute(ctx)
 
-        assert acquisitions == []
-        assert "_storage_slot_acquired" not in ctx.data
-        plan: RetrievalPlan = ctx.data["retrieval_plan"]
-        assert plan.skip_scored_search is False
-        sc.load_memories_by_ids.assert_not_awaited()
+            assert rec.acquisitions == []
+            plan: RetrievalPlan = ctx.data["retrieval_plan"]
+            assert plan.skip_scored_search is False
+            sc.load_memories_by_ids.assert_not_awaited()
 
+            _prime_for_execute(ctx)
+            await ExecuteScoredSearch().execute(ctx)
+
+            assert rec.acquisitions == [
+                ("execute_scored_search", "storage_search", "t1")
+            ]
+            sc.scored_search.assert_awaited_once()
+            assert sc.scored_search_held_at_call == [1]
+
+
+# ---------------------------------------------------------------------------
+# Case 4 — a stale C10 sentinel must be inert: nothing on ctx may disable
+# the bulkhead
+# ---------------------------------------------------------------------------
+
+
+async def test_stale_sentinel_does_not_disable_the_bulkhead():
+    """Regression guard for reintroducing the skip. ``_storage_slot_acquired``
+    is written by nothing anymore, but a ctx replayed from an old caller (or a
+    hand-built test ctx — tests/test_audit_s6_c1_events.py used to do exactly
+    this to dodge the slot) could still carry it; execute must acquire
+    regardless."""
+    with _recording_slots() as rec:
+        ctx = _make_classify_ctx("Alice", top_k=1)
+        ctx.data["_storage_slot_acquired"] = True
         _prime_for_execute(ctx)
-        sc.scored_search.return_value = []
-        await ExecuteScoredSearch().execute(ctx)
+        sc = _bare_sc(recorder=rec)
 
-        # Execute acquired the slot because classify did not mark the sentinel.
-        assert acquisitions == [("execute_scored_search", "storage_search", "t1")]
-        sc.scored_search.assert_awaited_once()
+        with _shared_storage_client(sc):
+            await ExecuteScoredSearch().execute(ctx)
 
-
-# ---------------------------------------------------------------------------
-# Case 4 — sentinel suppresses ONLY the slot, NOT the storage call
-# ---------------------------------------------------------------------------
-
-
-async def test_sentinel_only_suppresses_slot_not_scored_search_call():
-    eid = str(uuid.uuid4())
-    mid = str(uuid.uuid4())
-    sc = _entity_match_sc(eid=eid, mid=mid, memories=[])
-    ctx = _make_classify_ctx("Alice", top_k=1)
-
-    with _shared_storage_client(sc), _recording_slots() as acquisitions:
-        await ClassifyQuery().execute(ctx)
-        assert ctx.data.get("_storage_slot_acquired") is True
-        assert len(acquisitions) == 1
-
-        _prime_for_execute(ctx)
-        # Sentinel set, but scored_search MUST still be called with the
-        # expected tenant_id baked into its search_data argument.
-        sc.scored_search.reset_mock()
-        sc.scored_search.return_value = []
-        await ExecuteScoredSearch().execute(ctx)
-
-        sc.scored_search.assert_awaited_once()
-        call_args = sc.scored_search.await_args
-        # scored_search's first positional arg is the search_data dict in
-        # current usage; also accept tenant_id passed as kwarg.
-        search_data = call_args.args[0] if call_args.args else call_args.kwargs
-        assert search_data.get("tenant_id") == "t1"
+        assert rec.acquisitions == [("execute_scored_search", "storage_search", "t1")]
+        assert sc.scored_search_held_at_call == [1]
 
 
 # ---------------------------------------------------------------------------
-# Case 5 — sentinel does NOT leak across requests
+# Case 5 — load_memories_by_ids failure: classify's slot is released by the
+# ``async with`` on the exception; the fall-through search still gets gated
 # ---------------------------------------------------------------------------
 
 
-async def test_sentinel_does_not_leak_across_requests():
-    # First request: entity-lookup fall-through → sentinel set, execute skips
-    # the slot.
-    eid = str(uuid.uuid4())
-    mid = str(uuid.uuid4())
-    sc_first = _entity_match_sc(eid=eid, mid=mid, memories=[])
-    ctx_a = _make_classify_ctx("Alice", top_k=1)
-
-    with _shared_storage_client(sc_first) as _sc, _recording_slots() as acquisitions:
-        await ClassifyQuery().execute(ctx_a)
-        _prime_for_execute(ctx_a)
-        sc_first.scored_search.return_value = []
-        await ExecuteScoredSearch().execute(ctx_a)
-
-        # First request: exactly 1 acquisition (classify only).
-        assert acquisitions == [("classify_query", "storage_search", "t1")]
-
-    # Second request: non-entity-lookup path. Fresh ctx → fresh
-    # ``_storage_slot_acquired`` state. Execute must acquire the slot.
-    sc_second = _bare_sc()
-    ctx_b = _make_classify_ctx("what do we know about pricing strategy next quarter")
-
-    with _shared_storage_client(sc_second), _recording_slots() as acquisitions_b:
-        await ClassifyQuery().execute(ctx_b)
-        assert "_storage_slot_acquired" not in ctx_b.data
-
-        _prime_for_execute(ctx_b)
-        sc_second.scored_search.return_value = []
-        await ExecuteScoredSearch().execute(ctx_b)
-
-        # The second request, in isolation, recorded one execute-side slot.
-        assert acquisitions_b == [("execute_scored_search", "storage_search", "t1")]
-
-
-# ---------------------------------------------------------------------------
-# Case 6 — load_memories_by_ids failure does NOT mark the sentinel
-# ---------------------------------------------------------------------------
-
-
-async def test_load_failure_does_not_mark_sentinel():
+async def test_load_failure_releases_slot_and_fallthrough_still_gated():
     eid = str(uuid.uuid4())
     mid = str(uuid.uuid4())
     boom = RuntimeError("storage exploded")
-    sc = _entity_match_sc(eid=eid, mid=mid, memories=None, raise_on_load=boom)
-    ctx = _make_classify_ctx("Alice", top_k=1)
+    with _recording_slots() as rec:
+        sc = _entity_match_sc(
+            eid=eid, mid=mid, memories=None, raise_on_load=boom, recorder=rec
+        )
+        ctx = _make_classify_ctx("Alice", top_k=1)
 
-    with _shared_storage_client(sc), _recording_slots() as acquisitions:
-        # Classify's outer try/except may catch the exception and fall through.
-        # If it doesn't, the test should still surface the failure cleanly.
-        try:
+        with _shared_storage_client(sc):
+            # Classify's outer try/except catches the load failure and falls
+            # through to the keyword/semantic cascade.
             await ClassifyQuery().execute(ctx)
-        except RuntimeError as exc:
-            assert exc is boom
 
-        # Sentinel must NOT be set — the implementation marks it only after
-        # a successful load.
-        assert ctx.data.get("_storage_slot_acquired") is not True
+            # Classify entered the slot (recorded on enter) even though the
+            # load inside raised; ``async with``'s __aexit__ released it.
+            assert rec.acquisitions == [("classify_query", "storage_search", "t1")]
+            assert rec.held == 0
 
-        # Classify entered the slot (the ``async with`` records on enter)
-        # even though the load inside raised. That's expected: the slot is
-        # released on exception by ``async with``'s __aexit__.
-        assert acquisitions == [("classify_query", "storage_search", "t1")]
+            plan: RetrievalPlan = ctx.data["retrieval_plan"]
+            assert plan.skip_scored_search is False
 
-        # If classify swallowed the exception and set a retrieval_plan, the
-        # downstream ExecuteScoredSearch must acquire the slot itself (since
-        # the sentinel was never set). If classify propagated the exception,
-        # ExecuteScoredSearch wouldn't run in the real pipeline — but we
-        # exercise it here to pin the sentinel-not-set behaviour.
-        if (
-            "retrieval_plan" in ctx.data
-            and not ctx.data["retrieval_plan"].skip_scored_search
-        ):
             _prime_for_execute(ctx)
-            sc.scored_search.reset_mock()
-            sc.scored_search.return_value = []
             await ExecuteScoredSearch().execute(ctx)
-            assert acquisitions == [
+            assert rec.acquisitions == [
                 ("classify_query", "storage_search", "t1"),
                 ("execute_scored_search", "storage_search", "t1"),
             ]
             sc.scored_search.assert_awaited_once()
+            assert sc.scored_search_held_at_call == [1]
 
 
 # ---------------------------------------------------------------------------
-# Case 7 — explicit skip path: when classify already emitted a
+# Case 6 — explicit skip path: when classify already emitted a
 # skip_scored_search plan (entity-lookup SUCCESS), ExecuteScoredSearch must
-# NOT touch scored_search or the slot regardless of the sentinel value.
+# NOT touch scored_search or the slot — the skip is the PLAN's, decided
+# before the slot block, never a sentinel's.
 # ---------------------------------------------------------------------------
 
 
-async def test_execute_skips_when_plan_says_skip_regardless_of_sentinel():
+async def test_execute_skips_when_plan_says_skip():
     ctx = PipelineContext(
         data={
             "tenant_id": "t1",
@@ -470,14 +458,14 @@ async def test_execute_skips_when_plan_says_skip_regardless_of_sentinel():
                 strategy=RetrievalStrategy.ENTITY_LOOKUP,
                 skip_scored_search=True,
             ),
-            # Sentinel set, just like a real entity-lookup SUCCESS path.
+            # A stale sentinel must be inert on this path too.
             "_storage_slot_acquired": True,
         },
     )
     _prime_for_execute(ctx)
 
-    with _recording_slots() as acquisitions:
+    with _recording_slots() as rec:
         result = await ExecuteScoredSearch().execute(ctx)
         assert isinstance(result, StepResult)
         assert result.outcome == StepOutcome.SKIPPED
-        assert acquisitions == []
+        assert rec.acquisitions == []
