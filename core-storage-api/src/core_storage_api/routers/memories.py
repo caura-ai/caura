@@ -378,6 +378,26 @@ async def find_semantic_duplicate(request: Request) -> dict:
     return payload
 
 
+@router.post("/agent-scope-probe")
+async def agent_scope_probe(request: Request) -> dict:
+    """CAURA-723 — why an agent-filtered search came back empty.
+
+    POST rather than GET despite being a read: ``fleet_ids`` and
+    ``readable_tenant_ids`` are lists, and a JSON body is how every other
+    list-taking read here (``scored-search``) carries them.
+    """
+    body: dict = await request.json()
+    return await _svc.memory_agent_scope_probe(
+        tenant_id=body["tenant_id"],
+        agent_id=body["agent_id"],
+        fleet_ids=body.get("fleet_ids") or None,
+        readable_tenant_ids=body.get("readable_tenant_ids") or None,
+        # Default True keeps an older core-api (which does not send the key)
+        # getting both halves, as it expects.
+        include_agent_registered=bool(body.get("include_agent_registered", True)),
+    )
+
+
 @router.post("/entity-overlap-candidates")
 async def find_entity_overlap_candidates(request: Request) -> list[dict]:
     body: dict = await request.json()
