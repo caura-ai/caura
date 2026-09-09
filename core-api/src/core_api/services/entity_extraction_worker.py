@@ -366,8 +366,12 @@ async def process_entity_extraction(
             # carries the prior skip-on-failure semantics — a single
             # entity that fails to embed becomes ``None`` in its slot
             # rather than aborting the whole batch.
+            # ``tenant_cfg`` (resolved above for the extraction call) also
+            # routes the embeds: tenant provider/key overrides apply, and
+            # resolution can't fall to the raw env default — entity vectors
+            # must live in the same space as this tenant's memory vectors.
             embed_results = await asyncio.gather(
-                *(get_embedding(name, background=True) for name, _et, _role in filtered),
+                *(get_embedding(name, tenant_cfg, background=True) for name, _et, _role in filtered),
                 return_exceptions=True,
             )
             name_embeddings: dict[str, list[float] | None] = {}

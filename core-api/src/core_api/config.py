@@ -4,6 +4,7 @@ from typing import Any, Literal, Self
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
 from common.storage_auth import read_shared_secret_file
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,11 @@ class Settings(BaseSettings):
     # (bypassing the gateway via its public run.app URL) cannot impersonate a
     # tenant by setting identity headers itself. Unset (OSS/standalone/dev) = no-op.
     gateway_shared_secret: str | None = None
-    embedding_provider: str = "openai"  # fake | openai | local
+    # fake | openai | local. The default is the shared constant so this
+    # field can never drift from ``_resolve_provider_name``'s env fallback
+    # again (they disagreed once — "openai" here vs "fake" there — and
+    # tenant-config-less paths silently persisted fake vectors).
+    embedding_provider: str = DEFAULT_EMBEDDING_PROVIDER
     # C38 — model for ``embedding_provider="local"`` (sentence-transformers).
     # MUST emit VECTOR_DIM dimensions; the provider now refuses a mismatch at
     # load rather than failing later at INSERT. Maps to LOCAL_EMBEDDING_MODEL,
