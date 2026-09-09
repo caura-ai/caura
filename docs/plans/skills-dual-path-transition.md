@@ -26,7 +26,7 @@ is safer than a single synchronized flip.
 `plugin/skills/memclaw/` is protected from deletion by <!-- legacy-name-ok: dual-path skills transition -->
 `reconcile-skills.ts`'s `PROTECTED_SKILLS` set. That reconciler runs every
 60 seconds and deletes any on-disk skill slug that is neither in the
-server's dynamic catalog nor in `PROTECTED_SKILLS` — so removing the <!-- legacy-name-ok: dual-path skills transition -->
+server's dynamic catalog nor in `PROTECTED_SKILLS` — so removing the
 historical slug from that set deletes the directory, and whatever an
 agent's already-generated `TOOLS.md`/`AGENTS.md` text still points at,
 from every existing install within one heartbeat of the next deploy. That
