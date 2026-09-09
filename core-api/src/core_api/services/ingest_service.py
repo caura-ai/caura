@@ -123,14 +123,6 @@ _CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
 # latency.
 _PREVIEW_CONCURRENCY = 4
 
-# Maximum content length the LLM sees. Inputs longer than this get
-# truncated; ``ingest_preview`` reports the post-truncate length as
-# ``content_length`` and sets ``truncated: true`` + ``original_length``
-# so callers know the input was clipped. (Previously ``content_length``
-# returned the pre-truncate length, lying about what the LLM actually
-# processed.)
-_INGEST_MAX_CONTENT_CHARS = 50_000
-
 # Minimum content length before we'll even call the LLM. Whitespace-only
 # inputs and trivially short ones ("hi") used to burn a real LLM call
 # producing useless meta-facts ("The content begins with the greeting
@@ -174,6 +166,38 @@ _SALIENCE_FLOOR = 0.5
 # the validator drops them. "≥ 5 words" is the boundary — anything shorter
 # is almost always a heading, label, or one-word fragment.
 _MIN_FACT_WORDS = 5
+
+# Scripts that do not put spaces between words. A whitespace split reports 1
+# for an entire Chinese or Japanese sentence, so ``len(body.split())`` dropped
+# every CJK fact as a "sub-5-word fragment" — the filter deleted the content it
+# was meant to protect, and only for those languages.
+#
+# Hangul is deliberately EXCLUDED: Korean is space-delimited, so counting each
+# syllable as a word would over-count it and let real fragments through.
+_CJK_RE = re.compile(
+    "["
+    "\u3040-\u309f"  # hiragana
+    "\u30a0-\u30ff"  # katakana
+    "\u3400-\u4dbf"  # CJK unified ext A
+    "\u4e00-\u9fff"  # CJK unified
+    "\uf900-\ufaff"  # CJK compatibility
+    "\uff66-\uff9f"  # halfwidth katakana
+    "]"
+)
+
+
+def _fact_word_count(text: str) -> int:
+    """Word count that survives a script without spaces.
+
+    Each CJK character counts as one unit and the remainder is split on
+    whitespace, so mixed text ("Acme の売上は 12% 増加した") is counted once,
+    not twice. One character per unit is deliberately generous — a CJK word is
+    typically one to two characters, so this errs toward KEEPING a short fact
+    rather than silently dropping a real one, which is the failure being fixed.
+    """
+    cjk = len(_CJK_RE.findall(text))
+    return len(_CJK_RE.sub(" ", text).split()) + cjk
+
 
 # Drop facts that describe the input itself rather than extracting from it.
 # These show up when the LLM has nothing real to chunk — typical on short
@@ -346,7 +370,7 @@ async def _chunk_content(
 
         # A5: drop sub-5-word fragments. Prompt forbids them but the LLM
         # still emits short headings/labels on noisy inputs.
-        if len(body.split()) < _MIN_FACT_WORDS:
+        if _fact_word_count(body) < _MIN_FACT_WORDS:
             dropped_short += 1
             continue
 
@@ -998,6 +1022,15 @@ async def ingest_preview(request: IngestRequest) -> dict:
             "chunk_ms": 0,
             "cached": True,
             "run_id": prior_run_id,
+            # The contract this response documents: the caller echoes
+            # ``doc_hash`` to commit so the NEXT preview can hit this cache. The
+            # cache-hit branch omitted it, so a client that followed the
+            # documented flow lost the hash precisely when the cache was
+            # working — the second ingest of a document could never cache.
+            "doc_hash": doc_hash,
+            # Zero LLM calls were made, for the same reason ``chunk_ms`` is 0.
+            # Absent would read as "unknown"; 0 is the true count.
+            "sections": 0,
         }
 
     # ---- P2.3: whitespace / too-short short-circuit ----
