@@ -19,20 +19,30 @@ GEMINI_DEFAULT_MODEL = os.environ.get(
     "GEMINI_DEFAULT_MODEL", "gemini-3.1-flash-lite-preview"
 )
 
-# OpenAI's chat-completions base URL — used by ``OpenAILLMProvider``
-# (and for openrouter / anthropic compat where the API mirrors OpenAI's
-# shape, with the base URL swapped via tenant-config override).
-OPENAI_CHAT_BASE_URL = "https://api.openai.com/v1"
+# Chat-completions base URLs. ``OpenAILLMProvider`` works against any
+# OpenAI-compatible endpoint by varying ``base_url``; the registry picks
+# the URL from the provider name (``ProviderName``). Each URL can be
+# overridden from the environment, so a provider can talk to a self-hosted
+# server (LM Studio, vLLM, a gateway) without a code change.
+#
+# ``OPENAI_HOSTED_CHAT_BASE_URL`` is the literal hosted endpoint. It stays
+# separate from the overridable value so the provider can tell whether it
+# is talking to api.openai.com, which accepts request shapes that other
+# compatible servers reject.
+OPENAI_HOSTED_CHAT_BASE_URL = "https://api.openai.com/v1"
+OPENAI_CHAT_BASE_URL = os.environ.get(
+    "OPENAI_CHAT_BASE_URL", OPENAI_HOSTED_CHAT_BASE_URL
+)
 
-# Anthropic + OpenRouter base URLs and default models. The
-# ``OpenAILLMProvider`` works against any of these endpoints by varying
-# ``base_url``; the registry picks the right tuple based on
-# ``ProviderName``.
-ANTHROPIC_CHAT_BASE_URL = "https://api.anthropic.com/v1"
+ANTHROPIC_CHAT_BASE_URL = os.environ.get(
+    "ANTHROPIC_CHAT_BASE_URL", "https://api.anthropic.com/v1"
+)
 ANTHROPIC_DEFAULT_MODEL = os.environ.get(
     "ANTHROPIC_DEFAULT_MODEL", "claude-haiku-4-5-20251001"
 )  # Anthropic API requires native model IDs
-OPENROUTER_CHAT_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_CHAT_BASE_URL = os.environ.get(
+    "OPENROUTER_CHAT_BASE_URL", "https://openrouter.ai/api/v1"
+)
 OPENROUTER_DEFAULT_MODEL = os.environ.get(
     "OPENROUTER_DEFAULT_MODEL", "openai/gpt-5.4-nano"
 )
