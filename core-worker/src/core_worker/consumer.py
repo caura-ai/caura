@@ -284,6 +284,10 @@ _ENRICHMENT_METADATA_FIELDS: frozenset[str] = frozenset(
         "pii_types",
         "business_relevance",
         "retrieval_hint",
+        # Persisted, not consumed here: the row carries the claims the LLM
+        # found so core-api can fan them out. Storing them is what makes the
+        # gap recoverable — a dropped list means re-running the LLM.
+        "atomic_facts",
         "llm_ms",
     }
 )
@@ -293,11 +297,18 @@ _ENRICHMENT_METADATA_FIELDS: frozenset[str] = frozenset(
 # fails when a future field is added without a code site to handle it
 # — silent drops are the failure mode we're guarding against.
 #
-# ``atomic_facts``: the synchronous write path fans these out into
-# child memories; the async worker doesn't yet implement that — see
-# the ``logger.debug`` in ``handle_enrich_request`` that surfaces the
-# gap when an enrichment produces them.
-_ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset({"atomic_facts"})
+# Every ``EnrichmentResult`` field now routes somewhere. ``atomic_facts``
+# used to sit here — the worker computed them and threw them away, so a
+# fast-mode write of multi-claim content produced fewer memories than the
+# same content written in strong mode, and the difference was unrecoverable
+# because the LLM answer was gone. They are persisted to metadata now (see
+# ``_ENRICHMENT_METADATA_FIELDS``); the fan-out into child memories still
+# belongs to core-api, which already consumes ``Topics.Memory.ENRICHED`` and
+# already owns the fan-out logic, with its live-hash dedup, visibility and
+# weight inheritance. Duplicating that here would be a second implementation
+# of a subtle path — and the worker's storage client has no create-memory
+# call at all.
+_ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset()
 
 # Metadata fields that ALWAYS overwrite (when not ``None`` and the
 # result came from a real LLM call — see the ``llm_ms > 0`` guard at
@@ -331,8 +342,21 @@ _ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset({"atomic_facts"})
 #   memory personal↔business; the ``llm_ms > 0`` guard prevents
 #   ``fake_enrich``'s default "business" from clobbering a real
 #   "personal" classification on a heuristic-fallback redelivery.
+# * ``atomic_facts`` — same reasoning as ``tags``: a re-enrichment that finds
+#   ONE claim where a previous run found three must be able to clear the stale
+#   two, or the fan-out would later create children for claims the current
+#   content no longer makes. The ``llm_ms > 0`` guard keeps a heuristic-fallback
+#   redelivery from clearing a real LLM's facts.
 _ENRICHMENT_ALWAYS_WRITE_METADATA: frozenset[str] = frozenset(
-    {"contains_pii", "pii_types", "business_relevance", "retrieval_hint", "summary", "tags"}
+    {
+        "contains_pii",
+        "pii_types",
+        "business_relevance",
+        "retrieval_hint",
+        "summary",
+        "tags",
+        "atomic_facts",
+    }
 )
 
 # Defence-in-depth: a typo in the tuples above would silently drop in
@@ -580,26 +604,26 @@ async def handle_enrich_request(event: Event) -> None:
 
     patch = _build_patch(result, request.agent_provided_fields)
 
-    # Surface the sync-vs-async behavioural gap: the synchronous write
-    # path in ``memory_service.py`` fans ``atomic_facts`` out into
-    # child memories. The async worker doesn't yet — content with
-    # multiple distinct claims gets fewer memories on this path.
-    # Implementing child-memory creation in the worker requires a
-    # fresh embed roundtrip per child + a parent-link plumb through
-    # storage; tracked separately.
+    # The sync/async gap, now HALF closed. ``memory_service.py`` fans
+    # ``atomic_facts`` out into child memories on the synchronous path; this
+    # worker does not, so fast-mode multi-claim content still yields fewer
+    # memories than the same content written in strong mode.
     #
-    # Logged at WARNING (not ERROR): the gap is real but expected
-    # under the current PR scope, and ERROR-paging on every multi-fact
-    # write would drown the on-call alert channel without giving them
-    # an actionable fix. The follow-up ticket reference makes the gap
-    # discoverable; a dashboard counter on the WARNING string lets
-    # operators quantify exposure.
+    # What changed: the facts are no longer DISCARDED. They ride into the row's
+    # metadata above, so the gap is now recoverable from stored data instead of
+    # requiring the LLM to be re-run. Fan-out stays in core-api, which already
+    # consumes ``Topics.Memory.ENRICHED`` and already owns the dedup /
+    # visibility / weight rules a child must inherit.
+    #
+    # Still WARNING, not ERROR: the gap is real but expected, and paging on
+    # every multi-fact write would bury on-call without an actionable fix. The
+    # string stays greppable so the exposure remains countable — that count is
+    # what the A75 proof gate needs to size this.
     if result.atomic_facts:
         logger.warning(
-            "enrich-request for memory %s produced %d atomic_facts; "
-            "child-memory creation not yet implemented in async path "
-            "(tracked: CAURA-595 follow-up) — secondary facts will "
-            "NOT appear as child memories",
+            "enrich-request for memory %s produced %d atomic_facts; persisted to "
+            "metadata but child-memory fan-out is not yet implemented on the async "
+            "path — secondary facts will NOT appear as child memories YET",
             request.memory_id,
             len(result.atomic_facts),
         )
