@@ -32,36 +32,37 @@ from core_storage_api.services.postgres_service import _saturate_rank
 # cost back, a fall means the inner-projection work landed. Either way,
 # re-measure and move the number deliberately rather than loosening the check.
 #
-# CAURA-722 moved these 9 -> 10 and 20 -> 21, deliberately and with the trade
-# measured. ``fts_score`` is now projected out of the scored CTE so
-# ``SearchDiagnostic.all_candidates`` can report it: it declares the factor per
-# row and had returned ``None`` for it on every row of every query, because the
-# CTE computed it, folded it into ``score`` and then did not name it in its
-# select list.
+# The inner-projection work ``_saturate_rank`` promised has landed: the heavy
+# primitives — ``ts_rank_cd`` and the pgvector cosine distance — are projected
+# exactly once into the fenced ``ingredients`` CTE, and every derived factor
+# (similarity, score, the CAURA-722 diagnostic columns) references them as
+# plain columns. That takes ``ts_rank_cd`` from 10 renders to 1 and the cosine
+# ``<=>`` from 6 to 1; CAURA-722's ``fts_score`` projection, priced at one
+# extra render when it shipped, now costs nothing — exactly the end state its
+# comment predicted ("at which point this constant drops").
 #
-# Why the rise is only +1 and not +2, with the statement appearing in two union
-# branches: ``reserved_stmt`` already ordered by ``fts_score``, and once the
-# factor is a real column that ORDER BY references the label instead of
-# re-pasting the expression.
-#
-# The price, scaled from the measurement on ``_saturate_rank`` (18 -> 9 renders
-# bought 92.0ms -> 56.4ms at 11,505 matching rows on a 31,446-memory corpus):
-# roughly 4ms per render at that worst case, less on smaller matches, and
-# smaller again end-to-end since the same query also pays six pgvector distance
-# computations per row. Against a search p50 near 1,300ms that is well under a
-# percent. The render lands inside the candidate CTE, not in the outer query
-# past the entity-link fanout, so it is per candidate row rather than per
-# joined row.
-#
-# This does not concede the ratchet. The inner-projection work
-# ``_saturate_rank`` describes still takes renders to 1 and would make every
-# factor free to project — at which point this constant drops and CAURA-722's
-# reference costs nothing. Guard both directions as before.
-_EXPECTED_TS_RANK_CD_RENDERS = 10
-# The main and reserved candidate branches each carry ``fts_match`` into the
-# candidate CTE. Projecting it there keeps the expression ahead of entity-link
-# fanout, where an outer render would evaluate it once per joined row.
-_EXPECTED_TSQUERY_RENDERS = 21
+# History of the constants: 18 -> 9 (``_saturate_rank`` algebra), 9 -> 10 and
+# 20 -> 21 (CAURA-722 diagnostic projection, deliberately), 10 -> 1 and
+# 21 -> 4 (the two-layer split). Measured effect of the split alone on a
+# 50k-row / 1024-dim rig: the scored candidate select dropped 427ms -> 90ms —
+# the six distance evaluations per row were the dominant per-row cost.
+_EXPECTED_TS_RANK_CD_RENDERS = 1
+# ``plainto_tsquery`` remains in exactly four places, all inside the
+# ingredients CTE: the CAURA-594 admission guard (WHERE), the conflicted
+# carve-out (WHERE), the ``ts_rank_cd`` call inside ``fts_score``, and the
+# ``fts_match`` projection. The WHERE-clause renders cannot fold into the
+# projected column — predicate evaluation happens before the targetlist — so 4
+# is the floor for this statement shape, not a concession.
+_EXPECTED_TSQUERY_RENDERS = 4
+# The pgvector cosine distance: the single most expensive expression in the
+# statement (a 1024-dim float loop per evaluation, ~6x the whole per-row cost
+# when it rendered 6 times). Must stay exactly 1 — inside ``vec_sim`` in the
+# ingredients CTE. If you need the distance (or a derived similarity) in a new
+# place, reference the ``vec_sim`` / ``similarity`` COLUMN, never
+# ``Memory.embedding.cosine_distance`` — and mind the ``AS MATERIALIZED``
+# fence on the CTE: without it a single-branch statement gets inlined and
+# every column reference re-expands to a fresh distance computation.
+_EXPECTED_COSINE_RENDERS = 1
 
 
 def _scaled_rank():
@@ -198,5 +199,87 @@ async def test_the_shipped_statement_holds_its_tsquery_render_count(
     got = _calls(sql, "plainto_tsquery")
     assert got == _EXPECTED_TSQUERY_RENDERS, (
         f"memory_scored_search renders plainto_tsquery {got} times, expected "
-        f"{_EXPECTED_TSQUERY_RENDERS} (27 before the single-render change)."
+        f"{_EXPECTED_TSQUERY_RENDERS} (21 before the two-layer split, 27 before "
+        f"the single-render change)."
     )
+
+
+async def test_the_shipped_statement_computes_the_cosine_distance_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The primary-path guarantee of the two-layer split.
+
+    pgvector's ``<=>`` over a 1024-dim column is the single most expensive
+    expression in the statement, and before the split the compiled SQL carried
+    it six times — once per site that named ``vec_sim`` or anything derived
+    from it. The two-layer build projects it once into the fenced
+    ``ingredients`` CTE; everything above references the column. Counted on
+    the operator, not a function name, because pgvector compiles
+    ``cosine_distance`` to the ``<=>`` operator.
+    """
+    sql = await _compiled_scored_search_sql(monkeypatch)
+    got = sql.count("<=>")
+    assert got == _EXPECTED_COSINE_RENDERS, (
+        f"memory_scored_search renders the cosine distance {got} times, expected "
+        f"{_EXPECTED_COSINE_RENDERS} (6 before the two-layer split). A rise means a "
+        f"new expression references Memory.embedding.cosine_distance directly, or "
+        f"the ingredients CTE lost its AS MATERIALIZED fence and single-branch "
+        f"statements are being inlined — reference the vec_sim/similarity column "
+        f"instead, and keep the fence."
+    )
+
+
+async def test_the_shipped_statement_keeps_the_inlining_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fence is what makes the single render HOLD, not just occur.
+
+    With the FTS-reserved branch present the ingredients CTE is referenced
+    twice and PostgreSQL materialises it regardless; but a blank-query call
+    (entity-only / vector-only search) has one branch, and a plain
+    single-reference CTE is inlined back into its consumer — re-expanding
+    every column reference into a fresh distance computation. ``AS
+    MATERIALIZED`` is the documented PostgreSQL 12+ modifier that forbids
+    that folding. The compiled-text count above cannot see server-side
+    inlining, so this pins the fence's presence on the single-branch
+    statement where it matters — and
+    tests/test_scored_search_materialized_plan.py pins the resulting PLAN
+    against a real database, catching any future PostgreSQL/SQLAlchemy
+    change that stops the modifier short of the planner.
+    """
+    captured: list = []
+
+    class _Stop(Exception):
+        pass
+
+    class _Session:
+        async def execute(self, stmt, *args, **kwargs):
+            captured.append(stmt)
+            raise _Stop
+
+    @contextlib.asynccontextmanager
+    async def _fake_session():
+        yield _Session()
+
+    monkeypatch.setattr(ps, "get_read_session", _fake_session)
+
+    search_params = {k: kn.value_type(kn.bounds[0]) for k, kn in SEARCH_KNOBS.items()}
+    search_params["fts_rank_scale"] = 6.0
+
+    with contextlib.suppress(_Stop):
+        # Blank query → no FTS guard, no reserved branch → single-reference CTE.
+        await ps.PostgresService().memory_scored_search(
+            tenant_id="t",
+            embedding=[0.1] * 1536,
+            query="",
+            search_params=search_params,
+            top_k=10,
+        )
+    assert captured, "no statement reached session.execute"
+    sql = str(captured[0].compile(dialect=postgresql.dialect()))
+    assert "ingredients AS MATERIALIZED" in sql, (
+        "the ingredients CTE lost its AS MATERIALIZED fence: a plain "
+        "single-reference CTE gets inlined by PostgreSQL and every vec_sim "
+        "column reference re-expands into a fresh cosine distance computation."
+    )
+    assert sql.count("<=>") == _EXPECTED_COSINE_RENDERS

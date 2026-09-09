@@ -2381,6 +2381,19 @@ class PostgresService:
         _score_formula = int(sp.get("score_formula", 0) or 0)
 
         # -- Scoring expressions --
+        #
+        # Two-layer build. The per-row primitives that are expensive to
+        # evaluate — the pgvector cosine distance and ``ts_rank_cd`` — are
+        # projected exactly ONCE into a fenced ``ingredients`` CTE, and every
+        # derived factor (similarity, freshness, boosts, penalties, score) is
+        # computed in the branch layer above it from those columns. This is the
+        # inner-projection work ``_saturate_rank``'s note promised: before it,
+        # SQLAlchemy inlined the ``vec_sim`` CASE at every site that named it
+        # and the compiled statement paid SIX cosine distance computations per
+        # candidate row (427ms -> 90ms for this change alone on a 50k-row,
+        # 1024-dim rig; the ratchet in test_fts_score_single_render pins the
+        # counts in both directions).
+        #
         # CAURA-594: pgvector's `<=>` is strict — NULL in → NULL out. A
         # bare `1 - cosine_distance` would therefore propagate NULL up
         # through the similarity blend into `score`, and PostgreSQL's
@@ -2416,6 +2429,195 @@ class PostgresService:
         scaled_keyword_rank = _fts_rank_scale * raw_keyword_rank
         fts_score = _saturate_rank(scaled_keyword_rank).label("fts_score")
 
+        # CAURA-594 admission guard + exact-lexical-match gate share ONE
+        # expression. `plainto_tsquery('english', '')` (and any whitespace-only
+        # or stop-word-only input it normalises down to empty) returns the
+        # empty `tsquery`, which `@@`-matches every non-NULL `tsvector` — that
+        # would silently re-admit every NULL-embedding row when callers pass
+        # `query=""` or `query="   "` (e.g. entity-only / vector-only search
+        # modes), bringing back the displacement-by-weight bug. Gate on the
+        # Python-side query string so the operator is only emitted when there's
+        # actual text to match.
+        #
+        # ``_fts_guard`` is used in WHERE clauses (admission, the conflicted
+        # carve-out, and its projection below); the ``fts_match`` COLUMN it
+        # projects is what the derived layer reads for the status-penalty gate
+        # and the FTS-reserve filter — the exact-lexical-match signal and the
+        # fts-match signal are the same expression, so one column serves both.
+        _fts_guard = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
+        _exact_lexical_match = _fts_guard
+        fts_match = _fts_guard.label("fts_match")
+
+        # -- Layer 0: the ``ingredients`` CTE --
+        # Row filters are identical to the pre-split statement; only the select
+        # list changed. Raw row fields ride along so the derived layer never
+        # touches ``memories`` again before the final top_k join.
+        ingredients_stmt = (
+            select(
+                Memory.id.label("mem_id"),
+                vec_sim,
+                has_embedding,
+                fts_score,
+                fts_match,
+                Memory.created_at.label("created_at"),
+                Memory.ts_valid_start.label("ts_valid_start"),
+                Memory.ts_valid_end.label("ts_valid_end"),
+                Memory.memory_type.label("memory_type"),
+                Memory.weight.label("weight"),
+                Memory.status.label("status"),
+                Memory.recall_count.label("recall_count"),
+                Memory.last_recalled_at.label("last_recalled_at"),
+            )
+            # Multi-tenant read predicate: when ``readable_tenant_ids``
+            # is provided (cross-tenant agent key), reads widen across
+            # the full set; otherwise we stay single-tenant for the
+            # common case. Result rows still carry ``Memory.tenant_id``
+            # so the caller can attribute each row to its source tenant.
+            .where(
+                Memory.tenant_id.in_(readable_tenant_ids)
+                if readable_tenant_ids
+                else Memory.tenant_id == tenant_id
+            )
+            .where(Memory.deleted_at.is_(None))
+            # CAURA-594: NULL-embedding rows are admitted only if they also
+            # match the FTS query — otherwise they'd rank on `Memory.weight *
+            # freshness * ...` alone and could fill top_k slots with rows
+            # that have no relationship to the query during a large backfill
+            # window. `search_vector @@ ts_query` is GIN-indexed, so the
+            # extra predicate is free for rows that already had to scan
+            # the tenant/fleet slice.
+            # Other paths (find_semantic_duplicate, find_similar_candidates,
+            # find_neighbors_by_embedding, compute_health_stats) keep their
+            # NULL guards — vector-pure operations where a NULL operand has
+            # no comparable semantics.
+            .where(
+                or_(
+                    Memory.embedding.is_not(None),
+                    _fts_guard,
+                )
+            )
+        )
+
+        if fleet_ids:
+            ingredients_stmt = ingredients_stmt.where(
+                _fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping)
+            )
+
+        if caller_agent_id:
+            visibility_filter = or_(
+                Memory.visibility == "scope_org",
+                Memory.visibility == "scope_team",
+                and_(
+                    Memory.visibility == "scope_agent",
+                    Memory.agent_id == caller_agent_id,
+                ),
+            )
+            ingredients_stmt = ingredients_stmt.where(visibility_filter)
+        else:
+            ingredients_stmt = ingredients_stmt.where(Memory.visibility != "scope_agent")
+
+        if filter_agent_id:
+            ingredients_stmt = ingredients_stmt.where(Memory.agent_id == filter_agent_id)
+        if memory_type_filter:
+            ingredients_stmt = ingredients_stmt.where(Memory.memory_type == memory_type_filter)
+        if status_filter:
+            ingredients_stmt = ingredients_stmt.where(Memory.status == status_filter)
+        elif history_query:
+            # A63 — a history question ("what was…", "did I switch…",
+            # "how long have I been…") needs the superseded value: the
+            # older side of an update is EXACTLY what the caller asked
+            # for, so neither the exclusion below nor the status_penalty
+            # applies. Ranking is pure relevance; present-state queries
+            # keep both protections.
+            pass
+        else:
+            # Exclude superseded memories from default search results. The
+            # contradiction detector marks the older row ``outdated`` (RDF
+            # path) or ``conflicted`` (semantic path) and points the newer
+            # one at it via ``supersedes_id``. Surfacing both would dilute
+            # ranking with stale claims agents shouldn't act on. Callers
+            # that need to inspect superseded rows pass an explicit
+            # ``status_filter`` to override.
+            #
+            # Carve-out: a ``conflicted`` row that is an EXACT lexical match
+            # for the query is kept. ``conflicted`` (unlike ``outdated``) means
+            # "a competing claim exists", not "definitively retracted" — and the
+            # semantic contradiction path mismarks near-duplicate-but-distinct
+            # entities (e.g. ``Wayne #0000`` vs ``Wayne #0704``), so a blanket
+            # exclusion silently drops the very row the caller named. The
+            # exact-match gate scopes the carve-out to rows the caller clearly
+            # asked for; status_penalty above keeps a surfaced exact-match
+            # conflicted row un-demoted, and load_and_serialize still injects its
+            # supersedes successor so both sides are visible. ``outdated`` stays
+            # fully excluded.
+            ingredients_stmt = ingredients_stmt.where(
+                or_(
+                    Memory.status.notin_(("outdated", "conflicted")),
+                    and_(Memory.status == "conflicted", _exact_lexical_match),
+                )
+            )
+        if valid_at:
+            from datetime import date as _date_type
+
+            from sqlalchemy import Date as _Date
+            from sqlalchemy import cast as _cast
+            from sqlalchemy import literal as _literal
+
+            # Hard filter on the START side, compared at DAY granularity.
+            # Future-dated memories can't answer past questions — but strict
+            # timestamp comparison also excludes same-day memories written a
+            # few hours after the query was asked, which is too aggressive
+            # for workflows where the question + its evidence share a day.
+            # We cast both sides to DATE so same-day-later memories pass.
+            _valid_at_date = (
+                valid_at.date() if hasattr(valid_at, "date") else _date_type.fromisoformat(str(valid_at)[:10])
+            )
+            ingredients_stmt = ingredients_stmt.where(
+                or_(
+                    Memory.ts_valid_start.is_(None),
+                    _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
+                ),
+            )
+            # NOTE: the END side (`ts_valid_end >= valid_at`) is NO LONGER
+            # a hard filter.  A past ts_valid_end now triggers the soft
+            # ``currency_factor`` below (default 0.5x) — so an over-eager
+            # enrichment date can't silently hide a semantically strong
+            # memory from historical-question queries.
+
+        # NOTE: date_range_start/end no longer produces a hard WHERE filter;
+        # the multiplier ``date_range_boost`` below handles it softly.
+
+        # ``AS MATERIALIZED`` is a deliberate optimisation fence. With the
+        # FTS-reserved branch present the CTE is referenced twice and
+        # PostgreSQL materialises it anyway; but on blank-query paths
+        # (entity-only / vector-only search) only the main branch remains, a
+        # single-reference CTE is inlined back into its consumer, and inlining
+        # substitutes the defining expression at every column reference —
+        # putting the repeated cosine evaluations straight back.
+        #
+        # The modifier is the documented PostgreSQL 12+ contract for exactly
+        # this ("MATERIALIZED ... prevents folding into the parent query"),
+        # unlike the earlier ``.offset(0)`` draft of this fence, which leaned
+        # on the incidental planner rule that a set limitOffset disqualifies a
+        # subquery from pull-up. PG < 12 would reject the syntax, but the
+        # schema already floors on 12+ (pgvector, HNSW). SQLAlchemy 2.0 has no
+        # ``materialized=`` argument on ``cte()``; ``CTE.prefix_with`` is the
+        # documented way to emit the modifier and renders
+        # ``WITH ingredients AS MATERIALIZED (...)``.
+        #
+        # Guarded twice: test_fts_score_single_render pins the compiled text
+        # (modifier present, one ``<=>`` render), and
+        # test_scored_search_materialized_plan pins the PLAN — EXPLAIN must
+        # show the CTE as its own node on the single-branch statement, so a
+        # future PostgreSQL/SQLAlchemy behaviour change surfaces in CI rather
+        # than as a silent ~6x hot-path regression.
+        ing = ingredients_stmt.cte("ingredients").prefix_with("MATERIALIZED")
+
+        # -- Layer 1: derived factors over ingredient columns --
+        # Everything below is CASE/arithmetic over already-computed columns, so
+        # SQLAlchemy re-rendering an expression at another naming site costs a
+        # few flops per row, not another 1024-dim distance or rank call.
+        #
         # CAURA-679: NULL-embedding rows fall back to `fts_score` alone
         # rather than the `(1 - w) * 0 + w * fts_score` haircut that
         # the unconditional blend would apply. The haircut multiplies
@@ -2429,32 +2631,32 @@ class PostgresService:
         # than silently undiscoverable.
         similarity = case(
             (
-                Memory.embedding.is_not(None),
-                (1.0 - _fts_weight) * vec_sim + _fts_weight * fts_score,
+                ing.c.has_embedding,
+                (1.0 - _fts_weight) * ing.c.vec_sim + _fts_weight * ing.c.fts_score,
             ),
-            else_=fts_score,
+            else_=ing.c.fts_score,
         ).label("similarity")
 
         anchor = func.greatest(
-            Memory.created_at,
-            func.coalesce(Memory.ts_valid_start, Memory.created_at),
+            ing.c.created_at,
+            func.coalesce(ing.c.ts_valid_start, ing.c.created_at),
         )
         age_days = func.extract("epoch", func.now() - anchor) / 86400.0
 
         type_decay = case(
-            *[(Memory.memory_type == mt, float(days)) for mt, days in TYPE_DECAY_DAYS.items()],
+            *[(ing.c.memory_type == mt, float(days)) for mt, days in TYPE_DECAY_DAYS.items()],
             else_=float(_freshness_decay_days),
         ).label("type_decay_days")
 
         freshness = case(
             (
                 and_(
-                    Memory.ts_valid_end.is_not(None),
-                    Memory.ts_valid_end < func.now(),
+                    ing.c.ts_valid_end.is_not(None),
+                    ing.c.ts_valid_end < func.now(),
                 ),
                 _freshness_floor,
             ),
-            (Memory.ts_valid_end.is_not(None), 1.0),
+            (ing.c.ts_valid_end.is_not(None), 1.0),
             (
                 age_days < type_decay,
                 # Clamp age to >= 0 so a FUTURE anchor (e.g. an enrichment-set
@@ -2472,7 +2674,7 @@ class PostgresService:
             days_since_recall = (
                 func.extract(
                     "epoch",
-                    func.now() - func.coalesce(Memory.last_recalled_at, Memory.created_at),
+                    func.now() - func.coalesce(ing.c.last_recalled_at, ing.c.created_at),
                 )
                 / 86400.0
             )
@@ -2481,20 +2683,20 @@ class PostgresService:
                 1.0
                 + (_recall_boost_cap - 1.0)
                 * recency_factor
-                * Memory.recall_count
-                / (Memory.recall_count + RECALL_BOOST_SCALE)
+                * ing.c.recall_count
+                / (ing.c.recall_count + RECALL_BOOST_SCALE)
             ).label("recall_boost")
         else:
             recall_boost_expr = literal_column("1.0").label("recall_boost")
 
-        base_score = (_similarity_blend * similarity + (1.0 - _similarity_blend) * Memory.weight).label(
+        base_score = (_similarity_blend * similarity + (1.0 - _similarity_blend) * ing.c.weight).label(
             "base_score"
         )
 
         if temporal_window is not None:
             cutoff = func.now() - temporal_window
             temporal_boost = case(
-                (Memory.created_at >= cutoff, 1.3),
+                (ing.c.created_at >= cutoff, 1.3),
                 else_=1.0,
             ).label("temporal_boost")
         else:
@@ -2513,8 +2715,8 @@ class PostgresService:
             from core_storage_api.config import settings as _storage_settings
 
             temporal_anchor = func.coalesce(
-                cast(Memory.ts_valid_start, Date),
-                cast(Memory.created_at, Date),
+                cast(ing.c.ts_valid_start, Date),
+                cast(ing.c.created_at, Date),
             )
             _start_dt = date_type.fromisoformat(date_range_start)
             _end_dt = date_type.fromisoformat(date_range_end)
@@ -2548,7 +2750,8 @@ class PostgresService:
         # different entity". Empty/stopword-only queries degrade ts_query to the
         # empty tsquery (matches nothing here), so the gate is inert for
         # vector-only / entity-only callers and conflicted stays demoted.
-        _exact_lexical_match = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
+        # The gate reads the ``fts_match`` ingredient column — the same
+        # expression the admission guard projected, evaluated once.
         # A63 — ``history_query``: the caller detected a past-state /
         # change / duration question ("what was…", "did I switch…",
         # "how long have I been…"). Such queries NEED the superseded
@@ -2561,23 +2764,23 @@ class PostgresService:
             status_penalty = literal_column("1.0").label("status_penalty")
         else:
             status_penalty = case(
-                (Memory.status == "outdated", 0.5),
-                (and_(Memory.status == "conflicted", ~_exact_lexical_match), 0.5),
+                (ing.c.status == "outdated", 0.5),
+                (and_(ing.c.status == "conflicted", ~ing.c.fts_match), 0.5),
                 else_=1.0,
             ).label("status_penalty")
 
         # Soft currency factor: memories whose ts_valid_end is in the past
         # relative to valid_at are down-weighted instead of excluded.
         # Pairs with the removal of the `ts_valid_end >= valid_at` WHERE
-        # clause below — one bad enrichment date no longer blanks a memory.
+        # clause above — one bad enrichment date no longer blanks a memory.
         if valid_at is not None:
             from core_storage_api.config import settings as _storage_settings_cf
 
             currency_factor = case(
                 (
                     and_(
-                        Memory.ts_valid_end.is_not(None),
-                        Memory.ts_valid_end < valid_at,
+                        ing.c.ts_valid_end.is_not(None),
+                        ing.c.ts_valid_end < valid_at,
                     ),
                     _storage_settings_cf.expired_currency_factor,
                 ),
@@ -2593,7 +2796,7 @@ class PostgresService:
             for mid, factor in memory_boost_factor.items():
                 boost_tiers.setdefault(factor, []).append(mid)
             whens = [
-                (Memory.id.in_(mids), factor) for factor, mids in sorted(boost_tiers.items(), reverse=True)
+                (ing.c.mem_id.in_(mids), factor) for factor, mids in sorted(boost_tiers.items(), reverse=True)
             ]
             entity_boost = case(*whens, else_=1.0).label("entity_boost")
         else:
@@ -2636,210 +2839,35 @@ class PostgresService:
                 * status_penalty
             ).label("score")
 
-        # -- Build scored CTE --
-        # CAURA-594: NULL-embedding rows are admitted only if they also
-        # match the FTS query — otherwise they'd rank on `Memory.weight *
-        # freshness * ...` alone and could fill top_k slots with rows
-        # that have no relationship to the query during a large backfill
-        # window. `search_vector @@ ts_query` is GIN-indexed, so the
-        # extra predicate is free for rows that already had to scan
-        # the tenant/fleet slice.
-        # Other paths (find_semantic_duplicate, find_similar_candidates,
-        # find_neighbors_by_embedding, compute_health_stats) keep their
-        # NULL guards — vector-pure operations where a NULL operand has
-        # no comparable semantics.
-        # `plainto_tsquery('english', '')` (and any whitespace-only or
-        # stop-word-only input it normalises down to empty) returns the
-        # empty `tsquery`, which `@@`-matches every non-NULL `tsvector`
-        # — that would silently re-admit every NULL-embedding row when
-        # callers pass `query=""` or `query="   "` (e.g. entity-only /
-        # vector-only search modes), bringing back the displacement-by-
-        # weight bug. Gate on the Python-side query string so the
-        # operator is only emitted when there's actual text to match.
-        _fts_guard = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
-        fts_match = _fts_guard.label("fts_match")
-        scored_stmt = (
-            select(
-                Memory.id.label("mem_id"),
-                score,
-                similarity,
-                vec_sim,
-                fts_match,
-                has_embedding,
-                status_penalty,
-                # CAURA-722 — the score's own ingredients, carried out of the
-                # CTE rather than discarded at its boundary.
-                #
-                # These are the five factors ``SearchDiagnostic.all_candidates``
-                # has always declared per row and always reported as ``None``:
-                # each was computed here, multiplied (or added, under the A50
-                # formula) into ``score``, and then left behind because the CTE
-                # select list did not name it. core-api reads all five by name
-                # in ``execute_scored_search`` and the diagnostic rounds each
-                # through ``_f()``, so three layers were built to receive values
-                # the query never sent. Nothing was wrong with ranking — only
-                # with explaining it, which is what made a null read as "this
-                # signal did not apply" and cost a benchmark the conclusion that
-                # entity retrieval contributed nothing.
-                #
-                # No new computation: every expression below already exists
-                # above because ``score`` needs it. ``reserved_stmt`` even
-                # ORDER BYs ``fts_score`` already.
-                #
-                # Always selected, not gated on a diagnostic flag: storage takes
-                # no such flag, and plumbing one through the route to save five
-                # floats per row — on a response already carrying each row's
-                # full content — costs more than it saves.
-                #
-                # Both union branches derive from this statement, so they stay
-                # column-compatible. Dedup behaviour is unchanged too: the
-                # factors are deterministic per ``mem_id``, so rows that
-                # collapsed before still collapse.
-                #
-                # ``fts_score`` is the one with a price, and it is paid
-                # deliberately. The four below are CASE or literal expressions
-                # over the row, so naming them costs nothing. ``fts_score`` is
-                # ``ts_rank_cd``, and SQLAlchemy inlines an expression at every
-                # site that names it, so one more reference takes the compiled
-                # statement from 9 renders to 10 and ``plainto_tsquery`` from 20
-                # to 21 — the ratchet ``test_fts_score_single_render`` guards,
-                # and whose constants move with this change.
-                #
-                # Only +1 rather than +2 because ``reserved_stmt`` already
-                # ORDER BYs ``fts_score``; once it is a real column that clause
-                # references the label instead of re-pasting the expression.
-                #
-                # The cost, from the measurement recorded on ``_saturate_rank``
-                # (halving 18 -> 9 renders bought 92.0ms -> 56.4ms at 11,505
-                # matching rows on a 31,446-memory corpus): about 4ms per
-                # render at that worst case, less on smaller matches, and
-                # diluted again end-to-end because the same query pays six
-                # pgvector distance computations per row. Against a ~1,300ms
-                # search p50 that is well under a percent, in exchange for the
-                # fifth factor ``SearchDiagnostic`` declares actually arriving.
-                #
-                # It also lands inside this CTE rather than after the
-                # entity-link fanout in the outer query, so it is evaluated per
-                # candidate row and not per joined row.
-                #
-                # The real fix is the inner-projection work ``_saturate_rank``
-                # describes, which takes renders to 1 and makes every factor
-                # free to project; that needs an optimisation barrier and its
-                # own plan-shape review. When it lands, the constant drops and
-                # this reference costs nothing.
-                fts_score,
-                freshness,
-                entity_boost,
-                recall_boost_expr,
-                temporal_boost,
-            )
-            # Multi-tenant read predicate: when ``readable_tenant_ids``
-            # is provided (cross-tenant agent key), reads widen across
-            # the full set; otherwise we stay single-tenant for the
-            # common case. Result rows still carry ``Memory.tenant_id``
-            # so the caller can attribute each row to its source tenant.
-            .where(
-                Memory.tenant_id.in_(readable_tenant_ids)
-                if readable_tenant_ids
-                else Memory.tenant_id == tenant_id
-            )
-            .where(Memory.deleted_at.is_(None))
-            .where(
-                or_(
-                    Memory.embedding.is_not(None),
-                    _fts_guard,
-                )
-            )
+        # -- Branch layer: candidate selection over the scored ingredients --
+        # The select list is the same column contract the outer query and
+        # ``SearchDiagnostic.all_candidates`` have consumed since CAURA-722:
+        # every factor ``score`` is built from is named here, and naming one is
+        # now free — each is a CASE/arithmetic over ingredient columns, with
+        # the heavy primitives already paid exactly once in the CTE below the
+        # fence. (CAURA-722 originally priced the ``fts_score`` projection at
+        # one extra ``ts_rank_cd`` render; the two-layer split retired that
+        # cost, and the ratchet constants in test_fts_score_single_render
+        # moved down with it.)
+        #
+        # Both union branches derive from this statement, so they stay
+        # column-compatible. Dedup behaviour is unchanged too: the factors are
+        # deterministic per ``mem_id``, so rows that collapsed before still
+        # collapse.
+        scored_stmt = select(
+            ing.c.mem_id,
+            score,
+            similarity,
+            ing.c.vec_sim,
+            ing.c.fts_match,
+            ing.c.has_embedding,
+            status_penalty,
+            ing.c.fts_score,
+            freshness,
+            entity_boost,
+            recall_boost_expr,
+            temporal_boost,
         )
-
-        if fleet_ids:
-            scored_stmt = scored_stmt.where(
-                _fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping)
-            )
-
-        if caller_agent_id:
-            visibility_filter = or_(
-                Memory.visibility == "scope_org",
-                Memory.visibility == "scope_team",
-                and_(
-                    Memory.visibility == "scope_agent",
-                    Memory.agent_id == caller_agent_id,
-                ),
-            )
-            scored_stmt = scored_stmt.where(visibility_filter)
-        else:
-            scored_stmt = scored_stmt.where(Memory.visibility != "scope_agent")
-
-        if filter_agent_id:
-            scored_stmt = scored_stmt.where(Memory.agent_id == filter_agent_id)
-        if memory_type_filter:
-            scored_stmt = scored_stmt.where(Memory.memory_type == memory_type_filter)
-        if status_filter:
-            scored_stmt = scored_stmt.where(Memory.status == status_filter)
-        elif history_query:
-            # A63 — a history question ("what was…", "did I switch…",
-            # "how long have I been…") needs the superseded value: the
-            # older side of an update is EXACTLY what the caller asked
-            # for, so neither the exclusion below nor the status_penalty
-            # applies. Ranking is pure relevance; present-state queries
-            # keep both protections.
-            pass
-        else:
-            # Exclude superseded memories from default search results. The
-            # contradiction detector marks the older row ``outdated`` (RDF
-            # path) or ``conflicted`` (semantic path) and points the newer
-            # one at it via ``supersedes_id``. Surfacing both would dilute
-            # ranking with stale claims agents shouldn't act on. Callers
-            # that need to inspect superseded rows pass an explicit
-            # ``status_filter`` to override.
-            #
-            # Carve-out: a ``conflicted`` row that is an EXACT lexical match
-            # for the query is kept. ``conflicted`` (unlike ``outdated``) means
-            # "a competing claim exists", not "definitively retracted" — and the
-            # semantic contradiction path mismarks near-duplicate-but-distinct
-            # entities (e.g. ``Wayne #0000`` vs ``Wayne #0704``), so a blanket
-            # exclusion silently drops the very row the caller named. The
-            # exact-match gate scopes the carve-out to rows the caller clearly
-            # asked for; status_penalty above keeps a surfaced exact-match
-            # conflicted row un-demoted, and load_and_serialize still injects its
-            # supersedes successor so both sides are visible. ``outdated`` stays
-            # fully excluded.
-            scored_stmt = scored_stmt.where(
-                or_(
-                    Memory.status.notin_(("outdated", "conflicted")),
-                    and_(Memory.status == "conflicted", _exact_lexical_match),
-                )
-            )
-        if valid_at:
-            from datetime import date as _date_type
-
-            from sqlalchemy import Date as _Date
-            from sqlalchemy import cast as _cast
-            from sqlalchemy import literal as _literal
-
-            # Hard filter on the START side, compared at DAY granularity.
-            # Future-dated memories can't answer past questions — but strict
-            # timestamp comparison also excludes same-day memories written a
-            # few hours after the query was asked, which is too aggressive
-            # for workflows where the question + its evidence share a day.
-            # We cast both sides to DATE so same-day-later memories pass.
-            _valid_at_date = (
-                valid_at.date() if hasattr(valid_at, "date") else _date_type.fromisoformat(str(valid_at)[:10])
-            )
-            scored_stmt = scored_stmt.where(
-                or_(
-                    Memory.ts_valid_start.is_(None),
-                    _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
-                ),
-            )
-            # NOTE: the END side (`ts_valid_end >= valid_at`) is NO LONGER
-            # a hard filter.  A past ts_valid_end now triggers the soft
-            # ``currency_factor`` above (default 0.5x) — so an over-eager
-            # enrichment date can't silently hide a semantically strong
-            # memory from historical-question queries.
-
-        # NOTE: date_range_start/end no longer produces a hard WHERE filter;
-        # the multiplier ``date_range_boost`` above handles it softly.
 
         if _candidate_pool_size > 0:
             # A49: select the candidate POOL by semantic relevance (``similarity``)
@@ -2849,7 +2877,7 @@ class PostgresService:
             # PostFilterResults trims to the caller's top_k — so with A49 alone this
             # only *widens/relevance-selects the pool*, it does not reorder the final
             # result; the reorder is A50. Off (0) by default → unchanged behaviour.
-            main_stmt = scored_stmt.order_by(similarity.desc(), Memory.created_at.desc()).limit(
+            main_stmt = scored_stmt.order_by(similarity.desc(), ing.c.created_at.desc()).limit(
                 _candidate_pool_size
             )
         else:
@@ -2864,7 +2892,7 @@ class PostgresService:
             # result set. Ignoring a nested one is also the skew-safe direction:
             # an older core-api that still sends it gets the wider window it
             # always meant to ask for.
-            main_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(top_k)
+            main_stmt = scored_stmt.order_by(score.desc(), ing.c.created_at.desc()).limit(top_k)
 
         # Reserve candidate slots for full-text matches.
         #
@@ -2875,12 +2903,16 @@ class PostgresService:
         #
         # The dedicated branch is separately capped and the outer ORDER BY keeps
         # every row at its true score, so this changes candidate admission rather
-        # than the ranking formula.
+        # than the ranking formula. Its filter reads the ``fts_match`` /
+        # ``has_embedding`` ingredient columns — over the materialised CTE, not
+        # a second GIN probe of ``memories``.
         if _FTS_RESERVED_CANDIDATES > 0 and query and query.strip():
-            reserve_filter = _fts_guard if _fts_weight > 0.0 else and_(Memory.embedding.is_(None), _fts_guard)
+            reserve_filter = (
+                ing.c.fts_match if _fts_weight > 0.0 else and_(~ing.c.has_embedding, ing.c.fts_match)
+            )
             reserved_stmt = (
                 scored_stmt.where(reserve_filter)
-                .order_by(fts_score.desc(), Memory.created_at.desc())
+                .order_by(ing.c.fts_score.desc(), ing.c.created_at.desc())
                 .limit(_FTS_RESERVED_CANDIDATES)
             )
             # Each operand is wrapped in its own subquery so its ORDER BY/LIMIT is
