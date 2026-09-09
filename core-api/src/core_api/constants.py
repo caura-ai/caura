@@ -270,6 +270,27 @@ assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
     f"({MAX_CONTENT_LENGTH}) — an over-cap spec would fail schema validation."
 )
 
+# ── Document search (``caura_doc op=search`` / ``POST /documents/search``) ──
+# Deliberately NOT ``MAX_SEARCH_TOP_K``, which bounds MEMORY search. A memory
+# row is an enriched, summarised row; a document row is the caller's own body,
+# returned whole and bounded only by ``MAX_CONTENT_LENGTH``, so a page of 50
+# can already be ~500 KB. The two ceilings have never been equal and coupling
+# them would import a limit chosen for a different payload — but each was a
+# bare literal repeated across its surfaces, which is the drift both constants
+# exist to remove. Raise this only alongside a projected result shape
+# (``summary`` + ``doc_id``); on the current shape a bigger page is a bigger
+# blob, not better retrieval.
+#
+# Both surfaces must agree on the number and enforce it DIFFERENTLY: REST
+# rejects an over-cap ``top_k`` (422, via ``DocSearchRequest``'s ``le=``) while
+# MCP clamps silently, because a tool signature is read by a model that never
+# sees the validation error. Same ceiling, two behaviours — so the ceiling has
+# to come from one place, and the MCP parameter description (published to
+# callers in ``plugin/tools.json``) is interpolated from it rather than typed
+# out beside it.
+DEFAULT_DOC_SEARCH_TOP_K = 5
+MAX_DOC_SEARCH_TOP_K = 50
+
 # ── Tool surface bookkeeping ──
 # Tool descriptions live inline in `core_api/tools/caura_*.py` spec
 # modules (the SoT). Nothing else should hold a copy.

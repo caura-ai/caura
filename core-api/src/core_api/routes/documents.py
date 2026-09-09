@@ -13,6 +13,7 @@ from common.embedding import get_embedding
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
 from core_api.schemas import STRICT_WRITE_BODY
@@ -150,7 +151,7 @@ class DocSearchRequest(BaseModel):
     fleet_id: str | None = None
     collection: str | None = Field(default=None, min_length=1, max_length=200)
     query: str = Field(min_length=1)
-    top_k: int = Field(default=5, ge=1, le=50)
+    top_k: int = Field(default=DEFAULT_DOC_SEARCH_TOP_K, ge=1, le=MAX_DOC_SEARCH_TOP_K)
 
 
 class DocOut(BaseModel):

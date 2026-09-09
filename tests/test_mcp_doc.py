@@ -22,7 +22,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core_api import mcp_server
-from core_api.constants import VECTOR_DIM
+from core_api.constants import (
+    DEFAULT_DOC_SEARCH_TOP_K,
+    MAX_DOC_SEARCH_TOP_K,
+    VECTOR_DIM,
+)
 from tests._mcp_test_helpers import parse_envelope, strip_latency, stub_storage_client
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -457,15 +461,57 @@ async def test_doc_search_empty_results(mcp_env, monkeypatch):
     assert payload["results"] == []
 
 
-async def test_doc_search_top_k_capped_at_50(mcp_env, monkeypatch):
-    """top_k above 50 is capped server-side."""
+async def test_doc_search_top_k_capped_at_the_ceiling(mcp_env, monkeypatch):
+    """top_k above the ceiling is clamped server-side, not rejected.
+
+    MCP clamps where REST 422s (see ``test_doc_search_top_k_has_one_source_of
+    _truth``): a tool signature is read by a model that never sees the
+    validation error, so the useful behaviour is to serve the capped page.
+    """
     monkeypatch.setattr(
         "common.embedding.get_embedding", _async_return([0.1] * VECTOR_DIM)
     )
     sc = stub_storage_client(monkeypatch, search_documents_vector=[])
 
     await mcp_server.caura_doc(op="search", collection="c", query="q", top_k=9999)
-    assert sc.search_documents_vector.await_args.args[0]["top_k"] == 50
+    assert (
+        sc.search_documents_vector.await_args.args[0]["top_k"] == MAX_DOC_SEARCH_TOP_K
+    )
+
+
+def test_doc_search_top_k_has_one_source_of_truth():
+    """REST (``le=``), the MCP clamp and the MCP description read one constant.
+
+    The ceiling was a bare literal 50 in three places — the ``DocSearchRequest``
+    bound, the clamp in ``caura_doc``, and that tool's own parameter description,
+    which is also what ``plugin/tools.json`` publishes to callers. A cap the
+    description contradicts is worse than no description: the model plans around
+    the number it was told. This pins them together, and pins the published
+    string to the same constant so a change has to move all four at once.
+
+    ``MAX_DOC_SEARCH_TOP_K`` is deliberately NOT ``MAX_SEARCH_TOP_K``: document
+    rows are caller-supplied blobs ranked on one cosine distance, memory rows
+    carry enrichment and graph expansion. The two limits have never been equal.
+    """
+    import inspect
+
+    from core_api import constants as core_constants
+    from core_api.routes.documents import DocSearchRequest
+
+    le = [
+        m
+        for m in DocSearchRequest.model_fields["top_k"].metadata
+        if getattr(m, "le", None) is not None
+    ]
+    assert le and le[0].le == MAX_DOC_SEARCH_TOP_K
+    assert DocSearchRequest.model_fields["top_k"].default == DEFAULT_DOC_SEARCH_TOP_K
+
+    doc_top_k = inspect.get_annotations(mcp_server.caura_doc, eval_str=True)["top_k"]
+    desc = next(getattr(item, "description", "") for item in doc_top_k.__metadata__)
+    assert desc == f"op=search: max results (1-{MAX_DOC_SEARCH_TOP_K})."
+
+    assert core_constants.MAX_DOC_SEARCH_TOP_K == 50
+    assert core_constants.MAX_DOC_SEARCH_TOP_K != core_constants.MAX_SEARCH_TOP_K
 
 
 async def test_doc_search_embedding_provider_failure_aborts(mcp_env, monkeypatch):

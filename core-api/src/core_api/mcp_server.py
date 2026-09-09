@@ -36,9 +36,11 @@ from core_api.agent_ids import (
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
+    DEFAULT_DOC_SEARCH_TOP_K,
     DEFAULT_SEARCH_TOP_K,
     EVOLVE_OUTCOME_TYPES,
     INSIGHTS_FOCUS_MODES,
+    MAX_DOC_SEARCH_TOP_K,
     MAX_SEARCH_TOP_K,
     MEMORY_STATUSES,
     MEMORY_TYPES,
@@ -2120,7 +2122,10 @@ async def caura_doc(
         Field(description="op=write; optional scoping filter for op=list_collections|search."),
     ] = None,
     query: Annotated[str | None, Field(description="op=search: natural-language query.")] = None,
-    top_k: Annotated[int, Field(description="op=search: max results (1-50).")] = 5,
+    top_k: Annotated[
+        int,
+        Field(description=f"op=search: max results (1-{MAX_DOC_SEARCH_TOP_K})."),
+    ] = DEFAULT_DOC_SEARCH_TOP_K,
 ) -> ToolReply:
     """Structured-document CRUD. Op-dispatched. Replaces the 4 prior
     `caura_doc_*` tools."""
@@ -2635,7 +2640,7 @@ async def caura_doc(
                         ),
                         t0,
                     )
-                capped_top_k = max(1, min(top_k, 50))
+                capped_top_k = max(1, min(top_k, MAX_DOC_SEARCH_TOP_K))
                 # Active-only gate for a SCOPED skills search: push the
                 # status filter into the SQL so top_k stays exact (a
                 # post-filter alone would silently shrink the result
