@@ -4,7 +4,7 @@ fleets.
 
 from __future__ import annotations
 
-# The MemClaw/MemClawError/MemClawAPIError class-level aliases from the  # legacy-name-ok: records the retirement of the class-alias surface
+# The pre-rename class-level aliases from the
 # 2026-08 rename were retired 2026-09, the same treatment already given to
 # the separate legacy import package and the two legacy package-forwarder
 # distributions that once depended on this one -- no transition is owed to

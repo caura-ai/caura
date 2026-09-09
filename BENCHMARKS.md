@@ -134,7 +134,7 @@ application tables.
 python scripts/benchmark_blend_locomo.py \
     --dataset locomo10.json \
     --embed-url http://localhost:8080 \
-    --pg-dsn postgresql://memclaw:changeme@localhost:5433/memclaw \
+    --pg-dsn postgresql://caura:changeme@localhost:5433/caura \
     --k 6
 ```
 

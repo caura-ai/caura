@@ -145,7 +145,7 @@ def test_this_suite_does_not_share_the_root_suites_database() -> None:
     because a conftest is not importable as a module from another suite; it is
     the one value here that must be kept in step by hand.
     """
-    root_suite_database = "memclaw"  # legacy-name-ok: mirrors tests/conftest.py TEST_DB_URL
+    root_suite_database = "caura"  # mirrors tests/conftest.py TEST_DB_URL
 
     configured = urlsplit(settings.database_url.get_secret_value()).path.lstrip("/")
 

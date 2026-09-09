@@ -17,7 +17,7 @@ import core_worker.consumer as consumer
 from common.enrichment import EnrichmentResult
 from common.events.base import Event
 
-ENRICH_REQUESTED_TOPIC = "memclaw.memory.enrich-requested"  # legacy-name-ok: deployed Pub/Sub topic
+ENRICH_REQUESTED_TOPIC = "caura.memory.enrich-requested"
 
 
 def _make_event(payload: dict | None = None) -> Event:
