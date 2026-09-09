@@ -65,6 +65,31 @@ def _read_env(*names: str, default: str = "") -> str:
     return "" if saw_blank else default
 
 
+# The server truncates each event's content at this many characters
+# (``INTERVIEW_EVENT_MAX_CHARS`` in core-api) and REJECTS a window whose events
+# exceed it. The CLI accepted any integer, so ``--max-event-chars 20000`` made
+# every submission 422 — and because a rejected window never advances the
+# cursor, the transcript stalled permanently rather than degrading. Clamped
+# here, loudly, because a silently-honoured flag that breaks every request is
+# worse than one that says it was overruled.
+_SERVER_MAX_EVENT_CHARS = 8_000
+
+
+def _event_chars(value: str) -> int:
+    """``--max-event-chars`` clamped to what the server will actually accept."""
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError("--max-event-chars must be positive")
+    if n > _SERVER_MAX_EVENT_CHARS:
+        print(
+            f"caura-interviewer: --max-event-chars {n} exceeds the server limit "
+            f"of {_SERVER_MAX_EVENT_CHARS}; using {_SERVER_MAX_EVENT_CHARS}.",
+            file=sys.stderr,
+        )
+        return _SERVER_MAX_EVENT_CHARS
+    return n
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="caura-interviewer",
@@ -116,7 +141,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--max-windows", type=int, default=8)
     run_p.add_argument("--since-hours", type=float, default=168.0, help="only files modified in this window (0 = all)")
     run_p.add_argument("--min-events", type=int, default=10, help="dribble gate for the final window")
-    run_p.add_argument("--max-event-chars", type=int, default=4_000)
+    run_p.add_argument("--max-event-chars", type=_event_chars, default=4_000)
     run_p.add_argument("--flush", action="store_true", help="submit even below the dribble gate")
 
     status_p = sub.add_parser("status", help="show per-file cursor vs local line counts")
@@ -126,7 +151,7 @@ def _build_parser() -> argparse.ArgumentParser:
     hook_p = sub.add_parser("hook", help="Claude Code SessionEnd hook: drain the session transcript (stdin JSON)")
     common(hook_p)
     hook_p.add_argument("--max-windows", type=int, default=2)
-    hook_p.add_argument("--max-event-chars", type=int, default=4_000)
+    hook_p.add_argument("--max-event-chars", type=_event_chars, default=4_000)
 
     install_p = sub.add_parser("install", help="schedule a periodic `run` via cron (writes a 0600 env file it sources)")
     common(install_p)

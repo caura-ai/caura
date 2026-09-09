@@ -259,8 +259,9 @@ async def test_doc_write_summary_embeds_and_forwards(mcp_env, monkeypatch):
 
     # ``**kwargs`` tolerates get_embedding's keyword-only ``background``:
     # the doc write is synchronous, so it opts out of the deferred budget.
-    async def fake_embed(text, **_kwargs):
+    async def fake_embed(text, tenant_config=None, **_kwargs):
         captured["embed_text"] = text
+        captured["embed_tenant_config"] = tenant_config
         return [0.1] * VECTOR_DIM
 
     sc = stub_storage_client(monkeypatch, upsert_document_xmax={"xmax": 0})

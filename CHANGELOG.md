@@ -10,6 +10,35 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.5.0](https://github.com/caura-ai/caura/compare/backend-v3.4.1...backend-v3.5.0) (2026-09-09)
+
+
+### Features
+
+* **consumer:** fan out atomic facts on the deferred path (A70 step 2b) ([#1430](https://github.com/caura-ai/caura/issues/1430)) ([2a88514](https://github.com/caura-ai/caura/commit/2a88514de769df4f666627cf9712314daa7ad578))
+
+
+### Bug Fixes
+
+* **crystallizer:** stop the sweep destroying knowledge, re-paying LLM calls, and mislabelling fleet scope ([#1414](https://github.com/caura-ai/caura/issues/1414)) ([2c1df96](https://github.com/caura-ai/caura/commit/2c1df9658b6fd51ff76dc9abb2410288e0966931))
+* **embedding:** cache LocalEmbedding per model so the local provider stops reloading the model on every request ([#1420](https://github.com/caura-ai/caura/issues/1420)) ([d71250d](https://github.com/caura-ai/caura/commit/d71250d4f52c816c5638d7b49560e848b20adc7b))
+* **embedding:** unify the EMBEDDING_PROVIDER default and stop silent fake-vector persistence ([#1423](https://github.com/caura-ai/caura/issues/1423)) ([429e86c](https://github.com/caura-ai/caura/commit/429e86cb2a313692d8d41715c5d883952510c6d4))
+* **ingest:** stop dropping CJK facts, honour the cache contract, delete a dead constant ([#1418](https://github.com/caura-ai/caura/issues/1418)) ([4dd83af](https://github.com/caura-ai/caura/commit/4dd83afc07b267695c3066b723c049eb97b25cde))
+* narrow the Path C revert, drop three unreachable builders, clamp the interviewer flag ([#1419](https://github.com/caura-ai/caura/issues/1419)) ([a69ba38](https://github.com/caura-ai/caura/commit/a69ba3880bc4e4bbc4d6861329d382e6e1bfdb7f))
+* **search:** ENTITY_LOOKUP silently drops temporal hints — decline the short-circuit when one is present ([#1422](https://github.com/caura-ai/caura/issues/1422)) ([629daba](https://github.com/caura-ai/caura/commit/629daba9c04508e66ec3645802db06a70a23eb2c))
+* **search:** honor search.graph_retrieval on the ENTITY_LOOKUP short-circuit ([#1427](https://github.com/caura-ai/caura/issues/1427)) ([0bf240b](https://github.com/caura-ai/caura/commit/0bf240bff80a3ddd056c635063941bf474dd7a9d))
+* **worker:** stop discarding atomic facts on the async enrichment path (A70 step 1) ([#1424](https://github.com/caura-ai/caura/issues/1424)) ([1171c13](https://github.com/caura-ai/caura/commit/1171c1300087ecde31b2c04dd6b2b1263498e07b))
+
+
+### Documentation
+
+* **settings:** pin and document the reset shape and propagation contract (D17) ([#1421](https://github.com/caura-ai/caura/issues/1421)) ([8198260](https://github.com/caura-ai/caura/commit/8198260e9ac8fc62e1be8327d24878663ac00097))
+
+
+### Code Refactoring
+
+* **memory:** lift the atomic-fact fan-out out of the background task (A70 step 2a) ([#1428](https://github.com/caura-ai/caura/issues/1428)) ([0a65886](https://github.com/caura-ai/caura/commit/0a658863e9008a7c13c9a44ff80ce94e371b0de9))
+
 ## [3.4.1](https://github.com/caura-ai/caura/compare/backend-v3.4.0...backend-v3.4.1) (2026-09-09)
 
 

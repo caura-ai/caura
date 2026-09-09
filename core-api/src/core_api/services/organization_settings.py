@@ -1284,6 +1284,13 @@ async def update_settings(
 ) -> dict:
     """Upsert tenant overrides + write an audit row with the flat diff.
 
+    Writes are a deep MERGE (``_deep_merge``), so an omitted key keeps its
+    current value. The reset shape is an explicit ``null``: ``_validate_leaf_types``
+    passes ``None`` through deliberately, every resolver property reads ``None``
+    as "no override", and a section set to ``None`` drops the whole group back to
+    defaults. ``{}`` for a section merges nothing and is a no-op — it looks like
+    a clear and is not one, which is the trap worth knowing about.
+
     Returns the merged display view (``DEFAULT_SETTINGS`` ⊕ tenant overrides)
     so callers can echo back the resulting state. No-ops when the submitted
     payload introduces no actual changes.

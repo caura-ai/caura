@@ -1,8 +1,8 @@
 # Rebrand alias retirement policy
 
-**SUPERSEDED 2026-09-02 by Eldad's direction — legacy names are deleted, not retained;
-"permanent by choice" no longer applies to any row below. Each owning lane updates its
-own rows as it reaches them; see `codex-packages/PLAN.md`.**
+**AMENDED 2026-09-09 — source aliases without installed state may be deleted, but
+published compatibility projects and other resolution targets remain governed by the
+permanent and measured-sunset rules below. See `codex-packages/PLAN.md`.**
 
 **Status:** proposed 2026-09-01 · **Scope:** policy only · **Owner:** Caura release owner
 
@@ -54,13 +54,13 @@ These decisions are accepted inputs from AI or existing permanent-alias contract
 | --- | --- | --- |
 | Daemon executable | `memclaw` | Permanent executable alias. Offline scripts and managed services are not fully enumerable. | <!-- legacy-name-ok: names AI's permanent daemon-command alias -->
 | Python daemon project | PyPI `memclawd` | Keep the final forwarder published; never yank or delete it. | <!-- legacy-name-ok: names AI's permanent PyPI forwarder -->
-| npm daemon project | `@caura-ai/memclawd` | Keep the final forwarder published; never unpublish it. | <!-- legacy-name-ok: names AI's permanent npm forwarder -->
-| Homebrew | old `memclaw` token's rename record | Keep the rename record permanently after migration. | <!-- legacy-name-ok: names AI's permanent Homebrew compatibility token -->
-| Scoop | old `memclaw` manifest | Keep it updated from the canonical release description; Scoop has no proven installed-app rename. | <!-- legacy-name-ok: names AI's permanent Scoop compatibility manifest -->
+| npm daemon project | ~~`@caura-ai/memclawd`~~ | Never published. There is no old scoped npm forwarder to retain; the live canonical npm package is `caurad`. | <!-- legacy-name-ok: records the absent proposed npm forwarder -->
+| Homebrew | ~~old `memclaw` token's rename record~~ | Never published. There is no old cask rename record or installed state to retain. | <!-- legacy-name-ok: records the absent proposed Homebrew token -->
+| Scoop | ~~old `memclaw` manifest~~ | Never published. There is no old manifest or installed state to retain. | <!-- legacy-name-ok: records the absent proposed Scoop manifest -->
 | Installer entry point | `https://memclaw.dev/install.sh` | Resolve permanently, serving a self-migrating installer when the new channel exists. | <!-- legacy-name-ok: names AI's permanent installer URL -->
-| Python client | ~~The `MemClaw*` class/error names inside `caura_client`~~ | Retired 2026-09 — the same treatment already given to PyPI `memclaw-client` and the `memclaw_client` import package; no transition owed to pre-rename installs. | <!-- legacy-name-ok: records the retirement of the Python client class-alias surface -->
+| Python client | PyPI `memclaw-client==0.5.0`; ~~the `memclaw_client` import and `MemClaw*` class/error names~~ | The final PyPI release is yanked but exact pins still resolve and install `caura-client>=1.0.0`. The wheel contains no module, so its published claim that the old import keeps working is false; users must migrate imports and class names. | <!-- legacy-name-ok: records the broken final Python client forwarder -->
 | Python client PyPI keyword | ~~`"memclaw"` in `caura-client`'s `keywords` list~~ | Retired 2026-09 — deliberately NOT in the "cheap discovery alias, permanent by choice" bucket above. A keyword is pure registry search-indexing metadata, re-published fresh on every release; unlike a URL redirect or a Homebrew/Scoop compatibility token, nothing on any customer's disk or in any existing install depends on it, so its removal has no installed-state consequence to protect against. No sentinel entry needed for the same reason. | <!-- legacy-name-ok: records the retirement of the PyPI search keyword -->
-| npm client | ~~`@caura/memclaw-client`~~ | Retired 2026-09; the forwarding alias was deleted, not kept. | <!-- legacy-name-ok: records the retirement of a formerly-permanent npm client alias -->
+| npm client | ~~`@caura/memclaw-client`~~ | Never published. There is no forwarding alias or installed state to retain. | <!-- legacy-name-ok: records the absent proposed npm client alias -->
 | Interviewer | ~~`memclaw-interviewer` console-script entry point~~ | Retired 2026-09; nothing in Caura's own infrastructure invoked it (checked: no cron, Cloud Scheduler job, or CI workflow across caura-ops, caura-enterprise, caura-onprem, caura-onprem-installer, caura-daemon, caura-test-automation references it). | <!-- legacy-name-ok: records the retirement of the interviewer console-script alias -->
 | Interviewer (transitional) | `resolve_cmd()`'s PATH fallback, config path, lock name, and cron marker in `caura_client.interviewer` | Kept for exactly one caura-client release past the console-script removal above, so `caura-interviewer install`/`uninstall` can still find and replace a pre-rename customer's existing crontab line instead of writing a duplicate beside it. Removed in the release after this one — see the `legacy-name-deferred` annotations on each line. | <!-- legacy-name-deferred: one-release upgrade path for pre-rename customer crontabs (docs/plans/rebrand-alias-retirement-policy.md) -->
 | MCP | `memclaw_*` tool calls and the `mcpServers.memclaw` server/config key | Permanent dispatch/config aliases. Saved prompts and deployed agent configuration cannot be counted reliably. | <!-- legacy-name-ok: names permanent MCP tool and server aliases -->
