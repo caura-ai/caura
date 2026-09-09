@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.4.1](https://github.com/caura-ai/caura/compare/backend-v3.4.0...backend-v3.4.1) (2026-09-09)
+
+
+### Code Refactoring
+
+* **doc-search:** give the document top_k cap one source of truth ([#1413](https://github.com/caura-ai/caura/issues/1413)) ([339f3be](https://github.com/caura-ai/caura/commit/339f3bebbdc5656ed81dfa94ea9792868540df1c))
+
 ## [3.4.0](https://github.com/caura-ai/caura/compare/backend-v3.3.1...backend-v3.4.0) (2026-09-09)
 
 
