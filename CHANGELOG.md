@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.4.0](https://github.com/caura-ai/caura/compare/backend-v3.3.1...backend-v3.4.0) (2026-09-09)
+
+
+### Features
+
+* **search:** opt-in strict fleet scoping (C27) ([#1410](https://github.com/caura-ai/caura/issues/1410)) ([5783f8f](https://github.com/caura-ai/caura/commit/5783f8f3f07603c30c9a794ba807f7648491c7e7))
+* **search:** raise the top_k ceiling to 200 and give it one source of truth ([#1411](https://github.com/caura-ai/caura/issues/1411)) ([1d86102](https://github.com/caura-ai/caura/commit/1d86102e3ca70bb04c8a05fd61e26f35addf0296))
+
 ## [3.3.1](https://github.com/caura-ai/caura/compare/backend-v3.3.0...backend-v3.3.1) (2026-09-08)
 
 

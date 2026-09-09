@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.21.0](https://github.com/caura-ai/caura/compare/plugin-v2.20.3...plugin-v2.21.0) (2026-09-09)
+
+
+### Features
+
+* **search:** raise the top_k ceiling to 200 and give it one source of truth ([#1411](https://github.com/caura-ai/caura/issues/1411)) ([1d86102](https://github.com/caura-ai/caura/commit/1d86102e3ca70bb04c8a05fd61e26f35addf0296))
+
 ## [2.20.3](https://github.com/caura-ai/caura/compare/plugin-v2.20.2...plugin-v2.20.3) (2026-09-08)
 
 
