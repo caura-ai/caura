@@ -909,6 +909,11 @@
             "title": "Id",
             "type": "string"
           },
+          "injected": {
+            "default": false,
+            "title": "Injected",
+            "type": "boolean"
+          },
           "is_inferred": {
             "default": false,
             "title": "Is Inferred",
@@ -1684,7 +1689,7 @@
           },
           "top_k": {
             "default": 5,
-            "description": "Maximum results to return (1-200, default 5).",
+            "description": "Maximum results the query returns (1-200, default 5). Not the response ceiling: each returned outdated/conflicted row also carries its newest correction, injected beyond this budget and marked injected: true (with score: null), so a response holds at most 2*top_k items.",
             "maximum": 200.0,
             "minimum": 1.0,
             "title": "Top K",

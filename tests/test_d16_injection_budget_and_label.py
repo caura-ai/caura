@@ -142,7 +142,9 @@ async def test_response_holds_at_most_twice_top_k(monkeypatch):
     for sid in stale_ids:
         for hour in ("01", "02", "03"):
             successors.append(
-                _successor_dict(uuid.uuid4(), sid, created_at=f"2026-08-25T{hour}:00:00Z")
+                _successor_dict(
+                    uuid.uuid4(), sid, created_at=f"2026-08-25T{hour}:00:00Z"
+                )
             )
     ctx = await _run(rows, successors, monkeypatch)
     out = ctx.data["results"]
@@ -209,7 +211,9 @@ async def test_newer_correction_is_injected_above_an_older_organic_one(monkeypat
     NEWER correction exists: the newest is injected (marked), the organic row
     keeps its earned place and stays unmarked."""
     stale, organic_id, newest = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    organic = _mem_ns(organic_id, status="active", content="older correction", score=0.9)
+    organic = _mem_ns(
+        organic_id, status="active", content="older correction", score=0.9
+    )
     organic.Memory.supersedes_id = stale
     organic.Memory.created_at = "2026-08-25T01:00:00Z"
     ctx = await _run(
