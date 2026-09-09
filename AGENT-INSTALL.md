@@ -52,9 +52,9 @@ cat > .env << 'EOF'
 ENVIRONMENT=development
 POSTGRES_HOST=127.0.0.1
 POSTGRES_PORT=5432
-POSTGRES_USER=memclaw
+POSTGRES_USER=caura
 POSTGRES_PASSWORD=changeme
-POSTGRES_DB=memclaw
+POSTGRES_DB=caura
 POSTGRES_REQUIRE_SSL=false
 IS_STANDALONE=true
 EMBEDDING_PROVIDER=fake
@@ -64,9 +64,9 @@ CORS_ORIGINS=http://localhost:8000,http://localhost:3000
 EOF
 
 # 5. Create the database (if it doesn't exist)
-psql -U postgres -c "CREATE USER memclaw WITH PASSWORD 'changeme';"
-psql -U postgres -c "CREATE DATABASE memclaw OWNER memclaw;"
-psql -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql -U postgres -c "CREATE USER caura WITH PASSWORD 'changeme';"
+psql -U postgres -c "CREATE DATABASE caura OWNER caura;"
+psql -U caura -d caura -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
 # 6. Run migrations
 alembic upgrade head
