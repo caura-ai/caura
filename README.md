@@ -656,7 +656,7 @@ API key where one is present and by remote IP otherwise. It is applied per route
 
 | Route | Default | Setting |
 |---|---|---|
-| `POST /memories`, `POST /documents`, `POST /ingest/commit` | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories`, `POST /documents`, `POST /ingest/commit`, `POST /stm/promote` | 10/second | `RATE_LIMIT_WRITE` |
 | `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
 | `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
 
