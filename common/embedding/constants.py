@@ -12,12 +12,22 @@ late. Examples:
 
     monkeypatch.setattr("common.embedding._service.EMBEDDING_RETRY_ATTEMPTS", 1)
     monkeypatch.setattr("common.embedding.providers.openai.OPENAI_REQUEST_TIMEOUT_SECONDS", 5.0)
+
+One deliberate exception: ``OPENAI_REQUEST_TIMEOUT_SECONDS`` is re-read
+from the environment when ``OpenAIEmbeddingProvider`` is constructed,
+with the module binding as the fallback — core-api's
+``bridge_credentials_to_environ()`` populates that env var during
+startup, after this module has already been imported. For that one knob
+``monkeypatch.setenv`` before provider construction works too; see
+``common/embedding/providers/openai.py``.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+
+from common.env_utils import clamp_keepalive, read_float_env, read_int_env
 
 # Default model identifiers per provider. Override via env (e.g. swap
 # ``OPENAI_EMBEDDING_MODEL=text-embedding-3-large`` for a higher-dim
@@ -38,8 +48,18 @@ OPENAI_EMBEDDING_MODEL: str = (
 # so a single tunable controls both the LLM and the embedding paths.
 # Without this, a hung api.openai.com response would ride the SDK's
 # default 600s timeout and silently eat the worker's whole ack budget.
-OPENAI_REQUEST_TIMEOUT_SECONDS: float = float(
-    os.environ.get("OPENAI_REQUEST_TIMEOUT_SECONDS", "25.0")
+#
+# ``read_float_env`` (fall back to the default with a stderr WARN naming
+# the variable), not bare ``float(...)``: a value like "25s" would
+# otherwise raise ``ValueError`` at import — crashing core-worker, which
+# has no pydantic-settings layer validating this var first, with a
+# traceback that names neither the env var nor the fix. Falling back is
+# the right failure mode for a timeout (the default is safe); raising is
+# reserved for misconfigs that guarantee 100% failed calls (see
+# ``_registry.get_embedding_provider``). Matches the LLM twin
+# (``common/llm/constants.py``) and every other numeric knob here.
+OPENAI_REQUEST_TIMEOUT_SECONDS: float = read_float_env(
+    "OPENAI_REQUEST_TIMEOUT_SECONDS", 25.0
 )
 
 # Retry budget for the high-level ``get_embedding`` call. Two attempts
@@ -65,12 +85,6 @@ EMBEDDING_RETRY_DELAY_S: float = float(os.environ.get("EMBEDDING_RETRY_DELAY_S",
 # concurrent writes x 10 enrichment calls = 160 concurrent LLM
 # requests per process, well over the keepalive budget). See
 # ``common/llm/constants.py`` for full rationale.
-from common.env_utils import (  # noqa: E402 — intentional late import, see module docstring
-    clamp_keepalive,
-    read_float_env,
-    read_int_env,
-)
-
 OPENAI_HTTPX_MAX_CONNECTIONS: int = read_int_env("OPENAI_HTTPX_MAX_CONNECTIONS", 200)
 OPENAI_HTTPX_MAX_KEEPALIVE_CONNECTIONS: int = clamp_keepalive(
     OPENAI_HTTPX_MAX_CONNECTIONS,

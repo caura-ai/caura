@@ -20,6 +20,7 @@ from common.embedding.constants import (
     OPENAI_EMBEDDING_MODEL,
     OPENAI_REQUEST_TIMEOUT_SECONDS,
 )
+from common.env_utils import read_float_env
 
 # Opaque per-instance identity for ``dedup_scope``. A counter beats deriving
 # the scope from the backend config twice over: no credential ever enters the
@@ -120,6 +121,23 @@ class OpenAIEmbeddingProvider:
         # service layer already performs — and under the per-request
         # timeout that the bulk budgets are derived from. See
         # ``EMBEDDING_PROVIDER_MAX_RETRIES``.
+        #
+        # The request budget is re-read from the ENVIRONMENT here, at
+        # construction time, with the import-time constant as fallback:
+        # core-api's ``bridge_credentials_to_environ()`` copies the
+        # ``.env``-loaded ``settings.openai_request_timeout_seconds`` into
+        # ``os.environ`` during lifespan startup — AFTER this module was
+        # imported (``core_api.app`` pulls in ``common.embedding`` at
+        # module level via ``core_api.constants`` and the route modules) —
+        # so the frozen module constant would silently shadow a
+        # ``.env``-configured value. Same fix, same reason, as the
+        # construction-time read in ``common/llm/registry.py``. With the
+        # env var unset (and for the documented monkeypatch-the-module-
+        # binding test idiom) the constant still governs, so behaviour is
+        # unchanged for every existing configuration.
+        request_timeout: float = read_float_env(
+            "OPENAI_REQUEST_TIMEOUT_SECONDS", OPENAI_REQUEST_TIMEOUT_SECONDS
+        )
         client_kwargs: dict = {
             "api_key": api_key,
             "max_retries": EMBEDDING_PROVIDER_MAX_RETRIES,
@@ -127,14 +145,14 @@ class OpenAIEmbeddingProvider:
                 connect=EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS,
                 # read AND write keep the full request budget — the bare float
                 # this replaces set every phase to it.
-                read=OPENAI_REQUEST_TIMEOUT_SECONDS,
-                write=OPENAI_REQUEST_TIMEOUT_SECONDS,
+                read=request_timeout,
+                write=request_timeout,
                 # Pool tracks the request budget unless explicitly decoupled,
                 # preserving the previous behaviour for every configuration.
                 pool=(
                     EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS
                     if EMBEDDING_HTTPX_POOL_TIMEOUT_SECONDS is not None
-                    else OPENAI_REQUEST_TIMEOUT_SECONDS
+                    else request_timeout
                 ),
             ),
             "http_client": httpx.AsyncClient(
