@@ -147,6 +147,19 @@ DEFAULT_SETTINGS: dict = {
     },
     "dedup": {
         "semantic_dedup_enabled": None,
+        # A71 — act on the near-duplicate band instead of only reporting it.
+        # ``DetectNearDuplicate`` already finds the nearest stored row on every
+        # fast write and stashes ``near_duplicate_of`` as advice nothing acts on,
+        # so a restated fact accumulates a sibling and both stay live. With this
+        # on, a hit that is provably the SAME CLAIM (same subject, same
+        # single-valued predicate, different object) supersedes its predecessor
+        # instead of appending beside it.
+        #
+        # Default OFF, like every switch that changes what a write PRODUCES
+        # rather than what it reports. Turning it on retires rows, and while the
+        # supersession is reversible through the existing lineage, a tenant
+        # should choose that rather than inherit it from a deploy.
+        "merge_near_duplicates": None,
     },
     "lifecycle": {
         "lifecycle_automation_enabled": None,
@@ -615,6 +628,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "search.entity_retrieval": bool,
     "crystallizer.auto_crystallize": bool,
     "dedup.semantic_dedup_enabled": bool,
+    "dedup.merge_near_duplicates": bool,
     "lifecycle.lifecycle_automation_enabled": bool,
     "lifecycle.memory_retention_days": int,
     "entity_linking.auto_entity_linking_enabled": bool,
@@ -996,6 +1010,18 @@ class ResolvedConfig:
     def semantic_dedup_enabled(self) -> bool:
         val = self._ts.get("dedup", {}).get("semantic_dedup_enabled")
         return val if val is not None else True
+
+    @property
+    def merge_near_duplicates(self) -> bool:
+        """Supersede a same-claim near-duplicate instead of appending (default OFF).
+
+        Gated OFF because it changes what a write produces, not what it reports:
+        an enabled tenant sees its older row move to ``outdated``. Reversible via
+        the same lineage a contradiction supersession uses, but still a tenant's
+        choice rather than something inherited from a deploy.
+        """
+        val = self._ts.get("dedup", {}).get("merge_near_duplicates")
+        return val if val is not None else False
 
     # Lifecycle
     @property

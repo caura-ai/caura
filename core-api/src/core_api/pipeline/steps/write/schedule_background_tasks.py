@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
@@ -12,6 +13,58 @@ from core_api.services.task_tracker import tracked_task
 from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
+
+
+async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) -> None:
+    """Retire the near-duplicate this write supersedes (A71).
+
+    Two writes, and the ORDER is the safety property:
+
+      1. point the NEW row at the candidate (``supersedes_id``), leaving both
+         live for an instant;
+      2. mark the CANDIDATE ``outdated``.
+
+    Done the other way round, a failure between them leaves a row retired with
+    nothing standing in its place — the claim disappears from recall with no
+    successor to find. In this order the same failure leaves both rows live and
+    linked, which is exactly what an in-flight contradiction chain looks like
+    and which the existing lineage already tolerates.
+
+    ``update_memory_status`` guards the link with a CAS against NULL, so if a
+    contradiction verdict claimed this row between the write and here, that
+    verdict wins and this becomes a no-op rather than a second opinion.
+
+    Never raises: the memory is already committed and the caller returned 201.
+    A merge that fails leaves an ordinary near-duplicate pair — the state every
+    tenant without this flag is in — so degrading is strictly better than
+    failing a write that succeeded.
+    """
+    sc = get_storage_client()
+    try:
+        await sc.update_memory_status(new_id, "active", supersedes_id=candidate_id, tenant_id=tenant_id)
+    except Exception:
+        logger.warning(
+            "near-duplicate merge: could not link %s -> %s; leaving both rows live",
+            new_id,
+            candidate_id,
+            exc_info=True,
+        )
+        return
+    try:
+        await sc.update_memory_status(candidate_id, "outdated", tenant_id=tenant_id)
+    except Exception:
+        # The link landed, so the pair is discoverable and a later contradiction
+        # pass can finish the job. Logged at WARNING rather than swallowed
+        # because until then the superseded row still ranks as current.
+        logger.warning(
+            "near-duplicate merge: linked %s -> %s but could not retire the "
+            "candidate; it still reads as current",
+            new_id,
+            candidate_id,
+            exc_info=True,
+        )
+        return
+    logger.info("near_duplicate_merged new=%s superseded=%s tenant_id=%s", new_id, candidate_id, tenant_id)
 
 
 class ScheduleBackgroundTasks:
@@ -27,6 +80,13 @@ class ScheduleBackgroundTasks:
         enrichment = ctx.data.get("enrichment")
         resolved_write_mode = ctx.data.get("resolved_write_mode")
         memory_id = memory["id"] if isinstance(memory, dict) else memory.id
+
+        # A71 — perform the merge ``DetectNearDuplicate`` decided on. It runs
+        # before the row exists, so it can only record the intent; this is the
+        # first point at which there is an id to link.
+        merge_target = ctx.data.get("merge_supersedes_id")
+        if merge_target:
+            await _merge_near_duplicate(str(memory_id), str(merge_target), data.tenant_id)
 
         # Fast mode fan-out. The fast branch returns BEFORE the strong-mode
         # entity-extraction + Path A blocks below, so historically each had
