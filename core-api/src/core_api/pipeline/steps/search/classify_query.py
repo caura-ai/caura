@@ -364,6 +364,10 @@ class ClassifyQuery:
     ) -> dict[UUID, tuple[int, float]]:
         """Expand *seed_ids* per fleet, or return them as hop-0 when expansion is off.
 
+        Expansion failure degrades the same way: ``_expand_per_fleet`` falls
+        back to the hop-0 seed set when every fleet's call fails, so callers
+        are guaranteed a non-empty dict for a non-empty seed set either way.
+
         The gate mirrors ``_entity_boost_via_storage`` exactly
         (``graph_expand and graph_max_hops > 0`` → expand, else hop-0 seeds
         with neutral weight), so ``search.graph_retrieval`` means the same
@@ -434,6 +438,30 @@ class ClassifyQuery:
                     or (hop == merged[eid][0] and weight > merged[eid][1])
                 ):
                     merged[eid] = (hop, weight)
+
+        # oss-0814-l-05: an empty merge for a non-empty seed set means NO call
+        # succeeded — a successful expand_graph response always contains the
+        # seeds themselves at hop 0 / weight 1.0 (entity_expand_graph seeds its
+        # result dict with them before traversing), and every per-fleet call is
+        # given the full seed list, so a single surviving fleet keeps them all
+        # (which is why partial failure needs no case of its own here).
+        # Returning ``{}`` discarded the already-resolved entity-FTS matches
+        # along with the expansion: ``_collect_memories`` had no entities to
+        # load links for (reported, misleadingly, as "entity matched but no
+        # linked memories"), and the ``_classified_entity_hops`` stash handed
+        # ParallelEmbedAndEntityBoost an empty dict — which its
+        # ``precomputed_hops is not None`` check treats as authoritative, so it
+        # did not re-derive FTS either and hop-boost contributed nothing.
+        # Degrade to the hop-0 seed set instead — the same shape as the
+        # ``graph_expand`` off gate in ``_hops_for_seeds`` — so the direct
+        # matches stay retrievable and only the (unavailable) graph
+        # neighbourhood is lost.
+        if seed_ids and not merged:
+            logger.warning(
+                "expand_graph failed for all fleets; degrading to %d hop-0 seed entities",
+                len(seed_ids),
+            )
+            return dict.fromkeys(seed_ids, (0, 1.0))
         return merged
 
     @staticmethod
