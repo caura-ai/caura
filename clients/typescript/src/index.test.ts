@@ -133,6 +133,24 @@ test("recall ignores the key the server never sends", async () => {
   assert.deepEqual(result.supportingMemories, []);
 });
 
+test("recall posts caller extras into the request body", async () => {
+  let captured: Record<string, unknown> = {};
+  const client = makeClient((_url, init) => {
+    captured = JSON.parse(init.body as string);
+    return jsonResponse(200, liveRecallBody([]));
+  });
+  await client.recall("q", { topK: 7 });
+  assert.equal(captured.top_k, 7);
+  const probe = "x-extra-probe";
+  try {
+    await client.recall("q", { [probe]: "v" });
+  } catch {
+    // response parsing is validated by the other recall tests; here we only
+    // check that the extra key reached the request body
+  }
+  assert.equal(captured[probe], "v");
+});
+
 test("health hits /health", async () => {
   const client = makeClient((url) => {
     assert.equal(new URL(url).pathname, "/api/v1/health");

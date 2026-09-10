@@ -71,6 +71,11 @@ export interface SearchOptions {
   [extra: string]: unknown;
 }
 
+export interface RecallOptions {
+  topK?: number;
+  [extra: string]: unknown;
+}
+
 function toMemory(d: Record<string, any>): Memory {
   return {
     id: d.id ?? null,
@@ -142,8 +147,10 @@ export class Caura {
   }
 
   /** Search + LLM-synthesized context brief. POST /api/v1/recall */
-  async recall(query: string, options: { topK?: number } = {}): Promise<RecallResult> {
-    const body = { tenant_id: this.tenantId, query, top_k: options.topK ?? 5 };
+  async recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
+    const { topK = 5, ...extra } = options;
+    const body: Record<string, unknown> = { tenant_id: this.tenantId, query, top_k: topK };
+    Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/recall", body);
     // Wire key is `memories`; the server aliases the identical list under
     // `items` too, for consumers written against /search's shape.
