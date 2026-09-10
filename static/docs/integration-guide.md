@@ -2,7 +2,7 @@
 
 ---
 
-> **For server setup, configuration, endpoints, Web UI, deployment, and smoke tests, see the [README](../README.md).**
+> **For server setup, configuration, endpoints, Web UI, deployment, and smoke tests, see the [README](../../README.md).**
 > This guide covers only MCP client setup, OpenClaw plugin installation, agent trust levels, agent prompts, and usage examples.
 
 ## 1. Overview
