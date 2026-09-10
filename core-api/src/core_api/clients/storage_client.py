@@ -2610,6 +2610,22 @@ class CoreStorageClient:
             {"command_ids": command_ids, "tenant_id": tenant_id},
         )
 
+    async def agent_scope_probe(self, data: dict) -> dict | None:
+        """CAURA-723 — ``{has_memories, agent_registered}`` for one agent id.
+
+        Called only after a search that came back EMPTY, so a successful
+        agent-filtered search never pays for it. ``services/agent_scope``
+        carries the reasoning for that ordering; note it is not free, and this
+        docstring said the opposite until review caught it.
+
+        ``read=True``: the search this explains reads the replica, so answering
+        from the same replica keeps the probe's story consistent with the
+        result. Reading the primary could report "has memories" for a row the
+        search on the replica could not see — the one inconsistency that would
+        make the warning misleading rather than merely stale.
+        """
+        return await self._post_optional("/memories/agent-scope-probe", data, read=True)
+
     async def fleet_exists(self, tenant_id: str, fleet_id: str) -> bool:
         result = await self._get(
             "/fleet/exists",

@@ -10392,6 +10392,97 @@ class PostgresService:
                 },
             }
 
+    # ------------------------------------------------------------------
+    # CAURA-723 — agent-scope probe
+    # ------------------------------------------------------------------
+
+    async def memory_agent_scope_probe(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        fleet_ids: list[str] | None = None,
+        readable_tenant_ids: list[str] | None = None,
+        include_agent_registered: bool = True,
+    ) -> dict:
+        """Can an agent-filtered search return anything, and is the agent known?
+
+        Answers both halves of CAURA-723 in ONE round trip, because core-api
+        needs them together and a second HTTP hop would cost more than the
+        queries do.
+
+        ``has_memories`` is the load-bearing one: it is what makes skipping the
+        search provably safe. Zero live memories for this agent inside the read
+        scope means an agent-filtered search cannot match anything, whatever the
+        query is. It deliberately mirrors the search's own scoping —
+        ``readable_tenant_ids`` for a cross-tenant key, ``fleet_ids`` when the
+        request narrows fleets — so it can never report "has memories" for rows
+        the search itself would not have been allowed to see.
+
+        Only ``deleted_at IS NULL`` and not the status set the scored search
+        applies: this asks "is there anything here at all", and an agent holding
+        only archived rows is a real agent whose search legitimately returns
+        nothing. Being generous here biases toward running the search, which is
+        the safe direction — a needless search costs latency, a wrongly skipped
+        one loses results.
+
+        ``agent_registered`` only chooses the wording of the warning, never
+        whether the search runs. Absence of an agent row does NOT imply absence
+        of memories: ``agent_delete`` removes the row and leaves every memory
+        behind, and rows predating agent tracking were never registered at all.
+        Returned as ``None`` when ``include_agent_registered`` is False, which
+        means "not asked" and never "not registered".
+        """
+        async with get_read_session() as session:
+            tenant_pred = (
+                Memory.tenant_id.in_(readable_tenant_ids)
+                if readable_tenant_ids
+                else Memory.tenant_id == tenant_id
+            )
+            mem_stmt = (
+                select(Memory.id)
+                .where(
+                    tenant_pred,
+                    Memory.agent_id == agent_id,
+                    Memory.deleted_at.is_(None),
+                )
+                .limit(1)
+            )
+            if fleet_ids:
+                # C27 — through the helper, never a hand-rolled ``fleet_id.in_``.
+                # An inline copy is how A54 leaked: the predicate lived in
+                # several queries, one was fixed, and the leak moved to the next.
+                #
+                # ``strict=False`` deliberately, and it is the safe direction
+                # rather than an oversight. Non-strict is a SUPERSET — it also
+                # admits tenant-shared null-fleet rows and ``scope_org`` — so
+                # this probe can only ever be MORE generous than the search it
+                # explains. Over-reporting "has memories" costs a search that
+                # returns nothing; under-reporting would skip a search that had
+                # results, which is the one outcome this must never produce.
+                # (Threading the tenant's real ``strict_fleet_scoping`` here
+                # would tighten the probe and buy exactly that risk.)
+                mem_stmt = mem_stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=False))
+            has_memories = (await session.execute(mem_stmt)).scalar_one_or_none() is not None
+
+            # Skipped when core-api already knows. Its read paths call
+            # ``get_or_create_agent`` before reaching here, and that does this
+            # very lookup — so asking again would be the second of two
+            # identical queries, and worse, would answer POST-registration and
+            # report a typo as a known agent.
+            agent_registered: bool | None = None
+            if include_agent_registered:
+                # Home tenant only. An agent is registered in the tenant that
+                # owns it, and a cross-tenant reader asking "is this id known?"
+                # means its own tenant — widening here would report a peer
+                # tenant's agent as locally known.
+                agent_stmt = (
+                    select(Agent.id).where(Agent.tenant_id == tenant_id, Agent.agent_id == agent_id).limit(1)
+                )
+                agent_registered = (await session.execute(agent_stmt)).scalar_one_or_none() is not None
+
+        return {"has_memories": has_memories, "agent_registered": agent_registered}
+
     # -- Fleet CRUD --
 
     async def fleet_exists(

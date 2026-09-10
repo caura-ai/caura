@@ -103,8 +103,18 @@ def test_every_fleet_scoped_read_goes_through_the_helper():
         "the one inside _fleet_scope_clause); an inline copy sits outside the "
         "strict switch and is silently permissive — this is exactly how A54 leaked"
     )
-    # definition + the four fleet-scoped reads
-    assert src.count("_fleet_scope_clause(") == 5
+    # definition + the four fleet-scoped reads + CAURA-723's agent-scope probe.
+    #
+    # The probe is a fifth fleet-scoped read and so belongs here: it asks
+    # "does this agent have any memory reachable in the requested fleets?" to
+    # decide whether an agent-filtered search can be skipped. It calls the
+    # helper with ``strict=False`` deliberately — non-strict is a superset, so
+    # the probe stays at least as permissive as the search it explains, and can
+    # never skip a search that would have returned rows. Raising this number
+    # means a new fleet-scoped read exists; check it goes through the helper
+    # (the assertion above) and that its strictness is the safe direction for
+    # what it decides.
+    assert src.count("_fleet_scope_clause(") == 6
 
 
 @pytest.mark.parametrize(

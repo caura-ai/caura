@@ -24,6 +24,7 @@ async def get_or_create_agent(
     display_name: str | None = None,
     install_id: str | None = None,
     owner_install_uuid: str | None = None,
+    registration_ctx: dict | None = None,
 ) -> dict:
     """Return the agent dict, creating it on first encounter.
 
@@ -35,9 +36,23 @@ async def get_or_create_agent(
     differs (so a renamed machine propagates) and ``install_id`` is
     backfilled when previously NULL but never overwritten — the
     install identity is stable for the row's lifetime.
+
+    ``registration_ctx`` (CAURA-723): an out-dict, in the same shape as
+    ``diagnostic_ctx`` / ``warnings_ctx`` / ``recall_ctx`` elsewhere. Receives
+    ``{"preexisted": bool}`` — whether a row was already there before this
+    call. Free: the lookup below runs regardless, and this only stops the
+    answer being thrown away.
+
+    The read paths need it because they call this function and then, on an
+    empty result, want to say WHY. By that point the row exists whether or not
+    it did a moment ago, so asking afterwards would report every typo as a
+    registered agent. An out-dict rather than a changed return type so the
+    other seven callers stay untouched.
     """
     sc = get_storage_client()
     agent = await sc.get_agent(agent_id, tenant_id)
+    if registration_ctx is not None:
+        registration_ctx["preexisted"] = agent is not None
     if agent:
         # Backfill fleet_id if the agent was registered without one,
         # refresh display_name when it differs (hostname change), and
