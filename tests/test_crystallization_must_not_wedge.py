@@ -169,7 +169,9 @@ async def test_a_duplicate_does_not_stop_the_facts_after_it() -> None:
     ]
     calls: list[str] = []
 
-    async def _create(payload):
+    # ``**_kw`` so a new server-only keyword on ``create_memory`` (e.g. A62's
+    # ``is_inferred``) does not fail this double on an unrelated signature change.
+    async def _create(payload, **_kw):
         calls.append(payload.content)
         if payload.content == "first":
             raise HTTPException(status_code=409, detail="Duplicate memory exists: abc")

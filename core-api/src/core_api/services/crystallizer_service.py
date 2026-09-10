@@ -685,6 +685,12 @@ async def _run_crystallization(
                         status="confirmed",
                         metadata={"crystallized_from": [str(m.get("id")) for m in cluster_memories]},
                     ),
+                    # A62 — a crystallized fact is materialised by the system: an
+                    # LLM re-extraction that merges a cluster into a claim nobody
+                    # stated in those words. ``resolution.resolve`` uses this to
+                    # refuse letting it destructively overturn a fact a user did
+                    # state. Server-set; the flag is not on the wire.
+                    is_inferred=True,
                 )
                 new_ids.append(str(mem_out.id))
             except HTTPException as exc:

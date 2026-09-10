@@ -815,7 +815,17 @@ def _memory_to_out(
     )
 
 
-async def create_memory(data: MemoryCreate) -> MemoryOut:
+async def create_memory(data: MemoryCreate, *, is_inferred: bool = False) -> MemoryOut:
+    """Create one memory.
+
+    ``is_inferred`` is INTERNAL and keyword-only — deliberately not a field on
+    ``MemoryCreate``. It marks a row the system materialised by inference rather
+    than one a user stated, and ``resolution.resolve`` refuses to let such a row
+    destructively overturn an explicit one. Putting it on the wire would let a
+    caller pick which side of that invariant it sits on, which is the opposite of
+    a guard. Platform writers (the crystallizer, insights) pass True; every other
+    caller gets the default.
+    """
     if not data.agent_id:
         raise ValueError("agent_id must be resolved before calling create_memory")
     # Reserved-id guard (`main` fix): single chokepoint for REST + MCP + STM.
@@ -838,7 +848,7 @@ async def create_memory(data: MemoryCreate) -> MemoryOut:
     # needs its own call and its own route-level test.
     if data.metadata:
         data.metadata = sanitize_caller_metadata(data.metadata)
-    return await _run_write_pipeline(data)
+    return await _run_write_pipeline(data, is_inferred=is_inferred)
 
 
 def _memory_out_with_created_links(ctx, memory: dict) -> MemoryOut:
@@ -861,7 +871,7 @@ def _memory_out_with_created_links(ctx, memory: dict) -> MemoryOut:
     )
 
 
-async def _run_write_pipeline(data: MemoryCreate) -> MemoryOut:
+async def _run_write_pipeline(data: MemoryCreate, *, is_inferred: bool = False) -> MemoryOut:
     """Build the pipeline context and run the write pipeline this request needs.
 
     Kept separate from ``create_memory``, which stays a short prologue of
@@ -914,7 +924,7 @@ async def _run_write_pipeline(data: MemoryCreate) -> MemoryOut:
     if not data.persist or (
         len(data.content) > CHUNKING_THRESHOLD_CHARS and tenant_config.auto_chunk_enabled
     ):
-        ctx = PipelineContext(data={"input": data, "t0": time.perf_counter()})
+        ctx = PipelineContext(data={"input": data, "t0": time.perf_counter(), "is_inferred": is_inferred})
 
         # Phase 1: Enrichment (always runs)
         enrichment_pipeline = build_enrichment_pipeline()
@@ -965,6 +975,7 @@ async def _run_write_pipeline(data: MemoryCreate) -> MemoryOut:
             "input": data,
             "t0": time.perf_counter(),
             "resolved_write_mode": resolved_mode,
+            "is_inferred": is_inferred,
         },
         tenant_config=tenant_config,
     )
@@ -1381,6 +1392,7 @@ async def create_memories_bulk(
     *,
     bulk_attempt_id: str,
     memory_type_is_agent_set: bool | None = None,
+    is_inferred: bool = False,
 ) -> BulkMemoryResponse:
     """Create multiple memories with per-attempt idempotency (CAURA-602).
 
@@ -1938,6 +1950,12 @@ async def create_memories_bulk(
             "status": status,
             "visibility": data.visibility or "scope_team",
             "entity_links": entity_link_dicts,
+            # A62 — batch-level, because the only caller that passes True writes
+            # a batch that is entirely system-materialised (insights). Absent
+            # from ``BulkMemoryItem`` for the same reason it is absent from
+            # ``MemoryCreate``: a caller must not get to choose which side of the
+            # "inferred cannot overturn explicit" invariant its rows sit on.
+            "is_inferred": is_inferred,
         }
         pending.append((i, mem_data))
 

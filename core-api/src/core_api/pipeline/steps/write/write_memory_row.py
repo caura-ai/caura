@@ -84,6 +84,18 @@ class WriteMemoryRow:
             "ts_valid_end": str(fields["ts_valid_end"]) if fields.get("ts_valid_end") else None,
             "status": fields["status"],
             "visibility": data.visibility or "scope_team",
+            # A62 — migration 036 added this column and nothing ever wrote it, so
+            # every row read ``False`` = "directly stated". That silently disabled
+            # the invariant at ``resolution.py``: ``if is_inferred and action in
+            # _DESTRUCTIVE`` exists so a memory the SYSTEM materialised cannot
+            # destructively overturn one a user actually stated — and with the
+            # column always False it has never once fired.
+            #
+            # Server-set only. It is absent from ``MemoryCreate`` (it lives on
+            # ``MemoryOut``), so a caller cannot claim to be inferred, nor claim
+            # not to be; the value comes from ``create_memory``'s internal
+            # keyword, which only platform writers pass.
+            "is_inferred": bool(ctx.data.get("is_inferred", False)),
         }
         storage_t0 = time.perf_counter()
         try:

@@ -2045,7 +2045,9 @@ class TestInsightsWriteMode:
             seen: list = []
             real_bulk = ms_mod.create_memories_bulk
 
-            async def capturing_bulk(data, *, bulk_attempt_id):
+            # ``**_kw`` so a new server-only keyword on ``create_memories_bulk``
+            # (e.g. A62's ``is_inferred``) does not fail this double.
+            async def capturing_bulk(data, *, bulk_attempt_id, **_kw):
                 seen.extend(data.items)
                 return await real_bulk(data, bulk_attempt_id=bulk_attempt_id)
 
