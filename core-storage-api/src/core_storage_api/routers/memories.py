@@ -222,7 +222,20 @@ async def scored_search(request: Request) -> list[dict]:
                 history_query=bool(body.get("history_query", False)),
             )
         for r in results:
-            row = orm_to_dict(r.Memory, MEMORY_FIELDS)
+            # MEMORY_LIST_FIELDS, not MEMORY_FIELDS (audit oss-0814-m-39): this
+            # is the hottest read path — every recall crosses it, overfetched to
+            # ``top_k * 2`` rows — and neither of the two large columns survives
+            # the trip. ``orm_to_dict`` would ``tolist()`` the 1024-dim pgvector
+            # into ~20 KB of JSON floats per row (plus the tsvector text) for
+            # core-api to parse and drop: both consumers — ExecuteScoredSearch's
+            # row mapping and the legacy ``_dict_to_memory_out`` — read every
+            # field EXCEPT these two, and both read tolerantly, so the old shape
+            # cost CPU and wire on every search while its removal was silent.
+            # ``has_embedding`` below stays the authoritative presence signal;
+            # a caller that needs a row's actual vector fetches it by id
+            # (GET /memories/{id} keeps MEMORY_FIELDS — consumer.py's
+            # contradiction deferral reads the vector there, never from here).
+            row = orm_to_dict(r.Memory, MEMORY_LIST_FIELDS)
             row["score"] = float(r.score) if r.score is not None else 0.0
             row["similarity"] = float(r.similarity) if r.similarity is not None else 0.0
             row["vec_sim"] = float(r.vec_sim) if r.vec_sim is not None else 0.0
