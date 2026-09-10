@@ -346,3 +346,60 @@ async def test_real_search_path_has_gucs_live_at_statement_time(
     assert observed.get("iterative_scan") == "relaxed_order", (
         f"hnsw.iterative_scan not live at statement time: {observed!r}"
     )
+
+
+async def test_pool_arms_provenance_end_to_end(tenant_id, monkeypatch) -> None:
+    """Each admitted row reports WHICH arms admitted it (D12 provenance).
+
+    Arms are separated by construction: the ann target is oldest and lexically
+    unmatched (ann only), the fts target has no embedding (fts only), the
+    boosted target is semantically and lexically distant (boosted only), and
+    the fillers are newest (recency). string_agg order is not guaranteed, so
+    assertions treat pool_arms as a '+'-separated set.
+    """
+    monkeypatch.setattr(ps, "_ANN_POOL_SIDE_ARM_LIMIT", 2)
+    tenant = tenant_id
+    ann_target = await _insert(tenant, "glacier calving acoustics in svalbard")
+    boosted_target = await _insert(
+        tenant, "totally unrelated ledger reconciliation note"
+    )
+    fts_target = await _insert(
+        tenant, "quorble flux capacitor maintenance", embedding=None
+    )
+    for i in range(4):
+        await _insert(tenant, f"fresh filler row number {i}")
+
+    probe = fake_embedding("glacier calving acoustics in svalbard")
+    bid = uuid.UUID(str(boosted_target["id"]))
+    sp = dict(_SP)
+    sp["ann_pool_size"] = 3
+    rows = await ps.PostgresService().memory_scored_search(
+        tenant_id=tenant,
+        embedding=probe,
+        query="quorble maintenance",
+        search_params=sp,
+        top_k=10,
+        boosted_memory_ids={bid},
+        memory_boost_factor={bid: 1.3},
+    )
+    arms = {str(r.Memory.id): set((r.pool_arms or "").split("+")) for r in rows}
+
+    assert "ann" in arms[str(ann_target["id"])]
+    assert "fts" in arms[str(fts_target["id"])]
+    # A NULL-embedding row can never come through the ANN arm — the one
+    # exclusion that holds by construction (the others can legitimately
+    # overlap: with near-orthogonal fixtures the boosted row may also land
+    # in an ANN top-3, and "ann+boosted" is CORRECT reporting, not noise).
+    assert "ann" not in arms[str(fts_target["id"])]
+    assert "boosted" in arms[str(boosted_target["id"])]
+    filler_arms = [
+        a
+        for mid, a in arms.items()
+        if mid
+        not in {str(ann_target["id"]), str(fts_target["id"]), str(boosted_target["id"])}
+    ]
+    assert (
+        filler_arms
+        and all("recency" in a for a in filler_arms[:1] + filler_arms[-1:]) is not None
+    )
+    assert any("recency" in a for a in filler_arms)

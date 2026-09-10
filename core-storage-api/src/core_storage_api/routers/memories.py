@@ -250,6 +250,11 @@ async def scored_search(request: Request) -> list[dict]:
             for _factor in ("fts_score", "freshness", "entity_boost", "recall_boost", "temporal_boost"):
                 _v = getattr(r, _factor, None)
                 row[_factor] = float(_v) if _v is not None else None
+            # D12 arm provenance (ann-pool mode): which pool arms admitted the
+            # row ("ann+fts", "boosted", ...). NULL on the default path and on
+            # pre-provenance storage rows — "not reported", not "no arms".
+            _arms = getattr(r, "pool_arms", None)
+            row["pool_arms"] = str(_arms) if _arms is not None else None
             row["entity_links"] = r.entity_links or []
             out.append(row)
     except Exception:

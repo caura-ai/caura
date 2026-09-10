@@ -45,6 +45,7 @@ from common.embedding import (
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
 from common.governance import mask, scan
 from core_api.constants import (
+    ANN_POOL_SHADOW,
     ANN_POOL_SIZE,
     BULK_EMBEDDING_TIMEOUT_SECONDS,
     BULK_ENRICHMENT_CONCURRENCY,
@@ -4064,6 +4065,7 @@ def resolve_search_params(
         "candidate_pool_size": resolved.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
         "score_formula": resolved.get("score_formula", SCORE_FORMULA),
         "ann_pool_size": resolved.get("ann_pool_size", ANN_POOL_SIZE),
+        "ann_pool_shadow": resolved.get("ann_pool_shadow", ANN_POOL_SHADOW),
     }
 
 

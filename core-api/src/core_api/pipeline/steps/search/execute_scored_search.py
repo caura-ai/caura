@@ -8,6 +8,7 @@ response dicts back to SimpleNamespace rows for downstream steps.
 from __future__ import annotations
 
 import logging
+import time
 from collections import OrderedDict
 from types import SimpleNamespace
 
@@ -17,10 +18,73 @@ from core_api.middleware.per_tenant_concurrency import per_tenant_storage_slot
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.schemas import EntityLinkOut
+from core_api.services.task_tracker import tracked_task
+from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
 
 _ALLOWED_OVERRIDES = frozenset({"freshness_decay_days", "freshness_floor", "top_k"})
+
+
+async def _run_ann_pool_shadow(
+    sc,
+    shadow_search_data: dict,
+    primary_snapshot: list[tuple[str, float]],
+    *,
+    k: int,
+    tenant_id: str,
+    primary_ms: float,
+) -> None:
+    """Run the pooled query in the background and log the comparison.
+
+    Compares STORAGE-STAGE rankings at the caller's final_top_k — the raw
+    candidate order both paths hand to PostFilterResults — not the
+    post-filtered response: the floor and trim apply to both paths alike, and
+    comparing before them keeps the metric about what the pool changed. The
+    one-line INFO is the rollout gate's per-query evidence; it carries no
+    query text (the extract step documents why query text stays out of INFO
+    logs) and is grep-shaped: ann_pool_shadow: tenant=... overlap=...
+
+    Runs under the same per-tenant storage bulkhead as a real search — shadow
+    load is real load, and exempting it would let shadow-mode tenants park
+    unbounded concurrent scans on the reader pool.
+    """
+    t0 = time.perf_counter()
+    async with per_tenant_storage_slot("storage_search", tenant_id):
+        shadow_rows = await sc.scored_search(shadow_search_data)
+    shadow_ms = (time.perf_counter() - t0) * 1000.0
+
+    primary_ids = [mid for mid, _ in primary_snapshot][:k]
+    shadow_ids = [r["id"] for r in shadow_rows][:k]
+    p_set, s_set = set(primary_ids), set(shadow_ids)
+    overlap = len(p_set & s_set)
+    union_n = len(p_set | s_set)
+    # Same scope as overlap/jaccard above: ids shared between the two
+    # k-truncated windows. Without the [:k] cuts this averaged deltas over
+    # the full overfetched candidate sets while the rest of the line spoke
+    # about the top-k window — two scopes in one log line.
+    primary_scores = dict(primary_snapshot[:k])
+    deltas = [
+        abs(float(r.get("score") or 0.0) - primary_scores[r["id"]])
+        for r in shadow_rows[:k]
+        if r["id"] in primary_scores
+    ]
+    logger.info(
+        "ann_pool_shadow: tenant=%s k=%d overlap=%d jaccard=%.3f top1_match=%s "
+        "primary_n=%d shadow_n=%d shadow_underfilled=%s "
+        "primary_ms=%.0f shadow_ms=%.0f mean_abs_score_delta=%.4f",
+        tenant_id,
+        k,
+        overlap,
+        (overlap / union_n) if union_n else 1.0,
+        bool(primary_ids and shadow_ids and primary_ids[0] == shadow_ids[0]),
+        len(primary_ids),
+        len(shadow_ids),
+        len(shadow_ids) < min(k, len(primary_ids)),
+        primary_ms,
+        shadow_ms,
+        (sum(deltas) / len(deltas)) if deltas else 0.0,
+    )
 
 
 class ExecuteScoredSearch:
@@ -69,6 +133,23 @@ class ExecuteScoredSearch:
             # without starving the final result set. Final trim happens in PostFilterResults.
             data["final_top_k"] = top_k
             top_k = top_k * SEARCH_OVERFETCH_FACTOR
+
+        # ── ANN-pool shadow mode ──
+        # ann_pool_shadow=1 alongside ann_pool_size>0: the caller is SERVED
+        # the legacy full-scan result while the pooled query runs in the
+        # background and the comparison is logged — the rollout gate's
+        # evidence on real traffic (the crowding-regime parity analysis in
+        # docs/plans/hnsw-two-stage-retrieval.md is why rig numbers alone
+        # cannot clear a tenant for cutover). Diagnostic runs are excluded:
+        # they widen top_k for the trace and would compare a shape no user is
+        # served. Inert while ann_pool_size is 0.
+        _ann_pool_size = int(sp.get("ann_pool_size", 0) or 0)
+        use_shadow = int(sp.get("ann_pool_shadow", 0) or 0) == 1 and _ann_pool_size > 0 and not diagnostic
+        if use_shadow:
+            # The primary call crosses the wire with ann_pool_size forced to
+            # 0; the shadow payload below restores the configured size. Copy,
+            # never mutate — ``sp`` may still be ctx.data["search_params"].
+            sp = {**sp, "ann_pool_size": 0}
 
         # Build the request payload for the storage client.
         #
@@ -180,8 +261,39 @@ class ExecuteScoredSearch:
         # pool — exactly the noisy-neighbor hole the bulkhead exists to
         # close.
         sc = get_storage_client()
+        _t0 = time.perf_counter()
         async with per_tenant_storage_slot("storage_search", data["tenant_id"]):
             rows = await sc.scored_search(search_data)
+        _primary_ms = (time.perf_counter() - _t0) * 1000.0
+
+        if use_shadow:
+            shadow_search_data = dict(search_data)
+            shadow_search_data["search_params"] = {
+                **search_data["search_params"],
+                "ann_pool_size": _ann_pool_size,
+            }
+            # Snapshot ids+scores now: ``rows`` dicts are mutated into
+            # SimpleNamespaces below, and the background task must not hold a
+            # reference into pipeline state.
+            _primary_snapshot = [(r["id"], float(r.get("score") or 0.0)) for r in rows]
+            # Task handle stashed for tests and for /tasks-style draining;
+            # tracked_task turns failures into BackgroundTaskLog rows instead
+            # of unraised-exception noise.
+            data["_ann_shadow_task"] = track_task(
+                tracked_task(
+                    _run_ann_pool_shadow(
+                        sc,
+                        shadow_search_data,
+                        _primary_snapshot,
+                        k=data.get("final_top_k") or sp["top_k"],
+                        tenant_id=data["tenant_id"],
+                        primary_ms=_primary_ms,
+                    ),
+                    "ann_pool_shadow",
+                    None,
+                    data["tenant_id"],
+                )
+            )
 
         # Map response dicts to SimpleNamespace rows expected by downstream steps.
         grouped: OrderedDict[str, SimpleNamespace] = OrderedDict()
@@ -207,6 +319,7 @@ class ExecuteScoredSearch:
                                 "fts_match",
                                 "entity_links",
                                 "has_embedding",
+                                "pool_arms",
                             )
                         }
                     ),
@@ -218,6 +331,7 @@ class ExecuteScoredSearch:
                     entity_boost=row.get("entity_boost"),
                     recall_boost=row.get("recall_boost"),
                     temporal_boost=row.get("temporal_boost"),
+                    pool_arms=row.get("pool_arms"),
                     status_penalty=row.get("status_penalty"),
                     fts_match=bool(row.get("fts_match", False)),
                     has_embedding=row.get("has_embedding", True),

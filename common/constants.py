@@ -688,6 +688,14 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     # full scan below that. Mutually exclusive with ``candidate_pool_size`` —
     # storage lets ann win if both arrive, but don't set both.
     "ann_pool_size": SearchKnob(int, (0, 1000), sql=True),
+    # Shadow-compare mode for the ANN pool (PR3): when 1 AND ann_pool_size > 0,
+    # core-api SERVES the legacy full-scan result and runs the pooled query in
+    # the background, logging rank overlap / score deltas / latency — the
+    # rollout gate's evidence on real traffic. Core-api-side only (sql=False:
+    # storage never reads it; the primary call crosses the wire with
+    # ann_pool_size forced to 0 and the shadow call with the configured size).
+    # Inert when ann_pool_size is 0.
+    "ann_pool_shadow": SearchKnob(int, (0, 1)),
 }
 
 # The wire contract, derived. Core-api's two search-path builders project

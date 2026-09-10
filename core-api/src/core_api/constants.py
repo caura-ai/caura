@@ -331,6 +331,10 @@ SCORE_FORMULA = 0
 # doc's crowding-regime analysis). Mutually exclusive with
 # ``candidate_pool_size`` — storage lets ann win if both arrive.
 ANN_POOL_SIZE = 0
+# Shadow-compare for the ANN pool: serve legacy, run pooled in the background,
+# log the comparison (see ExecuteScoredSearch). Enable per-tenant together with
+# ann_pool_size via default_search_profile; inert while ann_pool_size is 0.
+ANN_POOL_SHADOW = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_BOOST_FACTOR = 1.3

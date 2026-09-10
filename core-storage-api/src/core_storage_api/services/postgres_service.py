@@ -23,6 +23,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     ColumnElement,
+    Date,
     String,
     Table,
     and_,
@@ -35,6 +36,7 @@ from sqlalchemy import (
     func,
     literal,
     literal_column,
+    null,
     or_,
     select,
     text,
@@ -2820,7 +2822,7 @@ class PostgresService:
             # binds before the union — same construction as the scored-CTE
             # union below.
             ann_arm = (
-                select(Memory.id)
+                select(Memory.id, literal("ann").label("arm"))
                 .where(*row_filters)
                 .where(Memory.embedding.is_not(None))
                 .order_by(Memory.embedding.cosine_distance(embedding))
@@ -2830,7 +2832,7 @@ class PostgresService:
 
             if query and query.strip():
                 fts_arm = (
-                    select(Memory.id)
+                    select(Memory.id, literal("fts").label("arm"))
                     .where(*row_filters)
                     .where(_fts_guard)
                     .order_by(raw_keyword_rank.desc(), Memory.created_at.desc())
@@ -2839,7 +2841,7 @@ class PostgresService:
                 arm_selects.append(select(fts_arm.subquery()))
 
             recency_arm = (
-                select(Memory.id)
+                select(Memory.id, literal("recency").label("arm"))
                 .where(*row_filters)
                 .order_by(Memory.created_at.desc())
                 .limit(_ANN_POOL_SIDE_ARM_LIMIT)
@@ -2864,7 +2866,7 @@ class PostgresService:
                     _dr_cast(Memory.created_at, _DrDate),
                 )
                 date_arm = (
-                    select(Memory.id)
+                    select(Memory.id, literal("date").label("arm"))
                     .where(*row_filters)
                     .where(
                         and_(
@@ -2879,11 +2881,29 @@ class PostgresService:
 
             if boosted_memory_ids:
                 boosted_arm = (
-                    select(Memory.id).where(*row_filters).where(Memory.id.in_(list(boosted_memory_ids)))
+                    select(Memory.id, literal("boosted").label("arm"))
+                    .where(*row_filters)
+                    .where(Memory.id.in_(list(boosted_memory_ids)))
                 )
                 arm_selects.append(select(boosted_arm.subquery()))
 
-            pool_cte = arm_selects[0].union(*arm_selects[1:]).cte("candidate_pool")
+            # D12 arm provenance: every arm tags its rows, UNION ALL keeps the
+            # duplicates, and the GROUP BY collapses them into one row per id
+            # with the set of admitting arms ("ann+fts", "boosted", ...). The
+            # dedup the old plain UNION did now happens here; the aggregate runs
+            # over at most (pool + 3 x side arm + boosted) rows, so provenance
+            # is effectively free — and it is what turns a shadow-mode
+            # divergence from "the pool missed it" into "WHICH signal's arm
+            # missed it".
+            arm_union = arm_selects[0].union_all(*arm_selects[1:]).subquery("candidate_arms")
+            pool_cte = (
+                select(
+                    arm_union.c.id,
+                    func.string_agg(arm_union.c.arm.distinct(), "+").label("arms"),
+                )
+                .group_by(arm_union.c.id)
+                .cte("candidate_pool")
+            )
             ingredients_stmt = ingredients_stmt.where(Memory.id.in_(select(pool_cte.c.id)))
 
         # ``AS MATERIALIZED`` is a deliberate optimisation fence. With the
@@ -3008,8 +3028,6 @@ class PostgresService:
         # memories remain retrievable.
         if date_range_start and date_range_end:
             from datetime import date as date_type
-
-            from sqlalchemy import Date, cast, literal
 
             from core_storage_api.config import settings as _storage_settings
 
@@ -3222,6 +3240,10 @@ class PostgresService:
             scored_cte = main_stmt.cte("scored")
 
         # -- Outer query: JOIN Memory + LEFT JOIN entity links --
+        # ``pool_arms`` (D12 provenance) exists only in ann-mode; the default
+        # path selects a typed NULL so the row shape is identical either way
+        # and the route serialises one contract.
+        pool_arms_col = pool_cte.c.arms.label("pool_arms") if use_ann_pool else null().label("pool_arms")
         stmt = (
             select(
                 Memory,
@@ -3237,6 +3259,7 @@ class PostgresService:
                 scored_cte.c.entity_boost,
                 scored_cte.c.recall_boost,
                 scored_cte.c.temporal_boost,
+                pool_arms_col,
                 MemoryEntityLink.entity_id,
                 MemoryEntityLink.role,
                 Agent.display_name.label("agent_display_name"),
@@ -3246,6 +3269,8 @@ class PostgresService:
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .order_by(scored_cte.c.score.desc(), Memory.created_at.desc())
         )
+        if use_ann_pool:
+            stmt = stmt.outerjoin(pool_cte, Memory.id == pool_cte.c.id)
 
         # db_ms captures only pool wait + SQL round-trip; materialise rows
         # inside the session (they hold lazy-load handles), then drop the
@@ -3312,10 +3337,22 @@ class PostgresService:
                     entity_boost=row.entity_boost,
                     recall_boost=row.recall_boost,
                     temporal_boost=row.temporal_boost,
+                    pool_arms=row.pool_arms,
                     entity_links=[],
                 )
             if row.entity_id is not None:
                 grouped[mid].entity_links.append({"entity_id": row.entity_id, "role": row.role})
+        if use_ann_pool and len(grouped) < top_k:
+            # The pool admitted fewer distinct rows than the caller asked for —
+            # either the tenant slice is simply small (benign) or the arms are
+            # under-sized for this workload. Ops greps this against the shadow
+            # compare lines to tell which.
+            logger.info(
+                "ann_pool: pooled search under-filled (%d rows < top_k=%d, tenant=%s)",
+                len(grouped),
+                top_k,
+                tenant_id,
+            )
         return list(grouped.values())
 
     # ------------------------------------------------------------------

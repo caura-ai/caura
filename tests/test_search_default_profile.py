@@ -292,12 +292,12 @@ def test_caura_tune_signature_matches_the_knob_table():
 
 def test_the_ab_knobs_are_not_agent_tunable():
     """``fts_rank_scale`` / ``candidate_pool_size`` / ``score_formula`` /
-    ``ann_pool_size`` stay off the agent ingress.
+    ``ann_pool_size`` / ``ann_pool_shadow`` stay off the agent ingress.
 
     They are the A/B and rollout knobs — held at their global defaults until
     the offline comparison validates them, and flipped per TENANT via
-    ``default_profile``, not per agent. The 9-of-13 split is deliberate; this
-    records which four and why, so a future reader does not "fix" the omission.
+    ``default_profile``, not per agent. The 9-of-14 split is deliberate; this
+    records which five and why, so a future reader does not "fix" the omission.
     """
     from common.constants import SEARCH_KNOBS
     from core_api.schemas import SearchProfileUpdate
@@ -307,6 +307,7 @@ def test_the_ab_knobs_are_not_agent_tunable():
         "candidate_pool_size",
         "score_formula",
         "ann_pool_size",
+        "ann_pool_shadow",
     }
 
 

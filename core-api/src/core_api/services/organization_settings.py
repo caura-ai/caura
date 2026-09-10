@@ -590,6 +590,15 @@ def _validate_default_search_profile(payload: dict) -> None:
             )
         if value < lo or value > hi:
             raise ValueError(f"search.default_profile.{key} must be in [{lo}, {hi}], got {value}")
+    # Cross-key rule the per-key loop cannot see: the two pool selectors are
+    # mutually exclusive. Storage lets ``ann_pool_size`` win if both arrive
+    # (skew safety), but an org-wide setting write should fail loudly instead
+    # of persisting a config whose A49 half is silently dead.
+    if int(dp.get("ann_pool_size") or 0) > 0 and int(dp.get("candidate_pool_size") or 0) > 0:
+        raise ValueError(
+            "search.default_profile: ann_pool_size and candidate_pool_size are "
+            "mutually exclusive pool selectors — set at most one of them > 0"
+        )
 
 
 def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
