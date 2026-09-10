@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.8.0](https://github.com/caura-ai/caura/compare/backend-v3.7.0...backend-v3.8.0) (2026-09-10)
+
+
+### Features
+
+* **search:** ANN-pool shadow mode, D12 arm provenance, pool-selector validation (HNSW plan PR3) ([#1460](https://github.com/caura-ai/caura/issues/1460)) ([84c4b62](https://github.com/caura-ai/caura/commit/84c4b62df8ae3986a377d0cd4568ddc94e3dc5d8))
+* **search:** freshness_reference — As-Of Recall for backfilled corpora ([#1471](https://github.com/caura-ai/caura/issues/1471)) ([c13b720](https://github.com/caura-ai/caura/commit/c13b720336bdcf926d6dc43fb93347693570ec69))
+
+
+### Performance
+
+* **contradiction:** admission-gate detection passes so stacked bursts queue instead of stampeding (A19) ([#1461](https://github.com/caura-ai/caura/issues/1461)) ([731ba53](https://github.com/caura-ai/caura/commit/731ba53f067d53613c60d7fab041d22e72bb458c))
+
 ## [3.7.0](https://github.com/caura-ai/caura/compare/backend-v3.6.3...backend-v3.7.0) (2026-09-10)
 
 
