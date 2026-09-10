@@ -10,6 +10,28 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.7.0](https://github.com/caura-ai/caura/compare/backend-v3.6.3...backend-v3.7.0) (2026-09-10)
+
+
+### Features
+
+* **bulk:** one contradiction pass per subject on a coherent batch (A73) ([#1455](https://github.com/caura-ai/caura/issues/1455)) ([bb74b9b](https://github.com/caura-ai/caura/commit/bb74b9b15bad9c60717c3875b75d7b8c53412101))
+* **dedup:** merge a same-claim near-duplicate instead of appending beside it (A71) ([#1433](https://github.com/caura-ai/caura/issues/1433)) ([350c3ab](https://github.com/caura-ai/caura/commit/350c3ab21944a4c4f01b7b85a68e1f382043a6b3))
+* **extraction:** write back the predicate so the RDF path can fire (A65 groundwork) ([#1458](https://github.com/caura-ai/caura/issues/1458)) ([92eb5b5](https://github.com/caura-ai/caura/commit/92eb5b5e2482ffb113345a577b36234f993db6b4))
+* **search:** opt-in ANN candidate pool — HNSW finally serves the primary path (HNSW plan PR2) ([#1448](https://github.com/caura-ai/caura/issues/1448)) ([382c060](https://github.com/caura-ai/caura/commit/382c0607efc68dfefe99458a04abf13cd4ca89d2))
+
+
+### Bug Fixes
+
+* **contradiction:** stop a paraphrased predicate hiding a real contradiction (A36) ([#1462](https://github.com/caura-ai/caura/issues/1462)) ([051a02e](https://github.com/caura-ai/caura/commit/051a02e8715055357de0b89ddbfbd3bf9e0ae949))
+* **memory:** populate is_inferred so the invariant that reads it can fire (A62) ([#1457](https://github.com/caura-ai/caura/issues/1457)) ([6cb951c](https://github.com/caura-ai/caura/commit/6cb951c3f161a799fd7128df33b5b3f6a8a497ac))
+* **search:** fall back to hop-0 seeds when expand_graph fails for all fleets ([#1444](https://github.com/caura-ai/caura/issues/1444)) ([769d9de](https://github.com/caura-ai/caura/commit/769d9defab30f81b9bb2ad9b959fe1a5428d0570))
+
+
+### Documentation
+
+* **openapi:** declare recall_raw on RecallDiagnostic (oss-0902-l-16) ([#1443](https://github.com/caura-ai/caura/issues/1443)) ([3768862](https://github.com/caura-ai/caura/commit/37688623aeffd347bb5b76568807245f85a9b870))
+
 ## [3.6.3](https://github.com/caura-ai/caura/compare/backend-v3.6.2...backend-v3.6.3) (2026-09-09)
 
 
