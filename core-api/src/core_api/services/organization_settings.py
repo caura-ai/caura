@@ -208,6 +208,25 @@ DEFAULT_SETTINGS: dict = {
         # instead of falling through to the LLM. ``None`` resolves to
         # the global default (true).
         "triple_emission_enabled": None,
+        # A73 — one contradiction pass per SUBJECT on a bulk write, instead of
+        # one per row. A coherent batch (seeding a biography, importing a
+        # document) writes dozens of rows about the same subject in seconds, and
+        # each row is currently judged against a store its own siblings are still
+        # landing in. Complementary facts come back ``conflicted`` — ~40% of a
+        # 55-fact biography in one observed store, before the first conversation
+        # — and a conflicted row carries a 0.5 ranking penalty, so the store
+        # starts every retrieval handicapped.
+        #
+        # With this on, the batch's LAST row per subject is judged and the rest
+        # are not. That still catches both kinds of real conflict: an earlier
+        # sibling is already committed and so is a candidate for the last row's
+        # pass, and the pre-existing store is too. What it removes is the
+        # N-way churn of a batch conflicting with itself.
+        #
+        # Default OFF like every switch that changes what a write produces. It
+        # also REDUCES LLM calls (N rows -> one per subject), so it is not
+        # blocked by the no-new-LLM-calls hold.
+        "bulk_subject_batching": None,
         # CAURA-130 (L3.8) — Path C retraction kill-switch. When true
         # (the default), Path C's ``_attempt_entity_retraction`` runs
         # the entity-aware judge and may revert a Path A verdict. When
@@ -608,6 +627,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "entity_blocklist": list,
     "memclaw.auto_upgrade_enabled": bool,  # legacy-name-floor: floor
     "write.triple_emission_enabled": bool,
+    "write.bulk_subject_batching": bool,
     "write.retraction_enabled": bool,
     # Skill Factory SF-006 — type validators for the skills_factory namespace.
     "skills_factory.enabled": bool,
@@ -1060,6 +1080,17 @@ class ResolvedConfig:
         if val in ("fast", "strong"):
             return val
         return "fast"  # default to fast when unset
+
+    @property
+    def bulk_subject_batching(self) -> bool:
+        """One contradiction pass per subject on a bulk write (default OFF).
+
+        Off by default because it changes which rows get judged. Turning it on
+        both fixes the false-conflict storm on coherent batches AND reduces LLM
+        calls, so it is a tenant's choice rather than a cost trade.
+        """
+        val = self._ts.get("write", {}).get("bulk_subject_batching")
+        return val if val is not None else False
 
     @property
     def triple_emission_enabled(self) -> bool:

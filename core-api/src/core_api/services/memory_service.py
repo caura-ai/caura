@@ -2146,6 +2146,10 @@ async def create_memories_bulk(
             and tenant_config.enrichment_provider != "none"
         )
 
+        # A73 — subject -> the batch's most recent row for that subject, so one
+        # contradiction pass covers the whole run of writes about it.
+        bulk_subject_batching = getattr(tenant_config, "bulk_subject_batching", False)
+        deferred_by_subject: dict[str, tuple] = {}
         reembed_batch: list[tuple[UUID, str]] = []
         for orig_idx, mem_data, mem_id in resolved:
             if tenant_config.entity_extraction_enabled:
@@ -2221,7 +2225,25 @@ async def create_memories_bulk(
                 )
             if embeddings[orig_idx] is None:
                 reembed_batch.append((mem_id, items[orig_idx].content))
+            elif bulk_subject_batching and mem_data.get("subject_entity_id"):
+                # A73 — hold this row back. A coherent batch writes dozens of
+                # rows about one subject in seconds, and judging each against a
+                # store its own siblings are still landing in is what returns
+                # complementary facts as ``conflicted``. Keyed by subject and
+                # overwritten as the loop advances, so the LAST row for each
+                # subject is the one judged — by then every sibling is committed
+                # and is an ordinary candidate for it, so a real intra-batch
+                # contradiction is still caught, and so is one against the
+                # pre-existing store. What is dropped is the batch conflicting
+                # with itself N ways.
+                deferred_by_subject[str(mem_data["subject_entity_id"])] = (
+                    mem_id,
+                    items[orig_idx].content,
+                    embeddings[orig_idx],
+                )
             else:
+                # No resolved subject (or batching off): nothing to group by, so
+                # this keeps the per-row behaviour rather than guessing at a key.
                 track_task(
                     tracked_task(
                         run_contradiction_detection(
@@ -2237,6 +2259,32 @@ async def create_memories_bulk(
                         data.tenant_id,
                     )
                 )
+        # One pass per subject, after every row in the batch is committed —
+        # which is what makes the last row's candidate set complete.
+        for _subject, (_mid, _content, _emb) in deferred_by_subject.items():
+            track_task(
+                tracked_task(
+                    run_contradiction_detection(
+                        _mid,
+                        data.tenant_id,
+                        data.fleet_id,
+                        trigger=Trigger.BULK,
+                        content=_content,
+                        embedding=_emb,
+                    ),
+                    "contradiction_detection",
+                    _mid,
+                    data.tenant_id,
+                )
+            )
+        if deferred_by_subject:
+            logger.info(
+                "bulk_subject_batching: %d subject(s) judged for %d created row(s) tenant_id=%s",
+                len(deferred_by_subject),
+                len(resolved),
+                data.tenant_id,
+            )
+
         if reembed_batch:
             # memory_id is None: no single UUID is authoritative for a
             # batch. _reembed_memories_bulk logs per-item failures with
