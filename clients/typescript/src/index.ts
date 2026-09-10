@@ -80,6 +80,11 @@ export interface SearchOptions {
   [extra: string]: unknown;
 }
 
+export interface RecallOptions {
+  topK?: number;
+  [extra: string]: unknown;
+}
+
 export interface GetDocumentOptions {
   collection: string;
   tenantId?: string;
@@ -156,8 +161,10 @@ export class Caura {
   }
 
   /** Search + LLM-synthesized context brief. POST /api/v1/recall */
-  async recall(query: string, options: { topK?: number } = {}): Promise<RecallResult> {
-    const body = { tenant_id: this.tenantId, query, top_k: options.topK ?? 5 };
+  async recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
+    const { topK = 5, ...extra } = options;
+    const body: Record<string, unknown> = { tenant_id: this.tenantId, query, top_k: topK };
+    Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/recall", body);
     if (!data || typeof data !== "object" || Array.isArray(data)) {
       throw new CauraApiError(200, "recall response must be a JSON object");
