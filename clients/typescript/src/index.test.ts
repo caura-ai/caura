@@ -141,6 +141,54 @@ test("health hits /health", async () => {
   assert.equal((await client.health()).status, "ok");
 });
 
+test("getDocument fetches document by id with collection and tenant query params", async () => {
+  const client = makeClient((url, init) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.pathname, "/api/v1/documents/doc-1");
+    assert.equal(parsed.searchParams.get("tenant_id"), "t1");
+    assert.equal(parsed.searchParams.get("collection"), "interviews");
+    assert.equal(init.method, "GET");
+    assert.equal((init.headers as Record<string, string>)["X-API-Key"], "mc_test");
+    return jsonResponse(200, { id: "doc-1", data: { title: "Doc Title" } });
+  });
+
+  const doc = await client.getDocument("doc-1", { collection: "interviews" });
+  assert.equal(doc.id, "doc-1");
+  assert.deepEqual(doc.data, { title: "Doc Title" });
+});
+
+test("getDocument encodes special characters in docId preventing path and query injection", async () => {
+  const client = makeClient((url) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.pathname, "/api/v1/documents/path%2Fwith%2Fslash%3Fand%3Dquery");
+    assert.equal(parsed.searchParams.get("tenant_id"), "t1");
+    assert.equal(parsed.searchParams.get("collection"), "interviews");
+    assert.equal(parsed.searchParams.has("and"), false);
+    return jsonResponse(200, { id: "path/with/slash?and=query", data: {} });
+  });
+
+  await client.getDocument("path/with/slash?and=query", { collection: "interviews" });
+});
+
+test("getDocument allows overriding tenantId", async () => {
+  const client = makeClient((url) => {
+    const parsed = new URL(url);
+    assert.equal(parsed.searchParams.get("tenant_id"), "override-tenant");
+    assert.equal(parsed.searchParams.get("collection"), "interviews");
+    return jsonResponse(200, { id: "doc-1", data: {} });
+  });
+
+  await client.getDocument("doc-1", { collection: "interviews", tenantId: "override-tenant" });
+});
+
+test("getDocument maps 404 to NotFoundError", async () => {
+  const client = makeClient(() => jsonResponse(404, { detail: "document not found" }));
+  await assert.rejects(
+    client.getDocument("missing-id", { collection: "interviews" }),
+    NotFoundError
+  );
+});
+
 test("403 maps to AuthError and parses the error envelope", async () => {
   const client = makeClient(() => jsonResponse(403, { error: { message: "cross-fleet", details: { x: 1 } } }));
   await assert.rejects(client.write("x"), (err: unknown) => {
