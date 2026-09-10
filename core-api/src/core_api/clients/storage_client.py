@@ -730,6 +730,26 @@ class CoreStorageClient:
         )
         return bool(result and result.get("updated"))
 
+    async def set_predicate_if_null(
+        self, memory_id: str, tenant_id: str, predicate: str, object_value: str
+    ) -> bool:
+        """A65 — conditional predicate/object write-back from the extraction worker.
+
+        Sibling of ``set_subject_entity_if_null``. Storage-side single UPDATE
+        guarded by ``predicate IS NULL`` (the write-time triple path's value
+        wins). Returns whether the row was actually updated; ``False`` is a
+        benign skip."""
+        result = await self._post(
+            f"/memories/{memory_id}/predicate",
+            {
+                "tenant_id": tenant_id,
+                "predicate": predicate,
+                "object_value": object_value,
+            },
+            read=False,
+        )
+        return bool((result or {}).get("updated"))
+
     async def update_memory_status(
         self,
         memory_id: str,

@@ -1641,6 +1641,47 @@ class PostgresService:
             )
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
+    async def memory_set_predicate_if_null(
+        self, memory_id: UUID, tenant_id: str, predicate: str, object_value: str
+    ) -> bool:
+        """A65 — write-back of the extraction-derived predicate and object.
+
+        The sibling of ``memory_set_subject_entity_if_null`` (A63), and it
+        exists for the reason that one's docstring already names: the
+        write-time triple path (``EmitMemoryTriple``, CAURA-123) only fires on
+        narrow phrase regexes, so ``predicate`` and ``object_value`` are NULL on
+        nearly every row. A63 filled in the subject and left those two behind —
+        which means the deterministic RDF contradiction path still cannot fire,
+        because it keys on (subject, predicate) and only one of the three
+        columns was ever populated.
+
+        Guarded by ``predicate IS NULL``, same as A63's guard and for the same
+        reason: when the regex path DID fire, its value came from a
+        deterministic match on the original text and is the higher-fidelity
+        source, so this async write-back must never clobber it. The guard also
+        makes concurrent deliveries race-safe without a read-modify-write.
+
+        Both columns are set together. A predicate without an object names an
+        attribute with no value, which the RDF comparison reads as a claim that
+        nothing can conflict with — worse than leaving the row untouched.
+
+        Returns ``True`` when the row was updated; ``False`` when it is absent,
+        soft-deleted, foreign-tenant, or already carries a predicate — all of
+        which callers treat as a benign skip.
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.predicate.is_(None),
+                )
+                .values(predicate=predicate, object_value=object_value)
+            )
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+
     async def memory_update_status(
         self,
         memory_id: UUID,

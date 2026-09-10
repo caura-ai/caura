@@ -617,6 +617,25 @@ async def set_subject_entity_if_null(memory_id: UUID, request: Request) -> dict:
     return {"updated": updated}
 
 
+@router.post("/{memory_id}/predicate")
+async def set_predicate_if_null(memory_id: UUID, request: Request) -> dict:
+    """A65 — conditional write-back of the extraction-derived predicate/object.
+
+    Sibling of ``/subject-entity`` (A63). Sets ``predicate`` and
+    ``object_value`` ONLY when ``predicate`` is currently NULL — the write-time
+    triple path's value always wins. Returns ``{"updated": bool}``; ``false``
+    covers absent / deleted / foreign-tenant / already-set rows alike.
+    """
+    body: dict = await request.json()
+    updated = await _svc.memory_set_predicate_if_null(
+        memory_id=memory_id,
+        tenant_id=body["tenant_id"],
+        predicate=body["predicate"],
+        object_value=body["object_value"],
+    )
+    return {"updated": updated}
+
+
 @router.get("/rdf-conflicts")
 async def find_rdf_conflicts(
     tenant_id: str,

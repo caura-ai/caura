@@ -3,9 +3,10 @@
 import asyncio
 import logging
 import re
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
+from common.constants import SINGLE_VALUE_PREDICATES
 from common.embedding import get_embedding
 from common.entity_naming import canonical_match_key
 from core_api.clients.storage_client import get_storage_client
@@ -23,6 +24,50 @@ from core_api.services.entity_extraction import extract_entities_from_content
 from core_api.services.entity_service import upsert_relation
 
 logger = logging.getLogger(__name__)
+
+# A65 — map the extractor's free-form ``relation_type`` onto the canonical
+# predicate vocabulary, so two rows that state the same attribute in different
+# words compare equal on the deterministic RDF path.
+#
+# The extractor is asked for "a short verb phrase like works_on, uses,
+# belongs_to" and answers in whatever shape it likes: "Managed By", "reports-to",
+# "is located in". None of those equal ``managed_by`` / ``reports_to`` /
+# ``located_in`` as strings, so without normalisation the write-back below would
+# populate ``predicate`` with values that never match another row's.
+#
+# Deliberately conservative. It normalises SHAPE (case, spaces, hyphens, a
+# leading "is_"/"has_" where the bare form is canonical) and nothing else — no
+# synonym table, no stemming, no inference. A predicate that does not land in
+# ``SINGLE_VALUE_PREDICATES`` after that is returned as None and the row keeps a
+# NULL predicate, because a wrong predicate is worse than none: the RDF path
+# treats (subject, predicate) as authoritative and would compare two unrelated
+# attributes as if they were the same one.
+_PREDICATE_PREFIXES: Final[tuple[str, ...]] = ("is_", "has_", "was_", "the_")
+
+
+def _canonical_predicate(raw: str | None) -> str | None:
+    """The canonical single-value predicate for an extracted relation, or None."""
+    if not raw:
+        return None
+    norm = re.sub(r"[\s\-]+", "_", str(raw).strip().lower())
+    norm = re.sub(r"[^a-z0-9_]", "", norm).strip("_")
+    if not norm:
+        return None
+    # Strip FIRST, not last. The canonical set contains both spellings of
+    # several predicates — ``is_located_in`` AND ``located_in``,
+    # ``is_based_in`` AND ``based_in``, ``has_status`` AND ``status`` — so
+    # returning the raw form when it happens to be canonical would let two rows
+    # stating the SAME attribute land on two different canonical predicates and
+    # never match. That is precisely the failure this function exists to remove,
+    # so the bare form always wins and both spellings converge on it.
+    for prefix in _PREDICATE_PREFIXES:
+        if norm.startswith(prefix):
+            stripped = norm[len(prefix) :]
+            if stripped in SINGLE_VALUE_PREDICATES:
+                return stripped
+    if norm in SINGLE_VALUE_PREDICATES:
+        return norm
+    return None
 
 
 # CAURA graph-build fix (A): reject literal VALUES and attribute/field NAMES so they
@@ -792,6 +837,72 @@ async def process_entity_extraction(
                     ),
                 )
                 rel_count += 1
+
+        # ---- A65: predicate write-back ----
+        #
+        # A63 filled in ``subject_entity_id`` from the extractor and stopped
+        # there, so ``predicate`` and ``object_value`` stayed NULL on nearly
+        # every row — and the deterministic RDF contradiction path keys on
+        # (subject, predicate), so populating one of the three columns left it
+        # exactly as dormant as before. This is the same write-back for the
+        # other two.
+        #
+        # Only when EXACTLY ONE relation canonicalises, and it starts at the
+        # subject we just wrote back. The ambiguity rule is A63's, for A63's
+        # reason: downstream gates treat these columns as authoritative, so a
+        # wrong predicate is worse than none — it makes two unrelated attributes
+        # compare as the same one. Two canonical relations about one subject is
+        # exactly that risk, so it skips.
+        # Recomputed here rather than reused from the subject write-back above:
+        # that block is nested inside a conditional, so reaching into its locals
+        # would NameError on every path where it did not run. Same expression,
+        # same inputs, no cross-scope dependency.
+        subject_names = {name for name, _et, role in filtered if role == "subject" and name in name_to_id}
+        if len(subject_names) == 1:
+            subject_name = next(iter(subject_names))
+            canonical_rels = [
+                (p, rel.to_entity)
+                for rel in graph.relations
+                if rel.from_entity == subject_name and (p := _canonical_predicate(rel.relation_type))
+            ]
+            if len(canonical_rels) == 1:
+                pred, obj = canonical_rels[0]
+                try:
+                    updated = await sc.set_predicate_if_null(
+                        memory_id=str(memory_id),
+                        tenant_id=tenant_id,
+                        predicate=pred,
+                        object_value=str(obj),
+                    )
+                    logger.info(
+                        "predicate_writeback memory=%s predicate=%s outcome=%s",
+                        memory_id,
+                        pred,
+                        "set" if updated else "kept_existing",
+                    )
+                except Exception:
+                    # Non-fatal, exactly like the subject write-back: the row
+                    # simply keeps a NULL predicate, which is today's behaviour.
+                    logger.warning(
+                        "predicate_writeback failed for memory %s (non-fatal)",
+                        memory_id,
+                        exc_info=True,
+                    )
+            elif canonical_rels:
+                logger.info(
+                    "predicate_writeback memory=%s outcome=skipped_ambiguous n_predicates=%d",
+                    memory_id,
+                    len(canonical_rels),
+                )
+            else:
+                # The common case: the extractor named relations, none of which
+                # are single-valued attributes. Logged so "no canonical
+                # predicate" stays distinguishable from "never ran".
+                logger.info(
+                    "predicate_writeback memory=%s outcome=skipped_no_canonical n_relations=%d",
+                    memory_id,
+                    len(graph.relations),
+                )
 
         # Audit log
         await log_action(
