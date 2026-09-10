@@ -82,6 +82,10 @@ from core_api.constants import (
     SIMILARITY_BLEND,
     SQL_SCORING_PARAM_KEYS,
 )
+from core_api.errors import (
+    AUTH_FLEET_SCOPE_FORBIDDEN,
+    coded_detail,
+)
 from core_api.schemas import (
     BulkItemResult,
     BulkMemoryCreate,
@@ -3563,7 +3567,10 @@ async def update_memory(
         if not allowed:
             raise HTTPException(
                 status_code=403,
-                detail=f"Agent '{agent_id}' cannot modify memory in fleet '{mem.get('fleet_id')}'.",
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"Agent '{agent_id}' cannot modify memory in fleet '{mem.get('fleet_id')}'.",
+                ),
             )
 
     fields_set = data.model_fields_set

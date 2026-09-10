@@ -37,6 +37,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.errors import (
+    AUTH_CROSS_TENANT_REQUIRED,
+    coded_detail,
+)
 from core_api.services.agent_digest import run_agent_digest
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
@@ -238,7 +242,9 @@ async def get_report(
     if org_mode and not (auth.is_admin or auth.is_cross_tenant_read):
         raise HTTPException(
             status_code=403,
-            detail="scope='org' requires a cross-tenant read credential.",
+            detail=coded_detail(
+                AUTH_CROSS_TENANT_REQUIRED, "scope='org' requires a cross-tenant read credential."
+            ),
         )
     # The internal admin credential (the enterprise org-report proxy) may pass an
     # explicit tenant set — the proxy has already org-admin-gated the caller and

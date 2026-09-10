@@ -23,6 +23,11 @@ from fastapi import HTTPException
 from core_api.agent_ids import DEFAULT_AGENT_ID, AgentIdentity
 from core_api.auth import AuthContext
 from core_api.config import settings as app_settings
+from core_api.errors import (
+    AUTH_AGENT_NOT_REGISTERED,
+    AUTH_AGENT_TRUST_TOO_LOW,
+    coded_detail,
+)
 from core_api.services.agent_service import broker_owned_agent_id
 from core_api.services.trust_service import parse_trust_error, require_trust
 
@@ -96,8 +101,14 @@ async def resolve_caller_and_gate(
     if not_found:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{caller_agent_id}' is not registered in tenant '{tenant_id}'.",
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED,
+                f"Agent '{caller_agent_id}' is not registered in tenant '{tenant_id}'.",
+            ),
         )
     if terr:
-        raise HTTPException(status_code=403, detail=parse_trust_error(terr))
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr)),
+        )
     return caller_agent_id

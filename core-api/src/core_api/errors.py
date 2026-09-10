@@ -102,6 +102,29 @@ AUTH_TENANT_NOT_READABLE = "TENANT_NOT_READABLE"
 AUTH_CROSS_TENANT_REQUIRED = "CROSS_TENANT_READ_REQUIRED"
 AUTH_ORG_SUSPENDED = "ORGANIZATION_SUSPENDED"
 
+# C32 — the reasons the remaining 33 refusal sites actually give. Added rather
+# than folded into the codes above because each one leaves the caller a
+# DIFFERENT next move, which is the whole test for whether a code earns its
+# place: "register this agent" and "raise this agent's trust_level" are both
+# FORBIDDEN and are not the same instruction.
+AUTH_AGENT_NOT_REGISTERED = "AGENT_NOT_REGISTERED"
+AUTH_AGENT_TRUST_TOO_LOW = "AGENT_TRUST_TOO_LOW"
+AUTH_TARGET_AGENT_RESTRICTED = "TARGET_AGENT_RESTRICTED"
+AUTH_FLEET_SCOPE_FORBIDDEN = "FLEET_SCOPE_FORBIDDEN"
+AUTH_FEATURE_DISABLED = "FEATURE_DISABLED"
+
+# Three codes whose VALUES are inherited, not chosen. ``skills_inbox`` and
+# ``stm`` already shipped a machine-readable token welded to the front of the
+# prose — ``"TENANT_MISMATCH — this credential is not scoped…"`` — with a
+# comment at the site stating that clients branch on the prefix and not on the
+# message. That is a live contract, so moving it into ``error.code`` must keep
+# the string byte-for-byte; a "tidier" spelling here would be a silent breaking
+# change for every caller already parsing it. ``TENANT_MISMATCH`` needed no new
+# constant — ``AUTH_TENANT_MISMATCH`` above already carries that exact value.
+AUTH_UNAUTHENTICATED = "UNAUTHENTICATED"
+AUTH_SKILLS_FACTORY_DISABLED = "SKILLS_FACTORY_DISABLED"
+AUTH_SKILLS_INBOX_FORBIDDEN = "SKILLS_INBOX_FORBIDDEN"
+
 
 def coded_detail(code: str, message: str, **details: object) -> dict:
     """An ``HTTPException`` detail that keeps its own error code.

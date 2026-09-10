@@ -23,6 +23,10 @@ from core_api import openapi_responses as _oar
 from core_api.agent_ids import DEFAULT_AGENT_ID
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.errors import (
+    AUTH_AGENT_NOT_REGISTERED,
+    coded_detail,
+)
 from core_api.schemas import ConflictListResponse, ConflictOut, ConflictResolveRequest
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import require_trust as _require_trust
@@ -108,10 +112,11 @@ async def resolve_conflict(
     if not_found or terr:
         raise HTTPException(
             status_code=403,
-            detail=(
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED,
                 f"Agent '{reviewer}' cannot review conflicts. Reviewing records ground "
                 "truth about detector accuracy, so it requires a registered agent at "
-                "trust >= 2 — call with X-Agent-ID or an agent-scoped credential."
+                "trust >= 2 — call with X-Agent-ID or an agent-scoped credential.",
             ),
         )
     payload = {

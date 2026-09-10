@@ -12,6 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from core_api.auth import AuthContext, get_auth_context
+from core_api.errors import (
+    AUTH_FEATURE_DISABLED,
+    AUTH_TENANT_MISMATCH,
+    coded_detail,
+)
 from core_api.schemas import STRICT_WRITE_BODY
 
 logger = logging.getLogger(__name__)
@@ -54,7 +59,9 @@ class TimeWarpResponse(BaseModel):
 def _require_testing_mode() -> None:
     """Fail fast if TESTING env var is not set."""
     if os.getenv("TESTING") != "1":
-        raise HTTPException(status_code=403, detail="Testing endpoints require TESTING=1")
+        raise HTTPException(
+            status_code=403, detail=coded_detail(AUTH_FEATURE_DISABLED, "Testing endpoints require TESTING=1")
+        )
 
 
 # ── Endpoint ──
@@ -123,7 +130,7 @@ async def _handle_set_field(body: TimeWarpRequest, auth: AuthContext) -> TimeWar
             # Admin credentials carry no tenant. The old comparison rejected
             # them here too — ``memories.tenant_id`` is NOT NULL, so it could
             # never equal None — and there is no tenant to scope the fetch to.
-            raise HTTPException(status_code=403, detail="Tenant mismatch")
+            raise HTTPException(status_code=403, detail=coded_detail(AUTH_TENANT_MISMATCH, "Tenant mismatch"))
         row = await sc.get_memory(body.id, auth.tenant_id)
         if not row:
             raise HTTPException(status_code=404, detail="Memory not found")
