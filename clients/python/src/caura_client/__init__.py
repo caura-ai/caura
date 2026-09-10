@@ -16,6 +16,7 @@ from .exceptions import (
     CauraAPIError,
     CauraError,
     NotFoundError,
+    RateLimitError,
 )
 from .models import Memory, RecallResult
 
@@ -27,6 +28,7 @@ __all__ = [
     "CauraAPIError",
     "AuthError",
     "NotFoundError",
+    "RateLimitError",
     "DEFAULT_BASE_URL",
 ]
 
