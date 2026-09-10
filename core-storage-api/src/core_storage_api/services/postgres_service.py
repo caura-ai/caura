@@ -33,6 +33,7 @@ from sqlalchemy import (
     distinct,
     false,
     func,
+    literal,
     literal_column,
     or_,
     select,
@@ -228,6 +229,30 @@ async def get_read_session() -> AsyncIterator[AsyncSession]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _normalized_object_sql(column):
+    """SQL-side object normalisation for the RDF conflict compare (A35).
+
+    ``memory_find_rdf_conflicts`` selects a conflict with
+    ``Memory.object_value != object_value`` — raw string inequality. So
+    "7,500 rpm" and "7500 RPM" read as two DIFFERENT values for one
+    (subject, predicate) and the row is flagged as a contradiction it is not.
+    A false conflict is not free: the loser carries a 0.5 ranking penalty, so
+    a formatting difference quietly demotes a correct memory.
+
+    Normalises SHAPE only — case, whitespace, thousands separators — and
+    deliberately nothing semantic. "7500 rpm" and "7500 per minute" still
+    compare as different, because unit synonymy is open-ended and getting it
+    wrong in the other direction SUPPRESSES a real contradiction, which is the
+    worse failure. Same conservative line as A65's predicate canonicaliser.
+
+    Applied identically to the column and the bound parameter so the two can
+    never drift apart. It does cost the index on ``object_value``, which is
+    acceptable here: the query has already narrowed to one
+    (tenant, subject_entity_id, predicate) before this predicate is evaluated.
+    """
+    return func.lower(func.regexp_replace(column, r"[\s,]", "", "g"))
 
 
 def _fleet_scope_clause(
@@ -3652,7 +3677,11 @@ class PostgresService:
                 Memory.status.in_(("active", "confirmed", "pending")),
                 Memory.subject_entity_id == subject_entity_id,
                 func.lower(Memory.predicate) == predicate.lower(),
-                Memory.object_value != object_value,
+                # A35 — compare NORMALISED forms. Raw inequality made
+                # "7,500 rpm" and "7500 RPM" look like competing values for the
+                # same attribute and flagged a contradiction that was only a
+                # formatting difference.
+                _normalized_object_sql(Memory.object_value) != _normalized_object_sql(literal(object_value)),
                 Memory.id != memory_id,
             )
             if fleet_id:
