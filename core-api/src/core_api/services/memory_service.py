@@ -61,6 +61,7 @@ from core_api.constants import (
     EMBEDDING_CACHE_TTL,
     FRESHNESS_DECAY_DAYS,
     FRESHNESS_FLOOR,
+    FRESHNESS_REFERENCE,
     FTS_BOOST_MAX_TOKENS,
     FTS_BOOST_SPECIFICITY_RATIO,
     FTS_RANK_SCALE,
@@ -4066,6 +4067,7 @@ def resolve_search_params(
         "score_formula": resolved.get("score_formula", SCORE_FORMULA),
         "ann_pool_size": resolved.get("ann_pool_size", ANN_POOL_SIZE),
         "ann_pool_shadow": resolved.get("ann_pool_shadow", ANN_POOL_SHADOW),
+        "freshness_reference": resolved.get("freshness_reference", FRESHNESS_REFERENCE),
     }
 
 

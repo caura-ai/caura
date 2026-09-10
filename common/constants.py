@@ -696,6 +696,27 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     # ann_pool_size forced to 0 and the shadow call with the configured size).
     # Inert when ann_pool_size is 0.
     "ann_pool_shadow": SearchKnob(int, (0, 1)),
+    # Reference clock for freshness and the temporal window when the request
+    # carries ``valid_at`` (the as-of time of the question). 0 = ``now()`` —
+    # byte-identical to today. 1 = age is measured from ``valid_at``, and the
+    # row's anchor is ``coalesce(ts_valid_start, created_at)`` instead of
+    # ``greatest(created_at, ts_valid_start)``. Inert without ``valid_at`` on
+    # the request; ``valid_at`` without the knob keeps today's behaviour, so
+    # only the conjunction retargets the clock and no existing caller moves.
+    #
+    # Per TENANT on purpose, not per agent or per request: whether
+    # ``ts_valid_start`` means "when the event happened" (a backfilled history,
+    # a benchmark whose questions carry an as-of date) or "start of a validity
+    # window" (a price effective from a date) is a property of the tenant's
+    # data, and only the former wants freshness anchored to it. The
+    # ``greatest()`` in the default anchor is exactly the guard that protects
+    # the latter — a validity-window row must never rank as older than its
+    # ingest — which is why this is a switch and not a new default.
+    #
+    # Storage reads it (sql=True). The recall-usage decay is deliberately NOT
+    # retargeted: "recently recalled" is a system-time fact, not an event-time
+    # one, and stays on ``now()`` under either setting.
+    "freshness_reference": SearchKnob(int, (0, 1), sql=True),
 }
 
 # The wire contract, derived. Core-api's two search-path builders project

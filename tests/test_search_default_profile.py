@@ -136,6 +136,38 @@ async def test_precedence_empty_tenant_default_is_neutral():
     assert params["min_similarity"] == MIN_SEARCH_SIMILARITY
 
 
+async def test_freshness_reference_defaults_to_now_and_crosses_the_wire():
+    """Off by default (0 = now()), and present in the SQL projection so storage
+    can read it — a knob that is ``sql=True`` but missing from the resolved
+    params would silently never reach the scoring query."""
+    from common.constants import SQL_SCORING_PARAM_KEYS
+
+    params = await _resolve(tenant_config=None, agent_profile=None)
+    assert params["freshness_reference"] == 0
+    assert "freshness_reference" in SQL_SCORING_PARAM_KEYS
+
+
+async def test_freshness_reference_is_a_tenant_default():
+    tc = ResolvedConfig({"search": {"default_profile": {"freshness_reference": 1}}})
+    params = await _resolve(tenant_config=tc, agent_profile=None)
+    assert params["freshness_reference"] == 1
+
+
+def test_validate_default_profile_bounds_freshness_reference():
+    _validate_default_search_profile(
+        {"search": {"default_profile": {"freshness_reference": 1}}}
+    )
+    with pytest.raises(ValueError, match="in \\[0, 1\\]"):
+        _validate_default_search_profile(
+            {"search": {"default_profile": {"freshness_reference": 2}}}
+        )
+    # bool is an int subclass; the validator must not let ``True`` through as 1.
+    with pytest.raises(ValueError, match="must be int"):
+        _validate_default_search_profile(
+            {"search": {"default_profile": {"freshness_reference": True}}}
+        )
+
+
 async def test_keyword_strategy_keeps_the_global_semantic_floor():
     step = ResolveSearchProfile()
     ctx = PipelineContext(
@@ -292,12 +324,16 @@ def test_caura_tune_signature_matches_the_knob_table():
 
 def test_the_ab_knobs_are_not_agent_tunable():
     """``fts_rank_scale`` / ``candidate_pool_size`` / ``score_formula`` /
-    ``ann_pool_size`` / ``ann_pool_shadow`` stay off the agent ingress.
+    ``ann_pool_size`` / ``ann_pool_shadow`` / ``freshness_reference`` stay off
+    the agent ingress.
 
-    They are the A/B and rollout knobs — held at their global defaults until
-    the offline comparison validates them, and flipped per TENANT via
-    ``default_profile``, not per agent. The 9-of-14 split is deliberate; this
-    records which five and why, so a future reader does not "fix" the omission.
+    They are the A/B, rollout and data-shape knobs — held at their global
+    defaults until the offline comparison validates them, and flipped per
+    TENANT via ``default_profile``, not per agent. ``freshness_reference`` is
+    tenant-level for a different reason: whether ``ts_valid_start`` is event
+    time or a validity-window start is a property of the tenant's data, not of
+    any one agent. The 9-of-15 split is deliberate; this records which six and
+    why, so a future reader does not "fix" the omission.
     """
     from common.constants import SEARCH_KNOBS
     from core_api.schemas import SearchProfileUpdate
@@ -308,6 +344,7 @@ def test_the_ab_knobs_are_not_agent_tunable():
         "score_formula",
         "ann_pool_size",
         "ann_pool_shadow",
+        "freshness_reference",
     }
 
 

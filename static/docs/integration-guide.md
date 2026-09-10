@@ -172,7 +172,7 @@ Once configured, the MCP client handles tool discovery. Agents can use Caura too
 | Works with | Any MCP client | OpenClaw agents only |
 | Tools | 12 (write, recall, manage, list, doc, entity_get, tune, insights, evolve, stats, keystones, keystones_set) | 11 (all except `keystones_set`) |
 | RDF triples | Not exposed (contradiction detection via semantic similarity only) | Yes — `subject_entity_id`, `predicate`, `object_value` on write |
-| Temporal filter | Not exposed | Yes — `valid_at` on search |
+| Temporal filter | Yes — `valid_at` on `caura_recall` | Yes — `valid_at` on search |
 | Visibility | Passed per-call (`scope_agent` / `scope_team` / `scope_org`) | Passed per-call (`scope_agent` / `scope_team` / `scope_org`) |
 | Multi-fleet search | Yes — `fleet_ids` parameter | Yes — `fleet_ids` parameter |
 | Fleet ID | Passed per-call (optional) | Auto-stamped from gateway env |
@@ -381,7 +381,7 @@ BEFORE starting any task:
   model's working)
 - Include fleet_id to scope to this fleet, omit for tenant-wide search
 - Filter by status="active" to skip deleted/archived memories
-- Use valid_at for point-in-time queries (OpenClaw plugin and REST API only)
+- Use `valid_at` for point-in-time queries (REST `/search`, MCP `caura_recall`, and the OpenClaw plugin all accept it)
 
 AFTER completing work:
 - Store findings with caura_write — just provide content
@@ -664,7 +664,8 @@ Togglable per tenant via `lifecycle_automation_enabled` setting.
 ### Temporal validity
 
 - `ts_valid_start` / `ts_valid_end` — auto-extracted from content by LLM, or set explicitly
-- Search with `valid_at` to return only memories valid at a point in time
+- Search with `valid_at` to return only memories valid at a point in time; relative dates in the query ("last month") resolve against it
+- For backfilled corpora whose `ts_valid_start` is the time the event happened, set `search.default_profile.freshness_reference` to `1` in tenant settings — freshness and the temporal window are then measured from `valid_at` against event time instead of from now against ingest time. Off by default; inert on requests without `valid_at`
 - Memories without temporal bounds are always considered valid
 
 ### Batch Write

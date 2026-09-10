@@ -45,7 +45,14 @@ async def _capture() -> list[dict]:
 
     tools = await mcp_server.mcp.list_tools()
     tools_list = [
-        t.model_dump(mode="json") if hasattr(t, "model_dump") else dict(t.__dict__) for t in tools
+        # ``by_alias=True`` matches what ``test_v1_baseline_matches_live_registry``
+        # compares against — the SDK's wire names (``inputSchema``), not the
+        # model's Python field names, which became snake_case in mcp 2.x. Without
+        # it this script writes a fixture the test rejects on 74 renamed lines.
+        t.model_dump(mode="json", by_alias=True)
+        if hasattr(t, "model_dump")
+        else dict(t.__dict__)
+        for t in tools
     ]
     # The tests sort by name before comparing, because spec modules are
     # auto-loaded in `pkgutil.iter_modules` order; store it sorted so the file

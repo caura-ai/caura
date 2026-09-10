@@ -335,6 +335,16 @@ ANN_POOL_SIZE = 0
 # log the comparison (see ExecuteScoredSearch). Enable per-tenant together with
 # ann_pool_size via default_search_profile; inert while ann_pool_size is 0.
 ANN_POOL_SHADOW = 0
+# Reference clock for freshness when the request carries ``valid_at`` (see
+# ``common.constants.SEARCH_KNOBS["freshness_reference"]`` for the full
+# contract). 0 = now(); 1 = the request's ``valid_at``, with the row anchored to
+# ``coalesce(ts_valid_start, created_at)``. Off by default; enable per tenant via
+# ``default_search_profile.freshness_reference`` for corpora whose
+# ``ts_valid_start`` is EVENT time — a backfilled history, a benchmark whose
+# questions ask "as of" a date. Without it a corpus ingested in one sitting has
+# every row the same age, so the time signal is uniform noise and "last month"
+# resolves against the ingest date rather than the question's.
+FRESHNESS_REFERENCE = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_BOOST_FACTOR = 1.3

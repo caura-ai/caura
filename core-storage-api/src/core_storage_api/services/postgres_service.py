@@ -24,6 +24,7 @@ from uuid import UUID
 from sqlalchemy import (
     ColumnElement,
     Date,
+    DateTime,
     String,
     Table,
     and_,
@@ -2532,6 +2533,15 @@ class PostgresService:
         memory_boost_factor = memory_boost_factor or {}
         sp = search_params
 
+        # ``valid_at`` is compared with timestamptz columns in multiple parts
+        # of this query. Normalize it once so every bind observes the public
+        # contract that a naive value means UTC.
+        if valid_at is not None and valid_at.tzinfo is None:
+            valid_at = valid_at.replace(tzinfo=UTC)
+        valid_at_ts: ColumnElement[Any] | None = (
+            literal(valid_at, type_=DateTime(timezone=True)) if valid_at is not None else None
+        )
+
         _fts_weight = sp["fts_weight"]
         _freshness_floor = sp["freshness_floor"]
         _freshness_decay_days = sp["freshness_decay_days"]
@@ -2555,6 +2565,19 @@ class PostgresService:
         # extensions so an on-prem box that predates iterative scans keeps
         # byte-identical behaviour.
         _ann_pool_size = int(sp.get("ann_pool_size", 0) or 0)
+        # Reference clock for freshness and temporal_boost. 0 = now() (default);
+        # 1 = the request's ``valid_at`` when one was sent. The knob alone changes
+        # nothing (no valid_at → now()) and valid_at alone changes nothing new
+        # (knob off → now()); only the conjunction retargets the clock, so no
+        # caller that exists today moves.
+        _freshness_reference = int(sp.get("freshness_reference", 0) or 0)
+        ref_ts: ColumnElement[Any]
+        anchor_to_valid_at = False
+        if _freshness_reference == 1 and valid_at_ts is not None:
+            anchor_to_valid_at = True
+            ref_ts = valid_at_ts
+        else:
+            ref_ts = func.now()
         use_ann_pool = _ann_pool_size > 0 and await _ann_pool_available()
         if use_ann_pool and _candidate_pool_size > 0:
             # The two pool selectors are mutually exclusive by design —
@@ -2956,11 +2979,22 @@ class PostgresService:
             else_=ing.c.fts_score,
         ).label("similarity")
 
-        anchor = func.greatest(
-            ing.c.created_at,
-            func.coalesce(ing.c.ts_valid_start, ing.c.created_at),
-        )
-        age_days = func.extract("epoch", func.now() - anchor) / 86400.0
+        anchor: ColumnElement[Any]
+        if anchor_to_valid_at:
+            # Event-time anchor: a backfilled row is as old as the event it
+            # records, not as old as its ingest. Only reachable when the tenant
+            # opted in AND the request said as-of when — see the knob's contract
+            # in ``common.constants``.
+            anchor = func.coalesce(ing.c.ts_valid_start, ing.c.created_at)
+        else:
+            # ``greatest`` is the guard for tenants whose ts_valid_start is a
+            # validity-window start rather than event time: such a row must
+            # never rank as older than its ingest.
+            anchor = func.greatest(
+                ing.c.created_at,
+                func.coalesce(ing.c.ts_valid_start, ing.c.created_at),
+            )
+        age_days = func.extract("epoch", ref_ts - anchor) / 86400.0
 
         type_decay = case(
             *[(ing.c.memory_type == mt, float(days)) for mt, days in TYPE_DECAY_DAYS.items()],
@@ -2971,7 +3005,10 @@ class PostgresService:
             (
                 and_(
                     ing.c.ts_valid_end.is_not(None),
-                    ing.c.ts_valid_end < func.now(),
+                    # Against the reference clock, not the wall clock: a row
+                    # whose validity ended AFTER the question's as-of time was
+                    # still current when the question was asked.
+                    ing.c.ts_valid_end < ref_ts,
                 ),
                 _freshness_floor,
             ),
@@ -3013,9 +3050,14 @@ class PostgresService:
         )
 
         if temporal_window is not None:
-            cutoff = func.now() - temporal_window
+            # "Last month" is a window ending at the reference clock. Under the
+            # default that is now() against created_at, unchanged; anchored to
+            # valid_at it is the question's as-of time against the row's event
+            # time, so a corpus ingested in one sitting still has a "last month".
+            cutoff = ref_ts - temporal_window
+            window_ts = anchor if anchor_to_valid_at else ing.c.created_at
             temporal_boost = case(
-                (ing.c.created_at >= cutoff, 1.3),
+                (window_ts >= cutoff, 1.3),
                 else_=1.0,
             ).label("temporal_boost")
         else:
@@ -3090,14 +3132,14 @@ class PostgresService:
         # relative to valid_at are down-weighted instead of excluded.
         # Pairs with the removal of the `ts_valid_end >= valid_at` WHERE
         # clause above — one bad enrichment date no longer blanks a memory.
-        if valid_at is not None:
+        if valid_at_ts is not None:
             from core_storage_api.config import settings as _storage_settings_cf
 
             currency_factor = case(
                 (
                     and_(
                         ing.c.ts_valid_end.is_not(None),
-                        ing.c.ts_valid_end < valid_at,
+                        ing.c.ts_valid_end < valid_at_ts,
                     ),
                     _storage_settings_cf.expired_currency_factor,
                 ),

@@ -1031,7 +1031,12 @@ async def caura_recall(
     ] = DEFAULT_SEARCH_TOP_K,
     valid_at: Annotated[
         str | None,
-        Field(description="As-of ISO 8601 date: filter to rows valid at that time."),
+        Field(
+            description=(
+                "As-of ISO 8601 date: filter to rows valid then; relative dates "
+                "resolve against it. Tenant freshness_reference=1 anchors freshness too."
+            )
+        ),
     ] = None,
     min_similarity: Annotated[
         float | None,

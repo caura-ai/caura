@@ -853,7 +853,7 @@
             }
           ],
           "default": null,
-          "description": "As-of ISO 8601 date: filter to rows valid at that time.",
+          "description": "As-of ISO 8601 date: filter to rows valid then; relative dates resolve against it. Tenant freshness_reference=1 anchors freshness too.",
           "title": "Valid At"
         },
         "min_similarity": {
