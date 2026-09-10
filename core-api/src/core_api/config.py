@@ -318,6 +318,29 @@ class Settings(BaseSettings):
     # enough that real exhaustion fails before the request hits the
     # worker.
     per_tenant_acquire_timeout_seconds: float = 0.05
+    # Process-wide cap on concurrently RUNNING contradiction-detection
+    # passes (A19). Every trigger — write, bulk fan-out, back-channel
+    # consumers, post-entity-extraction — schedules detection as an
+    # unbounded fire-and-forget task, so the caps above bound how fast
+    # writes are ADMITTED but nothing bounds how many detections then
+    # run at once: 8 concurrent 100-item bulks leave ~1,600 detection
+    # coroutines racing the moment they commit. Each pass holds up to
+    # ``_ENTITY_CTX_FANOUT_LIMIT`` (8) storage connections during its
+    # Path C context fetch and one LLM judge call for seconds, on the
+    # SAME storage pool (200 conns, 5s pool budget) and provider quota
+    # the foreground request path uses — a big enough burst turns into
+    # foreground PoolTimeouts and judge abstains (#821), i.e. dropped
+    # detections. Global rather than per-tenant because the resources
+    # being protected are process-global; detection is post-commit
+    # background work, so excess passes QUEUE (never shed) and drain in
+    # FIFO order. Sizing: 16 x 8 = 128 worst-instant storage conns
+    # (< 200 with headroom for foreground), 16 concurrent judge calls
+    # is below the enrichment path's accepted worst case (CAURA-627),
+    # and at a ~2s batch judge that sustains ~8 detections/s per
+    # process — comfortably above one saturated tenant's admitted
+    # write rate. Matches ``per_tenant_write_concurrency`` on purpose:
+    # one process keeps pace with one saturated tenant.
+    contradiction_detection_concurrency: int = 16
     # Idempotency-Key inbox TTL. 24h matches Stripe's default and is
     # longer than any realistic client retry budget. Cached responses
     # older than this are treated as absent and the request re-runs.

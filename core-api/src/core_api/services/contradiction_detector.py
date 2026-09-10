@@ -207,6 +207,71 @@ def _merge_status_update(acc: dict[str, dict], row: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A19 — process-wide admission gate for detection passes.
+# ---------------------------------------------------------------------------
+
+# Every trigger site schedules detection with ``track_task`` (a bare
+# ``asyncio.create_task``), so the per-tenant bulkheads bound how fast writes
+# are ADMITTED while nothing bounds how many detections then RUN at once: the
+# tasks outlive the requests that spawned them, and 8 concurrent 100-item
+# bulks leave ~1,600 detection coroutines racing the moment they commit. Each
+# pass holds up to ``_ENTITY_CTX_FANOUT_LIMIT`` (8) connections of the SAME
+# 200-connection / 5s-pool-budget storage pool the foreground request path
+# uses, plus one LLM judge call for seconds — a big enough burst surfaces as
+# foreground PoolTimeouts (the 2026-06-16 incident shape) and judge abstains
+# (#821), i.e. silently dropped detections. This gate turns that collapse
+# into bounded concurrency + FIFO queueing.
+#
+# Queue, never shed: detection is post-commit background work with no caller
+# waiting on it, and a shed pass is a contradiction nobody ever looks for.
+# Waiting coroutines cost ~KBs; the resources the cap protects (storage pool,
+# provider quota, event loop) are what actually collapse. ONE shared gate for
+# every entry point — mirroring ``interview_service.synthesis_sem`` — because
+# two independent Semaphore(N)s would allow 2N whenever Path A bursts overlap
+# Path C bursts, exactly the stampede the cap exists to prevent. Global
+# rather than per-tenant (unlike ``per_tenant_concurrency``) because the
+# protected resources are process-global; a hot tenant delaying another
+# tenant's BACKGROUND detection is acceptable in a way that pool exhaustion
+# for everyone is not.
+#
+# The semaphore is cached per running loop rather than created at import:
+# asyncio primitives bind to the first loop that awaits them, and the test
+# suite runs one loop per test — a module-level instance would poison every
+# later test with "bound to a different event loop" (same reason
+# ``_bounded_gather`` builds a fresh semaphore per call). Production has one
+# loop per process, so the cached instance is process-wide there.
+_DETECTION_GATE: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+
+
+def _detection_gate() -> asyncio.Semaphore:
+    global _DETECTION_GATE
+    loop = asyncio.get_running_loop()
+    if _DETECTION_GATE is None or _DETECTION_GATE[0] is not loop:
+        _DETECTION_GATE = (loop, asyncio.Semaphore(settings.contradiction_detection_concurrency))
+    return _DETECTION_GATE[1]
+
+
+async def _acquire_detection_slot() -> tuple[asyncio.Semaphore, int]:
+    """Take one detection slot, returning ``(gate, queued_ms)``.
+
+    ``queued_ms`` is surfaced in the ``path_a/c_completed`` lines so gate
+    pressure is quantifiable from production logs alone (detection-proper
+    time = ``elapsed_ms - queued_ms``); the pre-acquire DEBUG mirrors
+    ``per_tenant_storage_slot``'s saturation log. Split from the entry
+    points so both share one queue and one instrumentation story.
+    """
+    gate = _detection_gate()
+    if gate.locked():
+        logger.debug(
+            "contradiction-detection gate saturated; queuing",
+            extra={"cap": settings.contradiction_detection_concurrency},
+        )
+    t0 = time.monotonic()
+    await gate.acquire()
+    return gate, round((time.monotonic() - t0) * 1000)
+
+
+# ---------------------------------------------------------------------------
 # Public API: async post-commit entry point (P1-1)
 # ---------------------------------------------------------------------------
 
@@ -248,6 +313,15 @@ async def detect_contradictions_async(
     concluded = False
     lock_key = None
     lock_token = ""
+    # A19 — admission gate BEFORE any storage or Redis traffic, so a queued
+    # pass consumes nothing but a waiting coroutine. Acquired before the
+    # idempotency lock on purpose: the lock's 1h TTL must clock detection,
+    # not queue time, and a duplicate back-channel delivery that queued
+    # behind its twin still exits at the lock check in one Redis roundtrip.
+    # Acquire sits OUTSIDE the try so a cancellation mid-wait (shutdown's
+    # ``cancel_all_tasks``) cannot reach a ``release()`` for a slot that was
+    # never taken.
+    _gate, queued_ms = await _acquire_detection_slot()
     try:
         if new_memory is None:
             sc = get_storage_client()
@@ -316,6 +390,10 @@ async def detect_contradictions_async(
     except Exception:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
     finally:
+        # A19 — free the slot before the bookkeeping below: the Redis lock
+        # release and the completion log are not the contended work the gate
+        # protects, and a queued pass may as well start during them.
+        _gate.release()
         # H-06: keep the lock only for a run that reached a verdict. The lock
         # is taken BEFORE detection, so without this one transient LLM or
         # storage failure suppressed every later trigger for this memory for a
@@ -326,11 +404,12 @@ async def detect_contradictions_async(
             await _release_lock(lock_key, lock_token)
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
-            "path_a_completed for memory %s n_conflicts=%d skipped=%s elapsed_ms=%d tenant_id=%s",
+            "path_a_completed for memory %s n_conflicts=%d skipped=%s elapsed_ms=%d queued_ms=%d tenant_id=%s",
             memory_id,
             n_conflicts,
             str(skipped).lower(),
             elapsed_ms,
+            queued_ms,
             tenant_id,
         )
 
@@ -2317,6 +2396,13 @@ async def detect_contradictions_by_entities_async(
     concluded = False
     lock_key = None
     lock_token = ""
+    # A19 — same admission gate as Path A, and deliberately the SAME gate:
+    # Path C is the heavier occupant (its context fetch holds up to
+    # ``_ENTITY_CTX_FANOUT_LIMIT`` storage connections at once), so giving it
+    # a second Semaphore(N) would double the very stampede budget the cap
+    # exists to bound. See ``_acquire_detection_slot`` for ordering + the
+    # outside-the-try rationale.
+    _gate, queued_ms = await _acquire_detection_slot()
     try:
         # The row is fetched BEFORE the lock is taken, unlike Path A. The lock
         # key carries a fingerprint of the content this run will examine (H-06)
@@ -2849,6 +2935,8 @@ async def detect_contradictions_by_entities_async(
     except Exception:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)
     finally:
+        # A19 — free the slot before the bookkeeping; see Path A's block.
+        _gate.release()
         # H-06 — see the matching block in ``detect_contradictions_async``.
         # ``concluded`` is set at each legitimate exit rather than once early,
         # so a throw ANYWHERE in the judging loop still releases: a failure
@@ -2859,13 +2947,14 @@ async def detect_contradictions_by_entities_async(
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
             "path_c_completed for memory %s n_candidates=%d n_conflicts=%d "
-            "n_retractions=%d skipped=%s elapsed_ms=%d tenant_id=%s",
+            "n_retractions=%d skipped=%s elapsed_ms=%d queued_ms=%d tenant_id=%s",
             memory_id,
             n_candidates,
             n_conflicts,
             n_retractions,
             str(skipped).lower(),
             elapsed_ms,
+            queued_ms,
             tenant_id,
         )
 
