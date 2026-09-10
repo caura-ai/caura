@@ -18,6 +18,7 @@ import logging
 import time
 import uuid as _uuid
 from datetime import datetime
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from core_api.cache import cache_delete_if, cache_set_nx
@@ -276,6 +277,238 @@ async def _acquire_detection_slot() -> tuple[asyncio.Semaphore, int]:
 # ---------------------------------------------------------------------------
 
 
+# ── A40 — the deterministic RDF pass, callable from both triggers ─────────
+#
+# Extracted verbatim from ``detect_contradictions_async`` so the SAME pass can
+# also run after entity extraction. It used to be reachable only at write time,
+# and that made it close to dead for the facts this product is actually about.
+#
+# The gate needs ``(subject_entity_id, predicate, object_value)``.
+# ``EmitMemoryTriple`` populates those during the write with no LLM call, but it
+# resolves a SUBJECT from only two sources: a caller-supplied ``entity_links``
+# row, or an identifier-shaped token. Proper nouns deliberately return None
+# ("Alice", "Atlas" — see ``_infer_subject_token``), deferring to the
+# entity-extraction worker's higher-precision output. Measured on this code:
+#
+#     "Maya lives in Boston"             predicate=lives_in          subject=None
+#     "Acme is headquartered in Berlin"  predicate=headquartered_in  subject=None
+#     "Priya reports to Dana"            predicate=reports_to        subject=None
+#     "TOKEN-XYZ has release date 2027"  predicate=release_date      subject=TOKEN-XYZ
+#
+# So for any human- or company-subject fact the row commits with a NULL subject,
+# this gate fails, and Path A falls straight through to the STOCHASTIC raw-text
+# semantic judge — the R7 miss. Extraction then fills the columns in moments and
+# fires Path C, which does entity-overlap plus another LLM judge and never
+# retries the deterministic check. The one non-stochastic verdict in the module
+# was structurally unreachable exactly where it was needed.
+#
+# Running it again post-extraction is also CHEAPER, not more expensive: Path A's
+# semantic judge is gated on ``if not contradictions``, so a deterministic
+# verdict SUPPRESSES an LLM call rather than adding one.
+#
+# Re-running is safe by construction. ``memory_find_rdf_conflicts`` selects only
+# ``active``/``confirmed``/``pending`` rows, so anything an earlier pass already
+# retired is out of scope, and the storage CAS (``WHERE supersedes_id IS NULL``)
+# is the backstop on the chain edge.
+class _RdfPassResult(NamedTuple):
+    contradictions: list[ContradictionInfo]
+    record_pairs: list[tuple[dict, str, float | None]]
+    supersedes_id: Any
+    ran: bool
+
+
+async def _rdf_conflict_pass(
+    sc,
+    new_memory: dict,
+    *,
+    memory_id,
+    tenant_id: str,
+    supersedes_id,
+) -> _RdfPassResult:
+    """Run the deterministic single-value-predicate contradiction check.
+
+    ``ran`` reports whether the triple gate passed, so a caller can tell "no
+    conflict" apart from "could not look" — the distinction that hid this bug.
+    """
+    subject_entity_id = new_memory.get("subject_entity_id")
+    predicate = new_memory.get("predicate")
+    object_value = new_memory.get("object_value")
+    contradictions: list[ContradictionInfo] = []
+    _record_pairs: list[tuple[dict, str, float | None]] = []
+    ran = bool(
+        subject_entity_id and predicate and object_value and predicate.lower() in SINGLE_VALUE_PREDICATES
+    )
+
+    # --- Path 1: RDF triple contradiction (single-value predicates only) ---
+    if subject_entity_id and predicate and object_value and predicate.lower() in SINGLE_VALUE_PREDICATES:
+        rdf_conflicts = await sc.find_rdf_conflicts(
+            tenant_id,
+            subject_entity_id,
+            predicate,
+            exclude_id=str(memory_id),
+            # CAURA-123 — scope by fleet so RDF detection respects the
+            # same isolation boundary as semantic detection. Without
+            # this the storage-api router previously forced
+            # ``fleet_id IS NULL`` and the path was unreachable for
+            # any fleeted write.
+            fleet_id=new_memory.get("fleet_id"),
+            # CAURA-123 — pass the new memory's own object_value so
+            # the storage layer's ``Memory.object_value != :ov`` filter
+            # excludes same-value rows. Otherwise two writes of the
+            # same fact trigger a false conflict on themselves.
+            object_value=object_value,
+            # A54 — scope by the writer's visibility tier, exactly as the
+            # semantic path does below. Without it the RDF path could select
+            # another agent's ``scope_agent`` row as a candidate and then mark
+            # it outdated/conflicted: a status write into a row this writer
+            # cannot read. ``agent_id`` pins the owner for the agent-private
+            # tier, where the visibility value alone says only "private to SOME
+            # agent" and so still matches a different agent's private rows.
+            visibility=new_memory.get("visibility", "scope_team"),
+            agent_id=new_memory.get("agent_id"),
+        )
+        # CAURA-125 — state-corruption guard. When ``rdf_conflicts``
+        # mixes older and newer candidates relative to ``new_memory``,
+        # an earlier flipped iteration already marked ``new_memory``
+        # outdated; a later canonical iteration must NOT then re-write
+        # ``new_memory`` back to its previous status ("active") while
+        # setting ``supersedes_id``.
+        new_memory_is_outdated = False
+        # Collapsed-write accumulator — folded in per audit P2 even
+        # though the RDF loop isn't gather-prefaced; same N+1 shape and
+        # keeps the file consistent with semantic / Path C. Keyed by
+        # ``memory_id`` so a mixed canonical/flipped run that touches
+        # ``new_memory`` twice collapses into one merged row (see
+        # ``_merge_status_update`` for the ordering rationale).
+        rdf_updates: dict[str, dict] = {}
+        for old in rdf_conflicts:
+            # CAURA-125 — decide attribution direction AFTER confirming
+            # the conflict, not before. ``_pick_older`` chooses which
+            # row carries ``outdated`` status; the other carries the
+            # supersedes_id edge pointing at the older row. This makes
+            # the verdict symmetric under candidate vs. new_memory swap
+            # while preserving the chain's newer→older direction.
+            older = _pick_older(old, new_memory)
+            older_is_new = str(older.get("id")) == str(memory_id)
+            newer = new_memory if not older_is_new else old
+            older_id = older.get("id")
+            newer_id = newer.get("id")
+
+            _merge_status_update(rdf_updates, {"memory_id": str(older_id), "status": "outdated"})
+            if newer is new_memory:
+                # Canonical case (candidate is older). Track via local
+                # ``supersedes_id`` so multiple conflict candidates in
+                # this run don't each issue a write; storage's CAS
+                # ``WHERE supersedes_id IS NULL`` would only honour the
+                # first anyway.
+                if not supersedes_id:
+                    supersedes_id = older_id
+                    # Separate the status-reversion guard from the
+                    # chain edge. When a prior flipped iteration has
+                    # already marked ``new_memory`` ``"outdated"``,
+                    # the canonical iteration must still wire
+                    # ``new_memory.supersedes_id`` to ``older_id`` —
+                    # otherwise the older canonical candidate is left
+                    # orphaned (outdated but unreachable via the
+                    # chain). Using ``"outdated"`` as the target
+                    # status here is idempotent with the flipped
+                    # iteration's earlier write.
+                    target_status = (
+                        "outdated" if new_memory_is_outdated else new_memory.get("status", "active")
+                    )
+                    _merge_status_update(
+                        rdf_updates,
+                        {
+                            "memory_id": str(memory_id),
+                            "status": target_status,
+                            "supersedes_id": str(older_id),
+                        },
+                    )
+            else:
+                # Flipped case (candidate is newer). The just-written
+                # memory is the older row and is now ``outdated``; the
+                # pre-existing candidate carries supersedes_id pointing
+                # back at new_memory.
+                new_memory_is_outdated = True
+                # Application-level guard against overwriting an
+                # existing supersedes_id on the candidate. Storage CAS
+                # (``WHERE supersedes_id IS NULL``) is the
+                # last-line-of-defence; this guard logs an explicit
+                # warning so the orphaning attempt is visible in logs
+                # rather than silently no-op'd at the DB.
+                if newer.get("supersedes_id"):
+                    logger.warning(
+                        "Flipped contradiction skipped supersedes_id overwrite "
+                        "for candidate %s (already supersedes %s)",
+                        newer_id,
+                        newer.get("supersedes_id"),
+                    )
+                else:
+                    _merge_status_update(
+                        rdf_updates,
+                        {
+                            "memory_id": str(newer_id),
+                            "status": newer.get("status", "active"),
+                            "supersedes_id": str(older_id),
+                        },
+                    )
+
+            # ``ContradictionInfo.old_memory_id`` is documented as the
+            # pre-existing candidate. Always populate from ``old``
+            # (the candidate row from storage), never from ``older``
+            # — those diverge in the flipped case.
+            direction = "canonical" if newer is new_memory else "flipped"
+            contradictions.append(
+                ContradictionInfo(
+                    old_memory_id=old.get("id"),
+                    # In canonical, the candidate is the row we just
+                    # marked outdated. In flipped, the candidate's
+                    # status is unchanged — surface its actual current
+                    # state rather than a misleading "outdated".
+                    old_status="outdated" if direction == "canonical" else old.get("status", "active"),
+                    reason="rdf_conflict",
+                    old_content_preview=old.get("content", "")[:200],
+                    direction=direction,
+                )
+            )
+            _record_pairs.append((old, "rdf", None))
+            logger.info(
+                "RDF contradiction: memory %s outdated by %s "
+                "(subject=%s predicate=%s old_value=%s new_value=%s direction=%s)",
+                older_id,
+                newer_id,
+                subject_entity_id,
+                predicate,
+                older.get("object_value"),
+                newer.get("object_value"),
+                direction,
+            )
+
+        if rdf_updates:
+            rdf_result = await sc.batch_update_status(
+                {"updates": list(rdf_updates.values())}, tenant_id=tenant_id
+            )
+            if rdf_result.get("skipped"):
+                # ``skipped`` carries rows the storage-side dropped — CAS
+                # gate fail (caller-supplied ``expected_supersedes_id``
+                # mismatch) or row already deleted. Pre-batch, the single-
+                # row PATCH route surfaced 404 as a hard error; the batch
+                # route returns the list instead so we don't abort the
+                # whole detection cycle. Log so the dropped writes are
+                # visible in tracing — the contradiction detector itself
+                # doesn't use ``expected_supersedes_id`` today, so a
+                # non-empty list usually means the target row was
+                # soft-deleted between detect-and-flush.
+                logger.warning(
+                    "batch_update_status (RDF path) skipped %d row(s) (trigger memory %s): %s",
+                    len(rdf_result["skipped"]),
+                    memory_id,
+                    rdf_result["skipped"],
+                )
+
+    return _RdfPassResult(contradictions, _record_pairs, supersedes_id, ran)
+
+
 async def detect_contradictions_async(
     memory_id: UUID,
     tenant_id: str,
@@ -476,179 +709,30 @@ async def _detect(
     _record_pairs: list[tuple[dict, str, float | None]] = []
 
     memory_id = new_memory.get("id")
-    subject_entity_id = new_memory.get("subject_entity_id")
-    predicate = new_memory.get("predicate")
-    object_value = new_memory.get("object_value")
+    # A40 — the triple is read inside ``_rdf_conflict_pass`` now, not here. It
+    # is deliberately NOT hoisted back out: the pass is also called after entity
+    # extraction, where the row it must read is a fresher one than this caller
+    # ever holds.
     tenant_id = new_memory.get("tenant_id")
     content = new_memory.get("content", "")
     supersedes_id = new_memory.get("supersedes_id")
 
     # --- Path 1: RDF triple contradiction (single-value predicates only) ---
-    if subject_entity_id and predicate and object_value and predicate.lower() in SINGLE_VALUE_PREDICATES:
-        rdf_conflicts = await sc.find_rdf_conflicts(
-            tenant_id,
-            subject_entity_id,
-            predicate,
-            exclude_id=str(memory_id),
-            # CAURA-123 — scope by fleet so RDF detection respects the
-            # same isolation boundary as semantic detection. Without
-            # this the storage-api router previously forced
-            # ``fleet_id IS NULL`` and the path was unreachable for
-            # any fleeted write.
-            fleet_id=new_memory.get("fleet_id"),
-            # CAURA-123 — pass the new memory's own object_value so
-            # the storage layer's ``Memory.object_value != :ov`` filter
-            # excludes same-value rows. Otherwise two writes of the
-            # same fact trigger a false conflict on themselves.
-            object_value=object_value,
-            # A54 — scope by the writer's visibility tier, exactly as the
-            # semantic path does below. Without it the RDF path could select
-            # another agent's ``scope_agent`` row as a candidate and then mark
-            # it outdated/conflicted: a status write into a row this writer
-            # cannot read. ``agent_id`` pins the owner for the agent-private
-            # tier, where the visibility value alone says only "private to SOME
-            # agent" and so still matches a different agent's private rows.
-            visibility=new_memory.get("visibility", "scope_team"),
-            agent_id=new_memory.get("agent_id"),
-        )
-        # CAURA-125 — state-corruption guard. When ``rdf_conflicts``
-        # mixes older and newer candidates relative to ``new_memory``,
-        # an earlier flipped iteration already marked ``new_memory``
-        # outdated; a later canonical iteration must NOT then re-write
-        # ``new_memory`` back to its previous status ("active") while
-        # setting ``supersedes_id``.
-        new_memory_is_outdated = False
-        # Collapsed-write accumulator — folded in per audit P2 even
-        # though the RDF loop isn't gather-prefaced; same N+1 shape and
-        # keeps the file consistent with semantic / Path C. Keyed by
-        # ``memory_id`` so a mixed canonical/flipped run that touches
-        # ``new_memory`` twice collapses into one merged row (see
-        # ``_merge_status_update`` for the ordering rationale).
-        rdf_updates: dict[str, dict] = {}
-        for old in rdf_conflicts:
-            # CAURA-125 — decide attribution direction AFTER confirming
-            # the conflict, not before. ``_pick_older`` chooses which
-            # row carries ``outdated`` status; the other carries the
-            # supersedes_id edge pointing at the older row. This makes
-            # the verdict symmetric under candidate vs. new_memory swap
-            # while preserving the chain's newer→older direction.
-            older = _pick_older(old, new_memory)
-            older_is_new = str(older.get("id")) == str(memory_id)
-            newer = new_memory if not older_is_new else old
-            older_id = older.get("id")
-            newer_id = newer.get("id")
-
-            _merge_status_update(rdf_updates, {"memory_id": str(older_id), "status": "outdated"})
-            if newer is new_memory:
-                # Canonical case (candidate is older). Track via local
-                # ``supersedes_id`` so multiple conflict candidates in
-                # this run don't each issue a write; storage's CAS
-                # ``WHERE supersedes_id IS NULL`` would only honour the
-                # first anyway.
-                if not supersedes_id:
-                    supersedes_id = older_id
-                    # Separate the status-reversion guard from the
-                    # chain edge. When a prior flipped iteration has
-                    # already marked ``new_memory`` ``"outdated"``,
-                    # the canonical iteration must still wire
-                    # ``new_memory.supersedes_id`` to ``older_id`` —
-                    # otherwise the older canonical candidate is left
-                    # orphaned (outdated but unreachable via the
-                    # chain). Using ``"outdated"`` as the target
-                    # status here is idempotent with the flipped
-                    # iteration's earlier write.
-                    target_status = (
-                        "outdated" if new_memory_is_outdated else new_memory.get("status", "active")
-                    )
-                    _merge_status_update(
-                        rdf_updates,
-                        {
-                            "memory_id": str(memory_id),
-                            "status": target_status,
-                            "supersedes_id": str(older_id),
-                        },
-                    )
-            else:
-                # Flipped case (candidate is newer). The just-written
-                # memory is the older row and is now ``outdated``; the
-                # pre-existing candidate carries supersedes_id pointing
-                # back at new_memory.
-                new_memory_is_outdated = True
-                # Application-level guard against overwriting an
-                # existing supersedes_id on the candidate. Storage CAS
-                # (``WHERE supersedes_id IS NULL``) is the
-                # last-line-of-defence; this guard logs an explicit
-                # warning so the orphaning attempt is visible in logs
-                # rather than silently no-op'd at the DB.
-                if newer.get("supersedes_id"):
-                    logger.warning(
-                        "Flipped contradiction skipped supersedes_id overwrite "
-                        "for candidate %s (already supersedes %s)",
-                        newer_id,
-                        newer.get("supersedes_id"),
-                    )
-                else:
-                    _merge_status_update(
-                        rdf_updates,
-                        {
-                            "memory_id": str(newer_id),
-                            "status": newer.get("status", "active"),
-                            "supersedes_id": str(older_id),
-                        },
-                    )
-
-            # ``ContradictionInfo.old_memory_id`` is documented as the
-            # pre-existing candidate. Always populate from ``old``
-            # (the candidate row from storage), never from ``older``
-            # — those diverge in the flipped case.
-            direction = "canonical" if newer is new_memory else "flipped"
-            contradictions.append(
-                ContradictionInfo(
-                    old_memory_id=old.get("id"),
-                    # In canonical, the candidate is the row we just
-                    # marked outdated. In flipped, the candidate's
-                    # status is unchanged — surface its actual current
-                    # state rather than a misleading "outdated".
-                    old_status="outdated" if direction == "canonical" else old.get("status", "active"),
-                    reason="rdf_conflict",
-                    old_content_preview=old.get("content", "")[:200],
-                    direction=direction,
-                )
-            )
-            _record_pairs.append((old, "rdf", None))
-            logger.info(
-                "RDF contradiction: memory %s outdated by %s "
-                "(subject=%s predicate=%s old_value=%s new_value=%s direction=%s)",
-                older_id,
-                newer_id,
-                subject_entity_id,
-                predicate,
-                older.get("object_value"),
-                newer.get("object_value"),
-                direction,
-            )
-
-        if rdf_updates:
-            rdf_result = await sc.batch_update_status(
-                {"updates": list(rdf_updates.values())}, tenant_id=tenant_id
-            )
-            if rdf_result.get("skipped"):
-                # ``skipped`` carries rows the storage-side dropped — CAS
-                # gate fail (caller-supplied ``expected_supersedes_id``
-                # mismatch) or row already deleted. Pre-batch, the single-
-                # row PATCH route surfaced 404 as a hard error; the batch
-                # route returns the list instead so we don't abort the
-                # whole detection cycle. Log so the dropped writes are
-                # visible in tracing — the contradiction detector itself
-                # doesn't use ``expected_supersedes_id`` today, so a
-                # non-empty list usually means the target row was
-                # soft-deleted between detect-and-flush.
-                logger.warning(
-                    "batch_update_status (RDF path) skipped %d row(s) (trigger memory %s): %s",
-                    len(rdf_result["skipped"]),
-                    memory_id,
-                    rdf_result["skipped"],
-                )
+    # A40 — the pass itself now lives in ``_rdf_conflict_pass`` so the SAME
+    # deterministic check can run again once entity extraction has populated
+    # the triple. At write time this gate fails for every proper-noun subject
+    # (``EmitMemoryTriple`` resolves only identifier-shaped ones), which is what
+    # sent those writes to the stochastic semantic judge below.
+    _rdf = await _rdf_conflict_pass(
+        sc,
+        new_memory,
+        memory_id=memory_id,
+        tenant_id=tenant_id,
+        supersedes_id=supersedes_id,
+    )
+    contradictions.extend(_rdf.contradictions)
+    _record_pairs.extend(_rdf.record_pairs)
+    supersedes_id = _rdf.supersedes_id
 
     # --- Path 2: Semantic contradiction (vector similarity + batch LLM check) ---
     if not contradictions:
@@ -2445,6 +2529,44 @@ async def detect_contradictions_by_entities_async(
             refreshed = await sc.get_memory(str(memory_id), tenant_id)
             if refreshed and refreshed.get("deleted_at") is None:
                 new_memory = refreshed
+
+        # A40 — run the DETERMINISTIC pass here, where the triple finally
+        # exists. This is the whole point of the fix: at write time
+        # ``EmitMemoryTriple`` resolves a subject only for identifier-shaped
+        # tokens, so every proper-noun fact ("Maya lives in Boston") committed
+        # with a NULL subject, Path A's RDF gate failed, and the verdict was
+        # handed to the stochastic raw-text judge. Entity extraction has now
+        # populated ``subject_entity_id`` / ``predicate`` / ``object_value``,
+        # and it is extraction completing that fired this very function — so
+        # this is the first moment the check CAN run for those rows.
+        #
+        # Cheaper, not dearer: a deterministic verdict short-circuits the
+        # entity-overlap LLM judge below, exactly as an RDF hit short-circuits
+        # Path A's semantic judge. Re-running is safe — the query selects only
+        # live rows, so anything Path A already retired is out of scope.
+        rdf = await _rdf_conflict_pass(
+            sc,
+            new_memory,
+            memory_id=memory_id,
+            tenant_id=tenant_id,
+            supersedes_id=new_memory.get("supersedes_id"),
+        )
+        if rdf.contradictions:
+            n_conflicts += len(rdf.contradictions)
+            if rdf.record_pairs and settings.contradiction_write_conflict_record:
+                from core_api.services.contradiction.resolver import (
+                    record_detected_conflicts,
+                )
+
+                await record_detected_conflicts(
+                    new_memory,
+                    rdf.record_pairs,
+                    tenant_id=tenant_id,
+                    fleet_id=new_memory.get("fleet_id"),
+                    tenant_config=tenant_config,
+                )
+            concluded = True
+            return
 
         candidates = await sc.find_entity_overlap_candidates(
             {
