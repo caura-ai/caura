@@ -64,6 +64,7 @@ from common.constants import (
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
     SEMANTIC_DEDUP_THRESHOLD,
     TYPE_DECAY_DAYS,
+    predicate_cluster,
 )
 from common.entity_naming import canonical_match_key, normalize_entity_name
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
@@ -3676,7 +3677,18 @@ class PostgresService:
                 Memory.deleted_at.is_(None),
                 Memory.status.in_(("active", "confirmed", "pending")),
                 Memory.subject_entity_id == subject_entity_id,
-                func.lower(Memory.predicate) == predicate.lower(),
+                # A36 — match every spelling of the SAME attribute, not just
+                # the one this write happened to use. ``status`` and
+                # ``current_status`` are two members of
+                # ``SINGLE_VALUE_PREDICATES`` naming one attribute, and exact
+                # equality meant a subject holding one of each was never
+                # compared: no conflict raised, both rows live, both
+                # unpenalised. Expanded here rather than at write time so
+                # ALREADY-STORED rows are covered and the predicate a caller
+                # reads back is still the one its writer chose. A predicate in
+                # no cluster yields a single-member IN — the same query as the
+                # equality it replaces.
+                func.lower(Memory.predicate).in_(sorted(predicate_cluster(predicate))),
                 # A35 — compare NORMALISED forms. Raw inequality made
                 # "7,500 rpm" and "7500 RPM" look like competing values for the
                 # same attribute and flagged a contradiction that was only a

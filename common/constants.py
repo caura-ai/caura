@@ -433,6 +433,130 @@ SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
     }
 )
 
+# ── Predicate aliasing under paraphrase (A36) ──
+# ``SINGLE_VALUE_PREDICATES`` says WHICH attributes can hold only one value.
+# It does not say which of its own members are the SAME attribute — so
+# ``status`` and ``current_status`` are two keys, and a subject carrying one of
+# each is never compared. The RDF contradiction path keys on
+# ``(subject_entity_id, predicate)`` with an exact predicate match, so
+# "deploy target is staging" written as ``deployed_to`` and later contradicted
+# as ``deployed_on: production`` produces no conflict at all: both rows stay
+# live, both stay unpenalised, and a reader gets whichever ranks higher.
+#
+# Each key below is an alias; each value is the canonical member of its cluster
+# (itself always a member of ``SINGLE_VALUE_PREDICATES``). Consumers should go
+# through ``predicate_cluster()`` rather than reading this map directly.
+#
+# THE INCLUSION RULE, and why it is deliberately narrow. On the OBJECT side of
+# this query (A35) a wrong equivalence SUPPRESSES a real contradiction, so
+# normalising aggressively was safe. Here the failure runs the other way: a
+# wrong alias MANUFACTURES a contradiction between two facts that were never in
+# competition, and the loser takes a 0.5 ranking penalty. So a cluster is
+# admitted only when its members differ by a function word, an abbreviation, or
+# a form of the same word — never by a content word.
+#
+# What that rule REFUSES, and why each refusal is load-bearing:
+#
+#   * INVERSES. The set contains ``manager``/``manager_of``,
+#     ``head_of``/``headed_by``, ``ceo``/``ceo_of``,
+#     ``maintainer``/``maintainer_of``. These are not paraphrases — they point
+#     the other way. Aliasing "X's manager is Y" to "X is the manager of Y"
+#     would read an org chart as self-contradictory. Only the side that makes
+#     the value an attribute OF the subject joins a cluster.
+#   * ``title`` → ``job_title``. ``title`` is also a document's title, and the
+#     predicate carries no subject type to tell the two apart.
+#   * ``cost`` → ``price``. What a thing costs to make and what it sells for
+#     are two numbers that are SUPPOSED to differ.
+#   * ``latest_version`` / ``running_version`` → ``version``. Latest-released
+#     and currently-deployed differ on every system mid-rollout; that gap is
+#     the fact, not a conflict.
+#   * ``start_date`` / ``started_at`` and the ``end_date`` family. Planned vs
+#     actual. A slipped schedule would read as a contradiction.
+#   * ``resides_at`` / ``stationed_at`` / ``address`` / ``city`` / ``country``
+#     / ``region``. These differ from the location cluster in GRANULARITY, and
+#     "Boston" vs "12 Main St" is not a disagreement.
+#
+# Granularity note: this exposure is not new and is not created here —
+# ``located_in: Boston`` already conflicts with ``located_in: Massachusetts``
+# under a single predicate. The rule above keeps aliasing from WIDENING it.
+_PREDICATE_ALIAS_CLUSTERS: tuple[tuple[str, ...], ...] = (
+    # Identity & status. ``state``/``current_state`` sit in the set's own
+    # "Identity & status" section — geography is carried by ``region`` /
+    # ``country`` / ``city``, which stay out of every cluster.
+    ("status", "has_status", "current_status", "state", "current_state"),
+    ("phase", "current_phase"),
+    ("role", "has_role", "current_role"),
+    ("type", "has_type"),
+    # Where a thing is. One cluster on purpose: for a person "lives in" and
+    # "is located in" answer the same question, and the predicate does not
+    # know whether its subject is a person or a company.
+    (
+        "located_in",
+        "is_located_in",
+        "based_in",
+        "is_based_in",
+        "headquartered_in",
+        "hq_in",
+        "lives_in",
+        "resides_in",
+        "location",
+        "current_location",
+    ),
+    # Where a workload runs. Preposition-only differences.
+    ("deployed_to", "is_deployed_to", "deployed_at", "deployed_on"),
+    ("hosted_on", "is_hosted_on", "hosted_at"),
+    ("runs_on", "running_on"),
+    ("stored_in", "stored_at"),
+    ("registered_in", "registered_at"),
+    # Hierarchy — attribute-of-subject side only (see INVERSES above).
+    ("reports_to", "reporting_to", "supervisor", "supervised_by", "manager"),
+    ("led_by", "headed_by"),
+    ("assigned_to", "is_assigned_to", "assignee"),
+    ("maintained_by", "maintainer"),
+    # Metrics. ``price`` and ``cost`` are separate clusters, not one.
+    ("score", "has_score", "scored"),
+    ("rating", "has_rating", "rated"),
+    ("price", "has_price", "priced_at", "current_price"),
+    ("cost", "has_cost", "costs"),
+    ("rank", "has_rank", "ranked", "ranking"),
+    ("value", "has_value"),
+    ("version", "has_version", "current_version"),
+    ("due_date", "due_by", "due_on", "deadline", "has_deadline"),
+    # Contact & personal.
+    ("email", "has_email", "email_address"),
+    ("phone", "has_phone", "phone_number"),
+    ("birthdate", "date_of_birth"),
+    ("spouse", "married_to"),
+    ("employer", "employed_by"),
+)
+
+# alias → canonical. The first member of each tuple is the canonical form.
+PREDICATE_ALIASES: dict[str, str] = {
+    alias: cluster[0] for cluster in _PREDICATE_ALIAS_CLUSTERS for alias in cluster[1:]
+}
+
+# Any member → every member of its cluster, canonical included. This is the
+# lookup the query path wants: it turns one predicate into the set of spellings
+# a stored row might legitimately have used for the same attribute.
+_PREDICATE_CLUSTER_BY_MEMBER: dict[str, frozenset[str]] = {
+    member: frozenset(cluster)
+    for cluster in _PREDICATE_ALIAS_CLUSTERS
+    for member in cluster
+}
+
+
+def predicate_cluster(predicate: str) -> frozenset[str]:
+    """Every spelling that means the same attribute as ``predicate``.
+
+    Returns ``{predicate}`` (lowercased) for a predicate in no cluster, so a
+    caller can use the result unconditionally and an unaliased predicate keeps
+    exactly today's behaviour — a single-member IN is the same query as an
+    equality.
+    """
+    normalized = (predicate or "").strip().lower()
+    return _PREDICATE_CLUSTER_BY_MEMBER.get(normalized, frozenset({normalized}))
+
+
 # ── Lifecycle automation (CAURA-655) ──
 # Weight threshold for archive-stale: memories below this with zero
 # recalls are eligible for archival. Lives in common/ so the threshold

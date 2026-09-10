@@ -112,13 +112,21 @@ def test_the_query_applies_it_to_both_operands():
     assert "Memory.object_value != object_value" not in src
 
 
-def test_predicate_matching_is_untouched():
-    """Predicate aliasing is A36's job. This change must not quietly widen the
-    predicate match as well — two attributes that merely format alike are still
-    two attributes."""
+def test_object_normalisation_did_not_widen_the_predicate_match():
+    """A35 normalises the OBJECT only. It must not blur the predicate as well —
+    two attributes that merely format alike are still two attributes.
+
+    Predicate aliasing arrived separately as A36, which replaced the equality
+    with a cluster IN. That is a reviewed, enumerated widening; what this test
+    still forbids is a normalising expression leaking onto the predicate the way
+    it was applied to the object.
+    """
     import inspect
 
     from core_storage_api.services.postgres_service import PostgresService
 
     src = inspect.getsource(PostgresService.memory_find_rdf_conflicts)
-    assert "func.lower(Memory.predicate) == predicate.lower()" in src
+    assert (
+        "func.lower(Memory.predicate).in_(sorted(predicate_cluster(predicate)))" in src
+    )
+    assert "_normalized_object_sql(Memory.predicate)" not in src

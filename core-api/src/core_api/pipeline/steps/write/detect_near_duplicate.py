@@ -88,6 +88,11 @@ def _same_claim(new, candidate: dict) -> bool:
         return False
     if str(new_subject) != str(candidate.get("subject_entity_id") or ""):
         return False
+    # A36 deliberately does NOT reach here. The contradiction path expands a
+    # predicate to its alias cluster so ``status`` meets ``current_status``; a
+    # match there only FLAGS a row. A match here RETIRES one, so widening this
+    # comparison is a separate decision with a worse downside, and it is not
+    # taken as a side effect of the contradiction fix. Exact match stands.
     if str(new_predicate) != str(candidate.get("predicate") or ""):
         return False
     cand_object = candidate.get("object_value")
