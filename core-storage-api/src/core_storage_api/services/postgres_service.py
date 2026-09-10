@@ -397,19 +397,50 @@ _PGVECTOR_ITERATIVE_MIN = (0, 8)
 # means "not probed yet"; probe FAILURES do not populate it — a transient
 # read error must not stick the process on the fallback path forever.
 _pgvector_version: tuple[int, ...] | None = None
+# Probe coalescing: without it, every search that arrives in the window
+# between process start and the first probe completing sees ``None`` and
+# issues its own ``pg_extension`` read — a thundering herd exactly when a
+# big tenant with the knob on comes back after a deploy. The lock is
+# REBUILT when the running event loop changes rather than created at import:
+# an asyncio primitive binds to the loop that first awaits it, the test
+# suite runs each test on a fresh loop, and a lock carried across loops
+# raises "attached to a different loop". Production has one loop for the
+# process lifetime, so the rebuild branch never fires there.
+_probe_lock: asyncio.Lock | None = None
+_probe_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_probe_lock() -> asyncio.Lock:
+    global _probe_lock, _probe_lock_loop
+    loop = asyncio.get_running_loop()
+    if _probe_lock is None or _probe_lock_loop is not loop:
+        _probe_lock = asyncio.Lock()
+        _probe_lock_loop = loop
+    return _probe_lock
 
 
 async def _ann_pool_available() -> bool:
     """True when the ANN candidate pool may run: pgvector >= 0.8 on this DB.
 
     Called only when ``ann_pool_size`` > 0, so the default path never pays
-    the probe. First call runs one ``pg_extension`` lookup on a read session
-    and caches the parsed version; the fallback decision is logged once, at
-    WARNING, because a tenant explicitly asked for the pool and is silently
-    getting the full scan instead — on-call should be able to grep why.
+    the probe. The first caller runs one ``pg_extension`` lookup on a read
+    session and caches the parsed version; concurrent first callers coalesce
+    on the probe lock instead of each issuing their own lookup. The fallback
+    decision is logged once, at WARNING, because a tenant explicitly asked
+    for the pool and is silently getting the full scan instead — on-call
+    should be able to grep why.
+
+    A probe FAILURE deliberately caches nothing (a transient read error must
+    not stick the process on the fallback path), so callers queued behind a
+    failing probe retry it one at a time under the lock — serial, not a herd.
     """
     global _pgvector_version
-    if _pgvector_version is None:
+    if _pgvector_version is not None:
+        return _pgvector_version >= _PGVECTOR_ITERATIVE_MIN
+
+    async with _get_probe_lock():
+        if _pgvector_version is not None:  # a queued waiter after the winner
+            return _pgvector_version >= _PGVECTOR_ITERATIVE_MIN
         try:
             async with get_read_session() as session:
                 raw = (
@@ -3203,6 +3234,18 @@ class PostgresService:
                     # with this first execute, and reset at commit/rollback on
                     # session close, so nothing leaks to the next checkout of
                     # the pooled connection.
+                    #
+                    # This RELIES on the reader engine being transactional:
+                    # ``_build_engine`` sets no ``isolation_level``, so the
+                    # session autobegins one transaction spanning all three
+                    # executes. Were the reader engine ever flipped to
+                    # AUTOCOMMIT (per-statement transactions), SET LOCAL would
+                    # evaporate before the main statement and the pool would
+                    # silently lose its scan guarantees — two tests pin this:
+                    # test_ann_pool_behavior::test_read_session_preserves_set_local_across_executes
+                    # (the session property itself) and
+                    # ::test_real_search_path_has_gucs_live_at_statement_time
+                    # (this very code path, observed mid-flight).
                     #
                     # ``ef_search`` must be >= the arm's LIMIT for a one-pass
                     # scan (pgvector clamps the GUC to [1, 1000]);

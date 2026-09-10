@@ -217,6 +217,40 @@ async def test_old_pgvector_falls_back_to_the_default_shape(monkeypatch) -> None
     assert sqls[0].count("<=>") == 1
 
 
+async def test_concurrent_probes_coalesce_to_one_lookup(monkeypatch) -> None:
+    """First-call stampede protection: N concurrent probes, ONE pg_extension read.
+
+    Without the probe lock, every search arriving between process start and
+    the first probe completing would issue its own lookup — a thundering herd
+    exactly when a big tenant with the knob on comes back after a deploy.
+    """
+    import asyncio
+
+    opened = 0
+
+    class _Result:
+        def scalar(self):
+            return "0.8.1"
+
+    class _Session:
+        async def execute(self, stmt, *args, **kwargs):
+            # Widen the race window so all gathered coroutines are in flight
+            # before the first probe completes.
+            await asyncio.sleep(0.02)
+            return _Result()
+
+    @contextlib.asynccontextmanager
+    async def _counting_session():
+        nonlocal opened
+        opened += 1
+        yield _Session()
+
+    monkeypatch.setattr(ps, "get_read_session", _counting_session)
+    results = await asyncio.gather(*(ps._ann_pool_available() for _ in range(8)))
+    assert all(results)
+    assert opened == 1, f"expected one coalesced probe, saw {opened}"
+
+
 async def test_probe_failure_is_not_cached(monkeypatch) -> None:
     """A transient probe error must fall back for THIS call and re-probe later."""
 

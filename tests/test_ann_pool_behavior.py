@@ -22,12 +22,13 @@ TEST_DATABASE_URL against a schema created by alembic — the search_vector
 trigger and the HNSW index come from migrations 001/012).
 """
 
+import contextlib
 import hashlib
 import json
 import uuid
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 import core_storage_api.services.postgres_service as ps
 from common.embedding import fake_embedding
@@ -225,8 +226,6 @@ async def test_ann_arm_is_hnsw_servable(tenant_id, monkeypatch) -> None:
     for i in range(20):
         await _insert(tenant, f"plan shape corpus row {i}")
 
-    import contextlib
-
     captured: list = []
 
     class _Stop(Exception):
@@ -273,4 +272,77 @@ async def test_ann_arm_is_hnsw_servable(tenant_id, monkeypatch) -> None:
     assert "ix_memories_embedding_hnsw" in json.dumps(plan_doc), (
         "the ANN arm did not plan through the HNSW index even with seq scan "
         "and sort disabled — the arm's ORDER BY is no longer index-servable"
+    )
+
+
+async def test_read_session_preserves_set_local_across_executes() -> None:
+    """The session property the ann-mode GUC pinning depends on.
+
+    ``memory_scored_search`` issues two ``set_config(..., is_local=true)``
+    executes and THEN the pooled statement on the same ``get_read_session``
+    session, relying on SQLAlchemy's autobegin holding one transaction across
+    all three. ``_build_engine`` sets no isolation override today; if the
+    reader engine is ever flipped to AUTOCOMMIT (per-statement transactions),
+    SET LOCAL evaporates between executes and the ANN pool silently loses its
+    scan guarantees. This fails loudly instead: the value set in one execute
+    must be visible to the next on the same session.
+    """
+    async with ps.get_read_session() as session:
+        await session.execute(select(func.set_config("hnsw.ef_search", "123", True)))
+        observed = (await session.execute(text("SHOW hnsw.ef_search"))).scalar()
+    assert observed == "123", (
+        f"SET LOCAL did not survive to the next execute (saw {observed!r}) — "
+        "the reader session is no longer one transaction per checkout"
+    )
+
+
+async def test_real_search_path_has_gucs_live_at_statement_time(
+    tenant_id, monkeypatch
+) -> None:
+    """The ACTUAL ann-mode code path, observed mid-flight.
+
+    Unlike test_ann_arm_is_hnsw_servable (which re-applies GUCs by hand to
+    prove the arm is index-servable), this exercises memory_scored_search
+    itself: the real session, the real set_config calls, the real statement —
+    and asserts the GUC values are live on that session at the moment the
+    pooled statement executes. If the set_config effects did not persist to
+    the main statement (per-statement transactions, a session swap, a future
+    refactor reordering the block), this is the test that fails.
+    """
+    observed: dict = {}
+    real_get_read_session = ps.get_read_session
+
+    @contextlib.asynccontextmanager
+    async def _instrumented():
+        async with real_get_read_session() as session:
+
+            class _Spy:
+                async def execute(self, stmt, *args, **kwargs):
+                    if "candidate_pool" in str(stmt):
+                        observed["ef_search"] = (
+                            await session.execute(text("SHOW hnsw.ef_search"))
+                        ).scalar()
+                        observed["iterative_scan"] = (
+                            await session.execute(text("SHOW hnsw.iterative_scan"))
+                        ).scalar()
+                    return await session.execute(stmt, *args, **kwargs)
+
+            yield _Spy()
+
+    monkeypatch.setattr(ps, "get_read_session", _instrumented)
+    sp = dict(_SP)
+    sp["ann_pool_size"] = 200
+    rows = await ps.PostgresService().memory_scored_search(
+        tenant_id=tenant_id,
+        embedding=fake_embedding("guc liveness probe"),
+        query="guc liveness probe",
+        search_params=sp,
+        top_k=5,
+    )
+    assert rows == []  # empty tenant; the assertion is the GUC observation
+    assert observed.get("ef_search") == "200", (
+        f"hnsw.ef_search not live at statement time: {observed!r}"
+    )
+    assert observed.get("iterative_scan") == "relaxed_order", (
+        f"hnsw.iterative_scan not live at statement time: {observed!r}"
     )
