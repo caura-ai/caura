@@ -181,7 +181,9 @@ The plugin claims OpenClaw's `memory` slot and exposes the same agent-facing
 memory tools. Use the
 [agent installer's one-line setup](AGENT-INSTALL.md#connect-via-openclaw-plugin-alternative-to-mcp),
 then see the [OpenClaw integration guide](static/docs/integration-guide.md) for
-agent prompts and trust levels.
+agent prompts and trust levels. Already have nodes running? Keeping them current
+— auto-upgrade and the manual re-install — is covered in
+[`docs/plugin-upgrade.md`](docs/plugin-upgrade.md).
 
 ### Python client
 
