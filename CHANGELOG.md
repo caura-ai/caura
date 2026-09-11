@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.9.0](https://github.com/caura-ai/caura/compare/backend-v3.8.2...backend-v3.9.0) (2026-09-11)
+
+
+### Features
+
+* **client-typescript:** add getDocument() ([#1404](https://github.com/caura-ai/caura/issues/1404)) ([#1468](https://github.com/caura-ai/caura/issues/1468)) ([239098f](https://github.com/caura-ai/caura/commit/239098f3c8a1b48d1485a82c53fe836ecb5fd092))
+
 ## [3.8.2](https://github.com/caura-ai/caura/compare/backend-v3.8.1...backend-v3.8.2) (2026-09-11)
 
 
