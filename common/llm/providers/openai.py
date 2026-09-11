@@ -259,7 +259,25 @@ class OpenAILLMProvider:
             # judge. Temperature is a no-op in reasoning mode anyway, so
             # drop it rather than fail the call.
             create_kwargs.pop("temperature", None)
-        response = await self._client.chat.completions.create(**create_kwargs)
+        try:
+            response = await self._client.chat.completions.create(**create_kwargs)
+        except openai.BadRequestError:
+            # Some OpenAI-compatible endpoints (notably Polza's DeepSeek route)
+            # reject ``response_format={"type": "json_schema"}`` with HTTP 400
+            # ("This response_format type is unavailable now" / "does not
+            # support 'json_schema' response format") instead of ignoring the
+            # kwarg. Retry once with shape-less ``json_object``; the prompt
+            # still specifies the shape and the caller's Pydantic parse is the
+            # real guardrail. Providers that support json_schema are unaffected.
+            if response_format.get("type") != "json_schema":
+                raise
+            logger.warning(
+                "Provider rejected json_schema response_format for model %s; "
+                "retrying with json_object",
+                self._model,
+            )
+            create_kwargs["response_format"] = {"type": "json_object"}
+            response = await self._client.chat.completions.create(**create_kwargs)
         llm_ms = int((time.perf_counter() - t0) * 1000)
         tokens_in, tokens_out, tokens_reasoning = _usage_tokens(response)
         logger.info(
