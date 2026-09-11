@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.8.2](https://github.com/caura-ai/caura/compare/backend-v3.8.1...backend-v3.8.2) (2026-09-11)
+
+
+### Documentation
+
+* fix relative link to README in static/docs/integration-guide.md ([#1406](https://github.com/caura-ai/caura/issues/1406)) ([#1470](https://github.com/caura-ai/caura/issues/1470)) ([552f271](https://github.com/caura-ai/caura/commit/552f27161483249c3ef2e29bc2aa7c644c0955e8))
+
 ## [3.8.1](https://github.com/caura-ai/caura/compare/backend-v3.8.0...backend-v3.8.1) (2026-09-11)
 
 
