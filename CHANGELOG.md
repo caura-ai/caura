@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.8.1](https://github.com/caura-ai/caura/compare/backend-v3.8.0...backend-v3.8.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **api:** give every auth refusal a code that names the reason (C32) ([#1464](https://github.com/caura-ai/caura/issues/1464)) ([1a8cd24](https://github.com/caura-ai/caura/commit/1a8cd245edf5a08ff4f659548198f29388061eb2))
+
 ## [3.8.0](https://github.com/caura-ai/caura/compare/backend-v3.7.0...backend-v3.8.0) (2026-09-10)
 
 
