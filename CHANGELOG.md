@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.9.1](https://github.com/caura-ai/caura/compare/backend-v3.9.0...backend-v3.9.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **contradiction:** let the deterministic check run where it was needed (A40) ([#1463](https://github.com/caura-ai/caura/issues/1463)) ([1e2d38d](https://github.com/caura-ai/caura/commit/1e2d38d6cd4da6642fc36425ddf4be4ad7cba99d))
+
 ## [3.9.0](https://github.com/caura-ai/caura/compare/backend-v3.8.2...backend-v3.9.0) (2026-09-11)
 
 
