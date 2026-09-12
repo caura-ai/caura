@@ -18,17 +18,22 @@ Reads ``KEY`` and ``TENANT_ID`` from ``/tmp/e2e.env``::
     TENANT_ID=default
 """
 
+import argparse
 import json
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
+
+DEFAULT_ENV_FILE = Path("/tmp/e2e.env")
+DEFAULT_CORE_API = "http://localhost:8000"
 
 RUN = uuid.uuid4().hex[:8]  # nonce so re-runs don't hit write-dedup
 
 
-def load_env():
+def load_env(path: Path):
     env = {}
-    with open("/tmp/e2e.env") as f:
+    with path.open() as f:
         for line in f:
             k, _, v = line.strip().partition("=")
             if k:
@@ -36,12 +41,8 @@ def load_env():
     return env
 
 
-ENV = load_env()
-KEY = ENV["KEY"]
-TENANT = ENV.get("TENANT_ID", "default")
 OWN = "wt-fleet"  # the trust-1/2/3 agents' home fleet
 OTHER = "wt-other"  # a foreign fleet (cross-fleet target)
-CORE = "http://localhost:8000"  # direct core-api; X-API-Key resolves the tenant
 
 
 def http(method, url, body=None):
@@ -207,6 +208,25 @@ def run_read_liveness(ids):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_CORE_API,
+        help=f"Direct core-api URL (default: {DEFAULT_CORE_API})",
+    )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=DEFAULT_ENV_FILE,
+        help=f"Credentials environment file (default: {DEFAULT_ENV_FILE})",
+    )
+    args = parser.parse_args()
+
+    CORE = args.url.rstrip("/")
+    ENV = load_env(args.env_file)
+    KEY = ENV["KEY"]
+    TENANT = ENV.get("TENANT_ID", "default")
+
     ids = provision()
     ok1 = run_grid(ids)
     ok2 = run_fleetless()
