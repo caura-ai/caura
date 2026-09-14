@@ -34,12 +34,24 @@ class _FakeStorage:
         # Records the status the gate asked for, so a refactor can't silently
         # widen this spend gate to the live set (see the status= test below).
         self.status_arg: str | object | None = _UNSET
+        # A72 — new memories, never swept: the gate lets the run through.
+        self.gate: dict = {
+            "latest_memory_at": "2026-09-14T12:00:00+00:00",
+            "last_sweep_at": None,
+        }
 
     async def count_active(
         self, org_id: str, fleet_id: str | None, status: str | None = None
     ) -> int:
         self.status_arg = status
         return self._active
+
+    async def crystallizer_activity_gate(
+        self, *, tenant_id: str, fleet_id: str | None
+    ) -> dict:
+        """A72's gate. Defaults to "there is new work" so the cases below still
+        exercise what they were written for."""
+        return self.gate
 
 
 class _Cfg:

@@ -71,6 +71,23 @@ async def list_reports(tenant_id: str, limit: int = 10, offset: int = 0) -> list
     return [orm_to_dict(r, REPORT_FIELDS) for r in reports]
 
 
+@router.post("/activity-gate")
+async def crystallizer_activity_gate(request: Request) -> dict:
+    """A72 — has anything been written since the last COMPLETED sweep?
+
+    Body ``{tenant_id, fleet_id?}``. Returns ``{latest_memory_at,
+    last_sweep_at}`` (ISO or null), leaving the comparison to the caller, the
+    same shape as ``/insights/activity-gate``.
+
+    POST rather than GET to match that sibling: both take a body and both are
+    reads, and splitting the convention across two gates answering the same kind
+    of question would be the more surprising choice.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    return await _svc.crystallizer_activity_gate(tenant_id=tenant_id, fleet_id=body.get("fleet_id"))
+
+
 @router.get("/agent-activity")
 async def get_agent_activity_digest(
     tenant_id: str,

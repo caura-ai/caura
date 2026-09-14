@@ -10326,6 +10326,47 @@ class PostgresService:
             "latest_insight": latest_insight.isoformat() if latest_insight else None,
         }
 
+    async def crystallizer_activity_gate(self, *, tenant_id: str, fleet_id: str | None) -> dict:
+        """Cheap two-query activity gate for the crystallizer sweep (A72).
+
+        The sweep fires on a daily cron at 02:00, which a heavy writing day
+        outruns entirely — everything written after the tick waits ~24h for the
+        janitor. Raising the cadence is the fix, but a bare cadence increase
+        multiplies cost across every idle tenant, most of which wrote nothing.
+        This is the gate that makes a frequent tick cheap: a tenant with no
+        writes since its last COMPLETED sweep is answered in two indexed
+        aggregates and never reaches the LLM.
+
+        ``last_sweep_at`` deliberately reads only ``status="completed"`` rows,
+        the same reasoning as ``_type_ii_watermark``: a run reserves its report
+        with ``status="running"`` before it works, so "the latest report" is
+        frequently the caller itself, and a crashed run leaves a ``running`` row
+        behind forever. Either would advance the watermark past work that never
+        happened, and the memories written before it would never be swept.
+
+        Returns ``{latest_memory_at, last_sweep_at}`` as ISO strings or null and
+        leaves the comparison to the caller — mirroring
+        ``insights_activity_gate``, which likewise returns two timestamps rather
+        than a verdict so the decision stays readable in core-api.
+        """
+        mem_filter = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        report_filter = [
+            CrystallizationReport.tenant_id == tenant_id,
+            CrystallizationReport.status == "completed",
+        ]
+        if fleet_id:
+            mem_filter.append(Memory.fleet_id == fleet_id)
+            report_filter.append(CrystallizationReport.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            latest_memory = await session.scalar(select(func.max(Memory.created_at)).where(*mem_filter))
+            last_sweep = await session.scalar(
+                select(func.max(CrystallizationReport.completed_at)).where(*report_filter)
+            )
+        return {
+            "latest_memory_at": latest_memory.isoformat() if latest_memory else None,
+            "last_sweep_at": last_sweep.isoformat() if last_sweep else None,
+        }
+
     # ══════════════════════════════════════════════════════════════════════
     #  EVOLVE — scope-filter read + atomic weight-adjust/backfill write
     #  (Fix 2 Ph5b, PR2)

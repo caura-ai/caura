@@ -96,6 +96,33 @@ class _CoreApiLifecycleAdapter:
         active = await self._storage.count_active(org_id, fleet_id, status="active")
         if active <= _CRYSTALLIZE_MIN_ACTIVE_MEMORIES:
             return 0
+        # A72 — activity gate. The sweep fires on a daily cron, which a heavy
+        # writing day outruns: everything written after the tick waits ~24h for
+        # the janitor. Raising the cadence is the fix, but a bare increase
+        # multiplies LLM spend across every idle tenant. This gate is what makes
+        # a frequent tick affordable — a tenant with nothing new since its last
+        # COMPLETED sweep costs two indexed aggregates and returns here.
+        #
+        # Deliberately AFTER the count gate above, which is cheaper still and
+        # rejects small corpora outright, and BEFORE the lazy import below,
+        # which drags in the LLM clients this call exists to avoid paying for.
+        #
+        # ``last_sweep_at`` is the last COMPLETED run, never a running one — see
+        # the storage docstring: a run reserves its report before it works, so
+        # "latest" is often the caller, and a crashed run leaves a ``running``
+        # row forever. Either would advance the watermark past work that never
+        # happened and strand the memories written before it.
+        gate = await self._storage.crystallizer_activity_gate(tenant_id=org_id, fleet_id=fleet_id)
+        latest_memory_raw = gate.get("latest_memory_at")
+        if latest_memory_raw is None:
+            return 0
+        # Parsed rather than compared as strings, matching the insights gate:
+        # robust to mixed UTC offsets, which a lexicographic compare is not.
+        last_sweep_raw = gate.get("last_sweep_at")
+        if last_sweep_raw is not None and datetime.fromisoformat(latest_memory_raw) <= datetime.fromisoformat(
+            last_sweep_raw
+        ):
+            return 0
         # Lazy import: the crystallizer service has heavy transitive
         # deps (LLM clients, pipeline steps) we don't want loading at
         # core-api startup just for the lifecycle adapter wiring.

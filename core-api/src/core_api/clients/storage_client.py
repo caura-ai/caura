@@ -2446,6 +2446,14 @@ class CoreStorageClient:
             read=False,
         )
 
+    async def crystallizer_activity_gate(self, *, tenant_id: str, fleet_id: str | None) -> dict:
+        """MAX(created_at) of live memories vs the last COMPLETED sweep (A72)."""
+        return await self._post(  # type: ignore[return-value]
+            "/reports/activity-gate",
+            {"tenant_id": tenant_id, "fleet_id": fleet_id},
+            read=True,
+        )
+
     async def insights_activity_gate(self, *, tenant_id: str, fleet_id: str | None) -> dict:
         """MAX(created_at) for non-insight vs insight memories (lifecycle gate)."""
         return await self._post(  # type: ignore[return-value]

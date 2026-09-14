@@ -119,11 +119,22 @@ def _register_scheduled_tasks() -> None:
         run_purge_soft_deleted_tick,
         delay_provider=_daily_at("lifecycle_purge_run_at_hour"),
     )
+    # A72 — cadence is configurable. At the default (24) this is byte-for-byte
+    # today's behaviour: one run, wall-clock aligned to
+    # ``lifecycle_pipeline_run_at_hour``. Below 24 the alignment changes meaning
+    # — "every N hours from the next top of hour" rather than "at 02:00" — so
+    # the delay provider switches with it rather than pretending a sub-daily
+    # cadence can still anchor to one hour of the day.
+    _crystallize_hours = max(1, settings.lifecycle_crystallize_every_hours)
     scheduler.register(
         "lifecycle-crystallize",
-        24 * 3600,
+        _crystallize_hours * 3600,
         run_crystallize_tick,
-        delay_provider=_daily_at("lifecycle_pipeline_run_at_hour"),
+        delay_provider=(
+            _daily_at("lifecycle_pipeline_run_at_hour")
+            if _crystallize_hours >= 24
+            else (lambda: seconds_until_next_utc_top_of_hour())
+        ),
     )
     scheduler.register(
         "lifecycle-entity-link",

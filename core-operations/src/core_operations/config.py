@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     # may want these in their own off-peak slot away from the lighter SQL
     # ops. The consumer-side dedup gate still filters double-fires.
     lifecycle_pipeline_run_at_hour: int = 2
+    # A72 — how often the crystallize tick fires, in hours. 24 keeps today's
+    # single 02:00 run; lower values are the retune's third ground: a heavy
+    # writing day outruns a daily sweep entirely, so everything written after
+    # the tick waits ~24h for the janitor.
+    #
+    # Lowering this is affordable only because of the activity gate that landed
+    # with it: a tenant with nothing written since its last COMPLETED sweep is
+    # answered by two indexed aggregates in core-api and never reaches an LLM.
+    # WITHOUT that gate this knob would multiply spend across every idle tenant,
+    # which is why the two shipped together and why the default stays 24 — the
+    # cadence is an operator's decision, not a deploy's.
+    lifecycle_crystallize_every_hours: int = 24
     # Insights discovery (focus='discover'). Opt-in per-org
     # (``auto_insights_enabled``, default off); the consumer's activity
     # gate further no-ops ticks where no non-insight memories landed since
