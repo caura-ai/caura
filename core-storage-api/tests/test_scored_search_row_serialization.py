@@ -106,6 +106,11 @@ _ROUTE_ADDED_KEYS = {
     "recall_boost",
     "temporal_boost",
     "entity_links",
+    # D12 arm provenance (#1460): attached unconditionally by the route —
+    # ``None`` on the default path — so it belongs to the pinned contract.
+    # Landed on main between this PR's branch point and its CI run, which
+    # is exactly the drift this exact-set pin exists to surface.
+    "pool_arms",
 }
 
 
