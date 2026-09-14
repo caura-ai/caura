@@ -3090,8 +3090,14 @@ class CoreStorageClient:
             params["report_type"] = report_type
         return await self._get("/reports/latest", **params)
 
-    async def list_reports(self, tenant_id: str) -> list[dict]:
-        return await self._get_list("/reports", tenant_id=tenant_id)
+    async def list_reports(self, tenant_id: str, *, limit: int = 10, offset: int = 0) -> list[dict]:
+        """Crystallization reports, newest first.
+
+        ``limit``/``offset`` are forwarded (09/02 M-12). Keyword-only and
+        defaulted to the storage service's own values, so existing callers that
+        pass neither keep the exact window they had.
+        """
+        return await self._get_list("/reports", tenant_id=tenant_id, limit=limit, offset=offset)
 
     async def get_agent_activity_digest(
         self,

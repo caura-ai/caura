@@ -54,8 +54,20 @@ async def get_latest_report(
 
 
 @router.get("")
-async def list_reports(tenant_id: str) -> list[dict]:
-    reports = await _svc.report_list_by_tenant(tenant_id)
+async def list_reports(tenant_id: str, limit: int = 10, offset: int = 0) -> list[dict]:
+    """09/02 M-12 — forward the window instead of silently taking the default.
+
+    ``report_list_by_tenant`` has always paginated (ORDER BY started_at DESC,
+    OFFSET, LIMIT). This route did not pass anything, so every caller got the
+    function's DEFAULT first 10 rows — which meant core-api's own ``limit`` and
+    ``offset`` query params, validated and advertised, could not reach the query
+    that implements them. Paging returned page 1 forever.
+
+    Bounds are enforced at the core-api edge (``ge=1, le=100`` / ``ge=0``); this
+    is an internal route and mirrors the service's own defaults so an unpaged
+    caller sees exactly what it saw before.
+    """
+    reports = await _svc.report_list_by_tenant(tenant_id, limit=limit, offset=offset)
     return [orm_to_dict(r, REPORT_FIELDS) for r in reports]
 
 
