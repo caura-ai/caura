@@ -10,6 +10,37 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.11.0](https://github.com/caura-ai/caura/compare/backend-v3.10.1...backend-v3.11.0) (2026-09-14)
+
+
+### Features
+
+* **crystallizer:** let a tenant retune the sweep into the crowding band (A72) ([#1508](https://github.com/caura-ai/caura/issues/1508)) ([755b673](https://github.com/caura-ai/caura/commit/755b673408f62d1b740dfbc5a909377c732f4e24))
+
+
+### Bug Fixes
+
+* **crystallizer:** actually apply the reports pagination the API advertises (09/02 M-12) ([#1505](https://github.com/caura-ai/caura/issues/1505)) ([53798e4](https://github.com/caura-ai/caura/commit/53798e4216ffd0bd42fc8d10053c7cb74ef11afb))
+* **extraction:** record extraction failures instead of only logging them (09/02 M-40) ([#1504](https://github.com/caura-ai/caura/issues/1504)) ([0696f5f](https://github.com/caura-ai/caura/commit/0696f5f81652418b6822248e42774fc16306dfd4))
+* **plugin:** evict the least recently used session, not the oldest one (F1) ([#1507](https://github.com/caura-ai/caura/issues/1507)) ([138b2d9](https://github.com/caura-ai/caura/commit/138b2d9ac452ff54e99c227dd099223ed0da24d8))
+
+
+### Performance
+
+* **contradiction:** fetch every candidate's entity context in one batched pair of calls (m-05) ([#1500](https://github.com/caura-ai/caura/issues/1500)) ([2d6ad69](https://github.com/caura-ai/caura/commit/2d6ad695093bbde2435ee17fff4d46c8a5b17f74))
+* **crystallizer:** stop the near-duplicate scan making one round-trip per row and relaying every vector ([#1496](https://github.com/caura-ai/caura/issues/1496)) ([43c5487](https://github.com/caura-ai/caura/commit/43c5487203e6c07f51fc92a7ae1fd73ba8b9892e))
+
+
+### Dependencies
+
+* **actions:** bump the actions group with 2 updates ([#1489](https://github.com/caura-ai/caura/issues/1489)) ([95f7499](https://github.com/caura-ai/caura/commit/95f74998fcc5fc22e9d3b7c0fc77a23bd937d233))
+* update google-genai requirement from &gt;=2.22.0 to &gt;=2.23.0 ([#1484](https://github.com/caura-ai/caura/issues/1484)) ([c789014](https://github.com/caura-ai/caura/commit/c7890145317092fab4602dc848f7cc34474fa516))
+
+
+### Documentation
+
+* add the Caura Rail SDK to the quick start and agent install guide ([#1501](https://github.com/caura-ai/caura/issues/1501)) ([ff1007a](https://github.com/caura-ai/caura/commit/ff1007a045086f72ccb93d4c4c23e124ea013cf7))
+
 ## [3.10.1](https://github.com/caura-ai/caura/compare/backend-v3.10.0...backend-v3.10.1) (2026-09-14)
 
 

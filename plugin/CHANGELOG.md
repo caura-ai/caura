@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.22.2](https://github.com/caura-ai/caura/compare/plugin-v2.22.1...plugin-v2.22.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **plugin:** evict the least recently used session, not the oldest one (F1) ([#1507](https://github.com/caura-ai/caura/issues/1507)) ([138b2d9](https://github.com/caura-ai/caura/commit/138b2d9ac452ff54e99c227dd099223ed0da24d8))
+
 ## [2.22.1](https://github.com/caura-ai/caura/compare/plugin-v2.22.0...plugin-v2.22.1) (2026-09-14)
 
 
