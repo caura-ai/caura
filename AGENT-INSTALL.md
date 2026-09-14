@@ -165,6 +165,42 @@ This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims th
 
 Use MCP if your agent supports it. Use the plugin if you're running on OpenClaw.
 
+## Connect via Rail SDK (agents you write yourself)
+
+If the agent is your own Python or TypeScript code rather than an MCP client,
+use Rail. It calls the same API: rules and relevant facts are recalled before
+each turn, and facts the turn taught are stored after it.
+
+```bash
+export CAURA_URL=http://localhost:8000
+export CAURA_API_KEY=standalone     # or your admin / gate key
+pip install caura-rail              # or: npm install @caura/rail
+```
+
+```python
+from caura_rail import MemoryScope, Rail, RestMemoryStore
+
+with RestMemoryStore.from_env() as store:
+    rail = Rail(store, MemoryScope(agent_id="my-agent", fleet_id="my-fleet"))
+    with rail.turn("Remember: We deploy in eu-west-1.") as turn:
+        turn.reply = "Noted. " + turn.context.text
+    print([w.status for w in turn.writes])   # ['written']
+```
+
+```js
+import { MemoryScope, Rail, RestMemoryStore } from "@caura/rail";
+
+const rail = new Rail({
+  store: RestMemoryStore.fromEnv(process.env),
+  scope: new MemoryScope({ agentId: "my-agent", fleetId: "my-fleet" }),
+});
+const turn = await rail.turn("Remember: We deploy in eu-west-1.", (_, ctx) => "Noted. " + ctx.text);
+console.log(turn.writes.map(w => w.status));    // ['written']
+```
+
+In standalone mode Rail discovers the `default` tenant by itself; with a gate
+key set `CAURA_TENANT` as well. Full guide: https://github.com/caura-ai/caura-rail.
+
 ## Verify Your Connection
 
 ```bash
