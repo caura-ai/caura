@@ -7,7 +7,7 @@ The product was renamed to Caura. This file is the in-repo answer to "is this ol
 string a bug, and may I change it?" — because for a large and load-bearing subset of
 them the answer is **no**, and nothing in the code says so at the point of use.
 
-If you grepped this repo for `memclaw` and landed here, that grep worked as intended. <!-- legacy-name-ok: this doc must be findable by the exact grep it exists to answer -->
+If you grepped this repo for `memclaw` and landed here, that grep worked as intended. <!-- legacy-name-floor: this historical plan must remain findable by the exact grep it explains -->
 Read [The floor](#the-floor) before you change anything you found.
 
 ---

@@ -401,7 +401,7 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
     # than written here: an allowlist key must equal the path the app
     # serves, so the legacy spelling is mandatory, and a marker on this
     # line would be displaced the first time ``ruff format`` wrapped it.
-    LEGACY_KEYSTONES_ROUTE: "filter: the permanent legacy alias of the line above",
+    LEGACY_KEYSTONES_ROUTE: "filter: the supported legacy route of the line above",
     "GET /api/v1/reports/agent-activity": (
         "filter: narrows a digest on a surface that is cross-agent by design — "
         "GET /reports builds a per_agent breakdown of the tenant"

@@ -119,7 +119,6 @@ def test_renamed_leaves_a_nameless_topic_alone() -> None:
 def test_family_is_the_middle_segment() -> None:
     # The unit the publisher flip is decided in, one family at a time.
     assert topics_mod.family(Topics.Audit.EVENT_RECORDED) == "audit"
-    assert topics_mod.family(Topics.Pipeline.ENTITY_EXTRACTED) == "pipeline"
     assert topics_mod.family("no-dots-here") == ""
 
 
@@ -170,8 +169,8 @@ FLIPPED = frozenset({"audit", "lifecycle", "memory", "org"})
 # that family contracts, passing whether or not the guard still works. Spelling
 # it makes these tests independent of how far the cutover has got. Deliberately
 # not a name any environment serves.
-PRE_CONTRACT = "legacy.pipeline.entity-extracted"
-PRE_CONTRACT_FAMILY = "pipeline"
+PRE_CONTRACT = "legacy.uncontracted.example-requested"
+PRE_CONTRACT_FAMILY = "uncontracted"
 # Hand-spelled independently of ``Topics.Lifecycle`` so a new member requires an
 # explicit contract decision. An already-contracted family has no legacy twin to
 # bind: its current-topic infrastructure must exist before a new member ships.
@@ -229,12 +228,6 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     each, the readiness gate at 17/17 with nothing unbound, and a pre-flip week
     of 20 production publishes on the legacy name and zero on the twin.
 
-    ``pipeline`` is called out for the opposite reason: it is declared in both
-    repos but has no live topic in either environment, so flipping it would
-    publish into nothing and raise nothing. A no-op flip that reports success is
-    the worst outcome available in this cutover, because it also looks like
-    progress.
-
     ``org`` joined on 2026-09-08 — the third SHARED family, mirrored into
     caura-enterprise in the same cycle — and was contracted the same day. Its
     publisher flip was confirmed by DELIVERY rather than configuration: the first
@@ -250,7 +243,6 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     which ``dual=False`` was illegal fleet-wide.
     """
     assert topics_mod.FLIPPED_FAMILIES == FLIPPED
-    assert "pipeline" not in topics_mod.FLIPPED_FAMILIES
 
 
 def test_known_families_are_derived_from_the_enums() -> None:
@@ -258,7 +250,6 @@ def test_known_families_are_derived_from_the_enums() -> None:
     assert topics_mod.known_families() == {
         "memory",
         "audit",
-        "pipeline",
         "lifecycle",
         "org",
     }

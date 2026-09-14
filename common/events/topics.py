@@ -41,35 +41,6 @@ class Audit(enum.StrEnum):
     EVENT_RECORDED = "caura.audit.event-recorded"
 
 
-class Pipeline(enum.StrEnum):
-    # CONTRACTED 2026-09-09, and the only family that could be contracted
-    # WITHOUT first being flipped -- because it is the only one with nothing to
-    # move. It declares no topic in either environment's Terraform, has never
-    # had one provisioned, and no code in either repo publishes or subscribes
-    # to these members; the two references that exist name the SYMBOL in design
-    # comments (CAURA-593/595, the planned entity-extraction worker fleet), not
-    # the string.
-    #
-    # That absence is exactly why ``pipeline`` must never enter
-    # FLIPPED_FAMILIES -- publishing into a topic that does not exist is silent
-    # loss that reports success -- and it is also why renaming the members here
-    # is safe in a way no other family's would be. Expand/flip/drain exists to
-    # keep messages from falling between two names. There are no messages.
-    #
-    # After this, ``renamed`` is the identity for both members, so
-    # ``publish_name`` and ``subscribe_names`` agree under dual=True and
-    # dual=False alike and ``unbound_publish_topics`` is unaffected. ``family``
-    # still reads ``pipeline`` -- the segment is unchanged -- so
-    # ``known_families()`` is the same set and the guard that validates
-    # FLIPPED_FAMILIES against it behaves identically.
-    #
-    # The members keep their names so the design comments that reference them
-    # stay correct. If that worker fleet is ever built, it inherits a family
-    # already carrying the current brand and needs no cutover of its own.
-    ENTITY_EXTRACT_REQUESTED = "caura.pipeline.entity-extract-requested"
-    ENTITY_EXTRACTED = "caura.pipeline.entity-extracted"
-
-
 class Org(enum.StrEnum):
     # CAURA-694: enterprise platform-admin-api publishes one event per
     # soft-delete + restore, the payload carries the affected tenant_ids
@@ -131,7 +102,6 @@ class Topics:
 
     Memory = Memory
     Audit = Audit
-    Pipeline = Pipeline
     Lifecycle = Lifecycle
     Org = Org
 
@@ -181,7 +151,7 @@ def renamed(topic: str) -> str:
 def family(topic: str) -> str:
     """The topic family — the segment between the brand and the event name.
 
-    ``<brand>.pipeline.entity-extracted`` -> ``pipeline``. Publishers flip one
+    ``<brand>.memory.embedded`` -> ``memory``. Publishers flip one
     family at a time, so this is the unit that decision is made in. Returns ""
     for a name that has no family segment.
     """
@@ -207,10 +177,9 @@ def family(topic: str) -> str:
 # ``memory``, the other remaining shared family, on provisioning completeness
 # rather than size: every one of the 9 topics this family declares is live in
 # both environments, whereas ``memory`` then declared one topic (``.created``)
-# that existed in neither. That is the same defect that disqualifies
-# ``pipeline``, and a flip is not the step at which to rely on a topic being
-# harmless because nothing publishes it. That declaration has since been
-# removed — see the ``memory`` note below. Evidence, measured against the
+# that existed in neither. A flip is not the step at which to rely on an absent
+# topic being harmless because nothing publishes it. That declaration has
+# since been removed — see the ``memory`` note below. Evidence, measured against the
 # running world rather than the source tree:
 #
 #   * 12/12 pubsub-backed deployables reported EVENT_BUS_DUAL_SUBSCRIBE on at
@@ -291,12 +260,6 @@ def family(topic: str) -> str:
 # on the legacy name. What contraction changes is that subscribers stop BINDING
 # it, which is the precondition for draining it, not a substitute for having
 # drained it. The legacy topics stay until the drain gate passes.
-#
-# ``pipeline`` must NOT enter this set while it has zero live topics in either
-# environment: publishing to a topic that does not exist is silent loss, so
-# flipping it would move nothing and report success. Re-confirmed 2026-09-08
-# against the live project — ``pubsub topics list`` matches no ``pipeline``
-# topic under either brand, in either environment.
 #
 # ``audit`` FLIPPED 2026-09-10 — last, as planned, but NOT for the reason this
 # comment used to give. It said these rows are hash-chained and that a lost or

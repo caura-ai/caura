@@ -248,8 +248,7 @@ class ScheduleBackgroundTasks:
         # write load, extraction LLM calls compete with live traffic
         # (scaling doc §10 bottleneck #7). Full worker-fleet migration
         # waits on CAURA-593 (Pub/Sub publisher/subscriber wiring) +
-        # a new worker service that subscribes to
-        # Topics.Pipeline.ENTITY_EXTRACT_REQUESTED.
+        # a new worker service and a deliberately provisioned topic contract.
         if tenant_config.entity_extraction_enabled:
             track_task(
                 tracked_task(

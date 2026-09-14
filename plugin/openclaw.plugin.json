@@ -17,7 +17,7 @@
       },
       "MEMCLAW_AGENT_ID": {
         "type": "string",
-        "description": "Accepted forever as an alias for CAURA_AGENT_ID; the new name wins when both are set."
+        "description": "Supported alias for CAURA_AGENT_ID; the new name wins when both are set."
       }
     },
     "required": []

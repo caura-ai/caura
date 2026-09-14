@@ -1,6 +1,6 @@
 # caura-client
 
-> Formerly `memclaw-client`. Its yanked final release, `memclaw-client==0.5.0`, still installs `caura-client` when exactly pinned, but provides no `memclaw_client` module. Existing code must move its imports and the retired `MemClaw`/`MemClawError`/`MemClawAPIError` names to the canonical package and classes below. <!-- legacy-name-ok: taught as legacy alias -->
+> Formerly `memclaw-client`. Its yanked final release, `memclaw-client==0.5.0`, still installs `caura-client` when exactly pinned, but provides no `memclaw_client` module. Existing code must move its imports and the retired `MemClaw`/`MemClawError`/`MemClawAPIError` names to the canonical package and classes below. <!-- legacy-name-floor: taught as legacy alias -->
 
 Official Python client for [Caura](https://caura.ai) — governed shared
 memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).
@@ -120,9 +120,10 @@ For credentials, scopes, and the full API surface, see the
 
 ## caura-interviewer — Claude Code + Cursor adapter
 
-Installing this package also provides the `caura-interviewer` CLI (the
-legacy `memclaw-interviewer` entrypoint is installed too and keeps working): the <!-- legacy-name-ok: taught as legacy alias -->
-Caura Interviewer's disk-parser adapter for Claude Code and Cursor
+Installing this package provides the `caura-interviewer` CLI. When upgrading an
+older install, run `caura-interviewer install`; for one release it can find and replace
+an existing `memclaw-interviewer` crontab entry. <!-- legacy-name-floor: migration instruction for the retired entry point -->
+The Caura Interviewer is a disk-parser adapter for Claude Code and Cursor
 workstations. It reads agent session transcripts **read-only** — Claude
 Code's `~/.claude/projects/…/*.jsonl` or Cursor's
 `~/.cursor/projects/…/agent-transcripts/…/*.jsonl` — tracks a per-file
@@ -142,7 +143,7 @@ caura-interviewer run --harness cursor          # harvest Cursor instead (or
                                                 # CAURA_INTERVIEWER_HARNESS=cursor)
 ```
 
-Every `CAURA_*` variable above also answers to its pre-rename `MEMCLAW_*` name; where both are set the first non-empty value wins. <!-- legacy-name-ok: taught as legacy alias -->
+Every `CAURA_*` variable above also answers to its pre-rename `MEMCLAW_*` name; where both are set the first non-empty value wins. <!-- legacy-name-floor: taught as legacy alias -->
 
 **Privacy:** default-deny — with no allowlist the CLI lists discovered
 project dirs and exits with guidance; `--all-projects` is the explicit

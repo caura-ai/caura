@@ -309,8 +309,8 @@ async def process_entity_extraction(
     # the scaling plan, which was to land the work on a dedicated worker
     # fleet so core-api isn't CPU/memory-contended by burst-time LLM
     # calls. Full migration: CAURA-593 lands Pub/Sub first, then a new
-    # worker service subscribes to ``Topics.Pipeline.ENTITY_EXTRACT_REQUESTED``
-    # and this function becomes its handler body.
+    # worker service and topic contract land together, with this function as
+    # the handler body.
     #
     # H-02. Guards both of the trailing liveness checks — the one at the end of
     # the ``try`` and the one in the ``except``. It means "this memory MAY have

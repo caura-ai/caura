@@ -44,9 +44,9 @@ for _k, _v in _TEST_DEFAULTS.items():
 
 # Defensively unset env vars that change auth shape and routinely leak in
 # from developers' shells (the OSS plugin onboarding writes
-# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many  # legacy-name-ok: rule 3 env alias
+# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many  # legacy-name-floor: documents the live env alias
 # rc files source it for the openclaw CLI). A leaked value flips
-# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``  # legacy-name-ok: rule 3 dual-read field
+# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``  # legacy-name-floor: documents the dual-read field exercised below
 # enforce the gate at Path 2 with 401s before any standalone-mode
 # bypass — silently failing every test that doesn't sniff the env
 # itself (e.g. test_rate_limit's auth-gated burst test, which gets all
