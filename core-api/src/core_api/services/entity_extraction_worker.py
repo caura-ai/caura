@@ -822,21 +822,57 @@ async def process_entity_extraction(
         # that names the collapsed form must still land on the merged row.
         key_to_id: dict[str, UUID] = {canonical_match_key(n): i for n, i in name_to_id.items()}
         rel_count = 0
+        rel_failed = 0
         for rel in graph.relations:
             from_id = name_to_id.get(rel.from_entity) or key_to_id.get(canonical_match_key(rel.from_entity))
             to_id = name_to_id.get(rel.to_entity) or key_to_id.get(canonical_match_key(rel.to_entity))
             if from_id and to_id:
-                await upsert_relation(
-                    RelationUpsert(
-                        tenant_id=tenant_id,
-                        fleet_id=fleet_id,
-                        from_entity_id=from_id,
-                        relation_type=rel.relation_type,
-                        to_entity_id=to_id,
-                        evidence_memory_id=memory_id,
-                    ),
-                )
-                rel_count += 1
+                # Guarded PER RELATION, matching ``subject_writeback`` /
+                # ``predicate_writeback`` below. Unguarded, ONE failing upsert
+                # threw out of this whole function into the outer "(non-fatal)"
+                # handler — and everything after this loop is what actually
+                # feeds the deterministic contradiction path: the A65 predicate
+                # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY
+                # thing that runs A40's RDF pass. So a single transient storage
+                # error on one relation out of dozens left that memory with a
+                # NULL predicate forever and no Path C detection at all, and
+                # said "non-fatal" while doing it. Nothing retries.
+                #
+                # Observed, not hypothesised: a storage 500 on
+                # ``POST /entities/relations`` produced exactly this — every
+                # later stage skipped, one warning line, predicate never set.
+                try:
+                    await upsert_relation(
+                        RelationUpsert(
+                            tenant_id=tenant_id,
+                            fleet_id=fleet_id,
+                            from_entity_id=from_id,
+                            relation_type=rel.relation_type,
+                            to_entity_id=to_id,
+                            evidence_memory_id=memory_id,
+                        ),
+                    )
+                    rel_count += 1
+                except Exception:
+                    rel_failed += 1
+                    logger.warning(
+                        "relation_upsert failed for memory %s (%s -[%s]-> %s) (non-fatal)",
+                        memory_id,
+                        rel.from_entity,
+                        rel.relation_type,
+                        rel.to_entity,
+                        exc_info=True,
+                    )
+        if rel_failed:
+            # Surfaced as its own line so a partial graph is visible as a
+            # COUNT rather than N scattered warnings — a spike here means the
+            # entity graph is degrading quietly.
+            logger.warning(
+                "relation_upsert_partial memory=%s created=%d failed=%d",
+                memory_id,
+                rel_count,
+                rel_failed,
+            )
 
         # ---- A65: predicate write-back ----
         #

@@ -813,9 +813,22 @@ async def test_a_crash_after_the_writes_still_purges_a_dropped_row(
         ]
     )
     mock_sc_factory.return_value = sc
-    # Raised after the links are committed and before the audit call, so the
-    # function leaves with graph rows written and no normal-path check run.
-    mock_upsert_relation.side_effect = RuntimeError("storage went away mid-write")
+    # The raiser is the AUDIT CALL, not the relation upsert.
+    #
+    # This test used a failing ``upsert_relation`` as its vehicle for "leaves by
+    # raising". That stopped being one: relation upserts are now guarded per
+    # relation, because an unguarded failure there also skipped the predicate
+    # write-back and the ``Trigger.ENTITY`` fire — silently removing the memory
+    # from the deterministic contradiction path for good.
+    #
+    # The H-02 guarantee this test exists for is UNCHANGED, and so is its
+    # subject: anything between the link upsert and the final check that raises
+    # must still re-check and purge. ``log_action`` is such a thing — the
+    # docstring above already names it — so the test now uses it and keeps
+    # asserting the same property. A relation failure takes the FINISHING path
+    # instead, whose own check is covered by
+    # ``test_a_guarded_relation_failure_still_reaches_the_final_purge_check``.
+    mock_log.side_effect = RuntimeError("storage went away mid-write")
 
     with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         # Extraction is fire-and-forget; swallowing is the established contract
@@ -830,11 +843,76 @@ async def test_a_crash_after_the_writes_still_purges_a_dropped_row(
         )
 
     # It really did leave by raising — otherwise this passes for the wrong reason.
-    mock_log.assert_not_awaited()
+    mock_log.assert_awaited()
     assert sc.get_memory.await_count == 3, (
         "the except path never asked whether the memory survived"
     )
     sc.purge_entity_artifacts.assert_awaited_once()
+
+
+@patch(
+    "core_api.services.entity_extraction_worker._discover_cross_links_for_memory",
+    new_callable=AsyncMock,
+)
+@patch(
+    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+)
+@patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
+@patch(
+    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+)
+@patch("core_api.services.entity_extraction_worker.get_storage_client")
+@patch(
+    "core_api.services.entity_extraction_worker.extract_entities_from_content",
+    new_callable=AsyncMock,
+)
+@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
+async def test_a_guarded_relation_failure_still_reaches_the_final_purge_check(
+    mock_resolve,
+    mock_extract,
+    mock_sc_factory,
+    mock_embed,
+    mock_log,
+    mock_upsert_relation,
+    mock_discover,
+):
+    """The other half of the H-02 guarantee, after the relation guard.
+
+    A failing relation no longer leaves by raising, so it no longer reaches the
+    ``except`` path's check. It must therefore reach the FINISHING path's check
+    instead — otherwise guarding the upsert would have quietly opened the leak
+    the sibling test above exists to close.
+    """
+    mock_resolve.return_value = _fake_config()
+    mock_extract.return_value = _graph_with_relation()
+    mock_embed.return_value = None
+    sc = _graph_sc(deleted_at=None)
+    sc.get_memory = AsyncMock(
+        side_effect=[
+            {"id": "m", "deleted_at": None},  # pre-write check: live
+            {"id": "m", "deleted_at": None},  # post-link check: still live
+            {"id": "m", "deleted_at": "2026-09-06T00:00:00Z"},  # final check: dropped
+        ]
+    )
+    mock_sc_factory.return_value = sc
+    mock_upsert_relation.side_effect = RuntimeError("storage 500 on one relation")
+
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
+        await process_entity_extraction(
+            memory_id=uuid.uuid4(),
+            tenant_id="test-tenant",
+            fleet_id=None,
+            agent_id="test-agent",
+            content="Alice loves coffee",
+            memory_type="episodic",
+        )
+
+    # It did NOT leave by raising: the audit call was reached.
+    mock_log.assert_awaited()
+    assert sc.get_memory.await_count == 3, (
+        "the finishing path never asked whether the memory survived"
+    )
+    sc.purge_entity_artifacts.assert_awaited()
 
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
