@@ -22,6 +22,7 @@ from core_api.schemas import RelationUpsert
 from core_api.services.audit_service import log_action
 from core_api.services.entity_extraction import extract_entities_from_content
 from core_api.services.entity_service import upsert_relation
+from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
 
@@ -1025,8 +1026,29 @@ async def process_entity_extraction(
         if wrote_graph_rows:
             await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
+        # 09/02 M-40 — make the failure a ROW, not just a LINE.
+        #
+        # Every call site wraps this coroutine in ``tracked_task``, but that
+        # wrapper writes a ``BackgroundTaskLog`` row ONLY when the coroutine
+        # raises. This handler catches and returns normally — deliberately, and
+        # several tests pin that — so the wrapper saw success, the table an
+        # operator actually inspects stayed empty, the memory kept no entities,
+        # and nothing retried it or knew to.
+        #
+        # Recording here rather than re-raising keeps the non-raising contract
+        # intact. Raising would also work for the six production call sites,
+        # which are all wrapped, but it would turn a documented "logged
+        # non-fatal failure" into an unhandled task exception for any caller
+        # that is not — a distinction this module's handler comments reason
+        # about repeatedly.
+        #
+        # Observed cost of the silence: a storage 500 on
+        # ``POST /entities/relations`` killed the predicate write-back and the
+        # whole ``Trigger.ENTITY`` path for that memory, and presented as "A40
+        # does not work" — because nothing anywhere recorded a task had failed.
+        await record_task_failure("entity_extraction", memory_id, tenant_id, exc)
         # H-02, and the reason the check below is duplicated rather than moved
         # into a ``finally``. The normal-path call at the end of the ``try`` is
         # unreachable once anything between the link upsert and it raises — the
