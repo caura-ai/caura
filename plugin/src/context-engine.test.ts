@@ -18,6 +18,9 @@ import {
   // slice, and only this line will need to change.
   MemClawContextEngine as ContextEngine,  // legacy-name-ok: references the class as currently named
   type ShouldRecallInput,
+  _pushToBufferForTests,
+  _sessionKeysForTests,
+  _resetSessionBuffersForTests,
 } from "./context-engine.js";
 import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
@@ -485,5 +488,64 @@ describe("shouldRecall — noise-skip gate (auto)", () => {
     const r = shouldRecall(input({ prompt: "heartbeat check all healthy and nothing else here" }));
     // falls through to default-substantive (length >= 14, not a ping)
     assert.equal(r.reason, "default-substantive");
+  });
+});
+
+
+describe("session buffer eviction (F1 residual)", () => {
+  const msg = (content: string) =>
+    ({ role: "user", content }) as unknown as Parameters<
+      typeof _pushToBufferForTests
+    >[1];
+
+  test("evicts the least recently USED session, not the oldest created", () => {
+    // The comment always said LRU. The implementation read
+    // `sessionBuffers.keys().next()` — a Map yields INSERTION order, and a
+    // plain `get` does not move a key — so it was FIFO: at MAX_SESSIONS it
+    // dropped the longest-RUNNING session, the one most likely to be
+    // mid-conversation with the deepest buffer, while newer idle sessions
+    // survived. Losing that buffer silently degrades recall for that session,
+    // because buildQueryFromMessages has nothing left to build from.
+    _resetSessionBuffersForTests();
+
+    const MAX = 100;
+    for (let i = 0; i < MAX; i++) _pushToBufferForTests(`s${i}`, msg(`m${i}`));
+
+    // s0 is the oldest CREATED. Use it — under LRU that must protect it.
+    _pushToBufferForTests("s0", msg("s0 is still active"));
+
+    // Now force one eviction.
+    _pushToBufferForTests("overflow", msg("new session"));
+
+    const keys = _sessionKeysForTests();
+    assert.ok(keys.includes("s0"), "the recently used session must survive");
+    assert.ok(!keys.includes("s1"), "the least recently used session goes");
+    assert.ok(keys.includes("overflow"));
+    assert.equal(keys.length, MAX);
+  });
+
+  test("using a session moves it to the back of the eviction queue", () => {
+    _resetSessionBuffersForTests();
+    _pushToBufferForTests("a", msg("1"));
+    _pushToBufferForTests("b", msg("1"));
+    _pushToBufferForTests("c", msg("1"));
+    assert.deepEqual(_sessionKeysForTests(), ["a", "b", "c"]);
+
+    _pushToBufferForTests("a", msg("2"));
+    assert.deepEqual(
+      _sessionKeysForTests(),
+      ["b", "c", "a"],
+      "a was used, so it should now be last to be evicted",
+    );
+  });
+
+  test("a re-used session keeps its buffer", () => {
+    // The reorder is a delete+set on the same array reference; dropping the
+    // buffer instead would trade a wrong-eviction bug for a data-loss one.
+    _resetSessionBuffersForTests();
+    _pushToBufferForTests("keep", msg("first"));
+    _pushToBufferForTests("other", msg("x"));
+    _pushToBufferForTests("keep", msg("second"));
+    assert.deepEqual(_sessionKeysForTests(), ["other", "keep"]);
   });
 });
