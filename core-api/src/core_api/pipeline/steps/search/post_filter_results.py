@@ -75,6 +75,9 @@ class PostFilterResults:
                         "recall_boost": _f(getattr(row, "recall_boost", None)),
                         "temporal_boost": _f(getattr(row, "temporal_boost", None)),
                         "status_penalty": _f(getattr(row, "status_penalty", None)),
+                        # D12 arm provenance (ann-pool mode): which candidate-pool
+                        # arms admitted the row; None off-pool / pre-provenance.
+                        "pool_arms": getattr(row, "pool_arms", None),
                         "has_embedding": bool(getattr(row, "has_embedding", True)),
                         "excluded": excluded,
                     }

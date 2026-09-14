@@ -22,10 +22,11 @@ skill-write validator are patched at the module seam; no DB.
 """
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from core_api import errors
+from core_api.app import http_exception_handler as _http_exception_handler
 from core_api.auth import AuthContext, get_auth_context
 from core_api.routes import skills_inbox as si
 from core_api.services.forge.sentinel_scan import ScanResult
@@ -261,6 +262,13 @@ def make_client(
 ) -> AsyncClient:
     app = FastAPI()
     app.include_router(si.router, prefix="/api/v1")
+    # C32 — register the app's real HTTPException handler. Without it a bare
+    # ``FastAPI()`` serialises ``HTTPException.detail`` verbatim, so a
+    # ``coded_detail`` dict reaches the assertion as a dict and the test is
+    # checking a shape NO CLIENT EVER RECEIVES. The production app flattens it
+    # back to the message string and puts the code in ``error.code``; with the
+    # handler wired here these tests assert the contract callers actually see.
+    app.add_exception_handler(HTTPException, _http_exception_handler)
     auth = AuthContext(
         tenant_id=tenant_id,
         org_role=org_role,
@@ -533,7 +541,12 @@ async def test_actions_refuse_a_non_writing_credential(
     # top-level ``error`` key — is not installed and the dict stays under
     # ``detail``. Clients read ``error.code``; this is the harness's shape, and
     # the reason every other coded-error assertion in the suite differs.
-    assert r.json()["detail"]["code"] == code, f"{action}: {r.text}"
+    # C32 — the code lives in ``error.code``, not inside ``detail``. This used
+    # to read ``detail["code"]`` because the bare test app had no
+    # ``HTTPException`` handler and so leaked the raw ``coded_detail`` dict;
+    # with the real handler registered above, ``detail`` is the flat message
+    # string a client actually receives and the code sits alongside it.
+    assert r.json()["error"]["code"] == code, f"{action}: {r.text}"
     # Status alone would pass against a gate placed after the write.
     assert storage.upserts == [], f"{action} mutated the doc despite the refusal"
 

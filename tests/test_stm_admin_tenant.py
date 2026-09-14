@@ -28,9 +28,10 @@ are patched at the module boundary. No DB.
 from __future__ import annotations
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
+from core_api.app import http_exception_handler as _http_exception_handler
 from core_api.auth import AuthContext, get_auth_context
 from core_api.routes import stm
 
@@ -126,6 +127,13 @@ def make_client(
 ) -> AsyncClient:
     app = FastAPI()
     app.include_router(stm.router, prefix="/api/v1")
+    # C32 — register the app's real HTTPException handler. Without it a bare
+    # ``FastAPI()`` serialises ``HTTPException.detail`` verbatim, so a
+    # ``coded_detail`` dict reaches the assertion as a dict and the test is
+    # checking a shape NO CLIENT EVER RECEIVES. The production app flattens it
+    # back to the message string and puts the code in ``error.code``; with the
+    # handler wired here these tests assert the contract callers actually see.
+    app.add_exception_handler(HTTPException, _http_exception_handler)
     auth = AuthContext(tenant_id=tenant_id, is_admin=is_admin)
 
     async def _auth_dep():

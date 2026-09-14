@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.22.0](https://github.com/caura-ai/caura/compare/plugin-v2.21.1...plugin-v2.22.0) (2026-09-10)
+
+
+### Features
+
+* **search:** freshness_reference — As-Of Recall for backfilled corpora ([#1471](https://github.com/caura-ai/caura/issues/1471)) ([c13b720](https://github.com/caura-ai/caura/commit/c13b720336bdcf926d6dc43fb93347693570ec69))
+
 ## [2.21.1](https://github.com/caura-ai/caura/compare/plugin-v2.21.0...plugin-v2.21.1) (2026-09-09)
 
 

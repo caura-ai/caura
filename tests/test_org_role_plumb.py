@@ -18,10 +18,11 @@ Pins:
 """
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from core_api import auth as auth_mod
+from core_api.app import http_exception_handler as _http_exception_handler
 from core_api.routes import skills_inbox as si
 from tests._legacy_contracts import LEGACY_API_KEY_FIELD
 
@@ -140,6 +141,13 @@ def inbox_app(monkeypatch):
 
     app = FastAPI()
     app.include_router(si.router, prefix="/api/v1")
+    # C32 — register the app's real HTTPException handler. Without it a bare
+    # ``FastAPI()`` serialises ``HTTPException.detail`` verbatim, so a
+    # ``coded_detail`` dict reaches the assertion as a dict and the test is
+    # checking a shape NO CLIENT EVER RECEIVES. The production app flattens it
+    # back to the message string and puts the code in ``error.code``; with the
+    # handler wired here these tests assert the contract callers actually see.
+    app.add_exception_handler(HTTPException, _http_exception_handler)
     return app
 
 

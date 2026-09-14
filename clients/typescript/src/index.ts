@@ -71,6 +71,11 @@ export interface SearchOptions {
   [extra: string]: unknown;
 }
 
+export interface GetDocumentOptions {
+  collection: string;
+  tenantId?: string;
+}
+
 function toMemory(d: Record<string, any>): Memory {
   return {
     id: d.id ?? null,
@@ -162,6 +167,20 @@ export class Caura {
         : [],
       raw: data,
     };
+  }
+
+  /** Fetch one structured document. GET /api/v1/documents/{docId} */
+  async getDocument(
+    docId: string,
+    options: GetDocumentOptions,
+  ): Promise<Record<string, unknown>> {
+    const encoded = encodeURIComponent(docId);
+    const tenant = options.tenantId || this.tenantId;
+    const params = new URLSearchParams({
+      tenant_id: tenant,
+      collection: options.collection,
+    });
+    return this.request("GET", `/api/v1/documents/${encoded}?${params.toString()}`);
   }
 
   /** Liveness probe. GET /api/v1/health */

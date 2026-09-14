@@ -10,6 +10,47 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.9.1](https://github.com/caura-ai/caura/compare/backend-v3.9.0...backend-v3.9.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **contradiction:** let the deterministic check run where it was needed (A40) ([#1463](https://github.com/caura-ai/caura/issues/1463)) ([1e2d38d](https://github.com/caura-ai/caura/commit/1e2d38d6cd4da6642fc36425ddf4be4ad7cba99d))
+
+## [3.9.0](https://github.com/caura-ai/caura/compare/backend-v3.8.2...backend-v3.9.0) (2026-09-11)
+
+
+### Features
+
+* **client-typescript:** add getDocument() ([#1404](https://github.com/caura-ai/caura/issues/1404)) ([#1468](https://github.com/caura-ai/caura/issues/1468)) ([239098f](https://github.com/caura-ai/caura/commit/239098f3c8a1b48d1485a82c53fe836ecb5fd092))
+
+## [3.8.2](https://github.com/caura-ai/caura/compare/backend-v3.8.1...backend-v3.8.2) (2026-09-11)
+
+
+### Documentation
+
+* fix relative link to README in static/docs/integration-guide.md ([#1406](https://github.com/caura-ai/caura/issues/1406)) ([#1470](https://github.com/caura-ai/caura/issues/1470)) ([552f271](https://github.com/caura-ai/caura/commit/552f27161483249c3ef2e29bc2aa7c644c0955e8))
+
+## [3.8.1](https://github.com/caura-ai/caura/compare/backend-v3.8.0...backend-v3.8.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **api:** give every auth refusal a code that names the reason (C32) ([#1464](https://github.com/caura-ai/caura/issues/1464)) ([1a8cd24](https://github.com/caura-ai/caura/commit/1a8cd245edf5a08ff4f659548198f29388061eb2))
+
+## [3.8.0](https://github.com/caura-ai/caura/compare/backend-v3.7.0...backend-v3.8.0) (2026-09-10)
+
+
+### Features
+
+* **search:** ANN-pool shadow mode, D12 arm provenance, pool-selector validation (HNSW plan PR3) ([#1460](https://github.com/caura-ai/caura/issues/1460)) ([84c4b62](https://github.com/caura-ai/caura/commit/84c4b62df8ae3986a377d0cd4568ddc94e3dc5d8))
+* **search:** freshness_reference — As-Of Recall for backfilled corpora ([#1471](https://github.com/caura-ai/caura/issues/1471)) ([c13b720](https://github.com/caura-ai/caura/commit/c13b720336bdcf926d6dc43fb93347693570ec69))
+
+
+### Performance
+
+* **contradiction:** admission-gate detection passes so stacked bursts queue instead of stampeding (A19) ([#1461](https://github.com/caura-ai/caura/issues/1461)) ([731ba53](https://github.com/caura-ai/caura/commit/731ba53f067d53613c60d7fab041d22e72bb458c))
+
 ## [3.7.0](https://github.com/caura-ai/caura/compare/backend-v3.6.3...backend-v3.7.0) (2026-09-10)
 
 

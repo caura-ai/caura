@@ -34,7 +34,12 @@ from core_api.constants import (
     MAX_LIST_LIMIT,
     MEMORY_STATUSES_PATTERN,
 )
-from core_api.errors import coded_detail
+from core_api.errors import (
+    AUTH_AGENT_TRUST_TOO_LOW,
+    AUTH_FLEET_SCOPE_FORBIDDEN,
+    AUTH_TARGET_AGENT_RESTRICTED,
+    coded_detail,
+)
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
     IdempotencyGuard,
@@ -257,7 +262,10 @@ async def _resolve_scoped_read(
         # unregistered agent_id is cosmetic here because nothing is persisted.
         _, _, terr = await require_trust(tenant_id, caller_agent_id, min_level=min_level)
         if terr:
-            raise HTTPException(status_code=403, detail=parse_trust_error(terr))
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr)),
+            )
     return author_filter, fleet_id
 
 
@@ -1146,7 +1154,10 @@ async def _write_memory_inner(
     if agent.get("trust_level", 0) == 0:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            ),
         )
     # Resolve fleet_id from agent's home fleet if not provided
     if not body.fleet_id and agent.get("fleet_id"):
@@ -1634,8 +1645,9 @@ async def delete_memory(
             if not allowed:
                 raise HTTPException(
                     status_code=403,
-                    detail=(
-                        f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.get('fleet_id')}'."
+                    detail=coded_detail(
+                        AUTH_FLEET_SCOPE_FORBIDDEN,
+                        f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.get('fleet_id')}'.",
                     ),
                 )
     # ``soft_delete_memory`` already routes the fetch + delete through the
@@ -1705,7 +1717,10 @@ async def update_memory_status(
         if not allowed:
             raise HTTPException(
                 status_code=403,
-                detail=f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                ),
             )
     old_status = memory.get("status")
     await sc.update_memory_status(str(memory_id), status, tenant_id=tenant_id)
@@ -2324,7 +2339,9 @@ async def redistribute_memories(
     if caller is None or caller.get("trust_level", 0) < 3:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' requires trust_level >= 3 for redistribute.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW, f"Agent '{agent_id}' requires trust_level >= 3 for redistribute."
+            ),
         )
 
     # Verify target agent exists and is not restricted
@@ -2337,8 +2354,11 @@ async def redistribute_memories(
     if target.get("trust_level", 0) < 1:
         raise HTTPException(
             status_code=403,
-            detail=f"Target agent '{body.target_agent_id}' is restricted (trust_level=0). "
-            "Cannot assign memories to a restricted agent.",
+            detail=coded_detail(
+                AUTH_TARGET_AGENT_RESTRICTED,
+                f"Target agent '{body.target_agent_id}' is restricted (trust_level=0). "
+                "Cannot assign memories to a restricted agent.",
+            ),
         )
 
     # Usage quota

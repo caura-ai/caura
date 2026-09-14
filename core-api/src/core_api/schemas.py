@@ -864,7 +864,20 @@ class SearchRequest(BaseModel):
             "superseded rows directly."
         ),
     )
-    valid_at: datetime | None = None
+    valid_at: datetime | None = Field(
+        default=None,
+        description=(
+            "As-of time for the question (ISO 8601). Rows whose ts_valid_start is "
+            "after this date are excluded and rows whose ts_valid_end is before it "
+            "are down-weighted; relative dates in the query ('last month') are "
+            "resolved against it. When the tenant's search.default_profile sets "
+            "freshness_reference=1, freshness and the temporal window are ALSO "
+            "measured from this time against each row's event time "
+            "(ts_valid_start, else created_at) instead of from now() — the "
+            "setting for backfilled corpora where ingest time carries no signal. "
+            "Naive values are read as UTC."
+        ),
+    )
     top_k: int = Field(
         default=DEFAULT_SEARCH_TOP_K,
         ge=1,

@@ -37,6 +37,13 @@ from pydantic import BaseModel, Field
 
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.errors import (
+    AUTH_SKILLS_FACTORY_DISABLED,
+    AUTH_SKILLS_INBOX_FORBIDDEN,
+    AUTH_TENANT_MISMATCH,
+    AUTH_UNAUTHENTICATED,
+    coded_detail,
+)
 from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.forge.poison import write_rejected_fingerprint
@@ -78,7 +85,10 @@ async def _require_skills_factory_enabled(tenant_id: str) -> dict:
     if not enabled:
         raise HTTPException(
             status_code=403,
-            detail="SKILLS_FACTORY_DISABLED — set org_settings.skills_factory.enabled=true to use the inbox",
+            detail=coded_detail(
+                AUTH_SKILLS_FACTORY_DISABLED,
+                "SKILLS_FACTORY_DISABLED — set org_settings.skills_factory.enabled=true to use the inbox",
+            ),
         )
     return await get_settings_for_display(tenant_id)
 
@@ -114,7 +124,10 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
             # on the ``TENANT_MISMATCH`` prefix, not on the prose.
             raise HTTPException(
                 status_code=403,
-                detail="TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
+                detail=coded_detail(
+                    AUTH_TENANT_MISMATCH,
+                    "TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
+                ),
             )
         return auth.tenant_id
     if getattr(auth, "is_admin", False):
@@ -126,7 +139,7 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
         )
     raise HTTPException(
         status_code=401,
-        detail="UNAUTHENTICATED — auth context has no tenant_id",
+        detail=coded_detail(AUTH_UNAUTHENTICATED, "UNAUTHENTICATED — auth context has no tenant_id"),
     )
 
 
@@ -176,7 +189,9 @@ def _require_inbox_admin(auth: AuthContext) -> None:
     if not is_admin:
         raise HTTPException(
             status_code=403,
-            detail="SKILLS_INBOX_FORBIDDEN — inbox actions require admin privileges",
+            detail=coded_detail(
+                AUTH_SKILLS_INBOX_FORBIDDEN, "SKILLS_INBOX_FORBIDDEN — inbox actions require admin privileges"
+            ),
         )
 
 

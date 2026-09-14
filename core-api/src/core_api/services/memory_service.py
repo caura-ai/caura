@@ -45,6 +45,7 @@ from common.embedding import (
 from common.events import publish_memory_embed_request, publish_memory_enrich_request
 from common.governance import mask, scan
 from core_api.constants import (
+    ANN_POOL_SHADOW,
     ANN_POOL_SIZE,
     BULK_EMBEDDING_TIMEOUT_SECONDS,
     BULK_ENRICHMENT_CONCURRENCY,
@@ -60,6 +61,7 @@ from core_api.constants import (
     EMBEDDING_CACHE_TTL,
     FRESHNESS_DECAY_DAYS,
     FRESHNESS_FLOOR,
+    FRESHNESS_REFERENCE,
     FTS_BOOST_MAX_TOKENS,
     FTS_BOOST_SPECIFICITY_RATIO,
     FTS_RANK_SCALE,
@@ -79,6 +81,10 @@ from core_api.constants import (
     SEARCH_OVERFETCH_FACTOR,
     SIMILARITY_BLEND,
     SQL_SCORING_PARAM_KEYS,
+)
+from core_api.errors import (
+    AUTH_FLEET_SCOPE_FORBIDDEN,
+    coded_detail,
 )
 from core_api.schemas import (
     BulkItemResult,
@@ -3561,7 +3567,10 @@ async def update_memory(
         if not allowed:
             raise HTTPException(
                 status_code=403,
-                detail=f"Agent '{agent_id}' cannot modify memory in fleet '{mem.get('fleet_id')}'.",
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"Agent '{agent_id}' cannot modify memory in fleet '{mem.get('fleet_id')}'.",
+                ),
             )
 
     fields_set = data.model_fields_set
@@ -4064,6 +4073,8 @@ def resolve_search_params(
         "candidate_pool_size": resolved.get("candidate_pool_size", CANDIDATE_POOL_SIZE),
         "score_formula": resolved.get("score_formula", SCORE_FORMULA),
         "ann_pool_size": resolved.get("ann_pool_size", ANN_POOL_SIZE),
+        "ann_pool_shadow": resolved.get("ann_pool_shadow", ANN_POOL_SHADOW),
+        "freshness_reference": resolved.get("freshness_reference", FRESHNESS_REFERENCE),
     }
 
 

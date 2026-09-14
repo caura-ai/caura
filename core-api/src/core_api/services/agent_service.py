@@ -10,6 +10,12 @@ from fastapi import HTTPException
 from core_api.agent_ids import AgentIdentity
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_TRUST_LEVEL
+from core_api.errors import (
+    AUTH_AGENT_NOT_REGISTERED,
+    AUTH_AGENT_TRUST_TOO_LOW,
+    AUTH_FLEET_SCOPE_FORBIDDEN,
+    coded_detail,
+)
 from core_api.services.audit_service import log_action
 
 logger = logging.getLogger(__name__)
@@ -275,7 +281,10 @@ async def enforce_fleet_write(
     if trust < 3:
         raise HTTPException(
             status_code=403,
-            detail=f"fleet-scope policy: fleet '{fleet_id}' is not writable by principals of fleet '{agent.get('fleet_id') or 'none'}'.",
+            detail=coded_detail(
+                AUTH_FLEET_SCOPE_FORBIDDEN,
+                f"fleet-scope policy: fleet '{fleet_id}' is not writable by principals of fleet '{agent.get('fleet_id') or 'none'}'.",
+            ),
         )
     return agent
 
@@ -330,7 +339,10 @@ async def enforce_fleet_read_many(
         if trust < 2:
             raise HTTPException(
                 status_code=403,
-                detail=f"fleet-scope policy: fleet '{fleet_id}' is not readable by principals of fleet '{own_fleet or 'none'}'.",
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"fleet-scope policy: fleet '{fleet_id}' is not readable by principals of fleet '{own_fleet or 'none'}'.",
+                ),
             )
 
 
@@ -554,14 +566,19 @@ async def enforce_delete(
     if not agent:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' is not registered and cannot delete memories.",
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED, f"Agent '{agent_id}' is not registered and cannot delete memories."
+            ),
         )
 
     trust = agent.get("trust_level", 0)
     if trust < 3:
         raise HTTPException(
             status_code=403,
-            detail=f"access policy: principals of fleet '{agent.get('fleet_id') or 'none'}' are not permitted to delete memories.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"access policy: principals of fleet '{agent.get('fleet_id') or 'none'}' are not permitted to delete memories.",
+            ),
         )
 
 
@@ -575,18 +592,25 @@ async def enforce_update(
     if not agent:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' is not registered and cannot update memories.",
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED, f"Agent '{agent_id}' is not registered and cannot update memories."
+            ),
         )
     trust = agent.get("trust_level", 0)
     if trust == 0:
         raise HTTPException(
             status_code=403,
-            detail=f"access policy: agent '{agent_id}' is restricted from updates.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW, f"access policy: agent '{agent_id}' is restricted from updates."
+            ),
         )
     if trust < 3 and agent_id != memory_owner_agent_id:
         raise HTTPException(
             status_code=403,
-            detail=f"access policy: agent '{agent_id}' may only update its own memories.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"access policy: agent '{agent_id}' may only update its own memories.",
+            ),
         )
 
 

@@ -102,6 +102,8 @@ async def test_default_statement_has_no_pool_machinery(monkeypatch) -> None:
     sql = sqls[0]
     assert "candidate_pool" not in sql
     assert "set_config" not in sql
+    assert "string_agg" not in sql, "arm provenance must not leak into the default path"
+    assert "NULL AS pool_arms" in sql, "the row contract carries pool_arms as NULL off-pool"
     assert sql.count("<=>") == 1, "default path keeps the single-render invariant"
 
 
@@ -136,6 +138,9 @@ async def test_ann_mode_builds_one_arm_per_admission_signal(monkeypatch) -> None
     assert sql.count("UNION") == 4
     # ingredients gated on the pool.
     assert "IN (SELECT candidate_pool.id" in sql
+    # D12 arm provenance: arms tagged, deduped by GROUP BY, joined out.
+    assert "string_agg" in sql and "GROUP BY" in sql
+    assert "LEFT OUTER JOIN candidate_pool" in sql
     # Every arm carries the tenant predicate: 4 arms + ingredients = 5.
     assert sql.count("memories.tenant_id =") == 5, (
         "an arm lost the row filters — pool admission must never widen visibility"

@@ -10,6 +10,12 @@ from pydantic import BaseModel
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
+from core_api.errors import (
+    AUTH_AGENT_TRUST_TOO_LOW,
+    AUTH_TENANT_MISMATCH,
+    AUTH_UNAUTHENTICATED,
+    coded_detail,
+)
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 from core_api.middleware.rate_limit import write_limit
 from core_api.schemas import STRICT_WRITE_BODY
@@ -161,7 +167,10 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
             # ``TENANT_MISMATCH`` prefix, not on the prose.
             raise HTTPException(
                 status_code=403,
-                detail="TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
+                detail=coded_detail(
+                    AUTH_TENANT_MISMATCH,
+                    "TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
+                ),
             )
         return auth.tenant_id
     if getattr(auth, "is_admin", False):
@@ -173,7 +182,7 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
         )
     raise HTTPException(
         status_code=401,
-        detail="UNAUTHENTICATED — auth context has no tenant_id",
+        detail=coded_detail(AUTH_UNAUTHENTICATED, "UNAUTHENTICATED — auth context has no tenant_id"),
     )
 
 
@@ -348,7 +357,10 @@ async def promote_stm(
     if agent.get("trust_level", 0) == 0:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            ),
         )
     # Resolve fleet from the agent's home fleet, as the write path does, so the
     # fleet-write policy below is evaluated against the fleet the memory will

@@ -23,6 +23,8 @@ from uuid import UUID
 
 from sqlalchemy import (
     ColumnElement,
+    Date,
+    DateTime,
     String,
     Table,
     and_,
@@ -35,6 +37,7 @@ from sqlalchemy import (
     func,
     literal,
     literal_column,
+    null,
     or_,
     select,
     text,
@@ -2530,6 +2533,15 @@ class PostgresService:
         memory_boost_factor = memory_boost_factor or {}
         sp = search_params
 
+        # ``valid_at`` is compared with timestamptz columns in multiple parts
+        # of this query. Normalize it once so every bind observes the public
+        # contract that a naive value means UTC.
+        if valid_at is not None and valid_at.tzinfo is None:
+            valid_at = valid_at.replace(tzinfo=UTC)
+        valid_at_ts: ColumnElement[Any] | None = (
+            literal(valid_at, type_=DateTime(timezone=True)) if valid_at is not None else None
+        )
+
         _fts_weight = sp["fts_weight"]
         _freshness_floor = sp["freshness_floor"]
         _freshness_decay_days = sp["freshness_decay_days"]
@@ -2553,6 +2565,19 @@ class PostgresService:
         # extensions so an on-prem box that predates iterative scans keeps
         # byte-identical behaviour.
         _ann_pool_size = int(sp.get("ann_pool_size", 0) or 0)
+        # Reference clock for freshness and temporal_boost. 0 = now() (default);
+        # 1 = the request's ``valid_at`` when one was sent. The knob alone changes
+        # nothing (no valid_at → now()) and valid_at alone changes nothing new
+        # (knob off → now()); only the conjunction retargets the clock, so no
+        # caller that exists today moves.
+        _freshness_reference = int(sp.get("freshness_reference", 0) or 0)
+        ref_ts: ColumnElement[Any]
+        anchor_to_valid_at = False
+        if _freshness_reference == 1 and valid_at_ts is not None:
+            anchor_to_valid_at = True
+            ref_ts = valid_at_ts
+        else:
+            ref_ts = func.now()
         use_ann_pool = _ann_pool_size > 0 and await _ann_pool_available()
         if use_ann_pool and _candidate_pool_size > 0:
             # The two pool selectors are mutually exclusive by design —
@@ -2820,7 +2845,7 @@ class PostgresService:
             # binds before the union — same construction as the scored-CTE
             # union below.
             ann_arm = (
-                select(Memory.id)
+                select(Memory.id, literal("ann").label("arm"))
                 .where(*row_filters)
                 .where(Memory.embedding.is_not(None))
                 .order_by(Memory.embedding.cosine_distance(embedding))
@@ -2830,7 +2855,7 @@ class PostgresService:
 
             if query and query.strip():
                 fts_arm = (
-                    select(Memory.id)
+                    select(Memory.id, literal("fts").label("arm"))
                     .where(*row_filters)
                     .where(_fts_guard)
                     .order_by(raw_keyword_rank.desc(), Memory.created_at.desc())
@@ -2839,7 +2864,7 @@ class PostgresService:
                 arm_selects.append(select(fts_arm.subquery()))
 
             recency_arm = (
-                select(Memory.id)
+                select(Memory.id, literal("recency").label("arm"))
                 .where(*row_filters)
                 .order_by(Memory.created_at.desc())
                 .limit(_ANN_POOL_SIDE_ARM_LIMIT)
@@ -2864,7 +2889,7 @@ class PostgresService:
                     _dr_cast(Memory.created_at, _DrDate),
                 )
                 date_arm = (
-                    select(Memory.id)
+                    select(Memory.id, literal("date").label("arm"))
                     .where(*row_filters)
                     .where(
                         and_(
@@ -2879,11 +2904,29 @@ class PostgresService:
 
             if boosted_memory_ids:
                 boosted_arm = (
-                    select(Memory.id).where(*row_filters).where(Memory.id.in_(list(boosted_memory_ids)))
+                    select(Memory.id, literal("boosted").label("arm"))
+                    .where(*row_filters)
+                    .where(Memory.id.in_(list(boosted_memory_ids)))
                 )
                 arm_selects.append(select(boosted_arm.subquery()))
 
-            pool_cte = arm_selects[0].union(*arm_selects[1:]).cte("candidate_pool")
+            # D12 arm provenance: every arm tags its rows, UNION ALL keeps the
+            # duplicates, and the GROUP BY collapses them into one row per id
+            # with the set of admitting arms ("ann+fts", "boosted", ...). The
+            # dedup the old plain UNION did now happens here; the aggregate runs
+            # over at most (pool + 3 x side arm + boosted) rows, so provenance
+            # is effectively free — and it is what turns a shadow-mode
+            # divergence from "the pool missed it" into "WHICH signal's arm
+            # missed it".
+            arm_union = arm_selects[0].union_all(*arm_selects[1:]).subquery("candidate_arms")
+            pool_cte = (
+                select(
+                    arm_union.c.id,
+                    func.string_agg(arm_union.c.arm.distinct(), "+").label("arms"),
+                )
+                .group_by(arm_union.c.id)
+                .cte("candidate_pool")
+            )
             ingredients_stmt = ingredients_stmt.where(Memory.id.in_(select(pool_cte.c.id)))
 
         # ``AS MATERIALIZED`` is a deliberate optimisation fence. With the
@@ -2936,11 +2979,22 @@ class PostgresService:
             else_=ing.c.fts_score,
         ).label("similarity")
 
-        anchor = func.greatest(
-            ing.c.created_at,
-            func.coalesce(ing.c.ts_valid_start, ing.c.created_at),
-        )
-        age_days = func.extract("epoch", func.now() - anchor) / 86400.0
+        anchor: ColumnElement[Any]
+        if anchor_to_valid_at:
+            # Event-time anchor: a backfilled row is as old as the event it
+            # records, not as old as its ingest. Only reachable when the tenant
+            # opted in AND the request said as-of when — see the knob's contract
+            # in ``common.constants``.
+            anchor = func.coalesce(ing.c.ts_valid_start, ing.c.created_at)
+        else:
+            # ``greatest`` is the guard for tenants whose ts_valid_start is a
+            # validity-window start rather than event time: such a row must
+            # never rank as older than its ingest.
+            anchor = func.greatest(
+                ing.c.created_at,
+                func.coalesce(ing.c.ts_valid_start, ing.c.created_at),
+            )
+        age_days = func.extract("epoch", ref_ts - anchor) / 86400.0
 
         type_decay = case(
             *[(ing.c.memory_type == mt, float(days)) for mt, days in TYPE_DECAY_DAYS.items()],
@@ -2951,7 +3005,10 @@ class PostgresService:
             (
                 and_(
                     ing.c.ts_valid_end.is_not(None),
-                    ing.c.ts_valid_end < func.now(),
+                    # Against the reference clock, not the wall clock: a row
+                    # whose validity ended AFTER the question's as-of time was
+                    # still current when the question was asked.
+                    ing.c.ts_valid_end < ref_ts,
                 ),
                 _freshness_floor,
             ),
@@ -2993,9 +3050,14 @@ class PostgresService:
         )
 
         if temporal_window is not None:
-            cutoff = func.now() - temporal_window
+            # "Last month" is a window ending at the reference clock. Under the
+            # default that is now() against created_at, unchanged; anchored to
+            # valid_at it is the question's as-of time against the row's event
+            # time, so a corpus ingested in one sitting still has a "last month".
+            cutoff = ref_ts - temporal_window
+            window_ts = anchor if anchor_to_valid_at else ing.c.created_at
             temporal_boost = case(
-                (ing.c.created_at >= cutoff, 1.3),
+                (window_ts >= cutoff, 1.3),
                 else_=1.0,
             ).label("temporal_boost")
         else:
@@ -3008,8 +3070,6 @@ class PostgresService:
         # memories remain retrievable.
         if date_range_start and date_range_end:
             from datetime import date as date_type
-
-            from sqlalchemy import Date, cast, literal
 
             from core_storage_api.config import settings as _storage_settings
 
@@ -3072,14 +3132,14 @@ class PostgresService:
         # relative to valid_at are down-weighted instead of excluded.
         # Pairs with the removal of the `ts_valid_end >= valid_at` WHERE
         # clause above — one bad enrichment date no longer blanks a memory.
-        if valid_at is not None:
+        if valid_at_ts is not None:
             from core_storage_api.config import settings as _storage_settings_cf
 
             currency_factor = case(
                 (
                     and_(
                         ing.c.ts_valid_end.is_not(None),
-                        ing.c.ts_valid_end < valid_at,
+                        ing.c.ts_valid_end < valid_at_ts,
                     ),
                     _storage_settings_cf.expired_currency_factor,
                 ),
@@ -3222,6 +3282,10 @@ class PostgresService:
             scored_cte = main_stmt.cte("scored")
 
         # -- Outer query: JOIN Memory + LEFT JOIN entity links --
+        # ``pool_arms`` (D12 provenance) exists only in ann-mode; the default
+        # path selects a typed NULL so the row shape is identical either way
+        # and the route serialises one contract.
+        pool_arms_col = pool_cte.c.arms.label("pool_arms") if use_ann_pool else null().label("pool_arms")
         stmt = (
             select(
                 Memory,
@@ -3237,6 +3301,7 @@ class PostgresService:
                 scored_cte.c.entity_boost,
                 scored_cte.c.recall_boost,
                 scored_cte.c.temporal_boost,
+                pool_arms_col,
                 MemoryEntityLink.entity_id,
                 MemoryEntityLink.role,
                 Agent.display_name.label("agent_display_name"),
@@ -3246,6 +3311,8 @@ class PostgresService:
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .order_by(scored_cte.c.score.desc(), Memory.created_at.desc())
         )
+        if use_ann_pool:
+            stmt = stmt.outerjoin(pool_cte, Memory.id == pool_cte.c.id)
 
         # db_ms captures only pool wait + SQL round-trip; materialise rows
         # inside the session (they hold lazy-load handles), then drop the
@@ -3312,10 +3379,22 @@ class PostgresService:
                     entity_boost=row.entity_boost,
                     recall_boost=row.recall_boost,
                     temporal_boost=row.temporal_boost,
+                    pool_arms=row.pool_arms,
                     entity_links=[],
                 )
             if row.entity_id is not None:
                 grouped[mid].entity_links.append({"entity_id": row.entity_id, "role": row.role})
+        if use_ann_pool and len(grouped) < top_k:
+            # The pool admitted fewer distinct rows than the caller asked for —
+            # either the tenant slice is simply small (benign) or the arms are
+            # under-sized for this workload. Ops greps this against the shadow
+            # compare lines to tell which.
+            logger.info(
+                "ann_pool: pooled search under-filled (%d rows < top_k=%d, tenant=%s)",
+                len(grouped),
+                top_k,
+                tenant_id,
+            )
         return list(grouped.values())
 
     # ------------------------------------------------------------------
