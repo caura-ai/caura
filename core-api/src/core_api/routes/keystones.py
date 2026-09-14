@@ -56,6 +56,7 @@ from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.config import settings as app_settings
+from core_api.constants import KEYSTONES_EMPTY_HINT
 from core_api.errors import (
     AUTH_AGENT_NOT_REGISTERED,
     AUTH_AGENT_TRUST_TOO_LOW,
@@ -314,7 +315,15 @@ async def list_keystones(
     # array remains the default response shape — existing consumers (plugin
     # session-start fetch included) see zero change unless they ask.
     if envelope:
-        return {"count": len(rows), "items": rows}
+        body: dict = {"count": len(rows), "items": rows}
+        if not rows:
+            # F9 — parity with the MCP surface, which is where agents actually
+            # read this. ENVELOPE ONLY: the bare array is still the default
+            # response shape, and adding a key to it would change the wire
+            # contract for every existing consumer — the precise thing C30/D1
+            # opted out of.
+            body["hint"] = KEYSTONES_EMPTY_HINT
+        return body
     return rows
 
 

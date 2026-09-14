@@ -40,6 +40,7 @@ from core_api.constants import (
     DEFAULT_SEARCH_TOP_K,
     EVOLVE_OUTCOME_TYPES,
     INSIGHTS_FOCUS_MODES,
+    KEYSTONES_EMPTY_HINT,
     MAX_DOC_SEARCH_TOP_K,
     MAX_SEARCH_TOP_K,
     MEMORY_STATUSES,
@@ -3720,10 +3721,10 @@ async def caura_keystones(
     except Exception as e:
         logger.exception("Unhandled error in caura_keystones")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
-    return _with_latency(
-        json.dumps({"count": len(rows), "truncated": truncated, "rules": rows}, default=str),
-        t0,
-    )
+    payload: dict = {"count": len(rows), "truncated": truncated, "rules": rows}
+    if not rows:
+        payload["hint"] = KEYSTONES_EMPTY_HINT
+    return _with_latency(json.dumps(payload, default=str), t0)
 
 
 async def caura_keystones_set(

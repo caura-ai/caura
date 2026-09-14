@@ -1022,3 +1022,28 @@ def _relation_weight(relation_type: str, row_weight: float) -> float:
     """
     type_w = RELATION_TYPE_WEIGHTS.get(relation_type.lower(), DEFAULT_RELATION_TYPE_WEIGHT)
     return type_w * row_weight
+
+
+# F9 — what an empty keystone set should say. Shared by the REST envelope and
+# the MCP tool so the two surfaces cannot drift into saying different things
+# about the same state.
+#
+# Agents are taught to call keystones at every session start and obey what comes
+# back. A tenant that never authored a rule pays that round-trip and receives
+# ``count: 0`` — which is indistinguishable, to the caller, from "this tenant
+# has no standing policy", from "authoring failed", and from "you asked the
+# wrong scope". The agent's reasonable inference is the first, so it stops
+# asking and carries standing constraints in recall instead, which is the exact
+# thing keystones exist to prevent.
+#
+# Emitted ONLY on the empty result, so tenants with rules pay nothing, and it is
+# a RESPONSE field rather than schema — it does not touch the ``tools/list``
+# token ceiling that ``_AGENT_ID_DESC`` had to respect
+# (tests/test_mcp_token_budget.py).
+KEYSTONES_EMPTY_HINT = (
+    "No keystone rules are authored for this scope. Authoring is a separate, "
+    "trust-gated step (caura_keystones_set, trust >= 1 for a self-authored "
+    "agent-scoped rule, >= 2 otherwise) — an empty result does not mean the "
+    "call failed. Until rules exist, standing constraints have to travel in "
+    "recall instead of being pinned here."
+)
