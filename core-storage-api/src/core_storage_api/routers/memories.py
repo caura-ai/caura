@@ -690,28 +690,47 @@ async def find_rdf_conflicts(
 
 @router.post("/near-duplicates")
 async def check_near_duplicates(request: Request) -> dict:
+    """One batch of the crystallizer dedup sweep: swept ids + the pairs found.
+
+    Audit oss-0814-m-37. This used to return ``{"candidates": [{"id",
+    "embedding"}]}`` and leave the neighbour search to the caller, which ran it
+    one POST per candidate with the embedding echoed back up in each body —
+    501 round-trips and ~22 MB of vector JSON per 500-row batch, for a cosine
+    distance pgvector was already computing here. The scan is now resolved in
+    one statement and no vector crosses the wire in either direction; the
+    companion ``/neighbors-by-embedding`` route existed only to serve that loop
+    and went with it.
+
+    ``candidate_ids`` is every row the batch swept, including rows with no
+    near-duplicate — the caller stamps ``last_dedup_checked_at`` on all of
+    them, so it is deliberately not derivable from ``pairs``. The LEFT JOIN
+    emits a NULL-neighbour row for exactly those, which is what makes the two
+    lists separable here.
+    """
     body: dict = await request.json()
-    candidates = await _svc.memory_find_near_duplicate_candidates(
+    rows = await _svc.memory_find_near_duplicate_pairs(
         tenant_id=body["tenant_id"],
         fleet_id=body.get("fleet_id"),
         batch_size=body.get("batch_size", 100),
         offset=body.get("offset", 0),
-    )
-    return {"candidates": [{"id": str(r[0]), "embedding": r[1]} for r in candidates]}
-
-
-@router.post("/neighbors-by-embedding")
-async def find_neighbors_by_embedding(request: Request) -> list[dict]:
-    body: dict = await request.json()
-    rows = await _svc.memory_find_neighbors_by_embedding(
-        tenant_id=body["tenant_id"],
-        fleet_id=body.get("fleet_id"),
-        query_embedding=body["query_embedding"],
-        exclude_id=UUID(body["exclude_id"]),
         threshold=body.get("threshold", 0.95),
-        limit=body.get("limit", 5),
+        neighbor_limit=body.get("neighbor_limit", 5),
     )
-    return [{"id": str(r[0]), "similarity": float(r[1])} for r in rows]
+
+    candidate_ids: list[str] = []
+    seen: set[str] = set()
+    pairs: list[dict] = []
+    for candidate_id, neighbor_id, similarity in rows:
+        cid = str(candidate_id)
+        # A candidate repeats once per neighbour; the swept set is the distinct
+        # left side. Order is preserved (the query orders by candidate) because
+        # the caller's pair cap is positional.
+        if cid not in seen:
+            seen.add(cid)
+            candidate_ids.append(cid)
+        if neighbor_id is not None:
+            pairs.append({"id": cid, "neighbor_id": str(neighbor_id), "similarity": float(similarity)})
+    return {"candidate_ids": candidate_ids, "pairs": pairs}
 
 
 @router.post("/mark-dedup-checked")
