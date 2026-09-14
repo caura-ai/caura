@@ -218,18 +218,37 @@ pip install caura-rail        # Python 3.10+
 npm install @caura/rail       # Node.js 22+
 ```
 
+Point it at any Caura with `CAURA_URL` and `CAURA_API_KEY` (for the standalone
+Docker server above: `http://localhost:8000` and `standalone`), then wrap each
+agent turn:
+
 ```python
 from caura_rail import MemoryScope, Rail, RestMemoryStore
 
-with RestMemoryStore.from_env() as store:            # CAURA_URL, CAURA_API_KEY
-    rail = Rail(store, MemoryScope(agent_id="support-1"))
+with RestMemoryStore.from_env() as store:
+    rail = Rail(store, MemoryScope(agent_id="support-1", fleet_id="support"))
     with rail.turn("Remember: We deploy in eu-west-1.") as turn:
-        turn.reply = "Noted. " + turn.context.text     # rules first, then facts
+        # Call your model here; turn.context.text holds rules first, then facts.
+        turn.reply = "Noted. " + turn.context.text
+    print([w.status for w in turn.writes])   # ['written'], or ['deduplicated'] on a rerun
 ```
 
-Use the clients above when you only need to call the API; use Rail when an
-agent should remember and follow rules. Guide, API reference, and reliability
-semantics live in the [Rail repository](https://github.com/caura-ai/caura-rail).
+```js
+import { MemoryScope, Rail, RestMemoryStore } from "@caura/rail";
+
+const rail = new Rail({
+  store: RestMemoryStore.fromEnv(process.env),
+  scope: new MemoryScope({ agentId: "support-1", fleetId: "support" }),
+});
+const turn = await rail.turn("Remember: We deploy in eu-west-1.", (_, ctx) => "Noted. " + ctx.text);
+console.log(turn.writes.map(w => w.status));   // ['written'], or ['deduplicated'] on a rerun
+```
+
+Each turn recalls, runs your code, extracts, and writes; a turn whose code
+raises writes nothing, and writes that fail on a temporary error wait in an
+outbox you replay. Use the clients above when you only need to call the API;
+use Rail when an agent should remember and follow rules. Guide, API reference,
+and reliability semantics live in the [Rail repository](https://github.com/caura-ai/caura-rail).
 
 ---
 

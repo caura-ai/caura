@@ -184,7 +184,7 @@ with RestMemoryStore.from_env() as store:
     rail = Rail(store, MemoryScope(agent_id="my-agent", fleet_id="my-fleet"))
     with rail.turn("Remember: We deploy in eu-west-1.") as turn:
         turn.reply = "Noted. " + turn.context.text
-    print([w.status for w in turn.writes])   # ['written']
+    print([w.status for w in turn.writes])   # ['written'], or ['deduplicated'] on a rerun
 ```
 
 ```js
@@ -195,7 +195,7 @@ const rail = new Rail({
   scope: new MemoryScope({ agentId: "my-agent", fleetId: "my-fleet" }),
 });
 const turn = await rail.turn("Remember: We deploy in eu-west-1.", (_, ctx) => "Noted. " + ctx.text);
-console.log(turn.writes.map(w => w.status));    // ['written']
+console.log(turn.writes.map(w => w.status));    // ['written'], or ['deduplicated'] on a rerun
 ```
 
 In standalone mode Rail discovers the `default` tenant by itself; with a gate
