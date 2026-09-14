@@ -3,7 +3,7 @@
  * transition, docs/plans/gateway-rpc-dual-read-alias.md).
  *
  * `caura.status`/`.deploy`/`.deploy.status`/`.educate`/`.allowlist.check`/
- * `.allowlist.fix` are canonical; the historical `memclaw.*` spellings  // legacy-name-ok: rule 3 compat-alias test, dual-read alias
+ * `.allowlist.fix` are canonical; the historical `memclaw.*` spellings  // legacy-name-floor: documents the dual-read compatibility test
  * must keep dispatching to the exact same handler. Unlike the MCP
  * tool-name shim (a prefix-translation layer at dispatch time),
  * `registerGatewayMethod` takes an exact string per call, so this is

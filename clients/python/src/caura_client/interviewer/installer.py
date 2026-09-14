@@ -30,7 +30,7 @@ from typing import Optional
 
 # Marker comment appended to our managed cron line so uninstall/idempotent
 # re-install can find and remove exactly our entry, never the user's others.
-CRON_MARKER = "# memclaw-interviewer (managed)"  # legacy-name-deferred: matches a pre-rename customer's existing crontab line, one release only (docs/plans/rebrand-alias-retirement-policy.md)
+CRON_MARKER = "# memclaw-interviewer (managed)"  # legacy-name-deferred: current writer needs a canonical marker migration before removal (docs/plans/rebrand-alias-migration-notes.md)
 
 # Only the connection identity is persisted to the env file (0600). Non-secret
 # behavior flags (--harness, --all-projects) ride on the cron command instead.
@@ -47,7 +47,7 @@ _INTERVAL_RE = re.compile(r"^(\d+)\s*([mh])$", re.IGNORECASE)
 
 
 def config_dir() -> Path:
-    return Path.home() / ".config" / "memclaw-interviewer"  # legacy-name-deferred: existing customer config directory, one release only (docs/plans/rebrand-alias-retirement-policy.md)
+    return Path.home() / ".config" / "memclaw-interviewer"  # legacy-name-deferred: current writer needs a canonical directory migration before removal (docs/plans/rebrand-alias-migration-notes.md)
 
 
 def env_file_path() -> Path:
@@ -93,7 +93,7 @@ def resolve_cmd() -> str:
     """
     exe = shutil.which("caura-interviewer")
     if not exe:
-        exe = shutil.which("memclaw-interviewer")  # legacy-name-ok: finds a pre-rename install's console script for exactly one release after its removal from pyproject.toml, then drop this fallback (docs/plans/rebrand-alias-retirement-policy.md)
+        exe = shutil.which("memclaw-interviewer")  # legacy-name-ok: finds a pre-rename install's console script for exactly one release after its removal from pyproject.toml, then drop this fallback (docs/plans/rebrand-alias-migration-notes.md)
     if exe:
         return shlex.quote(exe)
     return f"{shlex.quote(sys.executable)} -m caura_client.interviewer.cli"

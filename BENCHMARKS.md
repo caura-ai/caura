@@ -1,6 +1,6 @@
 # Caura Benchmarks
 
-How Caura (formerly MemClaw) performs on the two most-cited public agent-memory benchmarks — <!-- legacy-name-ok: taught as legacy alias -->
+How Caura (formerly MemClaw) performs on the two most-cited public agent-memory benchmarks — <!-- legacy-name-floor: taught as legacy alias -->
 **LoCoMo** and **LongMemEval** — plus the fleet-shaped dimensions those
 single-agent benchmarks can't measure.
 

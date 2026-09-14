@@ -2,8 +2,8 @@
 
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
-<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-ok: taught as legacy alias -->
-Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env vars and URLs keep working unchanged. The yanked PyPI release <code>memclaw-client==0.5.0</code> still installs <code>caura-client</code> for exact pins, but it does not provide the retired <code>memclaw_client</code> import or <code>MemClaw</code> class aliases. The npm package <code>@caura/memclaw-client</code> was never published.</p> <!-- legacy-name-ok: taught as legacy alias -->
+<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-floor: taught as legacy alias -->
+Existing <code>memclaw_*</code> tool calls and supported <code>MEMCLAW_*</code> environment aliases continue to work; use <code>caura_*</code> names and current Caura URLs for new configuration. The yanked PyPI release <code>memclaw-client==0.5.0</code> still installs <code>caura-client</code> for exact pins, but it does not provide the retired <code>memclaw_client</code> import or <code>MemClaw</code> class aliases. The npm package <code>@caura/memclaw-client</code> was never published.</p> <!-- legacy-name-floor: migration guidance and package evidence -->
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
@@ -26,9 +26,9 @@ Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env v
 
 ---
 
-## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets <!-- legacy-name-ok: taught as legacy alias -->
+## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets <!-- legacy-name-floor: taught as legacy alias -->
 
-Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes. <!-- legacy-name-ok: taught as legacy alias -->
+Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes. <!-- legacy-name-floor: taught as legacy alias -->
 
 Agents write plain text. Caura turns it into searchable, governed, self-improving memory.
 
@@ -433,7 +433,7 @@ wiring, and the protocol are in the
 
 ### The Caura Broker
 
-The **Caura Broker** is a local daemon (`caura-daemon`, formerly `memclawd`, <!-- legacy-name-ok: taught as legacy alias -->
+The **Caura Broker** is a local daemon (`caura-daemon`, formerly `memclawd`, <!-- legacy-name-floor: taught as legacy alias -->
 driven by the `caura` CLI) that runs on a developer's machine and connects coding agents — Claude
 Code, Codex, Cursor, Gemini — to Caura. Its job is to be the trust boundary
 on the developer side: it enforces policy, applies redaction, and keeps a

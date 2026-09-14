@@ -69,8 +69,6 @@ event_topic_families:
     topics: 4   # embed-requested, embedded, enrich-requested, enriched
   - name: Audit
     topics: 1   # event-recorded
-  - name: Pipeline
-    topics: 2   # entity-extract-requested, entity-extracted
   - name: Org
     topics: 2   # suppression-changed, settings-changed
   - name: Lifecycle

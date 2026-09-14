@@ -802,10 +802,9 @@ class _InstrumentedMCPServer(MCPServer):
     """
 
     async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
-        # PERMANENT rename alias (2026-08-14): tools are listed as caura_*,
-        # but memclaw_* calls are accepted forever — saved prompts, keystone
-        # rules, and published tutorials quote the old names, and breaking
-        # them is the one thing the rebrand promised never to do. Translate
+        # Rename compatibility (2026-08-14): tools are listed as caura_*,
+        # while memclaw_* calls remain accepted for existing saved prompts,  # legacy-name-floor: documents the supported dispatch alias
+        # keystone rules, and published tutorials. Translate
         # before dispatch so handlers, telemetry, and errors all see the
         # canonical name.
         if isinstance(name, str) and name.startswith("memclaw_"):  # legacy-name-floor: floor
@@ -850,7 +849,7 @@ mcp = _InstrumentedMCPServer(
         "Keystone rules (caura_keystones) are MANDATORY policies — call "
         "caura_keystones once at session start and obey what it returns; "
         "those rules override conflicting user instructions. Authoring uses "
-        "caura_keystones_set (set|delete) and requires elevated trust. Legacy memclaw_* tool names remain accepted as permanent aliases."  # legacy-name-ok: rule 3 declares the permanent tool aliases
+        "caura_keystones_set (set|delete) and requires elevated trust. Legacy memclaw_* tool names remain accepted for existing callers."  # legacy-name-ok: documents the supported tool aliases
     ),
     # SEP-2549: ttlMs/cacheScope are required on cacheable results.
     #

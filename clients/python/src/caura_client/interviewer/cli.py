@@ -216,7 +216,7 @@ def _acquire_lock() -> Optional[object]:
         return object()
     # Per-user filename: a shared /tmp lock owned by another user would
     # fail our open() with EACCES forever, reading as "always locked".
-    lock_path = Path(tempfile.gettempdir()) / f"memclaw-interviewer-{getpass.getuser()}.lock"  # legacy-name-deferred: shared with any pre-rename install still running, one release only (docs/plans/rebrand-alias-retirement-policy.md)
+    lock_path = Path(tempfile.gettempdir()) / f"memclaw-interviewer-{getpass.getuser()}.lock"  # legacy-name-deferred: current writer needs a canonical lock migration before removal (docs/plans/rebrand-alias-migration-notes.md)
     handle = None
     try:
         handle = open(lock_path, "w")

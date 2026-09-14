@@ -8,9 +8,9 @@ via the programme coordinator, 2026-09-04.
 
 `caura.status`, `caura.deploy`, `caura.deploy.status`, `caura.educate`,
 `caura.allowlist.check`, and `caura.allowlist.fix` become the canonical
-gateway command names. The historical `memclaw.*` spellings keep <!-- legacy-name-ok: dual-read alias, tracked for eventual retirement in this doc -->
+gateway command names. The historical `memclaw.*` spellings keep <!-- legacy-name-floor: dual-read alias, tracked for eventual retirement in this doc -->
 dispatching to the exact same handlers — a dual-read alias, the same
-shape as the `caura_*`/`memclaw_*` MCP tool rename, but registered as two <!-- legacy-name-ok: dual-read alias, tracked for eventual retirement in this doc -->
+shape as the `caura_*`/`memclaw_*` MCP tool rename, but registered as two <!-- legacy-name-floor: dual-read alias, tracked for eventual retirement in this doc -->
 separate names rather than one shim, because `registerGatewayMethod`
 takes an exact string per registration with no prefix-stripping layer to
 hook into.
@@ -31,7 +31,7 @@ cheap insurance against something this repository cannot rule out.
 
 ## Retirement condition
 
-Drop the six `memclaw.*` gateway-method registrations no earlier than <!-- legacy-name-ok: dual-read alias, tracked for eventual retirement in this doc -->
+Drop the six `memclaw.*` gateway-method registrations no earlier than <!-- legacy-name-floor: dual-read alias, tracked for eventual retirement in this doc -->
 **12 months after this change ships**, and only after Eldad (or whoever
 owns the rebrand at the time) explicitly approves the cutover. Both
 conditions, not either alone: the date alone doesn't establish that

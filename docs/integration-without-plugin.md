@@ -1,6 +1,6 @@
 # Integrate with Caura without the plugin
 
-**Audience:** developers building Python, Node, or any other SDK client against `caura.ai` or a self-hosted Caura (formerly MemClaw) instance, without installing the OpenClaw plugin runtime. <!-- legacy-name-ok: taught as legacy alias -->
+**Audience:** developers building Python, Node, or any other SDK client against `caura.ai` or a self-hosted Caura (formerly MemClaw) instance, without installing the OpenClaw plugin runtime. <!-- legacy-name-floor: taught as legacy alias -->
 
 **Time to first tool call:** ~5 minutes.
 
