@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.10.1](https://github.com/caura-ai/caura/compare/backend-v3.10.0...backend-v3.10.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **keystones:** tell a caller why the rule set is empty (F9) ([#1497](https://github.com/caura-ai/caura/issues/1497)) ([d9e2eb5](https://github.com/caura-ai/caura/commit/d9e2eb53a22ae94791dd6a0f39173ae0edae80a7))
+
+
+### Dependencies
+
+* bump sentence-transformers from 5.7.0 to 6.0.1 ([#1491](https://github.com/caura-ai/caura/issues/1491)) ([e5c9bb8](https://github.com/caura-ai/caura/commit/e5c9bb800fc947ff564ac1edfeb7901dcb569472))
+* **plugin:** bump @types/node from 26.4.1 to 26.5.1 in /plugin in the npm-minor-patch group ([#1482](https://github.com/caura-ai/caura/issues/1482)) ([5caf8ef](https://github.com/caura-ai/caura/commit/5caf8ef04cffb10e01a7abe2692f5468ea74eff8))
+
 ## [3.10.0](https://github.com/caura-ai/caura/compare/backend-v3.9.1...backend-v3.10.0) (2026-09-14)
 
 
