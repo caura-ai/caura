@@ -595,7 +595,18 @@ async def _run_crystallization(
 
     # Build clusters from overlapping pairs
     clusters = _build_clusters(dup_pairs)
-    clusters = [c for c in clusters if len(c) >= CRYSTALLIZER_MIN_CLUSTER_SIZE]
+    # A72 — per-tenant, defaulting to the constant. At the default (3) the most
+    # common overlap, a PAIR, is skipped entirely, so two rows saying the same
+    # thing survive every sweep. A tenant that lowers it to 2 closes that and
+    # accepts the cost: admitting pairs multiplies the cluster count, and each
+    # cluster is an LLM re-extraction.
+    # ``getattr`` with the constant as the floor, matching
+    # ``getattr(tenant_config, "merge_near_duplicates", False)`` in
+    # DetectNearDuplicate: a config object that predates this knob — an older
+    # deploy's, or a test double — resolves to today's behaviour instead of
+    # raising.
+    min_cluster = getattr(config, "crystallizer_min_cluster_size", CRYSTALLIZER_MIN_CLUSTER_SIZE)
+    clusters = [c for c in clusters if len(c) >= min_cluster]
     result["clusters_found"] = len(clusters)
 
     if not clusters:
@@ -645,7 +656,9 @@ async def _run_crystallization(
             for mid in cluster_ids
             if mid in memories_by_id and memories_by_id[mid].get("status") in LIVE_MEMORY_STATUSES
         ]
-        if len(cluster_memories) < CRYSTALLIZER_MIN_CLUSTER_SIZE:
+        # Same floor as the filter above — re-checked because the live-status
+        # filter directly above can shrink a cluster below it.
+        if len(cluster_memories) < min_cluster:
             continue
 
         # Call LLM to crystallize
@@ -947,6 +960,8 @@ async def _check_orphaned_entities(
 async def _check_near_duplicates(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    threshold: float | None = None,
 ) -> dict:
     """Find near-duplicate memory pairs via batch ANN neighbor queries.
 
@@ -974,6 +989,16 @@ async def _check_near_duplicates(
     checked_ids: list[str] = []
     offset = 0
 
+    if threshold is None:
+        # Resolved here rather than passed down, because the hygiene checks are
+        # dispatched through a uniform ``fn(tenant_id, fleet_id)`` loop and
+        # special-casing one of them there would put this knob somewhere nobody
+        # looks for it. The parameter stays for tests.
+        from core_api.services.organization_settings import resolve_config
+
+        cfg = await resolve_config(tenant_id)
+        threshold = getattr(cfg, "crystallizer_dedup_threshold", CRYSTALLIZER_DEDUP_THRESHOLD)
+
     while len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
         batch = await sc.check_near_duplicates(
             {
@@ -984,7 +1009,14 @@ async def _check_near_duplicates(
                 # Sent rather than left to the storage defaults so the sweep's
                 # tuning stays in core-api's constants, where reg-a72 will look
                 # for it, instead of being split across two services.
-                "threshold": CRYSTALLIZER_DEDUP_THRESHOLD,
+                # A72 — per-tenant, defaulting to the constant. At 0.95 the
+                # sweep only catches near-verbatim copies, while the composites
+                # that actually crowd recall sit around 0.75-0.90 and pass
+                # underneath it. Lowering the floor is what makes this a
+                # crowding janitor rather than a copy detector — and it is
+                # opt-in because every extra pair the band admits is another
+                # LLM mergeability judgement.
+                "threshold": threshold,
                 "neighbor_limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
             }
         )
