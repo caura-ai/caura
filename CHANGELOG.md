@@ -10,6 +10,24 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.10.0](https://github.com/caura-ai/caura/compare/backend-v3.9.1...backend-v3.10.0) (2026-09-14)
+
+
+### Features
+
+* **recall:** gate the boost-feeding bump on a confirmed-use signal (A41) ([#1494](https://github.com/caura-ai/caura/issues/1494)) ([f236f34](https://github.com/caura-ai/caura/commit/f236f34ae46b63031968518bf5951221a0c577b4))
+
+
+### Bug Fixes
+
+* **bench:** supersession-aware recall for the regression sample — correct supersession no longer reads as a regression (reg-d15) ([#1493](https://github.com/caura-ai/caura/issues/1493)) ([0d5863b](https://github.com/caura-ai/caura/commit/0d5863b787cb20b2fe68cb79945f916d5b931757))
+* **extraction:** stop one failed relation disabling the deterministic contradiction path ([#1495](https://github.com/caura-ai/caura/issues/1495)) ([83913d1](https://github.com/caura-ai/caura/commit/83913d1c9492c29b2f9a0e50308b42fb6d4e25ef))
+
+
+### Performance
+
+* **storage:** stop shipping the embedding + tsvector on every scored-search row ([#1466](https://github.com/caura-ai/caura/issues/1466)) ([79d653c](https://github.com/caura-ai/caura/commit/79d653c3b69731a7177e7d0acfa6d3eb9e65a796))
+
 ## [3.9.1](https://github.com/caura-ai/caura/compare/backend-v3.9.0...backend-v3.9.1) (2026-09-12)
 
 
