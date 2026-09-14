@@ -76,6 +76,7 @@ from core_api.constants import (
     MIN_SEARCH_SIMILARITY,
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
+    RECALL_BOOST_SOURCE,
     RECALL_DECAY_WINDOW_DAYS,
     SCORE_FORMULA,
     SEARCH_OVERFETCH_FACTOR,
@@ -4068,6 +4069,10 @@ def resolve_search_params(
         "freshness_decay_days": resolved.get("freshness_decay_days", FRESHNESS_DECAY_DAYS),
         "recall_boost_cap": resolved.get("recall_boost_cap", RECALL_BOOST_CAP),
         "recall_decay_window_days": resolved.get("recall_decay_window_days", RECALL_DECAY_WINDOW_DAYS),
+        # A41: which counter feeds recall_boost — 0 = recall_count (bump-on-
+        # return, today), 1 = the confirmed-use counter fed by evolve outcome
+        # reports. Tenant-level A/B knob like score_formula; storage reads it.
+        "recall_boost_source": resolved.get("recall_boost_source", RECALL_BOOST_SOURCE),
         "similarity_blend": resolved.get("similarity_blend", SIMILARITY_BLEND),
         "fts_rank_scale": resolved.get("fts_rank_scale", FTS_RANK_SCALE),
         "candidate_pool_size": resolved.get("candidate_pool_size", CANDIDATE_POOL_SIZE),

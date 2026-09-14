@@ -696,6 +696,22 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     # ann_pool_size forced to 0 and the shadow call with the configured size).
     # Inert when ann_pool_size is 0.
     "ann_pool_shadow": SearchKnob(int, (0, 1)),
+    # A41: which counter feeds ``recall_boost``. 0 = ``recall_count`` (bumped on
+    # RETURN by TrackRecalls — current behaviour, the returned→boosted→returned
+    # loop A26/#411 could only dampen). 1 = the confirmed-use counter
+    # (``metadata._system.recall_used_count``, bumped when an agent REPORTS an
+    # outcome naming the memory in ``related_ids`` via evolve) — the boost then
+    # compounds only retrievals an agent actually acted on. The boost's shape,
+    # cap and window are IDENTICAL under both sources; only the counter (and its
+    # recency anchor) switches, so flipping is reversible and both counters keep
+    # accruing regardless of the setting (returned = recall_count, confirmed =
+    # the metadata counter) — the counterfactual stays measurable either way.
+    # Storage reads it (sql=True). Per TENANT via ``search.default_profile``,
+    # deliberately not agent-tunable: like ``score_formula`` it reshuffles
+    # ranking for every caller in the tenant and is held at the global default
+    # until the returned-vs-used measurement validates the flip (A50: every
+    # boost must earn its weight on the workload that needs it).
+    "recall_boost_source": SearchKnob(int, (0, 1), sql=True),
     # Reference clock for freshness and the temporal window when the request
     # carries ``valid_at`` (the as-of time of the question). 0 = ``now()`` —
     # byte-identical to today. 1 = age is measured from ``valid_at``, and the

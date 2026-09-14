@@ -2475,9 +2475,14 @@ class CoreStorageClient:
         cap: float,
         rule_id: str | None = None,
         outcome_id: str | None = None,
+        mark_used: bool = False,
     ) -> dict:
         """Clamp-adjust weights + (atomically) backfill the rule→outcome link;
-        primary write, ONE transaction. Returns
+        primary write, ONE transaction. ``mark_used=True`` additionally bumps
+        each id's confirmed-use counter (``metadata._system.recall_used_count``,
+        A41) in the same transaction — an older storage server ignores the
+        unknown key, so deploy skew degrades to today's behaviour rather than
+        erroring. Returns
         ``{adjustments:[{id, old_weight, new_weight}], backfilled}``."""
         return await self._post(  # type: ignore[return-value]
             "/evolve/apply-weights",
@@ -2489,6 +2494,7 @@ class CoreStorageClient:
                 "cap": cap,
                 "rule_id": rule_id,
                 "outcome_id": outcome_id,
+                "mark_used": mark_used,
             },
             read=False,
         )

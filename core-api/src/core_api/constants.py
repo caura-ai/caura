@@ -41,7 +41,7 @@ from common.enrichment.constants import (  # noqa: F401
     SERVER_RESERVED_MEMORY_TYPES,
     MemoryType,
 )
-from common.env_utils import read_float_env
+from common.env_utils import read_float_env, read_int_env
 
 # Re-export LLM provider constants from common.llm (CAURA-595).
 from common.llm.constants import (  # noqa: F401
@@ -726,13 +726,32 @@ FTS_RESERVED_RESULTS = 1  # result slots held for full-text matches; includes #6
 # A26: recall_count is bumped for every RETURNED row, used or not (see
 # TrackRecalls + memory_increment_recall), and feeds recall_boost back into the
 # rank score — a self-reinforcing "returned → boosted → returned" loop with no
-# usefulness signal. Until a confirmation-gated bump lands (the real fix, tied to
-# D5/D1), the cap is dialed down so the boost can no longer hijack rankings: at
-# cap=1.1 a popular-but-useless row can only overtake a more-relevant one whose
-# base score is <10% higher (was <50% at cap=1.5), and the shorter decay window
-# lets stale popularity fade in ~2 weeks instead of a quarter.
+# usefulness signal. The cap stays dialed down so the boost cannot hijack
+# rankings while the counter is return-fed: at cap=1.1 a popular-but-useless row
+# can only overtake a more-relevant one whose base score is <10% higher (was
+# <50% at cap=1.5), and the shorter decay window lets stale popularity fade in
+# ~2 weeks instead of a quarter.
+#
+# A41 — the confirmation-gated path the A26 interim pointed at now exists,
+# behind ``recall_boost_source`` (below / SEARCH_KNOBS): 1 feeds the boost from
+# ``metadata._system.recall_used_count`` — bumped only when an agent reports an
+# outcome naming the memory in ``related_ids`` (evolve, the platform's explicit
+# "I acted on these memories" signal) — instead of from recall_count. The
+# returned counter keeps accruing under either source (lifecycle/insights
+# consumers read it as "was returned", and it is the counterfactual for the
+# returned-vs-used measurement), so the flip is measured, not assumed, and
+# reversible. Held at 0 until that measurement validates it per tenant.
 RECALL_BOOST_CAP = 1.1  # max multiplier from frequent recall (A26: dialed down from 1.5)
 RECALL_DECAY_WINDOW_DAYS = 14  # only recalls within this window contribute to boost (A26: from 90)
+# A41: which counter feeds recall_boost. 0 = recall_count (bump-on-return —
+# current behaviour, byte-identical scoring SQL). 1 = the confirmed-use counter
+# (see the block above). Global default; flip per tenant via
+# ``search.default_profile.recall_boost_source``, or fleet-wide for an on-prem
+# install via the env var (defensive parse — a garbage value falls back to the
+# default with a stderr WARN instead of crashing import, #1441 pattern; any
+# value other than 1 keeps the return-fed source, mirroring storage's own
+# ``== 1`` read so a typo fails closed to today's behaviour).
+RECALL_BOOST_SOURCE = 1 if read_int_env("CAURA_RECALL_BOOST_SOURCE", 0, minimum=0) == 1 else 0
 
 # ── Recall summary ──
 MEMORY_RECALL_SUMMARY_TEMPERATURE = 0.3

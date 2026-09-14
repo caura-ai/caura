@@ -25,6 +25,7 @@ from sqlalchemy import (
     ColumnElement,
     Date,
     DateTime,
+    Integer,
     String,
     Table,
     and_,
@@ -2558,6 +2559,13 @@ class PostgresService:
         # A50 unified: which ranking formula computes `score`. 0 = legacy multiplicative
         # boost stack; 1 = unified relevance-dominant additive formula (see below).
         _score_formula = int(sp.get("score_formula", 0) or 0)
+        # A41: which counter feeds recall_boost. 0 = ``recall_count`` (bumped on
+        # RETURN by TrackRecalls — the returned→boosted→returned loop, current
+        # behaviour and byte-identical SQL). 1 = the confirmed-use counter
+        # (``metadata._system.recall_used_count``, bumped by evolve outcome
+        # reports) — the boost then compounds only retrievals an agent actually
+        # acted on; a value other than 1 fails closed to 0.
+        _recall_boost_source = int(sp.get("recall_boost_source", 0) or 0)
         # HNSW two-stage retrieval (PR2): 0 = off (full-scan candidate window,
         # unchanged); >0 = admit candidates through index-served pool arms and
         # run the scoring formula over that pool only. Gated below on a
@@ -2790,7 +2798,7 @@ class PostgresService:
         # Row filters are identical to the pre-split statement; only the select
         # list changed. Raw row fields ride along so the derived layer never
         # touches ``memories`` again before the final top_k join.
-        ingredients_stmt = select(
+        ingredient_cols: list[Any] = [
             Memory.id.label("mem_id"),
             vec_sim,
             has_embedding,
@@ -2804,7 +2812,31 @@ class PostgresService:
             Memory.status.label("status"),
             Memory.recall_count.label("recall_count"),
             Memory.last_recalled_at.label("last_recalled_at"),
-        ).where(*row_filters)
+        ]
+        if _recall_boost_source == 1:
+            # A41 — the confirmed-use counter, extracted only when a tenant has
+            # flipped ``recall_boost_source``: conditional so the DEFAULT
+            # statement stays byte-identical (the compiled-text ratchets in
+            # test_fts_score_single_render / test_ann_pool_statement pin that).
+            # Written exclusively by ``evolve_apply_weights(mark_used=True)`` as
+            # an int and a ``to_jsonb(now())`` ISO string, so the casts see
+            # NULL-or-well-typed values; COALESCE covers rows never confirmed.
+            ingredient_cols.append(
+                func.coalesce(
+                    cast(Memory.metadata_[("_system", "recall_used_count")].astext, Integer),
+                    0,
+                ).label("recall_used_count")
+            )
+            ingredient_cols.append(
+                func.coalesce(
+                    cast(
+                        Memory.metadata_[("_system", "recall_used_at")].astext,
+                        DateTime(timezone=True),
+                    ),
+                    Memory.created_at,
+                ).label("recall_used_at")
+            )
+        ingredients_stmt = select(*ingredient_cols).where(*row_filters)
 
         if use_ann_pool:
             # -- ANN candidate pool (HNSW two-stage retrieval, PR2) --
@@ -3027,10 +3059,27 @@ class PostgresService:
         ).label("freshness")
 
         if recall_boost_enabled:
+            # A41 — ``recall_boost_source`` switches WHICH counter the boost
+            # reads, never the boost's shape: cap, window, scale and the
+            # saturation curve are identical under both sources, so the boost
+            # still compounds correct repeat retrievals (the property the A50
+            # live replay validated) — under source=1 only CONFIRMED ones
+            # (evolve outcome reports), which breaks the returned→boosted→
+            # returned loop because merely being returned no longer moves the
+            # counter the score reads. A never-confirmed row has count 0 →
+            # boost exactly 1.0, whatever its recall_count says.
+            boost_count: ColumnElement[Any]
+            boost_anchor: ColumnElement[Any]
+            if _recall_boost_source == 1:
+                boost_count = ing.c.recall_used_count
+                boost_anchor = ing.c.recall_used_at  # already coalesced to created_at
+            else:
+                boost_count = ing.c.recall_count
+                boost_anchor = func.coalesce(ing.c.last_recalled_at, ing.c.created_at)
             days_since_recall = (
                 func.extract(
                     "epoch",
-                    func.now() - func.coalesce(ing.c.last_recalled_at, ing.c.created_at),
+                    func.now() - boost_anchor,
                 )
                 / 86400.0
             )
@@ -3039,8 +3088,8 @@ class PostgresService:
                 1.0
                 + (_recall_boost_cap - 1.0)
                 * recency_factor
-                * ing.c.recall_count
-                / (ing.c.recall_count + RECALL_BOOST_SCALE)
+                * boost_count
+                / (boost_count + RECALL_BOOST_SCALE)
             ).label("recall_boost")
         else:
             recall_boost_expr = literal_column("1.0").label("recall_boost")
@@ -10299,6 +10348,7 @@ class PostgresService:
         cap: float,
         rule_id: str | None = None,
         outcome_id: str | None = None,
+        mark_used: bool = False,
     ) -> dict:
         """Clamp-and-adjust weights for ``ids`` and (atomically) backfill the
         rule→outcome link, in ONE transaction.
@@ -10315,6 +10365,19 @@ class PostgresService:
         endpoint keeps the weight clamp + the backfill in a single storage
         transaction so evolve's documented split-commit isn't widened into two
         HTTP calls.
+
+        Stmt 3 (A41) runs ONLY when ``mark_used`` is true: one UPDATE bumping
+        each id's confirmed-use counter — ``metadata._system.recall_used_count``
+        (+1) and ``recall_used_at`` (now()) — the platform-key namespace whose
+        deep-merge guard in ``memory_update`` protects it from PATCH clobbering
+        (B7 x C25). An outcome report naming a memory in ``related_ids`` is the
+        explicit "an agent acted on this memory" signal, so it rides the same
+        transaction that adjusts those rows' weights. This counter is what
+        ``recall_boost`` reads under ``recall_boost_source=1``; under the
+        default 0 it is pure measurement (the returned-vs-used counterfactual).
+        The JSONB column lives in ``metadata``, NOT a new column — no schema
+        migration; the ``metadata::jsonb`` cast covers the CAURA-595 legacy
+        ``json``-typed installs like the sibling statements.
 
         Every statement is scoped by ``tenant_id``. Returns
         ``{adjustments:[{id, old_weight, new_weight}], backfilled: bool}`` —
@@ -10384,6 +10447,38 @@ class PostgresService:
                 # actually written. ``rowcount`` is reliable for an UPDATE on the
                 # asyncpg dialect (parsed from the ``UPDATE N`` command tag).
                 backfilled = (br.rowcount or 0) > 0  # type: ignore[attr-defined]
+            if mark_used:
+                # A41 — confirmed-use counter bump, same transaction. The
+                # ``_system`` sub-object is merged with ``||`` (sibling platform
+                # keys survive) and the whole ``'{_system}'`` path is written
+                # with ``jsonb_set`` at the TOP level, where the target always
+                # exists — ``jsonb_set`` only creates the LAST path element, so
+                # a two-level ``'{_system,recall_used_count}'`` path would be a
+                # silent no-op on rows that have never carried ``_system``.
+                # ``to_jsonb(now())`` serialises as an ISO-8601 timestamptz
+                # string, castable back with ``::timestamptz`` on the read side.
+                await session.execute(
+                    text(
+                        """
+                        UPDATE memories
+                           SET metadata = jsonb_set(
+                               COALESCE(metadata::jsonb, '{}'::jsonb),
+                               '{_system}',
+                               COALESCE(metadata::jsonb -> '_system', '{}'::jsonb)
+                                 || jsonb_build_object(
+                                      'recall_used_count',
+                                      COALESCE((metadata::jsonb #>> '{_system,recall_used_count}')::int, 0) + 1,
+                                      'recall_used_at',
+                                      to_jsonb(now())
+                                    )
+                           )
+                         WHERE id = ANY(CAST(:ids AS uuid[]))
+                           AND tenant_id = :tid
+                           AND deleted_at IS NULL
+                        """
+                    ),
+                    {"ids": list(ids), "tid": tenant_id},
+                )
         return {"adjustments": adjustments, "backfilled": backfilled}
 
     # ══════════════════════════════════════════════════════════════════════

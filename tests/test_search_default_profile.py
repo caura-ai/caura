@@ -324,16 +324,19 @@ def test_caura_tune_signature_matches_the_knob_table():
 
 def test_the_ab_knobs_are_not_agent_tunable():
     """``fts_rank_scale`` / ``candidate_pool_size`` / ``score_formula`` /
-    ``ann_pool_size`` / ``ann_pool_shadow`` / ``freshness_reference`` stay off
-    the agent ingress.
+    ``ann_pool_size`` / ``ann_pool_shadow`` / ``freshness_reference`` /
+    ``recall_boost_source`` stay off the agent ingress.
 
     They are the A/B, rollout and data-shape knobs — held at their global
     defaults until the offline comparison validates them, and flipped per
     TENANT via ``default_profile``, not per agent. ``freshness_reference`` is
     tenant-level for a different reason: whether ``ts_valid_start`` is event
     time or a validity-window start is a property of the tenant's data, not of
-    any one agent. The 9-of-15 split is deliberate; this records which six and
-    why, so a future reader does not "fix" the omission.
+    any one agent. ``recall_boost_source`` (A41) reshuffles ranking for every
+    caller in the tenant, exactly like ``score_formula``, and is held at 0
+    until the returned-vs-used measurement validates the flip. The 9-of-16
+    split is deliberate; this records which seven and why, so a future reader
+    does not "fix" the omission.
     """
     from common.constants import SEARCH_KNOBS
     from core_api.schemas import SearchProfileUpdate
@@ -345,6 +348,7 @@ def test_the_ab_knobs_are_not_agent_tunable():
         "ann_pool_size",
         "ann_pool_shadow",
         "freshness_reference",
+        "recall_boost_source",
     }
 
 

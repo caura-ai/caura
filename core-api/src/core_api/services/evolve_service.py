@@ -343,6 +343,19 @@ async def _adjust_weights(
             cap=EVOLVE_WEIGHT_CAP,
             rule_id=rule_id,
             outcome_id=outcome_id,
+            # A41 — an outcome report is the platform's explicit "I acted on
+            # these memories" signal, so the same atomic storage call also bumps
+            # each related memory's confirmed-use counter
+            # (``metadata._system.recall_used_count`` + ``recall_used_at``).
+            # ALL outcome types count: success, failure and partial all say the
+            # agent USED the memory; valence stays in ``weight`` (the delta this
+            # very call applies), use lives in the counter — mirroring
+            # click-through semantics, which also can't see how the click went.
+            # The counter is what ``recall_boost`` reads when a tenant flips
+            # ``recall_boost_source=1``; until then it is pure measurement
+            # (returned = recall_count vs used = this counter), which is the
+            # evidence the flip decision needs.
+            mark_used=True,
         )
     except Exception:
         logger.warning("evolve: bulk weight update failed for %d memories", len(valid_uuids), exc_info=True)
