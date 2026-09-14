@@ -312,13 +312,14 @@ async def test_fallback_to_base_judge_when_context_fetch_fails(caplog):
     cand = _make_candidate(cand_id, subject_entity_id=None)
     sc = _sc(new_mem, [cand], {})
 
-    # Patch ``_fetch_entity_context`` directly so the exception surfaces
-    # at the OUTER ``asyncio.wait_for`` / gather boundary in
-    # ``detect_contradictions_by_entities_async``. The inner helper has
-    # its own try/except that swallows storage failures and returns
-    # ``[]`` (the "no resolved entities" signal). Patching the helper
-    # is the only way to exercise the outer ``except Exception`` path
-    # where the CAURA-134 WARNING + INFO logs live.
+    # Patch ``_fetch_entity_contexts`` directly so the exception surfaces
+    # at the OUTER ``asyncio.wait_for`` boundary in
+    # ``detect_contradictions_by_entities_async``. The helper has its own
+    # try/except that swallows storage failures (and, since m-05, falls
+    # back from a failed batch call to the per-memory path) and returns
+    # empty contexts (the "no resolved entities" signal). Patching the
+    # helper is the only way to exercise the outer ``except Exception``
+    # path where the CAURA-134 WARNING + INFO logs live.
     fetch_ctx = AsyncMock(side_effect=RuntimeError("storage down"))
 
     base_judge = AsyncMock(return_value=(True, 0.95))
@@ -333,7 +334,7 @@ async def test_fallback_to_base_judge_when_context_fetch_fails(caplog):
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._fetch_entity_context",
+            "core_api.services.contradiction_detector._fetch_entity_contexts",
             fetch_ctx,
         ),
         patch(
@@ -412,10 +413,10 @@ async def test_fallback_to_base_judge_logs_timeouterror_explicitly(caplog):
     new_mem = _make_new_memory(new_id, subject_entity_id=None)
     cand = _make_candidate(cand_id, subject_entity_id=None)
     sc = _sc(new_mem, [cand], {})
-    # Patch ``_fetch_entity_context`` directly so the TimeoutError
+    # Patch ``_fetch_entity_contexts`` directly so the TimeoutError
     # surfaces at the OUTER ``asyncio.wait_for`` boundary in
-    # ``detect_contradictions_by_entities_async``. The inner helper
-    # swallows storage failures and returns ``[]`` — patching it is
+    # ``detect_contradictions_by_entities_async``. The helper swallows
+    # storage failures and returns empty contexts — patching it is
     # the only way to exercise the outer ``except Exception`` path
     # where the CAURA-134 WARNING lives. ``asyncio.TimeoutError()``
     # has ``str(e) == ""`` — the bug class CAURA-134 fixes.
@@ -433,7 +434,7 @@ async def test_fallback_to_base_judge_logs_timeouterror_explicitly(caplog):
             return_value=sc,
         ),
         patch(
-            "core_api.services.contradiction_detector._fetch_entity_context",
+            "core_api.services.contradiction_detector._fetch_entity_contexts",
             fetch_ctx,
         ),
         patch(
@@ -615,15 +616,20 @@ async def test_a1_17_matched_candidates_do_not_count_toward_cap():
         await detect_contradictions_by_entities_async(new_id, "t1", "f1")
 
     # Fall-through count (3) ≤ preflight cap (20) AND total (23) ≤
-    # detection cap (40) → fetch runs. ``_fetch_entity_context``
-    # issues one ``get_entity_links_for_memories([single_id])`` call
-    # per memory in the parallel gather, so we expect N+1 calls
-    # (1 for new_mem + N for candidates), not 1. The bound this
-    # test cares about is "fetch DID run" (cap didn't fire).
-    assert sc.get_entity_links_for_memories.call_count == len(cands) + 1, (
-        f"expected {len(cands) + 1} fetch calls (1 new_mem + {len(cands)} cands); "
+    # detection cap (40) → fetch runs. What this test cares about is
+    # "fetch DID run" (the cap didn't fire); the call COUNT it used to
+    # pin — N+1, one ``get_entity_links_for_memories([single_id])`` per
+    # memory — was the m-05 N+1 itself, and is now one call naming every
+    # memory. The cap assertion is unchanged in meaning: >0 means the
+    # fetch happened, and ``test_detection_fetch_skipped_when_total_
+    # exceeds_detection_cap`` covers the 0 case.
+    assert sc.get_entity_links_for_memories.call_count == 1, (
+        "expected ONE batched fetch call naming new_mem + every candidate; "
         f"got {sc.get_entity_links_for_memories.call_count}"
     )
+    assert sorted(sc.get_entity_links_for_memories.call_args.args[0]) == sorted(
+        [str(new_id)] + [c["id"] for c in cands]
+    ), "the batched call must name every memory the per-memory fan-out used to"
     # All candidates have non-empty entity context → ONE batched
     # entity-aware call covers them all. Base judge never runs.
     entity_aware_batch.assert_awaited_once()

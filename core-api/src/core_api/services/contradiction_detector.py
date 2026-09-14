@@ -1874,6 +1874,12 @@ async def _bounded_gather(coros, limit=_ENTITY_CTX_FANOUT_LIMIT):
     keep-alive pool the calls reuse connections instead of re-handshaking. A
     fresh semaphore per call (bound to the running loop) sidesteps cross-loop
     binding issues in tests. Order is preserved (``gather`` semantics).
+
+    That fan-out is now the FALLBACK shape, not the normal one:
+    ``_fetch_entity_contexts`` batches the whole candidate set into two
+    round-trips and only fans out when a batch call fails. The cap still has
+    to exist for exactly that window — a storage instance that 404s
+    ``/entities/by-ids`` puts every run back on the per-id path at once.
     """
     sem = asyncio.Semaphore(limit)
 
@@ -1897,6 +1903,12 @@ async def _fetch_entity_context(sc, memory_id: str, tenant_id: str) -> list[dict
     Returns ``[]`` (not ``None``) when the memory has no resolved links;
     the caller treats empty as the skip-retraction signal so this
     function never raises on missing data.
+
+    NOT the hot path any more. Both Path C call sites go through
+    ``_fetch_entity_contexts`` (plural), which asks for every memory at
+    once; this stays as that function's per-memory FALLBACK and as the
+    one-memory case. See ``_fetch_entity_contexts`` for the round-trip
+    arithmetic that made the difference worth having.
     """
     try:
         links_by_mem = await sc.get_entity_links_for_memories([memory_id], tenant_id)
@@ -1941,6 +1953,155 @@ async def _fetch_entity_context(sc, memory_id: str, tenant_id: str) -> list[dict
 
     hydrated = await _bounded_gather([_hydrate(link) for link in links])
     return [h for h in hydrated if h is not None]
+
+
+async def _fetch_entity_contexts(sc, memory_ids: list[str], tenant_id: str) -> dict[str, list[dict]]:
+    """Entity context for MANY memories in two storage round-trips, total.
+
+    Same output as calling ``_fetch_entity_context`` once per memory — a
+    ``{memory_id: [{name, entity_type, role, entity_id}, ...]}`` mapping,
+    link order preserved per memory, missing/foreign entities dropped —
+    but with the fan-out collapsed:
+
+      1. ONE ``get_entity_links_for_memories(all_ids)``. That endpoint has
+         always taken a LIST; the per-memory helper just never used it as
+         one, calling it with a single-element list per candidate.
+      2. ONE ``get_entities_by_ids(unique_entity_ids)``, deduplicated
+         across every memory. Entity-overlap candidates are selected
+         BECAUSE they share entities with the new memory, so the same
+         entity row was previously refetched once per candidate that
+         linked it.
+
+    Why it mattered enough to add a storage route (#1461 context): a Path C
+    detection pass fetches context for the new memory plus up to
+    ``_ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES`` (40) candidates, and
+    each of those made 1 links call + one ``get_entity`` per link. At the
+    ~1-5 links per memory documented on ``_format_entity_context`` that is
+    41 + ~120 ≈ 160 HTTP round-trips per run, plus 2 + ~6 more for the
+    retraction phase. This is 2 per phase, flat, independent of candidate
+    count.
+
+    The admission gate (#1461) made this MORE visible, not less: it bounds
+    how many runs contend at once, so a run's round-trips now sit inside a
+    held slot rather than racing other runs for the pool. Round-trips per
+    slot is exactly the term that sets gated throughput.
+
+    Failure handling is deliberately unchanged from the per-memory path,
+    because batching introduces failure modes single fetches did not have
+    (a payload storage rejects wholesale; a route an older core-storage-api
+    deployment does not serve yet — the two services deploy separately):
+
+      * links call raises → fall back to the per-memory
+        ``_fetch_entity_context`` fan-out, i.e. exactly the old code path.
+      * entity batch raises or answers a non-mapping → fall back to
+        per-entity ``get_entity`` hydration (see ``_hydrate_entities``).
+
+    Never raises. Path C is post-commit best-effort; a memory that could
+    not be resolved gets ``[]`` and its caller treats that as "no context",
+    which is what it already did.
+    """
+    # Dedup while preserving first-seen order: the result is keyed by id, so
+    # asking twice for the same memory would only buy a duplicate row in the
+    # request body.
+    ordered_ids = list(dict.fromkeys(str(m) for m in memory_ids))
+    if not ordered_ids:
+        return {}
+
+    try:
+        links_by_mem = await sc.get_entity_links_for_memories(ordered_ids, tenant_id)
+    except Exception as e:
+        logger.warning(
+            "Path C batched entity-context fetch failed (links, %d memories): %s. "
+            "Falling back to per-memory fetch.",
+            len(ordered_ids),
+            e,
+        )
+        per_memory = await _bounded_gather([_fetch_entity_context(sc, mid, tenant_id) for mid in ordered_ids])
+        return dict(zip(ordered_ids, per_memory, strict=False))
+
+    # Same defensive shape check the per-memory helper applies to this
+    # response: a non-dict means the contract drifted, and the honest answer
+    # is "no links" rather than an AttributeError inside a background task.
+    links_map = links_by_mem if isinstance(links_by_mem, dict) else {}
+
+    def _links_for(mid: str) -> list[dict]:
+        raw = links_map.get(mid) or []
+        return [link for link in raw if isinstance(link, dict)]
+
+    unique_entity_ids = list(
+        dict.fromkeys(
+            str(link["entity_id"]) for mid in ordered_ids for link in _links_for(mid) if link.get("entity_id")
+        )
+    )
+    if not unique_entity_ids:
+        return {mid: [] for mid in ordered_ids}
+
+    entities_by_id = await _hydrate_entities(sc, unique_entity_ids, tenant_id)
+
+    contexts: dict[str, list[dict]] = {}
+    for mid in ordered_ids:
+        rows: list[dict] = []
+        for link in _links_for(mid):
+            entity_id = link.get("entity_id")
+            if not entity_id:
+                continue
+            entity = entities_by_id.get(str(entity_id))
+            if not entity:
+                # Absent from the batch == ``get_entity`` returning None:
+                # deleted, or not this tenant's row. Drop the link, keep the
+                # rest — the per-entity path's behaviour, preserved.
+                continue
+            rows.append(
+                {
+                    "name": entity.get("canonical_name") or entity.get("name"),
+                    "entity_type": entity.get("entity_type"),
+                    "role": link.get("role"),
+                    "entity_id": str(entity_id),
+                }
+            )
+        contexts[mid] = rows
+    return contexts
+
+
+async def _hydrate_entities(sc, entity_ids: list[str], tenant_id: str) -> dict[str, dict]:
+    """``{entity_id: row}`` for these ids — one batch call, per-id fallback.
+
+    An EMPTY mapping from the batch route is a real answer (none of the ids
+    are this tenant's) and is returned as-is. Only a raised exception or a
+    response that is not a mapping falls through to the per-id fan-out —
+    the cases where we learned nothing, as opposed to learning "nothing".
+
+    The fallback is load-bearing rather than paranoid: core-api and
+    core-storage-api are deployed separately, so a core-api carrying
+    ``/entities/by-ids`` can reach a storage instance that 404s it, and the
+    detector must keep working across that window on the old per-id route.
+    """
+    try:
+        batch = await sc.get_entities_by_ids(entity_ids, tenant_id)
+    except Exception as e:
+        logger.warning(
+            "Path C batched entity hydration failed (%d entities): %s. Falling back to per-entity fetch.",
+            len(entity_ids),
+            e,
+        )
+    else:
+        if isinstance(batch, dict):
+            return {str(k): v for k, v in batch.items() if isinstance(v, dict)}
+        logger.warning(
+            "Path C batched entity hydration returned %s, not a mapping. Falling back to per-entity fetch.",
+            type(batch).__name__,
+        )
+
+    async def _one(entity_id: str) -> tuple[str, dict] | None:
+        try:
+            entity = await sc.get_entity(entity_id, tenant_id)
+        except Exception as e:
+            logger.warning("Path C entity-context fetch failed (entity %s): %s", entity_id, e)
+            return None
+        return (entity_id, entity) if entity else None
+
+    fetched = await _bounded_gather([_one(eid) for eid in entity_ids])
+    return dict(f for f in fetched if f is not None)
 
 
 async def _llm_entity_aware_contradiction_check(
@@ -2278,14 +2439,18 @@ async def _attempt_entity_retraction(
     # network, storage error), treat as "no context, leave Path A
     # alone" rather than retrying. See ``_CONTEXT_FETCH_TIMEOUT_SECONDS``
     # for the timeout rationale (CAURA-134).
+    new_memory_id = str(new_memory.get("id"))
+    candidate_id = str(candidate.get("id"))
     try:
-        new_entities, old_entities = await asyncio.wait_for(
-            asyncio.gather(
-                _fetch_entity_context(sc, str(new_memory.get("id")), retraction_tenant_id),
-                _fetch_entity_context(sc, str(candidate.get("id")), retraction_tenant_id),
-            ),
+        # One batched fetch for BOTH sides rather than two parallel
+        # per-memory fetches: same contexts, two round-trips instead of
+        # 2 + one per link on each side. See ``_fetch_entity_contexts``.
+        ctx_by_memory = await asyncio.wait_for(
+            _fetch_entity_contexts(sc, [new_memory_id, candidate_id], retraction_tenant_id),
             timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
         )
+        new_entities = ctx_by_memory.get(new_memory_id, [])
+        old_entities = ctx_by_memory.get(candidate_id, [])
     except Exception as e:
         # CAURA-134 — include exception class name in the log. The
         # default str(e) is empty for ``asyncio.TimeoutError``, which
@@ -2481,11 +2646,14 @@ async def detect_contradictions_by_entities_async(
     lock_key = None
     lock_token = ""
     # A19 — same admission gate as Path A, and deliberately the SAME gate:
-    # Path C is the heavier occupant (its context fetch holds up to
+    # Path C is the heavier occupant (it runs the entity-context fetch, and
+    # on the per-id fallback path that still holds up to
     # ``_ENTITY_CTX_FANOUT_LIMIT`` storage connections at once), so giving it
     # a second Semaphore(N) would double the very stampede budget the cap
     # exists to bound. See ``_acquire_detection_slot`` for ordering + the
-    # outside-the-try rationale.
+    # outside-the-try rationale. The batched fetch (m-05) cut the round-trips
+    # a held slot spends on storage from ~170 to 4 across both phases; it did
+    # not change which gate Path C belongs in.
     _gate, queued_ms = await _acquire_detection_slot()
     try:
         # The row is fetched BEFORE the lock is taken, unlike Path A. The lock
@@ -2704,18 +2872,25 @@ async def detect_contradictions_by_entities_async(
             )
         else:
             try:
+                # ONE batched fetch for the new memory and every candidate,
+                # not one fan-out group each. The cost guards above still
+                # bound the candidate count; what changed is that the count
+                # no longer multiplies storage round-trips (1 + N links
+                # calls + one per link became 2 calls, flat). The gate from
+                # #1461 bounds concurrent runs, so round-trips per run is
+                # what sets throughput per slot. See
+                # ``_fetch_entity_contexts``.
                 fetched = await asyncio.wait_for(
-                    _bounded_gather(
-                        [
-                            _fetch_entity_context(sc, str(memory_id), tenant_id),
-                            *(_fetch_entity_context(sc, str(c.get("id")), tenant_id) for c in candidates),
-                        ]
+                    _fetch_entity_contexts(
+                        sc,
+                        [str(memory_id), *(str(c.get("id")) for c in candidates)],
+                        tenant_id,
                     ),
                     timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
                 )
-                new_ctx = fetched[0]
-                for c, ctx in zip(candidates, fetched[1:], strict=False):
-                    contexts[str(c.get("id"))] = ctx
+                new_ctx = fetched.get(str(memory_id), [])
+                for c in candidates:
+                    contexts[str(c.get("id"))] = fetched.get(str(c.get("id")), [])
                 contexts_fetched = True
                 # CAURA-132 diag — context-fetch outcome. Per-candidate
                 # context sizes show which candidates have populated

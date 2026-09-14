@@ -6331,6 +6331,47 @@ class PostgresService:
                 select(Entity).where(Entity.id == entity_id, Entity.tenant_id == tenant_id)
             )
 
+    async def entity_get_by_ids(
+        self,
+        entity_ids: list[UUID],
+        tenant_id: str,
+    ) -> dict[UUID, Entity]:
+        """Batch form of ``entity_get_by_id``: many ids, one query.
+
+        Exists because the contradiction detector hydrated every entity link
+        with its own ``entity_get_by_id`` round-trip — one HTTP call per link
+        per candidate, so a Path C run with 40 candidates at ~3 links each
+        made ~120 calls where one ``IN`` does. The per-id route stays: it is
+        the single-row read and this is not a replacement for it.
+
+        Same tenant predicate as ``entity_get_by_id``, for the same reason
+        (GHSA-wgvw-28pq-jc36) — knowing a UUID is not entitlement to the row
+        behind it, and a batch read is the *sharper* version of that primitive
+        because one request can name many ids.
+
+        FILTER, not reject, on a partial match: an id outside ``tenant_id`` is
+        simply absent from the returned mapping, which is already how a
+        non-existent id answers. That is the same choice #1162 made for the
+        entity-link batch read, and it is the only coherent one here — a list
+        request cannot 404 "one of these" without telling the caller *which*
+        of the ids exist elsewhere, i.e. becoming the existence oracle the
+        per-id 404 deliberately is not.
+
+        Returns a mapping so the caller can look up by id without scanning;
+        callers must treat a missing key as "no such entity for me", never as
+        an error.
+        """
+        if not entity_ids:
+            return {}
+        async with get_session() as session:
+            result = await session.execute(
+                select(Entity).where(
+                    Entity.id.in_(entity_ids),
+                    Entity.tenant_id == tenant_id,
+                )
+            )
+            return {entity.id: entity for entity in result.scalars().all()}
+
     async def entity_find_exact(
         self,
         tenant_id: str,

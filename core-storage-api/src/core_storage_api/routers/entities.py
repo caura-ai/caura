@@ -84,6 +84,41 @@ async def list_entities(
     return [orm_to_dict(e, ENTITY_FIELDS) for e in entities]
 
 
+@router.post("/by-ids")
+async def get_entities_by_ids(request: Request) -> dict:
+    """Fetch many entities by id in one round-trip, scoped to one tenant.
+
+    POST rather than GET because the id list is unbounded in principle and a
+    query string is not where a caller should be discovering a URL-length
+    limit; the body is the same shape ``/memory-ids-by-entity-ids`` and
+    ``/count-memories`` already take.
+
+    Ids outside ``tenant_id`` are absent from the response rather than an
+    error — see ``entity_get_by_ids`` for why a batch read must filter where
+    the per-id route 404s. ``tenant_id`` is required (422 without it), so this
+    route can never degrade into the bare primary-key lookup #1174 removed
+    from ``GET /entities/{entity_id}``.
+
+    Declared above the parameterised ``/{entity_id}`` routes only for the
+    file's ordering convention — being a POST, it could not be shadowed by
+    the GET anyway.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    raw_ids = body.get("entity_ids") or []
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=422, detail="entity_ids must be a list")
+    try:
+        entity_ids = [UUID(eid) for eid in raw_ids]
+    except (ValueError, AttributeError, TypeError) as exc:
+        # A malformed id in the list is the caller's bug, not a 500. The
+        # per-id route gets this for free from FastAPI's ``entity_id: UUID``
+        # path coercion; a body-carried list has to say it itself.
+        raise HTTPException(status_code=422, detail=f"invalid entity_id UUID: {exc}") from exc
+    entities = await _svc.entity_get_by_ids(entity_ids, tenant_id)
+    return {str(eid): orm_to_dict(e, ENTITY_FIELDS) for eid, e in entities.items()}
+
+
 @router.get("/exact")
 async def find_exact_entity(
     tenant_id: str,
