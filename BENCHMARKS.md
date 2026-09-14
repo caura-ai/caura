@@ -151,6 +151,35 @@ effect rises monotonically with `k` across the range tested, so this benchmark c
 say whether more keyword weight helps on LoCoMo, but it does **not** locate an
 optimum; don't read the largest `k` as the best one.
 
+## Regression sample: comparing a run to the golden
+
+[`benchmark/regression_sample/compare_to_baseline.py`](benchmark/regression_sample/compare_to_baseline.py)
+scores a LongMemEval-runner results file (or directory of them) against a golden
+baseline and prints the per-category accuracy / recall@k delta table with
+threshold flags (exit 1 on a breach).
+
+Its recall is **supersession-aware** by default. The product deliberately
+retires the older side of an update — the contradiction detector marks it
+`outdated`/`conflicted` and chains `supersedes_id` from the newer row, and
+present-state search excludes retired rows — so a status-blind recall counts
+every *correct* supersession of a gold memory as a miss. That false-regression
+signature (category recall drops while its accuracy holds or rises) fired three
+times in the 2026-08-27 A63 sessions (#1023, #1025). The scorer instead credits
+a superseded gold **when a retrieved memory's supersedes chain reaches it**; a
+superseded gold with no retrieved successor still counts as a miss, so a
+detector that buries information without surfacing a replacement keeps hurting
+recall. The denominator is never reduced.
+
+Two things to know before quoting it:
+
+- `--recall-mode legacy` reproduces the historical status-blind counting, for
+  comparability with goldens captured before the scorer existed.
+- Every superseded gold is listed in the report (credited or lost, and by which
+  memory). *Credited* means the metric no longer penalises the supersession —
+  it does **not** certify the supersession was correct. When the
+  `gold superseded` count moves under unchanged data, the detector fired more:
+  audit the listed pairs before trusting either verdict (reg-d15).
+
 ## How Caura compares
 
 For a single chatbot, the public-benchmark leaders (Caura, Mem0, Zep) cluster
