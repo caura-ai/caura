@@ -948,7 +948,26 @@ async def _check_near_duplicates(
     tenant_id: str,
     fleet_id: str | None,
 ) -> dict:
-    """Find near-duplicate memory pairs via batch ANN neighbor queries."""
+    """Find near-duplicate memory pairs via batch ANN neighbor queries.
+
+    Audit oss-0814-m-37 — this loop was the N+1. It fetched a page of
+    candidates as ``(id, embedding)`` and then issued one
+    ``find_neighbors_by_embedding`` POST **per candidate**, awaited in-loop,
+    with that candidate's embedding copied back up in the request body. At
+    ``CRYSTALLIZER_DEDUP_BATCH_SIZE`` = 500 that is 501 serial HTTP round-trips
+    per batch and ~22 MB of vector JSON on the wire (a 1024-dim pgvector is
+    ~22 KB of JSON floats; it travelled down as the candidate and up again as
+    the query). Nothing here ever read ``embedding`` — it was relayed
+    unexamined, because the similarity is pgvector's ``<=>`` on the storage
+    side. Both halves now happen in one statement behind one POST.
+
+    Deliberately unchanged, because the perf half of the finding ships ahead of
+    the parked crystallizer retune (reg-a72): the thresholds, the neighbour
+    fan-out, the pair cap, the pair-key normalisation, the first-write-wins on
+    similarity, and the order pairs are discovered in. Storage returns pairs in
+    the same order the loop visited them — candidate by candidate,
+    nearest-neighbour first — so the cap still bites on exactly the same pairs.
+    """
     sc = get_storage_client()
 
     pairs: dict[tuple[str, str], float] = {}  # (id1, id2) -> similarity
@@ -962,33 +981,27 @@ async def _check_near_duplicates(
                 "fleet_id": fleet_id,
                 "batch_size": CRYSTALLIZER_DEDUP_BATCH_SIZE,
                 "offset": offset,
+                # Sent rather than left to the storage defaults so the sweep's
+                # tuning stays in core-api's constants, where reg-a72 will look
+                # for it, instead of being split across two services.
+                "threshold": CRYSTALLIZER_DEDUP_THRESHOLD,
+                "neighbor_limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
             }
         )
-        candidates = batch.get("candidates", [])
-        if not candidates:
+        # Every swept row, not just the ones that turned out to have a
+        # duplicate — this is the stamp set, and the old loop appended here
+        # before it knew whether the candidate had neighbours.
+        candidate_ids = batch.get("candidate_ids", [])
+        if not candidate_ids:
             break
 
-        for cand in candidates:
-            mem_id = cand["id"]
-            embedding = cand["embedding"]
-            checked_ids.append(mem_id)
+        checked_ids.extend(candidate_ids)
 
-            neighbors = await sc.find_neighbors_by_embedding(
-                {
-                    "tenant_id": tenant_id,
-                    "fleet_id": fleet_id,
-                    "query_embedding": embedding,
-                    "exclude_id": mem_id,
-                    "threshold": CRYSTALLIZER_DEDUP_THRESHOLD,
-                    "limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
-                }
-            )
-
-            for nb in neighbors:
-                id1, id2 = sorted([mem_id, nb["id"]])
-                pair_key = (id1, id2)
-                if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
-                    pairs[pair_key] = nb["similarity"]
+        for pair in batch.get("pairs", []):
+            id1, id2 = sorted([pair["id"], pair["neighbor_id"]])
+            pair_key = (id1, id2)
+            if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
+                pairs[pair_key] = pair["similarity"]
 
         offset += CRYSTALLIZER_DEDUP_BATCH_SIZE
 

@@ -1287,10 +1287,15 @@ class CoreStorageClient:
         return await self._get("/memories/lifecycle-candidates", **params) or {}
 
     async def check_near_duplicates(self, data: dict) -> dict:
-        return await self._post("/memories/near-duplicates", data)  # type: ignore[return-value]
+        """One batch of the crystallizer dedup sweep.
 
-    async def find_neighbors_by_embedding(self, data: dict) -> list[dict]:
-        return await self._post("/memories/neighbors-by-embedding", data) or []  # type: ignore[return-value]
+        Returns ``{"candidate_ids": [...], "pairs": [{"id", "neighbor_id",
+        "similarity"}]}``. Audit oss-0814-m-37: the neighbour search used to be
+        a second endpoint called once per candidate with that candidate's
+        embedding in the body, so the companion
+        ``find_neighbors_by_embedding`` is gone — the whole batch resolves here.
+        """
+        return await self._post("/memories/near-duplicates", data)  # type: ignore[return-value]
 
     async def mark_dedup_checked(self, memory_ids: list[str], tenant_id: str) -> dict:
         # ``tenant_id`` (the row's home tenant) bounds the bulk dedup-checked

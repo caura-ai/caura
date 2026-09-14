@@ -2697,7 +2697,7 @@ class PostgresService:
             # extra predicate is free for rows that already had to scan
             # the tenant/fleet slice.
             # Other paths (find_semantic_duplicate, find_similar_candidates,
-            # find_neighbors_by_embedding, compute_health_stats) keep their
+            # find_near_duplicate_pairs, compute_health_stats) keep their
             # NULL guards — vector-pure operations where a NULL operand has
             # no comparable semantics.
             or_(
@@ -4616,101 +4616,106 @@ class PostgresService:
                 int(total_remaining),
             )
 
-    async def memory_find_near_duplicate_candidates(
+    async def memory_find_near_duplicate_pairs(
         self,
         tenant_id: str,
         fleet_id: str | None,
         batch_size: int,
         offset: int = 0,
+        threshold: float = 0.95,
+        neighbor_limit: int = 5,
     ) -> list[tuple]:
-        """Rows the crystallizer has not yet dedup-checked. LIVE rows only.
+        """One batch of the crystallizer's dedup sweep: candidates AND their
+        near neighbours, resolved in a single statement.
 
-        M-61. The status filter is half of a pair — see
-        ``memory_find_neighbors_by_embedding`` for the other half and for why
-        both ends are needed. This one keeps an archived row from entering a
-        cluster as the CANDIDATE side of a pair.
+        Returns ``(candidate_id, neighbour_id, similarity)`` ordered
+        candidate-by-candidate, each candidate's neighbours nearest-first.
+        The join is a LEFT one, so a candidate with no neighbour above
+        ``threshold`` still yields one row with NULLs — that is how the caller
+        recovers the full swept set to stamp ``last_dedup_checked_at`` on, which
+        is not the same set as "rows that turned out to have a duplicate".
 
-        ``deleted_at IS NULL`` was the only state filter here, and soft-deletion
-        is not the state that matters: crystallization archives its sources, so
-        the rows this sweep must stop revisiting are precisely the ones it
-        archived itself.
-        """
-        async with get_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id)
-            result = await session.execute(
-                text(f"""
-                SELECT m.id, m.embedding
-                FROM memories m
-                WHERE {scope}
-                  AND m.embedding IS NOT NULL
-                  AND m.deleted_at IS NULL
-                  AND m.status = ANY(:live_statuses)
-                  AND m.last_dedup_checked_at IS NULL
-                ORDER BY m.created_at DESC
-                LIMIT :batch_size OFFSET :batch_offset
-            """),
-                {
-                    **params,
-                    "batch_size": batch_size,
-                    "batch_offset": offset,
-                    "live_statuses": list(LIVE_MEMORY_STATUSES),
-                },
-            )
-            return result.all()  # type: ignore[return-value]
+        Audit oss-0814-m-37. This was two queries behind two endpoints, and
+        core-api drove them in a serial N+1: fetch a page of ``(id, embedding)``
+        candidates, then issue one neighbour POST **per candidate**, each body
+        carrying that candidate's embedding straight back up. At the shipped
+        ``CRYSTALLIZER_DEDUP_BATCH_SIZE`` of 500 that is 501 HTTP round-trips
+        and ~22 MB of vector JSON per batch (a 1024-dim pgvector serialises to
+        ~22 KB, down once as the candidate and up again as the query), for a
+        similarity that pgvector was computing server-side the whole time — the
+        vector was never read by core-api, only relayed. The correlated
+        ``LATERAL`` expresses the same per-candidate top-K the loop did, so the
+        ANN index is still probed once per candidate; what goes away is the
+        round-trip and the relay, not the work.
 
-    async def memory_find_neighbors_by_embedding(
-        self,
-        tenant_id: str,
-        fleet_id: str | None,
-        query_embedding: Any,
-        exclude_id: UUID,
-        threshold: float,
-        limit: int,
-    ) -> list[tuple]:
-        """Near neighbours of one embedding, for the crystallizer's dedup sweep.
-
-        M-61. LIVE rows only, and this is the half of the fix that closes the
-        reported loop. A crystallized fact stays >=0.95 similar to the sources it
-        was merged from — that is what made them a cluster — and those sources
-        are ARCHIVED by the run that created it. Returning them here re-formed
-        the cluster {F, S1, S2} on the next sweep, re-sent it to the LLM, and
-        then archived F, because the archive step takes every cluster member and
-        does not care that one of them is the crystal produced an hour earlier.
-
-        Filtering the CANDIDATE query alone would not have been enough: a pair is
-        (candidate, neighbour), so an archived row excluded from one end still
-        reaches a cluster through the other. Both queries carry the filter, and
-        neither has any caller outside this sweep — the crystallizer is the only
-        production consumer of either, which is what makes filtering safe to do
-        in the query rather than at the call site.
+        M-61 lives here now, in both halves. LIVE rows only on BOTH sides of the
+        join, which is what closes the reported loop: a crystallized fact stays
+        >=0.95 similar to the sources it was merged from — that is what made
+        them a cluster — and those sources are ARCHIVED by the run that created
+        it. Offering them again re-formed the cluster {F, S1, S2} on the next
+        sweep, re-sent it to the LLM, and then archived F, because the archive
+        step takes every cluster member and does not care that one of them is
+        the crystal produced an hour earlier. Filtering one side would not have
+        been enough: a pair is (candidate, neighbour), so a row excluded from
+        one end still reaches a cluster through the other.
 
         Deliberately ``LIVE_MEMORY_STATUSES`` rather than ``!= 'archived'``:
         ``outdated`` and ``conflicted`` are no better as merge inputs, and naming
         the live set means a status added later is excluded by default rather
         than silently admitted.
+
+        ``deleted_at IS NULL`` alone was never the filter that mattered:
+        soft-deletion is not the state crystallization puts its sources into.
+
+        The trailing ``c.id`` / ``nb.id`` sort keys make an order Postgres never
+        promised deterministic rather than changing one it did. Candidates tie
+        on ``created_at`` and neighbours tie on distance; under a tie the old
+        loop's visit order — and therefore which pairs survive
+        ``CRYSTALLIZER_MAX_DEDUP_PAIRS`` — was whatever the executor happened to
+        emit. Similarity is symmetric, so a tie never changed a pair's recorded
+        score, only which pairs made the cap.
         """
         async with get_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id, table="n")
+            cand_scope, params = _scope_sql(tenant_id, fleet_id)
+            nb_scope, _ = _scope_sql(tenant_id, fleet_id, table="n")
             result = await session.execute(
                 text(f"""
-                SELECT n.id,
-                       1 - (n.embedding <=> :query_emb) AS similarity
-                FROM memories n
-                WHERE {scope}
-                  AND n.embedding IS NOT NULL
-                  AND n.deleted_at IS NULL
-                  AND n.status = ANY(:live_statuses)
-                  AND n.id != :self_id
-                  AND 1 - (n.embedding <=> :query_emb) >= :threshold
-                ORDER BY n.embedding <=> :query_emb
-                LIMIT :k
+                WITH candidates AS (
+                    SELECT m.id, m.embedding, m.created_at
+                    FROM memories m
+                    WHERE {cand_scope}
+                      AND m.embedding IS NOT NULL
+                      AND m.deleted_at IS NULL
+                      AND m.status = ANY(:live_statuses)
+                      AND m.last_dedup_checked_at IS NULL
+                    ORDER BY m.created_at DESC
+                    LIMIT :batch_size OFFSET :batch_offset
+                )
+                SELECT c.id AS candidate_id,
+                       nb.id AS neighbor_id,
+                       nb.similarity AS similarity
+                FROM candidates c
+                LEFT JOIN LATERAL (
+                    SELECT n.id AS id,
+                           1 - (n.embedding <=> c.embedding) AS similarity
+                    FROM memories n
+                    WHERE {nb_scope}
+                      AND n.embedding IS NOT NULL
+                      AND n.deleted_at IS NULL
+                      AND n.status = ANY(:live_statuses)
+                      AND n.id != c.id
+                      AND 1 - (n.embedding <=> c.embedding) >= :threshold
+                    ORDER BY n.embedding <=> c.embedding
+                    LIMIT :k
+                ) nb ON TRUE
+                ORDER BY c.created_at DESC, c.id, nb.similarity DESC NULLS LAST, nb.id
             """),
                 {
                     **params,
-                    "query_emb": str(query_embedding),
-                    "self_id": exclude_id,
+                    "batch_size": batch_size,
+                    "batch_offset": offset,
                     "threshold": threshold,
-                    "k": limit,
+                    "k": neighbor_limit,
                     "live_statuses": list(LIVE_MEMORY_STATUSES),
                 },
             )

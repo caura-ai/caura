@@ -1,13 +1,17 @@
 """Batch concurrent contradiction checks — asyncio.gather replaces serial loop.
 
 Unit tests validate:
-- Concurrent execution (N checks in ~1 check's time, not N×)
+- Concurrent execution (all N checks in flight at once, not one at a time)
 - Exception in one candidate doesn't block others
 - Results correctly matched back to candidates
+
+Concurrency is asserted as a property — the peak number of checks in flight —
+never as a wall-clock budget. A duration threshold turns the event loop's
+scheduling luck into a pass/fail verdict, which is a flake on a shared runner,
+not a signal about the code.
 """
 
 import asyncio
-import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -20,29 +24,48 @@ class TestBatchConcurrency:
 
     @pytest.mark.asyncio
     async def test_concurrent_execution(self):
-        """All candidates checked in parallel — total time ≈ single check, not sum."""
+        """All candidates are in flight at once, asserted by peak overlap.
+
+        The property this test exists for is OVERLAP — every check is started
+        before any of them finishes. Asserting a wall-clock budget instead
+        (``elapsed < 0.3`` for five 100ms sleeps) measured overlap only
+        indirectly, and left the verdict to the scheduler: the margin was
+        0.2s of absolute headroom, which a loaded CI runner can eat without
+        anything being wrong with the code. The in-flight peak is the same
+        claim stated directly, and it is decided by the event loop's ordering
+        rather than by the clock — see ``test_contradiction_fanout_bounded``
+        for the same idiom.
+        """
         call_count = 0
+        in_flight = 0
+        peak_in_flight = 0
 
         async def mock_check(new_content, old_content):
-            nonlocal call_count
+            nonlocal call_count, in_flight, peak_in_flight
             call_count += 1
-            await asyncio.sleep(0.1)  # simulate 100ms LLM call
-            return False
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
+            try:
+                await asyncio.sleep(0.005)  # stand-in for the LLM round trip
+                return False
+            finally:
+                in_flight -= 1
 
         candidates = [MagicMock(id=uuid4(), content=f"content {i}") for i in range(5)]
 
-        t0 = time.perf_counter()
         tasks = [
             asyncio.wait_for(mock_check("new", c.content), timeout=10.0)
             for c in candidates
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        elapsed = time.perf_counter() - t0
 
         assert call_count == 5
         assert len(results) == 5
-        # Concurrent: ~0.1s, not 0.5s
-        assert elapsed < 0.3, f"Expected concurrent (<0.3s), got {elapsed:.2f}s"
+        # Serial execution would peak at 1: each check would have to finish
+        # before the next one starts.
+        assert peak_in_flight == 5, (
+            f"checks did not overlap — peak in flight was {peak_in_flight}, expected 5"
+        )
 
     @pytest.mark.asyncio
     async def test_exception_doesnt_block_others(self):
@@ -80,25 +103,44 @@ class TestBatchConcurrency:
 
     @pytest.mark.asyncio
     async def test_timeout_per_task_not_total(self):
-        """Each task has its own 10s timeout, not a shared total timeout."""
-        call_times = []
+        """Each task gets its own timeout, so none is starved by the others.
+
+        Same fix as ``test_concurrent_execution``, and the old assertion here
+        was additionally measuring the wrong thing: it timed each call's OWN
+        duration (``t0`` was taken inside ``mock_slow_check``) and asserted
+        ``max(call_times) < 0.2``. A serial loop produces exactly the same
+        ~50ms per-call numbers, so the check could not have caught the
+        regression its docstring describes — it could only flake. What the
+        per-task ``wait_for`` actually buys is that all 8 run under their own
+        budget concurrently and none is cut off, which is what is asserted now.
+        """
+        completed = []
+        in_flight = 0
+        peak_in_flight = 0
 
         async def mock_slow_check(new_content, old_content):
-            t0 = time.perf_counter()
-            await asyncio.sleep(0.05)
-            call_times.append(time.perf_counter() - t0)
-            return False
+            nonlocal in_flight, peak_in_flight
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
+            try:
+                await asyncio.sleep(0.005)
+                completed.append(old_content)
+                return False
+            finally:
+                in_flight -= 1
 
         tasks = [
             asyncio.wait_for(mock_slow_check("new", f"content {i}"), timeout=10.0)
             for i in range(8)
         ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # All 8 should have run concurrently (each ~50ms)
-        assert len(call_times) == 8
-        # Total wall time should be << 8 * 50ms
-        assert max(call_times) < 0.2
+        assert len(completed) == 8
+        # A shared total budget would cut the tail off; a per-task budget does not.
+        assert not any(isinstance(r, asyncio.TimeoutError) for r in results)
+        assert peak_in_flight == 8, (
+            f"checks did not overlap — peak in flight was {peak_in_flight}, expected 8"
+        )
 
     @pytest.mark.asyncio
     async def test_empty_candidates_no_gather(self):
