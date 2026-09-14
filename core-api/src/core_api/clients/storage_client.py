@@ -1558,6 +1558,24 @@ class CoreStorageClient:
         # so the tenant has to travel with it or storage has no predicate.
         return await self._get(f"/entities/{entity_id}", tenant_id=tenant_id)
 
+    async def get_entities_by_ids(self, entity_ids: list[str], tenant_id: str) -> dict:
+        """Batch form of ``get_entity``: ``{entity_id: row}`` for one tenant.
+
+        Ids the tenant does not own (or that do not exist) are simply absent
+        from the mapping — the batch analogue of ``get_entity``'s ``None``,
+        and the same "filter, not reject" contract
+        ``get_entity_links_for_memories`` already has. Callers MUST treat a
+        missing key as "no such entity", never as a failure.
+
+        ``read=True``: this is a read, and it pairs with ``get_entity``, which
+        has always gone to the read replica.
+        """
+        return await self._post(  # type: ignore[return-value]
+            "/entities/by-ids",
+            {"entity_ids": entity_ids, "tenant_id": tenant_id},
+            read=True,
+        )
+
     async def update_entity(self, entity_id: str, tenant_id: str, data: dict) -> dict | None:
         # Same contract as ``update_memory`` above, for the same reason.
         # The explicit arg wins over any ``tenant_id`` in ``data``.
