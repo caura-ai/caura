@@ -934,6 +934,46 @@ async def _walk_redirects_and_fetch(url: str) -> str:
         )
 
 
+async def _prior_ingest_was_complete(tenant_id: str, run_id: str) -> bool:
+    """True only when the run that populated the cache committed every fact.
+
+    09/02 M-44. ``ingest_commit`` tolerates partial failure: it counts
+    ``created`` and ``errored`` and, when facts fail, logs a warning suggesting
+    the operator wipe the batch by ``ingest_run_id``. The rows that DID land
+    still carry ``metadata["doc_hash"]``, so the next preview of the same
+    document found them, returned ``cached: True``, and served an incomplete
+    extraction as the finished one — permanently, because the cache
+    short-circuits before any LLM call, so re-previewing could never recover the
+    missing facts.
+
+    The signal already existed and simply was not read: the parent Document
+    records ``errored`` alongside ``doc_hash``. This consults it.
+
+    A MISSING parent is treated as NOT complete. The parent write is
+    best-effort (its own handler says so), so absence means "cannot prove this
+    cache is whole" — and the whole point here is to stop serving a result we
+    cannot prove. The cost of being wrong that way is one extraction; the cost
+    of the other way is a document that is permanently missing facts.
+    """
+    try:
+        doc = await get_storage_client().get_document(tenant_id, INGEST_DOCUMENTS_COLLECTION, run_id)
+    except Exception:
+        logger.warning(
+            "ingest_preview: could not read parent Document for run %s; "
+            "treating the doc-hash cache as unproven",
+            run_id,
+            exc_info=True,
+        )
+        return False
+    if not doc:
+        return False
+    data = doc.get("data") or {}
+    errored = data.get("errored")
+    # ``errored`` absent means the parent predates this field — same "cannot
+    # prove" reasoning as a missing parent.
+    return errored == 0
+
+
 async def _find_prior_ingest_by_doc_hash(tenant_id: str, doc_hash: str) -> list[dict]:
     """A2 cache lookup. Returns memory rows from the most recent prior ingest of
     the same content for the same tenant — or empty list if no cache hit.
@@ -996,6 +1036,21 @@ async def ingest_preview(request: IngestRequest) -> dict:
     source_uri_default = request.source_uri or url or "text-input"
     doc_hash = _doc_hash(request.tenant_id, content)
     cached_memories = await _find_prior_ingest_by_doc_hash(request.tenant_id, doc_hash)
+    if cached_memories and not await _prior_ingest_was_complete(
+        request.tenant_id, cached_memories[0]["run_id"]
+    ):
+        # 09/02 M-44 — the prior run did not commit every fact, so its rows are
+        # a partial extraction. Fall through and re-extract rather than serve
+        # them as finished; the cache is an optimisation, and an optimisation
+        # that makes missing data permanent is not one.
+        logger.info(
+            "ingest_preview: doc-hash cache REFUSED (tenant=%s prior_run=%s) — "
+            "the prior commit was partial or unprovable; re-extracting",
+            request.tenant_id,
+            cached_memories[0]["run_id"],
+        )
+        cached_memories = []
+
     if cached_memories:
         prior_run_id = cached_memories[0]["run_id"]
         cached_facts = []
