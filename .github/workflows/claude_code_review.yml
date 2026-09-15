@@ -340,6 +340,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Install Claude CLI
         run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
@@ -449,6 +450,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Install Claude CLI
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
@@ -504,6 +506,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Install Claude CLI
         run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: keep in step with the review job
