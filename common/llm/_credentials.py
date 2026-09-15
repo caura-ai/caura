@@ -20,6 +20,8 @@ import os
 from common.llm.constants import (
     ANTHROPIC_CHAT_BASE_URL,
     ANTHROPIC_DEFAULT_MODEL,
+    ATLASCLOUD_CHAT_BASE_URL,
+    ATLASCLOUD_DEFAULT_MODEL,
     GEMINI_DEFAULT_MODEL,
     LLM_FALLBACK_MODEL_OPENAI,
     OPENAI_CHAT_BASE_URL,
@@ -38,6 +40,7 @@ _TENANT_KEY_ATTR: dict[str, str] = {
     ProviderName.OPENAI: "openai_api_key",
     ProviderName.ANTHROPIC: "anthropic_api_key",
     ProviderName.OPENROUTER: "openrouter_api_key",
+    ProviderName.ATLASCLOUD: "atlascloud_api_key",
     ProviderName.GEMINI: "gemini_api_key",
 }
 
@@ -50,6 +53,8 @@ def _env_key(provider: str) -> str:
         return os.environ.get("ANTHROPIC_API_KEY", "")
     if provider == ProviderName.OPENROUTER:
         return os.environ.get("OPENROUTER_API_KEY", "")
+    if provider == ProviderName.ATLASCLOUD:
+        return os.environ.get("ATLASCLOUD_API_KEY", "")
     if provider == ProviderName.GEMINI:
         return os.environ.get("GEMINI_API_KEY", "")
     return ""
@@ -112,6 +117,18 @@ def resolve_openai_compatible(
             or ""
         )
         return key, OPENROUTER_CHAT_BASE_URL, OPENROUTER_DEFAULT_MODEL
+
+    if provider == ProviderName.ATLASCLOUD:
+        key = (
+            (
+                getattr(tenant_config, "atlascloud_api_key", None)
+                if tenant_config is not None
+                else None
+            )
+            or _env_key(ProviderName.ATLASCLOUD)
+            or ""
+        )
+        return key, ATLASCLOUD_CHAT_BASE_URL, ATLASCLOUD_DEFAULT_MODEL
 
     return "", "", ""
 
