@@ -13,8 +13,8 @@ single-agent benchmarks can't measure.
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **72.5%** | — |
-| Token savings vs full context | **96.6%** | **98.2%** | — |
+| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
+| Token savings vs full context | **96.6%** | **79.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** (warm) |
 
 LoCoMo and LongMemEval both measure one agent, one user, one long
@@ -22,8 +22,16 @@ conversation — the single-chatbot shape. Accuracy across the leading systems
 clusters in a narrow band, so the meaningful differences show up on the other
 axes.
 
-**Numbers are point-in-time (last run 2026-04-19) and move when we re-run.** The
-canonical, current version lives in the blog write-up linked below.
+**Numbers are point-in-time and move when we re-run.** The LongMemEval column is
+the 2026-09-15 run (461 of 500 under the benchmark's reference judge, GPT-4o with
+the official prompts; 90.2% under a stricter second judge, Gemini 3.5 Flash-Lite;
+Gemini 3.8 Flash answering; token savings are the 22.4k-token median context
+against the 108k-token median haystack). Its harness, saved contexts and
+per-question verdicts are public at
+[caura-ai/caura-longmemeval](https://github.com/caura-ai/caura-longmemeval), and
+the write-up is at [caura.ai/blog/caura-longmemeval](https://caura.ai/blog/caura-longmemeval).
+The LoCoMo column is still the 2026-04-19 run. The canonical, current version
+lives in the blog write-up linked below.
 
 ## What we measure, and how
 
