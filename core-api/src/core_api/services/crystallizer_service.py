@@ -209,6 +209,15 @@ async def start_crystallization(
                 {
                     "status": "failed",
                     "completed_at": datetime.now(UTC).isoformat(),
+                    # 09/02 M-38. Storage reads this one with a bare subscript
+                    # (``duration_ms=body["duration_ms"]`` in the PATCH handler)
+                    # while its neighbours use ``.get`` with defaults, so
+                    # omitting it raised KeyError INSIDE the handler that exists
+                    # to un-wedge the report — leaving the row 'running'
+                    # forever, which is the exact failure this block was written
+                    # to prevent. Zero is the honest value: the publish never
+                    # landed, so no run occurred to time.
+                    "duration_ms": 0,
                     "summary": {"error": "could not queue the crystallization run"},
                 },
                 tenant_id=tenant_id,
