@@ -34,7 +34,7 @@ mcp>=2.2.0,<3
 
 # Auth: password hashing, JWT, TOTP, encryption
 argon2-cffi>=25.1.0
-cryptography>=42.0
+cryptography>=50.0.1
 python-jose[cryptography]>=3.5.0
 pyotp>=2.10.0
 cachetools>=7.1.8
