@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.12.3](https://github.com/caura-ai/caura/compare/backend-v3.12.2...backend-v3.12.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **lifecycle:** nack a flaked skip-write instead of stranding the audit row ([#1530](https://github.com/caura-ai/caura/issues/1530)) ([840c625](https://github.com/caura-ai/caura/commit/840c62589f451fbbd0b2f5b388683304064035cf))
+
+
+### Dependencies
+
+* update sentry-sdk requirement from &lt;3,&gt;=2.68.1 to &gt;=2.69.1,&lt;3 ([#1485](https://github.com/caura-ai/caura/issues/1485)) ([db84053](https://github.com/caura-ai/caura/commit/db84053c2ed5846e0cdeb87f26a3f408a3de502f))
+
 ## [3.12.2](https://github.com/caura-ai/caura/compare/backend-v3.12.1...backend-v3.12.2) (2026-09-15)
 
 
