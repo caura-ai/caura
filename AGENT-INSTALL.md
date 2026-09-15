@@ -165,6 +165,10 @@ This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims th
 
 Use MCP if your agent supports it. Use the plugin if you're running on OpenClaw.
 
+Already installed and need to upgrade? See
+[`docs/plugin-upgrade.md`](docs/plugin-upgrade.md) for auto-upgrade and manual
+re-install.
+
 ## Connect via Rail SDK (agents you write yourself)
 
 If the agent is your own Python or TypeScript code rather than an MCP client,

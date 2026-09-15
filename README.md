@@ -643,6 +643,10 @@ database snapshot, and re-embed stored data.
 Follow the complete [v1.x → v2.x upgrade guide](docs/upgrading-from-v1.md)
 before pulling a v2 image.
 
+Operators running the OpenClaw plugin: see also the
+[plugin upgrade guide](docs/plugin-upgrade.md) for auto-upgrade and manual
+re-install.
+
 ---
 
 ## API Reference

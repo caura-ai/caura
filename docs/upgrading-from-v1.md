@@ -136,3 +136,10 @@ No public API changes. Code that reads memory embeddings via the search/recall
 endpoints is unaffected. External clients should not assume a vector width;
 custom integrations that directly handle the internal storage schema must
 migrate from 768 to 1024 dimensions with the database.
+
+## Related: upgrading the OpenClaw plugin
+
+Server/schema upgrades (this guide) are separate from keeping the OpenClaw
+plugin current on each node. For heartbeat-driven auto-upgrade and the manual
+`/api/v1/install-plugin` re-install path, see
+[`plugin-upgrade.md`](plugin-upgrade.md).
