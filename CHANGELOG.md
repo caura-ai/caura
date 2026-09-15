@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.12.4](https://github.com/caura-ai/caura/compare/backend-v3.12.3...backend-v3.12.4) (2026-09-15)
+
+
+### Bug Fixes
+
+* **reports:** filter the canonical smoke-probe title too ([#1531](https://github.com/caura-ai/caura/issues/1531)) ([a908a60](https://github.com/caura-ai/caura/commit/a908a60b2caa0b79707f2aac53d0d23001753337))
+
 ## [3.12.3](https://github.com/caura-ai/caura/compare/backend-v3.12.2...backend-v3.12.3) (2026-09-15)
 
 
