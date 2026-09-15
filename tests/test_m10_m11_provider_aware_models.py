@@ -169,3 +169,45 @@ def test_the_override_is_logged_with_both_models(caplog):
     msg = " ".join(r.getMessage() for r in caplog.records)
     assert "gpt-5.4-nano" in msg
     assert GEMINI_DEFAULT_MODEL in msg
+
+
+def test_every_provider_branch_routes_through_the_shared_resolver():
+    """Forward guard for providers added after this fix.
+
+    Each branch of ``resolve_openai_compatible`` used to end in
+    ``return key, <BASE_URL>, <DEFAULT_MODEL>`` — the shape that made M-11
+    possible, since a hardcoded default silently ignores ``model_attr``. A new
+    provider copied from an existing branch inherits that bug, and nothing
+    would notice: the knob just quietly does nothing for that one provider.
+
+    So the invariant is structural, not per-provider — every ``return`` that
+    yields a model must take it from ``_model_for_provider``. This is expected
+    to fail for any branch added without that call, which is the point.
+    """
+    import ast
+    import inspect
+
+    from common.llm import _credentials
+
+    fn = ast.parse(inspect.getsource(_credentials.resolve_openai_compatible).lstrip())
+    returns = [
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Return)
+        and isinstance(n.value, ast.Tuple)
+        and len(n.value.elts) == 3
+    ]
+    assert returns, "expected the (key, base_url, model) returns"
+
+    offenders = []
+    for r in returns:
+        model_expr = ast.unparse(r.value.elts[2])
+        # The empty-credentials guard returns literals; it resolves no model.
+        if model_expr in {'""', "''"}:
+            continue
+        if "_model_for_provider" not in model_expr and model_expr != "model":
+            offenders.append(model_expr)
+    assert not offenders, (
+        "these provider branches return a hardcoded model instead of resolving "
+        f"it through _model_for_provider, so model_attr is inert for them: {offenders}"
+    )
