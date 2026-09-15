@@ -339,6 +339,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Install Claude CLI
@@ -448,6 +449,7 @@ jobs:
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
         uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Install Claude CLI
@@ -503,6 +505,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Install Claude CLI
