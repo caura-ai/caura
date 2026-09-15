@@ -10,6 +10,40 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.12.1](https://github.com/caura-ai/caura/compare/backend-v3.12.0...backend-v3.12.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **lifecycle:** bound the fanout across actions, and stop hiding dropped orgs ([#1525](https://github.com/caura-ai/caura/issues/1525)) ([3ccfa2e](https://github.com/caura-ai/caura/commit/3ccfa2efd92689f33d5f0509e7307590767b5903))
+
+## [3.12.0](https://github.com/caura-ai/caura/compare/backend-v3.11.0...backend-v3.12.0) (2026-09-15)
+
+
+### Features
+
+* **crystallizer:** activity-gate the sweep and make its cadence configurable (A72, third ground) ([#1509](https://github.com/caura-ai/caura/issues/1509)) ([43c7e6a](https://github.com/caura-ai/caura/commit/43c7e6a0d827e6e6371920debfeb24ec7625b551))
+* **triple:** resolve proper-noun subjects by lookup so the subject column fills (A59) ([#1514](https://github.com/caura-ai/caura/issues/1514)) ([34d37a7](https://github.com/caura-ai/caura/commit/34d37a7238e5c17059441aaa6b512b4e5e52acf2))
+
+
+### Bug Fixes
+
+* **crystallizer:** send duration_ms so the publish-failure recovery can't wedge the report (09/02 M-38) ([#1518](https://github.com/caura-ai/caura/issues/1518)) ([d9b6b7a](https://github.com/caura-ai/caura/commit/d9b6b7a7c3e4571f6d725a5a243a2a4aebf15cd7))
+* **ingest:** stop serving a partial extraction as the cached complete one (09/02 M-44) ([#1516](https://github.com/caura-ai/caura/issues/1516)) ([cadddb9](https://github.com/caura-ai/caura/commit/cadddb9372eaec557f5751cf30a8ff63c929ca0b))
+* **llm:** cache OpenAI providers so every call stops minting an unclosed pool (09/02 M-36) ([#1520](https://github.com/caura-ai/caura/issues/1520)) ([3a2974d](https://github.com/caura-ai/caura/commit/3a2974d304d4249b1d5f958bdf6009b005091fda))
+* **scripts:** route forge_dry_run through storage instead of the deleted DB pool (09/02 M-07) ([#1519](https://github.com/caura-ai/caura/issues/1519)) ([1c6f6cb](https://github.com/caura-ai/caura/commit/1c6f6cbb69882d52a69988cd89d48bf77c2a6aec))
+* **triple:** stop reporting sentence openers as missing subject entities (A59) ([#1515](https://github.com/caura-ai/caura/issues/1515)) ([fecdb0d](https://github.com/caura-ai/caura/commit/fecdb0df3477e85d8c8c14d96585d3ce2cd12c0b))
+
+
+### Dependencies
+
+* update fastapi requirement from &lt;1,&gt;=0.115 to &gt;=0.141.1,&lt;1 ([#1487](https://github.com/caura-ai/caura/issues/1487)) ([b73e670](https://github.com/caura-ai/caura/commit/b73e6701da3ef4106605c42b8eb86e5a6403c52a))
+
+
+### Documentation
+
+* **forge-cron:** correct the fanout URL prefix and the dedup window (09/02 M-69, M-70) ([#1517](https://github.com/caura-ai/caura/issues/1517)) ([7bc22d4](https://github.com/caura-ai/caura/commit/7bc22d4f6a0d7a2605474e76efc066e0a0276657))
+
 ## [3.11.0](https://github.com/caura-ai/caura/compare/backend-v3.10.1...backend-v3.11.0) (2026-09-14)
 
 

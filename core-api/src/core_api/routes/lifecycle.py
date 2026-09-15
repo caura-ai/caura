@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+import weakref
+from collections.abc import Awaitable, Callable, MutableMapping
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from common.env_utils import read_int_env
 from common.events import (
     publish_archive_expired_request,
     publish_archive_stale_request,
@@ -87,14 +89,84 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     "forge-distill": publish_forge_distill_request,
 }
 
-# Cap on concurrent per-org ``audit_begin + publish`` pairs in the
-# fanout loop. Each pair = 1 HTTP POST to core-storage-api + 1 Pub/Sub
-# publish; without the cap, a deployment with thousands of orgs would
-# fire that many simultaneous round-trips on a single cron tick. 50 is
-# a generous default — enough that small deploys never queue, low
-# enough that the storage-writer pool is never saturated by fanout
-# traffic alone (the same pool serves the live request path).
-_FANOUT_CONCURRENCY = 50
+# Cap on concurrent per-org ``audit_begin + publish`` pairs. Each pair =
+# 1 HTTP POST to core-storage-api + 1 Pub/Sub publish; without the cap, a
+# deployment with thousands of orgs would fire that many simultaneous
+# round-trips on a single cron tick.
+#
+# Tunable because the right number is a property of the OPERATOR's storage
+# tier rather than of this code: it wants to stay under core-storage-api's
+# warm request capacity (instances x per-instance concurrency), and that
+# differs per deployment. 50 remains the default.
+#
+# See the ceiling arithmetic below before picking a value — the budget binds
+# per worker PROCESS, so the deployment-wide figure is larger than this number.
+#
+# Read through ``read_int_env`` rather than a bare ``int(...)``, and that
+# choice is about blast radius rather than tidiness. ``core_api.app`` imports
+# this module unconditionally at startup, so anything raising at import time
+# here stops every route serving — memories, search, auth — over one cron
+# tunable. A mistyped ``5o`` or a stray ``0`` degrades to the default with a
+# stderr warning instead. The helper's ``minimum`` already defaults to 1, and
+# its docstring names this exact hazard: a semaphore-style cap reads 0 as
+# "block forever", which would park every fanout with no error and no timeout.
+_FANOUT_CONCURRENCY: int = read_int_env("LIFECYCLE_FANOUT_CONCURRENCY", 50)
+
+# The budget is PER WORKER PROCESS, not per-request, and that distinction is
+# the whole point of this block. Read the last paragraph before sizing it: per
+# process is not per deployment.
+#
+# It used to be constructed inside the handler, so every in-flight fanout got
+# a fresh budget of its own. The scheduler fires each action on the same cron
+# minute — eight of them as of this writing — so the real ceiling was
+# 8 x _FANOUT_CONCURRENCY simultaneous storage round-trips, while the comment
+# above it claimed the cap kept the storage writer "never saturated by fanout
+# traffic alone". That claim reasoned about a single fanout. Nothing bounded
+# the aggregate, and the aggregate is what the writer actually sees.
+#
+# Measured 2026-09-15 on a deployment whose writer held 120 warm request slots
+# against a ceiling of 8 x 50 = 400: the burst pushed it past capacity, the
+# platform shed the overflow, and ``audit_begin`` raised for 38 distinct orgs
+# across 5 actions. Those orgs' lifecycle actions did not run and left no
+# audit row behind — so every downstream counter stayed self-consistent and
+# the shortfall was invisible to all of them. A row that is never created
+# cannot be counted as failed.
+#
+# WHAT THIS DOES NOT DO, and operators must size around it: the cap is not
+# deployment-wide. core-api's Dockerfile runs uvicorn with ``--workers 2`` and
+# the service scales horizontally, so the real ceiling against
+# core-storage-api is ``instances x workers x _FANOUT_CONCURRENCY``. Each
+# fanout POST lands on one worker, so this bounds the actions that happen to
+# share a worker and nothing more — in the worst case, N actions landing on N
+# distinct workers, it changes nothing at all. It is strictly better than a
+# per-REQUEST budget, which bounded nothing even within a worker, but the
+# honest headline is "predictable per worker", not "400 becomes 50". A true
+# cross-process cap needs shared state (a Redis-backed semaphore) and is a
+# separate change; until then, size this against one worker's share of the
+# writer's warm capacity.
+#
+# Keyed by running loop rather than a bare module-level ``Semaphore``: a
+# Semaphore binds to the first loop that awaits it, so a plain global raises
+# "bound to a different event loop" in any suite that runs more than one.
+# WeakKeyDictionary so a finished loop's entry is collected with it. uvloop is
+# the production loop here (locked via the ``uvicorn[standard]`` extra and
+# selected by uvicorn's default ``loop="auto"``), and its ``Loop`` is a Cython
+# cdef class — but it DOES support weak references: verified against the
+# pinned uvloop 0.22.1 that both ``weakref.ref(loop)`` and
+# ``WeakKeyDictionary.__setitem__`` succeed. Recorded because the question is
+# a reasonable one to have about a cdef class, and the answer is not obvious
+# from reading this line.
+_FANOUT_SEMAPHORES: MutableMapping[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+
+
+def _fanout_semaphore() -> asyncio.Semaphore:
+    """Return this process's shared fanout budget for the running loop."""
+    loop = asyncio.get_running_loop()
+    sem = _FANOUT_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_FANOUT_CONCURRENCY)
+        _FANOUT_SEMAPHORES[loop] = sem
+    return sem
 
 
 async def _list_tenants_for_action(action: str) -> list[str]:
@@ -189,11 +261,12 @@ async def fanout_lifecycle_action(
 
     org_ids = await _list_tenants_for_action(action)
 
-    # Fan out concurrently with a semaphore cap (see _FANOUT_CONCURRENCY)
-    # so a deployment with N orgs doesn't fire N simultaneous storage
-    # round-trips. ``return_exceptions=True`` keeps the
+    # Fan out concurrently under the PROCESS-WIDE budget (see
+    # ``_fanout_semaphore``) so neither a deployment with N orgs nor N
+    # actions firing on the same cron minute can exceed it.
+    # ``return_exceptions=True`` keeps the
     # one-bad-org-must-not-abort-the-rest invariant.
-    sem = asyncio.Semaphore(_FANOUT_CONCURRENCY)
+    sem = _fanout_semaphore()
 
     async def _bounded_trigger(org_id: str) -> int:
         async with sem:
