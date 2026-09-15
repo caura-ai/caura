@@ -118,6 +118,7 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     openrouter_api_key: str | None = None
+    atlascloud_api_key: str | None = None
     gemini_api_key: str | None = None
     entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
     entity_extraction_model: str = "gpt-5.4-nano"
@@ -792,6 +793,7 @@ def bridge_credentials_to_environ() -> None:
         "OPENAI_API_KEY": settings.openai_api_key or "",
         "ANTHROPIC_API_KEY": settings.anthropic_api_key or "",
         "OPENROUTER_API_KEY": settings.openrouter_api_key or "",
+        "ATLASCLOUD_API_KEY": settings.atlascloud_api_key or "",
         "GEMINI_API_KEY": settings.gemini_api_key or "",
         # Default provider + model used by ``common.enrichment.service``.
         "ENTITY_EXTRACTION_PROVIDER": settings.entity_extraction_provider or "",
