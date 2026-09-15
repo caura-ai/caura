@@ -396,9 +396,10 @@ class TestSubjectInference:
     shape. When no ``role="subject"`` entity_link is supplied, the
     step looks at ``content[:match.start()]`` and emits a subject
     from a deterministic identifier-token regex. Proper-noun shapes
-    deliberately skip — they're left to the background entity-
-    extraction worker. Each test below mocks ``upsert_entity`` (it
-    would otherwise touch the real storage client)."""
+    never reach that regex — since A59 they are handled by a
+    lookup-only path (``TestProperNounSubjectLookup`` below), which
+    still creates nothing. Each test below mocks ``upsert_entity``
+    (it would otherwise touch the real storage client)."""
 
     @staticmethod
     def _patch_upsert(monkeypatch, returned_id):
@@ -457,16 +458,23 @@ class TestSubjectInference:
         assert data.predicate == "status"
         assert data.subject_entity_id is not None
 
-    async def test_proper_noun_subject_skips(self, monkeypatch):
-        """``Alice`` is a proper noun, not an identifier — skip and
-        leave it to background entity extraction. Mirrors the
-        skip-on-doubt contract for the object side."""
+    async def test_proper_noun_subject_never_reaches_the_identifier_upsert(
+        self, monkeypatch
+    ):
+        """``Alice`` is a proper noun, not an identifier. The identifier
+        path must not claim it — creating an entity from a bare name is
+        the fragmentation risk that skip-on-doubt exists to avoid. Since
+        A59 an UNKNOWN name skips as ``no_subject_match`` rather than
+        ``no_subject``, but the thing this test protects is unchanged:
+        ``upsert_entity`` is never called for a name."""
         fake = self._patch_upsert(monkeypatch, uuid4())
+        lookup = _patch_lookup(monkeypatch, None)
         data = _input("Alice has release date 2027-05-01")
         result = await EmitMemoryTriple().execute(_ctx(data))
         assert result.outcome == StepOutcome.SKIPPED
-        assert result.detail["reason"] == "no_subject"
+        assert result.detail["reason"] == "no_subject_match"
         fake.assert_not_called()
+        lookup.assert_called_once()
 
     async def test_stopword_subject_skips(self, monkeypatch):
         """``She`` / ``They`` / ``Today`` / ``Q4`` all skip."""
@@ -756,3 +764,187 @@ class TestTenantConfigFlag:
 
         cfg = ResolvedConfig(org_settings={"write": {"triple_emission_enabled": True}})
         assert cfg.triple_emission_enabled is True
+
+
+def _patch_lookup(monkeypatch, returned_id):
+    """Replace ``find_entity_by_exact_name`` with an AsyncMock returning
+    ``returned_id`` (a UUID for a known name, None for an unknown one)."""
+    from unittest.mock import AsyncMock as _AM
+
+    fake = _AM(return_value=returned_id)
+    monkeypatch.setattr(
+        "core_api.pipeline.steps.write.emit_memory_triple.find_entity_by_exact_name",
+        fake,
+    )
+    return fake
+
+
+@pytest.mark.unit
+class TestProperNounSubjectLookup:
+    """A59 — proper-noun subjects resolved by LOOKUP, never by create.
+
+    The subject column is what gates A59's Type-II materializer: it groups
+    live memories by ``subject_entity_id`` and ignores every row without
+    one. Measured on a real staging corpus (777 rows), only 1.3% carried a
+    subject, so the materializer saw 0 candidate subjects and the whole
+    instrument was dark.
+
+    The identifier heuristic could not close that gap because real content
+    names things ("Atlas", "Project Brightwood"), not identifiers, and
+    creating entity rows from bare names is precisely what skip-on-doubt
+    forbids — it races the extraction worker and fragments the entity.
+
+    So this path proposes a name and resolves it against entities that
+    ALREADY exist. A repeat mention of a known name fills the subject; a
+    first mention still skips. That keeps the extraction worker's precision
+    exactly as it was while filling the column on the repeat mentions —
+    which is the only population the materializer can use anyway, since it
+    requires two or more live memories on one subject.
+    """
+
+    async def test_a_known_name_resolves_and_emits(self, monkeypatch):
+        """The point of the change: a name the entity table already holds
+        now fills the subject column instead of skipping."""
+        known = uuid4()
+        lookup = _patch_lookup(monkeypatch, known)
+        data = _input("Atlas has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result is None, f"Expected emit; got {result}"
+        assert data.subject_entity_id == known
+        assert data.predicate == "release_date"
+        assert data.object_value == "2027-05-01"
+        assert lookup.call_args.kwargs["canonical_name"] == "Atlas"
+
+    async def test_the_lookup_is_scoped_to_tenant_and_fleet(self, monkeypatch):
+        """An unscoped lookup would resolve one tenant's subject onto
+        another tenant's memory — a cross-tenant write, not just a bad
+        ranking."""
+        lookup = _patch_lookup(monkeypatch, uuid4())
+        data = _input("Atlas has release date 2027-05-01")
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert lookup.call_args.kwargs["tenant_id"] == TENANT_ID
+        assert lookup.call_args.kwargs["fleet_id"] == FLEET_ID
+
+    async def test_an_unknown_name_skips_and_creates_nothing(self, monkeypatch):
+        """The safety property. A name nobody has seen stays the extraction
+        worker's to create, so this path can never fragment an entity."""
+        upsert = TestSubjectInference._patch_upsert(monkeypatch, uuid4())
+        _patch_lookup(monkeypatch, None)
+        data = _input("Atlas has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "no_subject_match"
+        upsert.assert_not_called()
+
+    async def test_the_unknown_name_skip_reports_the_candidate(self, monkeypatch):
+        """``no_subject_match`` is a distinct reason from ``no_subject``
+        because the two have opposite remedies: nothing fixes ``no_subject``
+        (the text carried no subject at all), while ``no_subject_match``
+        counts exactly the rows a subject backfill would convert. Carrying
+        the candidate makes that population measurable rather than merely
+        countable."""
+        _patch_lookup(monkeypatch, None)
+        data = _input("Atlas has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.detail["subject_candidate"] == "Atlas"
+
+    async def test_content_with_no_subject_at_all_still_says_no_subject(
+        self, monkeypatch
+    ):
+        """The distinction above is only meaningful if the other branch
+        still fires. A lowercase stopword head is subject-less in the old
+        sense and must NOT be reported as a missing entity."""
+        lookup = _patch_lookup(monkeypatch, None)
+        data = _input("the has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "no_subject"
+        lookup.assert_not_called()
+
+    async def test_a_multi_word_name_resolves_as_one_canonical_name(self, monkeypatch):
+        """Real subjects are frequently multi-word ("Project Brightwood" was
+        4 of the 5 subjects in the staging corpus). Looking up only the last
+        word would resolve the wrong entity, or none."""
+        lookup = _patch_lookup(monkeypatch, uuid4())
+        data = _input("Project Brightwood has release date 2028-10-15")
+        await EmitMemoryTriple().execute(_ctx(data))
+        assert lookup.call_args.kwargs["canonical_name"] == "Project Brightwood"
+
+    async def test_a_leading_stopword_is_not_folded_into_the_name(self, monkeypatch):
+        """ "Today Atlas ..." is a connective plus a name. Looking the pair up
+        as one canonical name could only ever miss, and would report a
+        ``no_subject_match`` that no backfill could satisfy."""
+        lookup = _patch_lookup(monkeypatch, uuid4())
+        data = _input("Today Atlas has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "no_subject"
+        lookup.assert_not_called()
+
+    async def test_identifier_subjects_keep_their_create_on_miss_behaviour(
+        self, monkeypatch
+    ):
+        """Precedence guard. The identifier path runs first and is unchanged
+        — if the proper-noun path ever claimed these, identifier subjects
+        would silently stop being created."""
+        upsert = TestSubjectInference._patch_upsert(monkeypatch, uuid4())
+        lookup = _patch_lookup(monkeypatch, None)
+        data = _input("TOKEN-736C57D0 has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result is None, f"Expected emit; got {result}"
+        upsert.assert_called_once()
+        lookup.assert_not_called()
+
+    async def test_the_lookup_is_deferred_until_every_other_gate_passes(
+        self, monkeypatch
+    ):
+        """Phase B placement. The two-phase split exists so a later SKIP
+        cannot leave a side effect behind; the lookup joins Phase A only at
+        the cost of a wasted read on every row that skips downstream."""
+        lookup = _patch_lookup(monkeypatch, uuid4())
+        # Object side is unparseable, so the step skips before subject
+        # resolution would ever be worth doing.
+        data = _input("Atlas has release date ")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] != "no_subject_match"
+        lookup.assert_not_called()
+
+    async def test_a_storage_failure_skips_rather_than_breaking_the_write(
+        self, monkeypatch
+    ):
+        """This step runs inside the write pipeline. A storage blip must
+        cost the triple, never the memory."""
+        from unittest.mock import AsyncMock as _AM
+
+        monkeypatch.setattr(
+            "core_api.pipeline.steps.write.emit_memory_triple.find_entity_by_exact_name",
+            _AM(side_effect=RuntimeError("storage down")),
+        )
+        data = _input("Atlas has release date 2027-05-01")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "subject_lookup_failed"
+
+    async def test_an_explicit_entity_link_still_wins(self, monkeypatch):
+        """Caller-supplied subjects are the high-trust path and must not
+        start paying for a lookup they don't need."""
+        lookup = _patch_lookup(monkeypatch, uuid4())
+        supplied = uuid4()
+        data = _input("Atlas has release date 2027-05-01", subject_id=supplied)
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result is None, f"Expected emit; got {result}"
+        assert data.subject_entity_id == supplied
+        lookup.assert_not_called()
+
+    async def test_both_subject_paths_read_the_same_head(self):
+        """``_subject_head`` is shared so the identifier and proper-noun
+        readings can never disagree about where the subject ends. A
+        divergence would be invisible: one path would silently see a
+        different string than the other."""
+        import inspect
+
+        from core_api.pipeline.steps.write import emit_memory_triple as m
+
+        for fn in (m._infer_subject_token, m._infer_proper_noun_subject):
+            assert "_subject_head(content, match)" in inspect.getsource(fn)
