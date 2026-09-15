@@ -6,13 +6,17 @@ Operator-grade companion to the public benchmarks write-up. The blog answers *"i
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **72.5%** | — |
-| Token savings vs full context | **96.6%** | **98.2%** | — |
+| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
+| Token savings vs full context | **96.6%** | **79.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** (warm) |
 
 LoCoMo and LongMemEval are the two most-cited public agent-memory benchmarks. Both measure one agent, one user, one long conversation — the single-chatbot shape. Accuracy across the leading systems (Caura, Mem0, Zep) clusters in a narrow band.
 
-**Source:** [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19).
+**Source:** LongMemEval, [Caura scores 92.2% on LongMemEval](https://caura.ai/blog/caura-longmemeval)
+(2026-09-15; harness and per-question verdicts at
+[caura-ai/caura-longmemeval](https://github.com/caura-ai/caura-longmemeval)).
+LoCoMo and search latency, [Fast, Token-Efficient, and Built for
+Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19).
 
 **Last updated:** 2026-04-19. These numbers move when we re-run; check the blog for the current canonical version.
 
