@@ -184,7 +184,13 @@ def get_llm_provider(
         return FakeLLMProvider()
 
     if name in _OPENAI_COMPATIBLE:
-        api_key, base_url, model = resolve_openai_compatible(name, tenant_config)
+        # 09/02 M-11: ``model_attr`` is forwarded here now. Without it the
+        # per-service knobs (contradiction_model, dedup_model, recall_model …)
+        # resolved to the provider default on every OpenAI-compatible provider,
+        # i.e. the settings existed and did nothing.
+        api_key, base_url, model = resolve_openai_compatible(
+            name, tenant_config, model_attr=model_attr
+        )
         if not api_key:
             platform = get_platform_llm()
             if platform is not None:

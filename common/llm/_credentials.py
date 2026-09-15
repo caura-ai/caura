@@ -68,14 +68,106 @@ def has_credentials(provider: str, tenant_config: object | None = None) -> bool:
     return bool(_env_key(provider))
 
 
+# 09/02 M-10 / M-11 — the model chain did not know which provider it was
+# resolving for.
+#
+# ``enrichment_model`` / ``contradiction_model`` / ``recall_model`` are SHARED
+# tenant settings: one value, read by whichever provider happens to be active.
+# Two separate defects fell out of that.
+#
+# M-11: ``resolve_openai_compatible`` never accepted ``model_attr`` at all, so
+# every per-service model knob was inert on the default provider — a tenant
+# could set ``contradiction_model`` and nothing would read it. Only the Gemini
+# branch honoured it.
+#
+# M-10: the reverse. Gemini DOES read the shared attribute, so a tenant who had
+# configured ``enrichment_model = "gpt-5.4-nano"`` for OpenAI and then switched
+# provider handed Gemini an OpenAI model id — a 404 on every call, which is why
+# the documented Gemini setup never worked.
+#
+# The principled fix is provider-scoped model settings; that is a config
+# migration. This is the contained one: recognise when a configured model
+# CONFIDENTLY belongs to a different provider family and fall back to the
+# target provider's default instead of sending a request that cannot succeed.
+#
+# Deliberately conservative — it only overrides on a positive match against
+# another family's prefixes, never on an unrecognised name. Custom deployments,
+# fine-tunes and OpenRouter's ``vendor/model`` ids must keep passing through
+# untouched, so "not recognised" means "leave it alone".
+_MODEL_FAMILY_PREFIXES: dict[str, tuple[str, ...]] = {
+    ProviderName.OPENAI: ("gpt-", "o1", "o3", "o4", "chatgpt", "text-", "davinci"),
+    ProviderName.ANTHROPIC: ("claude-",),
+    ProviderName.GEMINI: ("gemini-", "models/gemini"),
+}
+
+
+def _model_family(model: str) -> str | None:
+    """The provider family a model id confidently belongs to, or None."""
+    low = (model or "").strip().lower()
+    for family, prefixes in _MODEL_FAMILY_PREFIXES.items():
+        if low.startswith(prefixes):
+            return family
+    return None
+
+
+def _model_for_provider(
+    provider: str,
+    tenant_config: object | None,
+    model_attr: str,
+    default_model: str,
+) -> str:
+    """Resolve the model for ``provider``, ignoring another family's id.
+
+    Same precedence the Gemini branch already used — tenant attribute, then the
+    matching env var, then the provider default — with one addition: a value
+    that belongs to a different provider family is discarded with a WARNING
+    rather than sent. Silently overriding an operator's explicit setting would
+    trade a 404 for a mystery, so the log names both the rejected model and the
+    substitute.
+    """
+    configured = (
+        getattr(tenant_config, model_attr, None) if tenant_config is not None else None
+    ) or os.environ.get(model_attr.upper())
+    # Must be a non-empty STRING. ``getattr`` on a loosely-typed config object
+    # can yield anything — a Mock in tests, a sentinel, an int from a
+    # mis-parsed env — and a non-string model id is meaningless here and would
+    # only fail further down, inside the provider SDK, where the cause is much
+    # harder to see.
+    if not isinstance(configured, str) or not configured.strip():
+        return default_model
+    family = _model_family(configured)
+    if family is not None and family != provider:
+        logger.warning(
+            "LLM model %r is a %s model but the active provider is %s; "
+            "falling back to %r. Set a %s model for this tenant, or scope the "
+            "%s setting per provider.",
+            configured,
+            family,
+            provider,
+            default_model,
+            provider,
+            model_attr,
+        )
+        return default_model
+    return configured
+
+
 def resolve_openai_compatible(
     provider: str,
     tenant_config: object | None = None,
+    *,
+    model_attr: str = "enrichment_model",
 ) -> tuple[str, str, str]:
     """Resolve (api_key, base_url, model) for an OpenAI-compatible provider.
 
     Tenant config first, env-var fallback. Returns empty strings when
     credentials are missing.
+
+    ``model_attr`` names the tenant setting to read the model from
+    (``"enrichment_model"``, ``"contradiction_model"``, ``"recall_model"``, …),
+    matching ``resolve_gemini_config``. 09/02 M-11: this parameter did not
+    exist, so the per-service model knobs were inert on every OpenAI-compatible
+    provider — a tenant could set ``contradiction_model`` and nothing read it.
     """
     if provider == ProviderName.OPENAI:
         key = (
@@ -87,7 +179,10 @@ def resolve_openai_compatible(
             or _env_key(ProviderName.OPENAI)
             or ""
         )
-        return key, OPENAI_CHAT_BASE_URL, LLM_FALLBACK_MODEL_OPENAI
+        model = _model_for_provider(
+            provider, tenant_config, model_attr, LLM_FALLBACK_MODEL_OPENAI
+        )
+        return key, OPENAI_CHAT_BASE_URL, model
 
     if provider == ProviderName.ANTHROPIC:
         key = (
@@ -99,7 +194,10 @@ def resolve_openai_compatible(
             or _env_key(ProviderName.ANTHROPIC)
             or ""
         )
-        return key, ANTHROPIC_CHAT_BASE_URL, ANTHROPIC_DEFAULT_MODEL
+        model = _model_for_provider(
+            provider, tenant_config, model_attr, ANTHROPIC_DEFAULT_MODEL
+        )
+        return key, ANTHROPIC_CHAT_BASE_URL, model
 
     if provider == ProviderName.OPENROUTER:
         key = (
@@ -111,7 +209,12 @@ def resolve_openai_compatible(
             or _env_key(ProviderName.OPENROUTER)
             or ""
         )
-        return key, OPENROUTER_CHAT_BASE_URL, OPENROUTER_DEFAULT_MODEL
+        # OpenRouter ids are ``vendor/model`` and deliberately do not match any
+        # family prefix, so a configured value passes through untouched.
+        model = _model_for_provider(
+            provider, tenant_config, model_attr, OPENROUTER_DEFAULT_MODEL
+        )
+        return key, OPENROUTER_CHAT_BASE_URL, model
 
     return "", "", ""
 
@@ -145,14 +248,16 @@ def resolve_gemini_config(
     )
     # Tenant config takes precedence; env var fallback uses the same
     # ``ENTITY_EXTRACTION_MODEL`` shape core-api's ``settings`` exposed.
-    model = (
-        (
-            getattr(tenant_config, model_attr, None)
-            if tenant_config is not None
-            else None
-        )
-        or os.environ.get(model_attr.upper())
-        or os.environ.get("ENTITY_EXTRACTION_MODEL")
-        or GEMINI_DEFAULT_MODEL
+    #
+    # 09/02 M-10: this read the SHARED model attribute unguarded, so a tenant
+    # who had configured ``enrichment_model`` for OpenAI and then switched to
+    # Gemini handed Gemini an OpenAI model id — a 404 on every call, which is
+    # why the documented Gemini setup never worked. ``_model_for_provider``
+    # discards a confidently-foreign id and logs what it substituted.
+    model = _model_for_provider(
+        ProviderName.GEMINI,
+        tenant_config,
+        model_attr,
+        os.environ.get("ENTITY_EXTRACTION_MODEL") or GEMINI_DEFAULT_MODEL,
     )
     return key, model
