@@ -212,11 +212,18 @@ async def _run_action(
             )
             already_done = False
         if already_done:
-            # Same best-effort treatment as the in_progress mark
-            # below: the skip record is observability data, and a
-            # raise here would nack the message into a redeliver
-            # loop that re-checks the gate, fails the same write,
-            # and eventually DLQs a legitimate skip.
+            # A skip is an outcome, and this row is the only durable record
+            # that the delivery was consumed and consciously did nothing. So
+            # ack only once that record exists -- the same rule the failure
+            # path below states for itself. This branch used to ack regardless,
+            # treating the skip row as mere observability data and a raise as a
+            # DLQ risk. But a stranded row is the worse failure: nothing retries
+            # it, no reconciler sweeps it, and the deploy gate reads it as an
+            # unfinished op for the rest of its 30h window (prod 2026-09-15,
+            # audit 73668). A DLQ is at least bounded and alertable.
+            #
+            # Redelivery is safe here because this is the skip path: re-running
+            # re-checks the dedup gate and skips again.
             try:
                 await adapter.update_lifecycle_audit_row(
                     audit_id,
@@ -226,10 +233,11 @@ async def _run_action(
                 )
             except Exception:
                 logger.warning(
-                    "lifecycle audit skip update failed; acking anyway",
+                    "lifecycle audit skip update failed; nacking for redelivery",
                     exc_info=True,
                     extra={"audit_id": audit_id, "action": action},
                 )
+                raise
             logger.info(
                 "lifecycle %s skipped — recent successful run exists",
                 action,

@@ -528,3 +528,49 @@ async def test_permanent_error_still_reraises_when_the_failure_row_could_not_be_
     # the op failed, and the audit error would be a misleading substitute.
     with pytest.raises(PermanentOpError, match="wiring bug"):
         await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+
+@pytest.mark.asyncio
+async def test_skip_write_failure_nacks_instead_of_stranding_the_row():
+    """A flaked skip-write must NACK, not ack.
+
+    The skip row is the only durable record that this delivery was
+    consumed and consciously did nothing. Acking when that write failed
+    strands the row at ``pending`` with nothing to retry it and no
+    reconciler to sweep it, and the deploy-gate smoke then reads it as an
+    unfinished op for the remaining 30h of its window — which is exactly
+    what prod audit 73668 did on 2026-09-15.
+
+    Raising hands the delivery back to the bus, whose redelivery is
+    bounded by max-delivery-attempts → DLQ: a visible, alertable failure
+    instead of an invisible permanent one. Safe on this path specifically
+    because a redelivered skip re-checks the gate and skips again.
+    """
+
+    class _FlakySkipAdapter(_FakeAdapter):
+        async def update_lifecycle_audit_row(
+            self,
+            audit_id: int,
+            *,
+            org_id: str,
+            status: str,
+            stats: dict | None = None,
+            error_message: str | None = None,
+        ) -> None:
+            self.audit_calls.append((audit_id, status, stats, error_message))
+            if stats is not None and stats.get("skipped"):
+                raise RuntimeError("audit endpoint down")
+
+    adapter = _FlakySkipAdapter(has_recent_success=True)
+    handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
+
+    with pytest.raises(RuntimeError, match="audit endpoint down"):
+        await handler(_archive_event(Topics.Lifecycle.CRYSTALLIZE_REQUESTED))
+
+    # The primitive still must not run — this is the skip path, and the
+    # nack is about recording the skip, not about redoing the work.
+    assert adapter.archive_calls == []
+    # Exactly one write attempt, and it was the skip record.
+    assert len(adapter.audit_calls) == 1
+    assert adapter.audit_calls[0][1] == "success"
+    assert adapter.audit_calls[0][2] == {"skipped": True, "reason": "recent_success"}
