@@ -122,7 +122,9 @@ SENTINELS: tuple[Sentinel, ...] = (
         min_level="warning",
         breaks="gcp_alerts.tf:40 stops detecting TEI 429 — the only aggregate-demand signal",
     ),
-    # -- The smoke probe: an emitter and a matcher that must move together. ----
+    # -- The smoke probe: an emitter and a matcher. The matcher accepts BOTH
+    # -- spellings, so it leads and the emitter follows; until the emitter has
+    # -- moved, dropping either alternative floods every per-agent report. -----
     Sentinel(
         path="plugin/src/context-engine.ts",
         text="memclaw-smoke-",  # legacy-name-floor: floor
@@ -131,7 +133,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="core-api/src/core_api/services/report_corpus.py",
-        text="cache refresh|memclaw-smoke)",  # legacy-name-floor: floor
+        text="cache refresh|(memclaw|caura)-smoke)",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="~200 probe facts/day stop being filtered and flood every per-agent report",
     ),
