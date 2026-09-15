@@ -324,8 +324,8 @@ Benchmarked against the two most-cited public agent-memory benchmarks. Full resu
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **72.5%** | — |
-| Token savings vs full context | **96.6%** | **98.2%** | — |
+| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
+| Token savings vs full context | **96.6%** | **79.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** |
 
 Accuracy sits inside the leading cluster across the field (Mem0, Zep, Caura — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.

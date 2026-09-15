@@ -282,8 +282,9 @@ Then restart the server (`docker compose restart app` or re-run uvicorn).
 On our reference benchmarks (warm cache, single tenant):
 
 - **Search latency:** 23 ms p50, 27 ms p95
-- **Recall accuracy:** 77.6% (LoCoMo) / 72.5% (LongMemEval), LLM-judge
-- **Token savings vs full context:** 96–98%
+- **Recall accuracy:** 77.6% (LoCoMo, 2026-04-19) / 92.2% (LongMemEval, 2026-09-15,
+  the benchmark's reference judge; 90.2% under a stricter second judge)
+- **Token savings vs full context:** 79% (LongMemEval) to 97% (LoCoMo)
 
 If you see search latency materially above ~50 ms p50 after warm-up, the pgvector index is likely cold or your embedding-provider roundtrip is the bottleneck — see [`docs/performance.md`](docs/performance.md) for the methodology and the operator-scale notes.
 
