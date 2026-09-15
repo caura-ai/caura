@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import HTTPException
 
+from common.embedding import get_embedding
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES
@@ -1233,6 +1234,7 @@ async def _write_parent_ingest_document(
     errored: int,
     skipped: int,
     ingest_ms: int,
+    tenant_config: object | None = None,
 ) -> None:
     """Upsert one row into ``documents (collection='ingest-sources')`` so each
     ingest batch has a queryable parent record. Each persisted memory joins
@@ -1272,9 +1274,6 @@ async def _write_parent_ingest_document(
         "agent_id": request.agent_id,
     }
     summary = _summarize_batch_for_embedding(survivors)
-    if summary is not None:
-        data["summary"] = summary  # triggers embedding population in storage
-
     payload: dict = {
         "tenant_id": request.tenant_id,
         "fleet_id": request.fleet_id,
@@ -1282,9 +1281,59 @@ async def _write_parent_ingest_document(
         "doc_id": run_id,
         "data": data,
     }
+    if summary is not None:
+        data["summary"] = summary
+        # 09/02 M-45. The line this replaces set ``data["summary"]`` with the
+        # comment "triggers embedding population in storage". It does not.
+        # Storage computes no vector of its own, and the endpoint this parent
+        # was written to — ``POST /documents`` — has no ``embedding`` parameter
+        # AT ALL; only ``POST /documents/upsert-xmax`` does. Nor does the parent
+        # pass through the REST/MCP doc path that calls ``resolve_embed_source``
+        # and embeds, a fact ``doc_indexing``'s own docstring states about
+        # server-written collections. So the summary was stored as text and
+        # never indexed, and the promised semantic search over ingest batches
+        # could not work for any batch.
+        #
+        # Hence the endpoint switch below when a vector exists: the same
+        # if/else ``routes/documents.py`` already makes for exactly this reason.
+        #
+        # ``background=True``, unlike the REST doc route's ``background=False``:
+        # there the client blocks on the write and gets a 502 if the vector is
+        # missing, so it must not sit on the reduced deferred budget. Here
+        # nobody is waiting, and the parent write is explicitly best-effort.
+        #
+        # Which is also why a failure degrades instead of raising. The ingest
+        # itself has already committed by this point; losing the batch over its
+        # index entry would trade a missing search result for lost memories.
+        #
+        # ``tenant_config`` is threaded in from ``ingest_commit`` rather than
+        # re-resolved: that call happens exactly once, to pre-warm the cache so
+        # the per-fact pipeline does not race on the shared session.
+        try:
+            embedding = await get_embedding(summary, tenant_config, background=True)
+        except Exception:
+            logger.warning(
+                "ingest_commit: embedding the parent summary failed (run_id=%s); "
+                "the document is still written, but this batch will not be "
+                "reachable by semantic search over ingest batches",
+                run_id,
+                exc_info=True,
+            )
+            embedding = None
+        if embedding is not None:
+            payload["embedding"] = embedding
+        else:
+            logger.warning(
+                "ingest_commit: no embedding vector for the parent summary "
+                "(run_id=%s); document written unindexed",
+                run_id,
+            )
     try:
         sc = get_storage_client()
-        await sc.upsert_document(payload)
+        if "embedding" in payload:
+            await sc.upsert_document_xmax(payload)
+        else:
+            await sc.upsert_document(payload)
         logger.info(
             "ingest_commit: parent Document written (run_id=%s collection=%s memory_count=%d)",
             run_id,
@@ -1356,7 +1405,13 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
     # Pre-warm the tenant-config cache so every per-fact pipeline below hits
     # the in-process TTLCache instead of each issuing its own storage fetch
     # when the concurrent writes fan out.
-    await resolve_config(request.tenant_id)
+    #
+    # 09/02 M-45: the result is KEPT now and handed to the parent-document
+    # write, which needs a tenant config to resolve the embedding provider.
+    # Calling ``resolve_config`` again there would be the cheap-looking change
+    # and the wrong one — this call is documented as happening exactly once,
+    # and ``test_resolve_config_called_once_before_loop`` pins that.
+    tenant_config = await resolve_config(request.tenant_id)
 
     # ----- P1.4: pre-loop dedup -----
     # Compute the same content-hash the write pipeline uses for its 409
@@ -1606,6 +1661,7 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
         errored=errored,
         skipped=skipped,
         ingest_ms=ingest_ms,
+        tenant_config=tenant_config,
     )
 
     return {
