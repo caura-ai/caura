@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.12.2](https://github.com/caura-ai/caura/compare/backend-v3.12.1...backend-v3.12.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **governance:** stop the SSN rule matching invoice numbers and ZIP+4 (09/02 M-03) ([#1521](https://github.com/caura-ai/caura/issues/1521)) ([6f829f2](https://github.com/caura-ai/caura/commit/6f829f296ec76fa1ac207a008cb9a4adcf961c0c))
+* **llm:** resolve models per provider so the per-service knobs work and Gemini stops 404ing (09/02 M-10, M-11) ([#1522](https://github.com/caura-ai/caura/issues/1522)) ([a8cca8a](https://github.com/caura-ai/caura/commit/a8cca8a8e5ffba53d40dd577740dd47e51556950))
+
+
+### Dependencies
+
+* update cryptography requirement from &gt;=42.0 to &gt;=50.0.1 ([#1486](https://github.com/caura-ai/caura/issues/1486)) ([e05552b](https://github.com/caura-ai/caura/commit/e05552bf6f5e3b78f17c68eb1b8262b7a918747b))
+
 ## [3.12.1](https://github.com/caura-ai/caura/compare/backend-v3.12.0...backend-v3.12.1) (2026-09-15)
 
 
