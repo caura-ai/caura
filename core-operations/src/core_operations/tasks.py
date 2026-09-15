@@ -65,11 +65,29 @@ async def _fire_fanout(action: str) -> None:
         )
         return
     body = resp.json()
+    # ``failed`` is the count of orgs whose ``audit_begin + publish`` pair
+    # raised; core-api logs each one and keeps going, so the fanout still
+    # returns 200. Logging only ``published`` made a partial sweep read as a
+    # clean one from the scheduler's side: on 2026-09-15 this line reported
+    # success for every action while 38 orgs were dropped. The count was
+    # already in the response and nothing looked at it.
+    failed = body.get("failed") or 0
+    if failed:
+        logger.error(
+            "lifecycle fanout dropped orgs",
+            extra={
+                "action": action,
+                "published": body.get("published"),
+                "failed": failed,
+            },
+        )
+        return
     logger.info(
         "lifecycle fanout fired",
         extra={
             "action": action,
             "published": body.get("published"),
+            "failed": 0,
         },
     )
 
