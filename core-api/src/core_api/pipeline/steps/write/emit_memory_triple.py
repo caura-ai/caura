@@ -329,6 +329,105 @@ _SUBJECT_STOPWORDS = frozenset(
 _PROPER_NOUN_PHRASE = re.compile(r"((?:[A-Z][\w'\u2019&.]*)(?:\s+[A-Z][\w'\u2019&.]*){0,3})\s*$")
 
 
+# Function words that are capitalised only because they OPEN a sentence, plus
+# possessives and determiners. A name is capitalised for a reason; these are
+# capitalised for a position, and a regex looking at a trailing capitalised run
+# cannot tell the two apart.
+#
+# Kept SEPARATE from ``_SUBJECT_STOPWORDS`` on purpose. That set also gates the
+# identifier path, where these words can never appear anyway (the identifier
+# regex would not match them), so folding them in would widen a shared gate for
+# one path's benefit and make the other harder to reason about.
+#
+# Why this matters beyond tidiness: every false candidate is recorded as a
+# ``no_subject_match``, and that reason exists to SIZE the population a subject
+# backfill would convert. A candidate no backfill could ever satisfy — "If",
+# "My" — does not just miss, it inflates the number the decision rests on. Worth
+# noting the miss itself is harmless: this path only ever RESOLVES against
+# existing entities, so a bad candidate creates nothing.
+_NON_NAME_OPENERS = frozenset(
+    {
+        # subordinators / conjunctions that commonly open a clause
+        "if",
+        "when",
+        "while",
+        "after",
+        "before",
+        "since",
+        "because",
+        "although",
+        "though",
+        "unless",
+        "until",
+        "whereas",
+        "whether",
+        "however",
+        "therefore",
+        "meanwhile",
+        "otherwise",
+        "instead",
+        "and",
+        "but",
+        "or",
+        "so",
+        "yet",
+        "then",
+        "also",
+        "plus",
+        # possessives and determiners
+        "my",
+        "our",
+        "your",
+        "his",
+        "her",
+        "its",
+        "their",
+        "whose",
+        "each",
+        "every",
+        "any",
+        "all",
+        "both",
+        "some",
+        "no",
+        "none",
+        "which",
+        "what",
+        "who",
+        "whom",
+        "why",
+        "how",
+        "where",
+        # copulas / auxiliaries that can lead a fronted clause
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "do",
+        "does",
+        "did",
+        "has",
+        "have",
+        "had",
+        "can",
+        "could",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "must",
+        "per",
+        "via",
+        "not",
+    }
+)
+
+
 def _subject_head(content: str, match: re.Match[str]) -> str | None:
     """The text a subject may be drawn from: ``content`` up to the predicate.
 
@@ -379,11 +478,13 @@ def _infer_proper_noun_subject(content: str, match: re.Match[str]) -> str | None
     name = m.group(1).strip().rstrip(".,;:-").strip()
     if not name or len(name) > 80:
         return None
-    # Reject when ANY word is a stopword. A phrase like "This Atlas" or
-    # "Today Atlas" is a sentence connective plus a name, and looking up the
-    # pair as one canonical name can only miss; the single-word check that
-    # ``_subject_head`` already did does not cover the multi-word case.
-    if any(w.lower() in _SUBJECT_STOPWORDS for w in name.split()):
+    # Reject when ANY word is a stopword or a non-name opener. A phrase like
+    # "This Atlas" or "Today Atlas" is a connective plus a name, and looking
+    # the pair up as one canonical name can only miss; the single-word check
+    # ``_subject_head`` already did does not cover the multi-word case, and
+    # does not cover these openers at all.
+    words = [w.lower() for w in name.split()]
+    if any(w in _SUBJECT_STOPWORDS or w in _NON_NAME_OPENERS for w in words):
         return None
     return name
 

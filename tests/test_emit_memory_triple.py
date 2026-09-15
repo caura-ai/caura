@@ -948,3 +948,64 @@ class TestProperNounSubjectLookup:
 
         for fn in (m._infer_subject_token, m._infer_proper_noun_subject):
             assert "_subject_head(content, match)" in inspect.getsource(fn)
+
+
+@pytest.mark.unit
+class TestSubjectCandidateHygiene:
+    """A59 follow-up — a candidate name no lookup could ever satisfy must not
+    be reported as a missing entity.
+
+    ``no_subject_match`` exists to SIZE the population a subject backfill would
+    convert. A replay of the merged A59 path over a real 777-row corpus
+    recorded ``If`` and ``My`` among only 6 distinct candidates, so the noise
+    was a material fraction of the very number the backfill decision rests on.
+
+    The miss itself was always harmless — this path only resolves against
+    existing entities and creates nothing — which is exactly why it needed
+    fixing deliberately rather than showing up as a bug report.
+    """
+
+    async def test_a_sentence_opening_conjunction_is_not_a_name(self, monkeypatch):
+        lookup = _patch_lookup(monkeypatch, uuid4())
+        data = _input("If status is open")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.outcome == StepOutcome.SKIPPED
+        assert result.detail["reason"] == "no_subject"
+        lookup.assert_not_called()
+
+    async def test_a_possessive_is_not_a_name(self, monkeypatch):
+        lookup = _patch_lookup(monkeypatch, uuid4())
+        data = _input("My status is open")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.detail["reason"] == "no_subject"
+        lookup.assert_not_called()
+
+    async def test_an_opener_is_not_folded_into_a_real_name(self, monkeypatch):
+        """ "If Atlas ..." is an opener plus a name. Looking the pair up as one
+        canonical name can only miss, so it must not be reported as one."""
+        lookup = _patch_lookup(monkeypatch, uuid4())
+        data = _input("If Atlas status is open")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result.detail["reason"] == "no_subject"
+        lookup.assert_not_called()
+
+    async def test_a_real_name_is_still_a_candidate(self, monkeypatch):
+        """The guard must not be so wide that it eats the path it protects."""
+        known = uuid4()
+        lookup = _patch_lookup(monkeypatch, known)
+        data = _input("Atlas status is open")
+        result = await EmitMemoryTriple().execute(_ctx(data))
+        assert result is None, f"Expected emit; got {result}"
+        assert data.subject_entity_id == known
+        assert lookup.call_args.kwargs["canonical_name"] == "Atlas"
+
+    async def test_the_opener_set_is_kept_separate_from_subject_stopwords(self):
+        """``_SUBJECT_STOPWORDS`` also gates the identifier path, where these
+        words cannot appear anyway. Folding them in would widen a shared gate
+        for one path's benefit."""
+        from core_api.pipeline.steps.write import emit_memory_triple as m
+
+        assert not (m._NON_NAME_OPENERS & m._SUBJECT_STOPWORDS), (
+            "the two sets should not overlap — a word belongs to one gate or the other"
+        )
+        assert "if" in m._NON_NAME_OPENERS and "if" not in m._SUBJECT_STOPWORDS
