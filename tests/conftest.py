@@ -585,6 +585,29 @@ from tests._mcp_test_helpers import (  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
+def _reset_llm_provider_cache():
+    """Drop cached LLM providers between tests (09/02 M-36).
+
+    ``get_llm_provider`` memoises OpenAI-compatible providers in a module-level
+    LRU so each call stops minting an unclosed ``httpx`` pool. That cache is
+    process-wide by design, which in a test process means one test's provider —
+    built under that test's monkeypatched credentials, env and patched classes —
+    would otherwise be handed to the next test that happens to resolve the same
+    configuration. The symptom is nasty: every affected test passes in
+    isolation and fails in a full run.
+
+    Same reasoning and same shape as ``_patch_storage_client`` resetting
+    ``sc_mod._client`` and ``_reset_hooks`` resetting hooks: a module singleton
+    that production wants and test isolation does not.
+    """
+    from common.llm.registry import reset_provider_cache
+
+    reset_provider_cache()
+    yield
+    reset_provider_cache()
+
+
+@pytest.fixture(autouse=True)
 def _reset_hooks():
     """Ensure hooks are wired for integration tests.
 

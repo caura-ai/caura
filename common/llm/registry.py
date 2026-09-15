@@ -13,8 +13,10 @@ narrow public surface both processes share.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from collections import OrderedDict
 
 from common.llm._credentials import (
     resolve_gemini_config,
@@ -31,6 +33,79 @@ from common.llm.providers.openai import OpenAILLMProvider
 from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
+
+# 09/02 M-36 — one pooled client per CONFIGURATION, not per call.
+#
+# ``OpenAILLMProvider.__init__`` builds an ``httpx.AsyncClient`` with its own
+# connection pool (CAURA-627 sized it for bulk-write fan-out). This factory is
+# called on EVERY LLM call — ``common/llm/retry.py`` invokes ``provider_factory``
+# for the primary provider and again for the fallback — so each call minted a
+# fresh pool, and nothing ever closed it. ``OpenAILLMProvider.aclose`` exists and
+# its own docstring names this exact failure ("a leak in long-lived processes
+# that rotate client instances"); it simply had no caller.
+#
+# Only the OpenAI-compatible branch is cached, because it is the only provider
+# that owns a client — Gemini and Fake hold none, so caching them would buy
+# nothing and add a lifetime to reason about.
+#
+# THE KEY IS THE WHOLE CONFIGURATION, deliberately. ``request_timeout`` is read
+# from ``os.environ`` at construction time (see the comment at that call site,
+# which explains why it must not use the import-time constant), and the api key
+# and model come from tenant config. Putting all of them in the key preserves
+# today's behaviour exactly: change any of them and you get a NEW provider, as
+# you would have before. A key of just ``name`` would silently pin the first
+# tenant's credentials for the life of the process.
+#
+# The api key goes in the key VERBATIM, and that is deliberate. An earlier
+# revision hashed it, on the reasoning that a cache outliving a request should
+# not retain a secret. That reasoning was wrong: the value being cached is the
+# PROVIDER, and ``OpenAILLMProvider`` holds the same api key in memory for
+# exactly as long as the cache holds the tuple. Hashing bought no reduction in
+# exposure — only the appearance of one — while adding a collision whose
+# consequence is handing one tenant's provider to another. CodeQL flagged the
+# hash as ``py/weak-sensitive-data-hashing``, and the right response was to
+# delete the hashing rather than suppress the alert or reach for bcrypt: this
+# is an equality comparison inside one process, not password verification, and
+# a salted slow hash would be both non-deterministic and useless here.
+_PROVIDER_CACHE: OrderedDict[tuple, LLMProvider] = OrderedDict()
+
+# Bounded so a many-tenant process cannot grow pools without limit. Eviction is
+# LRU, so the hot tenants keep their pools and a rare one pays a reconnect.
+_PROVIDER_CACHE_MAX = 32
+
+
+def _close_evicted(provider: LLMProvider) -> None:
+    """Best-effort close of an evicted provider's pool.
+
+    ``get_llm_provider`` is synchronous, so the ``await`` that ``aclose``
+    requires cannot happen inline. When a loop is running (every production
+    caller is async) the close is scheduled on it; otherwise the provider is
+    simply dropped, which is exactly today's behaviour and no worse.
+
+    A failure here must never propagate: this runs on the path that is trying
+    to hand a caller a working provider.
+    """
+    aclose = getattr(provider, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = loop.create_task(aclose())
+    # Keep a strong reference until it finishes — a bare ``create_task`` result
+    # can be garbage-collected mid-flight, which would cancel the close.
+    _PENDING_CLOSES.add(task)
+    task.add_done_callback(_PENDING_CLOSES.discard)
+
+
+_PENDING_CLOSES: set = set()
+
+
+def reset_provider_cache() -> None:
+    """Drop every cached provider. For tests that swap credentials or env."""
+    _PROVIDER_CACHE.clear()
+
 
 _LLM_FAKE_SENTINELS = frozenset({ProviderName.FAKE, ProviderName.NONE})
 _OPENAI_COMPATIBLE = frozenset(
@@ -148,13 +223,30 @@ def get_llm_provider(
             )
         except (TypeError, ValueError):
             request_timeout = _DEFAULT_OPENAI_TIMEOUT
-        return OpenAILLMProvider(
+        cache_key = (
+            name,
+            base_url,
+            model_override or model,
+            api_key,
+            request_timeout,
+        )
+        cached = _PROVIDER_CACHE.get(cache_key)
+        if cached is not None:
+            _PROVIDER_CACHE.move_to_end(cache_key)
+            return cached
+
+        provider = OpenAILLMProvider(
             api_key=api_key,
             model=model_override or model,
             base_url=base_url,
             provider_name=name,
             request_timeout_seconds=request_timeout,
         )
+        _PROVIDER_CACHE[cache_key] = provider
+        while len(_PROVIDER_CACHE) > _PROVIDER_CACHE_MAX:
+            _, evicted = _PROVIDER_CACHE.popitem(last=False)
+            _close_evicted(evicted)
+        return provider
 
     if name == ProviderName.GEMINI:
         api_key, model = resolve_gemini_config(tenant_config, model_attr=model_attr)
