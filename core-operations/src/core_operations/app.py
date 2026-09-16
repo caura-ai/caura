@@ -14,7 +14,7 @@ Lifespan ordering:
    as a no-op; OSS standalone deployments should not deploy this image
    at all, but the flag is a defensive short-circuit.
 3. Otherwise: register cron jobs via ``scheduler.register(...)`` and call
-   ``scheduler.start()``. Ten jobs are registered unconditionally: six daily
+   ``scheduler.start()``. Eleven jobs are registered unconditionally: six daily
    lifecycle ticks (``lifecycle-archive-expired``, ``lifecycle-archive-stale``,
    ``lifecycle-purge-soft-deleted``, ``lifecycle-crystallize``,
    ``lifecycle-entity-link``, ``lifecycle-insights``), each wall-clock
@@ -23,7 +23,9 @@ Lifespan ordering:
    ``interviewer-schedule`` (hourly, top of hour) which queues Interviewer
    work — per-tenant settings gate actual command creation; and
    ``embedding-coverage`` (hourly, top of hour), a read-only sample that logs
-   how many live memories are still unembedded. An eleventh,
+   how many live memories are still unembedded; and ``lifecycle-reconcile``
+   (hourly, half past), which republishes audit rows a fanout wrote but never
+   published a message for, offset off the fanout hours it repairs. A twelfth,
    ``embed-backfill``, registers only when ``embed_backfill_enabled`` is set,
    because its Pub/Sub topic is Terraform-provisioned and firing into an
    unprovisioned topic would just error every night.
@@ -67,6 +69,7 @@ configure_logging(
 
 from core_operations.scheduler import (
     scheduler,
+    seconds_until_next_utc_half_past,
     seconds_until_next_utc_hour,
     seconds_until_next_utc_top_of_hour,
     seconds_until_next_utc_weekday_hour,
@@ -82,6 +85,7 @@ from core_operations.tasks import (
     run_entity_link_tick,
     run_insights_tick,
     run_interviewer_schedule_tick,
+    run_lifecycle_reconcile_tick,
     run_purge_soft_deleted_tick,
 )
 
@@ -176,6 +180,22 @@ def _register_scheduled_tasks() -> None:
         7 * 24 * 3600,
         run_agent_digest_weekly_tick,
         delay_provider=_weekly_at("agent_digest_weekly_run_at_weekday", "agent_digest_weekly_run_at_hour"),
+    )
+    # Repairs audit rows an earlier fanout wrote but never published a
+    # message for. Hourly, so a drop is repaired within the hour rather
+    # than at the action's next daily run.
+    #
+    # Offset to half past deliberately. Every lifecycle fanout is aligned
+    # to the top of its hour, so firing there would put the sweep's own
+    # storage reads in the same instant as the burst it exists to clean up
+    # after. Half past also sits clear of the 30-minute strand threshold,
+    # so a row from the top of this hour is never young enough to be swept
+    # while its consumer may still be working on it.
+    scheduler.register(
+        "lifecycle-reconcile",
+        3600,
+        run_lifecycle_reconcile_tick,
+        delay_provider=lambda: seconds_until_next_utc_half_past(),
     )
     # Interviewer Phase 1: hourly queue-only tick; per-tenant period_hours
     # gates actual command creation, so opted-out tenants pay zero cost.

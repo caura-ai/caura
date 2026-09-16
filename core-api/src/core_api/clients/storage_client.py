@@ -2923,14 +2923,24 @@ class CoreStorageClient:
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
-    ) -> None:
-        """Flip the row to ``in_progress``, ``success``, or ``failure``."""
+        claim_token: str | None = None,
+    ) -> dict:
+        """Flip the row to ``in_progress``, ``success``, or ``failure``.
+
+        Returns the storage response. ``claim_conflict`` true means an
+        ``in_progress`` request lost the claim to a live consumer and the
+        caller must not run the primitive. Existing callers that ignore the
+        return value keep their present behaviour.
+        """
         body: dict[str, Any] = {"org_id": org_id, "status": status}
         if stats is not None:
             body["stats"] = stats
         if error_message is not None:
             body["error_message"] = error_message
-        await self._patch(f"/lifecycle-audit/{audit_id}", body)
+        if claim_token is not None:
+            body["claim_token"] = claim_token
+        result = await self._patch(f"/lifecycle-audit/{audit_id}", body)
+        return result if isinstance(result, dict) else {}
 
     async def has_recent_lifecycle_success(
         self,
@@ -2951,6 +2961,40 @@ class CoreStorageClient:
             since_hours=since_hours,
         )
         return bool((result or {}).get("has_recent_success"))
+
+    async def list_stranded_lifecycle_audits(
+        self,
+        *,
+        triggered_by: str,
+        older_than_minutes: int,
+        limit: int,
+    ) -> list[dict]:
+        """Rows the fanout wrote but never published a message for.
+
+        Read path. Returns oldest-first so the caller republishes in
+        arrival order when the backlog exceeds ``limit``.
+        """
+        result = await self._post(
+            "/lifecycle-audit/stranded",
+            {
+                # Explicit admin-wide: a fanout drop is not confined to one
+                # tenant, and the endpoint requires the scope to be written
+                # rather than omitted.
+                "org_id": None,
+                "triggered_by": triggered_by,
+                "older_than_minutes": older_than_minutes,
+                "limit": limit,
+            },
+            read=True,
+            idempotent=True,
+        )
+        rows = (result or {}).get("rows")
+        if not isinstance(rows, list):
+            # A non-list here means schema drift or an error envelope. Fail
+            # with a diagnostic rather than letting the caller iterate a dict
+            # and republish messages keyed on its string keys.
+            raise RuntimeError("stranded lifecycle audit endpoint returned a non-list 'rows'")
+        return rows
 
     # =====================================================================
     # Organization settings (Fix 2 Phase 0)

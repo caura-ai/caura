@@ -10,6 +10,7 @@ the real adapters are thin wrappers covered by integration tests.
 
 from __future__ import annotations
 
+import logging
 from functools import partial
 
 import pytest
@@ -103,6 +104,7 @@ class _FakeAdapter:
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
+        claim_token: str | None = None,
     ) -> None:
         self.audit_org_ids.append(org_id)
         self.audit_calls.append((audit_id, status, stats, error_message))
@@ -284,6 +286,7 @@ async def test_failure_audit_update_error_does_not_swallow_original():
             status: str,
             stats: dict | None = None,
             error_message: str | None = None,
+            claim_token: str | None = None,
         ) -> None:
             self.audit_calls.append((audit_id, status, stats, error_message))
             if status == "failure":
@@ -516,6 +519,7 @@ async def test_permanent_error_still_reraises_when_the_failure_row_could_not_be_
             status: str,
             stats: dict | None = None,
             error_message: str | None = None,
+            claim_token: str | None = None,
         ) -> None:
             self.audit_calls.append((audit_id, status, stats, error_message))
             if status == "failure":
@@ -556,6 +560,7 @@ async def test_skip_write_failure_nacks_instead_of_stranding_the_row():
             status: str,
             stats: dict | None = None,
             error_message: str | None = None,
+            claim_token: str | None = None,
         ) -> None:
             self.audit_calls.append((audit_id, status, stats, error_message))
             if stats is not None and stats.get("skipped"):
@@ -574,3 +579,242 @@ async def test_skip_write_failure_nacks_instead_of_stranding_the_row():
     assert len(adapter.audit_calls) == 1
     assert adapter.audit_calls[0][1] == "success"
     assert adapter.audit_calls[0][2] == {"skipped": True, "reason": "recent_success"}
+
+
+@pytest.mark.asyncio
+async def test_losing_the_claim_skips_the_primitive_and_nacks():
+    """A consumer that loses the pending -> in_progress race must not run.
+
+    Two deliveries of one audit_id are reachable: the reconcile sweep
+    republishes a message whose original was merely queued (these
+    subscriptions retain for seven days, so no age threshold separates
+    "lost" from "slow"), or Pub/Sub redelivers while the first attempt is
+    still running. The dedup gate does not help — it only matches work that
+    already SUCCEEDED, and neither racer has finished. Without the claim,
+    both run the primitive: for crystallize or insights that is duplicate
+    LLM spend and duplicate records.
+
+    It must raise rather than return. Acking would drop this delivery for
+    good, and if the claim holder then died the row would sit at
+    in_progress, where the reconcile sweep deliberately does not look.
+    """
+
+    class _ClaimedAdapter(_FakeAdapter):
+        async def update_lifecycle_audit_row(
+            self,
+            audit_id: int,
+            *,
+            org_id: str,
+            status: str,
+            stats: dict | None = None,
+            error_message: str | None = None,
+            claim_token: str | None = None,
+        ) -> dict:
+            self.audit_calls.append((audit_id, status, stats, error_message))
+            return {"ok": True, "claim_conflict": status == "in_progress"}
+
+    adapter = _ClaimedAdapter()
+    handler = _bind(adapter, action="archive-expired")
+    with pytest.raises(RuntimeError, match="claimed by another consumer"):
+        await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    assert adapter.archive_calls == [], "primitive ran despite losing the claim"
+    # Only the claim attempt itself — no success/failure row written, because
+    # this delivery did no work to report.
+    assert [c[1] for c in adapter.audit_calls] == ["in_progress"]
+
+
+@pytest.mark.asyncio
+async def test_winning_the_claim_runs_the_primitive_as_before():
+    """The guard must only fire on a lost claim, not on every run.
+
+    Pairs with the test above so a change that made the handler skip
+    unconditionally — which would pass that one — fails here.
+    """
+
+    class _UncontestedAdapter(_FakeAdapter):
+        async def update_lifecycle_audit_row(
+            self,
+            audit_id: int,
+            *,
+            org_id: str,
+            status: str,
+            stats: dict | None = None,
+            error_message: str | None = None,
+            claim_token: str | None = None,
+        ) -> dict:
+            self.audit_calls.append((audit_id, status, stats, error_message))
+            return {"ok": True, "claim_conflict": False}
+
+    adapter = _UncontestedAdapter()
+    handler = _bind(adapter, action="archive-expired")
+    await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    assert len(adapter.archive_calls) == 1
+    assert [c[1] for c in adapter.audit_calls] == ["in_progress", "success"]
+
+
+class _TokenRecordingAdapter(_FakeAdapter):
+    """Records the ``claim_token`` presented on every audit write."""
+
+    def __init__(self, *args, claim_lost_on_success: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tokens: list[tuple[str, str | None]] = []
+        self._claim_lost_on_success = claim_lost_on_success
+
+    async def update_lifecycle_audit_row(
+        self,
+        audit_id: int,
+        *,
+        org_id: str,
+        status: str,
+        stats: dict | None = None,
+        error_message: str | None = None,
+        claim_token: str | None = None,
+    ) -> dict:
+        self.audit_org_ids.append(org_id)
+        self.audit_calls.append((audit_id, status, stats, error_message))
+        self.tokens.append((status, claim_token))
+        if status == "success" and self._claim_lost_on_success:
+            return {"ok": True, "claim_lost": True}
+        return {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_terminal_write_presents_the_same_token_as_the_claim():
+    """A finalize must be attributable to the run that won the claim.
+
+    The storage-side guard can only reject a write from a consumer that
+    lost its claim if the write carries the token in the first place. A
+    terminal write with no token is admitted unconditionally, so failing
+    to thread it here would silently disable the guard rather than break
+    anything visibly.
+    """
+    adapter = _TokenRecordingAdapter(expired_count=4)
+    handler = _bind(adapter, action="archive-expired")
+    await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    by_status = dict(adapter.tokens)
+    assert set(by_status) == {"in_progress", "success"}
+    assert by_status["in_progress"] is not None, "claim must mint a token"
+    assert by_status["success"] == by_status["in_progress"], (
+        "the terminal write must present the claim's own token, not a new "
+        f"one: {adapter.tokens}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_lost_on_finalize_is_logged_as_an_error(caplog):
+    """Losing the claim mid-run means the primitive ran twice.
+
+    Nothing here can undo that, and retrying would make it three times, so
+    the handler must not raise. What it must not do is stay silent: this is
+    the only place the duplicate becomes visible.
+    """
+    adapter = _TokenRecordingAdapter(expired_count=4, claim_lost_on_success=True)
+    handler = _bind(adapter, action="archive-expired")
+
+    with caplog.at_level(logging.ERROR):
+        await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "a lost claim on a terminal write must be logged at error"
+    assert any("without its claim" in r.getMessage() for r in errors), (
+        f"expected the duplicate-run message, got {[r.getMessage() for r in errors]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_redelivery_of_a_succeeded_row_does_not_rerun_the_primitive():
+    """A ``noop`` claim means the row already reached ``success``.
+
+    Re-running is the duplicate this path exists to avoid, and it is also what
+    would make the terminal write look like a lost claim: the winner's token is
+    on the row and this delivery's is not, so a routine redelivery would be
+    reported as a duplicate run. Acking here keeps both from happening.
+    """
+
+    class _AlreadySucceededAdapter(_TokenRecordingAdapter):
+        async def update_lifecycle_audit_row(
+            self,
+            audit_id: int,
+            *,
+            org_id: str,
+            status: str,
+            stats: dict | None = None,
+            error_message: str | None = None,
+            claim_token: str | None = None,
+        ) -> dict:
+            await super().update_lifecycle_audit_row(
+                audit_id,
+                org_id=org_id,
+                status=status,
+                stats=stats,
+                error_message=error_message,
+                claim_token=claim_token,
+            )
+            return {"ok": True, "noop": status == "in_progress"}
+
+    adapter = _AlreadySucceededAdapter(expired_count=7)
+    handler = _bind(adapter, action="archive-expired")
+    await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    assert adapter.archive_calls == [], (
+        "the primitive re-ran on a row that had already succeeded: "
+        f"{adapter.archive_calls}"
+    )
+    statuses = [c[1] for c in adapter.audit_calls]
+    assert statuses == ["in_progress"], (
+        f"a redelivery must not write a terminal status, got {statuses}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_claim_lost_on_the_failure_path_is_also_logged(caplog):
+    """The preempted run that FAILS is the more alarming half.
+
+    Reporting a lost claim only on the success path would make a duplicate
+    visible exactly when it cost least. Here two consumers ran, the result
+    standing on the row belongs to the other one, and this run is about to
+    raise — none of which is inferable from the exception alone.
+    """
+
+    class _LostOnFailureAdapter(_TokenRecordingAdapter):
+        async def update_lifecycle_audit_row(
+            self,
+            audit_id: int,
+            *,
+            org_id: str,
+            status: str,
+            stats: dict | None = None,
+            error_message: str | None = None,
+            claim_token: str | None = None,
+        ) -> dict:
+            await super().update_lifecycle_audit_row(
+                audit_id,
+                org_id=org_id,
+                status=status,
+                stats=stats,
+                error_message=error_message,
+                claim_token=claim_token,
+            )
+            return {"ok": True, "claim_lost": status == "failure"}
+
+    adapter = _LostOnFailureAdapter(raise_on_op=RuntimeError("storage down"))
+    handler = _bind(adapter, action="archive-expired")
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="storage down"):
+            await handler(_archive_event(Topics.Lifecycle.ARCHIVE_EXPIRED_REQUESTED))
+
+    assert any(
+        "failed without its claim" in r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.ERROR
+    ), (
+        "a lost claim on the failure path was not reported: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+    # The original op error must still propagate — the log is additive.
+    statuses = [c[1] for c in adapter.audit_calls]
+    assert statuses == ["in_progress", "failure"]

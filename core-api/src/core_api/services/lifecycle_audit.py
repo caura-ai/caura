@@ -359,13 +359,18 @@ class _CoreApiLifecycleAdapter:
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
-    ) -> None:
-        await self._storage.update_lifecycle_audit_row(
+        claim_token: str | None = None,
+    ) -> dict:
+        # Returns the storage response rather than swallowing it: the
+        # ``claim_conflict`` flag is how a consumer learns it lost the
+        # pending -> in_progress race and must not run the primitive.
+        return await self._storage.update_lifecycle_audit_row(
             audit_id,
             org_id=org_id,
             status=status,
             stats=stats,
             error_message=error_message,
+            claim_token=claim_token,
         )
 
 

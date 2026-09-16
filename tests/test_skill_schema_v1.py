@@ -1084,7 +1084,7 @@ class TestMigrationChain:
         """
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"045"}, f"Expected single head '045', got {sorted(heads)}"
+        assert heads == {"047"}, f"Expected single head '047', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -1143,6 +1143,17 @@ class TestMigrationChain:
         # inference had to window on created_at and dropped evidence for any
         # memory older than the scan window.
         assert chain.get("045") == "044", "045 must follow 044"
+        # 046 — partial index on lifecycle_audit(started_at) WHERE
+        # status='pending'. The reconcile sweep's predicate is selective on the
+        # STATUS, not the timestamp: started_at < now() - interval matches
+        # nearly the whole append-only table, so 041's recency index scanned
+        # almost all of it to return normally-zero rows.
+        assert chain.get("046") == "045", "046 must follow 045"
+        # 047 — lifecycle_audit.claimed_at. Without a claim, an original
+        # message that was merely queued and the reconcile sweep's republish of
+        # it could both move a row out of pending and run the primitive at
+        # once; for crystallize or insights that is duplicate LLM spend.
+        assert chain.get("047") == "046", "047 must follow 046"
 
     def test_no_plain_set_not_null_on_large_tables(self):
         """Tightening a column to NOT NULL on a large table must not full-scan

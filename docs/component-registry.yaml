@@ -55,6 +55,9 @@ cron_ticks:
   - name: agent-digest-weekly
     cadence: weekly (configurable UTC weekday + hour)
     module: core_operations.app
+  - name: lifecycle-reconcile
+    cadence: hourly at half past (offset off the fanout hours it repairs)
+    module: core_operations.app
   - name: interviewer-schedule
     cadence: hourly (top of UTC hour)
     module: core_operations.app

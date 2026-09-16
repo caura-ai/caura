@@ -22,6 +22,7 @@ import asyncio
 import logging
 import weakref
 from collections.abc import Awaitable, Callable, MutableMapping
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -307,6 +308,233 @@ async def fanout_lifecycle_action(
         },
     )
     return {"action": action, "published": published, "failed": failed}
+
+
+# A fanout completes in about a minute in production. 30 minutes is far
+# past that, so a row still ``pending`` at this age was not slow -- its
+# message was never published at all.
+_RECONCILE_STRANDED_AFTER_MINUTES = 30
+# Caps one sweep. A larger backlog drains oldest-first across successive
+# sweeps rather than turning the reconcile into its own unbounded fanout.
+_RECONCILE_MAX_ROWS = 200
+# A row older than this has already been through at least two hourly sweeps
+# and is STILL pending, so those sweeps did not work on it. Publishing is
+# fire-and-forget (``PubSubEventBus.publish`` batches and does not await the
+# delivery future, so a 403 on the topic never reaches this code), which
+# means "the publish call returned" is not evidence of delivery. Row age is
+# the only evidence available here, and it is sufficient: a repaired row
+# leaves ``pending`` and stops being selected at all.
+_RECONCILE_INEFFECTIVE_AFTER_MINUTES = 150
+
+
+# MUST stay registered before ``POST /admin/lifecycle/{action}`` below. That
+# route is a catch-all of the same three-segment shape, and Starlette matches
+# in registration order, so moving this one after it would route these requests
+# into ``trigger_lifecycle_action`` and answer with a confusing "unknown
+# lifecycle action 'reconcile-stranded'" 404 instead of running the sweep --
+# a silent misroute, since both are valid-looking POSTs to this prefix.
+# ``test_reconcile_route_resolves_to_the_sweep_not_the_catch_all`` resolves an
+# actual request against the router so a reorder fails loudly.
+@router.post("/admin/lifecycle/reconcile-stranded")
+async def reconcile_stranded_lifecycle_actions(
+    auth: AuthContext = Depends(get_auth_context),
+) -> dict:
+    """Republish the message for every audit row the fanout stranded.
+
+    ``_trigger_one`` writes the audit row BEFORE publishing, so that a
+    failed publish leaves a visible ``pending`` row. Nothing ever acted
+    on those rows: there is no redelivery, because the message was never
+    published; no reconciler; no sweep. The work did not run, and the
+    row records a job that never happened.
+
+    This completes them. Each stranded row's message is republished
+    under the SAME ``audit_id``, so the consumer finalizes the ORIGINAL
+    row. Publishing a fresh row instead would leave the stranded one
+    exactly as stuck as before while making the totals look healthier --
+    the row that is wrong is the one that has to reach a terminal state.
+
+    Safe to repeat, but not for the reason it first appears. The dedup
+    gate only catches work that has already SUCCEEDED, so it does
+    nothing for two deliveries racing before either finishes -- and a
+    row can sit at ``pending`` because its message is merely queued
+    (subscriptions here retain for seven days, so no age threshold
+    separates "lost" from "slow"), which means a republish can land
+    alongside a live original. What actually makes repetition safe is
+    the claim: ``pending -> in_progress`` is a compare-and-swap, so only
+    one delivery may start the primitive and the loser nacks. Sticky
+    success then makes its retry a no-op.
+
+    Restricted to ``triggered_by='core-operations'``. Manual triggers may
+    have carried a ``fleet_id`` or a one-off ``retention_days`` that this
+    table does not persist, so republishing one would run a different job
+    than the row records.
+
+    Runs under the SAME process-wide semaphore as the nightly fanout. A
+    sweep with its own budget would be a second unbounded fanout against
+    the storage writer -- the precise failure that stranded these rows.
+
+    ``republish_attempted`` means the publish call returned without
+    raising. It does NOT mean the message was delivered:
+    ``PubSubEventBus.publish`` batches and deliberately does not await
+    the delivery future, so publisher-side failures such as a 403 on an
+    unprovisioned topic never reach this code. Naming the counter for
+    what is actually known keeps a sweep that is achieving nothing from
+    reading as a successful one. ``ineffective`` is that signal: rows
+    this sweep republished which are already far past the point where
+    they should have completed. It is derived from row age, the only
+    evidence available here, and age cannot separate "an earlier sweep
+    failed on this row" from "no sweep had run yet" -- true of the whole
+    backlog on first deployment. Both call for the same investigation,
+    so the counter reports the observation and does not assert a cause.
+    """
+    auth.enforce_admin()
+    storage = get_storage_client()
+    rows = await storage.list_stranded_lifecycle_audits(
+        triggered_by="core-operations",
+        older_than_minutes=_RECONCILE_STRANDED_AFTER_MINUTES,
+        limit=_RECONCILE_MAX_ROWS,
+    )
+    if not rows:
+        return {
+            "stranded": 0,
+            "republish_attempted": 0,
+            "failed": 0,
+            "unknown_action": 0,
+            "ineffective": 0,
+        }
+
+    sem = _fanout_semaphore()
+
+    async def _republish(row: dict) -> str:
+        publisher = _ACTION_PUBLISHERS.get(row["action"])
+        if publisher is None:
+            # Nothing can ever republish this row. Left pending it would sit
+            # at the head of every future oldest-first sweep and, once enough
+            # accumulate, starve repairable rows out of the LIMIT window
+            # entirely. Terminal failure is the truthful state: unlike an
+            # undelivered message, this job is unrunnable, not merely
+            # unreported. Finalizing also drops it from the partial index.
+            #
+            # Inside the semaphore: this is a write to core-storage-api like
+            # any other. A batch of rows sharing one retired action would
+            # otherwise fire up to ``_RECONCILE_MAX_ROWS`` concurrent PATCHes
+            # at the writer -- the unbounded burst this sweep exists to avoid
+            # recreating, arriving by the one path that skipped the budget.
+            async with sem:
+                await storage.update_lifecycle_audit_row(
+                    row["audit_id"],
+                    org_id=row["org_id"],
+                    status="failure",
+                    error_message=(
+                        f"lifecycle action {row['action']!r} is no longer in "
+                        "the publisher registry; the reconcile sweep cannot "
+                        "republish it"
+                    ),
+                )
+            return "unknown_action"
+        async with sem:
+            extra = await resolve_publisher_kwargs(row["action"], row["org_id"])
+            await publisher(
+                audit_id=row["audit_id"],
+                org_id=row["org_id"],
+                triggered_by=row["triggered_by"],
+                # Always None for a fanout row: the cron path never passes
+                # one, which is half of why only fanout rows are swept.
+                fleet_id=None,
+                **(extra or {}),
+            )
+        return "attempted"
+
+    results = await asyncio.gather(
+        *(_republish(row) for row in rows),
+        return_exceptions=True,
+    )
+
+    republish_attempted = 0
+    failed = 0
+    unknown_action = 0
+    ineffective = 0
+    # Rows older than this were stranded long enough ago that, once the sweep
+    # has been running, an earlier pass should already have repaired them.
+    cutoff = datetime.now(UTC) - timedelta(minutes=_RECONCILE_INEFFECTIVE_AFTER_MINUTES)
+
+    def _is_long_unrepaired(row: dict) -> bool:
+        started = row.get("started_at")
+        if not isinstance(started, str):
+            return False
+        try:
+            return datetime.fromisoformat(started) < cutoff
+        except ValueError:
+            return False
+
+    for row, outcome in zip(rows, results, strict=True):
+        if isinstance(outcome, BaseException):
+            # Leave the row stranded rather than finalizing it: the next
+            # sweep retries, and a row marked failure here would report the
+            # sweep's own problem as the lifecycle job's outcome.
+            logger.exception(
+                "lifecycle reconcile: republish failed; row stays stranded for the next sweep",
+                exc_info=outcome,
+                extra={
+                    "action": row.get("action"),
+                    "org_id": row.get("org_id"),
+                    "audit_id": row.get("audit_id"),
+                },
+            )
+            failed += 1
+        elif outcome == "unknown_action":
+            unknown_action += 1
+            logger.warning(
+                "lifecycle reconcile: stranded row names an unknown action; "
+                "finalized as failure so it stops blocking the sweep",
+                extra={"action": row.get("action"), "audit_id": row.get("audit_id")},
+            )
+        else:
+            republish_attempted += 1
+            # Only rows this sweep actually published for. A row finalized as
+            # ``unknown_action`` above is terminal now, not stuck, and one that
+            # raised is already reported as ``failed`` -- counting either here
+            # would report the same row twice under two different causes.
+            if _is_long_unrepaired(row):
+                ineffective += 1
+
+    if ineffective:
+        # Deliberately states what was observed, not what caused it.
+        # ``republish_attempted`` cannot distinguish a delivered message from
+        # one the Pub/Sub SDK dropped on a background thread, and row age
+        # cannot distinguish "an earlier sweep failed on this row" from "no
+        # sweep had ever run yet" -- which is every row in the backlog on the
+        # first deployment. Both readings warrant the same operator action
+        # (find out why these rows are not completing), so the line reports
+        # the fact and leaves the cause open rather than asserting a history
+        # it cannot see.
+        logger.error(
+            "lifecycle reconcile: rows republished this sweep are far past the "
+            "point where they should have completed; if a previous sweep ran, "
+            "its publishes did not land",
+            extra={
+                "ineffective": ineffective,
+                "older_than_minutes": _RECONCILE_INEFFECTIVE_AFTER_MINUTES,
+            },
+        )
+
+    logger.info(
+        "lifecycle reconcile swept stranded rows",
+        extra={
+            "stranded": len(rows),
+            "republish_attempted": republish_attempted,
+            "failed": failed,
+            "unknown_action": unknown_action,
+            "ineffective": ineffective,
+        },
+    )
+    return {
+        "stranded": len(rows),
+        "republish_attempted": republish_attempted,
+        "failed": failed,
+        "unknown_action": unknown_action,
+        "ineffective": ineffective,
+    }
 
 
 @router.get("/admin/lifecycle/audits/summary")

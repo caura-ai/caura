@@ -42,14 +42,19 @@ class _CoreWorkerLifecycleAdapter:
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
-    ) -> None:
-        await update_lifecycle_audit_row(
+        claim_token: str | None = None,
+    ) -> dict:
+        # Returns the storage response rather than swallowing it: the
+        # ``claim_conflict`` flag is how the shared handler learns it lost
+        # the pending -> in_progress race and must not run the primitive.
+        return await update_lifecycle_audit_row(
             get_storage_client(),
             audit_id,
             org_id=org_id,
             status=status,
             stats=stats,
             error_message=error_message,
+            claim_token=claim_token,
         )
 
 

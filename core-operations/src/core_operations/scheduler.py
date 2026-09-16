@@ -73,6 +73,27 @@ def seconds_until_next_utc_top_of_hour(*, now: datetime | None = None) -> float:
     return (target - current).total_seconds()
 
 
+def seconds_until_next_utc_half_past(*, now: datetime | None = None) -> float:
+    """Seconds from ``now`` until the next :30 UTC of any hour.
+
+    Same strict-future guarantee as the helpers above — always positive, at
+    most 1h — so an aligned task cannot hot-loop after a fast failure at the
+    mark.
+
+    This is NOT ``seconds_until_next_utc_top_of_hour() + 1800``. That helper
+    returns the distance to the next :00, so adding half an hour lands half
+    past the FOLLOWING hour: evaluated at 10:05 it yields 11:30 rather than
+    10:30, skipping the mark it was aiming at and waiting 85 minutes instead
+    of 25. Because a delay provider is recomputed every cycle, that error
+    shows up on every process start landing in the first half of an hour.
+    """
+    current = now or datetime.now(UTC)
+    target = current.replace(minute=30, second=0, microsecond=0)
+    if target <= current:
+        target += timedelta(hours=1)
+    return (target - current).total_seconds()
+
+
 def seconds_until_next_utc_weekday_hour(weekday: int, hour: int, *, now: datetime | None = None) -> float:
     """Seconds from ``now`` until the next ``weekday``@``hour``:00 UTC.
 

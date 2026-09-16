@@ -92,6 +92,68 @@ async def _fire_fanout(action: str) -> None:
     )
 
 
+async def run_lifecycle_reconcile_tick() -> None:
+    """POST ``/admin/lifecycle/reconcile-stranded``.
+
+    Not routed through ``_fire_fanout``: different endpoint, and a
+    different response to read. The fanout reports what it dispatched;
+    this reports what an earlier fanout failed to dispatch and this
+    sweep has now republished.
+    """
+    url = f"{settings.core_api_url.rstrip('/')}/api/v1/admin/lifecycle/reconcile-stranded"
+    headers: dict[str, str] = {}
+    if settings.core_api_admin_api_key:
+        headers["X-API-Key"] = settings.core_api_admin_api_key
+    else:
+        logger.warning(
+            "core-operations: CORE_API_ADMIN_API_KEY unset; lifecycle reconcile will be unauthorised",
+        )
+
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.post(url, headers=headers)
+        except httpx.HTTPError:
+            logger.exception("lifecycle reconcile POST failed", extra={"url": url})
+            return
+    if resp.status_code >= 400:
+        logger.error(
+            "lifecycle reconcile returned non-2xx; will retry next tick",
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    body = resp.json()
+    stranded = body.get("stranded") or 0
+    if not stranded:
+        # The steady state. Debug, so an hourly no-op does not bury the
+        # sweeps that actually found something.
+        logger.debug("lifecycle reconcile: nothing stranded")
+        return
+    # A non-zero count means an earlier fanout dropped work on the floor.
+    # The sweep repairs it, so this is not an error -- but it is the only
+    # signal that the drop happened at all, since the rows it repairs were
+    # stranded without any log line of their own.
+    # ``ineffective`` counts rows this sweep republished that are already far
+    # past the point where they should have completed. Escalated above the
+    # ordinary sweep line because publishing is fire-and-forget: a permanently
+    # unroutable topic would otherwise produce a healthy-looking sweep every
+    # hour forever. On the very first run the backlog can trip this without
+    # any sweep having failed, which is still worth an operator's attention --
+    # the rows are genuinely not completing either way.
+    ineffective = body.get("ineffective") or 0
+    level = logger.error if ineffective else logger.warning
+    level(
+        "lifecycle reconcile swept stranded rows",
+        extra={
+            "stranded": stranded,
+            "republish_attempted": body.get("republish_attempted"),
+            "failed": body.get("failed"),
+            "unknown_action": body.get("unknown_action"),
+            "ineffective": ineffective,
+        },
+    )
+
+
 async def run_archive_expired_tick() -> None:
     await _fire_fanout("archive-expired")
 

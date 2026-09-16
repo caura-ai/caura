@@ -27,6 +27,11 @@ _EXPECTED_JOBS = {
     "agent-digest",
     "agent-digest-weekly",
     "interviewer-schedule",
+    # Republishes audit rows a fanout wrote but never published a message for.
+    # Hourly at half past, offset off the fanout hours it repairs so the sweep's
+    # own storage reads do not land in the same instant as the burst it cleans
+    # up after.
+    "lifecycle-reconcile",
     # Read-only hourly sample of how many live memories are still unembedded.
     # Registered unconditionally, unlike ``embed-backfill``: the count matters
     # most when the sweep is OFF, since nothing is draining the backlog then.

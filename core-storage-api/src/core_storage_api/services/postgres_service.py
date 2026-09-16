@@ -1110,6 +1110,15 @@ class BulkRowShapeError(permanent_failure.PermanentWriteFailure):
     """
 
 
+# How long a consumer's claim on an ``in_progress`` lifecycle audit row is
+# honoured before another delivery may take it. Sized well past any single-org
+# lifecycle op -- the Pub/Sub client extends the 60s ack deadline while a
+# handler is alive, so a redelivery generally means the consumer died rather
+# than that it is slow -- and short enough that a died-mid-run row is picked up
+# again the same hour instead of being parked indefinitely.
+LIFECYCLE_CLAIM_LEASE_MINUTES = 60
+
+
 class Unscoped:
     """Marker for a call that deliberately spans every tenant.
 
@@ -11471,6 +11480,79 @@ class PostgresService:
             "actions": {action: actions[action] for action in sorted(actions)},
         }
 
+    async def lifecycle_audit_list_stranded(
+        self,
+        *,
+        org_id: str | Unscoped,
+        triggered_by: str,
+        older_than_minutes: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Rows still at ``pending`` long after their fanout dispatched.
+
+        ``pending`` is written by the fanout BEFORE the per-org Pub/Sub
+        message goes out, so a row sits here whenever that publish never
+        happened -- most often because the fanout request was cancelled
+        part-way through its ``gather`` and the rows it had already
+        written were never reached. Such a row is not merely unreported:
+        the work behind it never ran, and nothing retries it.
+
+        Deliberately excludes ``in_progress``. That state means a
+        consumer already holds the message, so republishing would
+        duplicate live work. A consumer that dies mid-run gets its
+        redelivery from Pub/Sub -- which is exactly the mechanism that
+        does not exist for a message that was never published at all.
+
+        ``org_id`` is a binding scope, not a convenience filter: the
+        sweep's own caller passes ``UNSCOPED`` because a fanout drop is
+        not confined to one tenant, but the parameter is explicit so a
+        cross-tenant read is a stated choice at the call site rather
+        than the default. Same shape as ``lifecycle_audit_summary``.
+
+        ``triggered_by`` is required rather than optional because the
+        two producers are not equally republishable. Fanout rows carry
+        no state beyond this table -- ``fleet_id`` is always None and
+        the publisher kwargs come from the per-org settings resolver --
+        so they reproduce exactly. Manual rows may have carried a
+        ``fleet_id`` or an operator's one-off ``retention_days``, and
+        neither is persisted here, so republishing one would silently
+        run a DIFFERENT job than the row records. Making the caller
+        name the producer keeps that choice deliberate.
+
+        Oldest first, so a backlog larger than ``limit`` drains in
+        arrival order over successive sweeps instead of starving the
+        earliest rows.
+        """
+        stmt = (
+            select(
+                LifecycleAudit.id,
+                LifecycleAudit.org_id,
+                LifecycleAudit.action,
+                LifecycleAudit.triggered_by,
+                LifecycleAudit.started_at,
+            )
+            .where(LifecycleAudit.status == "pending")
+            .where(LifecycleAudit.triggered_by == triggered_by)
+            .where(LifecycleAudit.started_at < func.now() - timedelta(minutes=older_than_minutes))
+            .order_by(LifecycleAudit.started_at)
+            .limit(limit)
+        )
+        if not isinstance(org_id, Unscoped):
+            stmt = stmt.where(LifecycleAudit.org_id == org_id)
+
+        async with get_read_session() as session:
+            rows = (await session.execute(stmt)).all()
+        return [
+            {
+                "audit_id": int(row.id),
+                "org_id": row.org_id,
+                "action": row.action,
+                "triggered_by": row.triggered_by,
+                "started_at": row.started_at.isoformat(),
+            }
+            for row in rows
+        ]
+
     async def lifecycle_audit_finalize(
         self,
         audit_id: int,
@@ -11479,18 +11561,31 @@ class PostgresService:
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
-    ) -> bool | None:
+        claim_token: str | None = None,
+    ) -> str:
         """Set terminal-or-progress state on the row.
 
-        Tri-state return distinguishes the two ``rowcount==0`` cases:
-        * ``True``  — row updated.
-        * ``None``  — row exists but is already at ``status='success'``
-          (the sticky-success gate skipped the UPDATE). A no-op, NOT
-          an error — typically a Pub/Sub redelivery of an already-
-          acked successful message.
-        * ``False`` — no row matches both ``audit_id`` and ``org_id``
-          (pruned, belongs to another org, or a buggy publisher
-          invented an id).
+        Returns which of four things happened, because the three
+        ``rowcount==0`` causes need different handling by the caller:
+        * ``"updated"``       — row updated.
+        * ``"noop_success"``  — row exists but is already at
+          ``status='success'`` (the sticky-success gate skipped the
+          UPDATE). A no-op, NOT an error — typically a Pub/Sub
+          redelivery of an already-acked successful message.
+        * ``"claim_conflict"`` — an ``in_progress`` request lost the
+          claim: another consumer holds this row and its claim has not
+          gone stale. The caller must NOT run the primitive. A caller
+          re-presenting its own ``claim_token`` never gets this, so an
+          HTTP-level retry of a claim that already succeeded is not
+          mistaken for a competitor.
+        * ``"claim_lost"``    — a terminal write from a consumer whose
+          claim was taken over while it was still running. The row is
+          NOT written: the holder's own result stands. Nothing can undo
+          the duplicate run, so the caller should record it loudly
+          rather than retry.
+        * ``"missing"``       — no row matches both ``audit_id`` and
+          ``org_id`` (pruned, belongs to another org, or a buggy
+          publisher invented an id).
 
         ``finished_at`` is only stamped on terminal status values so the
         ``in_progress`` transition leaves the row addressable for a
@@ -11510,6 +11605,10 @@ class PostgresService:
             # and any query using ``finished_at IS NOT NULL`` to find
             # completed rows would misclassify the retrying row.
             values["finished_at"] = None
+            # Stamping the claim is what makes this transition
+            # single-winner; the guard below reads it back.
+            values["claimed_at"] = func.now()
+            values["claim_token"] = claim_token
         if stats is not None:
             values["stats"] = stats
         if error_message is not None:
@@ -11538,21 +11637,106 @@ class PostgresService:
                 .where(LifecycleAudit.status != "success")
                 .values(**values)
             )
+            if status == "in_progress":
+                # Compare-and-swap. Only one delivery may move a row out of
+                # ``pending``: without this, an original message that was
+                # merely slow and the reconcile sweep's republish of it both
+                # pass this transition and run the primitive at once. The
+                # staleness arm keeps the older behaviour where it was load
+                # bearing -- a consumer that died mid-run leaves a claim that
+                # nobody will ever clear, so after the lease another delivery
+                # may take the row. ``failure -> in_progress`` is unaffected;
+                # only a live ``in_progress`` claim blocks.
+                arms = [
+                    LifecycleAudit.status != "in_progress",
+                    # Migration 047 stamps every row that was mid-flight when it ran,
+                    # so this arm is not what carries pre-existing work. It covers the
+                    # narrower case of a row moved to ``in_progress`` by a pre-047
+                    # revision still serving during a rolling deploy, which writes no
+                    # claim. Without the arm such a row is unclaimable forever --
+                    # ``NULL < now() - lease`` is NULL, not true -- and the reconcile
+                    # sweep will not rescue it either, because that only looks at
+                    # ``pending``. Keeping it trades a bounded theft window during one
+                    # deploy for rows that can never be recovered at all.
+                    LifecycleAudit.claimed_at.is_(None),
+                    LifecycleAudit.claimed_at < func.now() - timedelta(minutes=LIFECYCLE_CLAIM_LEASE_MINUTES),
+                ]
+                if claim_token is not None:
+                    # Same claimant re-presenting its own claim. The storage
+                    # client retries a PATCH on ReadTimeout and 5xx, so a claim
+                    # that succeeded server-side but lost its response is
+                    # re-sent verbatim; without this arm the CAS reads that
+                    # retry as a competing consumer and the handler nacks a
+                    # delivery it had already won. A genuine second delivery is
+                    # a different invocation with a different token, so it
+                    # still loses the race.
+                    arms.append(LifecycleAudit.claim_token == claim_token)
+                stmt = stmt.where(or_(*arms))
+            elif status in ("success", "failure") and claim_token is not None:
+                # Only the holder of the live claim may finalize it. Winning the
+                # claim is not the same as still holding it: the staleness arm
+                # above exists so an abandoned claim can be taken over, and it
+                # cannot tell an abandoned consumer from a slow one, so a
+                # primitive that outruns the lease is preempted while alive.
+                # Both then finalize, and without this the loser's write lands
+                # silently -- the duplicate run leaves no trace anywhere.
+                #
+                # ``claim_token IS NULL`` is admitted so this never blocks a
+                # caller that does not participate in the protocol at all (the
+                # embed-backfill consumer claims without a token); those keep
+                # their previous behaviour rather than becoming unfinalizable.
+                stmt = stmt.where(
+                    or_(
+                        LifecycleAudit.claim_token.is_(None),
+                        LifecycleAudit.claim_token == claim_token,
+                    )
+                )
             result = await session.execute(stmt)
             if result.rowcount > 0:  # type: ignore[attr-defined]
-                return True
-            # rowcount==0 has two causes — disambiguate so the router
-            # can return 200 for the no-op (already-success) path
-            # instead of a misleading 404 that would surface as a
-            # spurious "audit row not found" warning on every Pub/Sub
-            # redelivery of an acked-but-late-acked successful message.
-            exists = await session.scalar(
-                select(LifecycleAudit.id).where(
-                    LifecycleAudit.id == audit_id,
-                    LifecycleAudit.org_id == org_id,
+                return "updated"
+            # rowcount==0 has three causes — disambiguate so the router can
+            # return 200 for the no-op (already-success) path instead of a
+            # misleading 404 that would surface as a spurious "audit row not
+            # found" warning on every redelivery of an acked-but-late-acked
+            # successful message, and so a lost claim is distinguishable from
+            # both: the caller has to skip the primitive for one and may run
+            # it for the other.
+            row = (
+                await session.execute(
+                    select(LifecycleAudit.status, LifecycleAudit.claim_token).where(
+                        LifecycleAudit.id == audit_id,
+                        LifecycleAudit.org_id == org_id,
+                    )
                 )
-            )
-            return None if exists else False
+            ).first()
+            if row is None:
+                return "missing"
+            if (
+                status in ("success", "failure")
+                and claim_token is not None
+                and row[1] is not None
+                and row[1] != claim_token
+            ):
+                # A terminal write from a consumer that no longer holds the
+                # claim. The work already ran twice; that cannot be undone here,
+                # but it must not also be invisible.
+                #
+                # This is tested BEFORE the sticky-success no-op below, and the
+                # order is the whole point. A preempted consumer loses its claim
+                # to a winner that usually goes on to SUCCEED, so the row it
+                # finds is almost always at ``success`` -- checking the status
+                # first would classify the overwhelmingly common case as an
+                # ordinary redelivery and report nothing. The rarer failure case
+                # would be the only one this ever caught.
+                #
+                # A caller that still holds the claim reaches the no-op below
+                # normally: its own token matches, so this arm is false and its
+                # HTTP retry of a successful write is not mistaken for a
+                # competitor.
+                return "claim_lost"
+            if row[0] == "success":
+                return "noop_success"
+            return "claim_conflict"
 
     async def lifecycle_audit_has_recent_success(
         self,
