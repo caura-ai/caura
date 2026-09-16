@@ -572,6 +572,14 @@ class ConflictOut(BaseModel):
     resolution_note: str | None = None
     resolved_by: str | None = None
     resolved_at: str | None = None
+    # --- fields present on the runtime conflict payload but previously absent here ---
+    fleet_id: str | None = None
+    relationship_confidence: float | None = None
+    diagnosis_confidence: float | None = None
+    evidence_strength: str | None = None
+    audit_reason: str | None = None
+    created_by: str | None = None
+    created_at: str | None = None
 
 
 class ConflictListResponse(BaseModel):
