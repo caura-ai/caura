@@ -30,6 +30,7 @@ CountField = Literal[
     "unclassified_lines",
     "deliberate_alias_lines",
     "deliberate_floor_lines",
+    "deliberate_absence_lines",
     "marker_metadata_lines",
 ]
 
@@ -38,6 +39,7 @@ _COUNT_FIELDS: tuple[CountField, ...] = (
     "unclassified_lines",
     "deliberate_alias_lines",
     "deliberate_floor_lines",
+    "deliberate_absence_lines",
     "marker_metadata_lines",
 )
 
@@ -57,6 +59,7 @@ class Counts(TypedDict):
     unclassified_lines: int
     deliberate_alias_lines: int
     deliberate_floor_lines: int
+    deliberate_absence_lines: int
     marker_metadata_lines: int
 
 
@@ -111,6 +114,7 @@ def _empty_counts() -> Counts:
         "unclassified_lines": 0,
         "deliberate_alias_lines": 0,
         "deliberate_floor_lines": 0,
+        "deliberate_absence_lines": 0,
         "marker_metadata_lines": 0,
     }
 
@@ -228,6 +232,20 @@ def _marker_meta_paths(repo: Path, commit: str) -> frozenset[str]:
     return frozenset(ratchet._MARKER_SYSTEM_PATHS) | frozenset(configured)
 
 
+# Keyed by marker so a kind added to the ratchet is one entry here, not a fourth
+# branch nobody remembers to write. The cost of forgetting is silent and lands on
+# the one number that must not drift: an exempted, reviewed, permanently-correct
+# line would be filed as ``unclassified candidate debt`` -- the programme's
+# measure of work it has NOT yet triaged -- and would sit there forever, never
+# clearable. ``test_every_ratchet_kind_has_a_census_field`` fails if one is
+# missing rather than letting it degrade quietly.
+_MARKER_FIELDS: dict[str, CountField] = {
+    ratchet.EXEMPT_MARKER: "deliberate_alias_lines",
+    ratchet.FLOOR_MARKER: "deliberate_floor_lines",
+    ratchet.ABSENT_MARKER: "deliberate_absence_lines",
+}
+
+
 def _classification(
     match: Match, marker_meta_paths: frozenset[str]
 ) -> tuple[CountField, ...]:
@@ -235,11 +253,8 @@ def _classification(
     kind = ratchet._kind(text)
     if match["path"] in marker_meta_paths and kind is not None:
         return ("all_match_lines", "marker_metadata_lines")
-    if kind == ratchet.EXEMPT_MARKER:
-        return ("all_match_lines", "deliberate_alias_lines")
-    if kind == ratchet.FLOOR_MARKER:
-        return ("all_match_lines", "deliberate_floor_lines")
-    return ("all_match_lines", "unclassified_lines")
+    field = _MARKER_FIELDS.get(kind) if kind is not None else None
+    return ("all_match_lines", field or "unclassified_lines")
 
 
 def _increment(counts: Counts, fields: tuple[CountField, ...]) -> None:
@@ -341,6 +356,7 @@ def _print_counts(prefix: str, counts: Counts) -> None:
         f"{counts['unclassified_lines']:,} unclassified candidate debt; "
         f"{counts['deliberate_alias_lines']:,} deliberate aliases; "
         f"{counts['deliberate_floor_lines']:,} deliberate floor mentions; "
+        f"{counts['deliberate_absence_lines']:,} deliberate absence assertions; "
         f"{counts['marker_metadata_lines']:,} marker metadata"
     )
 

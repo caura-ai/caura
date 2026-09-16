@@ -12,7 +12,14 @@ import pytest
 pytestmark = [pytest.mark.unit]
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "legacy_name_census.py"
-LEGACY = "mem" + "claw"
+
+# Written out rather than spliced from fragments. These tests feed the census
+# synthetic source text and read back what it counted, so the literal IS the
+# pattern under test and the marker is true. It was previously assembled to keep
+# the line out of the gate's own count, which is the shape this programme spent a
+# sweep removing: the gate matches text per line, so a name built at runtime is a
+# name it cannot see.
+LEGACY = "memclaw"  # legacy-name-ok: the pattern these tests exercise
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -99,6 +106,7 @@ def test_json_counts_debt_and_permanent_lines_by_top_level(repo: Path) -> None:
         "unclassified_lines": 3,
         "deliberate_alias_lines": 1,
         "deliberate_floor_lines": 1,
+        "deliberate_absence_lines": 0,
         "marker_metadata_lines": 1,
     }
     assert report["top_level"] == {
@@ -107,6 +115,7 @@ def test_json_counts_debt_and_permanent_lines_by_top_level(repo: Path) -> None:
             "unclassified_lines": 1,
             "deliberate_alias_lines": 0,
             "deliberate_floor_lines": 1,
+            "deliberate_absence_lines": 0,
             "marker_metadata_lines": 1,
         },
         "src": {
@@ -114,6 +123,7 @@ def test_json_counts_debt_and_permanent_lines_by_top_level(repo: Path) -> None:
             "unclassified_lines": 2,
             "deliberate_alias_lines": 1,
             "deliberate_floor_lines": 0,
+            "deliberate_absence_lines": 0,
             "marker_metadata_lines": 0,
         },
     }
@@ -276,3 +286,57 @@ def test_missing_control_is_an_error_despite_legacy_matches(repo: Path) -> None:
     assert result.returncode == 2
     assert "positive control 'caura' matched no lines" in result.stderr
     assert result.stdout == ""
+
+
+def test_every_ratchet_kind_has_a_census_field() -> None:
+    """A marker the census cannot classify is counted as untriaged debt.
+
+    The census reports anything it cannot place as ``unclassified candidate
+    debt`` — the programme's measure of work nobody has looked at yet. A
+    deliberately marked, reviewed, permanently correct line landing there is
+    worse than a wrong total: it is indistinguishable from real debt, and no
+    amount of work will ever clear it.
+
+    That failure is silent by construction, because the census still runs and
+    still prints a number. So the coupling between the two scripts is asserted
+    here rather than left to whoever adds the next kind noticing.
+    """
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        import legacy_name_census as census
+        import legacy_name_ratchet as ratchet
+    finally:
+        sys.path.pop(0)
+
+    missing = set(ratchet._KINDS) - set(census._MARKER_FIELDS)
+    assert not missing, (
+        f"ratchet kind(s) {sorted(missing)} have no census count field, so every "
+        "line carrying one would be reported as unclassified candidate debt"
+    )
+    unknown = set(census._MARKER_FIELDS.values()) - set(census._COUNT_FIELDS)
+    assert not unknown, f"census field(s) {sorted(unknown)} are not counted fields"
+
+
+def test_an_absence_assertion_is_counted_apart_from_untriaged_debt(repo: Path) -> None:
+    """The classification that matters: marked, and NOT filed as debt.
+
+    ``unclassified_lines`` is the programme's measure of work nobody has
+    triaged yet. A reviewed, permanently correct absence assertion landing
+    there is indistinguishable from real debt and can never be cleared, so
+    this pins the field it does land in as well as the one it does not.
+
+    Its own file rather than the shared fixture: that fixture's totals are
+    asserted by several tests, so a line added there is a change to all of
+    them rather than to this one.
+    """
+    (repo / "src" / "proof.py").write_text(
+        f'assert "{LEGACY}_write" not in tools  # legacy-name-absent: proven gone\n'
+    )
+    _git(repo, "add", "src/proof.py")
+    _git(repo, "commit", "-qm", "an absence assertion")
+
+    payload = json.loads(_run(repo, "--json").stdout)
+    counts = payload["repositories"][0]["counts"]
+
+    assert counts["deliberate_absence_lines"] == 1
+    assert counts["unclassified_lines"] == 3
