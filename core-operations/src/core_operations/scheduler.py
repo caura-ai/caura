@@ -31,6 +31,13 @@ from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+# ``(task_name, ttl_seconds) -> may_this_process_run_the_tick``. Kept as a
+# plain callable rather than a client object so this module stays free of
+# any transport: the only implementation today speaks HTTP to core-api,
+# but nothing here needs to know that, and the tests substitute a plain
+# async function.
+LeaseFn = Callable[[str, float], Awaitable[bool]]
+
 
 def seconds_until_next_utc_hour(hour: int, *, now: datetime | None = None) -> float:
     """Seconds from ``now`` until the next occurrence of ``hour``:00 UTC.
@@ -105,6 +112,16 @@ class ScheduledTask:
     delay_provider: Callable[[], float] | None = None
 
 
+# Default lease TTL for one aligned tick, in seconds. Sized against the
+# two things it sits between: it must comfortably outlive the spread
+# between replicas reaching the same tick (measured at 116-300ms in prod
+# on 2026-09-16), and it must expire well before the same task's next
+# legitimate tick, or it suppresses real work instead of duplicate work.
+# The effective value is ``min(this, interval_seconds / 2)`` so the second
+# property holds for any cadence without this constant being retuned.
+_LEASE_TTL_S: float = 300.0
+
+
 class Scheduler:
     def __init__(self) -> None:
         self._tasks: list[ScheduledTask] = []
@@ -113,6 +130,41 @@ class Scheduler:
         # post-stop register() hole: stop() clears _running, but a later
         # register() + start() would otherwise re-spawn old tasks twice.
         self._started: bool = False
+        # Optional cross-process guard; see ``set_lease``. None means no
+        # coordination, which is this module's historical behaviour.
+        self._lease: LeaseFn | None = None
+
+    def set_lease(self, lease: LeaseFn | None) -> None:
+        """Install a cross-process guard for wall-clock aligned ticks.
+
+        ``_started`` guards a double start within ONE process; nothing in
+        this module can guard across processes, because the scheduler
+        holds no shared state and this service deliberately has no
+        datastore. So instance count is fire count: at N replicas every
+        aligned task fires N times, all inside the same second. Measured
+        in prod on 2026-09-16 at two replicas — all nine scheduled
+        endpoints fired twice per tick, and two of them exceeded
+        core-api's 45s request budget under the doubled load.
+
+        ``lease(task_name, ttl_s)`` returns True if this process may run
+        the tick. It is asked ONCE per aligned tick, after the sleep and
+        immediately before ``fn()``, so the question is asked at the
+        moment of firing rather than a sleep-length earlier.
+
+        Interval-mode tasks are deliberately NOT leased. They fire an
+        immediate tick at startup and then drift by ``fn`` duration, so
+        replicas do not converge on a shared instant the way an aligned
+        task does — there is no single tick for them to contend over, and
+        a lease keyed on the task name would just make one replica the
+        permanent winner. Every task this service registers is aligned,
+        so today that exclusion is theoretical.
+
+        Must be called before ``start()``; raises otherwise, matching
+        ``register``.
+        """
+        if self._started:
+            raise RuntimeError("cannot set a lease after scheduler has started")
+        self._lease = lease
 
     def register(
         self,
@@ -172,6 +224,41 @@ class Scheduler:
             await asyncio.gather(*self._running, return_exceptions=True)
         self._running.clear()
 
+    async def _claim(self, task: ScheduledTask) -> bool:
+        """Ask the lease whether THIS process runs this aligned tick.
+
+        FAILS OPEN on every error path, and that is the whole design: a
+        lease is an optimisation over behaviour that already tolerates
+        duplicates downstream (the consumer dedup gate and the per-tenant
+        activity gate both survive a double fire). Denying a tick because
+        the coordinator was unreachable would turn a transient outage
+        into a silently skipped nightly sweep — strictly worse than the
+        duplicate it was trying to prevent. So an unreachable lease, a
+        malformed answer and a raised exception all mean "run".
+        """
+        if self._lease is None:
+            return True
+        # Halve the cadence so a lease can never outlive into the next
+        # legitimate tick of the same task, whatever that cadence is.
+        ttl = min(_LEASE_TTL_S, task.interval_seconds / 2)
+        try:
+            granted = await self._lease(task.name, ttl)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "tick lease unavailable; running the tick unguarded",
+                exc_info=True,
+                extra={"task": task.name},
+            )
+            return True
+        if not granted:
+            logger.info(
+                "tick lease held by another instance; skipping this tick",
+                extra={"task": task.name},
+            )
+        return granted
+
     async def _run(self, task: ScheduledTask) -> None:
         aligned = task.delay_provider is not None
         while True:
@@ -181,6 +268,13 @@ class Scheduler:
                     # each cycle so fn() duration can't drift the schedule.
                     assert task.delay_provider is not None  # narrow for mypy
                     await asyncio.sleep(task.delay_provider())
+                    # Asked AFTER the sleep, so the claim is made at the
+                    # instant of firing rather than a cadence earlier.
+                    # Losing it re-enters the loop, which re-sleeps to the
+                    # NEXT occurrence — ``delay_provider`` is guaranteed
+                    # strictly-future, so this cannot hot-loop.
+                    if not await self._claim(task):
+                        continue
                 await task.fn()
                 if not aligned:
                     await asyncio.sleep(task.interval_seconds)

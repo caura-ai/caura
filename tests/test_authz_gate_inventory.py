@@ -222,7 +222,8 @@ IDENTITY_BINDERS = frozenset(
 )
 
 # Routers whose mutating surface is admin-plane: operations on the fleet, on
-# agent identity, on tenant settings, on the org itself. This is where
+# agent identity, on tenant settings, on the org itself, and on the schedule
+# that drives them. This is where
 # ``enforce_not_agent_credential`` is the house rule, and where M-25 and #1335
 # both landed.
 #
@@ -239,7 +240,15 @@ IDENTITY_BINDERS = frozenset(
 # new router cannot become exempt by default, which is how ``keystones``
 # escaped an earlier draft of this file.
 ADMIN_PLANE_ROUTERS = frozenset(
-    {"agents", "fleet", "settings", "org_deletion", "lifecycle", "skills_inbox"}
+    {
+        "agents",
+        "fleet",
+        "settings",
+        "org_deletion",
+        "lifecycle",
+        "skills_inbox",
+        "scheduler_lease",
+    }
 )
 
 # Routers with mutating routes that are deliberately NOT admin-plane. The

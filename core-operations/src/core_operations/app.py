@@ -27,6 +27,11 @@ Lifespan ordering:
    ``embed-backfill``, registers only when ``embed_backfill_enabled`` is set,
    because its Pub/Sub topic is Terraform-provisioned and firing into an
    unprovisioned topic would just error every night.
+
+   Every one of those is wall-clock aligned, so every one of them fires
+   once per live replica of this service unless something coordinates
+   across processes. ``scheduler.set_lease`` installs that coordination
+   immediately before ``start()``; see ``core_operations.lease``.
 4. Shutdown cancels all running tasks and awaits their unwind.
 """
 
@@ -40,6 +45,7 @@ from fastapi import FastAPI, HTTPException
 
 from common.structlog_config import configure_logging, reroute_third_party_loggers
 from core_operations.config import settings
+from core_operations.lease import claim_tick_lease
 
 # Configure logging at import — before the scheduler/tasks imports below AND
 # before uvicorn emits its startup lines. uvicorn imports this module during
@@ -227,6 +233,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
     _register_scheduled_tasks()
+    # Cross-process guard for the aligned ticks. Cloud Run may run more
+    # than one replica of this service, and each runs its own copy of the
+    # scheduler loop, so without this every wall-clock task fires once per
+    # replica inside the same second. Installed before ``start()`` because
+    # ``set_lease`` refuses once the scheduler is running.
+    scheduler.set_lease(claim_tick_lease)
     await scheduler.start()
     logger.info(
         "Scheduler started",
