@@ -183,7 +183,16 @@ def _make_status_checker() -> StatusChecker:
     sc = get_storage_client()
 
     async def _check(tenant_id: str, collection: str, doc_id: str) -> str | None:
-        doc = await sc.get_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id)
+        # 09/02 L-33: read=False — the PRIMARY. This is the clobber guard: it
+        # exists to skip writes against a slug an operator has already moved to
+        # active / rejected / quarantined. Reading the replica means a recent
+        # status flip may not have arrived, the check returns the OLD status (or
+        # None), and the write it was meant to prevent goes through — the guard
+        # fails in the unsafe direction, silently.
+        #
+        # ``skill_promoter``'s equivalent existence check already passes
+        # read=False for exactly this reason; only this one did not.
+        doc = await sc.get_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id, read=False)
         if doc is None:
             return None
         data = doc.get("data") if isinstance(doc, dict) else None

@@ -2013,8 +2013,16 @@ class CoreStorageClient:
         result = await self._get("/documents/collection-count", read=True, **params)
         return (result or {}).get("count", 0)
 
-    async def query_documents(self, data: dict) -> list[dict]:
-        return await self._post("/documents/query", data, read=True)  # type: ignore[return-value]
+    async def query_documents(self, data: dict, *, read: bool = True) -> list[dict]:
+        """Filtered document query. Replica by default.
+
+        ``read=False`` forces the PRIMARY, for a caller that queries rows it
+        wrote earlier in the same request — on the replica those rows may not
+        have arrived yet, and the query returns a short list rather than an
+        error, so the miss is silent. Default is unchanged, so every existing
+        caller keeps reading the replica.
+        """
+        return await self._post("/documents/query", data, read=read)  # type: ignore[return-value]
 
     async def update_document_status(
         self,
