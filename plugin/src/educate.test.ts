@@ -716,7 +716,7 @@ describe("writeEducationFiles", () => {
 
       assert.equal(result.toolsUpdated, 1, "a pre-rename tool listing must be recognized as our block");
       const tools = readFile(join(wsDir, "TOOLS.md"));
-      assert.ok(!tools.includes("memclaw_write_bulk"), "stale pre-rename body must be replaced"); // legacy-name-ok: asserts the old body is gone
+      assert.ok(!tools.includes("memclaw_write_bulk"), "stale pre-rename body must be replaced"); // legacy-name-absent: asserts the old body is gone
       assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/); // legacy-name-floor: the fence tag is a pinned on-disk contract
       assert.ok(tools.startsWith(userBefore), "user content above the legacy block must be preserved");
       assert.ok(tools.includes("## Other"), "user content below the legacy block must be preserved");
