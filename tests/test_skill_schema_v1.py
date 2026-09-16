@@ -1084,7 +1084,7 @@ class TestMigrationChain:
         """
         chain = self._load()
         heads = set(chain) - {dr for dr in chain.values() if dr is not None}
-        assert heads == {"044"}, f"Expected single head '044', got {sorted(heads)}"
+        assert heads == {"045"}, f"Expected single head '045', got {sorted(heads)}"
 
     def test_skill_factory_chain_links(self):
         chain = self._load()
@@ -1138,6 +1138,11 @@ class TestMigrationChain:
         # it concluded, nothing recorded what a person concluded, so precision was
         # unmeasurable (D11).
         assert chain.get("043") == "042", "043 must follow 042"
+        # 045 — memories.status_changed_at (09/02 M-55). A contradiction is a
+        # status flip, and the row had no timestamp for it, so outcome
+        # inference had to window on created_at and dropped evidence for any
+        # memory older than the scan window.
+        assert chain.get("045") == "044", "045 must follow 044"
 
     def test_no_plain_set_not_null_on_large_tables(self):
         """Tightening a column to NOT NULL on a large table must not full-scan
