@@ -1636,6 +1636,14 @@ class PostgresService:
             values["embedded_content_hash"] = (
                 values["content_hash"] if values["embedding"] is not None else None
             )
+        # 09/02 M-55: this generic patch path also accepts ``status`` (the
+        # docstring lists it), so it is the SECOND way a status can change and
+        # has to stamp the transition time too — otherwise a contradiction
+        # applied through here would still be invisible to the outcome window.
+        # An explicit ``status_changed_at`` in the patch wins, so a caller
+        # replaying a known transition can supply the real time.
+        if "status" in values and "status_changed_at" not in values:
+            values["status_changed_at"] = datetime.now(UTC)
         async with get_session() as session:
             # Existence check FIRST — runs even on empty / all-unknown-
             # keys patches so a PATCH on an absent or soft-deleted row
@@ -1847,7 +1855,14 @@ class PostgresService:
             exist. Existing callers ignore the return value — adding it is
             backward-compatible.
         """
-        values: dict[str, Any] = {"status": status}
+        # 09/02 M-55: stamp WHEN the status changed. A contradiction is a flip
+        # on an existing row, and that event previously had no timestamp — so
+        # the outcome-inference window had to use ``created_at`` and dropped
+        # evidence for any memory older than the scan window.
+        values: dict[str, Any] = {
+            "status": status,
+            "status_changed_at": datetime.now(UTC),
+        }
         if unset_supersedes:
             values["supersedes_id"] = None
         elif supersedes_id is not None:
@@ -9512,16 +9527,21 @@ class PostgresService:
         ANY(:contradicted_statuses)`` + a window on the status-transition
         time).
 
-        DEVIATION (Fix 2 Ph5a): the source SQL windowed on
-        ``COALESCE(m.updated_at, m.created_at)``, but the OSS ``memories``
-        table has NO ``updated_at`` column (verified against
-        ``001_initial_schema`` + the ``Memory`` model — only ``agents`` /
-        ``documents`` carry one). That reference was a latent bug against the
-        OSS schema (the extractor was only ever unit-tested with a mocked
-        ``db``, never executed against a real OSS DB). We window on
-        ``created_at`` instead — the faithful OSS-correct approximation of the
-        same intent. When a ``status_changed_at`` / ``updated_at`` column lands
-        (the CAURA-future the source docstring anticipates), swap it back in.
+        09/02 M-55: the ``status_changed_at`` column the previous note called
+        for has landed (migration 045), so the window is on the status
+        TRANSITION time — the event this signal is actually about.
+
+        Before it, this windowed on ``created_at``, which meant a memory
+        written weeks ago and contradicted TODAY fell outside the current scan
+        window and its failure evidence was dropped. Silently: "no rows" and
+        "no contradictions" are the same answer to the caller, so the signal
+        under-reported without ever erroring.
+
+        ``COALESCE(m.status_changed_at, m.created_at)`` because the column is
+        NULL on every row written before 045 and is deliberately NOT
+        backfilled — there is no source of truth for when a historical row's
+        status changed, and inventing one would fabricate evidence. The
+        fallback reproduces the old behaviour exactly for those rows.
         """
         sql = """
             SELECT
@@ -9529,12 +9549,12 @@ class PostgresService:
                 m.run_id      AS run_id,
                 m.agent_id    AS agent_id,
                 m.status      AS status,
-                m.created_at  AS observed_at
+                COALESCE(m.status_changed_at, m.created_at) AS observed_at
             FROM memories AS m
             WHERE m.tenant_id = :tenant_id
               AND m.status = ANY(CAST(:contradicted_statuses AS text[]))
-              AND m.created_at >= :w_start
-              AND m.created_at <  :w_end
+              AND COALESCE(m.status_changed_at, m.created_at) >= :w_start
+              AND COALESCE(m.status_changed_at, m.created_at) <  :w_end
               AND (CAST(:fleet_id AS text) IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
               AND (CAST(:run_id AS text) IS NULL OR m.run_id   = :run_id)
               AND (CAST(:agent_id AS text) IS NULL OR m.agent_id = :agent_id)
