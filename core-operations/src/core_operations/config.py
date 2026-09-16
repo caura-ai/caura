@@ -29,7 +29,30 @@ class Settings(BaseSettings):
     # local docker-compose service name.
     core_storage_api_url: str = "http://oss-core-storage-api:8002"
 
-    storage_http_timeout_s: float = 30.0
+    # Timeout for this service's HTTP calls, all of which go to core-api.
+    #
+    # Sized ABOVE core-api's own request budget
+    # (``core_api.config.Settings.request_timeout_seconds``, 45s, enforced by
+    # RequestTimeoutMiddleware) so a slow sweep is WAITED OUT rather than
+    # raced, and below the 120s gateway cap. tests/ asserts that ordering
+    # against both real values rather than against a copy of either.
+    #
+    # Racing it is not a cosmetic problem. When the client gives up first the
+    # POST raises, and ``_fire_fanout`` returns from the exception handler
+    # WITHOUT reading the response body — where ``failed`` lives. That count is
+    # the partial-sweep detector added after 2026-09-15, when every action
+    # reported success while 38 orgs were dropped. A client timeout under the
+    # server budget therefore disables that detector on precisely the slow
+    # sweeps it exists to catch. Measured in prod on 2026-09-16: both archive
+    # actions raised at 01:00:30, 28s after the 01:00:02 tick, while core-api
+    # went on to finish the same work at 01:00:46.
+    #
+    # Was ``storage_http_timeout_s``, 30.0. Nothing in this service talks to
+    # core-storage-api — all three call sites POST to core-api — so the name
+    # described a dependency that is not there and the value was inherited
+    # from one. Checked before renaming that no deploy workflow sets
+    # STORAGE_HTTP_TIMEOUT_S, so nothing loses an override.
+    core_api_http_timeout_s: float = 60.0
 
     # CAURA-655: core-operations doesn't talk to the DB directly — its
     # cron ticks POST to core-api's ``/admin/lifecycle/fanout/<action>``

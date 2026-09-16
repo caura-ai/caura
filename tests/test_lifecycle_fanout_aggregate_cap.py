@@ -1,8 +1,9 @@
 """The nightly lifecycle fanout must not oversubscribe core-storage-api.
 
-Both tests here cover the same 2026-09-15 incident from its two ends: the
-burst that dropped 38 orgs, and the log line that reported the sweep as
-clean while it happened.
+These tests cover the same 2026-09-15 incident from three ends: the burst
+that dropped 38 orgs, the log line that reported the sweep as clean while it
+happened, and the client timeout that stops that log line from ever being
+reached.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ async def test_fanout_budget_is_shared_across_concurrent_actions() -> None:
     The scheduler fires every lifecycle action on the same cron minute. While
     the semaphore was constructed inside the request handler each of those got
     a fresh budget, so the ceiling the storage writer actually saw was
-    ``actions x _FANOUT_CONCURRENCY`` — 8 x 50 in production. That is what
+    ``actions x _FANOUT_CONCURRENCY`` — 6 x 50 in production. That is what
     pushed the writer past its warm capacity and made ``audit_begin`` raise
     for 38 orgs, none of which left an audit row to count.
 
@@ -190,3 +191,37 @@ def test_a_bad_concurrency_value_does_not_take_down_the_api() -> None:
         # Restore the module to its real configuration for every later test.
         os.environ.pop("LIFECYCLE_FANOUT_CONCURRENCY", None)
         importlib.reload(lifecycle)
+
+
+@pytest.mark.unit
+def test_core_operations_waits_out_core_api_request_budget() -> None:
+    """core-operations must not give up before core-api's own deadline.
+
+    Reads BOTH live values rather than asserting a copy of either, because a
+    copy is exactly how this drifts back: raise one side and a hardcoded
+    threshold keeps passing while the mismatch returns.
+
+    The ordering is load-bearing in one direction only. If the client budget
+    is the smaller of the two, a slow sweep surfaces as an httpx exception,
+    and ``_fire_fanout`` returns from its exception handler without reading
+    the response body — so ``failed``, the partial-sweep detector the test
+    above exists to protect, is never read at all. The detector is disabled
+    on precisely the runs it was written for.
+
+    Observed in prod on 2026-09-16 before the fix: both archive actions raised
+    at 01:00:30, 28 seconds into a 30s client budget, while core-api completed
+    the same work at 01:00:46 — inside its own 45s budget, and unheard.
+    """
+    from core_api.config import settings as core_api_settings
+    from core_operations.config import settings as ops_settings
+
+    client_budget = ops_settings.core_api_http_timeout_s
+    server_budget = core_api_settings.request_timeout_seconds
+
+    assert client_budget > server_budget, (
+        f"core-operations gives up after {client_budget}s but core-api is "
+        f"allowed {server_budget}s. The caller must outlast the callee, or a "
+        f"slow fanout is reported as a transport error and its per-org "
+        f"failure count is never read. Raise core_api_http_timeout_s in "
+        f"core-operations/src/core_operations/config.py."
+    )

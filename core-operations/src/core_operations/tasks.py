@@ -44,7 +44,7 @@ async def _fire_fanout(action: str) -> None:
             extra={"action": action},
         )
 
-    timeout = httpx.Timeout(settings.storage_http_timeout_s)
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.post(url, headers=headers)
@@ -221,7 +221,7 @@ async def run_embedding_coverage_tick() -> None:
             "core-operations: CORE_API_ADMIN_API_KEY unset; embedding-coverage sample will be unauthorised",
         )
 
-    timeout = httpx.Timeout(settings.storage_http_timeout_s)
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.get(url, headers=headers)
@@ -390,9 +390,11 @@ async def run_interviewer_schedule_tick() -> None:
             "core-operations: CORE_API_ADMIN_API_KEY unset; interviewer schedule run will be unauthorised",
         )
 
-    # Scheduling is queue-only (no LLM work inline) — the storage default
-    # timeout is plenty.
-    timeout = httpx.Timeout(settings.storage_http_timeout_s)
+    # Scheduling is queue-only (no LLM work inline), so this one never
+    # approaches the budget; it shares the setting because it is a core-api
+    # call and the ordering against core-api's own deadline has to hold for
+    # every one of them, not just the slow one.
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.post(url, headers=headers)

@@ -40,6 +40,11 @@ class _StubAsyncClient:
         self._response = response
         self._raise = raise_on_post
         self.calls: list[tuple[str, dict | None]] = []
+        # Kwargs the production code passed to ``httpx.AsyncClient(...)``.
+        # Recorded so a test can assert the TIMEOUT reaches the client: the
+        # call sites read it from settings, and nothing else here would notice
+        # that wiring being dropped or pointed at the wrong field.
+        self.init_kwargs: dict[str, Any] = {}
 
     async def __aenter__(self) -> _StubAsyncClient:
         return self
@@ -73,11 +78,12 @@ async def _patch_client(
     raise_on_post: Exception | None = None,
 ) -> AsyncIterator[_StubAsyncClient]:
     stub = _StubAsyncClient(response=response, raise_on_post=raise_on_post)
-    monkeypatch.setattr(
-        tasks.httpx,
-        "AsyncClient",
-        lambda *a, **kw: stub,
-    )
+
+    def _construct(*_a: Any, **kw: Any) -> _StubAsyncClient:
+        stub.init_kwargs = kw
+        return stub
+
+    monkeypatch.setattr(tasks.httpx, "AsyncClient", _construct)
     yield stub
 
 
@@ -599,3 +605,26 @@ async def test_alert_survives_a_storage_service_without_the_predicate(monkeypatc
     assert len(alerts) == 1, "the alert must still fire without the predicate field"
     assert alerts[0].missing_provenance == 2
     assert alerts[0].predicate is None
+
+
+@pytest.mark.asyncio
+async def test_fanout_client_uses_the_core_api_timeout(monkeypatch: pytest.MonkeyPatch):
+    """The fanout POST is built with the core-api budget, not a default.
+
+    Guards the wiring rather than the number: the value itself is checked
+    against core-api's real budget in tests/test_lifecycle_fanout_aggregate_cap.py.
+    What this catches is the call site quietly losing its ``timeout=`` or
+    reading some other field — which restores the 30s behaviour with the
+    setting still present and correct, and nothing red.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, {"action": "archive-expired", "published": 1, "failed": 0})
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_archive_expired_tick()
+
+    timeout = stub.init_kwargs.get("timeout")
+    assert timeout is not None, "fanout client was constructed without a timeout"
+    assert timeout.read == settings.core_api_http_timeout_s
+    assert timeout.connect == settings.core_api_http_timeout_s
