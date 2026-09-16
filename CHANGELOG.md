@@ -10,6 +10,23 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.13.0](https://github.com/caura-ai/caura/compare/backend-v3.12.5...backend-v3.13.0) (2026-09-16)
+
+
+### Features
+
+* **ratchet:** add the absence-assertion marker ([#1544](https://github.com/caura-ai/caura/issues/1544)) ([2ab011a](https://github.com/caura-ai/caura/commit/2ab011ab75fe31264d32abeb5c7e65aabf2ebddc))
+
+
+### Bug Fixes
+
+* **forge:** don't re-buy the mining half when promotion blips (09/02 L-34) ([#1539](https://github.com/caura-ai/caura/issues/1539)) ([2a9a78c](https://github.com/caura-ai/caura/commit/2a9a78cebda22315ee885dc3c08158f2583dbf24))
+
+
+### Documentation
+
+* **benchmarks:** publish the September LongMemEval run, 72.5% -&gt; 92.2% ([#1545](https://github.com/caura-ai/caura/issues/1545)) ([ccd11eb](https://github.com/caura-ai/caura/commit/ccd11eb85d15dc936a2ba2f6abaa60f47e323162))
+
 ## [3.12.5](https://github.com/caura-ai/caura/compare/backend-v3.12.4...backend-v3.12.5) (2026-09-16)
 
 
