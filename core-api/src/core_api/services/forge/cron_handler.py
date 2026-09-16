@@ -366,7 +366,6 @@ async def run_forge_cron_tick(
     # every tick is indistinguishable from one with nothing to promote, for as
     # long as nobody reads the logs.
     promotion_ok = True
-    promotion_error: str | None = None
     try:
         promote_result = await promote_pending_candidates(
             tenant_id=tenant_id,
@@ -382,19 +381,18 @@ async def run_forge_cron_tick(
         )
     except Exception as exc:
         logger.exception(
-            "forge cron tick: promotion half failed (tenant=%s fleet=%s) — "
-            "%d candidate(s) from this tick are written and will be promoted "
-            "on a later tick; the mining half is NOT re-run",
+            "forge cron tick: promotion half failed (tenant=%s fleet=%s "
+            "error=%s) — %d candidate(s) from this tick are written and will "
+            "be promoted on a later tick; the mining half is NOT re-run",
             tenant_id,
             fleet_id,
+            # Type name, not ``str(exc)``: the full exception is already in
+            # this record's traceback, and some ``__str__`` implementations
+            # carry hostnames, URLs or request fragments.
+            type(exc).__name__,
             forge_result.candidates_written,
         )
         promotion_ok = False
-        # Type name only. The full exception is in the log line above, and this
-        # string reaches an audit row / log field — some ``__str__``
-        # implementations carry hostnames, URLs or request fragments. The type
-        # is what a dashboard branches on; the detail belongs where it is.
-        promotion_error = type(exc).__name__
         # Zeroed rather than omitted, so ``stats`` keeps one shape whether the
         # half ran or not — the log line and any downstream reader index these
         # keys directly.
@@ -431,11 +429,19 @@ async def run_forge_cron_tick(
         # alerting on.
         "skipped_internal_error": forge_result.candidates_skipped_internal_error,
         "skipped_existing": forge_result.candidates_skipped_existing,
-        # 09/02 L-34. Without these, a promotion half that raises every tick
+        # 09/02 L-34. Without this, a promotion half that raises every tick
         # returns the same zeros as one with nothing to promote — the mining
         # counters above still look healthy, so the tick reads fine.
+        #
+        # The bool only. The interview sweep carries a companion
+        # ``jobs_sweep_error`` string, but its summary is an untyped HTTP
+        # response body; this dict is ``dict[str, int]`` and feeds
+        # ``lifecycle_audit``, which does ``int(stats.get(...))``. Widening it
+        # to admit a string just moves the type error to that caller. ``bool``
+        # is an ``int`` subtype, so the alertable signal fits as-is, and the
+        # exception TYPE is in the log line below next to the full traceback —
+        # which is where a reader chasing it would look anyway.
         "promotion_ok": promotion_ok,
-        "promotion_error": promotion_error,
     }
     logger.info(
         "forge cron tick: tenant=%s fleet=%s window=[%s,%s] %s",
