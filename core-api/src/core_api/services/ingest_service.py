@@ -17,9 +17,10 @@ import httpx
 from fastapi import HTTPException
 
 from common.embedding import get_embedding
+from common.enrichment.constants import DEFAULT_MEMORY_TYPE
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES
+from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES, MEMORY_TYPES_WRITE
 from core_api.providers._retry import call_with_fallback
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -251,21 +252,16 @@ later without the surrounding document.
      - 0.0 = filler / restatement
    Be honest. Anything below 0.5 will be dropped automatically.
 
-7. **memory_type.** Pick the most specific tag. When in doubt prefer the
-   left option in each pair:
-     - fact         — a stable proposition about the world ("Iron melts at 1538°C")
-     - decision     — a chosen course of action by an identified actor
-     - task         — work item assigned but not yet finished
-     - plan         — intended future action stated as plan
-     - outcome      — past event/result; if you'd write "X happened" or "Y
-                      was completed", use this (not "fact")
-     - preference   — a stated like/dislike
-     - intention    — what someone aims to do
-     - commitment   — explicit promise
-     - action       — something done (granular than outcome)
-     - episode      — narrative event tied to a specific moment
-     - semantic     — definitional/conceptual relationship
-     - cancellation — explicit revocation of a prior plan/commitment
+7. **memory_type.** Pick the most specific tag. Use ONLY these values:
+     - fact       — a stable proposition about the world ("Iron melts at 1538°C"),
+                    including definitional and conceptual relationships
+     - decision   — a chosen course of action by an identified actor
+     - task       — work item assigned but not yet finished
+     - plan       — intended future action, an aim, or an explicit promise
+     - preference — a stated like/dislike
+     - action     — something done; also use this for a completed past
+                    event or result ("X happened", "Y was completed")
+     - episode    — narrative event tied to a specific moment
 
 ## Quantity guidance
 
@@ -1398,6 +1394,39 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                 f"Invalid suggested_type on facts {[i for i, _ in bad]}: "
                 f"{[t for _, t in bad]}. Allowed: {sorted(MEMORY_TYPES)}"
             ),
+        )
+
+    # ---- 09/02 M-42: coerce types a caller may not WRITE ----
+    # The gate above rejects slugs outside the vocabulary entirely. It does not
+    # catch the band between: ``outcome``/``insight``/``rule`` are server-
+    # reserved ("authored only by internal flows and rejected at the write
+    # boundary") and ``semantic``/``intention``/``commitment``/``cancellation``
+    # are classifier-deprecated, yet all seven are valid ``MEMORY_TYPES``. They
+    # passed straight through to ``memory_type=fact.suggested_type``, so
+    # auto-chunk children minted reserved-type rows from caller content — the
+    # exact thing ``MEMORY_TYPES_WRITE`` exists to prevent.
+    #
+    # COERCED, not rejected, and deliberately so: the ingest prompt itself
+    # offered these types (``outcome`` even preferentially), so a 422 here
+    # would reject the server's OWN prior output and break every preview
+    # generated before this fix that is still being round-tripped. The prompt
+    # is corrected in the same change, which stops new ones appearing.
+    #
+    # Same rule and same reason as ``crystallizer_service`` (CAURA-717): a type
+    # outside ``MEMORY_TYPES_WRITE`` is coerced to the default so a stray LLM
+    # completion cannot smuggle a reserved slug past the write pipeline.
+    coerced = [
+        (i, f.suggested_type) for i, f in enumerate(facts) if f.suggested_type not in MEMORY_TYPES_WRITE
+    ]
+    if coerced:
+        for i, _ in coerced:
+            facts[i] = facts[i].model_copy(update={"suggested_type": DEFAULT_MEMORY_TYPE})
+        logger.info(
+            "ingest_commit: coerced %d non-writeable suggested_type value(s) to %r (run_id=%s): %s",
+            len(coerced),
+            DEFAULT_MEMORY_TYPE,
+            run_id,
+            sorted({t for _, t in coerced}),
         )
 
     t0 = time.perf_counter()
