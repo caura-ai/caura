@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.12.5](https://github.com/caura-ai/caura/compare/backend-v3.12.4...backend-v3.12.5) (2026-09-16)
+
+
+### Bug Fixes
+
+* **forge:** read the primary for the clobber guard and same-tick promotion (09/02 L-33) ([#1538](https://github.com/caura-ai/caura/issues/1538)) ([276d857](https://github.com/caura-ai/caura/commit/276d857eccd7b44fe5ab4a2d64fc35187fff36a0))
+* **ingest:** actually embed the parent batch summary (09/02 M-45) ([#1528](https://github.com/caura-ai/caura/issues/1528)) ([f589592](https://github.com/caura-ai/caura/commit/f58959262c7abe8ba17ec7a75f288d27f2dc77ab))
+* **ingest:** enforce the token cap the paragraph splitter promises (09/02 M-41) ([#1523](https://github.com/caura-ai/caura/issues/1523)) ([07cfc0a](https://github.com/caura-ai/caura/commit/07cfc0a90e80ebee1f9be9d16b6a55de861c0fce))
+* **ingest:** stop minting server-reserved memory types from caller content (09/02 M-42) ([#1533](https://github.com/caura-ai/caura/issues/1533)) ([c660aab](https://github.com/caura-ai/caura/commit/c660aabc71115502a70054cdba8a47298b5b7a53))
+* **interview:** contain a tenant's settings failure so the sweep finishes (09/02 M-15) ([#1535](https://github.com/caura-ai/caura/issues/1535)) ([e8d1ec7](https://github.com/caura-ai/caura/commit/e8d1ec7e7a3119f20dc2e3ef7a9d2c91bad5d4bc))
+* **operations:** wait out core-api's request budget instead of racing it ([#1540](https://github.com/caura-ai/caura/issues/1540)) ([50442c5](https://github.com/caura-ai/caura/commit/50442c5bba076f7212e574751b63e67dd62626c0))
+* **outcome:** window contradiction evidence on the status flip, not creation (09/02 M-55) ([#1537](https://github.com/caura-ai/caura/issues/1537)) ([ac7ffb8](https://github.com/caura-ai/caura/commit/ac7ffb8c939fc2fec13a69408baea891387ee698))
+
 ## [3.12.4](https://github.com/caura-ai/caura/compare/backend-v3.12.3...backend-v3.12.4) (2026-09-15)
 
 
