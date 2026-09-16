@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.14.0](https://github.com/caura-ai/caura/compare/backend-v3.13.0...backend-v3.14.0) (2026-09-16)
+
+
+### Features
+
+* **operations:** lease each scheduled tick so replicas fire it once ([#1546](https://github.com/caura-ai/caura/issues/1546)) ([c1d21a6](https://github.com/caura-ai/caura/commit/c1d21a6bdc1a242c9c8c6b1c8f3398ff486228f0))
+
 ## [3.13.0](https://github.com/caura-ai/caura/compare/backend-v3.12.5...backend-v3.13.0) (2026-09-16)
 
 
