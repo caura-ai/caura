@@ -75,6 +75,9 @@ def seams(monkeypatch):
 
     async def _clear_notes(tenant_id, agent_id):
         s.clear_notes.append((tenant_id, agent_id))
+        # True = "the backend was reached". The route refuses to answer
+        # {"ok": true} for a clear that was not, so the double has to say.
+        return True
 
     async def _read_bulletin(tenant_id, fleet_id, limit=100):
         s.read_bulletin.append((tenant_id, fleet_id))
@@ -82,6 +85,7 @@ def seams(monkeypatch):
 
     async def _clear_bulletin(tenant_id, fleet_id):
         s.clear_bulletin.append((tenant_id, fleet_id))
+        return True
 
     async def _promote(**kwargs):
         s.promoted.append(kwargs)

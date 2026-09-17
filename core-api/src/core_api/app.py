@@ -35,7 +35,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from common import permanent_failure
 from common.events.factory import get_event_bus
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
-from core_api.constants import VERSION, is_mcp_path
+from core_api.constants import STM_WRITE_ROUTE_NOTE, VERSION, is_mcp_path
 from core_api.consumer import register_consumers
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
 from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
@@ -607,9 +607,11 @@ async def lifespan(app):
 # CAP-01 / F6. Tag-level labelling for capabilities whose REST surface is not
 # what its presence in this spec implies. Only STM qualifies today: it is
 # advertised here, gated on a server setting hosted tenants cannot reach, and
-# has no REST write route at all. The per-operation text lives in
+# has no DEDICATED REST write route. The per-operation text lives in
 # ``routes/stm.py``; this is what a reader sees in the docs sidebar before
-# they open an operation.
+# they open an operation — which is why the sentence about the write path is
+# shared with that module rather than restated here. It used to be restated,
+# and said something untrue for longer than the copy that got corrected.
 OPENAPI_TAGS = [
     {
         "name": "stm",
@@ -617,8 +619,8 @@ OPENAPI_TAGS = [
             "**Plugin-only — not available over hosted REST.** Short-term "
             "memory is served by the OpenClaw plugin. These operations are "
             "gated on the server-side `USE_STM` setting, which is off in the "
-            "hosted deployment and is not per-tenant, and there is no REST "
-            "write route for STM at all. Use `/memories` and `/search` for "
+            "hosted deployment and is not per-tenant. "
+            f"{STM_WRITE_ROUTE_NOTE} Use `/memories` and `/search` for "
             "durable memory."
         ),
     },

@@ -223,6 +223,50 @@ MEMORY_VISIBILITIES_PATTERN = (
     f"^({MEMORY_VISIBILITY_SCOPE_AGENT}|{MEMORY_VISIBILITY_SCOPE_TEAM}|{MEMORY_VISIBILITY_SCOPE_ORG})$"
 )
 
+# The refusal both STM doors give when ``use_stm`` is off — the read/clear/
+# promote routes (``routes.stm._check_stm_enabled``) and the write path
+# (``services.memory_service``, reached by POST /memories with
+# write_mode='stm').
+#
+# ONE constant because the two had drifted. The read door's text was rewritten
+# once already, on the grounds that "Set USE_STM=true" is advice the reader it
+# reaches cannot act on — USE_STM is a server setting and the caller hitting
+# this is a hosted one. The write door kept the old wording, so a single
+# capability had two doors telling the caller different things to do next.
+# Sharing the string is what stops that recurring; agreement enforced by
+# comparing two copies of the text can only ever notice the drift after it
+# happens.
+# How short-term memory is written over REST — one sentence, because it was
+# three, and two of them were wrong.
+#
+# "There is no REST write route for STM at all" was published in the OpenAPI
+# TAG (app.py, what a reader sees in the sidebar before opening an operation),
+# in the per-operation description (routes/stm.py) and in a test's own
+# docstring. It was true of the dedicated routes and false of the capability:
+# POST /memories with write_mode='stm' runs the STM write pipeline. It is gated
+# on the same USE_STM setting, so the claim held for the hosted deployment and
+# was false for exactly the self-hosted readers its last sentence addressed.
+#
+# app.py's SAFE-01 note already argues this case for its own text: "the same
+# fact written twenty-five times has twenty-five chances to go stale, and the
+# copy that gets forgotten is the one someone reads."
+STM_WRITE_ROUTE_NOTE = (
+    "There are no dedicated STM write routes (`POST /stm/notes` and "
+    "`POST /stm/bulletin` return 405). Short-term memory is written over REST "
+    "with `POST /memories` and `write_mode='stm'`, which returns an "
+    "`STMWriteResponse` rather than a `MemoryOut`, and is gated on the same "
+    "`USE_STM` setting as these operations."
+)
+
+STM_DISABLED_DETAIL = (
+    "Short-term memory is not available on this deployment. STM is "
+    "plugin-only: it is served by the OpenClaw plugin, and the hosted "
+    "REST API cannot enable it (USE_STM is a server setting, not a "
+    "per-tenant one). Self-hosted operators can set USE_STM=true; "
+    "hosted callers should use the durable memory endpoints "
+    "(/memories, /search) instead."
+)
+
 MAX_CONTENT_LENGTH = 10000
 CHUNKING_THRESHOLD_CHARS = 2000  # content above this triggers auto-chunking
 MAX_QUERY_LENGTH = 5000

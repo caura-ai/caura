@@ -1095,7 +1095,20 @@ async def get_contradictions(
     }
 
 
-@router.post("/memories", response_model=MemoryOut, status_code=201)
+# Two shapes, and the document now says so. The STM branch returns
+# ``STMWriteResponse`` through a raw ``JSONResponse``, which bypasses
+# ``response_model`` — so the SERVER was always right here and only the
+# published contract was wrong: it advertised one 201 shape for an endpoint
+# with two, which a generated client discovers by failing to parse a
+# SUCCESSFUL write.
+#
+# Written as a union on ``response_model`` rather than an extra ``responses``
+# entry. Both produce an anyOf, but adding it alongside ``response_model``
+# leaves FastAPI emitting a ``$ref`` WITH an ``anyOf`` sibling, which
+# generators are free to read either way — replacing one ambiguity with
+# another is not a fix. The LTM path still validates: a ``MemoryOut`` cannot
+# satisfy ``STMWriteResponse``, which requires target/ttl/posted_at.
+@router.post("/memories", response_model=MemoryOut | STMWriteResponse, status_code=201)
 @write_limit
 async def write_memory(
     request: Request,

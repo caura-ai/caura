@@ -907,10 +907,14 @@ async def _run_write_pipeline(data: MemoryCreate, *, is_inferred: bool = False) 
         from core_api.config import settings as _stm_settings
 
         if not _stm_settings.use_stm:
-            raise HTTPException(
-                status_code=422,
-                detail="STM is not enabled. Set USE_STM=true to enable short-term memory.",
-            )
+            # The same refusal the read door gives, from the same constant —
+            # see ``STM_DISABLED_DETAIL``. This copy used to carry the older
+            # "Set USE_STM=true" wording that the read door had already been
+            # rewritten to drop, so the two doors to one capability told the
+            # caller different things to do next.
+            from core_api.constants import STM_DISABLED_DETAIL
+
+            raise HTTPException(status_code=422, detail=STM_DISABLED_DETAIL)
         # Resolve config so the deterministic governance gate runs on STM too.
         # STM bypasses enrichment, so only the deterministic scan applies (no
         # LLM free-form / business-relevance signal) — a scoped limitation.

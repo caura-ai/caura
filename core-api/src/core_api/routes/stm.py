@@ -5,11 +5,18 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
+from core_api.constants import (
+    MAX_CONTENT_LENGTH,
+    MEMORY_VISIBILITIES_PATTERN,
+    STM_DISABLED_DETAIL,
+    STM_WRITE_ROUTE_NOTE,
+    MemoryType,
+)
 from core_api.errors import (
     AUTH_AGENT_TRUST_TOO_LOW,
     AUTH_TENANT_MISMATCH,
@@ -31,10 +38,19 @@ router = APIRouter(tags=["stm"])
 # STM is advertised here and reachable nowhere. Three facts, all verified
 # against a running stack:
 #
-#   1. There is no REST WRITE route. POST /stm/notes and POST /stm/bulletin
-#      do not exist, so a caller who reads these docs and tries to put
-#      anything into short-term memory gets a bare 405 with no explanation.
-#      Writing is plugin-only.
+#   1. There is no dedicated REST WRITE route. POST /stm/notes and POST
+#      /stm/bulletin do not exist, so a caller who reads these docs and tries
+#      to put anything into short-term memory THERE gets a bare 405 with no
+#      explanation.
+#
+#      What the original wording went on to claim — that nothing can be put
+#      into STM over REST at all — was not true, and the published text said
+#      so for as long as it stood. POST /memories with write_mode='stm' runs
+#      the STM write pipeline and stores the entry; it is gated on the same
+#      USE_STM setting, so the claim held for the hosted deployment (where the
+#      gate is off) and was false for exactly the self-hosted readers the last
+#      sentence was addressed to. A doc that is accidentally right about the
+#      configuration nobody reading it is running is the harder kind to catch.
 #   2. Every read, delete and promote below is gated on ``USE_STM``, which is
 #      off by default and is not tenant-toggleable — the setting appears
 #      nowhere in the hosted deployment, so a hosted customer cannot turn it
@@ -53,10 +69,8 @@ _PLUGIN_ONLY = (
     "served by the OpenClaw plugin, not by this API. This operation is gated "
     "on the server-side `USE_STM` setting, which is off in the hosted "
     "deployment and cannot be enabled per tenant; it returns 422 there. "
-    "There is also no REST write route for STM (`POST /stm/notes` and "
-    "`POST /stm/bulletin` return 405), so nothing can be put into short-term "
-    "memory over REST even where reads are enabled. Self-hosted operators who "
-    "set `USE_STM=true` get the read, clear and promote operations only."
+    f"{STM_WRITE_ROUTE_NOTE} Self-hosted operators who set `USE_STM=true` get "
+    "these read, clear and promote operations as well."
 )
 
 
@@ -99,6 +113,22 @@ def _reject_reserved_memory_type(memory_type: str | None) -> None:
     )
 
 
+def _require_cleared(cleared: bool) -> None:
+    """Refuse to answer ``{"ok": true}`` for a delete that never reached the
+    backend.
+
+    The same rule the STM WRITE path owes, on the verb where breaking it is
+    more alarming: a caller told its notes are gone, whose notes are still
+    there on the next read, has no reason to try again. 503 rather than 500 —
+    the request was fine and retrying is the right move.
+    """
+    if not cleared:
+        raise HTTPException(
+            status_code=503,
+            detail=("Short-term memory is temporarily unavailable and nothing was cleared. Retry shortly."),
+        )
+
+
 def _check_stm_enabled() -> None:
     """Reject with a message the reader can actually act on.
 
@@ -111,17 +141,7 @@ def _check_stm_enabled() -> None:
     no way to reach.
     """
     if not settings.use_stm:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Short-term memory is not available on this deployment. STM is "
-                "plugin-only: it is served by the OpenClaw plugin, and the hosted "
-                "REST API cannot enable it (USE_STM is a server setting, not a "
-                "per-tenant one). Self-hosted operators can set USE_STM=true; "
-                "hosted callers should use the durable memory endpoints "
-                "(/memories, /search) instead."
-            ),
-        )
+        raise HTTPException(status_code=422, detail=STM_DISABLED_DETAIL)
 
 
 def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) -> str:
@@ -240,7 +260,7 @@ async def clear_notes(
     auth.enforce_self_agent(agent_id)
     from core_api.services.stm_service import clear_notes
 
-    await clear_notes(tenant_id, agent_id)
+    _require_cleared(await clear_notes(tenant_id, agent_id))
     return {"ok": True, "tenant_id": tenant_id, "agent_id": agent_id}
 
 
@@ -284,7 +304,7 @@ async def clear_bulletin(
     tenant_id = _require_tenant(auth, tenant_id)
     from core_api.services.stm_service import clear_bulletin
 
-    await clear_bulletin(tenant_id, fleet_id)
+    _require_cleared(await clear_bulletin(tenant_id, fleet_id))
     return {"ok": True, "tenant_id": tenant_id, "fleet_id": fleet_id}
 
 
@@ -294,13 +314,38 @@ async def clear_bulletin(
 
 
 class PromoteRequest(BaseModel):
+    """The promote body, declaring the constraints it always had.
+
+    Every field below is handed to ``MemoryCreate`` by ``stm_service.promote``,
+    and MemoryCreate has enforced these three rules all along — it just
+    enforced them INSIDE the handler, where a ``ValidationError`` is an
+    unhandled exception rather than a request-parsing failure. So a bad
+    ``memory_type``, a bad ``visibility``, or over-long content answered 500:
+    the server reporting its own fault for what was squarely a malformed
+    request, and (being a 5xx) inviting the client to retry something that can
+    never succeed.
+
+    Declaring them here moves the refusal to where FastAPI can make it — a 422
+    with the offending field named — and, because this is a published schema,
+    puts the same rules in the OpenAPI document where a caller can read them
+    before sending.
+
+    The VALUES are shared — the constants here are the ones MemoryCreate
+    itself uses, so the two cannot come to disagree about what the limit is.
+    Coverage is a separate question and is not automatic: these constraints are
+    restated per model, which is this repo's idiom (BulkMemoryItem's comment in
+    schemas.py makes deliberate divergence between the write models explicit
+    policy), so a constraint MemoryCreate gains later on a shared field does
+    not arrive here on its own.
+    """
+
     model_config = STRICT_WRITE_BODY
 
-    agent_id: str
-    content: str
+    agent_id: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     fleet_id: str | None = None
-    memory_type: str | None = None
-    visibility: str | None = None
+    memory_type: MemoryType | None = None
+    visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
 
 
 @router.post("/stm/promote", description=_PLUGIN_ONLY)
