@@ -46,7 +46,7 @@
     "prepublishOnly": "tsc"
   },
   "devDependencies": {
-    "@types/node": "^20",
-    "typescript": "^5.4"
+    "@types/node": "^26",
+    "typescript": "^7.0"
   }
 }
