@@ -20,7 +20,9 @@ behavior — see :class:`ScanFinding`):
   5. **PII** (SSN / credit card / phone / email) in content / evidence
      (``warn``; redact-on-display flag set by the inbox renderer).
   6. **memory-id stuffing** — more than 20 unique cited memory ids in
-     ``data.evidence.memory_ids`` (``warn``; capped at 20 on render).
+     ``data.cites`` (the field Forge writes) or ``data.evidence.memory_ids``
+     (the dict shape an external writer may use); ``warn``, capped at 20 on
+     render.
   7. **body size** — UTF-8 byte length of ``data.content`` exceeds
      ``body_max_bytes`` — ``fatal=True``.
   8. **description size** — UTF-8 byte length of ``data.description``
@@ -479,22 +481,50 @@ def _scan_pii(text: str | None, field_name: str) -> Iterable[ScanFinding]:
 
 
 # ── Check #6 — memory-id stuffing ──────────────────────────────────
-def _scan_memory_id_stuffing(evidence: dict | None) -> Iterable[ScanFinding]:
-    if not isinstance(evidence, dict):
-        return
-    mids = evidence.get("memory_ids")
-    if not isinstance(mids, list):
-        return
-    n_unique = len({m for m in mids if isinstance(m, str)})
+def _scan_memory_id_stuffing(data: dict) -> Iterable[ScanFinding]:
+    """Warn when a doc cites more memory ids than the inbox will render.
+
+    09/02 L-35: this used to take ``evidence`` and read
+    ``evidence["memory_ids"]``, guarded by ``isinstance(evidence, dict)``. The
+    only production writer is Forge, and its distill schema declares
+    ``evidence`` as a STRING — "a 2-3 sentence human-readable rationale"
+    (``distill_prompt``). So the isinstance guard returned on every real doc
+    and the check never fired once.
+
+    Meanwhile the ids it was meant to bound live at ``data["cites"]``
+    (``all_memory_ids`` in ``forge_service``), top-level and unguarded — so a
+    runaway or adversarial distillation could stuff hundreds there with no
+    warning, which is precisely what this check exists to surface.
+
+    Both locations are read now. ``cites`` is the real one; the
+    ``evidence.memory_ids`` path stays because the documents API accepts
+    arbitrary ``data``, so an external writer may legitimately use the dict
+    shape this check was originally written against. Ids are unioned rather
+    than counted per-field: the cap describes what the renderer will show for
+    the doc, not per-location quotas.
+    """
+    seen: set[str] = set()
+
+    cites = data.get("cites")
+    if isinstance(cites, list):
+        seen.update(m for m in cites if isinstance(m, str))
+
+    evidence = data.get("evidence")
+    if isinstance(evidence, dict):
+        mids = evidence.get("memory_ids")
+        if isinstance(mids, list):
+            seen.update(m for m in mids if isinstance(m, str))
+
+    n_unique = len(seen)
     if n_unique > MAX_MEMORY_IDS_BEFORE_WARN:
         yield ScanFinding(
             code="MEMORY_ID_STUFFING",
             severity="warn",
             message=(
-                f"evidence.memory_ids has {n_unique} unique cites "
+                f"{n_unique} unique cited memory ids "
                 f"(> {MAX_MEMORY_IDS_BEFORE_WARN} cap); inbox renderer will truncate"
             ),
-            locator="data.evidence.memory_ids",
+            locator="data.cites",
         )
 
 
@@ -626,7 +656,7 @@ async def scan_skill_doc(
         findings.extend(_scan_path_violations(support_files, "data.support_files"))
 
     # Check #6 — memory-id stuffing.
-    findings.extend(_scan_memory_id_stuffing(evidence))
+    findings.extend(_scan_memory_id_stuffing(data))
 
     # Checks #7 + #8 — size caps.
     findings.extend(
