@@ -12,6 +12,7 @@ import logging
 from types import SimpleNamespace
 
 from core_api.clients.storage_client import get_storage_client
+from core_api.constants import CONTRADICTED_STATUSES
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.schemas import ScoreParts
@@ -122,7 +123,7 @@ class LoadAndSerialize:
             row.Memory.id if hasattr(row.Memory, "id") else row.Memory.get("id")
             for row in rows
             if (row.Memory.status if hasattr(row.Memory, "status") else row.Memory.get("status"))
-            in ("outdated", "conflicted")
+            in CONTRADICTED_STATUSES
         ]
         if outdated_ids:
             stale_total = len(outdated_ids)

@@ -24,7 +24,7 @@ from uuid import UUID
 from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.constants import SINGLE_VALUE_PREDICATES
+from core_api.constants import CONTRADICTED_STATUSES, SINGLE_VALUE_PREDICATES
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 from core_api.schemas import ContradictionInfo
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
@@ -2558,9 +2558,9 @@ async def _attempt_entity_retraction(
     # that discards someone else's decision to undo our own.
     #
     # Mirrors the guard the content-edit reset already applies for exactly this
-    # reason (``memory_service``: reset to "active" only ``if mem["status"] in
-    # ("outdated", "conflicted")``); the two paths clear the same state and had
-    # no business disagreeing.
+    # reason (``memory_service._revert_superseded_row``); the two paths clear the
+    # same state and had no business disagreeing, which is why the tuple they
+    # both read is now ``CONTRADICTED_STATUSES`` rather than two literals.
     #
     # NOTE this restores "active", not the status the row held BEFORE detection.
     # A row that was "confirmed" and got marked "conflicted" comes back as
@@ -2569,7 +2569,7 @@ async def _attempt_entity_retraction(
     # the write is the part that can be fixed without a migration; recovering the
     # original value cannot.
     cand_status = candidate.get("status")
-    if cand_status in ("outdated", "conflicted"):
+    if cand_status in CONTRADICTED_STATUSES:
         await sc.update_memory_status(str(candidate.get("id")), "active", tenant_id=cand_tenant)
     else:
         logger.info(

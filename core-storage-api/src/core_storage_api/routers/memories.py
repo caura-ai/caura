@@ -20,7 +20,7 @@ from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MIN_DAYS,
 )
 from core_storage_api.observability import bind_timer, log_request
-from core_storage_api.routers._validation import _require, _require_dict
+from core_storage_api.routers._validation import _require, _require_dict, _require_uuid
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
     MISSING_PROVENANCE_PREDICATE_SQL,
@@ -436,6 +436,23 @@ async def find_children_by_parent_id(tenant_id: str, parent_id: str) -> list[dic
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 
 
+@router.post("/reset-entity-artifacts")
+async def reset_entity_artifacts(request: Request) -> dict:
+    """Clear the graph rows of a LIVE memory whose content changed.
+
+    Same body, same per-table counts and the same POST-not-DELETE reasoning as
+    ``purge-entity-artifacts`` below; the difference is which rows the service
+    will act on, and that lives in the service method's guard rather than here.
+    Two routes for the two guards, so a caller cannot reach the wrong one by
+    passing a flag.
+    """
+    body: dict = await request.json()
+    return await _svc.memory_reset_entity_artifacts(
+        tenant_id=_require(body, "tenant_id"),
+        memory_id=_require_uuid(body, "memory_id"),
+    )
+
+
 @router.post("/purge-entity-artifacts")
 async def purge_entity_artifacts(request: Request) -> dict:
     """H-02 — drop the graph rows mined out of a governance-dropped memory.
@@ -444,22 +461,10 @@ async def purge_entity_artifacts(request: Request) -> dict:
     counts the caller audits. Body carries ``tenant_id`` and ``memory_id``.
     """
     body: dict = await request.json()
-    tenant_id = body.get("tenant_id")
-    memory_id = body.get("memory_id")
-    if not tenant_id or not memory_id:
-        # 4xx at the edge, same convention as the bulk route above: a missing
-        # scope here would be a delete with no tenant, which must never be a
-        # thing this endpoint attempts.
-        raise HTTPException(status_code=422, detail="tenant_id and memory_id are both required")
-    try:
-        parsed = UUID(str(memory_id))
-    except (ValueError, TypeError) as exc:
-        # Same shape as every sibling route that parses a UUID out of the body.
-        # Unguarded this surfaced as a 500, which reads as "the purge broke" when
-        # the truth is the caller sent something that was never an id — and the
-        # caller in question lets failures propagate out of a remediation.
-        raise HTTPException(status_code=422, detail="memory_id must be a UUID") from exc
-    return await _svc.memory_purge_entity_artifacts(tenant_id=tenant_id, memory_id=parsed)
+    return await _svc.memory_purge_entity_artifacts(
+        tenant_id=_require(body, "tenant_id"),
+        memory_id=_require_uuid(body, "memory_id"),
+    )
 
 
 @router.post("/find-successors")
@@ -534,11 +539,34 @@ async def find_duplicate_hash(
     tenant_id: str,
     content_hash: str,
     exclude_id: str | None = None,
+    fleet_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict | None:
+    """The update path's exact-dedup lookup.
+
+    ``fleet_id`` and ``agent_id`` are both forwarded so the lookup matches
+    ``uq_memories_live_content_hash``, which keys on
+    ``(tenant, COALESCE(fleet,''), agent, content_hash)``. Each omission fails
+    in its own direction and they are easy to confuse:
+
+    * no ``fleet_id`` is not "any fleet" — the service's default is the
+      NULL/empty group, so the lookup could never match a fleet-scoped memory
+      and the gate above it was dead for every tenant that uses fleets;
+    * no ``agent_id`` IS "any agent", which is wider than the constraint, so
+      the gate refuses an edit the index would have admitted. Two agents
+      recording identical content are two independent observations — the same
+      scope ``bulk_find_by_content_hashes`` and ``memory_find_by_content_hash``
+      already dedup on.
+
+    Both stay optional here because the parameter set is the caller's to choose;
+    what is not optional is that a caller pinning one leg pins the other.
+    """
     dup_id = await _svc.memory_find_duplicate_hash(
         tenant_id,
         content_hash,
         exclude_id=UUID(exclude_id) if exclude_id else None,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
     )
     if dup_id is None:
         return None

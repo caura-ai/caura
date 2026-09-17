@@ -456,12 +456,47 @@ def _card_from_doc(doc: dict) -> InboxCard:
     )
 
 
+def _binding_target_slug(data: dict) -> str | None:
+    """Which live skill a ``kind='update'`` candidate binds against.
+
+    ``data["slug"]``, and named here so it can be tested without standing up
+    the whole edit route. It read ``data["target"]["slug"]`` before: ``target``
+    carries ``target_content_hash`` and nothing else — the validator requires
+    that one key and no writer has ever set a ``slug`` beside it — so the
+    lookup always came back None and the binding gate refused every edit with
+    "no live skill exists", naming a skill that does.
+
+    ``validate_and_normalize_skill_write``'s own gate resolves the live skill
+    by ``doc["slug"]``; reading the same key is what makes the pre-fetch and
+    the check agree about which document is being bound.
+    """
+    if data.get("kind") != "update":
+        return None
+    slug = data.get("slug")
+    return slug if isinstance(slug, str) and slug else None
+
+
 async def _load_doc_or_404(*, tenant_id: str, slug: str) -> dict:
+    """Load one inbox doc, from the WRITER.
+
+    Every caller here is a read-modify-write: approve, edit, defer and reject
+    all load the doc, change part of it, and upsert the whole thing back. A
+    replica read makes that a lost update — approve reloads the version from
+    before a just-saved edit and writes it back, silently reverting the edit,
+    and the TOCTOU re-checks that exist to catch concurrent modification
+    re-read the same stale copy and agree with themselves.
+
+    ``get_document``'s own docstring already names this case: "read=False
+    forces the primary — use it for read-after-write re-fetches ... so
+    replication lag can't yield None." The inbox is where that matters most and
+    was the one place not passing it.
+    """
     sc = get_storage_client()
     doc = await sc.get_document(
         tenant_id=tenant_id,
         collection=SKILLS_COLLECTION,
         doc_id=slug,
+        read=False,
     )
     if doc is None:
         raise HTTPException(status_code=404, detail=f"skill {slug!r} not found")
@@ -1198,22 +1233,28 @@ async def edit(
         is_inbox_edit=True,
     )
     # For ``kind='update'`` candidates, hash-binding must validate
-    # against the live TARGET skill (a separate doc identified by
-    # ``data.target.slug``), NOT the candidate itself. Passing the
+    # against the live TARGET skill (the document at ``data.slug``),
+    # NOT the candidate itself. Passing the
     # candidate as its own ``live_skill_doc`` would let
     # ``target.target_content_hash`` self-match and silently bypass
     # the binding. For ``kind='create'`` the validator ignores
     # ``live_skill_doc``, so ``None`` is the safe default.
     live_for_binding: dict | None = None
-    if data.get("kind") == "update":
-        target_slug = (data.get("target") or {}).get("slug")
-        if target_slug:
-            sc_binding = get_storage_client()
-            live_for_binding = await sc_binding.get_document(
-                tenant_id=tenant_id,
-                collection=SKILLS_COLLECTION,
-                doc_id=target_slug,
-            )
+    # Which key names the target, and why, is ``_binding_target_slug``'s own
+    # docstring — including the ``kind`` check, which is why there is no second
+    # one here.
+    target_slug = _binding_target_slug(data)
+    if target_slug:
+        sc_binding = get_storage_client()
+        live_for_binding = await sc_binding.get_document(
+            tenant_id=tenant_id,
+            collection=SKILLS_COLLECTION,
+            doc_id=target_slug,
+            # The edit is a read-modify-write against this document and the
+            # binding compares its content hash; a replica read can bind
+            # against a version that is already gone.
+            read=False,
+        )
     normalized, scan = await validate_and_normalize_skill_write(
         data, ctx=ctx, live_skill_doc=live_for_binding
     )

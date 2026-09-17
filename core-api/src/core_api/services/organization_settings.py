@@ -1340,6 +1340,25 @@ async def get_raw_settings(tenant_id: str) -> dict:
 
 
 async def _load_and_cache(tenant_id: str) -> dict:
+    # The WRITER, on every miss — and this is the whole fix, not half of it.
+    #
+    # A miss here is rarely cold. ``update_settings`` invalidates, then
+    # broadcasts, and EVERY process — the publisher included, since
+    # ``subscribe(broadcast=True)`` gives each its own subscription — drops its
+    # copy and reloads through this function. That reload is the race: served by
+    # a replica it can return the PRE-update settings and cache them for the
+    # full 5 minutes, so a write meant to tighten a governance control appears
+    # to land and does not take effect. Re-caching a stale value is strictly
+    # worse than not caching at all — the TTL then hides the mistake for exactly
+    # as long as the cache was meant to help.
+    #
+    # Priming the entry post-write instead was tried and is not equivalent: the
+    # publisher receives its own broadcast and evicts what it just primed, so
+    # the reload happens anyway and has to be correct on its own.
+    #
+    # The cost is bounded by the thing the cache already guarantees: at most one
+    # read per tenant per TTL per process. That is what makes taking it from the
+    # primary affordable here and not elsewhere.
     resolved = await get_storage_client().get_org_settings(tenant_id)
     _settings_cache[tenant_id] = resolved
     logger.info("organization_settings cache miss for %s; loaded via storage-api and cached", tenant_id)

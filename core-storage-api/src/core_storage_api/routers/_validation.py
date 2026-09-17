@@ -7,6 +7,8 @@ kept in one place so the four routers that use them don't drift.
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import HTTPException
 
 
@@ -42,3 +44,18 @@ def _require_number(body: dict, key: str) -> float:
     if isinstance(val, bool) or not isinstance(val, (int, float)):
         raise HTTPException(status_code=422, detail=f"{key} (number) is required")
     return float(val)
+
+
+def _require_uuid(body: dict, key: str) -> UUID:
+    """Fail-closed required-UUID guard — 422 if missing/falsy or unparseable.
+
+    The two halves belong together because both routes that needed them wrote
+    both: a missing scope on a delete route would be a delete with no tenant,
+    and an unparseable id surfaced as a 500, which reads as "the endpoint
+    broke" when the request was simply malformed.
+    """
+    val = _require(body, key)
+    try:
+        return UUID(str(val))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"{key} must be a UUID") from exc

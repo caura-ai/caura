@@ -131,7 +131,9 @@ def inbox_app(monkeypatch):
     }
 
     class _Storage:
-        async def get_document(self, *, tenant_id, collection, doc_id):
+        async def get_document(
+            self, *, tenant_id, collection, doc_id, read: bool = True
+        ):
             return staged_doc
 
         async def upsert_document(self, payload):

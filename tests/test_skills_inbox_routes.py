@@ -138,14 +138,20 @@ class FakeStorage:
         self.upserts: list[dict] = []
         self.query_rows: list[dict] = []
         self.queries: list[dict] = []
+        self.get_reads: list[bool] = []
 
     def seed(self, doc: dict) -> dict:
         self.docs[doc["doc_id"]] = doc
         return doc
 
-    async def get_document(self, *, tenant_id, collection, doc_id):
+    async def get_document(self, *, tenant_id, collection, doc_id, read: bool = True):
         assert tenant_id == TENANT
         assert collection == "skills"
+        # ``read`` is recorded, not ignored: every load on this route is a
+        # read-modify-write and must come from the writer, so a caller that
+        # stops passing ``read=False`` is a lost update waiting to happen.
+        # ``test_every_inbox_load_takes_the_primary`` below is what pins it.
+        self.get_reads.append(read)
         if self.doc_sequence:
             return self.doc_sequence.pop(0)
         return self.docs.get(doc_id)

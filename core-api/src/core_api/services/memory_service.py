@@ -54,6 +54,7 @@ from core_api.constants import (
     CANDIDATE_POOL_SIZE,
     CHUNKING_THRESHOLD_CHARS,
     CLASSIFIER_DEPRECATED_MEMORY_TYPES,
+    CONTRADICTED_STATUSES,
     CRYSTALLIZER_SHORT_CONTENT_CHARS,
     DEFAULT_MEMORY_TYPE,
     DEFAULT_MEMORY_WEIGHT,
@@ -3539,6 +3540,55 @@ async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
             logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
 
+async def _revert_superseded_row(sc, tenant_id: str, superseded_id: str, editor_id: str) -> None:
+    """Return a row to ``active`` when the edit that superseded it retracts.
+
+    Mirrors ``contradiction_detector``'s Path-C retraction, including its
+    refusal to touch a status it did not set: an ``archived`` or ``deleted``
+    row is outdated for a reason that has nothing to do with this supersession,
+    and reviving it would be a second bug wearing the first one's fix.
+
+    The duplication with Path-C is deliberate and bounded. What the two share is
+    ``CONTRADICTED_STATUSES`` and the conditional revert, which is now one
+    constant; what they do not share is the transaction story — Path-C holds the
+    row already and clears the edge with a CAS anchor, where this fetches by id
+    and clears it through the ordinary patch. Folding them needs a
+    row-taking ``revert_if_detection_set(sc, row, *, tenant_id)`` in
+    ``services/contradiction/`` and is a change to the detector, not to this
+    path; it is not attempted here.
+
+    Failures are logged, not raised. The edit itself is the caller's request and
+    has already been validated; refusing it because a SECOND row could not be
+    tidied would fail the operation the user actually asked for, and the row is
+    left exactly as it was before — which is the state this function exists to
+    improve, not a new one.
+    """
+    try:
+        superseded = await sc.get_memory(superseded_id, tenant_id)
+    except Exception:
+        logger.warning(
+            "supersession retract: could not load superseded row %s for %s",
+            superseded_id,
+            editor_id,
+            exc_info=True,
+        )
+        return
+    if not superseded:
+        return
+    status = superseded.get("status")
+    if status not in CONTRADICTED_STATUSES:
+        logger.info(
+            "supersession retract: leaving memory %s at status=%s (not a status this supersession set)",
+            superseded_id,
+            status,
+        )
+        return
+    try:
+        await sc.update_memory_status(superseded_id, "active", tenant_id=tenant_id)
+    except Exception:
+        logger.warning("supersession retract: could not revert %s to active", superseded_id, exc_info=True)
+
+
 async def update_memory(
     memory_id: UUID,
     tenant_id: str,
@@ -3549,7 +3599,14 @@ async def update_memory(
     from core_api.services.organization_settings import resolve_config
 
     sc = get_storage_client()
-    mem = await sc.get_memory(str(memory_id), tenant_id)
+    # ``read=False`` — the writer. Both reads in this function are
+    # read-your-write and neither tolerates replication lag.
+    #
+    # This one decides whether the row EXISTS. Served by the replica it answers
+    # 404 for a memory created moments earlier, which is the one answer a client
+    # cannot tell from "you deleted it": PATCHing a just-created id is ordinary
+    # usage, and it is exactly the window a replica is behind in.
+    mem = await sc.get_memory(str(memory_id), tenant_id, read=False)
     if not mem:
         raise HTTPException(status_code=404, detail="Memory not found")
 
@@ -3623,20 +3680,46 @@ async def update_memory(
         new_hash = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
 
         # Dedup check (exclude self)
+        # Both scope legs, because the gate exists to pre-empt
+        # ``uq_memories_live_content_hash`` and that index keys on
+        # ``(tenant, COALESCE(fleet,''), agent, content_hash)``. Passing neither
+        # made this dead code: storage's ``fleet_id`` default is the fleetless
+        # group, so for a fleet-scoped row the lookup could never match. That
+        # was invisible because ``new_hash`` is ALREADY fleet-scoped —
+        # ``_content_hash`` mixes the fleet in — so the hash looked like it
+        # carried the scope while the query quietly added a second,
+        # contradictory one.
+        #
+        # ``agent_id`` has to come with it. Fixing only the fleet turns a gate
+        # that never fired into one that fires too WIDE: it would refuse an edit
+        # whose content matches ANOTHER agent's row in the same fleet, which the
+        # index admits deliberately — two agents recording identical content are
+        # two independent observations (CAURA-721). The row's own owner is the
+        # right pin: this is an edit to THIS row, so it may only collide with
+        # what the constraint would collide with.
         dup = await sc.find_duplicate_hash(
             tenant_id,
             new_hash,
             exclude_id=str(memory_id),
+            fleet_id=mem.get("fleet_id"),
+            agent_id=mem.get("agent_id"),
         )
         if dup:
+            # ``memory_id``, not ``id``: that is the key this endpoint returns.
+            # Reading ``id`` here meant that on the rare occasion the gate DID
+            # fire — a fleetless row, the only case it could reach — the 409
+            # reported ``existing_id: null`` and a message naming no row, which
+            # is the least useful form of a conflict a caller can be handed.
+            # ``status`` is not returned by this endpoint at all, so it stays
+            # absent rather than being asserted as null.
+            existing_id = dup.get("memory_id")
             raise HTTPException(
                 status_code=409,
                 detail=duplicate_memory.core_api_detail(
-                    duplicate_memory.exact_message(dup.get("id")),
+                    duplicate_memory.exact_message(existing_id),
                     **duplicate_memory.duplicate_fields(
                         reason=duplicate_memory.REASON_EXACT,
-                        existing_id=dup.get("id"),
-                        existing_status=dup.get("status"),
+                        existing_id=existing_id,
                     ),
                 ),
             )
@@ -3689,9 +3772,30 @@ async def update_memory(
         patch["content_hash"] = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
         # P1-2: Clear stale contradiction/supersession state on content change
         if mem.get("supersedes_id") is not None:
+            # The edge clear is a patch key, so it lands with the edit or not at
+            # all. Reviving the row on the other end of that edge is a WRITE TO
+            # A DIFFERENT ROW, and it is deferred to the post-commit block
+            # below — see the comment there for why building a patch must not
+            # have side effects.
             patch["supersedes_id"] = None
-        if mem.get("status") in ("outdated", "conflicted"):
+        if mem.get("status") in CONTRADICTED_STATUSES:
             patch["status"] = "active"
+        # The subject half of the entity state. ``subject_entity_id`` is the
+        # entity this row is ABOUT, derived from the old content by extraction;
+        # once the content changes it is an assertion about text that is gone,
+        # exactly like the links cleared below. It is a column on this row, so
+        # unlike the links it costs one key in the patch. Extraction writes it
+        # back when it re-runs; NULL in the meantime is the honest value.
+        #
+        # Safe to write unconditionally even when the caller NAMES the field in
+        # the same request: ``simple_fields`` below runs after this and writes
+        # the caller's value over it. That holds because storage serialises
+        # UUIDs to ``str`` (``orm_to_dict``) while ``MemoryUpdate`` parses them
+        # to ``UUID``, so the loop's ``old_val != new_val`` is true for ANY
+        # named subject — including one re-asserted unchanged. Guarding this on
+        # ``fields_set`` would be defending against a state that cannot occur.
+        if mem.get("subject_entity_id") is not None:
+            patch["subject_entity_id"] = None
 
     # Apply simple field updates
     simple_fields = {
@@ -3811,6 +3915,34 @@ async def update_memory(
         # else (empty dict in merge mode) → storage no-op, no audit
         # entry, no patch field.
 
+    # ``embedding_pending`` for an update whose re-embed failed. The flag is
+    # public API — ``MemoryOut.metadata`` documents its ABSENCE as "that stage
+    # ran inline" — so a PATCH that leaves it off says the row is embedded when
+    # it is not, and the updater has no other signal: the create paths set it
+    # (``WriteMemoryRow``, the atomic-fact fan-out) and this one did not.
+    #
+    # MERGED, never replaced, and applied after the caller's own metadata
+    # handling above so it cannot be clobbered by it. When the caller sent
+    # replace-mode metadata the flag joins that dict; otherwise it merges on its
+    # own. ``set_system_value`` rather than a bare key because this is a
+    # platform-written value: it lands in ``_system`` and is mirrored to the
+    # top-level key the existing consumers poll.
+    # Both directions, because the flag is public API and callers read its
+    # ABSENCE as "the embed ran inline". Setting it on failure alone left a row
+    # that had failed once — here or at create time — reporting
+    # ``embedding_pending: True`` forever after a later edit re-embedded it
+    # successfully. The async worker clears it on ITS success
+    # (``core_worker.clients.storage_client``), but a successful INLINE re-embed
+    # schedules no worker task, so nothing else was ever going to.
+    if content_changed:
+        pending = new_embedding is None
+        if "metadata_" in patch:
+            set_system_value(patch["metadata_"], "embedding_pending", pending)
+        else:
+            pending_patch = dict(patch.get("metadata_patch") or {})
+            set_system_value(pending_patch, "embedding_pending", pending)
+            patch["metadata_patch"] = pending_patch
+
     # Entity links: ADD the named links when explicitly provided. Never a
     # replace — see the ``changes`` entry below for what the storage call does
     # and does not do. There is no API path that removes a link today.
@@ -3885,11 +4017,96 @@ async def update_memory(
             logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
     # Re-fetch updated memory
-    updated = await sc.get_memory(str(memory_id), tenant_id)
+    # ``read=False`` for the same reason, one step further: this is the row the
+    # PATCH RESPONSE is built from, immediately after writing it. From the
+    # replica the caller can be echoed its own pre-edit content as the result of
+    # a successful edit — a response that does not merely lag but actively
+    # contradicts the write it is confirming.
+    updated = await sc.get_memory(str(memory_id), tenant_id, read=False)
 
     # Post-commit async tasks for content changes
     if content_changed:
         tenant_config = await resolve_config(tenant_id)
+        # Clear the graph rows mined out of the OLD content before extraction
+        # re-runs; why a live row needs this is on
+        # ``memory_reset_entity_artifacts``, where the behaviour lives.
+        #
+        # Two things are decided HERE rather than there. UNCONDITIONAL,
+        # deliberately outside the ``entity_extraction_enabled`` branch below:
+        # gating it on that setting would leave a tenant who turned extraction
+        # OFF holding the links forever with nothing left to replace them — the
+        # one configuration where the stale rows are permanent. And synchronous,
+        # while re-extraction is a background task, so there is a window where
+        # the row has no links at all — the right side to err on, since a
+        # missing link under-recalls the row until extraction lands where a
+        # stale one recalls it for the wrong thing and nothing revisits it.
+        # Logged, NOT raised — and this is a correction of what an earlier
+        # revision of this comment said. Everything here runs AFTER
+        # ``sc.update_memory`` committed and after the audit hook fired, so a
+        # transient storage failure would hand the caller a 500 for an edit that
+        # landed. Retrying it does not repair anything either: the row's content
+        # now equals what was sent, so ``content_changed`` is False on the
+        # retry and this whole branch — the reset, the embed-retry scheduling,
+        # the contradiction re-check — is skipped forever.
+        #
+        # So propagating buys a misleading status code and costs the three
+        # background tasks below, which are scheduled here and nowhere else.
+        # ``_revert_superseded_row`` already takes this position for the same
+        # reason; the two had no business disagreeing four lines apart. The
+        # graph is left stale either way, which is what the log line is for.
+        try:
+            await sc.reset_entity_artifacts(tenant_id, str(memory_id))
+        except Exception:
+            logger.exception(
+                "entity graph reset failed for memory %s — content updated, stale links may remain",
+                memory_id,
+            )
+        # Revive the row this one superseded — HERE, not while the patch was
+        # being built. Clearing our pointer is only half of a retraction: the
+        # other row was set ``outdated`` BECAUSE this row superseded it, so
+        # dropping the edge and walking away leaves it outdated with nothing
+        # superseding it, permanently, since the detector never revisits a row
+        # whose conflict is gone.
+        #
+        # It ran inline with the patch construction until a review caught what
+        # that means: it is a live PATCH against ANOTHER row, and two later
+        # checks in this function can still abort the request — ``metadata``
+        # null-in-merge-mode (400) and an ``entity_links`` entity the tenant
+        # does not own (422). Either one left the superseded row flipped back to
+        # active while the edit that was supposed to justify reviving it was
+        # rejected, with nothing to roll it back. Building a patch must not have
+        # side effects; only a committed edit may retract anything.
+        #
+        # Same non-raising policy as the reset above, for the same reason.
+        if mem.get("supersedes_id") is not None:
+            await _revert_superseded_row(sc, tenant_id, str(mem.get("supersedes_id")), str(memory_id))
+        # A failed re-embed leaves ``embedding=NULL`` above, deliberately, so
+        # the repair paths can see the row. But unlike EVERY create path this
+        # one then did nothing further: no ``embedding_pending`` for the caller
+        # (``WriteMemoryRow`` sets it, and the PATCH response is where an
+        # updater would look for it), and no backfill scheduled — so the row sat
+        # semantically unsearchable until the nightly NULL-embedding sweep
+        # happened past it, with the response reporting nothing amiss.
+        #
+        # ``_schedule_embed_or_reembed`` is named for exactly this and had no
+        # caller on the update path; ``is_failure_fallback=True`` is what gives
+        # the inline branch its backoff, the same as the atomic-fact fan-out's
+        # failure path above.
+        if new_embedding is None:
+            track_task(
+                tracked_task(
+                    _schedule_embed_or_reembed(
+                        memory_id,
+                        data.content,
+                        tenant_id,
+                        content_hash=patch.get("content_hash"),
+                        is_failure_fallback=True,
+                    ),
+                    "embed_or_publish",
+                    memory_id,
+                    tenant_id,
+                )
+            )
         if tenant_config.entity_extraction_enabled:
             track_task(
                 tracked_task(

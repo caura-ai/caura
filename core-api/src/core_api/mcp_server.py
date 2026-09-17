@@ -3037,8 +3037,28 @@ async def caura_doc(
                     json.dumps({"error": f"Document '{doc_id}' not found in collection '{collection}'"}),
                     t0,
                 )
+            # Un-mint, exactly as the REST delete does. ``op=index`` above mints
+            # through ``safe_sync_doc_memory``; without the inverse here a
+            # document deleted over MCP left its minted memory recallable with
+            # nothing able to reach it. The helper never raises — the document
+            # is already gone and the caller asked for that, not for a memory.
+            from core_api.services.doc_memory import safe_unmint_doc_memory
+
+            unminted = await safe_unmint_doc_memory(
+                collection,  # type: ignore[arg-type]  # same op guard as the delete above
+                doc_id,
+                tenant_id=tenant_id,
+            )
             return _with_latency(
-                json.dumps({"ok": True, "collection": collection, "doc_id": doc_id, "deleted": True}),
+                json.dumps(
+                    {
+                        "ok": True,
+                        "collection": collection,
+                        "doc_id": doc_id,
+                        "deleted": True,
+                        "memories_unminted": unminted,
+                    }
+                ),
                 t0,
             )
         except HTTPException as e:

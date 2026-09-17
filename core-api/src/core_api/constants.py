@@ -146,6 +146,21 @@ MEMORY_STATUSES_PATTERN = (
     r"|outdated|conflicted|archived|deleted)$"
 )
 
+# The two statuses contradiction detection writes on a losing row — and the only
+# two any retraction path may revert FROM. Anything else on a contradicted row
+# means another writer has moved it since (a human confirmed it, the crystallizer
+# archived it, a different chain superseded it), so stamping "active" over that
+# would discard someone else's decision.
+#
+# One definition because four call sites read it and every one of them is a
+# destructive-write guard: ``contradiction_detector``'s Path-C retraction,
+# ``memory_service``'s edit-time revert, the supersedes-chain follow in
+# ``pipeline.steps.search.load_and_serialize``, and outcome inference's failure
+# evidence. It previously lived in ``outcome_inference.contradictions`` under a
+# comment telling readers to keep it in sync BY HAND with the detector's writes —
+# which is the strongest possible argument that it belongs in one place.
+CONTRADICTED_STATUSES: tuple[str, ...] = ("outdated", "conflicted")
+
 # ── Health / status probe timeouts ──
 # The storage pool's per-attempt connect ceiling (``storage_client._make_pool``
 # reads it from here). Named rather than inlined because PROBE_TIMEOUT_SECONDS

@@ -846,10 +846,30 @@ class CoreStorageClient:
         tenant_id: str,
         content_hash: str,
         exclude_id: str | None = None,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict | None:
+        """Exact-hash dedup for the UPDATE path. Returns ``{"memory_id": ...}``.
+
+        Note the key: this endpoint answers with ``memory_id``, NOT the ``id``
+        its write-path sibling ``find_by_content_hash`` returns. The one caller
+        read ``dup["id"]`` and ``dup["status"]``, so on the rare path where it
+        did fire, the 409 it raised named ``None`` as the existing row.
+
+        ``fleet_id`` and ``agent_id`` together scope the lookup to what
+        ``uq_memories_live_content_hash`` keys on. Pass both or the gate
+        disagrees with the constraint it exists to pre-empt: without the fleet,
+        storage looks only at the fleetless group and a fleet-scoped memory can
+        never match its own duplicate; without the agent, it matches ANY agent's
+        row and refuses an edit the index would have admitted.
+        """
         params: dict[str, Any] = {"tenant_id": tenant_id, "content_hash": content_hash}
         if exclude_id is not None:
             params["exclude_id"] = exclude_id
+        if fleet_id is not None:
+            params["fleet_id"] = fleet_id
+        if agent_id is not None:
+            params["agent_id"] = agent_id
         # Write-path: called during memory-update dedup. Reader would
         # miss a just-updated row and fail to detect the duplicate.
         return await self._get("/memories/duplicate-hash", read=False, **params)
@@ -966,6 +986,29 @@ class CoreStorageClient:
         """
         return await self._get_list(
             "/memories/by-parent-id", read=False, tenant_id=tenant_id, parent_id=parent_id
+        )
+
+    async def reset_entity_artifacts(self, tenant_id: str, memory_id: str) -> dict:
+        """Clear the graph rows of a LIVE memory whose content changed.
+
+        The update path's counterpart to ``purge_entity_artifacts`` below.
+        Entity extraction only ever adds, so without this an edited memory keeps
+        the links and relations of the content it no longer holds — and goes on
+        being recalled for names that are gone.
+
+        Links, relations and orphaned entities only. The row's own
+        ``subject_entity_id`` is cleared by the update's patch, not here — this
+        endpoint takes no memory columns.
+
+        Storage refuses this for a soft-deleted row (that is the purge's job)
+        and returns zero counts, so the two cannot be used for each other's
+        case. Same ``idempotent=True`` reasoning as the purge: a replay finds
+        the rows already gone and removes nothing more.
+        """
+        return await self._post(  # type: ignore[return-value]
+            "/memories/reset-entity-artifacts",
+            {"tenant_id": tenant_id, "memory_id": memory_id},
+            idempotent=True,
         )
 
     async def purge_entity_artifacts(self, tenant_id: str, memory_id: str) -> dict:
@@ -3015,10 +3058,17 @@ class CoreStorageClient:
     async def get_org_settings(self, org_id: str) -> dict:
         """Return the org's raw setting overrides (``{}`` when unset).
 
-        Read path (rides the connect-phase retry budget). core-api fronts
-        this with a 5-min TTL cache, so it's hit only on a cache miss.
+        Explicit ``read=False``, hardcoded rather than offered as a parameter,
+        the same way the three content-hash lookups above state it: there is one
+        caller and no correct way to route this to a replica.
+
+        core-api fronts this with a 5-min TTL cache, so it is hit only on a
+        cache miss — which is what makes the primary affordable. A miss
+        immediately after a write is the dangerous one: served by the replica it
+        re-caches the PRE-update settings for the full TTL, so a tightened
+        governance control silently does not apply for five more minutes.
         """
-        result = await self._get(f"/organization-settings/{org_id}")
+        result = await self._get(f"/organization-settings/{org_id}", read=False)
         return (result or {}).get("settings", {})
 
     async def update_org_settings(
