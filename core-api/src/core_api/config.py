@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     entity_retrieval_enabled: bool = True
     use_llm_for_memory_creation: bool = True
     sentry_dsn: str = ""  # Set to enable Sentry error tracking
+    # Anonymous daily heartbeat from self-hosted servers (docs/telemetry.md).
+    # ``off`` / ``0`` / ``false`` disables it; so do DO_NOT_TRACK, CI, an
+    # enterprise gateway secret and platform providers (see
+    # core_api.heartbeat.policy). The URL override exists for tests and for
+    # operators pointing the beat at their own collector; plain http is
+    # refused unless the host is localhost.
+    caura_telemetry: str = "on"
+    caura_telemetry_url: str = "https://telemetry.caura.ai/api/telemetry/heartbeat"
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.
     cors_origins: str = "http://localhost:3000"
     # Request-wide budget enforced by RequestTimeoutMiddleware. 45s fits

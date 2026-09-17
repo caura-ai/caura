@@ -11227,6 +11227,38 @@ class PostgresService:
             )
             return result.scalar() or 0
 
+    async def fleet_nodes_summary(
+        self,
+        *,
+        tenant_id: str,
+        since: datetime,
+    ) -> tuple[int, list[str]]:
+        """Count of this tenant's nodes seen since ``since`` and their distinct
+        ``plugin_version`` values (raw strings, sorted, at most 50).
+
+        Read-only; the anonymous heartbeat calls it once a day per tenant.
+        """
+        async with get_read_session() as session:
+            count = await session.scalar(
+                select(func.count(FleetNode.id)).where(
+                    FleetNode.tenant_id == tenant_id,
+                    FleetNode.last_heartbeat >= since,
+                )
+            )
+            rows = await session.execute(
+                select(FleetNode.plugin_version)
+                .where(
+                    FleetNode.tenant_id == tenant_id,
+                    FleetNode.last_heartbeat >= since,
+                    FleetNode.plugin_version.is_not(None),
+                )
+                .distinct()
+                .order_by(FleetNode.plugin_version)
+                .limit(50)
+            )
+            versions = [row[0] for row in rows.all() if row[0]]
+            return int(count or 0), versions
+
     async def fleet_delete_node(
         self,
         *,

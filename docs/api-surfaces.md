@@ -38,6 +38,7 @@ when to add or move an operation.
 | Ingest preview/commit | REST only (revisit per use case) | Pipeline workflow; expose to MCP only if "agent crawls a URL and writes memories" becomes a real use case. |
 | Contradictions / lineage at `/memories/{id}/contradictions` | REST + MCP (`caura_manage op=lineage`) | UI gets the rich endpoint; agents get the focused tool. |
 | Heartbeat / fleet readiness | REST receives, plugin produces | Plugin is the natural producer (it knows the local node state). REST is the receiver. MCP doesn't need this — agents don't report their own runtime state. |
+| Server telemetry (`GET /telemetry`, `POST /telemetry/rotate`) | REST only | Operator transparency for the anonymous daily heartbeat ([telemetry.md](telemetry.md)): what this server would send, why it is off, and a fresh deployment id. An operator concern, not an agent one. |
 | Agent registration | OpenClaw plugin | Local-runtime concern. |
 
 ## When to add an operation

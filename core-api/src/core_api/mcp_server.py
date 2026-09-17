@@ -51,6 +51,7 @@ from core_api.constants import (
     VERSION,
 )
 from core_api.errors import AUTH_ORG_SUSPENDED, AUTH_PLAN_LIMIT, code_for_status
+from core_api.heartbeat.clients import record_mcp as _record_mcp_client
 from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -536,6 +537,13 @@ class MCPAuthMiddleware:
                 send, _tenant_id_var.get(_UNAUTH), _readable_tenant_ids_var.get(None)
             ):
                 return
+
+            # Anonymous heartbeat: MCP requests are counted by transport, not
+            # by User-Agent (the REST twin is in ``auth.get_auth_context``).
+            # Only authenticated requests count; a no-op unless the heartbeat
+            # policy enabled the counter at boot.
+            if _tenant_id_var.get(_UNAUTH) not in (_UNAUTH, _NO_AUTH):
+                _record_mcp_client()
 
         await self.app(scope, receive, send)
 

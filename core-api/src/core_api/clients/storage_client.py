@@ -2743,6 +2743,19 @@ class CoreStorageClient:
         result = await self._get("/fleet/nodes/count", **params)
         return (result or {}).get("count", 0)
 
+    async def fleet_nodes_summary(self, tenant_id: str, *, days: int = 7) -> dict:
+        """``{"nodes_7d": int, "plugin_versions": [str]}`` for one tenant.
+
+        Nodes whose ``last_heartbeat`` falls inside the last ``days`` days and
+        the distinct raw ``plugin_version`` strings among them. Tenant-scoped
+        like every other fleet read; the anonymous heartbeat fans it out over
+        the active tenants (``core_api.heartbeat.payload``).
+        """
+        result = await self._get("/fleet/nodes/summary", tenant_id=tenant_id, days=days)
+        if not isinstance(result, dict):
+            return {"nodes_7d": 0, "plugin_versions": []}
+        return result
+
     async def delete_fleet(self, tenant_id: str, fleet_id: str) -> bool:
         return await self._delete(f"/fleet/{fleet_id}", tenant_id=tenant_id)
 

@@ -689,14 +689,37 @@ auth modes, and contributor requirements live in the
 
 ## Telemetry
 
-The self-hosted OSS runtime supports optional [Sentry](https://sentry.io)
-integration for error tracking and performance monitoring:
+*Updated 2026-09-17.* A self-hosted server sends **one anonymous heartbeat a
+day** to `telemetry.caura.ai`: its version, Python/OS/arch, deploy kind
+(docker or source), uptime bucket, provider *kinds* (never model names or
+keys), whether Redis and Sentry are configured (never the values), bucketed
+counts of memories, agents, tenants and recently-seen plugin nodes, and
+bucketed counts of which SDK families called it. Every number is a bucket
+(`0`, `1`, `2-5`, `6-20`, ...), the id is a random UUID stored in your own
+database, and nothing about hostnames, IPs, names, content or configuration
+values is ever sent. The exact payload, its JSON schema, the retention policy
+and the change log are in [docs/telemetry.md](docs/telemetry.md).
 
-- **Opt-in only** — set the `SENTRY_DSN` environment variable to enable. No errors are reported unless you explicitly configure a DSN.
-- **No built-in usage analytics** — a self-hosted deployment does not collect usage statistics, feature flags, or behavioral data.
-- **No phone-home** — the self-hosted application makes zero outbound calls unless you configure a Sentry DSN or an LLM/embedding provider.
+Every way to turn it off, each permanent for that install:
 
-The managed platform's usage analytics are a hosted-service feature; they are
+- `CAURA_TELEMETRY=off` in `core-api`'s environment (`.env`, or the commented
+  line under `core-api` in `docker-compose.yml`).
+- `DO_NOT_TRACK=1` (the [Console Do Not Track](https://consoledonottrack.com/) convention).
+- `CI` set to any value: pipelines are never counted.
+- Block `telemetry.caura.ai:443` at the firewall: one attempt a day, 5 s timeout, no retry.
+- Running behind the enterprise gateway or with platform providers switches it off automatically.
+
+Inspect what your server would send with `GET /api/v1/telemetry`; start over
+with a fresh id via `POST /api/v1/telemetry/rotate`. The boot log prints the
+ON/OFF decision, the reason and the disable hint on every start.
+
+Error tracking stays opt-in: set `SENTRY_DSN` to enable optional
+[Sentry](https://sentry.io) integration for error tracking and performance
+monitoring. No errors are reported unless you explicitly configure a DSN.
+
+Apart from the heartbeat, a self-hosted deployment makes no other outbound
+calls unless you configure a Sentry DSN or an LLM/embedding provider. The
+managed platform's usage analytics are a hosted-service feature; they are
 not part of the self-hosted runtime.
 
 ---

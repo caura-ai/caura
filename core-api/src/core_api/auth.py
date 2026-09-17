@@ -9,6 +9,7 @@ from core_api.agent_ids import AgentIdentity
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
+from core_api.heartbeat.clients import record as _record_client_family
 from core_api.suppression import is_tenant_suppressed
 from core_api.tenant_context import set_current_tenant, set_readable_tenants
 
@@ -530,6 +531,16 @@ async def get_auth_context(
     request: Request,
     key: str | None = Security(api_key_header),
 ) -> AuthContext:
+    ctx = await _resolve_auth_context(request, key)
+    # Anonymous heartbeat: count the client family (by User-Agent prefix)
+    # once the caller is authenticated. One prefix match, and a no-op unless
+    # the heartbeat policy enabled the counter at boot — the raw header is
+    # never stored. See core_api.heartbeat.clients.
+    _record_client_family(request.headers.get("user-agent"))
+    return ctx
+
+
+async def _resolve_auth_context(request: Request, key: str | None) -> AuthContext:
     admin_key = get_admin_key()
     # Enterprise gateway injects X-Agent-ID when the caller's credential
     # is agent-scoped (kind=agent_key). Constructed here rather than left a bare

@@ -45,7 +45,7 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 | Evolve | `POST /evolve/report` |
 | Crystallizer | `POST /crystallize`, `POST /crystallize/all`, `GET /crystallize/reports`, `GET /crystallize/latest` |
 | Settings | `GET/PUT /settings` |
-| System | `GET /health`, `GET /version`, `GET /tool-descriptions`, `GET /audit-log` |
+| System | `GET /health`, `GET /version`, `GET /tool-descriptions`, `GET /audit-log`, `GET /telemetry`, `POST /telemetry/rotate` (see [telemetry.md](telemetry.md)) |
 | MCP | `POST /mcp` (Streamable HTTP transport, mounted at app root) |
 | Bootstrap (plugin) | `GET /plugin-source`, `GET /plugin-source-hash`, `GET /plugin-manifest`, `GET/POST /install-plugin`, `GET /install-skill[?skill=memclaw\|company-brain]`, `GET /skill/{memclaw\|company-brain}`. `/plugin-source`, `/plugin-manifest`, and `GET/POST /install-plugin` are also aliased under `/api` (no `/v1`) for the generated installer. | <!-- legacy-name-floor: published skill query parameter and route -->
 
