@@ -1,8 +1,11 @@
 """Fleet heartbeat and command channel — replaces WebSocket/SSH gateway model."""
 
+import asyncio
 import json
 import logging
 import time
+import weakref
+from collections.abc import MutableMapping
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -12,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
+from common.env_utils import read_int_env
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
@@ -37,6 +41,73 @@ from core_api.version_compat import (
 _OUTDATED_PLUGIN_LOG_TTL = 3600.0
 _OUTDATED_PLUGIN_LOG_MAX = 5000
 _outdated_plugin_logged: dict[tuple[str, str], float] = {}
+
+# Concurrent agent upserts per WORKER PROCESS, shared by every heartbeat that
+# process is serving (OSS 08/14 L-36). Read through ``read_int_env`` for the
+# reason ``lifecycle`` documents at length: ``core_api.app`` imports this
+# module unconditionally, so a mistyped value raising at import time would
+# stop every route serving — and the helper's ``minimum`` floor of 1 keeps a
+# stray ``0`` from becoming ``Semaphore(0)``, which is already locked and
+# would park every heartbeat forever with no error and no timeout.
+#
+# Sized against core-storage-api's pool, not against this endpoint's traffic:
+# ``db_pool_size=5`` + ``db_max_overflow=5`` is TEN connections, and each
+# upsert is a ``GET /agents/{id}`` plus a conditional POST that draw from
+# those same ten — there is no reader/writer split, so a refresh competes
+# with live writes for the same slots.
+#
+# WHAT THIS DOES NOT DO, same caveat ``lifecycle`` spells out: the cap is per
+# worker PROCESS, not deployment-wide. Both services run ``--workers 2`` and
+# core-api scales horizontally, so the real ceiling against storage is
+# ``instances x workers x`` this number. It is strictly better than the
+# per-request budget it replaces, which bounded nothing even within a worker,
+# but the honest headline is "predictable per worker".
+#
+# It is also tenant-BLIND. One tenant reporting many agents can hold every
+# slot and delay another tenant's heartbeat on that worker.
+# ``per_tenant_storage_slot`` is the repo's mechanism for that, and it is not
+# a substitute here: it queues unboundedly per ``(scope, tenant)``, so N
+# tenants give N x cap and the aggregate — the thing this exists to bound —
+# is unbounded again. A per-tenant SHARE of this budget is the real fix and
+# is a follow-up, not a one-line swap.
+_HEARTBEAT_AGENT_CONCURRENCY: int = read_int_env("FLEET_HEARTBEAT_AGENT_CONCURRENCY", 8)
+
+# The per-request ceiling, and it is what makes the budget above safe to
+# share. A shared budget with no bound on the work one caller may enqueue is
+# not a cap — it is a queue, and this endpoint is the highest-frequency call
+# the API takes. ``HeartbeatIn.agents`` is ``list | None``: untyped,
+# caller-supplied and unbounded, with no rate limit and no per-tenant slot on
+# the route. One node reporting 10,000 agents would hold the process's slots
+# for as long as it took to drain them and stall every other node's heartbeat
+# on that worker — turning a fan-out that only ever slowed ITSELF into one
+# that slows its neighbours.
+#
+# Truncating (rather than rejecting) follows the contract this path already
+# states below: the node and command channel is what the heartbeat promises,
+# while the agent-row refresh is best-effort observability. A 422 would fail
+# the part that matters to protect the part that does not. The overflow is
+# logged, so a deployment that genuinely needs more than this raises the knob
+# instead of discovering the gap in the UI.
+_HEARTBEAT_AGENT_MAX: int = read_int_env("FLEET_HEARTBEAT_AGENT_MAX", 200)
+
+# Keyed by running loop rather than a bare module-level ``Semaphore``, for the
+# reason ``lifecycle._FANOUT_SEMAPHORES`` records: a Semaphore binds to the
+# first loop that awaits it, so a plain global raises "bound to a different
+# event loop" in any suite that runs more than one. WeakKeyDictionary so a
+# finished loop's entry is collected with it.
+_HEARTBEAT_AGENT_SEMAPHORES: MutableMapping[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _heartbeat_agent_semaphore() -> asyncio.Semaphore:
+    """Return this process's shared agent-upsert budget for the running loop."""
+    loop = asyncio.get_running_loop()
+    sem = _HEARTBEAT_AGENT_SEMAPHORES.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(_HEARTBEAT_AGENT_CONCURRENCY)
+        _HEARTBEAT_AGENT_SEMAPHORES[loop] = sem
+    return sem
 
 
 def _should_log_outdated_plugin(node: str, version: str) -> bool:
@@ -105,6 +176,37 @@ class FleetCreateIn(BaseModel):
                 "fleet_id must be 3-50 chars, alphanumeric + hyphens, no leading/trailing hyphens"
             )
         return v
+
+
+def _cap_agent_list(v: list | None) -> list | None:
+    """Bound the reported agent list without failing the heartbeat.
+
+    Same posture as ``_cap_or_drop`` below and for the same 2026-06-28 reason
+    — degrade, never 422, because a rejected heartbeat takes the node's
+    registration and command channel with it. Different mechanism, though: a
+    marker dict would erase every agent, so this truncates and keeps the
+    prefix.
+
+    At the MODEL rather than in the handler because ``agents`` is written
+    wholesale to ``nodes.agents_json`` and read back out to the fleet view.
+    Bounding only the work list would leave the row and the API response
+    unbounded — the very growth the sibling caps exist to stop. One bound
+    here covers the storage fan-out, the node row and the response together.
+
+    Not a strict element type: ``HeartbeatIn`` is deliberately permissive
+    (SAFE-01 below) because there is no plugin/backend version handshake. A
+    length bound does not break that; a typed element would.
+    """
+    if v is not None and len(v) > _HEARTBEAT_AGENT_MAX:
+        logger.warning(
+            "fleet.heartbeat: %d agents reported (> %d cap) — refreshing the first "
+            "%d and dropping the rest for this tick",
+            len(v),
+            _HEARTBEAT_AGENT_MAX,
+            _HEARTBEAT_AGENT_MAX,
+        )
+        return v[:_HEARTBEAT_AGENT_MAX]
+    return v
 
 
 def _cap_or_drop(v: dict | None, limit: int, field: str) -> dict | None:
@@ -202,6 +304,14 @@ class HeartbeatIn(BaseModel):
     # approved/active skill actually landed on the fleet. Optional —
     # older plugin versions don't send it.
     reconcile: dict | None = None
+
+    @field_validator("agents")
+    @classmethod
+    def _cap_agents(cls, v: list | None) -> list | None:
+        # Anti-ballooning cap on the one free-form field that had none. Unlike
+        # its two siblings this truncates rather than dropping, because an
+        # empty marker would lose every agent instead of the overflow.
+        return _cap_agent_list(v)
 
     @field_validator("recall_metrics")
     @classmethod
@@ -777,18 +887,38 @@ async def heartbeat(
     #
     # ``get_or_create_agent`` (rather than a direct
     # ``sc.create_or_update_agent``) is load-bearing here: it does
-    # ``GET /agents/{id}`` first and only POSTs an update when the
-    # diff is non-empty. The bare POST hits storage's ``agent_add``
-    # which catches ``IntegrityError`` from the unique-key conflict,
-    # rolls back, and re-selects — but the rollback closes the
-    # outer ``session.begin()`` transaction, so the re-select 500s.
-    # The pre-Task6 only-on-write callers always pre-checked, so the
-    # path was never live; the heartbeat upsert exercises it on the
-    # second tick.
+    # ``GET /agents/{id}`` first and only POSTs an update when the diff
+    # is non-empty, so a steady fleet costs one read per agent per tick
+    # instead of a write. It is NOT still needed to dodge a 500 — an
+    # earlier version of this comment said the bare POST hit an
+    # ``IntegrityError`` → ``rollback()`` → re-SELECT path whose
+    # mid-session rollback closed the outer transaction. ``agent_add``
+    # was since rewritten to ``INSERT ... ON CONFLICT DO NOTHING
+    # RETURNING`` with a same-session re-SELECT precisely to remove that
+    # pattern, and its docstring says so. The read-first shape is an
+    # optimisation now, not a workaround.
+    #
+    # It is NOT what makes the concurrent fan-out below safe — read-then-write
+    # is itself racy, and two callers can both miss the GET and both POST.
+    # What makes that safe is the storage side: ``ON CONFLICT DO NOTHING``
+    # plus the ``with_for_update`` re-SELECT. The fan-out is safe despite the
+    # read-first shape, not because of it.
     if body.agents:
         from core_api.services.agent_service import get_or_create_agent
 
-        failed_agents: list[str] = []
+        # Parse and de-duplicate BEFORE fanning out. Sequentially, a key
+        # repeated in one payload was harmless — the second pass saw the row
+        # the first had just written. Concurrently it would be two in-flight
+        # upserts of the same row, racing for a slot each and serialising on
+        # the same ``with_for_update`` re-SELECT at the far end.
+        #
+        # A later entry wins, but only when it actually carries a name. Plain
+        # last-wins would silently differ from the loop this replaces:
+        # ``get_or_create_agent`` refreshes ``display_name`` only when the
+        # argument is not None, so for ``[{a, "box"}, {a}]`` the sequential
+        # pass applied "box" and the bare repeat left it alone. Collapsing to
+        # the last value would hand it None and drop the name.
+        wanted: dict[str, str | None] = {}
         for a in body.agents:
             if not isinstance(a, dict):
                 continue
@@ -803,14 +933,39 @@ async def heartbeat(
             # hostname-derived label.
             raw_dn = a.get("display_name") or a.get("displayName")
             display_name = raw_dn[:255] if isinstance(raw_dn, str) else None
+            key = str(agent_key)
+            wanted[key] = display_name if display_name is not None else wanted.get(key)
+
+        # The upserts are independent storage round-trips that used to be
+        # awaited one at a time, so a node reporting 40 agents paid 40
+        # sequential round-trips on the highest-frequency call the API takes.
+        # ``_heartbeat_agent_semaphore`` is where the budget's scope and
+        # sizing are argued.
+        #
+        # Per-agent isolation is unchanged: each task keeps its own
+        # try/except, so one bad agent still cannot drop the heartbeat or its
+        # neighbours.
+        sem = _heartbeat_agent_semaphore()
+
+        async def _upsert(agent_key: str, display_name: str | None) -> str | None:
+            """Refresh one agent row. Returns its key on failure, else None."""
+            # ``try`` OUTSIDE ``async with`` deliberately: the semaphore is
+            # released by ``__aexit__`` as the exception unwinds, before this
+            # handler runs, so the traceback is formatted off the budget.
+            # ``exc_info=True`` is ~110x the cost of the same call without it
+            # (measured 465us vs 4.2us) and formats synchronously on the event
+            # loop; inside the slot, a storage outage at the cap would hold
+            # budget for ~93ms of pure formatting per heartbeat, on the
+            # highest-frequency endpoint, from every node, every tick.
             try:
-                await get_or_create_agent(
-                    tenant_id=body.tenant_id,
-                    agent_id=agent_key,
-                    fleet_id=body.fleet_id,
-                    display_name=display_name,
-                    install_id=body.install_id,
-                )
+                async with sem:
+                    await get_or_create_agent(
+                        tenant_id=body.tenant_id,
+                        agent_id=agent_key,
+                        fleet_id=body.fleet_id,
+                        display_name=display_name,
+                        install_id=body.install_id,
+                    )
             except Exception:
                 # A single agent upsert failure mustn't drop the heartbeat
                 # — the node + commands path is the contract; the row
@@ -821,17 +976,27 @@ async def heartbeat(
                     body.tenant_id,
                     exc_info=True,
                 )
-                failed_agents.append(str(agent_key))
+                return agent_key
+            return None
+
+        results = await asyncio.gather(*(_upsert(key, name) for key, name in wanted.items()))
+        failed_agents: list[str] = [key for key in results if key is not None]
+
         # Summary log so the committed audit trail is recoverable: the
         # individual per-agent warnings above are stack-traced but not
         # easy to correlate; this single line tells the on-call exactly
         # how many agents in the batch failed and which ones, with the
         # tenant pivot for dashboard filters.
+        #
+        # Denominator is what was ATTEMPTED, not ``len(body.agents)``: after
+        # de-duplication and the cap those differ, and a ratio against the raw
+        # payload would read as a partial failure on a tick where every upsert
+        # that ran succeeded.
         if failed_agents:
             logger.warning(
                 "fleet.heartbeat: agent upsert failed for %d/%d agents in tenant=%s: %s",
                 len(failed_agents),
-                len(body.agents),
+                len(wanted),
                 body.tenant_id,
                 failed_agents,
             )
