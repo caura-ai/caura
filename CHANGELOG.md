@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.15.1](https://github.com/caura-ai/caura/compare/backend-v3.15.0...backend-v3.15.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **core-api:** close five surface-parity and authz gaps on MCP and /memories/count ([#1552](https://github.com/caura-ai/caura/issues/1552)) ([8619e9c](https://github.com/caura-ai/caura/commit/8619e9c08163b91b63120af4e1c77de3b73d2c4f))
+* **core-api:** make short-term memory report what actually happened ([#1554](https://github.com/caura-ai/caura/issues/1554)) ([190e319](https://github.com/caura-ai/caura/commit/190e31962b924d285fd76d6331529966743dad85))
+
 ## [3.15.0](https://github.com/caura-ai/caura/compare/backend-v3.14.0...backend-v3.15.0) (2026-09-17)
 
 
