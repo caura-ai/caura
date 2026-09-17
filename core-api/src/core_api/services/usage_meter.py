@@ -46,9 +46,13 @@ import logging
 from collections import defaultdict
 from datetime import UTC, datetime
 
+from common.http_retry import CONNECT_PHASE_EXCEPTIONS
 from core_api.clients.storage_client import get_storage_client
 
 logger = logging.getLogger(__name__)
+
+#: Per-flush ceiling on individually-named dropped rows (OSS 09/02 L-44).
+_DROPPED_ROW_LOG_LIMIT = 20
 
 #: How often buffered counts are written. Short enough that a crash costs
 #: seconds, long enough that a busy tenant is one upsert rather than thousands.
@@ -71,6 +75,10 @@ class UsageMeter:
 
     def __init__(self, flush_interval: float = FLUSH_INTERVAL_SECONDS) -> None:
         self._counts: dict[tuple[str, str, datetime], int] = defaultdict(int)
+        #: Counter rows dropped rather than replayed after an ambiguous or
+        #: cancelled flush. The audit path got ``interrupted_count`` in this
+        #: same change; the billing path is where the number matters more.
+        self.dropped_rows = 0
         self._flush_interval = flush_interval
         self._task: asyncio.Task | None = None
         # Guards the swap in ``flush``. Increments themselves are plain dict
@@ -89,8 +97,64 @@ class UsageMeter:
         self._counts[(tenant_id, operation, current_period_start())] += count
         return None
 
+    async def _rebuffer(self, batch: dict) -> None:
+        """Merge a batch back into the buffer, with whatever arrived meanwhile."""
+        async with self._lock:
+            for key, count in batch.items():
+                self._counts[key] += count
+
+    def _log_dropped(self, rows: list[dict], reason: str) -> None:
+        """Name dropped counter rows so the shortfall is recoverable by hand.
+
+        Capped. ``_counts`` is keyed by ``(tenant_id, operation, period)`` and
+        ``tenant_id`` is unbounded, so a busy multi-tenant instance can carry
+        hundreds of rows per flush — and a sustained storage incident would
+        repeat that every ``FLUSH_INTERVAL_SECONDS``. ``usage_service`` already
+        refuses the uncapped version of this in the same subsystem
+        (``_METER_FAILURE_LOG_EVERY``: "one traceback per failed write would
+        turn a meter outage into a log-volume incident on top of a metering
+        one"). A bounded sample plus a total is what a hand recovery needs;
+        ``dropped_rows`` is what tells an operator how big the leak is, which a
+        grep over ERROR lines does not.
+        """
+        self.dropped_rows += len(rows)
+        for row in rows[:_DROPPED_ROW_LOG_LIMIT]:
+            logger.error(
+                "usage meter counter row dropped (%s): tenant=%s operation=%s period_start=%s count=%d",
+                reason,
+                row["tenant_id"],
+                row["operation"],
+                row["period_start"],
+                row["count"],
+            )
+        if len(rows) > _DROPPED_ROW_LOG_LIMIT:
+            logger.error(
+                "usage meter: %d further counter rows dropped (%s), not listed; %d rows dropped since start",
+                len(rows) - _DROPPED_ROW_LOG_LIMIT,
+                reason,
+                self.dropped_rows,
+            )
+
     async def flush(self) -> int:
-        """Write and clear the buffer. Returns the number of rows sent."""
+        """Write and clear the buffer. Returns the number of rows sent.
+
+        OSS 09/02 L-44 — a batch is returned to the buffer ONLY when the
+        request provably never reached storage. ``/tenant-usage/increment`` is
+        an additive upsert with no storage-side dedupe, so replaying a write
+        that did commit bills the tenant twice. ``common/http_retry`` already
+        draws this exact line for non-idempotent POSTs — connection-phase
+        failures are raised before a byte is written, while "ReadTimeout and
+        5xx are NOT retried there — the request reached storage and may have
+        committed" — and ``increment_tenant_usage`` goes out at the
+        ``idempotent=False`` default accordingly. This method used to replay on
+        ANY failure one layer up, which is the thing that policy refuses.
+
+        Under-counting is the deliberate direction: charging a tenant for work
+        they did not do is the worse error and the one nobody outside can
+        detect. Dropped rows are logged individually. The durable fix is an
+        idempotency key on that endpoint, which is what would make a whole
+        batch safe to replay.
+        """
         async with self._lock:
             if not self._counts:
                 return 0
@@ -105,41 +169,50 @@ class UsageMeter:
             }
             for (tenant_id, operation, period), count in batch.items()
         ]
-        sent = False
         try:
-            written = await get_storage_client().increment_tenant_usage(rows)
-            sent = True
-            return written
-        except Exception:
+            return await get_storage_client().increment_tenant_usage(rows)
+        except CONNECT_PHASE_EXCEPTIONS:
+            # Raised before a single request byte is written, so re-sending
+            # cannot double-bill. A blip here costs latency, not accuracy.
             logger.exception(
-                "usage meter flush failed; %d counter rows returned to the buffer",
+                "usage meter flush failed before transmission; %d counter rows returned to the buffer",
                 len(rows),
             )
+            await self._rebuffer(batch)
             return 0
-        finally:
-            if not sent:
-                # Put the counts BACK rather than dropping them: the upsert is
-                # additive, so re-sending is safe, and a transient storage blip
-                # should cost latency rather than billing accuracy. Merged with
-                # whatever arrived while the flush was in flight.
-                #
-                # In ``finally`` rather than in the ``except``, because the
-                # batch is already out of the buffer and NOTHING may leave this
-                # frame without putting it back. ``stop()`` cancels this task,
-                # and a CancelledError landing on the await above is a
-                # BaseException that walks straight past ``except Exception`` —
-                # dropping precisely the counts ``stop()``'s final flush exists
-                # to save.
-                #
-                # This ``acquire`` runs while that cancellation is propagating,
-                # and completes because it takes the uncontended fast path,
-                # which does not yield. That holds because ``flush`` is never
-                # re-entered concurrently: its only callers are the loop task
-                # and ``stop()``, and ``stop()`` joins the task before its own
-                # call. A third caller would have to re-check this.
-                async with self._lock:
-                    for (tenant_id, operation, period), count in batch.items():
-                        self._counts[(tenant_id, operation, period)] += count
+        except Exception:
+            # AMBIGUOUS — ReadTimeout, 5xx, a response lost after the commit.
+            logger.exception(
+                "usage meter flush failed ambiguously; %d counter rows dropped "
+                "rather than risk double-billing a committed write",
+                len(rows),
+            )
+            self._log_dropped(rows, "ambiguous flush failure")
+            return 0
+        except BaseException:
+            # ``CancelledError`` from ``stop()``, and NOT re-buffered — which
+            # is the opposite of what it looks like it should do.
+            #
+            # ``CoreStorageClient._cancel_safe`` wraps every request in
+            # ``asyncio.shield`` on purpose: cancelling mid-request used to
+            # strand the pooled connection (incident 2026-06-16), so the
+            # request now "runs to completion while the caller still observes
+            # CancelledError immediately". The POST therefore very likely
+            # COMMITS after this frame has already unwound. Putting the batch
+            # back would hand it to ``stop()``'s final flush and bill it twice
+            # — the precise failure L-44 is about, on the one path that looked
+            # safe to exempt.
+            #
+            # Dropping instead means a shutdown racing a flush can lose an
+            # interval of counts if the shielded write did NOT land. That is
+            # the same under-count-rather-than-over-count trade as above.
+            logger.warning(
+                "usage meter flush cancelled; %d counter rows dropped — the shielded "
+                "request may still commit, so replaying them could double-bill",
+                len(rows),
+            )
+            self._log_dropped(rows, "flush cancelled at shutdown")
+            raise
 
     async def _run(self) -> None:
         while True:
@@ -158,9 +231,19 @@ class UsageMeter:
 
         The final flush is the difference between a clean shutdown costing
         nothing and costing up to one interval of counts. Cancelling the loop
-        can land inside that loop's own in-flight flush; ``flush`` returns its
-        batch to the buffer on every failure path, so this method's cancel
-        never drops counts and the flush below re-sends them.
+        can land inside that loop's own in-flight flush, and since OSS 09/02
+        L-44 that batch is DROPPED rather than returned to the buffer:
+        ``_cancel_safe`` shields the request, so the POST very likely commits
+        after the frame has unwound, and handing it to the flush below would
+        bill it twice. ``flush`` logs those rows and counts them in
+        ``dropped_rows``.
+
+        Only a connection-phase failure — provably never transmitted — comes
+        back to the buffer for that final flush to re-send. An ambiguous one
+        (ReadTimeout, 5xx — the request may have committed) drops its batch
+        too, rather than replay an additive upsert that has no storage-side
+        dedupe. So a shutdown racing a storage blip can still lose counts;
+        what it can no longer do is bill them twice.
 
         The deadline is the same trade ``audit_queue`` documents: the storage
         client will wait 120s on a read, which is far longer than Cloud Run
@@ -173,6 +256,7 @@ class UsageMeter:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        dropped_before = self.dropped_rows
         try:
             await asyncio.wait_for(self.flush(), timeout=timeout)
             for (tenant_id, operation, period), count in self._counts.items():
@@ -184,8 +268,18 @@ class UsageMeter:
                     count,
                 )
         except TimeoutError:
+            # ``flush`` moved the buffer into its own batch before the deadline
+            # cancelled it, and since OSS 09/02 L-44 that batch is DROPPED, not
+            # put back. So ``_counts`` holds only what raced in DURING the
+            # flush: reading its length here would report ~0 rows lost on the
+            # one path where the loss is largest. Both numbers are gone once
+            # this returns — the dropped batch is already named row-by-row by
+            # ``_log_dropped``; what is still buffered has nobody left to flush
+            # it.
             logger.warning(
-                "usage meter final flush did not complete within %ss; %d counter rows are lost to shutdown",
+                "usage meter final flush did not complete within %ss; %d counter rows dropped "
+                "by the cancelled flush and %d still buffered are lost to shutdown",
                 timeout,
+                self.dropped_rows - dropped_before,
                 len(self._counts),
             )

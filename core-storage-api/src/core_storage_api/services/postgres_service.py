@@ -12426,14 +12426,24 @@ class PostgresService:
         tenant_id: str,
         error_message: str,
         error_traceback: str,
+        status: str = "failed",
     ) -> None:
+        """Record one background-task outcome.
+
+        ``status`` exists on the model with a ``(tenant_id, status)`` index and
+        was hardcoded to ``"failed"`` by this, its only writer — so the column
+        and the index the schema built for querying had exactly one value in
+        them. ``"cancelled"`` (OSS 09/02 M-56) is the second: work that a
+        shutdown stopped, which is not a failure and must not be read as one,
+        but is also not a success and needs to be findable.
+        """
         async with get_session() as session:
             session.add(
                 BackgroundTaskLog(
                     task_name=task_name,
                     memory_id=memory_id,
                     tenant_id=tenant_id,
-                    status="failed",
+                    status=status,
                     error_message=error_message[:1000],
                     error_traceback=error_traceback,
                     completed_at=datetime.now(UTC),
