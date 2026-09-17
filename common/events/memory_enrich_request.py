@@ -150,3 +150,27 @@ class MemoryEnrichRequest(BaseModel):
     # publisher hasn't classified, worker writes everything (used
     # before the core-api hot-path change in PR-C lands).
     agent_provided_fields: list[str] | None = None
+
+    # The metadata-side counterpart, and needed for the same reason: which
+    # CALLER-OWNABLE metadata keys (C25 ``CALLER_OWNABLE_KEYS`` —
+    # ``summary`` / ``tags``) the caller supplied at write time.
+    #
+    # ``agent_provided_fields`` covers ORM COLUMNS only, so nothing told the
+    # worker that ``metadata["summary"]`` was the caller's own. The row's
+    # merged metadata cannot answer it either — a caller's summary and a
+    # platform-written one are the same key. So the worker wrote the LLM's
+    # summary over the caller's on every deferred enrichment, while the
+    # synchronous path had honoured the boundary since C25.
+    #
+    # core-api owns the boundary and ships the decision — but the worker does
+    # NOT trust this list wholesale, and the difference from
+    # ``agent_provided_fields`` is why. That list pins ORM columns the caller
+    # could have set directly at write time, so honouring a forged entry grants
+    # no capability the caller lacked. This one can name a PLATFORM key, and
+    # some of those are read from the legacy top-level position only
+    # (``governance_remediation`` does ``md.get("contains_pii")``), so an
+    # arbitrary entry could silently disable a governance verdict. The worker
+    # intersects against its own ``_CALLER_OWNABLE_KEYS`` on arrival.
+    #
+    # ``None`` = caller owns nothing here.
+    caller_owned_metadata_keys: list[str] | None = None
