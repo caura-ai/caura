@@ -686,21 +686,45 @@ class TestPipelineComposition:
     """Guard: STM and extract-only pipelines must NOT include EmitMemoryTriple."""
 
     def test_fast_pipeline_includes_step(self):
+        """Bracketed by the two steps it actually depends on.
+
+        It reads the merged fields, and ``WriteMemoryRow`` persists the triple
+        columns it populates, so it must sit between them. It used to be
+        asserted as "before ``check_exact_duplicate``" as well, which was true
+        only incidentally — both happened to sit after enrichment. The exact
+        gate has since moved up to immediately after the content hash it reads
+        (OSS 08/14 L-33), so that a duplicate is refused before paying for the
+        embed, the enrichment, and this step's own entity UPSERT. Nothing here
+        depends on the dedup gate, in either direction.
+        """
         from core_api.pipeline.compositions.write import build_fast_write_pipeline
 
         names = [s.name for s in build_fast_write_pipeline()._steps]
         assert "emit_memory_triple" in names
-        assert names.index("emit_memory_triple") < names.index("check_exact_duplicate")
         assert names.index("merge_enrichment_fields") < names.index(
             "emit_memory_triple"
         )
+        assert names.index("emit_memory_triple") < names.index("write_memory_row")
 
     def test_strong_pipeline_includes_step(self):
+        """Same bracket, plus the one ordering the semantic gate does require.
+
+        ``CheckSemanticDuplicate``'s subject preflight (A1 #17) accepts a write
+        whose ``subject_entity_id`` differs from the candidate's — a comparison
+        that reads whatever this step resolved. So here the step must precede
+        the SEMANTIC gate; the exact-hash gate, which reads only the content
+        hash, may and now does run before both.
+        """
         from core_api.pipeline.compositions.write import build_strong_write_pipeline
 
         names = [s.name for s in build_strong_write_pipeline()._steps]
         assert "emit_memory_triple" in names
-        assert names.index("emit_memory_triple") < names.index("check_exact_duplicate")
+        assert names.index("merge_enrichment_fields") < names.index(
+            "emit_memory_triple"
+        )
+        assert names.index("emit_memory_triple") < names.index(
+            "check_semantic_duplicate"
+        )
 
     def test_persist_pipeline_includes_step(self):
         from core_api.pipeline.compositions.write import build_persist_pipeline

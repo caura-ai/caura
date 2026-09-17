@@ -43,7 +43,7 @@ from core_api.services.governance_remediation import (
     GovernanceCascadeError,
     remediate_after_enrichment,
 )
-from core_api.services.memory_service import fan_out_atomic_facts
+from core_api.services.memory_service import _resolve_parent_weight, fan_out_atomic_facts
 from core_api.services.organization_settings import invalidate_cache, resolve_config
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ async def _fan_out_persisted_atomic_facts(sc, memory: dict, payload, outcome) ->
                 agent_id=memory.get("agent_id") or "",
                 parent_metadata=md,
                 parent_visibility=parent_visibility,
-                parent_weight=memory.get("weight") or 0.5,
+                parent_weight=_resolve_parent_weight(memory.get("weight")),
                 parent_ts_start=memory.get("ts_valid_start"),
                 tenant_config=await resolve_config(payload.tenant_id),
             )

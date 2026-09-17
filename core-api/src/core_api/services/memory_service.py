@@ -243,7 +243,7 @@ async def _live_duplicate_hashes(
     The server-internal write paths — auto-chunk children and the atomic-fact
     fanout — attach a ``content_hash`` to every child and then insert it
     without ever consulting a dedup lookup. The public bulk path does consult
-    one (``existing_hashes`` + ``seen_hashes`` in ``create_memories_bulk``),
+    one (``existing_hashes`` + ``first_writer`` in ``create_memories_bulk``),
     and the single-write path has ``CheckExactDuplicate``; those two
     server-internal paths had neither. That is why prod carries duplicate
     content-hash groups with no concurrency involved at all: the same document
@@ -436,8 +436,9 @@ async def _embed_children_or_degrade(
     tenant_config,
     *,
     parent_id: str,
+    background: bool,
 ) -> list[list[float] | None]:
-    """Batch-embed auto-chunk children; a provider failure degrades, never raises.
+    """Batch-embed derived child rows; a provider failure degrades, never raises.
 
     Audit H-09. ``get_embeddings_batch`` raises on every provider-side error,
     gate saturation, quota and misconfig — its own docstring notes that both
@@ -469,13 +470,32 @@ async def _embed_children_or_degrade(
     the trade: refusing loses the children AND wedges every retry, while
     degrading keeps the facts and leaves a repair queued.
 
-    One caller since #1347 deleted the legacy handler this was shared with.
-    Still a named helper: two copies of this degrade decision, only one of them
-    fixed, is exactly what H-09 was. ``test_the_degrade_policy_lives_in_one_place``
-    pins one definition and one call site.
+    Two callers: the auto-chunk children and the atomic-fact fan-out (OSS 08/14
+    L-38, which batched an embed it used to issue one fact at a time). They
+    differ in ``background`` and in nothing else, which is why it is a parameter
+    and not a second helper — the degrade decision above is identical for both,
+    and two copies of it with only one of them fixed is exactly what H-09 was.
+    ``test_the_degrade_policy_lives_in_one_place`` pins one definition and one
+    raw ``get_embeddings_batch`` call.
+
+    ``background`` is the caller's position relative to a live request, and it
+    must be passed rather than assumed: auto-chunk children are embedded while
+    the caller waits on the create (``False`` — foreground priority, same as the
+    parent's own embed), whereas the fan-out runs inside a fire-and-forget task
+    with no request behind it (``True``), and must not outrank the requests it
+    is running alongside for the provider's rate-limit budget.
     """
+    if not child_texts:
+        # Same short-circuit ``_insert_children_or_degrade`` has, and for a
+        # sharper reason: ``get_embeddings_batch`` has no empty-input guard of
+        # its own, so an empty list reaches the provider as ``{"input": []}``,
+        # is rejected, and lands in ``record_failure`` — advancing the bulk
+        # failure streak that trips the degraded-provider wire. An empty batch
+        # is not a provider failure; it is the dedup filter having done its job
+        # and left nothing to embed.
+        return []
     try:
-        return await get_embeddings_batch(child_texts, tenant_config, background=False)
+        return await get_embeddings_batch(child_texts, tenant_config, background=background)
     except Exception:
         logger.warning(
             # Conditional throughout, and BOTH clauses had to become so. This
@@ -937,6 +957,8 @@ async def _run_write_pipeline(data: MemoryCreate, *, is_inferred: bool = False) 
     if not data.persist or (
         len(data.content) > CHUNKING_THRESHOLD_CHARS and tenant_config.auto_chunk_enabled
     ):
+        # No ``resolved_write_mode`` on this context, deliberately — see
+        # ``_handle_auto_chunk_from_ctx``, which resolves the mode for itself.
         ctx = PipelineContext(data={"input": data, "t0": time.perf_counter(), "is_inferred": is_inferred})
 
         # Phase 1: Enrichment (always runs)
@@ -1085,7 +1107,9 @@ async def _run_write_pipeline(data: MemoryCreate, *, is_inferred: bool = False) 
 async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> MemoryOut:
     """Auto-chunking branch using pipeline context enrichment results."""
     from core_api.pipeline.compositions.write import (
+        build_auto_chunk_dedup_pipeline,
         build_auto_chunk_governance_pipeline,
+        build_fast_persist_pipeline,
         build_persist_pipeline,
     )
     from core_api.services.ingest_service import _chunk_content
@@ -1120,6 +1144,24 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
     embedding = ctx.data["embedding"]
     t0 = ctx.data["t0"]
     tenant_config = ctx.tenant_config
+
+    # OSS 09/02 M-47. This branch is chosen on content LENGTH alone, before
+    # ``create_memory`` reaches its own ``_resolve_write_mode`` call, so the
+    # caller's mode used to be lost the moment a document crossed
+    # ``CHUNKING_THRESHOLD_CHARS`` and both exits below applied strong-mode
+    # dedup regardless. Resolved here, from the same ``data`` and the same
+    # ``tenant_config`` the standard path uses, so the two agree by
+    # construction.
+    #
+    # Resolved LOCALLY rather than carried on the context under
+    # ``resolved_write_mode``, which is the obvious-looking alternative and is
+    # wrong: six write steps read that key, and ``ParallelEmbedEnrich`` reads it
+    # BEFORE this function runs — a "fast" value there defers the very
+    # enrichment this branch needs in hand to chunk at all, leaving nothing to
+    # split. (``ScheduleBackgroundTasks`` would also take its fast fan-out and
+    # schedule a second, redundant enrichment.) Nothing outside this function
+    # needs the value, so nothing outside it gets one.
+    write_mode = _resolve_write_mode(data, tenant_config)
 
     try:
         facts = await _chunk_content(data.content, None, tenant_config)
@@ -1160,6 +1202,29 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             ),
             source="auto_chunk",
         )
+        # OSS 08/14 M-16 — the parent's semantic dedup gate. The children got
+        # an exact-hash gate in #841 (``_drop_duplicate_facts`` above) and the
+        # parent gets a 409 from ``_create_memory_or_409`` on an exact hash
+        # collision, but nothing on this branch had ever asked whether the
+        # parent is a NEAR duplicate of a document already stored. Re-submitting
+        # the same report with a byte changed therefore produced a second parent
+        # and a second set of children on every write mode.
+        #
+        # Gated on the mode the caller actually asked for (M-47): strong keeps
+        # its 409 contract, fast stays ungated here for the reason the builder
+        # sets out. Placed after the fact dedup and before the parent insert, so
+        # a rejection costs neither the insert nor the children — and after
+        # ``GovernanceDecision`` at the top of this function, so a
+        # masked/downgraded parent is judged as it will be stored.
+        if write_mode == "strong":
+            dedup_result = await build_auto_chunk_dedup_pipeline().run(ctx)
+            if dedup_result.failed:
+                # Checked for the same reason the governance gate above is: a
+                # step that raised reads as ``failed``, not as an exception.
+                # (The 409 itself is an ``HTTPException``, which the runner
+                # re-raises; it never arrives here.)
+                raise HTTPException(status_code=500, detail="Memory dedup pipeline failed unexpectedly")
+
         parent_metadata = dict(fields["metadata"])
         parent_metadata["auto_chunked"] = True
         parent_metadata["child_count"] = len(facts)
@@ -1200,7 +1265,16 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "metadata_": parent_metadata,
                     "content_hash": ch,
                     "expires_at": data.expires_at.isoformat() if data.expires_at else None,
-                    "subject_entity_id": data.subject_entity_id,
+                    # OSS 08/14 M-18 — ``str(...)``, because this dict is handed
+                    # to ``httpx`` as ``json=`` and ``MemoryCreate`` types this
+                    # field as ``UUID``, which the stdlib encoder refuses. Every
+                    # other non-JSON-native field in this literal is already
+                    # converted (``expires_at``, ``ts_valid_*``); this one was
+                    # missed, so ANY auto-chunked write that carried a subject
+                    # entity died with a TypeError the caller saw as a 500. The
+                    # inline path never hit it because ``WriteMemoryRow`` builds
+                    # its payload through the same conversion.
+                    "subject_entity_id": str(data.subject_entity_id) if data.subject_entity_id else None,
                     "predicate": data.predicate,
                     "object_value": data.object_value,
                     "ts_valid_start": fields["ts_valid_start"].isoformat()
@@ -1244,7 +1318,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         # Degrades rather than raising — the parent is already committed. See
         # ``_embed_children_or_degrade``.
         child_embeddings = await _embed_children_or_degrade(
-            child_texts, tenant_config, parent_id=str(parent_id)
+            child_texts, tenant_config, parent_id=str(parent_id), background=False
         )
 
         child_payloads = []
@@ -1384,12 +1458,16 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         return _dict_to_memory_out(parent)
 
     # Chunking produced 0-1 facts: fall through to persist pipeline. Governed
-    # by the gate at the top of this function — ``build_persist_pipeline`` has
-    # no ``GovernanceDecision`` of its own, and the fast-mode fan-out in
+    # by the gate at the top of this function — neither persist pipeline has a
+    # ``GovernanceDecision`` of its own, and the fast-mode fan-out in
     # ``ScheduleBackgroundTasks`` (which is what would otherwise request
     # post-write remediation) is keyed on a ``resolved_write_mode`` this branch
-    # never sets.
-    persist_pipeline = build_persist_pipeline()
+    # still never sets — see the key's definition in ``create_memory``.
+    #
+    # OSS 09/02 M-47: which of the two, by the caller's mode — see
+    # ``build_fast_persist_pipeline`` for what taking the strong one
+    # unconditionally did to a fast write.
+    persist_pipeline = build_persist_pipeline() if write_mode == "strong" else build_fast_persist_pipeline()
     persist_result = await persist_pipeline.run(ctx)
     if persist_result.failed:
         raise HTTPException(status_code=500, detail="Memory write pipeline failed unexpectedly")
@@ -1596,6 +1674,60 @@ async def create_memories_bulk(
         if governance_errors:
             valid_indices = [i for i in valid_indices if i not in governance_errors]
 
+    # -- Batch hash dedup, BEFORE embed and enrich (OSS 08/14 M-38).
+    #
+    # This lookup used to sit below both provider blocks, so a retried batch —
+    # the ordinary outcome of a lost 200, and the exact case the per-attempt
+    # idempotency above is built for — paid the full embedding AND enrichment
+    # budget for every item before discovering that every row was already
+    # stored. Nothing between here and there needs a vector or an enrichment:
+    # the hash is computed from ``item.content``, which governance has already
+    # finished masking above.
+    #
+    # Storage returns ``{content_hash: {id, client_request_id}}`` so the
+    # per-item classifier below can split content matches into
+    # ``duplicate_attempt`` (this caller's own prior commit) vs
+    # ``duplicate_content`` (a different attempt's row).
+    hashes = [_content_hash(data.tenant_id, data.fleet_id, item.content) for item in items]
+
+    existing_hashes: dict[str, dict] = {}
+    if hashes:
+        # Stage 5: scope bulk dedup to (tenant, fleet, agent) so a batch
+        # from agent-A and a batch from agent-B in the same fleet don't
+        # collide on identical content.
+        existing_hashes = await sc.bulk_find_by_content_hashes(
+            data.tenant_id,
+            hashes,
+            fleet_id=data.fleet_id,
+            agent_id=data.agent_id,
+        )
+
+    # Which item is the canonical writer of each hash, and which items are
+    # therefore not written at all: already stored, or a repeat of an earlier
+    # item in this same batch. The classifier loop below used to derive this for
+    # itself, but it runs AFTER the providers — so it is derived once, here, and
+    # the loop reads ``first_writer`` rather than rebuilding it. One definition
+    # of "first writer of this content", two consumers.
+    #
+    # Over ``valid_indices`` and NOT over ``hashes``, which is the subtlety the
+    # loop's own version encoded positionally: a hash is claimed only once an
+    # item has survived its validation and governance checks, so an item that
+    # errors out never becomes the first occurrence of its content and the next
+    # item carrying that content is the one written. Scanning every index would
+    # award the slot to the errored item, mark the real writer an intra-batch
+    # duplicate, and skip its embedding — a vectorless row that persists,
+    # invisible to search until a backfill sweep finds it.
+    first_writer: dict[str, int] = {}  # content hash -> index of the item that writes it
+    prededuped: set[int] = set()
+    for i in valid_indices:
+        h = hashes[i]
+        if h in existing_hashes or h in first_writer:
+            prededuped.add(i)
+        else:
+            first_writer[h] = i
+    if prededuped:
+        valid_indices = [i for i in valid_indices if i not in prededuped]
+
     embeddings: list = [None] * n
     # Items embedded here keep their vector; the rest fall to the background
     # ``reembed_batch`` below. ``write_mode="strong"`` opts an item in even when
@@ -1696,28 +1828,6 @@ async def create_memories_bulk(
                 BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS,
             )
 
-    # -- Batch hash dedup: compute all hashes, query storage API in one shot.
-    # Storage returns ``{content_hash: {id, client_request_id}}`` so the
-    # per-item classifier below can split content matches into
-    # ``duplicate_attempt`` (this caller's own prior commit) vs
-    # ``duplicate_content`` (a different attempt's row).
-    hashes = [_content_hash(data.tenant_id, data.fleet_id, item.content) for item in items]
-
-    existing_hashes: dict[str, dict] = {}
-    if hashes:
-        # Stage 5: scope bulk dedup to (tenant, fleet, agent) so a batch
-        # from agent-A and a batch from agent-B in the same fleet don't
-        # collide on identical content.
-        existing_hashes = await sc.bulk_find_by_content_hashes(
-            data.tenant_id,
-            hashes,
-            fleet_id=data.fleet_id,
-            agent_id=data.agent_id,
-        )
-
-    # -- Also detect intra-batch duplicates (same content appearing twice) --
-    seen_hashes: dict[str, int] = {}  # hash -> first index
-
     # -- Build memories and track results --
     results: list[BulkItemResult | None] = [None] * n
     # Each queued entry pairs the original input index with the row dict
@@ -1765,7 +1875,7 @@ async def create_memories_bulk(
         # above for the dedup gate, so this costs nothing and keeps the two
         # keyed on the same value. 16 hex chars is 64 bits over a batch capped
         # at 100 items; identical content within one batch never reaches the
-        # write path anyway (``seen_hashes`` collapses it first), so the only
+        # write path anyway (``first_writer`` collapses it first), so the only
         # collisions this has to rule out are accidental ones.
         item_request_id = f"{bulk_attempt_id}:{hashes[i][:16]}"
 
@@ -1853,7 +1963,7 @@ async def create_memories_bulk(
         # the same call. Surface as ``duplicate_content`` for caller
         # consistency with the cross-batch case — both states mean
         # "this row was not the canonical writer of the content."
-        if ch in seen_hashes:
+        if first_writer.get(ch) != i:
             results[i] = BulkItemResult(
                 index=i,
                 client_request_id=item_request_id,
@@ -1861,7 +1971,6 @@ async def create_memories_bulk(
             )
             dup_count += 1
             continue
-        seen_hashes[ch] = i
 
         # Apply enrichment
         enrichment = enrichments[i]
@@ -2018,7 +2127,7 @@ async def create_memories_bulk(
                 # no per-item outcome to report when none of them landed. This
                 # path is reachable only by a race: the loop above already
                 # resolved every duplicate it could see, through
-                # ``existing_hashes`` and ``seen_hashes``. A retry re-runs those
+                # ``existing_hashes`` and ``first_writer``. A retry re-runs those
                 # against the now-committed winner and succeeds.
                 raise HTTPException(
                     status_code=409,
@@ -2093,7 +2202,7 @@ async def create_memories_bulk(
         # ``duplicate_content`` rows. The first-occurrence loop above
         # marks them with no canonical id — at the time we couldn't
         # know it, since the canonical row hadn't been written yet.
-        # Now that ``results[seen_hashes[ch]]`` carries the storage id
+        # Now that ``results[first_writer[ch]]`` carries the storage id
         # (whether it's ``created`` or ``duplicate_attempt``), copy it
         # forward so the ``BulkItemResult`` docstring contract holds:
         # ``duplicate_content`` always has both fields populated.
@@ -2101,7 +2210,7 @@ async def create_memories_bulk(
             later = results[j]
             if later is None or later.status != "duplicate_content" or later.id is not None:
                 continue
-            canonical = results[seen_hashes[hashes[j]]]
+            canonical = results[first_writer[hashes[j]]]
             if canonical is None or canonical.id is None:
                 # Canonical row never persisted (storage error) — leaving
                 # this slot as a contract-violating
@@ -2931,6 +3040,26 @@ def _resolve_write_mode(data: MemoryCreate, tenant_config) -> str:
     return tenant_config.default_write_mode
 
 
+def _resolve_parent_weight(*candidates: float | None) -> float:
+    """First non-None weight, else ``DEFAULT_MEMORY_WEIGHT`` (OSS 09/02 L-38).
+
+    ``or`` cannot do this job: ``weight`` is declared ``ge=0.0`` on
+    ``MemoryCreate``/``MemoryUpdate``, so 0.0 is a legal, meaningful value — "this
+    memory is worthless, keep it but never surface it" — and it is falsy. Both
+    fan-out call sites chained ``or``, so every child of a deliberately
+    zero-weighted parent was born at 0.5, inflating exactly the rows an operator
+    had just finished suppressing, and doing it silently.
+
+    Takes the candidates in priority order so a caller can express "the weight
+    this write is setting, else the row's current one, else the default" without
+    restating the None handling at each site.
+    """
+    for candidate in candidates:
+        if candidate is not None:
+            return float(candidate)
+    return DEFAULT_MEMORY_WEIGHT
+
+
 async def fan_out_atomic_facts(
     sc,
     *,
@@ -2978,12 +3107,13 @@ async def fan_out_atomic_facts(
     # rather than per-fact: this loop calls ``create_memory`` (singular)
     # per child, so a per-fact lookup would double the roundtrips on a
     # path that already runs one write each.
+    fact_hashes = [_content_hash(tenant_id, fleet_id, f.content) for f in atomic_facts]
     fanout_live_hashes = await _live_duplicate_hashes(
         sc,
         tenant_id=tenant_id,
         fleet_id=fleet_id,
         agent_id=agent_id,
-        hashes=[_content_hash(tenant_id, fleet_id, f.content) for f in atomic_facts],
+        hashes=fact_hashes,
     )
     # Repeats within this fanout. The live set cannot cover them: those
     # rows do not exist yet at lookup time, and each is written by its
@@ -2991,50 +3121,59 @@ async def fan_out_atomic_facts(
     # duplicate of a row this very loop just created.
     fanout_seen_hashes: set[str] = set()
     fanout_deduped = 0
-    for fact in atomic_facts:
-        fact_content = fact.content
-        child_ch = _content_hash(tenant_id, fleet_id, fact_content)
+    # Dedup FIRST, over the whole list, then embed what survives in one call
+    # (OSS 08/14 L-38). Both properties the per-fact loop had are kept and the
+    # ordering is what keeps them:
+    #
+    #   - a dropped fact still costs no embedding, because the filter runs to
+    #     completion before a single text is handed to the provider. That was
+    #     the reason the old ``continue`` sat ahead of the embed, and it is why
+    #     this is two passes rather than one;
+    #   - a failed embed still persists its fact, because
+    #     ``_embed_children_or_degrade`` returns a list of ``None`` rather than
+    #     raising, which is exactly the state the old ``except`` arm produced.
+    #
+    # What changes is the cost: N provider round-trips become one. The CREATE
+    # stays per-fact below — ``_insert_children_or_degrade`` is all-or-nothing
+    # (one refused row aborts the statement), which would trade this function's
+    # documented "one bad fact cannot cost the others" guarantee for throughput
+    # on the cheaper of the two calls.
+    surviving: list[tuple[object, str]] = []
+    for fact, child_ch in zip(atomic_facts, fact_hashes):
         if child_ch in fanout_live_hashes or child_ch in fanout_seen_hashes:
             # The fact is already recorded — either from an earlier
-            # enrichment of this parent, or earlier in this very loop.
+            # enrichment of this parent, or earlier in this very list.
             # Writing it again is one of the two reasons prod carries
             # duplicate content-hash groups with no concurrency.
-            #
-            # Before the embed below on purpose: a dropped fact must not
-            # cost an embedding call. This ``continue`` is unlike the two
-            # inside the embed block — those exit AFTER deciding
-            # ``child_embedding`` precisely so a failed embed still
-            # persists the fact (see below); this one decides the fact
-            # should not be persisted at all, so it is the one case where
-            # skipping ahead of the embed is correct.
             fanout_deduped += 1
             continue
         fanout_seen_hashes.add(child_ch)
-        # A failed embed must NOT skip the fact. Both exits here used
-        # to ``continue`` BEFORE ``create_memory``, so the child row
-        # was never written at all and the fact was lost outright —
-        # nothing downstream could repair what does not exist. Persist
-        # unembedded instead, exactly as the auto-chunk parent insert
-        # does, and hand the vector off to the normal recovery path
-        # below.
-        #
-        # The two arms are not symmetric in how often they fire.
-        # ``get_embedding`` RETURNS None once its retry budget is
-        # exhausted rather than raising (see
-        # ``common/embedding/_service.py::_run_with_retry``), so under
-        # the gate saturation this path actually meets, the None arm is
-        # the common one. It was not silent globally — ``_run_with_retry``
-        # logs its own terminal error — but nothing here attributed the
-        # loss to a parent, a fact, or this code path.
-        child_embedding: list[float] | None = None
-        try:
-            child_embedding = await get_embedding(fact_content, tenant_config=tenant_config, background=True)
-        except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
-            logger.warning(
-                "atomic-fact embed raised for memory %s; persisting the fact unembedded",
-                memory_id,
-                exc_info=True,
-            )
+        surviving.append((fact, child_ch))
+
+    # ``get_embeddings_batch`` behind a degrade wrapper, the same pairing the
+    # auto-chunk children use. A provider failure yields Nones and the facts
+    # below persist unembedded with a repair queued, rather than being lost:
+    # both exits of the old per-fact ``try`` used to ``continue`` BEFORE
+    # ``create_memory``, so the child row was never written at all and the fact
+    # was gone outright — nothing downstream can repair what does not exist.
+    #
+    # That arm was not rare, either. ``get_embedding`` RETURNS None once its
+    # retry budget is exhausted rather than raising (see
+    # ``common/embedding/_service.py::_run_with_retry``), so under the gate
+    # saturation this path actually meets it was the common outcome. It was not
+    # silent globally — ``_run_with_retry`` logs its own terminal error — but
+    # nothing attributed the loss to a parent, a fact, or this code path.
+    fanout_embeddings = await _embed_children_or_degrade(
+        [f.content for f, _ in surviving],
+        tenant_config,
+        parent_id=str(memory_id),
+        # Preserved from the per-fact call this replaces: no request is waiting
+        # on it, so it takes the background rate-limit lane.
+        background=True,
+    )
+
+    for (fact, child_ch), child_embedding in zip(surviving, fanout_embeddings):
+        fact_content = fact.content
         child_meta = {
             "parent_memory_id": str(memory_id),
             "source": "atomic_fact_fanout",
@@ -3464,7 +3603,7 @@ async def _enrich_memory_background(
             # can route to a replica, which is the H-02 shape the governed_row
             # assembly above documents.
             parent_visibility = effective_visibility or mem.get("visibility") or "scope_team"
-            parent_weight = patch.get("weight") or mem.get("weight") or 0.5
+            parent_weight = _resolve_parent_weight(patch.get("weight"), mem.get("weight"))
             await fan_out_atomic_facts(
                 sc,
                 atomic_facts=atomic_facts,

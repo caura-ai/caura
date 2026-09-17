@@ -740,16 +740,6 @@ def _refuse_reserved_memory_type(memory_type: str | None, *, index: int | None =
     return _error_response("INVALID_ARGUMENTS", detail)
 
 
-# C29 legacy path. Every duplicate 409 in this repo now carries its fields as
-# data, so this regex is only reachable while a deploy is mid-flight — a core-api
-# on this version talking to a storage that predates the structured body, which
-# still answers with the sentence and nothing else. Kept for exactly that window
-# rather than deleted, and deliberately anchored to the one message form
-# ``common.duplicate_memory.exact_message`` produces, so it cannot start matching
-# something else if the wording moves.
-_DUPLICATE_DETAIL_RE = re.compile(r"^Duplicate memory exists:\s*(?P<id>[0-9a-fA-F-]{36})\s*$")
-
-
 def _detail_text(detail: object) -> str:
     """The human message, whichever shape the detail arrived in.
 
@@ -778,22 +768,12 @@ def _detail_code(detail: object, status_code: int) -> str:
 def _duplicate_info(detail: object) -> dict | None:
     """What the 409 says about the row that already holds this content.
 
-    Returns ``None`` when the detail is not a duplicate answer at all.
-    Structured first — that is the whole point of C29, and it is also the only
-    path that can report ``existing_status`` or tell an exact hit from a
-    semantic one. The regex is the mid-deploy fallback described above, and it
-    can only ever recover the id.
+    Delegates to ``common.duplicate_memory.parse_detail``, which owns the shape
+    on both sides of the wire. This was the only reader for a long time; it is
+    not any more (evolve's outcome persistence absorbs the same 409), and one
+    parser with one fallback beats two that drift.
     """
-    if isinstance(detail, dict) and detail.get("code") == duplicate_memory.DUPLICATE_MEMORY_CODE:
-        fields = detail.get("details")
-        return dict(fields) if isinstance(fields, dict) else {}
-    m = _DUPLICATE_DETAIL_RE.match(_detail_text(detail))
-    if m:
-        return {
-            "existing_id": m.group("id"),
-            "reason": duplicate_memory.REASON_EXACT,
-        }
-    return None
+    return duplicate_memory.parse_detail(detail)
 
 
 def _check_auth() -> CallToolResult | None:

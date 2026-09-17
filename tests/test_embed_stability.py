@@ -134,9 +134,14 @@ async def test_atomic_fact_children_embed_raw_fact_content() -> None:
 
     embed_inputs: list[str] = []
 
-    async def _spy_embed(text: str, *_a, **_k):
-        embed_inputs.append(text)
-        return [0.2] * VECTOR_DIM
+    async def _spy_embed_batch(texts: list[str], *_a, **_k):
+        # The fan-out batches its children into one provider call (OSS 08/14
+        # L-38). The property under test is unchanged by that — it is about
+        # which TEXT reaches the embedder, not how many calls carry it — so the
+        # spy records each text in the batch and the assertions below still read
+        # one entry per fact.
+        embed_inputs.extend(texts)
+        return [[0.2] * VECTOR_DIM for _ in texts]
 
     fact_a = SimpleNamespace(
         content="Anniversary is July 22.",
@@ -196,7 +201,7 @@ async def test_atomic_fact_children_embed_raw_fact_content() -> None:
 
     with (
         patch.object(memory_service.settings, "deployment_mode", "inline"),
-        patch.object(memory_service, "get_embedding", new=_spy_embed),
+        patch.object(memory_service, "get_embeddings_batch", new=_spy_embed_batch),
         patch.object(memory_service, "get_storage_client", return_value=sc),
         patch(
             "core_api.services.memory_enrichment.enrich_memory",
@@ -222,7 +227,7 @@ async def test_atomic_fact_children_embed_raw_fact_content() -> None:
             uuid.uuid4(), "parent content", TENANT_ID, "f1", "a"
         )
 
-    # One embed call per fact, each with the fact's raw content.
+    # One embedded text per fact, each the fact's raw content.
     assert embed_inputs == [fact_a.content, fact_b.content], (
         f"atomic-fact embed inputs {embed_inputs!r} — expected raw "
         f"fact.content with no hint prefix"

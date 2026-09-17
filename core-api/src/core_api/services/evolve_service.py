@@ -10,6 +10,9 @@ import logging
 import time
 from uuid import UUID
 
+from fastapi import HTTPException
+
+from common import duplicate_memory
 from core_api.constants import (
     EVOLVE_FAILURE_DELTA,
     EVOLVE_MAX_RELATED_IDS,
@@ -612,6 +615,55 @@ async def _persist_outcome(
     # the caller.
     try:
         result = await create_memory(data)
+    except HTTPException as exc:
+        # OSS 08/14 M-14 — a repeat of an outcome already recorded is not a
+        # failure of this call, and it must not be allowed to abort it.
+        #
+        # The outcome memory goes through the ordinary write path, so identical
+        # outcome TEXT from the same agent trips ``CheckExactDuplicate`` and
+        # comes back 409. Re-raising that killed the whole ``report_outcome``
+        # from Phase 3, which is the worst possible place to stop: Phase 2 has
+        # already COMMITTED a rule memory, and Phase 4 — the weight adjustments
+        # that are the entire point of reporting an outcome — had not run yet
+        # and now never would. The caller saw a 409 and a rule row appeared out
+        # of nowhere, with no weights touched.
+        #
+        # And a repeat is ordinary. The content is ``[Outcome/success] <text>``
+        # scoped to one agent, so "the deploy succeeded" reported after two
+        # different deploys is a hash collision by construction. The outcome is
+        # a fact recorded once; the weight adjustment is an action that should
+        # happen each time it is reported. Adopting the existing row's id gives
+        # both: the memory stays single, and Phase 4 proceeds and attributes its
+        # clamp and its rule backfill to it.
+        #
+        # What the adopted row does NOT get is this call's metadata: its
+        # ``related_memory_ids``, ``weight_adjustments`` and ``rule_memory_id``
+        # stay as the first report left them. Mostly that is the point — the row
+        # describes the outcome, not the reporting of it. One sharp edge is
+        # worth naming, though: ``_persist_rule`` runs BEFORE this function and
+        # is called without ``outcome_id``, so its ``source_outcome_id`` is
+        # None, which leaves the outcome's ``rule_memory_id`` as the ONLY link
+        # between a rule and the outcome that produced it. A repeat that
+        # generates a rule therefore leaves that rule referenced from neither
+        # side. Pre-existing — before this arm the same repeat raised, stranding
+        # the Phase 2 rule just as thoroughly and losing the weight adjustments
+        # with it — but it now happens on a call that SUCCEEDS, so nothing
+        # surfaces it. Re-pointing the row at the newest rule is a semantics
+        # question (does an outcome cite its first rule or its latest?) for
+        # whoever owns evolve, not something to settle inside a dedup fix.
+        info = duplicate_memory.parse_detail(exc.detail) if exc.status_code == 409 else None
+        existing_id = (info or {}).get("existing_id")
+        if not existing_id:
+            # Not the case above — a different 409, or a duplicate answer this
+            # build cannot resolve to a row. Treat it as the failure it is
+            # rather than inventing an id for it.
+            logger.exception("evolve: failed to persist outcome")
+            raise
+        logger.info(
+            "evolve: outcome already recorded; reusing existing memory and continuing to weight adjustment",
+            extra={"tenant_id": tenant_id, "agent_id": agent_id, "outcome_memory_id": existing_id},
+        )
+        return str(existing_id)
     except Exception:
         logger.exception("evolve: failed to persist outcome")
         raise
