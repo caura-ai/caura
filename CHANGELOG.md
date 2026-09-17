@@ -10,6 +10,18 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.15.0](https://github.com/caura-ai/caura/compare/backend-v3.14.0...backend-v3.15.0) (2026-09-17)
+
+
+### Features
+
+* **lifecycle:** republish audit rows the fanout stranded ([#1549](https://github.com/caura-ai/caura/issues/1549)) ([27646ff](https://github.com/caura-ai/caura/commit/27646ffe98e6f199c4c25a5f2b80e773b0ea47ce))
+
+
+### Bug Fixes
+
+* **common:** type _dd_tracer as Tracer | None ([#1551](https://github.com/caura-ai/caura/issues/1551)) ([ff25d19](https://github.com/caura-ai/caura/commit/ff25d196bd93a19b5af3218d72b34b2be945379d))
+
 ## [3.14.0](https://github.com/caura-ai/caura/compare/backend-v3.13.0...backend-v3.14.0) (2026-09-16)
 
 
