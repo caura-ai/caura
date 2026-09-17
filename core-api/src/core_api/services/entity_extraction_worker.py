@@ -26,6 +26,14 @@ from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
 
+# 09/02 L-37. Relation upserts are one HTTP POST each and run concurrently;
+# this bounds the fan-out so a memory with a large graph cannot open dozens of
+# simultaneous connections to core-storage-api. Matches the order of magnitude
+# of the other per-item caps in this codebase (ingest preview 4, A19 admission
+# 16) — high enough that the serial round-trips stop dominating, low enough
+# that one memory's extraction is not a load event.
+_RELATION_UPSERT_CONCURRENCY = 8
+
 # A65 — map the extractor's free-form ``relation_type`` onto the canonical
 # predicate vocabulary, so two rows that state the same attribute in different
 # words compare equal on the deterministic RDF path.
@@ -822,26 +830,57 @@ async def process_entity_extraction(
         # service`` deduped under ``new analytics service``), and a relation
         # that names the collapsed form must still land on the merged row.
         key_to_id: dict[str, UUID] = {canonical_match_key(n): i for n, i in name_to_id.items()}
-        rel_count = 0
-        rel_failed = 0
-        for rel in graph.relations:
+        # 09/02 L-37: the upserts below run CONCURRENTLY under a bounded
+        # semaphore. Everything else this worker does is already batched —
+        # ``bulk_upsert_entities``, ``bulk_upsert_entity_links`` — and then
+        # relations went back to one sequential HTTP POST each, so a memory
+        # with a dozen relations paid a dozen serial round-trips while the rest
+        # of the extraction had been reduced to two.
+        #
+        # Concurrency rather than a bulk endpoint, deliberately. There is no
+        # bulk relations route, and adding one means a router, a service method
+        # and a client method — plus PER-ITEM result reporting, because the
+        # per-relation guard below is load-bearing (see its comment: one failed
+        # upsert used to skip the A65 predicate write-back and the
+        # ``Trigger.ENTITY`` fire that is the only thing running A40's RDF
+        # pass). A single bulk call that succeeds-or-fails as a unit would
+        # throw that isolation away to save round-trips. This keeps every
+        # relation's own request and its own ``try``, and only stops them
+        # queueing behind each other.
+        #
+        # Safe to gather here because ``upsert_relation`` goes through the
+        # storage HTTP client, not a shared ``AsyncSession`` — gathering two
+        # ``db.execute`` calls on one session is what is unsafe.
+        rel_sem = asyncio.Semaphore(_RELATION_UPSERT_CONCURRENCY)
+
+        async def _upsert_one(rel) -> bool | None:
+            """True = landed, False = failed, None = endpoints unresolvable.
+
+            Never raises: the caller counts outcomes, and one relation's
+            failure must not cost the others (or the stages after this loop).
+            """
             from_id = name_to_id.get(rel.from_entity) or key_to_id.get(canonical_match_key(rel.from_entity))
             to_id = name_to_id.get(rel.to_entity) or key_to_id.get(canonical_match_key(rel.to_entity))
-            if from_id and to_id:
-                # Guarded PER RELATION, matching ``subject_writeback`` /
-                # ``predicate_writeback`` below. Unguarded, ONE failing upsert
-                # threw out of this whole function into the outer "(non-fatal)"
-                # handler — and everything after this loop is what actually
-                # feeds the deterministic contradiction path: the A65 predicate
-                # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY
-                # thing that runs A40's RDF pass. So a single transient storage
-                # error on one relation out of dozens left that memory with a
-                # NULL predicate forever and no Path C detection at all, and
-                # said "non-fatal" while doing it. Nothing retries.
-                #
-                # Observed, not hypothesised: a storage 500 on
-                # ``POST /entities/relations`` produced exactly this — every
-                # later stage skipped, one warning line, predicate never set.
+            if not (from_id and to_id):
+                # Unresolvable endpoints are not a failure — the same silent
+                # skip the sequential loop did, counted in neither bucket.
+                return None
+
+            # Guarded PER RELATION, matching ``subject_writeback`` /
+            # ``predicate_writeback`` below. Unguarded, ONE failing upsert
+            # threw out of this whole function into the outer "(non-fatal)"
+            # handler — and everything after this loop is what actually
+            # feeds the deterministic contradiction path: the A65 predicate
+            # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY
+            # thing that runs A40's RDF pass. So a single transient storage
+            # error on one relation out of dozens left that memory with a
+            # NULL predicate forever and no Path C detection at all, and
+            # said "non-fatal" while doing it. Nothing retries.
+            #
+            # Observed, not hypothesised: a storage 500 on
+            # ``POST /entities/relations`` produced exactly this — every
+            # later stage skipped, one warning line, predicate never set.
+            async with rel_sem:
                 try:
                     await upsert_relation(
                         RelationUpsert(
@@ -853,9 +892,8 @@ async def process_entity_extraction(
                             evidence_memory_id=memory_id,
                         ),
                     )
-                    rel_count += 1
+                    return True
                 except Exception:
-                    rel_failed += 1
                     logger.warning(
                         "relation_upsert failed for memory %s (%s -[%s]-> %s) (non-fatal)",
                         memory_id,
@@ -864,6 +902,21 @@ async def process_entity_extraction(
                         rel.to_entity,
                         exc_info=True,
                     )
+                    return False
+
+        # ``return_exceptions=True`` as a backstop: ``_upsert_one`` already
+        # swallows everything, but a bug in the resolution above it would
+        # otherwise cancel the siblings mid-flight and lose relations that had
+        # already succeeded.
+        outcomes = await asyncio.gather(
+            *(_upsert_one(rel) for rel in graph.relations), return_exceptions=True
+        )
+        # Counted from the outcomes themselves rather than by re-deriving which
+        # relations were resolvable — one source of truth, and the two cannot
+        # drift. A ``BaseException`` in the list means the backstop fired and
+        # is counted as a failure, which is what it is.
+        rel_count = sum(1 for o in outcomes if o is True)
+        rel_failed = sum(1 for o in outcomes if o is not True and o is not None)
         if rel_failed:
             # Surfaced as its own line so a partial graph is visible as a
             # COUNT rather than N scattered warnings — a spike here means the
