@@ -49,6 +49,21 @@ calls a handler makes, and which module-local guard helpers it calls — and the
 allowlists carry the JUDGMENTS, one line each, with a name attached. Same split
 as ``core-storage-api/tenant_scope_allowlist.json``.
 
+KNOWN UNCOVERED AXIS — the fleet-read gate on READ routes. #1552 found
+``GET /memories/count`` reading another fleet's rows with no
+``enforce_fleet_read``, and nothing here was supposed to catch it: the write
+and plane invariants run over mutating routes, and the self-plane invariant is
+scoped by ``SELF_ID_PARAMS``, which ``fleet_id`` is not. A fourth axis —
+"a read route taking ``fleet_id`` reaches ``enforce_fleet_read`` /
+``enforce_fleet_read_many``" — is the mechanism-level fix and ``_Axis`` already
+anticipates one. It is not written yet, and the reason is content rather than
+mechanism: a good many routes take that param, ``_classify`` does not follow
+imported helpers (``enforce_fleet_read_many`` is already named in its
+blind-spot list), so the axis has to credit ``imported_calls`` — a weaker
+attribution than the other three use, needing its own argument and a
+route-by-route pass to build the allowlist. Recorded here so a reader does not
+mistake three passing invariants for coverage of this one.
+
 WHY A TEST AND NOT A SCRIPT. ``scripts/tenant_scope_gate.py`` needs its own CI
 step and degrades to a report when the environment cannot import the app. This
 needs neither: it runs in the suite that already imports ``core_api.app``, so

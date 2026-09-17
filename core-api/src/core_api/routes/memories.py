@@ -203,6 +203,31 @@ async def list_fleets(
     return await get_storage_client().memory_fleet_distribution(tenant_id, exclude_scope_agent=True)
 
 
+async def _gate_fleet_read(
+    auth: AuthContext,
+    tenant_id: str | None,
+    caller_agent_id: AgentIdentity | None,
+    fleet_id: str | None,
+) -> None:
+    """Apply the fleet-read trust gate, under the condition it needs to be
+    meaningful — in one place, because three read routes had to agree on it.
+
+    The four-term condition is not a style choice. The gate resolves a trust
+    ladder for a *verifiable* caller, so it needs an authenticated tenant, a
+    resolved tenant to check against, an agent identity to resolve, and a fleet
+    to resolve it for. A tenant/user credential has no agent identity and is
+    tenant-wide by design; there is nothing for the ladder to rank.
+
+    ``_resolve_scoped_read`` below states this same condition in prose as the
+    thing its callers are expected to match. This makes the prose executable:
+    the list, stats and count routes now match it by calling one function
+    rather than by three copies staying in step. Count is the route that proves
+    the point — it is the neighbour that never got the gate at all.
+    """
+    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
+        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+
+
 async def _resolve_scoped_read(
     scope: str,
     *,
@@ -381,8 +406,7 @@ async def list_memories(
     # Not redundant with the ladder above: scope='agent' resolves to L1 WITHOUT
     # inspecting the fleet it was handed, so this is the only thing standing
     # between a constrained caller and `scope=agent&fleet_id=<someone else's>`.
-    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
-        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
 
     # An inverted range matches nothing. Say so rather than serving an empty
     # page the caller reads as "no such memories".
@@ -549,11 +573,9 @@ async def memory_stats(
             written_by=None,
         )
         effective_agent_id = caller_agent_id if scope == "agent" else None
-    # A fleet-scoped aggregate is a fleet-scoped read: gate it exactly as
-    # GET /memories does. Previously absent here, which let a trust-1 agent
-    # read another fleet's breakdown that the list route would have refused.
-    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
-        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+    # Previously absent here, which let a trust-1 agent read another fleet's
+    # breakdown that the list route would have refused.
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
 
     # Type/agent/status breakdown (GROUPING SETS) via core-storage-api. Aggregates
     # across the readable set when the caller has cross-tenant read AND didn't pin
@@ -610,7 +632,27 @@ async def memory_count(
         tenant_id = auth.tenant_id
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
-    count = await get_storage_client().count_active(tenant_id, fleet_id, status=status)
+    # This route sat beside stats and list without the gate, so a trust-1 agent
+    # could count another fleet's rows the list route would have refused to show
+    # it — the same hole that was closed on stats and missed here.
+    caller_agent_id = auth.effective_agent_id(None)
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
+    # Visibility, scoped exactly as ``GET /memories`` scopes the rows this
+    # number summarises: ``scope_agent`` rows count only for their own author.
+    # Counting them all handed back, as a number, what the list route withholds
+    # — peers' private row counts. Excluding them all was the equal and
+    # opposite error: an agent credential's own count would then come in UNDER
+    # the list it can see.
+    #
+    # This route takes no ``agent_id`` param, so there is nothing to forge: the
+    # identity is the authenticated one or nothing.
+    count = await get_storage_client().count_active(
+        tenant_id,
+        fleet_id,
+        status=status,
+        exclude_scope_agent=True,
+        caller_agent_id=caller_agent_id,
+    )
     return {"count": count}
 
 

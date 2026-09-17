@@ -1129,13 +1129,25 @@ class CoreStorageClient:
         tenant_id: str,
         fleet_id: str | None = None,
         status: str | None = None,
+        exclude_scope_agent: bool = False,
+        caller_agent_id: str | None = None,
     ) -> int:
-        """Live-memory count; ``status`` narrows to one exact status."""
+        """Live-memory count; ``status`` narrows to one exact status.
+
+        ``exclude_scope_agent`` applies the list route's visibility scoping and
+        ``caller_agent_id`` is the identity inside it — an agent's own private
+        rows stay counted, its peers' do not. Both default off, keeping the
+        whole-corpus system callers' numbers unchanged.
+        """
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
         if status is not None:
             params["status"] = status
+        if exclude_scope_agent:
+            params["exclude_scope_agent"] = True
+        if caller_agent_id is not None:
+            params["caller_agent_id"] = caller_agent_id
         result = await self._get("/memories/count-active", **params)
         return (result or {}).get("count", 0)
 

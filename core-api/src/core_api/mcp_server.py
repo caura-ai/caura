@@ -42,13 +42,14 @@ from core_api.constants import (
     INSIGHTS_FOCUS_MODES,
     KEYSTONES_EMPTY_HINT,
     MAX_DOC_SEARCH_TOP_K,
+    MAX_QUERY_LENGTH,
     MAX_SEARCH_TOP_K,
     MEMORY_STATUSES,
     MEMORY_TYPES,
     VALID_SCOPES,
     VERSION,
 )
-from core_api.errors import AUTH_PLAN_LIMIT, code_for_status
+from core_api.errors import AUTH_ORG_SUSPENDED, AUTH_PLAN_LIMIT, code_for_status
 from core_api.pagination import decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -242,19 +243,41 @@ _ADMIN_ERROR = _as_error_result(
     )
 )
 
+# Every value that occupies ``_tenant_id_var`` WITHOUT being a tenant. The one
+# consumer (``_refuse_if_suppressed``) was written enumerating two of the
+# three, which is how a suppression lookup for a tenant that cannot exist got
+# onto the no-key path.
+#
+# ``_check_auth`` below is the SECOND enumeration of this roster and
+# deliberately does not use the set — it has to tell the sentinels apart to
+# pick an error, and it must keep NAMING ``_AUTH_ERROR`` / ``_ADMIN_ERROR``,
+# because ``tests/_error_codes.py`` resolves a tool's reachable error codes by
+# the module-level constants a function mentions. Collapsing it to a lookup
+# keyed on this dict hid ``UNAUTHORIZED``/``FORBIDDEN`` from that scan and took
+# ``test_tool_error_codes_inventory`` down with it — 12 specs' published codes
+# rest on that scan seeing them. The two lists are tied together by
+# ``test_every_sentinel_is_refused`` instead, which is the cheaper half of the
+# trade: a sentinel missing from ``_check_auth`` falls through to
+# ``return None``, i.e. auth PASSES, which is far worse than the wasted lookup
+# fixed here.
+#
+# (``core_api.services.capability_usage._NON_TENANT`` holds the same three plus
+# ``""``, spelled as literals; it cannot import them from here without a cycle,
+# and is cross-referenced there instead.)
+_SENTINEL_TENANTS = frozenset({_UNAUTH, _ADMIN, _NO_AUTH})
 
-async def _send_401(send: Send, message: str) -> None:
-    """Refuse the request outright with a JSON error envelope.
 
-    Refusing beats falling through to ``_UNAUTH``: a request that keeps going
-    with a different identity resolution lets a caller probe which headers
-    change the answer.
+async def _send_error(send: Send, status: int, code: str, message: str) -> None:
+    """End the request here with a JSON error envelope, before the MCP app.
+
+    The middleware runs ahead of the tool layer, so it cannot return a tool
+    envelope; it writes the ASGI response itself.
     """
-    body = _error_response("UNAUTHORIZED", message).encode()
+    body = _error_response(code, message).encode()
     await send(
         {
             "type": "http.response.start",
-            "status": 401,
+            "status": status,
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
@@ -262,6 +285,59 @@ async def _send_401(send: Send, message: str) -> None:
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+async def _send_401(send: Send, message: str) -> None:
+    """Refuse an unauthenticated request outright.
+
+    Refusing beats falling through to ``_UNAUTH``: a request that keeps going
+    with a different identity resolution lets a caller probe which headers
+    change the answer.
+    """
+    await _send_error(send, 401, "UNAUTHORIZED", message)
+
+
+async def _refuse_if_suppressed(send: Send, tenant_id: str, readable: list[str] | None) -> bool:
+    """403 a soft-deleted org's request. Returns True when it refused.
+
+    The MCP twin of REST's ``auth._block_if_suppressed`` (CAURA-694). It lives
+    in the middleware rather than in each tool for the same reason REST puts it
+    in ``get_auth_context``: every surface is then covered by construction, and
+    a tool added later cannot forget it. Without it a soft-deleted org kept full
+    MCP read AND write while REST 403'd the same credential — the gap was not
+    that MCP refused differently, it was that MCP never asked.
+
+    ``_SENTINEL_TENANTS`` is skipped deliberately. ``_ADMIN`` is the operator
+    key, which REST also exempts (its ``tenant_id`` is None there, so the guard
+    returns early); ``_UNAUTH`` and ``_NO_AUTH`` have no tenant to look up and
+    are refused by ``_check_auth`` on their own terms.
+
+    Readable tenants are checked too, mirroring
+    ``_block_if_any_readable_suppressed``: a multi-tenant credential whose
+    readable set spans a suppressed org would otherwise pass a home-only check.
+
+    ``is_tenant_suppressed`` caches for 30s and fails OPEN on a storage error,
+    both by design — see :mod:`core_api.suppression`. That posture is inherited
+    here rather than re-decided.
+    """
+    from core_api.suppression import is_tenant_suppressed
+
+    candidates = [tenant_id] + [t for t in (readable or []) if t and t != tenant_id]
+    for candidate in candidates:
+        if candidate in _SENTINEL_TENANTS:
+            continue
+        if await is_tenant_suppressed(candidate):
+            await _send_error(
+                send,
+                403,
+                AUTH_ORG_SUSPENDED,
+                # Same generic wording as REST, for the same reason: naming
+                # "soft-deleted" leaks org lifecycle state to a partner whose
+                # key was provisioned under that org.
+                "Organization is suspended; access denied.",
+            )
+            return True
+    return False
 
 
 class MCPAuthMiddleware:
@@ -452,6 +528,13 @@ class MCPAuthMiddleware:
             _org_read_only_var.set(
                 (headers.get(b"x-org-read-only", b"").decode().lower() == "true") if via_gateway else False
             )
+
+            # Last, because it needs the resolved tenant — and before the app,
+            # because a suppressed org must not reach a tool at all.
+            if await _refuse_if_suppressed(
+                send, _tenant_id_var.get(_UNAUTH), _readable_tenant_ids_var.get(None)
+            ):
+                return
 
         await self.app(scope, receive, send)
 
@@ -718,6 +801,12 @@ def _check_auth() -> CallToolResult | None:
     ``None`` if OK. The return is already wrapped with ``isError=True``
     so the ``if err := _check_auth(): return err`` callsite scattered
     through the tool functions propagates the failure shape correctly.
+
+    Spelled out rather than keyed off ``_SENTINEL_TENANTS``: see that
+    constant's comment — naming the two error constants here is what keeps
+    them visible to the reachable-code scan, and
+    ``test_every_sentinel_is_refused`` is what keeps this list and that set
+    from drifting apart.
     """
     tid = _get_tenant()
     if tid == _UNAUTH:
@@ -1077,6 +1166,28 @@ async def caura_recall(
             ),
             t0,
         )
+    # Same bound REST's SearchRequest applies (schemas.py, MAX_QUERY_LENGTH).
+    # Unbounded here, an arbitrarily long query reached the embedding provider
+    # and the FTS path — the one surface where the cost of a request is set by
+    # the caller. Enforced in the handler rather than as a ``max_length`` on the
+    # Field so the refusal is this file's structured envelope rather than
+    # whatever shape the MCP SDK gives a Pydantic error.
+    #
+    # Deliberately NOT advertised in the tool description. Tool-surface tokens
+    # are paid on every agent call (see the ceiling in
+    # tests/test_mcp_token_budget.py and the note in tests/fixtures/README.md),
+    # whereas this bound only concerns callers who exceed it — and the refusal
+    # below names the limit, so one round trip teaches it.
+    if len(query) > MAX_QUERY_LENGTH:
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"query exceeds the maximum length of {MAX_QUERY_LENGTH} characters.",
+                field="query",
+                value=f"<{len(query)} characters>",
+            ),
+            t0,
+        )
     if memory_type and memory_type not in MEMORY_TYPES:
         return _with_latency(
             _error_response(
@@ -1104,7 +1215,13 @@ async def caura_recall(
     agent_id = effective_read_agent_id(_get_agent_id(), agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
-    capped_top_k = min(top_k, MAX_SEARCH_TOP_K)
+    # Clamped at BOTH ends. ``min`` alone let a negative top_k through to the
+    # service: the entity route returned a full unscored pool and the scored
+    # route sent a negative SQL LIMIT and 500'd. The response also echoed
+    # ``effective_top_k: -5``, reporting the bad value back as if honoured.
+    # ``max(1, min(...))`` is the same clamp the doc-search path in this file
+    # already uses; this one had only half of it.
+    capped_top_k = max(1, min(top_k, MAX_SEARCH_TOP_K))
 
     # Audit finding P3: prior implementation held ``_mcp_session()``
     # open across the brief-generation LLM round-trip (~5-30s), pinning
@@ -1221,6 +1338,8 @@ async def caura_recall(
             "results": _rows,
             "items": _rows,
             "count": len(_rows),
+            # Against the CLAMPED value, so a negative top_k is not reported as
+            # a truncation of a larger request.
             "truncated": top_k > capped_top_k,
             "requested_top_k": top_k,
             "effective_top_k": capped_top_k,
@@ -1539,6 +1658,22 @@ async def caura_write(
             # client can pass an explicit token via metadata.
             bulk_result = await create_memories_bulk(bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
             return _with_latency(_serialize(bulk_result), t0)
+        except ValidationError as e:
+            # ``MemoryCreate(...)`` on the single-write path above validates
+            # weight, content length, memory_type and visibility, and RAISES on
+            # anything else — but only ``HTTPException`` was handled, so those
+            # escaped this tool uncaught and reached the caller as an
+            # unstructured MCP error instead of INVALID_ARGUMENTS. The batch
+            # path already caught its own (INVALID_BATCH_ITEM, per item); this
+            # is the single path's missing twin, kept at the same level as the
+            # HTTPException handler so it covers every construction in the try.
+            return _with_latency(
+                _error_response(
+                    "INVALID_ARGUMENTS",
+                    f"Invalid write arguments — {e}",
+                ),
+                t0,
+            )
         except HTTPException as e:
             # Idempotent retry-safe duplicate: when create_memory raises 409
             # with the "Duplicate memory exists: <uuid>" detail (Stage 5's

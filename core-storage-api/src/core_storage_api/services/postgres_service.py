@@ -294,6 +294,37 @@ def _fleet_scope_clause(
     return or_(*disjuncts)
 
 
+def _visibility_scope_clause(caller_agent_id: str | None) -> ColumnElement[bool]:
+    """The read visibility predicate, in one place — the sibling of
+    ``_fleet_scope_clause`` above, and centralised for the reason its docstring
+    gives.
+
+    With an identity: ``scope_org``/``scope_team`` always, plus the caller's OWN
+    ``scope_agent`` rows. Without one, every ``scope_agent`` row is dropped —
+    a credential that authenticates no agent is entitled to none of them.
+
+    Spelled as an allow-list, NOT as ``!= "scope_agent" OR agent_id ==
+    caller``. ``Memory.visibility`` is plain Text with no CHECK constraint, so
+    the two forms differ on any value outside the three: the allow-list omits
+    it, the negation admits it. Every reader here has to make the same choice,
+    which is the argument for the predicate living in one place — a count that
+    disagrees with the list it summarises is the bug this was extracted for.
+
+    (``Memory.visibility`` is NOT NULL with a server default, so the
+    three-valued-logic NULL pitfall does not apply to either form.)
+    """
+    if not caller_agent_id:
+        return Memory.visibility != "scope_agent"
+    return or_(
+        Memory.visibility == "scope_org",
+        Memory.visibility == "scope_team",
+        and_(
+            Memory.visibility == "scope_agent",
+            Memory.agent_id == caller_agent_id,
+        ),
+    )
+
+
 def _scope_sql(
     tenant_id: str,
     fleet_id: str | None,
@@ -4244,6 +4275,8 @@ class PostgresService:
         tenant_id: str,
         fleet_id: str | None = None,
         status: str | None = None,
+        exclude_scope_agent: bool = False,
+        caller_agent_id: str | None = None,
     ) -> int:
         """Count live (non-deleted) memories for a tenant, optionally a fleet.
 
@@ -4252,6 +4285,19 @@ class PostgresService:
         used to test ``status == "active"`` literally, which silently returned
         0 for tenants whose rows enrichment had promoted to ``confirmed`` /
         ``pending``. Pass an explicit ``status`` to count exactly that one.
+
+        ``exclude_scope_agent`` turns on visibility scoping and
+        ``caller_agent_id`` is the identity applied within it — together,
+        ``_visibility_scope_clause``, the same predicate the list route builds.
+
+        TWO parameters rather than one, because this counter has three states
+        where the list route has two: unscoped is real here (the
+        auto-crystallize spend gate counts the whole corpus, private rows
+        included). A lone ``caller_agent_id: str | None`` cannot carry three,
+        and not just in Python — this is reached over HTTP via
+        ``/count-active``, where an absent optional query param and an explicit
+        null are the same value, so "don't scope" and "scope with no identity"
+        would collapse into each other on the wire.
         """
         status_filter = (
             Memory.status == status if status is not None else Memory.status.in_(LIVE_MEMORY_STATUSES)
@@ -4268,6 +4314,8 @@ class PostgresService:
             )
             if fleet_id:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
+            if exclude_scope_agent:
+                stmt = stmt.where(_visibility_scope_clause(caller_agent_id))
             result = await session.execute(stmt)
             return result.scalar() or 0
 

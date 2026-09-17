@@ -1110,12 +1110,26 @@ async def count_active_memories(
     tenant_id: str,
     fleet_id: str | None = None,
     status: str | None = None,
+    exclude_scope_agent: bool = False,
+    caller_agent_id: str | None = None,
 ) -> dict:
     """Count live memories (``LIVE_MEMORY_STATUSES``), not just literal ``active``.
 
     Pass ``status=active`` for the old narrow behaviour.
+
+    ``exclude_scope_agent`` applies the list route's visibility scoping;
+    ``caller_agent_id`` is the identity applied within it, so the caller's own
+    private rows stay counted while its peers' do not. Defaults keep every
+    existing caller's numbers identical — core-api's ``GET /memories/count``
+    passes both, whole-corpus system callers pass neither.
     """
-    count = await _svc.memory_count_active(tenant_id, fleet_id, status=status)
+    count = await _svc.memory_count_active(
+        tenant_id,
+        fleet_id,
+        status=status,
+        exclude_scope_agent=exclude_scope_agent,
+        caller_agent_id=caller_agent_id,
+    )
     return {"count": count}
 
 
