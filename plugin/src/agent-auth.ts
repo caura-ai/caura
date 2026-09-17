@@ -18,6 +18,7 @@
 import { readFileSync, writeFileSync, existsSync, chmodSync } from "fs";
 import { CAURA_API_URL, CAURA_API_KEY, CAURA_API_PREFIX } from "./env.js";
 import { getSecretsPath } from "./paths.js";
+import { withUserAgent } from "./user-agent.js";
 import { logError } from "./logger.js";
 
 // --- Configuration ---
@@ -70,10 +71,10 @@ async function provisionAgentKey(
     const url = new URL(`${CAURA_API_PREFIX}/admin/agent-keys/provision`, CAURA_API_URL);
     const res = await fetch(url.toString(), {
       method: "POST",
-      headers: {
+      headers: withUserAgent({
         "Content-Type": "application/json",
         "X-API-Key": CAURA_API_KEY,
-      },
+      }),
       body: JSON.stringify({ agent_id: agentId }),
       signal: AbortSignal.timeout(10_000),
     });

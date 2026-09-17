@@ -15,6 +15,7 @@ process.env.CAURA_API_KEY = "mc_test_key_for_env_tests";
 delete process.env.CAURA_TENANT_ID;
 
 const { resolveTenantId, readEnv, isPluginEnvKey, hasPluginEnvPrefix } = await import("./env.js");
+const { USER_AGENT } = await import("./user-agent.js");
 
 interface MockCall {
   url: string;
@@ -71,6 +72,13 @@ describe("resolveTenantId — network failure handling", () => {
 
     assert.equal(result, "", "returns empty string on failure");
     assert.equal(calls.length, 1, "should only attempt fetch once (no retries)");
+    const headers = calls[0].init?.headers as Record<string, string>;
+    assert.equal(
+      headers["User-Agent"],
+      USER_AGENT,
+      "the /auth/verify request must identify the plugin (Caura Heartbeat v1 §7)",
+    );
+    assert.equal(headers["Content-Type"], "application/json", "existing headers stay intact");
     assert.ok(elapsed < 500, `should short-circuit fast, took ${elapsed}ms`);
     assert.equal(
       warnLines.length,

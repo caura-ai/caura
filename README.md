@@ -184,6 +184,11 @@ memory tools. Use the
 then see the [OpenClaw integration guide](static/docs/integration-guide.md) for
 agent prompts and trust levels.
 
+The plugin talks only to the Caura server you configure (`CAURA_API_URL`) and
+identifies itself on every request with
+`User-Agent: openclaw-plugin/<version> (node/<major>)`, which the server's
+self-hosted heartbeat uses to count connected plugin installs.
+
 ### Python client
 
 Talk to any managed or self-hosted Caura deployment from Python:

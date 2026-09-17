@@ -44,6 +44,7 @@ import { readInterviewEvents, pruneInterviewBuffer } from "./interview-buffer.js
 import { syncTaskTrail } from "./task-trail.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { PLUGIN_VERSION } from "./version.js";
+import { withUserAgent } from "./user-agent.js";
 import { CAURA_TOOLS } from "./tools.js";
 import {
   getPluginDir,
@@ -736,6 +737,10 @@ async function processCommand(cmd: {
           // statically imported by ``context-engine.ts``, so a fallback
           // list without it bricks a fresh-ish deploy with TS2307.
           "interview-buffer.ts",
+          // ``user-agent.ts`` — statically imported by ``transport.ts``,
+          // ``env.ts``, ``agent-auth.ts`` and this file. Same TS2307
+          // failure class as the two entries above if it is missing.
+          "user-agent.ts",
         ];
         const FALLBACK_ROOT_FILES = [
           "openclaw.plugin.json", "tools.json", "skills/memclaw/SKILL.md", // legacy-name-floor: shipped skill path
@@ -759,7 +764,7 @@ async function processCommand(cmd: {
           // docstring), so sending the key is just to satisfy the
           // gateway; the bootstrap-router alias path is the
           // unauthenticated route for fresh installs.
-          const mHeaders: Record<string, string> = {};
+          const mHeaders: Record<string, string> = withUserAgent();
           if (CAURA_API_KEY) mHeaders["X-API-Key"] = CAURA_API_KEY;
           const mRes = await fetch(mUrl, {
             headers: mHeaders,
@@ -908,7 +913,10 @@ async function processCommand(cmd: {
                 `${CAURA_API_PREFIX}/plugin-source?file=${encodeURIComponent(name)}`,
                 CAURA_API_URL,
               ).toString();
-              const res = await fetch(url, { signal: fetchController.signal });
+              const res = await fetch(url, {
+                headers: withUserAgent(),
+                signal: fetchController.signal,
+              });
               if (res.ok) {
                 const text = await res.text();
                 if (text.length > 0 && text.length <= MAX_SOURCE_SIZE) {

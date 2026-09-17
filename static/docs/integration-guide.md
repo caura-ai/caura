@@ -298,6 +298,7 @@ The plugin registers 11 tools (the MCP surface minus the MCP-only `caura_keyston
 - **ContextEngine** — 7 lifecycle hooks: `bootstrap` (smoke test), `ingest` (message buffering + persistence), `assemble` (token-budget-aware recall injection), `compact` (persist summaries), `afterTurn` (auto-write turn summaries), `prepareSubagentSpawn`, `onSubagentEnded`
 - **Memory runtime** — API-backed `search()` and `get()` replacing file-based `memory-core`
 - **Heartbeat** — every 60 seconds, POSTs node status (agents, tools, OS, IP, plugin version, setup_status) to `/api/v1/fleet/heartbeat`. Caura responds with any pending commands
+- **Request identity** — every HTTP request to the Caura server carries `User-Agent: openclaw-plugin/<plugin version> (node/<Node major>)` alongside `X-API-Key`. The server's heartbeat counts connected SDK families from this prefix; nothing else is sent
 - **Commands** — the plugin processes HMAC-verified commands from the heartbeat response:
   - `deploy` — fetch all source files to memory, backup originals, write + build, rollback on failure
   - `educate` — write prompts to agent HEARTBEAT.md files + write SKILL.md, TOOLS.md, AGENTS.md to workspaces
