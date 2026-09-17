@@ -192,6 +192,7 @@
               "items": {
                 "type": "string"
               },
+              "maxItems": 50,
               "type": "array"
             },
             {

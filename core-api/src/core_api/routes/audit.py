@@ -33,4 +33,9 @@ async def list_audit_log(
 ):
     auth.enforce_tenant(tenant_id)
     sc = get_storage_client()
-    return await sc.list_audit_logs(tenant_id, limit=limit)
+    # OSS 08/14 M-11 — ``since`` is forwarded. It was declared here and dropped
+    # on the floor, so a caller asking "what happened since X" got the
+    # unfiltered tail and no indication the filter had not been applied. On an
+    # AUDIT log that is the worst shape of wrong: the extra entries look like
+    # events inside the requested window.
+    return await sc.list_audit_logs(tenant_id, limit=limit, since=since)

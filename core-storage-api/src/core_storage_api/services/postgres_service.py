@@ -5936,6 +5936,7 @@ class PostgresService:
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
         readable_tenant_ids: list[str] | None = None,
+        visibility: str | None = None,
     ) -> list[Memory]:
         """Filter, sort, paginate memories WITH visibility scoping.
 
@@ -5986,6 +5987,14 @@ class PostgresService:
             stmt = stmt.where(Memory.status == status)
         if run_id is not None:
             stmt = stmt.where(Memory.run_id == run_id)
+        if visibility:
+            # OSS 09/02 M-27 — a caller-supplied NARROWING filter, and only
+            # that. It is ANDed onto a statement the scoping predicate above
+            # has already restricted, so it can hide rows the caller may see
+            # and can never surface one it may not: asking for
+            # ``visibility=scope_org`` does not grant scope_org reach, it just
+            # drops everything else from the page.
+            stmt = stmt.where(Memory.visibility == visibility)
         if weight_min is not None:
             stmt = stmt.where(Memory.weight >= weight_min)
         if weight_max is not None:
