@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import MemoryOut
+from core_api.schemas import MemoryOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -110,12 +110,29 @@ class RecallResponse(BaseModel):
     summary: str
     memory_count: int
     memories: list[MemoryOut]
-    items: list[MemoryOut] = Field(
-        description="Alias of memories (canonical list key per the wire contract)."
+    # ax-0917-h-03 — still emitted by default (the shape is SemVer-stable per
+    # docs/public-api-stability.md), but now OPTIONAL: a request setting
+    # ``items_alias: false`` omits it and halves the payload. Read ``memories``.
+    items: list[MemoryOut] | None = Field(
+        default=None,
+        description=(
+            "Back-compat alias of memories, for consumers written against "
+            "/search's shape. Present unless the request set items_alias=false; "
+            "duplicating the result set is ~50% of this response."
+        ),
     )
     recall_ms: int
     diagnostic: RecallDiagnostic | None = Field(
         default=None, description="Only when the request sets diagnostic=true."
+    )
+    # ax-0917-h-05 — same shape as ``SearchResponse.warnings`` (A28). Absent
+    # when there is nothing to report, which is the ordinary case.
+    warnings: list[SearchWarning] | None = Field(
+        default=None,
+        description=(
+            "Non-fatal notices about this request — e.g. parameters the "
+            "endpoint does not read and therefore ignored."
+        ),
     )
 
 

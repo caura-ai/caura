@@ -60,6 +60,7 @@ from core_api.schemas import (
     MemoryOut,
     MemoryUpdate,
     PaginatedMemoryResponse,
+    RecallRequest,
     RedistributeRequest,
     RedistributeResponse,
     SearchDiagnostic,
@@ -1933,6 +1934,56 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     return eff_agent_id, identity_asserted
 
 
+# ax-0917-h-05 — a stable slug, same contract as SUCCESSOR_ENRICHMENT_INCOMPLETE.
+UNRECOGNIZED_PARAMETERS = "unrecognized_parameters"
+_MAX_REPORTED_UNKNOWN = 20
+
+
+def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
+    """Report the request keys this surface accepted and then ignored.
+
+    ax-0917-h-05. The search/filter/query bodies accept unknown fields on
+    purpose (SAFE-01: a misspelled filter returns the wrong rows, not a wrong
+    write, and the permissiveness is a compatibility promise to integrators).
+    What was never deliberate is that the caller is told NOTHING: ``limit: 2``
+    and ``bogus_param_xyz: 2`` produced byte-identical responses to sending
+    neither, so an agent that asked for 2 rows got the default 5 and 3.5x the
+    payload with no signal anywhere that its parameter had not been read.
+
+    So the field survives (still 2xx, still no rejection) and the silence does
+    not. Two channels, because they answer to different people: a
+    ``logger.warning`` for the operator watching an integration, and an A28
+    ``warnings`` entry for the caller, which is the only one an autonomous agent
+    can act on — it does not read our logs.
+
+    Declared aliases are not extras, so the ``limit`` -> ``top_k`` absorption
+    above never lands here; only genuinely unread keys do.
+
+    Capped at ``_MAX_REPORTED_UNKNOWN`` names. A caller that sends two hundred
+    junk keys should not get a warning bigger than the result set it asked
+    for — in a change whose whole point is payload size, an unbounded echo of
+    caller input would be its own bug.
+    """
+    unknown = sorted((body.model_extra or {}).keys())[:_MAX_REPORTED_UNKNOWN]
+    if not unknown:
+        return []
+    logger.warning(
+        "request carried parameters this route does not read",
+        extra={"path": route, "tenant_id": body.tenant_id, "unknown_parameters": unknown},
+    )
+    return [
+        {
+            "code": UNRECOGNIZED_PARAMETERS,
+            "message": (
+                "These request parameters are not read by this endpoint and had no effect: "
+                + ", ".join(unknown)
+                + ". Result-count is controlled by 'top_k'."
+            ),
+            "details": {"unknown_parameters": unknown},
+        }
+    ]
+
+
 @router.post("/search", response_model=SearchResponse)
 @search_limit
 async def search(
@@ -1998,7 +2049,10 @@ async def _search_inner(
     recall_ctx: dict = {}
     # A28 — always collected (no request flag gates it); only serialized below
     # when a step actually put something in it.
-    search_warnings: list = []
+    # ax-0917-h-05 seeds it with any parameter the body carried and this route
+    # does not read — the same silent-drop that hid ``limit`` on /recall is live
+    # on /search, which shares this body.
+    search_warnings: list = _unknown_param_warnings(body, route="memory-search")
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -2246,7 +2300,7 @@ async def ingest_undo_endpoint(
 @search_limit
 async def recall_endpoint(
     request: Request,
-    body: SearchRequest,
+    body: RecallRequest,
     response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -2343,7 +2397,7 @@ async def recall_endpoint(
     # idempotent, so it's a no-op there.
 
     # ── Phase 2: LLM brief (no DB held) ──────────────────────────
-    return await summarize_memories(
+    brief = await summarize_memories(
         memories,
         body.query,
         config,
@@ -2352,7 +2406,18 @@ async def recall_endpoint(
         diagnostic_ctx=diagnostic_ctx,
         top_k=body.top_k,
         t0=t0,
+        items_alias=body.items_alias,
     )
+    # ax-0917-h-05 — same A28 channel /search uses, and the reason this route
+    # needed it most: ``limit`` is now an alias of ``top_k`` (schemas.py), but
+    # the NEXT plausible guess an agent makes still has to arrive as something
+    # other than silence. Added only when non-empty: unlike ``SearchResponse``
+    # this envelope is a plain dict, so an always-present ``"warnings": null``
+    # would be new bytes on every recall for the case where there is nothing
+    # to say — the opposite of what this PR is for.
+    if warnings := _unknown_param_warnings(body, route="memory-recall"):
+        brief["warnings"] = warnings
+    return brief
 
 
 # ---------------------------------------------------------------------------
