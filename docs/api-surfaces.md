@@ -86,10 +86,14 @@ independently of ownership decisions:
 - **Response shape drift on `recall`**: REST `/recall` returns
   `{query, summary, memory_count, memories, items, recall_ms}`; MCP
   `caura_recall(include_brief=true)` returns
-  `{results, items, count, brief: <REST-recall-response>}`. Both dual-emit
-  the row list under `items` now, so that key is the safe one to read on
-  either surface — but the rest of the envelope (and the nesting of the
-  brief) still differs for one conceptual operation. Pick one and align.
+  `{results, items, count, brief: <REST-recall-response>}`. `memories` is
+  the key to read on a recall brief and `items` on a search result: both
+  first-party SDKs already do exactly that. The `items` mirror on REST
+  `/recall` is back-compat only — it doubles the payload (ax-0917-h-03),
+  so REST callers can send `items_alias: false` and the MCP brief has
+  already dropped it, since that payload carries the same rows under
+  `results`/`items` anyway. The rest of the envelope (and the nesting of
+  the brief) still differs for one conceptual operation. Pick one and align.
   `summary` behaves the same on both: the model is prompted to reason step
   by step and to close with a `**Answer:**` line, and the server surfaces
   only that final answer — callers get the answer, not the scaffold, and

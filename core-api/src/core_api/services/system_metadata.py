@@ -124,6 +124,41 @@ def set_system_value(
         metadata[key] = value
 
 
+def strip_platform_metadata(metadata: dict | None) -> dict | None:
+    """Caller-owned view of ``metadata``: the dual-write copies removed.
+
+    ax-0917-h-04. ``set_system_value`` writes every platform value TWICE (the
+    legacy top-level key plus ``_system``), and the read side derives a THIRD
+    copy into ``MemoryOut.system_metadata`` — so a recall row shipped the same
+    ``llm_ms`` / ``write_latency_ms`` / ``semantic_dedup_ms`` / ``weight_source``
+    block three times, ~1.9 KB per row against 65-82 B of actual content.
+
+    This picks ONE location for agent-facing reads. ``system_metadata`` is the
+    one that survives: it is the documented C25 read surface, it is the merged
+    view (nested wins over legacy) so it is correct for historical rows too, and
+    ``MemoryOut.metadata``'s own docstring already says reading platform keys
+    from ``metadata`` is deprecated. NOTHING is deleted — the JSONB column is
+    untouched, ``system_metadata`` carries the same values in the same response,
+    and the detail read (``GET /memories/{id}``) still returns raw ``metadata``.
+
+    ``summary`` and ``tags`` are deliberately KEPT at top level even though they
+    are platform-produced too: they are ``CALLER_OWNABLE_KEYS``, and the read
+    side cannot tell a caller's own ``summary`` from the platform's mirror of
+    one. Dropping them would be data loss for the caller that set them, which is
+    the exact clobber C25 exists to prevent — so only ``PLATFORM_ONLY_KEYS`` (and
+    the namespace) go.
+
+    Only None-ness is preserved; a row left with nothing caller-owned returns
+    ``{}``, never None. That is the same falsy-``{}`` trap ``_dict_to_memory_out``
+    guards: ``null`` and ``{}`` are different answers on the wire, and a row that
+    HAS a metadata column should not report it absent just because every key in
+    it was platform-written.
+    """
+    if metadata is None:
+        return None
+    return {k: v for k, v in metadata.items() if k not in PLATFORM_ONLY_KEYS and k != SYSTEM_NAMESPACE}
+
+
 def extract_system_metadata(metadata: dict | None) -> dict | None:
     """Read-side view: ``_system`` merged over legacy top-level platform keys.
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import MemoryOut
+from core_api.schemas import MemoryOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -110,12 +110,44 @@ class RecallResponse(BaseModel):
     summary: str
     memory_count: int
     memories: list[MemoryOut]
-    items: list[MemoryOut] = Field(
-        description="Alias of memories (canonical list key per the wire contract)."
+    # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
+    #
+    # ``POST /recall`` is a SemVer-stable REST surface (docs/public-api-stability.md,
+    # Memory row), so flipping this default is a breaking change owed a major. The
+    # MCP brief carries no such pin — that document fixes tool names and purposes,
+    # not response bodies — so it already defaults to omitting the alias. That
+    # split is a MIGRATION STATE, not a permanent design: marking the field
+    # deprecated here is what gives it an end, so the two surfaces converge at
+    # v4 rather than disagreeing indefinitely.
+    #
+    # Sunset follows the same deprecate-then-remove convention this PR leans on
+    # for h-04 (C25, #967). No first-party consumer reads it: both SDKs read
+    # ``memories`` first and only fall back (clients/python .../models.py,
+    # clients/typescript/src/index.ts), and the plugin's items reader is only
+    # ever fed /search.
+    items: list[MemoryOut] | None = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "DEPRECATED — scheduled for removal in v4.0.0; read `memories` instead. "
+            "Back-compat alias of memories, for consumers written against "
+            "/search's shape. Present unless the request set items_alias=false; "
+            "duplicating the result set is ~50% of this response. The MCP recall "
+            "brief already omits it by default."
+        ),
     )
     recall_ms: int
     diagnostic: RecallDiagnostic | None = Field(
         default=None, description="Only when the request sets diagnostic=true."
+    )
+    # ax-0917-h-05 — same shape as ``SearchResponse.warnings`` (A28). Absent
+    # when there is nothing to report, which is the ordinary case.
+    warnings: list[SearchWarning] | None = Field(
+        default=None,
+        description=(
+            "Non-fatal notices about this request — e.g. parameters the "
+            "endpoint does not read and therefore ignored."
+        ),
     )
 
 
