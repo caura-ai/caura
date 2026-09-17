@@ -28,6 +28,7 @@ the shape of its ``payload`` dict.
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SerializationInfo, field_serializer
@@ -65,7 +66,20 @@ class MemoryEnrichRequest(BaseModel):
     # ``ts_valid_*`` extraction guidance. Worker defaults to ``date.today()``
     # when omitted; sending it explicitly pins the value to the publisher's
     # clock so a delayed delivery doesn't drift the prompt.
-    reference_datetime: str | None = None
+    #
+    # Typed ``datetime``, not ``str``. It was a ``str`` that the publisher
+    # produced with ``.isoformat()`` and the worker turned back with
+    # ``fromisoformat`` — so the schema accepted anything and the real
+    # rejector sat in the consumer, BELOW its poison-payload guard. A
+    # malformed value therefore raised past the handler and nack-looped to
+    # the DLQ, even though every redelivery re-parses the same bytes and
+    # fails identically. Declaring the real type makes pydantic reject it
+    # here, inside the guard that already ack-drops malformed payloads.
+    #
+    # Not a wire change: ``model_dump(mode="json")`` still emits ISO 8601, and
+    # an ISO string on the way in still parses, so in-flight messages survive
+    # a rolling deploy in both directions.
+    reference_datetime: datetime | None = None
 
     # Provider selection — mirrors the ``ResolvedConfig`` attributes
     # ``common.enrichment.service.enrich_memory`` reads.

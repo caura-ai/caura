@@ -44,7 +44,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from datetime import datetime
 from types import SimpleNamespace
 
 import httpx
@@ -266,20 +265,20 @@ _ENRICHMENT_ORM_FIELDS: frozenset[str] = frozenset(
         "memory_type",
         "weight",
         "title",
-        "status",
         "ts_valid_start",
         "ts_valid_end",
     }
 )
 
 # Enrichment fields that live in ``Memory.metadata`` JSONB. Synchronous
-# path (``memory_service.py``) writes them as ``metadata["summary"]``,
-# ``metadata["tags"]``, etc.; the worker mirrors that via the storage
-# layer's atomic ``metadata_patch`` JSONB merge.
+# path (``memory_service.py``) writes them as ``metadata["summary"]``
+# etc.; the worker mirrors that via the storage layer's atomic
+# ``metadata_patch`` JSONB merge. Not a mirror of the sync path's whole
+# set: ``tags`` is written there behind ``if enrichment.tags:`` and is
+# not routed here at all (see ``_ENRICHMENT_UNROUTED_FIELDS``).
 _ENRICHMENT_METADATA_FIELDS: frozenset[str] = frozenset(
     {
         "summary",
-        "tags",
         "contains_pii",
         "pii_types",
         "business_relevance",
@@ -297,10 +296,9 @@ _ENRICHMENT_METADATA_FIELDS: frozenset[str] = frozenset(
 # fails when a future field is added without a code site to handle it
 # — silent drops are the failure mode we're guarding against.
 #
-# Every ``EnrichmentResult`` field now routes somewhere. ``atomic_facts``
-# used to sit here — the worker computed them and threw them away, so a
-# fast-mode write of multi-claim content produced fewer memories than the
-# same content written in strong mode, and the difference was unrecoverable
+# ``atomic_facts`` used to sit here — the worker computed them and threw
+# them away, so a fast-mode write of multi-claim content produced fewer
+# memories than the same content in strong mode, unrecoverably,
 # because the LLM answer was gone. They are persisted to metadata now (see
 # ``_ENRICHMENT_METADATA_FIELDS``); the fan-out into child memories still
 # belongs to core-api, which already consumes ``Topics.Memory.ENRICHED`` and
@@ -308,7 +306,52 @@ _ENRICHMENT_METADATA_FIELDS: frozenset[str] = frozenset(
 # weight inheritance. Duplicating that here would be a second implementation
 # of a subtle path — and the worker's storage client has no create-memory
 # call at all.
-_ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset()
+#
+# ``status`` and ``tags`` moved HERE from the routed sets. CAURA-719 stopped
+# asking the LLM for either (see ``common/enrichment/_prompts.py``), so on a
+# real-LLM run ``EnrichmentResult`` carries only their schema defaults —
+# ``"active"`` and ``[]``. Routing a constant to storage cannot improve a row;
+# it can only overwrite what is already there.
+#
+# The HEURISTIC path is worse, not better. ``fake_enrich`` picks ``status``
+# from a keyword guess — ``"pending"`` for task/plan/commitment,
+# ``"confirmed"`` for outcome (``common/enrichment/service.py``) — and
+# ``status`` sat in ``_ENRICHMENT_ORM_FIELDS``, which has no ``llm_ms > 0``
+# guard. So the case where the LLM was UNAVAILABLE wrote a guessed lifecycle
+# state over a real one.
+#
+# * ``status`` is a LIFECYCLE field, owned by explicit setters: ``caura_manage``'s
+#   transition op, the contradiction detector (``outdated`` / ``conflicted``),
+#   the crystallizer (``archived``) and the delete path (``deleted``). The
+#   ``agent_provided_fields`` gate does not protect it, because that list is a
+#   snapshot of what the caller set AT WRITE TIME — it says nothing about a
+#   transition that happened afterwards. Enrichment is deferred, so "afterwards"
+#   is the whole Pub/Sub delivery window plus any redelivery: a memory archived
+#   or marked outdated a minute after it was written got ``status="active"``
+#   written back over that decision, and ~11 query paths filter the literal
+#   ``'active'``, so the revert is invisible rather than loud. core-api's inline
+#   path guards this by comparing against the row's CURRENT status
+#   (``_agent_pinned``); the worker never reads the row, so it cannot.
+#
+# * ``tags`` is CALLER-owned. ``_prompts.py`` states the contract outright — "a
+#   caller who supplies ``metadata["tags"]`` keeps them untouched" — and the
+#   inline path honours it with ``if enrichment.tags:``, which skips the empty
+#   list. This path did not: ``tags`` sat in ``_ENRICHMENT_ALWAYS_WRITE_METADATA``,
+#   whose guard is ``value is not None``, and ``[]`` is not None. So every
+#   deferred enrichment THAT REACHED THE LLM wrote ``tags: []`` over the
+#   caller's list, in BOTH the legacy key and ``_system`` — the ``llm_ms > 0``
+#   guard spared only the heuristic path, the inverse of ``status`` above. The comment that used to sit on that bullet said
+#   a caller list was "protected by ``CALLER_OWNABLE_KEYS`` at the
+#   ``set_system_value`` boundary, not here" — that boundary lives in
+#   ``core_api.services.system_metadata``, and this worker PATCHes
+#   core-storage-api directly without importing any of it. The protection it
+#   named does not cover this path.
+#
+# Both keep their ``EnrichmentResult`` entry, default and validator so existing
+# payloads still deserialise; they simply stop being written. Clearing the
+# stale values a pre-CAURA-719 enrichment left behind is a backfill's job, not
+# something to pay for by overwriting live data on every message.
+_ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset({"status", "tags"})
 
 # Metadata fields that ALWAYS overwrite (when not ``None`` and the
 # result came from a real LLM call — see the ``llm_ms > 0`` guard at
@@ -326,11 +369,6 @@ _ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset()
 #   keeping the row in step with a "prefix-augmented" embedding — that
 #   stopped being true at CAURA-222, which disabled hint-based
 #   embedding entirely.)
-# * ``tags`` — CAURA-719 retired it from the prompt too, so the same
-#   reasoning applies: always-write clears a list a pre-CAURA-719
-#   enrichment left behind. A caller-supplied list is protected by
-#   ``CALLER_OWNABLE_KEYS`` at the ``set_system_value`` boundary, not
-#   here.
 # * ``summary`` — without the guard, a heuristic-fallback redelivery
 #   would write ``fake_enrich``'s ``summary=content[:200]`` over a
 #   prior quality LLM summary. The truncation is a non-empty string,
@@ -342,8 +380,8 @@ _ENRICHMENT_UNROUTED_FIELDS: frozenset[str] = frozenset()
 #   memory personal↔business; the ``llm_ms > 0`` guard prevents
 #   ``fake_enrich``'s default "business" from clobbering a real
 #   "personal" classification on a heuristic-fallback redelivery.
-# * ``atomic_facts`` — same reasoning as ``tags``: a re-enrichment that finds
-#   ONE claim where a previous run found three must be able to clear the stale
+# * ``atomic_facts`` — a re-enrichment that finds ONE claim where a
+#   previous run found three must be able to clear the stale
 #   two, or the fan-out would later create children for claims the current
 #   content no longer makes. The ``llm_ms > 0`` guard keeps a heuristic-fallback
 #   redelivery from clearing a real LLM's facts.
@@ -354,7 +392,6 @@ _ENRICHMENT_ALWAYS_WRITE_METADATA: frozenset[str] = frozenset(
         "business_relevance",
         "retrieval_hint",
         "summary",
-        "tags",
         "atomic_facts",
     }
 )
@@ -449,8 +486,9 @@ def _build_patch(
     can't downgrade an agent-provided ``weight=0.9`` back to
     ``EnrichmentResult.weight``'s default of ``0.7``. Critical because
     Pydantic defaults survive ``exclude_none=True`` — every event
-    technically carries values for ``memory_type``, ``weight``,
-    ``status``.
+    technically carries values for ``memory_type`` and ``weight``.
+    (``status`` was the third example until it stopped being routed at
+    all — see ``_ENRICHMENT_UNROUTED_FIELDS``.)
 
     ``ts_valid_*`` are emitted as ISO strings (``model_dump(mode="json")``).
     asyncpg requires datetime instances for ``DateTime(timezone=True)``
@@ -496,8 +534,8 @@ def _build_patch(
             value = dump[field]
             # Empty title from the LLM (or from ``fake_enrich`` for
             # very short content) shouldn't clobber a previously-
-            # stored valid title. Other ORM fields (``memory_type``,
-            # ``weight``, ``status``) have schema defaults that
+            # stored valid title. The other routed ORM fields
+            # (``memory_type``, ``weight``) have schema defaults that
             # ``EnrichmentResult`` always emits — those go through
             # ``agent_provided_fields`` for the gate. ``title`` has
             # no agent-side counterpart (it's enricher-only output)
@@ -530,12 +568,13 @@ def _build_patch(
         if field in _ENRICHMENT_ALWAYS_WRITE_METADATA:
             # Same ``llm_ms > 0`` guard as ``ts_valid_*`` above:
             # ``fake_enrich`` returns ``contains_pii=False``,
-            # ``pii_types=[]``, ``tags=[]``, ``retrieval_hint=""`` as
-            # Pydantic defaults — all non-None. Without this guard, a
+            # ``pii_types=[]``, ``retrieval_hint=""`` as Pydantic
+            # defaults — all non-None. Without this guard, a
             # heuristic-fallback redelivery (LLM outage during a
             # storage 5xx retry) would clobber real LLM-produced PII
-            # detection + recall hints + tags that an earlier
-            # successful run wrote. The ``llm_ms > 0`` proxy is the
+            # detection + recall hints that an earlier successful run
+            # wrote. (``tags`` was in this list until M-66 took it out
+            # of always-write entirely.) The ``llm_ms > 0`` proxy is the
             # same one ``ts_valid_*`` uses; ``fake_enrich`` hard-codes
             # ``llm_ms=0`` so the proxy is reliable.
             if result.llm_ms > 0 and value is not None:
@@ -565,6 +604,11 @@ async def handle_enrich_request(event: Event) -> None:
     ``common.enrichment.enrich_memory``) → PATCH result onto the row.
     """
     try:
+        # ``reference_datetime`` is typed ``datetime`` on the model, so a
+        # malformed timestamp is a ``ValidationError`` HERE rather than a
+        # ``ValueError`` from a ``fromisoformat`` further down — which is what
+        # used to escape this guard, nack, and redeliver to the DLQ for a
+        # payload that can never parse. No separate parse step to guard.
         request = MemoryEnrichRequest(**event.payload)
     except ValidationError:
         logger.exception(
@@ -591,15 +635,13 @@ async def handle_enrich_request(event: Event) -> None:
     storage = _storage_client_factory()
     tenant_config = _build_tenant_config(request)
 
-    reference_dt = datetime.fromisoformat(request.reference_datetime) if request.reference_datetime else None
-
     # ``enrich_memory`` never raises — it falls through to the keyword
     # heuristic (``fake_enrich``) on every error path. So a transient
     # provider failure can't nack-loop the subscription.
     result = await enrich_memory(
         request.content,
         tenant_config,
-        reference_datetime=reference_dt,
+        reference_datetime=request.reference_datetime,
     )
 
     patch = _build_patch(result, request.agent_provided_fields)
