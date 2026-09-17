@@ -32,6 +32,7 @@ from uuid import uuid4
 import pytest
 
 from core_api.services.entity_extraction_worker import process_entity_extraction
+from tests.conftest import close_scheduled_coro
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -74,6 +75,10 @@ def _build_sc_mock(
     links_returns: list[dict] | None = None,
 ) -> MagicMock:
     sc = MagicMock()
+    # H-02: the worker re-reads the memory before persisting, so nothing is
+    # written to the graph of a row governance dropped mid-extraction. These
+    # tests exercise a live row.
+    sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     sc.bulk_resolve_entities = AsyncMock(return_value=resolve_returns)
     sc.bulk_upsert_entities = AsyncMock(return_value=upsert_returns)
     sc.bulk_upsert_entity_links = AsyncMock(
@@ -129,7 +134,7 @@ async def test_bulk_path_collapses_to_3_storage_https_for_n_entities(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -182,7 +187,7 @@ async def test_embeddings_fire_concurrently_via_gather(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -220,7 +225,7 @@ async def test_zero_entities_skips_bulk_https_entirely(
     sc = _build_sc_mock(resolve_returns=[], upsert_returns=[])
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -269,7 +274,7 @@ async def test_blocklisted_entities_filtered_before_bulk_path(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -327,7 +332,7 @@ async def test_duplicate_canonical_names_collapse_to_first(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -396,7 +401,7 @@ async def test_first_seen_wins_canonical_when_longer_name_arrives(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -457,7 +462,7 @@ async def test_existing_aliases_preserved_and_extended(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -507,7 +512,7 @@ async def test_no_match_takes_create_path(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -563,7 +568,7 @@ async def test_embedding_failure_yields_null_in_resolve_payload(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -620,7 +625,7 @@ async def test_link_role_binding_preserved_per_entity(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",
@@ -670,7 +675,7 @@ async def test_threshold_constant_passed_to_resolve(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid4(),
             tenant_id="t1",

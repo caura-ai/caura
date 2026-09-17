@@ -31,8 +31,11 @@ fixture, so the in-process storage app can see them.
 from __future__ import annotations
 
 import uuid
+from typing import NamedTuple
 
 import pytest
+
+from core_api import errors
 
 pytestmark = pytest.mark.asyncio
 
@@ -71,19 +74,33 @@ def _uid() -> str:
     return uuid.uuid4().hex[:8]
 
 
-async def _make_command(client, as_auth, tenant_id: str) -> str:
-    """Heartbeat a node and dispatch a command for ``tenant_id``; return command id."""
+class _Node(NamedTuple):
+    fleet_id: str
+    node_name: str
+    node_id: str
+
+
+async def _seed_node(client, as_auth, tenant_id: str) -> _Node:
+    """Register one node in a fresh fleet, and hand back all three identifiers.
+
+    Arms a plain tenant credential to do it, so a caller under test that holds
+    a narrower one (read-only, or agent-scoped) starts from a node it did not
+    create itself.
+    """
+    fleet_id = f"fleet-{_uid()}"
+    node_name = f"node-{_uid()}"
     as_auth(tenant_id)
     resp = await client.post(
         "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": tenant_id,
-            "node_name": f"node-{_uid()}",
-            "fleet_id": f"fleet-{_uid()}",
-        },
+        json={"tenant_id": tenant_id, "node_name": node_name, "fleet_id": fleet_id},
     )
     assert resp.status_code == 200, resp.text
-    node_id = resp.json()["node_id"]
+    return _Node(fleet_id, node_name, resp.json()["node_id"])
+
+
+async def _make_command(client, as_auth, tenant_id: str) -> str:
+    """Heartbeat a node and dispatch a command for ``tenant_id``; return command id."""
+    node_id = (await _seed_node(client, as_auth, tenant_id)).node_id
 
     resp = await client.post(
         "/api/v1/fleet/commands",
@@ -98,9 +115,22 @@ async def _make_command(client, as_auth, tenant_id: str) -> str:
     return resp.json()["id"]
 
 
-async def _seed_agent(sc, tenant_id: str, agent_id: str, trust_level: int):
+async def _seed_agent(sc, tenant_id: str, agent_id: str, trust_level: int, **extra):
+    """Create an agent row. ``extra`` sets any other ``Agent`` column directly.
+
+    Storage inserts the dict as given (``agent_add`` is
+    ``pg_insert(Agent).values(**data)``) and ``search_profile`` is a real
+    column in ``AGENT_FIELDS`` — so a fixture needing a pre-existing profile
+    does not have to write one through the route under test, where a bug in
+    the route would surface as a setup failure inside a gate test.
+    """
     await sc.create_or_update_agent(
-        {"tenant_id": tenant_id, "agent_id": agent_id, "trust_level": trust_level}
+        {
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "trust_level": trust_level,
+            **extra,
+        }
     )
 
 
@@ -313,6 +343,15 @@ async def test_delete_audit_attributes_gateway_agent(client, as_auth, sc):
 
 READ_ONLY = {"read"}
 
+# The two credentials that may never write, whatever route they reach:
+# ``enforce_read_only`` refuses exactly these and nothing else. Shared so the
+# parametrized users of the pair cannot drift apart — they already had, one
+# spelling the capability set as a literal.
+NON_WRITING_CREDS = [
+    pytest.param({"capabilities": READ_ONLY}, id="read-only-key"),
+    pytest.param({"is_demo": True}, id="demo-sandbox"),
+]
+
 
 async def test_fleet_command_cannot_be_queued_into_another_tenant(client, as_auth):
     """H-13: the queued command's tenant came from ``body.tenant_id``, unchecked.
@@ -324,17 +363,7 @@ async def test_fleet_command_cannot_be_queued_into_another_tenant(client, as_aut
     attacker = f"attacker-{_uid()}"
 
     # A real node in the victim's fleet, created by the victim.
-    as_auth(victim)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": victim,
-            "node_name": f"node-{_uid()}",
-            "fleet_id": f"fleet-{_uid()}",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    node_id = resp.json()["node_id"]
+    node_id = (await _seed_node(client, as_auth, victim)).node_id
 
     as_auth(attacker)
     resp = await client.post(
@@ -360,10 +389,14 @@ async def test_fleet_command_cannot_target_another_tenants_node(client, as_auth)
 
     ``enforce_tenant`` only checks ``body.tenant_id``, so a caller naming its OWN
     tenant clears it — while still pointing ``body.node_id`` at somebody else's
-    node. Nothing downstream re-checks the pair: the insert satisfies the FK to
-    ``fleet_nodes.id`` on its own, and the pending-command query the heartbeat
-    runs is keyed on ``node_id`` alone. The row is therefore handed to the other
-    tenant's node on its next heartbeat.
+    node. The insert satisfies the FK to ``fleet_nodes.id`` on its own, so
+    nothing about the write itself objects.
+
+    Two independent gates stop it, and this test covers the write half — the
+    404 below. Delivery is gated separately and was closed later, by #1173:
+    ``fleet_get_pending_commands`` filters the (node, tenant, status) triple
+    rather than ``node_id`` alone, so a row written before either fix is not
+    handed over either.
 
     Queueing into a node you do not own is a 404, not a 403 — the same
     non-disclosing answer ``POST /fleet/commands/{id}/result`` gives for a
@@ -372,20 +405,9 @@ async def test_fleet_command_cannot_target_another_tenants_node(client, as_auth)
     """
     victim = f"victim-{_uid()}"
     attacker = f"attacker-{_uid()}"
-    victim_node_name = f"node-{_uid()}"
 
     # A real node in the victim's fleet, created by the victim.
-    as_auth(victim)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": victim,
-            "node_name": victim_node_name,
-            "fleet_id": f"fleet-{_uid()}",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    victim_node_id = resp.json()["node_id"]
+    _, victim_node_name, victim_node_id = await _seed_node(client, as_auth, victim)
 
     # The attacker queues into its own tenant — the tenant gate passes cleanly —
     # but aims the command at the victim's node.
@@ -402,8 +424,9 @@ async def test_fleet_command_cannot_target_another_tenants_node(client, as_auth)
     assert resp.status_code == 404, resp.text
 
     # The whole point: the victim's node must not be handed the command when it
-    # next checks in. Asserting on the queue alone would miss a row that is
-    # filed under the attacker's tenant but still delivered on node_id.
+    # next checks in. The victim's own queue listing cannot settle that — a row
+    # filed under the ATTACKER's tenant never appears in it — so this heartbeat
+    # is the assertion that spans both gates at once.
     as_auth(victim)
     resp = await client.post(
         "/api/v1/fleet/heartbeat",
@@ -443,17 +466,7 @@ async def test_fleet_command_for_an_unknown_node_is_404_not_500(client, as_auth)
 async def test_fleet_command_rejects_a_read_only_credential(client, as_auth):
     """H-13, second half: queueing a command is a write."""
     tenant = f"tenant-{_uid()}"
-
-    as_auth(tenant)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": tenant,
-            "node_name": f"node-{_uid()}",
-            "fleet_id": f"fleet-{_uid()}",
-        },
-    )
-    node_id = resp.json()["node_id"]
+    node_id = (await _seed_node(client, as_auth, tenant)).node_id
 
     as_auth(tenant, capabilities=READ_ONLY)
     resp = await client.post(
@@ -511,6 +524,180 @@ async def test_agent_trust_still_works_when_over_usage_limits(client, as_auth, s
     assert resp.json()["trust_level"] == 0
 
 
+# ---------------------------------------------------------------------------
+# PATCH /agents/{agent_id}/tune had neither write gate.
+#
+# H-12 again, on the sibling route that sweep did not reach. Of the four
+# mutating routes in ``routes/agents.py`` it was the only one without
+# ``enforce_read_only`` — trust, fleet reassignment and agent deletion all call
+# it. ``enforce_tenant`` and the self-plane check it does have say WHOSE
+# profile may be written, never whether this credential may write at all.
+#
+# The tuning knobs reached through MCP ``caura_tune`` are guarded by
+# ``_check_write_scope``, which is exactly ``enforce_read_only``'s
+# write-capability half — so the capability was required of an MCP caller and
+# not of a REST one. The two are not equivalent gates: ``enforce_read_only``
+# also refuses ``is_demo``, which the MCP path never checks.
+#
+# NOT ``enforce_not_agent_credential``: an agent tuning its OWN profile is
+# documented product behaviour, and the over-refusal guard below pins it.
+# ---------------------------------------------------------------------------
+
+
+async def _tuned_top_k(client, as_auth, tenant: str, agent: str):
+    """The agent's stored ``top_k``, read back with a credential that may read it.
+
+    RE-ARMS a plain tenant credential, so calling this mid-test replaces
+    whatever narrow credential the test had installed. Read back AFTER the
+    call under test, never before it.
+    """
+    as_auth(tenant)
+    resp = await client.get(f"/api/v1/agents/{agent}/tune?tenant_id={tenant}")
+    assert resp.status_code == 200, resp.text
+    return (resp.json().get("search_profile") or {}).get("top_k")
+
+
+@pytest.mark.parametrize("cred", NON_WRITING_CREDS)
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        pytest.param({"json": {"top_k": 19}}, id="merge"),
+        pytest.param({"json": {}, "query": "&reset=true"}, id="reset"),
+    ],
+)
+async def test_agent_tune_rejects_a_non_writing_credential(
+    client, as_auth, sc, cred, attempt
+):
+    """Both halves of ``enforce_read_only``, against both write branches.
+
+    ``reset=true`` is parametrized because it is a second, separate storage
+    write (``reset_search_profile``). A gate added inside the merge branch
+    alone would leave it reachable, and that mutant fails only here.
+
+    The profile is seeded through storage rather than through the route, so a
+    bug in the route cannot masquerade as a setup failure in a gate test.
+    """
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1, search_profile={"top_k": 7})
+
+    as_auth(tenant, **cred)
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant}{attempt.get('query', '')}",
+        json=attempt["json"],
+    )
+    assert resp.status_code == 403, resp.text
+
+    # The refusal has to mean the write never happened, not that it was
+    # reported as refused afterwards. This is also the only check that the
+    # seed landed, so a mismatch is not necessarily a gate bypass.
+    assert await _tuned_top_k(client, as_auth, tenant, agent) == 7, (
+        "expected the seeded profile to be intact: either the gate ran after "
+        "the storage call, or the fixture never seeded"
+    )
+
+
+async def test_a_write_capable_agent_can_still_tune_itself(client, as_auth, sc):
+    """OVER-REFUSAL GUARD, and the one that matters.
+
+    Self-tune is the documented behaviour behind MCP ``caura_tune``, and this
+    route is what the plugin's own tool PATCHes. Adding a write gate must not
+    take it away from an agent credential that carries 'write' — which is the
+    shape the enterprise gateway mints. ``test_agent_tune_self_allowed_peer_blocked``
+    reaches the same path with a legacy ``capabilities=None`` key, though it
+    only asserts ``!= 403`` on a self-tune that 404s — a weaker check than the
+    200-plus-read-back here.
+    """
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1)
+
+    as_auth(tenant, agent_id=agent, capabilities={"read", "write"})
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant}", json={"top_k": 11}
+    )
+    assert resp.status_code == 200, resp.text
+    assert await _tuned_top_k(client, as_auth, tenant, agent) == 11
+
+
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        pytest.param({"json": {"top_k": 3}, "expect": 3}, id="merge"),
+        pytest.param({"json": {}, "query": "&reset=true", "expect": None}, id="reset"),
+    ],
+)
+async def test_agent_tune_still_works_when_over_usage_limits(
+    client, as_auth, sc, attempt
+):
+    """Pins a deliberate omission, so nobody "fixes" it by adding the gate.
+
+    ``enforce_usage_limits`` is NOT applied here. The principle is the one
+    stated on ``WRITE_QUOTA_OPS`` in ``usage_service``: an update that rewrites
+    a row rather than adding one does not grow the store, and this writes a
+    single column on a row that must already exist. Lowering ``top_k`` is also
+    how an over-quota tenant reduces retrieval cost, so gating it would put
+    plan state between them and the knob that gets them back under.
+
+    The omission ships whether or not this test exists — the omission IS the
+    decision. What the test buys is legibility: it is the difference between a
+    choice and the oversight it would otherwise be indistinguishable from,
+    which is the distinction ``usage_service`` draws about the same gate on the
+    memory update route. Deleting this test is the whole cost of reversing the
+    call.
+    """
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1, search_profile={"top_k": 7})
+
+    as_auth(tenant, is_read_only=True)
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant}{attempt.get('query', '')}",
+        json=attempt["json"],
+    )
+    assert resp.status_code == 200, resp.text
+    # Not merely un-refused — the write has to have landed.
+    assert await _tuned_top_k(client, as_auth, tenant, agent) == attempt["expect"]
+
+
+# ---------------------------------------------------------------------------
+# POST /crystallize had no write gate.
+#
+# Found by tests/test_authz_gate_inventory.py on its first run, which is the
+# argument for that file existing. ``enforce_tenant`` says WHICH tenant, never
+# whether this credential may write to it.
+#
+# These are behavioural, and they are not redundant with the inventory: the
+# static check proves the CALL is present, not that the route refuses. That
+# distinction matters more here than usual — ``start_crystallization`` reserves
+# a report row and then publishes to the event bus, so the memory creates
+# happen in a worker holding no ``AuthContext``. Nothing downstream re-checks;
+# this gate is the whole of it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("cred", NON_WRITING_CREDS)
+async def test_crystallize_refuses_a_non_writing_credential(client, as_auth, cred):
+    """A credential that cannot write must not be able to start a run."""
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, **cred)
+    resp = await client.post("/api/v1/crystallize", json={"tenant_id": tenant})
+    assert resp.status_code == 403, resp.text
+
+
+async def test_a_write_capable_credential_can_still_crystallize(client, as_auth):
+    """OVER-REFUSAL GUARD. Refusing every caller would satisfy the test above.
+
+    Asserts the run was actually accepted — a report id comes back — rather
+    than only that the status was not 403.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)
+    resp = await client.post("/api/v1/crystallize", json={"tenant_id": tenant})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["report_id"], resp.text
+
+
 async def test_settings_rejects_a_read_only_credential(client, as_auth):
     """H-15: the hand-rolled ``is_demo`` check missed read-only credentials.
 
@@ -540,6 +727,89 @@ async def test_settings_still_refuses_the_demo_sandbox(client, as_auth):
         json={"tenant_id": tenant, "require_agent_approval": False},
     )
     assert resp.status_code == 403, resp.text
+
+
+async def test_settings_still_works_when_over_usage_limits(client, as_auth):
+    """Pins a deliberate omission, so nobody "fixes" it by adding the gate.
+
+    H-15 also named the missing ``enforce_usage_limits`` on ``PUT /settings``.
+    It is NOT applied, on purpose: plan-limit read-only mode stops an over-plan
+    org GROWING the store (``usage_service`` policy record), and a settings
+    row grows nothing. More to the point this is a mitigation route — turning
+    enrichment off, rotating a leaked provider key, requiring agent approval —
+    and quota state must not stand between an operator and a mitigation. Same
+    carve-out as ``test_agent_trust_still_works_when_over_usage_limits``.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, is_read_only=True)
+    resp = await client.put(
+        "/api/v1/settings",
+        json={"tenant_id": tenant, "agents": {"require_agent_approval": True}},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agents"]["require_agent_approval"] is True
+
+
+# ---------------------------------------------------------------------------
+# L-39 — /settings derived "admin" from ``tenant_id is None``
+#
+# The shared ``CAURA_API_KEY`` gate (auth Path 2) builds a tenant-less,
+# non-admin context when the request names no ``X-Tenant-ID`` — and, having
+# no tenant, that path runs no suppression check. ``_resolve_tenant`` read
+# "no tenant" as "admin", so such a caller could pick ANY tenant with
+# ``?tenant_id=`` and read or rewrite its settings, past the suppression guard.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def as_tenantless(monkeypatch):
+    """Install a Path-2-shaped context: authenticated, no tenant, not admin."""
+    from core_api.app import app
+    from core_api.auth import AuthContext, get_auth_context
+    from core_api.tenant_context import set_current_tenant
+
+    def _install(*, is_admin: bool = False):
+        async def _dep():
+            set_current_tenant(None)
+            return AuthContext(tenant_id=None, is_admin=is_admin)
+
+        app.dependency_overrides[get_auth_context] = _dep
+
+    yield _install
+    from core_api.app import app as _app
+    from core_api.auth import get_auth_context as _gac
+
+    _app.dependency_overrides.pop(_gac, None)
+
+
+async def test_tenantless_non_admin_cannot_pick_a_tenants_settings(
+    client, as_tenantless
+):
+    victim = f"tenant-{_uid()}"
+    as_tenantless()
+    read = await client.get(f"/api/v1/settings?tenant_id={victim}")
+    write = await client.put(
+        f"/api/v1/settings?tenant_id={victim}",
+        json={"agents": {"require_agent_approval": False}},
+    )
+    assert read.status_code == 400, read.text
+    assert write.status_code == 400, write.text
+    assert "tenant_id required" in write.text
+
+
+async def test_admin_still_targets_a_named_tenant(client, as_tenantless):
+    """The admin credential (auth Path 1) is ALSO tenant-less; it keeps the
+    selector — the fix narrows the derivation, it does not remove the feature."""
+    tenant = f"tenant-{_uid()}"
+    as_tenantless(is_admin=True)
+    resp = await client.put(
+        f"/api/v1/settings?tenant_id={tenant}",
+        json={"agents": {"require_agent_approval": True}},
+    )
+    assert resp.status_code == 200, resp.text
+    reread = await client.get(f"/api/v1/settings?tenant_id={tenant}")
+    assert reread.status_code == 200, reread.text
+    assert reread.json()["agents"]["require_agent_approval"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -774,18 +1044,7 @@ async def test_promote_refuses_a_quarantined_agent(client, as_auth, sc, _stm_ena
 
 async def _queue_command_for(client, as_auth, tenant: str) -> tuple[str, str]:
     """Register a node and queue one command for it. Returns (node_name, command_id)."""
-    node_name = f"node-{_uid()}"
-    as_auth(tenant)
-    resp = await client.post(
-        "/api/v1/fleet/heartbeat",
-        json={
-            "tenant_id": tenant,
-            "node_name": node_name,
-            "fleet_id": f"fleet-{_uid()}",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    node_id = resp.json()["node_id"]
+    _, node_name, node_id = await _seed_node(client, as_auth, tenant)
 
     resp = await client.post(
         "/api/v1/fleet/commands",
@@ -800,13 +1059,7 @@ async def _queue_command_for(client, as_auth, tenant: str) -> tuple[str, str]:
     return node_name, resp.json()["id"]
 
 
-@pytest.mark.parametrize(
-    "cred",
-    [
-        pytest.param({"capabilities": {"read"}}, id="read-only-key"),
-        pytest.param({"is_demo": True}, id="demo-sandbox"),
-    ],
-)
+@pytest.mark.parametrize("cred", NON_WRITING_CREDS)
 async def test_heartbeat_refuses_a_non_writing_credential(client, as_auth, cred):
     """A credential that cannot write must not be able to heartbeat.
 
@@ -912,3 +1165,142 @@ async def test_heartbeat_delivers_commands_to_a_writing_credential(client, as_au
     delivered = [c for c in resp.json()["commands"] if c["id"] == command_id]
     assert delivered, f"command {command_id} was not delivered: {resp.text}"
     assert delivered[0]["command"] == "ping"
+
+
+# ---------------------------------------------------------------------------
+# M-25: DELETE /fleet/{fleet_id} accepted an agent-scoped credential.
+#
+# ``enforce_not_agent_credential`` names fleet operations as admin-plane in its
+# own docstring, and the sibling ``POST /fleet/{fleet_id}/purge`` calls it. This
+# route carried the policy everywhere except the line enforcing it.
+#
+# These assert on STATE, not only the status code: without the guard the call
+# does not merely return 2xx, it actually deletes the fleet's node rows. A
+# status-only test would still pass against a version that refused the response
+# after doing the work.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_fleet(client, as_auth, tenant: str) -> str:
+    """Heartbeat one node into a fresh fleet; return the fleet_id."""
+    return (await _seed_node(client, as_auth, tenant)).fleet_id
+
+
+async def _node_count(client, as_auth, tenant: str, fleet_id: str) -> int:
+    """Nodes still in ``fleet_id``. Scoped to the fleet, so it says what it means.
+
+    Re-arms the tenant credential first: the caller under test may hold an
+    agent-scoped one, which is not what should be reading this back.
+    """
+    as_auth(tenant)
+    resp = await client.get(
+        f"/api/v1/fleet/nodes?tenant_id={tenant}&fleet_id={fleet_id}"
+    )
+    assert resp.status_code == 200, resp.text
+    return len(resp.json())
+
+
+async def test_agent_credential_cannot_delete_a_fleet(client, as_auth):
+    """The finding. The key is scoped to one agent; the path param is any fleet."""
+    tenant = f"tenant-{_uid()}"
+    fleet_id = await _seed_fleet(client, as_auth, tenant)
+
+    as_auth(tenant, agent_id=f"agent-{_uid()}")
+    resp = await client.delete(f"/api/v1/fleet/{fleet_id}?tenant_id={tenant}")
+    assert resp.status_code == 403, resp.text
+
+    assert await _node_count(client, as_auth, tenant, fleet_id) == 1, (
+        f"fleet {fleet_id} was deleted despite the refusal — the guard has to "
+        "run before the storage call, not after it"
+    )
+
+
+async def test_a_tenant_credential_can_still_delete_a_fleet(client, as_auth):
+    """OVER-REFUSAL GUARD. Blocking every caller would satisfy the test above."""
+    tenant = f"tenant-{_uid()}"
+    fleet_id = await _seed_fleet(client, as_auth, tenant)
+
+    as_auth(tenant)
+    resp = await client.delete(f"/api/v1/fleet/{fleet_id}?tenant_id={tenant}")
+    assert resp.status_code == 204, resp.text
+
+    assert await _node_count(client, as_auth, tenant, fleet_id) == 0, (
+        "the fleet's node survived a delete by a credential that may delete it"
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /fleet/commands accepted an agent-scoped credential.
+#
+# Same missing gate as M-25 above, on the route that dispatches TO a node
+# rather than deleting one. Why the other two gates do not narrow this caller,
+# and what a ``deploy`` payload reaches on the node, is on ``create_command``
+# in ``core_api/routes/fleet.py`` — not restated here.
+#
+# These assert the ERROR CODE, not just the status. All three of this route's
+# gates answer 403 (bar ``enforce_tenant``'s no-tenant 400), so a status-only
+# test would pass against a version that refused for the wrong reason — or one
+# that refuses every caller.
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_credential_cannot_queue_a_fleet_command(client, as_auth):
+    """The finding. The payload is the code the node would go on to run."""
+    tenant = f"tenant-{_uid()}"
+    node_id = (await _seed_node(client, as_auth, tenant)).node_id
+
+    as_auth(tenant, agent_id=f"agent-{_uid()}")
+    resp = await client.post(
+        "/api/v1/fleet/commands",
+        json={
+            "tenant_id": tenant,
+            "node_id": node_id,
+            "command": "deploy",
+            "payload": {"source": "export const injected = 1;"},
+        },
+    )
+    assert resp.status_code == 403, resp.text
+    code = resp.json()["error"]["code"]
+    assert code == errors.AUTH_AGENT_CREDENTIAL_FORBIDDEN, resp.text
+
+    # The status is not the property that matters — assert the row was never
+    # written, so a gate placed AFTER the storage call still fails here.
+    #
+    # This listing settles delivery too, without a second heartbeat.
+    # ``fleet_list_commands`` filters on ``tenant_id`` alone (no status, limit
+    # 50), while ``fleet_get_pending_commands`` filters the (node, tenant,
+    # status='pending') triple — so an empty listing for a fresh tenant is the
+    # strict superset of what any node in it could be handed.
+    as_auth(tenant)
+    listed = await client.get(f"/api/v1/fleet/commands?tenant_id={tenant}")
+    assert listed.status_code == 200, listed.text
+    assert listed.json() == [], f"the refused command was queued anyway: {listed.text}"
+
+
+async def test_a_tenant_credential_can_still_queue_a_fleet_command(client, as_auth):
+    """OVER-REFUSAL GUARD, and it is load-bearing.
+
+    This is the dashboard's own dispatch path — an operator restarting a node
+    or pushing a deploy. Refusing every caller would satisfy the test above and
+    leave the fleet uncommandable, which is worse than the bug being fixed.
+    """
+    tenant = f"tenant-{_uid()}"
+    node_id = (await _seed_node(client, as_auth, tenant)).node_id
+
+    as_auth(tenant)
+    resp = await client.post(
+        "/api/v1/fleet/commands",
+        json={
+            "tenant_id": tenant,
+            "node_id": node_id,
+            "command": "deploy",
+            "payload": {"source": "export const legitimate = 1;"},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+
+    listed = await client.get(f"/api/v1/fleet/commands?tenant_id={tenant}")
+    assert listed.status_code == 200, listed.text
+    assert [c["id"] for c in listed.json()] == [resp.json()["id"]], (
+        f"a legitimate command did not reach the queue: {listed.text}"
+    )

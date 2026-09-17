@@ -6,6 +6,7 @@ from fastapi import HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
 from core_api import errors
+from core_api.agent_ids import AgentIdentity
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
@@ -54,7 +55,7 @@ class AuthContext:
         user_id: str | None = None,
         org_id: str | None = None,
         org_role: str | None = None,
-        agent_id: str | None = None,
+        agent_id: AgentIdentity | None = None,
         is_read_only: bool = False,
         is_install_credential: bool = False,
         install_uuid: str | None = None,
@@ -253,6 +254,101 @@ class AuthContext:
                 ),
             )
 
+    def enforce_self_agent(
+        self,
+        requested_agent_id: str | None,
+        *,
+        field: str = "agent_id",
+        message: str | None = None,
+    ) -> None:
+        """Raise 403 if an agent credential named an agent other than itself.
+
+        The self plane, a third question from the two gates above it:
+        ``enforce_read_only`` asks whether this credential may write at all,
+        ``enforce_not_agent_credential`` refuses agent credentials outright, and
+        this one admits an agent credential but only as ITSELF. Self-service
+        routes — tune your own profile, read your own notes — are exactly the
+        ones that must NOT take ``enforce_not_agent_credential``, since it would
+        refuse the callers they exist for, and no caller of this one does. It is
+        orthogonal to the write gate rather than paired with it: the write paths
+        among them also call ``enforce_read_only``, the read paths do not.
+
+        ``field`` names the offending parameter in the default message and rides
+        along in ``error.details`` either way, so a caller that sent two of them
+        can tell which one was refused. ``message`` replaces the whole sentence
+        where a route has something more specific to say; the two are
+        independent, since ``field`` reaches the caller regardless.
+
+        ``None`` passes, and only ``None`` — an omission means the caller
+        asserted no identity, which each route treats as "use the authenticated
+        identity" or as a deliberately wider aggregate. An explicit empty string
+        is an assertion and is refused. Both spellings that can produce one bind
+        ``""`` rather than ``None`` (measured: ``?agent_id=`` on a required or
+        optional ``Query``, and ``{"filter_agent_id": ""}`` in a JSON body — the
+        body is the likelier source, from a serializer that emits empty strings
+        for unset fields).
+
+        Admin credentials are exempt with no special case: ``get_auth_context``
+        returns ``AuthContext(tenant_id=None, is_admin=True)`` on the admin-key
+        branch and never plumbs ``X-Agent-ID`` into it, so the first clause
+        declines to fire. Pinned in ``tests/test_auth_context.py`` against that
+        real branch rather than a hand-built context, which would only have
+        pinned the constructor default.
+
+        ``services/caller_identity.py`` spells the same predicate and
+        deliberately answers it the other way — it logs the mismatch and lets
+        the verified identity win instead of refusing. It is not a missing
+        caller of this gate; the routes behind it want an override.
+        """
+        if self.agent_id and requested_agent_id is not None and requested_agent_id != self.agent_id:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    errors.AUTH_AGENT_IDENTITY_MISMATCH,
+                    message
+                    or (
+                        f"{field} '{requested_agent_id}' does not match the "
+                        f"authenticated agent identity '{self.agent_id}'."
+                    ),
+                    field=field,
+                ),
+            )
+
+    def effective_agent_id(self, requested_agent_id: str | None) -> AgentIdentity | None:
+        """The agent this request ACTS AS: the authenticated identity, or the
+        caller's assertion only when the credential authenticates none.
+
+        The precedence half of the self plane, where ``enforce_self_agent`` is
+        the refusing half. Routes that must not 403 a legitimate caller use
+        this instead: an agent credential silently keeps its own identity, and
+        a tenant or user credential — which authenticates no agent — may still
+        name one, which is what a dashboard listing a fleet does.
+
+        WHY THIS IS A METHOD AND NOT ``self.agent_id or requested``. It is
+        exactly that expression; the value is entirely in the name. The bare
+        form could not be told from an audit-log line of the same shape, so
+        ``tests/test_authz_gate_inventory.py`` had to delete the rule that
+        credited it — the block above ``SELF_ID_PARAMS`` there has the case in
+        full, and is the copy to keep current.
+
+        SCOPE, because the name is broader than the guarantee. This returns the
+        identity; it does not decide what the caller may do with it, and
+        calling it is not authorization. It is for the visibility or
+        authorization identity ONLY — an audit attribution that must record
+        what the request carried, even when authorization ignored it, is a
+        different value and must keep spelling itself out. ``delete_memory`` is
+        the live example of both in one handler, and is deliberately not
+        converted — pinned by
+        ``test_the_audit_attribution_is_not_bound_by_the_helper``, so this
+        paragraph is a rule rather than a request.
+        """
+        resolved = self.agent_id or requested_agent_id
+        # ``is not None``, not truthiness: an explicit ``""`` assertion is
+        # PRESERVED here (pinned by test_auth_context.py), because
+        # ``enforce_self_agent`` treats it as an assertion and refuses it.
+        # Collapsing it to None would read as "no assertion" instead.
+        return AgentIdentity(resolved) if resolved is not None else None
+
     def enforce_tenant(self, requested_tenant: str | None) -> None:
         """Raise if the caller may not write to ``requested_tenant``.
 
@@ -432,8 +528,15 @@ async def get_auth_context(
 ) -> AuthContext:
     admin_key = get_admin_key()
     # Enterprise gateway injects X-Agent-ID when the caller's credential
-    # is agent-scoped (kind=agent_key).
-    agent_id = request.headers.get("x-agent-id") or None
+    # is agent-scoped (kind=agent_key). Constructed here rather than left a bare
+    # string because this header IS the REST plane's authentication boundary —
+    # the twin of ``mcp_server``'s ``_agent_id_var`` — and every ``AuthContext``
+    # built below carries this one value. This module is still on the mypy
+    # ``ignore_errors`` list, so nothing here would have forced the step; making
+    # it explicit is what keeps the boundary visible (and recorded in
+    # ``tests/test_agent_identity_construction.py``) until the exemption goes.
+    _agent_header = request.headers.get("x-agent-id") or None
+    agent_id = AgentIdentity(_agent_header) if _agent_header else None
     # Enterprise gateway injects X-Org-Read-Only: true when the org has
     # exceeded plan limits after a subscription cancellation. In standalone
     # and OSS-direct paths the header is absent, so enforcement is a no-op.

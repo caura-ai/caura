@@ -37,3 +37,17 @@ class ProviderName(StrEnum):
     # Sentinels
     FAKE = "fake"
     NONE = "none"
+
+
+# Single source of truth for the embedding-provider default. Two resolution
+# paths read ``EMBEDDING_PROVIDER``: core-api's pydantic ``Settings``
+# (tenant-aware callers, via ``ResolvedConfig``) and
+# ``common.embedding._service._resolve_provider_name`` (tenant-config-less
+# callers — doc/skill writes, MCP doc ops, entity embeddings, the storage
+# backfill CLI). They historically carried different fallbacks ("openai" vs
+# "fake"), so with the env var unset the same process embedded memories with
+# a real provider while silently persisting fake vectors everywhere else.
+# Both defaults MUST come from here. Lives in this leaf module (not
+# ``common.embedding.constants``) so ``core_api.config`` can import it
+# without pulling the whole embedding package at settings-import time.
+DEFAULT_EMBEDDING_PROVIDER: str = ProviderName.OPENAI.value

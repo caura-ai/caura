@@ -33,6 +33,7 @@ import time
 from typing import Any
 
 from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
+from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
 
@@ -182,7 +183,9 @@ class VertexLLMProvider:
             model=self._model,
             max_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
         )
-        parsed = json.loads(text)
+        parsed = unwrap_singleton_array(
+            json.loads(text), provider="Vertex", model=self._model, log=logger
+        )
         if not isinstance(parsed, dict):
             # CAURA-651: see ``VertexResponseShapeError`` above.
             raise VertexResponseShapeError(text, type(parsed).__name__)

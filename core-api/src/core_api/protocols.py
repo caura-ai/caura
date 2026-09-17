@@ -257,15 +257,27 @@ class STMBackend(Protocol):
         """
         ...
 
-    async def post_note(self, tenant_id: str, agent_id: str, entry: dict[str, Any]) -> None:
+    async def post_note(self, tenant_id: str, agent_id: str, entry: dict[str, Any]) -> bool:
         """Append a note to an agent's private list.
 
         Implementations SHOULD cap the list length and apply TTL.
+
+        Returns True only when the entry is STORED, and False when it was not
+        — an unreachable backend included. Reads here degrade to an empty
+        list, which is an honest answer to "what notes are there"; a write has
+        no equivalent, and returning None either way is what let a dropped
+        write reach the caller as a success.
         """
         ...
 
-    async def clear_notes(self, tenant_id: str, agent_id: str) -> None:
-        """Delete all notes for an agent."""
+    async def clear_notes(self, tenant_id: str, agent_id: str) -> bool:
+        """Delete all notes for an agent.
+
+        Returns True only when the delete reached the backend. A clear is a
+        MUTATION, so it owes the same receipt a write does — and its silent
+        failure is the more alarming of the two: the caller is told the notes
+        are gone, and they reappear on the next read.
+        """
         ...
 
     async def get_bulletin(self, tenant_id: str, fleet_id: str, limit: int = 100) -> list[dict[str, Any]]:
@@ -281,14 +293,20 @@ class STMBackend(Protocol):
         tenant_id: str,
         fleet_id: str,
         entry: dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """Append an entry to the fleet bulletin board.
 
         Implementations SHOULD cap the bulletin length and evict
         oldest entries when the limit is reached.
+
+        Returns True only when the entry is STORED — see ``post_note``.
         """
         ...
 
-    async def clear_bulletin(self, tenant_id: str, fleet_id: str) -> None:
-        """Delete all entries from a fleet bulletin board."""
+    async def clear_bulletin(self, tenant_id: str, fleet_id: str) -> bool:
+        """Delete all entries from a fleet bulletin board.
+
+        Returns True only when the delete reached the backend — see
+        ``clear_notes``.
+        """
         ...

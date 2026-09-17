@@ -22,6 +22,20 @@ from common.ranking.protocols import RankProvider
 from common.ranking.providers.remote import RemoteRanker
 
 
+def _ranking_records(caplog, levelname: str) -> list:
+    """Records at ``levelname`` emitted by the ranking service itself.
+
+    ``caplog.records`` spans every propagating logger, so a level-only filter
+    also catches unrelated output. These tests count and negate the result, so
+    one foreign record is the difference between green and red.
+    """
+    return [
+        rec
+        for rec in caplog.records
+        if rec.levelname == levelname and rec.name == svc_mod.logger.name
+    ]
+
+
 def _cands(*contents):
     return [
         RankCandidate(id=str(i), content=c, similarity=0.5)
@@ -254,15 +268,43 @@ async def test_permanent_error_logs_once_then_debug_until_next_success(
     r = _client_with(handler)
     with caplog.at_level("DEBUG"):
         await _run_service(r, monkeypatch, attempts=1)
-        first = [rec for rec in caplog.records if rec.levelname == "ERROR"]
+        first = _ranking_records(caplog, "ERROR")
         assert len(first) == 1, "first occurrence reports in full"
 
         caplog.clear()
         await _run_service(r, monkeypatch, attempts=1)
-        assert not [rec for rec in caplog.records if rec.levelname == "ERROR"], (
+        assert not _ranking_records(caplog, "ERROR"), (
             "a repeat of the same condition must not ERROR again"
         )
-        assert [rec for rec in caplog.records if rec.levelname == "DEBUG"]
+        assert _ranking_records(caplog, "DEBUG")
+    await r._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_once_only_count_ignores_another_logger(monkeypatch, caplog):
+    """The dedup count must be the ranker's ERRORs, not the process's.
+
+    ``caplog.at_level("DEBUG")`` above lowers the level on the ROOT logger, so
+    the capture spans everything that propagates. "Reported exactly once" is a
+    count and "must not ERROR again" is an emptiness claim, and one unrelated
+    ERROR arriving mid-test is the difference between green and red for either.
+    Background tasks in this suite outlive the test that scheduled them, so
+    that record is not hypothetical — see the same failure mode fixed in
+    ``tests/test_consumer_enriched.py``.
+    """
+    import logging as _logging
+
+    handler, _ = _counting_handler(413, text="too big")
+    r = _client_with(handler)
+    with caplog.at_level("DEBUG"):
+        _logging.getLogger("core_api.services.contradiction_detector").error(
+            "Async contradiction detection failed for memory %s", "some-uuid"
+        )
+        await _run_service(r, monkeypatch, attempts=1)
+        assert len(_ranking_records(caplog, "ERROR")) == 1, (
+            "the count must exclude loggers this test is not about; got "
+            f"{[(rec.name, rec.getMessage()[:60]) for rec in caplog.records if rec.levelname == 'ERROR']}"
+        )
     await r._client.aclose()
 
 

@@ -465,6 +465,16 @@ class MemoryOut(BaseModel):
     # successor-injected rows, which were never scored.
     score: float | None = None
     score_parts: ScoreParts | None = None
+    # D16 — true when the row was not matched by the query but injected as the
+    # newest successor of a returned outdated/conflicted row (hence its
+    # ``score``/``similarity`` are null — never scored). Injected rows arrive
+    # BEYOND the caller's ``top_k`` budget, at most one per stale row, ranked
+    # immediately above the row they supersede (A34). A successor the query
+    # recalled on its own merit is NOT marked — this flag says "you would not
+    # have gotten this row from ranking alone", not "this row supersedes
+    # something" (``supersedes_id`` already says that). Always false outside
+    # search responses.
+    injected: bool = False
     # RDF triple
     subject_entity_id: UUID | None = None
     predicate: str | None = None
@@ -616,7 +626,129 @@ class SearchDiagnostic(BaseModel):
     search_params: dict = {}
     # One entry per widened candidate: id/title/type/status + score + factors +
     # ``excluded`` (None | "below_min_similarity" | "trimmed_by_top_k").
+    #
+    #
+    # KNOWN GAP (CAURA-722, not fixed here): five of these factors —
+    # ``entity_boost``, ``freshness``, ``recall_boost``, ``temporal_boost``,
+    # ``fts_score`` — are ``None`` on every row of the scored-search path.
+    # Storage computes them in the scored CTE, uses them to build ``score``,
+    # and then omits them from the outer ``select()``, so the route never
+    # serializes them (``postgres_service.memory_scored_search``). Only
+    # ``score``, ``vec_sim``, ``fts_match`` and ``status_penalty`` are real
+    # today. Do not read a null factor as "this signal did not apply" — it
+    # applied to ``score`` and was simply not reported.
+    #
+    # This matters most for ``entity_boost``, because it is the ONLY place the
+    # entity *boost* is observable. ``retrieval_strategy`` reports only the
+    # ENTITY_LOOKUP *short-circuit*, which fires solely when the entity-linked
+    # pool fills ``top_k`` unaided — so a run that reads the strategy alone and
+    # concludes "entity retrieval contributed nothing" has measured the
+    # short-circuit, not the subsystem, and the field that would settle it is
+    # currently null.
     all_candidates: list[dict] = []
+    # CAURA-722 — the two facts that separate the reasons entity retrieval
+    # stayed out of a query. Before these, ``retrieval_strategy`` said only
+    # that it was not ENTITY_LOOKUP, and the three causes below were
+    # indistinguishable from outside the server; they belong to different
+    # owners, so the ambiguity blocked the follow-up.
+    #
+    #   entity_matches | declined | meaning
+    #   ---------------|----------|----------------------------------------
+    #   None           |  false   | entity FTS never ran — retrieval disabled
+    #                  |          | by org setting, no entity-shaped tokens in
+    #                  |          | the query, or the lookup raised and was
+    #                  |          | swallowed
+    #   0              |  false   | FTS ran and matched nothing → extraction /
+    #                  |          | linking question
+    #   > MAX_MATCHES  |  TRUE    | over-broad, declined by CAURA-698 → the
+    #                  |          | entity boost is SUPPRESSED for this query,
+    #                  |          | so entity really did contribute nothing
+    #   1..MAX_MATCHES |  false   | matched; if the strategy is not
+    #                  |          | ENTITY_LOOKUP the pool under-filled top_k
+    #                  |          | and the boost WAS still applied
+    #
+    # The last two rows are the pair worth the field: they have opposite
+    # answers to "did the entity signal affect this result?" and looked
+    # identical before.
+    #
+    # ``None`` vs ``0`` is load-bearing — "never asked" against "asked, got
+    # nothing" — so this is deliberately nullable rather than defaulting to 0.
+    entity_matches: int | None = Field(
+        default=None,
+        description=(
+            "Entities the query's tokens matched in entity FTS, counted "
+            "before the over-broad decline empties the set. None means the "
+            "lookup never ran (entity retrieval off, no entity-shaped tokens, "
+            "or a swallowed failure) — distinct from 0, which means it ran and "
+            "matched nothing."
+        ),
+    )
+    entity_match_declined: bool = Field(
+        default=False,
+        description=(
+            "True when the entity match was refused as over-broad "
+            "(> ENTITY_LOOKUP_MAX_MATCHES). This is the only decline that also "
+            "suppresses the per-row entity boost; an under-filled pool falls "
+            "through with the boost still applied and reports False here."
+        ),
+    )
+
+
+class ConflictOut(BaseModel):
+    """D11 — a detected conflict plus its human-review state.
+
+    The detector's own fields (``relationship`` / ``diagnosis`` / ``action``)
+    and the reviewer's (``resolution_action`` / ``resolution_note``) are kept
+    side by side on purpose: comparing them IS the precision measurement, and
+    collapsing them into one field would destroy the only record of the
+    detector being wrong.
+    """
+
+    id: UUID
+    tenant_id: str
+    fleet_id: str | None = None
+    new_memory_id: UUID
+    old_memory_id: UUID
+    relationship: str
+    relationship_confidence: float | None = None
+    diagnosis: str | None = None
+    diagnosis_confidence: float | None = None
+    evidence_strength: str | None = None
+    action: str | None = Field(default=None, description="What the DETECTOR proposed.")
+    audit_reason: str | None = None
+    created_by: str | None = None
+    created_at: datetime | None = None
+    review_status: str = Field(description="pending | resolved | dismissed")
+    resolution_action: str | None = Field(
+        default=None, description="What the REVIEWER chose, from the same vocabulary as `action`."
+    )
+    resolution_note: str | None = None
+    resolved_by: str | None = None
+    resolved_at: datetime | None = None
+
+
+class ConflictListResponse(BaseModel):
+    """Envelope for the review queue — ``items`` per the ratified wire contract."""
+
+    items: list[ConflictOut]
+
+
+class ConflictResolveRequest(BaseModel):
+    model_config = STRICT_WRITE_BODY
+
+    tenant_id: str
+    review_status: Literal["resolved", "dismissed"] = Field(
+        description=(
+            "Terminal state only. 'pending' is rejected: this endpoint records a "
+            "decision, and re-opening a reviewed conflict would erase the audit trail "
+            "of who decided what."
+        )
+    )
+    resolution_action: str | None = Field(
+        default=None,
+        description="Optional; the action the reviewer chose. Validated against the shared vocabulary.",
+    )
+    resolution_note: str | None = Field(default=None, max_length=2000)
 
 
 class SearchWarning(BaseModel):
@@ -732,12 +864,36 @@ class SearchRequest(BaseModel):
             "superseded rows directly."
         ),
     )
-    valid_at: datetime | None = None
+    valid_at: datetime | None = Field(
+        default=None,
+        description=(
+            "As-of time for the question (ISO 8601). Rows whose ts_valid_start is "
+            "after this date are excluded and rows whose ts_valid_end is before it "
+            "are down-weighted; relative dates in the query ('last month') are "
+            "resolved against it. When the tenant's search.default_profile sets "
+            "freshness_reference=1, freshness and the temporal window are ALSO "
+            "measured from this time against each row's event time "
+            "(ts_valid_start, else created_at) instead of from now() — the "
+            "setting for backfilled corpora where ingest time carries no signal. "
+            "Naive values are read as UTC."
+        ),
+    )
     top_k: int = Field(
         default=DEFAULT_SEARCH_TOP_K,
         ge=1,
         le=MAX_SEARCH_TOP_K,
-        description=f"Maximum results to return (1-{MAX_SEARCH_TOP_K}, default {DEFAULT_SEARCH_TOP_K}).",
+        # D16 — top_k bounds what the query RECALLS, not the response length:
+        # successor injection is additive on purpose (suppressing a correction
+        # to honor a count would return stale claims as current), so the
+        # description states the real contract instead of promising a maximum
+        # the behavior never kept.
+        description=(
+            f"Maximum results the query returns (1-{MAX_SEARCH_TOP_K}, default "
+            f"{DEFAULT_SEARCH_TOP_K}). Not the response ceiling: each returned "
+            "outdated/conflicted row also carries its newest correction, "
+            "injected beyond this budget and marked injected: true (with "
+            "score: null), so a response holds at most 2*top_k items."
+        ),
     )
     # D12 — per-request cosine floor. Overrides the resolved profile/tenant
     # default for THIS call only (request beats profile beats tenant beats

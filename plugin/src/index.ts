@@ -190,7 +190,7 @@ const cauraPlugin = {
 
     // Dual-read alias (rebrand transition, docs/plans/gateway-rpc-dual-read-alias.md):
     // registers the same handler under both the canonical "caura.*" name
-    // and the historical "memclaw.*" one. registerGatewayMethod takes an // legacy-name-ok: dual-read alias (docs/plans/gateway-rpc-dual-read-alias.md)
+    // and the historical "memclaw.*" one. registerGatewayMethod takes an // legacy-name-floor: documents the dual-read alias in docs/plans/gateway-rpc-dual-read-alias.md
     // exact string per call with no shared prefix-stripping layer (unlike
     // the MCP tool-name shim), so both names are registered explicitly
     // rather than translated at dispatch time.

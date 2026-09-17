@@ -39,6 +39,13 @@ DIAGNOSES = (
     "unresolved",
 )
 EVIDENCE_STRENGTHS = ("explicit", "entailed", "probabilistic")
+
+# D11 — human review state. A row starts ``pending``; a reviewer moves it to
+# ``resolved`` (they chose an action) or ``dismissed`` (not a real conflict).
+# ``dismissed`` is the ground-truth signal that matters most: it is the only
+# record that the detector was WRONG, and nothing else in the system captures a
+# false positive.
+REVIEW_STATUSES = ("pending", "resolved", "dismissed")
 ACTIONS = (
     "replace",
     "supersede",
@@ -93,6 +100,19 @@ class MemoryConflict(Base):
     action: Mapped[str | None] = mapped_column(Text)
     audit_reason: Mapped[str | None] = mapped_column(Text)
 
+    # D11 — human review. Separate from ``action``/``audit_reason``, which record
+    # what the DETECTOR proposed; these record what a PERSON decided. Keeping the
+    # two apart is the point: comparing them is the precision measurement.
+    review_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'pending'")
+    )
+    # The action the reviewer chose, from the same ACTIONS vocabulary the
+    # detector uses — so "did the human agree" is a direct comparison.
+    resolution_action: Mapped[str | None] = mapped_column(Text)
+    resolution_note: Mapped[str | None] = mapped_column(Text)
+    resolved_by: Mapped[str | None] = mapped_column(Text)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     created_by: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
@@ -115,6 +135,23 @@ class MemoryConflict(Base):
         ),
         CheckConstraint(
             _one_of("action", ACTIONS, nullable=True), name="ck_memory_conflicts_action"
+        ),
+        CheckConstraint(
+            _one_of("review_status", REVIEW_STATUSES),
+            name="ck_memory_conflicts_review_status",
+        ),
+        CheckConstraint(
+            _one_of("resolution_action", ACTIONS, nullable=True),
+            name="ck_memory_conflicts_resolution_action",
+        ),
+        # D11 — the review queue is always "this tenant's pending rows, newest
+        # first". Without this the queue degrades to a seq scan as the table
+        # grows, and the table grows on every detected conflict.
+        Index(
+            "ix_memory_conflicts_review_queue",
+            "tenant_id",
+            "review_status",
+            "created_at",
         ),
         Index("ix_memory_conflicts_tenant", "tenant_id"),
         Index("ix_memory_conflicts_new", "new_memory_id"),

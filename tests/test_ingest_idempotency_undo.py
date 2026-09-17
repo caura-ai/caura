@@ -90,6 +90,16 @@ async def test_cache_hit_returns_cached_facts_without_llm(
 
     monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _fake_lookup)
 
+    # 09/02 M-44 — a cache hit now also requires PROOF that the run which
+    # populated it committed every fact. That proof is the parent Document's
+    # ``errored`` count, so the happy path has to supply a clean one; without
+    # it the cache is refused by design, because an unprovable cache is exactly
+    # what made partial extractions permanent.
+    async def _complete_prior(tenant_id, run_id):
+        return True
+
+    monkeypatch.setattr(ingest_service, "_prior_ingest_was_complete", _complete_prior)
+
     # Track that the LLM was NOT called
     llm_called = False
 
@@ -158,7 +168,7 @@ async def test_commit_stamps_doc_hash_in_metadata_when_echoed(monkeypatch):
             default_write_mode="fast",
         )
 
-    async def _fake_bulk(data, *, bulk_attempt_id):
+    async def _fake_bulk(data, *, bulk_attempt_id, memory_type_is_agent_set=None):
         import uuid as _uuid
 
         from core_api.schemas import BulkItemResult, BulkMemoryResponse
@@ -218,7 +228,7 @@ async def test_commit_does_not_stamp_doc_hash_when_omitted(monkeypatch):
             default_write_mode="fast",
         )
 
-    async def _fake_bulk(data, *, bulk_attempt_id):
+    async def _fake_bulk(data, *, bulk_attempt_id, memory_type_is_agent_set=None):
         import uuid as _uuid
 
         from core_api.schemas import BulkItemResult, BulkMemoryResponse
@@ -277,7 +287,7 @@ async def test_commit_stamps_salience_when_present_on_ingestfact(monkeypatch):
             default_write_mode="fast",
         )
 
-    async def _fake_bulk(data, *, bulk_attempt_id):
+    async def _fake_bulk(data, *, bulk_attempt_id, memory_type_is_agent_set=None):
         import uuid as _uuid
 
         from core_api.schemas import BulkItemResult, BulkMemoryResponse

@@ -35,7 +35,12 @@ SCRIPT = Path(
 
 # Assembled rather than written out, so this file does not itself carry the
 # literal the gate scans for and need exempting.
-LEGACY = "mem" + "claw"
+# Written out rather than spliced from fragments. These tests build synthetic
+# source for the gate to scan, so the literal IS the pattern under test and the
+# marker is true. Assembling it kept the line out of the gate's own count while
+# teaching every reader of this file that hiding from the gate is normal — and
+# it was cited as precedent in another repository for doing exactly that.
+LEGACY = "memclaw"  # legacy-name-ok: the pattern these tests exercise
 _RELEASE_CONTEXT_ENV = frozenset(
     {"GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH", "GITHUB_HEAD_REF"}
 )
@@ -244,10 +249,11 @@ def test_the_marker_exempts_only_its_own_line(repo: Path) -> None:
 # caura-daemon#136: eleven exemptions in one PR, four of them aliases.
 
 
-# One regex serves both markers, with the boundaries outside the alternation, so
+# One regex serves every marker, with the boundaries outside the alternation, so
 # there is no second code path for a per-marker copy of these to cover — a
-# loosened bound loosens both at once. These are parametrized rather than cloned
-# so that is what gets asserted, and so a third marker is one list entry.
+# loosened bound loosens all of them at once. These are parametrized rather than
+# cloned so that is what gets asserted, and so a further marker is one list
+# entry. ``legacy-name-absent`` was exactly that when it arrived.
 #
 # The ``legacy-name-ok`` cases above are deliberately left standing and unedited.
 # They pin that marker's own contract independently of this table, which is worth
@@ -264,7 +270,16 @@ class _Marker(NamedTuple):
 _MARKERS = [
     _Marker("legacy-name-ok", "legacy-name-okay", "compat alias(es)"),
     _Marker("legacy-name-floor", "legacy-name-floored", "floor mention(s)"),
+    _Marker("legacy-name-absent", "legacy-name-absentee", "absence assertion(s)"),
 ]
+# Looked up by name, not taken as the last row: position in _MARKERS is the
+# engine's precedence order and a fourth kind could take that slot, which would
+# silently repoint every assertion below at the wrong marker.
+_ABSENT = next(m for m in _MARKERS if m.marker == "legacy-name-absent")
+# Every permanent marker that absence must lose to. Derived, not listed: a kind
+# added to _MARKERS above has to gain precedence coverage here without anyone
+# remembering to, which is the whole reason this file parametrizes.
+_OUTRANK_ABSENT = [m for m in _MARKERS if m.marker != _ABSENT.marker]
 _EACH = pytest.mark.parametrize("m", _MARKERS, ids=lambda m: m.marker)
 
 # Comfortably above the script's ``_EXEMPTION_GROUP_AT``, so a list of this many
@@ -808,7 +823,37 @@ def test_report_exposes_invalid_deferred_markers_without_exempting_them(
     }
 
 
-@pytest.mark.parametrize("permanent", ["legacy-name-ok", "legacy-name-floor"])
+@pytest.mark.parametrize("other", _OUTRANK_ABSENT, ids=lambda m: m.marker)
+def test_an_absence_assertion_never_outranks_a_permanent_marker(
+    repo: Path, other: _Marker
+) -> None:
+    """Absence is last in the table, and that ordering is the whole guarantee.
+
+    The claims contradict rather than coexist: an alias or floor mention says
+    something still answers to the name, an absence assertion says nothing on
+    that line does. Both cannot be true, so a line carrying both is a mistake
+    — and the useful direction to resolve it is toward the marker a reviewer
+    has to check. Filing such a line as an absence assertion would retire a
+    rule 3 decision into the one list nobody reads for new names.
+
+    Written with the absence marker FIRST so positional precedence would file
+    it as an absence assertion and fail this.
+    """
+    _stage(
+        repo,
+        "cli.md",
+        f"    {LEGACY} setup  # {_ABSENT.marker}: proves it is gone  "
+        f"{other.marker}: real\n",
+    )
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert f"1 {other.label} — " in result.stdout
+    assert f"{_ABSENT.label} — " not in result.stdout
+
+
+@pytest.mark.parametrize("permanent", [m.marker for m in _MARKERS], ids=lambda m: m)
 def test_deferred_cannot_be_combined_with_a_permanent_marker(
     repo: Path, permanent: str
 ) -> None:

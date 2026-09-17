@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 // Set env BEFORE importing reconcile-skills.js — module reads from
 // process.env at import time via env.ts.

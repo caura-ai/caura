@@ -71,6 +71,11 @@ export interface SearchOptions {
   [extra: string]: unknown;
 }
 
+export interface GetDocumentOptions {
+  collection: string;
+  tenantId?: string;
+}
+
 function toMemory(d: Record<string, any>): Memory {
   return {
     id: d.id ?? null,
@@ -168,6 +173,20 @@ export class Caura {
     };
   }
 
+  /** Fetch one structured document. GET /api/v1/documents/{docId} */
+  async getDocument(
+    docId: string,
+    options: GetDocumentOptions,
+  ): Promise<Record<string, unknown>> {
+    const encoded = encodeURIComponent(docId);
+    const tenant = options.tenantId || this.tenantId;
+    const params = new URLSearchParams({
+      tenant_id: tenant,
+      collection: options.collection,
+    });
+    return this.request("GET", `/api/v1/documents/${encoded}?${params.toString()}`);
+  }
+
   /** Liveness probe. GET /api/v1/health */
   async health(): Promise<Record<string, unknown>> {
     return this.request("GET", "/api/v1/health");
@@ -219,12 +238,12 @@ async function raiseForStatus(res: Response): Promise<void> {
   throw new CauraApiError(res.status, message || "request failed", details);
 }
 
-// Permanent legacy aliases (2026-08 rename) — same classes/types, so
+// Rename compatibility aliases (2026-08) — same classes/types, so
 // instanceof and catch clauses agree across old and new spellings.
-export const MemClaw = Caura; // legacy-name-ok: rule 3 permanent class alias
-export type MemClaw = Caura; // legacy-name-ok: rule 3 permanent class alias
-export const MemClawError = CauraError; // legacy-name-ok: rule 3 permanent exception alias
-export type MemClawError = CauraError; // legacy-name-ok: rule 3 permanent exception alias
-export const MemClawApiError = CauraApiError; // legacy-name-ok: rule 3 permanent exception alias
-export type MemClawApiError = CauraApiError; // legacy-name-ok: rule 3 permanent exception alias
-export type MemClawOptions = CauraOptions; // legacy-name-ok: rule 3 permanent options-type alias
+export const MemClaw = Caura; // legacy-name-ok: published class alias
+export type MemClaw = Caura; // legacy-name-ok: published class alias
+export const MemClawError = CauraError; // legacy-name-ok: published exception alias
+export type MemClawError = CauraError; // legacy-name-ok: published exception alias
+export const MemClawApiError = CauraApiError; // legacy-name-ok: published exception alias
+export type MemClawApiError = CauraApiError; // legacy-name-ok: published exception alias
+export type MemClawOptions = CauraOptions; // legacy-name-ok: published options-type alias

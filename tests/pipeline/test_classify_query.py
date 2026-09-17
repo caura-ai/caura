@@ -294,8 +294,15 @@ async def test_temporal_does_not_route_without_window(mock_get_sc):
 
 @pytest.mark.asyncio
 @patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
-async def test_entity_lookup_takes_priority_over_temporal(mock_get_sc):
-    """Entity match + temporal_window set → ENTITY_LOOKUP wins."""
+async def test_temporal_window_declines_entity_short_circuit(mock_get_sc):
+    """Entity match + temporal_window set → TEMPORAL wins; hops preserved.
+
+    Inverts the pre-fix pin (``ENTITY_LOOKUP wins``): the short-circuit skips
+    the scored search, which is the only place the ``date_range_filter`` hard
+    filter and the temporal freshness handling are applied — so taking it on a
+    dated query silently returned linked memories from any date. The entity
+    match survives as a hop boost via ``_classified_entity_hops``.
+    """
     entity_id = uuid.uuid4()
     memory_id = uuid.uuid4()
     eid_str = str(entity_id)
@@ -325,7 +332,85 @@ async def test_entity_lookup_takes_priority_over_temporal(mock_get_sc):
     await step.execute(ctx)
 
     plan: RetrievalPlan = ctx.data["retrieval_plan"]
-    assert plan.strategy == RetrievalStrategy.ENTITY_LOOKUP
+    assert plan.strategy == RetrievalStrategy.TEMPORAL
+    assert plan.search_param_overrides["freshness_decay_days"] == 7
+    # The decline must happen BEFORE the pool load — no wasted storage
+    # roundtrip, no per-tenant slot spent on rows that would be discarded.
+    sc.get_memory_ids_by_entity_ids.assert_not_awaited()
+    sc.load_memories_by_ids.assert_not_awaited()
+    assert "filtered_rows" not in ctx.data
+    # Entity relevance is preserved for hop-boosting, NOT suppressed: this is
+    # a good match declined for temporal correctness, unlike over-broad.
+    assert ctx.data["_classified_entity_hops"] == {entity_id: (0, 1.0)}
+    assert "entity_match_declined" not in ctx.data
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_date_range_filter_declines_entity_short_circuit(mock_get_sc):
+    """Entity match + hard date_range_filter (no soft window) → falls through.
+
+    The hard filter is applied only by the scored search, so the short-circuit
+    must decline even when no temporal_window was extracted ("two months ago"
+    style queries set only the date range). With no window the cascade lands on
+    keyword/semantic, where ExecuteScoredSearch applies the date range.
+    """
+    entity_id = uuid.uuid4()
+    memory_id = uuid.uuid4()
+    eid_str = str(entity_id)
+    mid_str = str(memory_id)
+
+    sc = _mock_sc()
+    sc.fts_search_entities = AsyncMock(return_value=[eid_str])
+    sc.expand_graph = AsyncMock(return_value={eid_str: {"hop": 0, "weight": 1.0}})
+    sc.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
+    )
+    mock_get_sc.return_value = sc
+
+    ctx = _make_ctx(
+        "Alice",
+        top_k=1,
+        date_range_filter={"start_date": "2026-07-06", "end_date": "2026-07-12"},
+    )
+
+    step = ClassifyQuery()
+    await step.execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.SEMANTIC_SEARCH
+    sc.load_memories_by_ids.assert_not_awaited()
+    assert "filtered_rows" not in ctx.data
+    assert ctx.data["_classified_entity_hops"] == {entity_id: (0, 1.0)}
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_over_broad_decline_wins_over_temporal_decline(mock_get_sc):
+    """Over-broad match + temporal hint → over-broad handling, no expansion.
+
+    Ordering pin: the over-broad decline must run first, so a dated query with
+    a >threshold match still suppresses hop-boosting (``entity_match_declined``)
+    and never pays for expanding the over-broad seed set.
+    """
+    from core_api.constants import ENTITY_LOOKUP_MAX_MATCHES
+
+    sc = _mock_sc()
+    sc.fts_search_entities = AsyncMock(
+        return_value=[str(uuid.uuid4()) for _ in range(ENTITY_LOOKUP_MAX_MATCHES + 1)]
+    )
+    mock_get_sc.return_value = sc
+
+    ctx = _make_ctx("Alice", temporal_window=timedelta(days=7))
+
+    step = ClassifyQuery()
+    await step.execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.TEMPORAL
+    assert ctx.data["entity_match_declined"] is True
+    sc.expand_graph.assert_not_awaited()
+    assert "_classified_entity_hops" not in ctx.data
 
 
 @pytest.mark.asyncio
@@ -512,6 +597,119 @@ async def test_expand_per_fleet_partial_failure():
 
     assert result[eid_a] == (0, 1.0)
     assert sc.expand_graph.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Total expansion failure falls back to hop-0 seeds (oss-0814-l-05)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_expand_per_fleet_total_failure_falls_back_to_hop0_seeds():
+    """When EVERY fleet's expand_graph call fails, the already-resolved seed
+    entities must survive as hop-0 / weight 1.0 instead of being dropped.
+
+    Pre-fix this returned ``{}``, which zeroed both consumers at once: the
+    ENTITY_LOOKUP pool had no entities to load links for, and the
+    ``_classified_entity_hops`` stash handed the boost step an empty dict its
+    ``precomputed_hops is not None`` check treats as authoritative — so entity
+    lookup AND hop-boost silently contributed nothing for the request.
+    """
+    eid_a = uuid.uuid4()
+    eid_b = uuid.uuid4()
+
+    sc = AsyncMock()
+    sc.expand_graph = AsyncMock(
+        side_effect=[
+            RuntimeError("storage 503"),
+            RuntimeError("storage 503"),
+        ]
+    )
+
+    result = await ClassifyQuery._expand_per_fleet(
+        sc=sc,
+        seed_ids=[eid_a, eid_b],
+        tenant_id="t1",
+        fleet_ids=["f1", "f2"],
+        max_hops=2,
+    )
+
+    assert result == {eid_a: (0, 1.0), eid_b: (0, 1.0)}
+    assert sc.expand_graph.call_count == 2
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_entity_lookup_survives_expand_graph_failure(mock_get_sc):
+    """Entity match + expand_graph down → ENTITY_LOOKUP still fires off the
+    hop-0 seeds (oss-0814-l-05).
+
+    Pre-fix the seeds were dropped with the failed expansion, so the linked
+    memory was unreachable and the query fell through to semantic search
+    after (misleadingly) logging "entity matched but no linked memories".
+    """
+    ctx = _make_ctx("Alice", top_k=1)
+
+    entity_id = uuid.uuid4()
+    memory_id = uuid.uuid4()
+    eid_str = str(entity_id)
+    mid_str = str(memory_id)
+
+    sc = _mock_sc()
+    sc.fts_search_entities = AsyncMock(return_value=[eid_str])
+    sc.expand_graph = AsyncMock(side_effect=RuntimeError("storage 503"))
+    sc.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
+    )
+    sc.load_memories_by_ids = AsyncMock(
+        return_value=[
+            {
+                "id": mid_str,
+                "tenant_id": "t1",
+                "content": "Alice test memory",
+                "memory_type": "fact",
+            }
+        ]
+    )
+    mock_get_sc.return_value = sc
+
+    step = ClassifyQuery()
+    await step.execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.ENTITY_LOOKUP
+    assert len(ctx.data["filtered_rows"]) == 1
+    # The links were looked up for the SEED, not for an empty expansion set.
+    sc.get_memory_ids_by_entity_ids.assert_awaited_once_with([eid_str], "t1")
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_hop_boost_stash_survives_expand_graph_failure(mock_get_sc):
+    """Temporal decline + expand_graph down → ``_classified_entity_hops``
+    still carries the hop-0 seeds, NOT ``{}`` (oss-0814-l-05).
+
+    The boost step's ``precomputed_hops is not None`` check treats an empty
+    dict as an authoritative "no entities" answer and skips its own FTS, so a
+    ``{}`` stash turned an expansion outage into zero hop-boost for a query
+    whose entities were already resolved.
+    """
+    entity_id = uuid.uuid4()
+    eid_str = str(entity_id)
+
+    sc = _mock_sc()
+    sc.fts_search_entities = AsyncMock(return_value=[eid_str])
+    sc.expand_graph = AsyncMock(side_effect=RuntimeError("storage 503"))
+    mock_get_sc.return_value = sc
+
+    ctx = _make_ctx("Alice", temporal_window=timedelta(days=7), top_k=1)
+
+    step = ClassifyQuery()
+    await step.execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.TEMPORAL
+    assert ctx.data["_classified_entity_hops"] == {entity_id: (0, 1.0)}
 
 
 # ---------------------------------------------------------------------------

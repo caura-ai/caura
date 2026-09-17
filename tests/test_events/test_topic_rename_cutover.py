@@ -22,14 +22,24 @@ described:
 The rest is about which way each default points, because the two backends need
 opposite ones and a missing twin fails differently in each.
 
-EVERY FLIPPED FAMILY IS NOW CONTRACTED, WHICH CHANGES WHAT THESE TESTS CAN USE.
-``lifecycle`` and ``memory`` both stay in ``FLIPPED_FAMILIES`` while carrying the
-current names, so ``renamed`` is the identity for them and a default-constructed
-bus is legal again. That also means the silent-failure state this file exists to
-pin can no longer be reached through any real declaration: a test that reaches
-for a real family to demonstrate it goes VACUOUS. Those tests use ``PRE_CONTRACT``
-instead. Tests about *the flag's parse rule* still take the ``nothing_flipped``
-fixture so their precondition cannot depend on cutover state.
+CONTRACTION, NOT FLIPPING, IS WHAT CHANGES WHAT THESE TESTS CAN USE.
+``lifecycle`` and ``memory`` are flipped AND contracted: they stay in
+``FLIPPED_FAMILIES`` while carrying the current names, so ``renamed`` is the
+identity for them and neither can demonstrate a mismatch. A test that reaches
+for a real family to show the silent-failure state this file exists to pin would
+therefore go VACUOUS on those two, which is why such tests use ``PRE_CONTRACT``.
+
+``org`` flipped AND contracted 2026-09-08, so it joins them: every real flipped
+family now carries the current name, and a default-constructed (``dual=False``)
+Pub/Sub bus is legal again. The window where it was not — between the flip and
+the contract — is the same one memory passed through between 2026-09-01 and
+2026-09-05, and it is why ``PRE_CONTRACT`` exists at all: with no real family
+mid-cutover, a test that reached for one to demonstrate the mismatch would assert
+nothing. ``PRE_CONTRACT`` stays regardless: it must not depend on a real family
+happening to be mid-cutover.
+
+Tests about *the flag's parse rule* still take the ``nothing_flipped`` fixture so
+their precondition cannot depend on cutover state.
 """
 
 from __future__ import annotations
@@ -109,7 +119,6 @@ def test_renamed_leaves_a_nameless_topic_alone() -> None:
 def test_family_is_the_middle_segment() -> None:
     # The unit the publisher flip is decided in, one family at a time.
     assert topics_mod.family(Topics.Audit.EVENT_RECORDED) == "audit"
-    assert topics_mod.family(Topics.Pipeline.ENTITY_EXTRACTED) == "pipeline"
     assert topics_mod.family("no-dots-here") == ""
 
 
@@ -120,13 +129,19 @@ def test_subscribe_names_defaults_to_the_current_name_only() -> None:
 
 
 def test_subscribe_names_dual_returns_both_without_duplicates() -> None:
-    # Exercised through ``audit``, which has NOT been renamed. ``subscribe_names``
-    # never consults ``FLIPPED_FAMILIES`` — it returns two names whenever
-    # ``renamed`` moves the name — so the only requirement is a member still on
-    # the outgoing prefix. It used to be ``memory``; that member is contracted
-    # now and yields one name, which is the case asserted just below.
-    both = topics_mod.subscribe_names(Topics.Audit.EVENT_RECORDED, dual=True)
-    assert both == (str(Topics.Audit.EVENT_RECORDED), "caura.audit.event-recorded")
+    # A SYNTHETIC name, because no declared member carries the outgoing prefix
+    # any more — audit was the last and contracted on 2026-09-10. This walked
+    # from ``memory`` to ``audit`` as each contracted; there is nowhere left for
+    # it to walk, so it stops chasing the estate and states the rule directly.
+    #
+    # Any first segment other than the new prefix exercises it. ``renamed``
+    # rewrites the first dot-segment rather than matching the outgoing brand by
+    # name — that is a deliberate property of the module, and relying on it here
+    # keeps the outgoing brand out of this file rather than minting a fresh
+    # occurrence of it for the ratchet to count.
+    outgoing = "outgoing.audit.event-recorded"
+    both = topics_mod.subscribe_names(outgoing, dual=True)
+    assert both == (outgoing, "caura.audit.event-recorded")
     # An already-renamed name must yield ONE entry, not the same string twice —
     # a duplicate would register the handler twice and double-dispatch it. Read
     # off a real contracted member rather than a hand-written string, so it stays
@@ -145,7 +160,7 @@ def test_subscribe_names_dual_returns_both_without_duplicates() -> None:
 # has to be stated in exactly two places — the module, and this literal — and the
 # equality in ``test_exactly_the_flipped_families_are_flipped`` is what turns the
 # second one into a deliberate stop rather than a chore.
-FLIPPED = frozenset({"lifecycle", "memory"})
+FLIPPED = frozenset({"audit", "lifecycle", "memory", "org"})
 
 # A synthetic flipped-but-NOT-contracted topic, for the tests that need the
 # silent-failure state to exist. Every real family here is now either unflipped
@@ -154,8 +169,8 @@ FLIPPED = frozenset({"lifecycle", "memory"})
 # that family contracts, passing whether or not the guard still works. Spelling
 # it makes these tests independent of how far the cutover has got. Deliberately
 # not a name any environment serves.
-PRE_CONTRACT = "legacy.pipeline.entity-extracted"
-PRE_CONTRACT_FAMILY = "pipeline"
+PRE_CONTRACT = "legacy.uncontracted.example-requested"
+PRE_CONTRACT_FAMILY = "uncontracted"
 # Hand-spelled independently of ``Topics.Lifecycle`` so a new member requires an
 # explicit contract decision. An already-contracted family has no legacy twin to
 # bind: its current-topic infrastructure must exist before a new member ships.
@@ -200,28 +215,34 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
     also holds ``fleet`` and ``security``, which are declared only there; naming
     either here would raise at import in every OSS service.
 
-    ``audit`` is called out because it must be flipped LAST — those rows are
-    hash-chained, and a lost or reordered audit event is the one failure in this
-    programme that cannot be undone.
+    ``audit`` flipped 2026-09-10, last, which closes the cutover. It was held to
+    the end on a premise that did not survive checking: that these rows are
+    hash-chained and a lost or reordered audit event could not be repaired. The
+    hash-chained audit log is a SEPARATE transport and never touches this topic;
+    what rides here is an append-only notification whose consumer tolerates
+    duplicates and requires no ordering. The hazard is the opposite shape — the
+    audit publisher swallows every exception by design, so a flip onto a name
+    that did not exist would have lost every event in silence. The evidence that
+    made it safe was existence and attachment, not chain ceremony: both
+    environments carrying the twin and its ``-dlq`` with an ACTIVE subscription
+    each, the readiness gate at 17/17 with nothing unbound, and a pre-flip week
+    of 20 production publishes on the legacy name and zero on the twin.
 
-    ``pipeline`` is called out for the opposite reason: it is declared in both
-    repos but has no live topic in either environment, so flipping it would
-    publish into nothing and raise nothing. A no-op flip that reports success is
-    the worst outcome available in this cutover, because it also looks like
-    progress.
+    ``org`` joined on 2026-09-08 — the third SHARED family, mirrored into
+    caura-enterprise in the same cycle — and was contracted the same day. Its
+    publisher flip was confirmed by DELIVERY rather than configuration: the first
+    post-promote production publish landed on
+    ``prod--caura.org.suppression-changed``, with zero on the legacy name.
 
     ``memory`` joined on 2026-09-01 — the second SHARED family, mirrored into
     caura-enterprise in the same cycle. Its absent ``.created`` declaration had
     already been removed. The live re-measurement found 12/12 running Pub/Sub
     deployables dual-subscribing and 16/16 active durable twins attached to the
-    matching twin topics (8 per environment), with no ephemerals. Its enum
-    members remain on the legacy names because contraction is the next step,
-    not part of this flip.
+    matching twin topics (8 per environment), with no ephemerals. It was
+    contracted on 2026-09-05 by #1307, four days after the flip — the window in
+    which ``dual=False`` was illegal fleet-wide.
     """
     assert topics_mod.FLIPPED_FAMILIES == FLIPPED
-    assert "audit" not in topics_mod.FLIPPED_FAMILIES
-    assert "pipeline" not in topics_mod.FLIPPED_FAMILIES
-    assert "org" not in topics_mod.FLIPPED_FAMILIES
 
 
 def test_known_families_are_derived_from_the_enums() -> None:
@@ -229,7 +250,6 @@ def test_known_families_are_derived_from_the_enums() -> None:
     assert topics_mod.known_families() == {
         "memory",
         "audit",
-        "pipeline",
         "lifecycle",
         "org",
     }
@@ -347,13 +367,16 @@ def test_pubsub_subscribe_binds_both_names_when_enabled() -> None:
     b = PubSubEventBus(
         project_id="proj", subscription_prefix="core-api", dual_subscribe=True
     )
-    # ``audit`` is still on the outgoing prefix, so it has a twin to bind.
-    # ``memory`` is contracted and would bind exactly one name, which would make
-    # this assertion pass without testing the expansion at all.
-    b.subscribe(Topics.Audit.EVENT_RECORDED, handler)
+    # A SYNTHETIC name on the outgoing prefix. Every declared member is
+    # contracted now — audit was the last, on 2026-09-10 — and a contracted
+    # member binds exactly one name, which would make this assertion pass
+    # without testing the expansion at all. ``renamed`` rewrites whatever the
+    # first dot-segment is, so any non-``caura`` prefix exercises the twin.
+    outgoing = "outgoing.audit.event-recorded"
+    b.subscribe(outgoing, handler)
     assert sorted(b._handlers) == [
         "caura.audit.event-recorded",
-        str(Topics.Audit.EVENT_RECORDED),
+        outgoing,
     ]
     # One handler per name, not two on one name.
     assert all(len(hs) == 1 for hs in b._handlers.values())
@@ -397,12 +420,14 @@ def test_inprocess_binds_both_names_with_no_flag() -> None:
     flipped, instead of silently delivering to nobody.
     """
     b = InProcessEventBus()
-    # ``audit`` for the same reason as the Pub/Sub case above: a contracted
-    # member binds one name and would make this pass vacuously.
-    b.subscribe(Topics.Audit.EVENT_RECORDED, handler)
+    # A synthetic outgoing name for the same reason as the Pub/Sub case above:
+    # every declared member is contracted now, and a contracted member binds one
+    # name, which would make this pass vacuously.
+    outgoing = "outgoing.audit.event-recorded"
+    b.subscribe(outgoing, handler)
     assert sorted(b._handlers) == [
         "caura.audit.event-recorded",
-        str(Topics.Audit.EVENT_RECORDED),
+        outgoing,
     ]
 
 
@@ -577,8 +602,9 @@ def test_unbound_publish_topics_names_a_flipped_family_when_dual_is_off(
         assert topics_mod.publish_name(topic) not in topics_mod.subscribe_names(
             topic, dual=False
         )
-    # A family that has NOT flipped is not swept up in the report — audit above
-    # all, since it is the one that must flip last.
+    # A family that has NOT flipped is not swept up in the report. ``audit`` is
+    # the illustration because it was the last family to flip; the set is
+    # patched above, so this holds regardless of the module's real value.
     assert not any(topics_mod.family(t) == "audit" for t in unbound)
 
 
@@ -648,6 +674,31 @@ def test_the_guard_does_not_fire_once_lifecycle_is_fully_contracted(
     monkeypatch.setattr(topics_mod, "FLIPPED_FAMILIES", frozenset({"lifecycle"}))
     assert topics_mod.unbound_publish_topics(dual=False) == ()
     PubSubEventBus(project_id="proj", subscription_prefix="test")
+
+
+def test_every_flipped_family_is_contracted_so_the_default_bus_is_legal() -> None:
+    """The REAL set, unmonkeypatched: no flipped family may sit uncontracted.
+
+    Every other assertion about the construction guard in this file isolates a
+    single family with ``monkeypatch``, which answers "does the guard work?" but
+    not "is the fleet currently in the state the guard permits?". Those are
+    different questions, and only the second one catches a flip that shipped
+    without its contraction.
+
+    That gap is not hypothetical. ``memory`` sat flipped-but-uncontracted from
+    2026-09-01 to 2026-09-05 and ``org`` did the same on 2026-09-08. In both
+    windows ``dual_subscribe=False`` -- the DEFAULT -- raised on construction for
+    every standalone and on-prem process, because the guard is fleet-wide by
+    design rather than scoped to the family that moved. No test failed either
+    time; the breakage was found by reading the module.
+
+    Deliberately no monkeypatch: the value under test is the shipped one.
+    """
+    unbound = topics_mod.unbound_publish_topics(dual=False)
+    assert unbound == (), (
+        "a flipped family is not contracted, so a default-constructed "
+        f"PubSubEventBus raises fleet-wide: {sorted(unbound)}"
+    )
 
 
 def test_inprocess_bus_can_never_reach_the_guarded_state(

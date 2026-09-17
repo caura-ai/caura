@@ -461,13 +461,22 @@ async def update_lifecycle_audit_row(
     status: str,
     stats: dict | None = None,
     error_message: str | None = None,
-) -> None:
-    """PATCH the lifecycle_audit row created by core-api fanout."""
+    claim_token: str | None = None,
+) -> dict:
+    """PATCH the lifecycle_audit row created by core-api fanout.
+
+    Returns the storage response body. ``claim_conflict`` true means an
+    ``in_progress`` request lost the claim to a live consumer and the caller
+    must not run the primitive. ``{}`` when the row is gone or the body is
+    unreadable, so a caller reading one key cannot mistake either for a claim.
+    """
     body: dict[str, Any] = {"org_id": org_id, "status": status}
     if stats is not None:
         body["stats"] = stats
     if error_message is not None:
         body["error_message"] = error_message
+    if claim_token is not None:
+        body["claim_token"] = claim_token
     resp = await _signed_call(
         client.patch,
         f"{_PREFIX}/lifecycle-audit/{audit_id}",
@@ -481,8 +490,13 @@ async def update_lifecycle_audit_row(
             audit_id,
             status,
         )
-        return
+        return {}
     resp.raise_for_status()
+    try:
+        parsed = resp.json()
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 async def update_memory_enrichment(

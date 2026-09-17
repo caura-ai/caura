@@ -56,6 +56,10 @@ def storage(monkeypatch):
             actions.append(("find_children", parent_id, tenant_id))
             return list(actions.children)
 
+        async def purge_entity_artifacts(self, tenant_id, memory_id):
+            actions.append(("purge_entities", memory_id, tenant_id))
+            return {"links": 0, "relations": 0, "entities": 0}
+
     monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
     return actions
 
@@ -104,6 +108,95 @@ async def test_pii_drop_soft_deletes_and_audits(emitted, storage):
     assert outcome.dropped is True
     assert ("soft_delete", "m1", "t1") in storage
     assert any(c["action"] == "pii_drop" for c in emitted)
+
+
+# ---------------------------------------------------------------------------
+# H-02 — entity rows mined out of dropped content
+# ---------------------------------------------------------------------------
+#
+# #808 named this case when it fixed the inline path: "entities mined out of
+# dropped content are the same leak in another table". Both non-inline paths
+# schedule extraction at write time, racing the verdict, and a soft-deleted
+# memory still satisfies the link/relation foreign keys — so the names survived,
+# listable tenant-wide, with nothing tying them to the drop.
+
+
+async def test_a_pii_drop_purges_the_graph_rows(emitted, storage):
+    cfg = _cfg(pii={"enabled": True, "action": "drop"})
+    mem = _mem(metadata={"contains_pii": True, "pii_types": ["health"]})
+
+    outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+
+    assert outcome.dropped is True
+    assert ("purge_entities", "m1", "t1") in storage, storage
+
+
+async def test_a_nonbusiness_drop_purges_the_graph_rows(emitted, storage):
+    """Both destructive dispositions, not just one — separate branches, separate
+    configs, and a tenant on either policy leaks identically without this."""
+    cfg = _cfg(nb={"enabled": True, "disposition": "drop"})
+    mem = _mem(metadata={"business_relevance": "personal"})
+
+    await governance_remediation.remediate_after_enrichment(mem, cfg)
+
+    assert ("purge_entities", "m1", "t1") in storage, storage
+
+
+async def test_a_failed_purge_does_not_abort_the_handler(
+    emitted, storage, monkeypatch, caplog
+):
+    """A raise here would nack the Pub/Sub event and redeliver it forever.
+
+    ``consumer.handle_memory_enriched`` has no guard around remediation, and the
+    dispatcher nacks on a handler exception. Redelivery re-runs the whole drop
+    branch, emitting a SECOND ``critical=True`` audit for a memory that was
+    already dropped — duplicate destructive entries in a tamper-evident log, for
+    a row nothing further can be done to.
+
+    The trade is bounded the other way: the memory is already gone, so the
+    content is not live. What remains is graph rows, and the ERROR names the
+    memory so they can be purged by hand.
+    """
+
+    class _SC:
+        async def soft_delete_memory(self, mid, tenant_id):
+            storage.append(("soft_delete", mid, tenant_id))
+
+        async def purge_entity_artifacts(self, tenant_id, memory_id):
+            raise RuntimeError("storage refused the purge")
+
+    monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
+
+    cfg = _cfg(nb={"enabled": True, "disposition": "drop"})
+    mem = _mem(metadata={"business_relevance": "personal"})
+
+    with caplog.at_level("ERROR"):
+        outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+
+    # The parent's verdict still reaches the caller.
+    assert outcome.dropped is True
+    assert ("soft_delete", "m1", "t1") in storage
+    # And the failure is not silent.
+    assert any("were NOT" in r.getMessage() for r in caplog.records), [
+        r.getMessage()[:80] for r in caplog.records
+    ]
+
+
+async def test_a_non_destructive_verdict_purges_nothing(emitted, storage):
+    """OVER-REFUSAL GUARD. ``flag`` and ``keep_private`` leave the row readable.
+
+    The graph rows describe content that is still there and still allowed, so
+    removing them would destroy data no policy asked to remove.
+    """
+    cfg = _cfg(
+        pii={"enabled": True, "action": "flag"},
+        nb={"enabled": True, "disposition": "keep_private"},
+    )
+    mem = _mem(metadata={"contains_pii": True, "business_relevance": "personal"})
+
+    await governance_remediation.remediate_after_enrichment(mem, cfg)
+
+    assert not any(kind == "purge_entities" for kind, *_ in storage), storage
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +364,10 @@ async def test_one_failing_child_does_not_abandon_the_rest(
         async def find_children_by_parent_id(self, tenant_id, parent_id):
             return list(storage.children)
 
+        async def purge_entity_artifacts(self, tenant_id, memory_id):
+            storage.append(("purge_entities", memory_id, tenant_id))
+            return {"links": 0, "relations": 0, "entities": 0}
+
     monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
 
     cfg = _cfg(nb={"enabled": True, "disposition": "drop"})
@@ -328,6 +425,10 @@ async def test_a_child_whose_delete_failed_after_its_audit_is_logged_as_such(
 
         async def find_children_by_parent_id(self, tenant_id, parent_id):
             return list(storage.children)
+
+        async def purge_entity_artifacts(self, tenant_id, memory_id):
+            storage.append(("purge_entities", memory_id, tenant_id))
+            return {"links": 0, "relations": 0, "entities": 0}
 
     monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
 
@@ -408,6 +509,92 @@ async def test_a_child_whose_audit_failed_is_reported_as_untouched(
     assert not [a for a in storage if a[0] == "soft_delete" and a[1] == "c1"]
 
 
+async def test_a_cascaded_child_has_its_own_graph_rows_purged(emitted, storage):
+    """The invariant has to hold for the children, not just the row the event named.
+
+    A child is an ordinary memory. Narrow in practice — auto-chunk children get no
+    extraction of their own, so the names mined from chunked content hang off the
+    PARENT — but a child whose content was later rewritten has its own graph rows,
+    because ``update_memory`` re-extracts.
+    """
+    storage.children = [_child("c1"), _child("c2")]
+    cfg = _cfg(nb={"enabled": True, "disposition": "drop"})
+    mem = _mem(
+        metadata={
+            "business_relevance": "personal",
+            "auto_chunked": True,
+            "child_count": 2,
+        }
+    )
+
+    await governance_remediation.remediate_after_enrichment(mem, cfg)
+
+    purged = {mid for kind, mid, *_ in storage if kind == "purge_entities"}
+    assert purged == {"m1", "c1", "c2"}, f"a dropped row kept its graph rows: {purged}"
+
+
+async def test_a_child_that_could_not_be_deleted_is_not_purged(
+    emitted, storage, monkeypatch, caplog
+):
+    """OVER-REFUSAL GUARD. The row is STILL LIVE, so its graph rows describe
+    content that is still there — removing them would destroy the graph of a
+    memory no policy managed to drop."""
+    storage.children = [_child("c1")]
+
+    class _SC:
+        async def soft_delete_memory(self, mid, tenant_id):
+            if mid == "c1":
+                raise RuntimeError("delete refused")
+            storage.append(("soft_delete", mid, tenant_id))
+
+        async def find_children_by_parent_id(self, tenant_id, parent_id):
+            return list(storage.children)
+
+        async def purge_entity_artifacts(self, tenant_id, memory_id):
+            storage.append(("purge_entities", memory_id, tenant_id))
+            return {"links": 0, "relations": 0, "entities": 0}
+
+    monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
+
+    cfg = _cfg(nb={"enabled": True, "disposition": "drop"})
+    mem = _mem(
+        metadata={
+            "business_relevance": "personal",
+            "auto_chunked": True,
+            "child_count": 1,
+        }
+    )
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(governance_remediation.GovernanceCascadeError):
+            await governance_remediation.remediate_after_enrichment(mem, cfg)
+
+    purged = {mid for kind, mid, *_ in storage if kind == "purge_entities"}
+    assert "c1" not in purged, (
+        "the child is still live; purging its graph rows destroys data no policy removed"
+    )
+    # The parent's own purge still ran — it WAS dropped.
+    assert "m1" in purged
+
+
+async def test_privatised_children_keep_their_graph_rows(emitted, storage):
+    """OVER-REFUSAL GUARD. ``keep_private`` narrows visibility; nothing is removed,
+    so the graph rows still describe content that is there and still allowed."""
+    storage.children = [_child("c1")]
+    cfg = _cfg(nb={"enabled": True, "disposition": "keep_private"})
+    mem = _mem(
+        metadata={
+            "business_relevance": "personal",
+            "auto_chunked": True,
+            "child_count": 1,
+        }
+    )
+
+    await governance_remediation.remediate_after_enrichment(mem, cfg)
+
+    assert not any(kind == "purge_entities" for kind, *_ in storage), storage
+
+
 async def test_the_cascade_count_does_not_include_rows_it_skipped(
     emitted, storage, caplog
 ):
@@ -465,6 +652,10 @@ async def test_a_failed_cascade_never_erases_the_parents_own_audit(
         async def find_children_by_parent_id(self, tenant_id, parent_id):
             return list(storage.children)
 
+        async def purge_entity_artifacts(self, tenant_id, memory_id):
+            storage.append(("purge_entities", memory_id, tenant_id))
+            return {"links": 0, "relations": 0, "entities": 0}
+
     monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
 
     cfg = _cfg(nb={"enabled": True, "disposition": "keep_private"})
@@ -505,6 +696,57 @@ async def test_pii_flag_config_records_no_configured_action(emitted, storage):
     await governance_remediation.remediate_after_enrichment(mem, cfg)
     flag = next(c for c in emitted if c["action"] == "pii_flag")
     assert "configured_action" not in flag["detail"]
+
+
+async def test_a_purge_response_that_is_not_an_object_does_not_raise(
+    emitted, monkeypatch, caplog
+):
+    """This function's one hard requirement is that it must not raise.
+
+    ``_post`` is declared ``dict | list`` and the storage client silences the
+    mismatch with a ``type: ignore``, so nothing between the caller and the wire
+    enforces the shape. A 2xx carrying a list satisfies ``raise_for_status`` and
+    never reaches the ``except`` around the call — and reading ``.get`` on it
+    then raises ``AttributeError`` from OUTSIDE that guard.
+
+    The consequence is not a stray log line. ``remediate_after_enrichment`` runs
+    under ``consumer.handle_memory_enriched``, which catches
+    ``GovernanceCascadeError`` and nothing else, and the dispatcher nacks on any
+    other exception: redelivery, the whole drop branch re-run, and a SECOND
+    ``critical=True`` audit for a memory already dropped. Every redelivery. That
+    is the exact failure mode round 2 of this PR fixed, arriving back through a
+    type nobody checked.
+    """
+
+    class _SC:
+        async def soft_delete_memory(self, mid, tenant_id):
+            pass
+
+        async def find_children_by_parent_id(self, tenant_id, parent_id):
+            return []
+
+        async def purge_entity_artifacts(self, tenant_id, memory_id):
+            # A success whose body is not an object.
+            return ["unexpected", "shape"]
+
+    monkeypatch.setattr(governance_remediation, "get_storage_client", lambda: _SC())
+
+    # ``action`` on the PII branch — ``disposition`` is the non-business key, and
+    # passing the wrong one here silently lands on ``flag``, which never purges.
+    cfg = _cfg(pii={"enabled": True, "action": "drop"})
+    mem = _mem(metadata={"contains_pii": True, "pii_types": ["health"]})
+
+    with caplog.at_level("ERROR"):
+        outcome = await governance_remediation.remediate_after_enrichment(mem, cfg)
+
+    # The parent's own verdict still stands; only the cleanup is unconfirmable.
+    assert outcome.dropped is True
+    assert any(c["action"] == "pii_drop" for c in emitted), (
+        "the drop branch never ran, so the purge was never reached"
+    )
+    assert any("m1" in r.getMessage() for r in caplog.records), (
+        "an unreadable purge response went by without a word in the log"
+    )
 
 
 async def test_nonbusiness_keep_private_updates_visibility(emitted, storage):

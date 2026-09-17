@@ -4,6 +4,68 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.22.2](https://github.com/caura-ai/caura/compare/plugin-v2.22.1...plugin-v2.22.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **plugin:** evict the least recently used session, not the oldest one (F1) ([#1507](https://github.com/caura-ai/caura/issues/1507)) ([138b2d9](https://github.com/caura-ai/caura/commit/138b2d9ac452ff54e99c227dd099223ed0da24d8))
+
+## [2.22.1](https://github.com/caura-ai/caura/compare/plugin-v2.22.0...plugin-v2.22.1) (2026-09-14)
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.4.1 to 26.5.1 in /plugin in the npm-minor-patch group ([#1482](https://github.com/caura-ai/caura/issues/1482)) ([5caf8ef](https://github.com/caura-ai/caura/commit/5caf8ef04cffb10e01a7abe2692f5468ea74eff8))
+
+## [2.22.0](https://github.com/caura-ai/caura/compare/plugin-v2.21.1...plugin-v2.22.0) (2026-09-10)
+
+
+### Features
+
+* **search:** freshness_reference — As-Of Recall for backfilled corpora ([#1471](https://github.com/caura-ai/caura/issues/1471)) ([c13b720](https://github.com/caura-ai/caura/commit/c13b720336bdcf926d6dc43fb93347693570ec69))
+
+## [2.21.1](https://github.com/caura-ai/caura/compare/plugin-v2.21.0...plugin-v2.21.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **search:** budget and label successor injection (D16) ([#1439](https://github.com/caura-ai/caura/issues/1439)) ([b17771f](https://github.com/caura-ai/caura/commit/b17771f5ebf65aaec3fda67533b1301ace31b094))
+
+## [2.21.0](https://github.com/caura-ai/caura/compare/plugin-v2.20.3...plugin-v2.21.0) (2026-09-09)
+
+
+### Features
+
+* **search:** raise the top_k ceiling to 200 and give it one source of truth ([#1411](https://github.com/caura-ai/caura/issues/1411)) ([1d86102](https://github.com/caura-ai/caura/commit/1d86102e3ca70bb04c8a05fd61e26f35addf0296))
+
+## [2.20.3](https://github.com/caura-ai/caura/compare/plugin-v2.20.2...plugin-v2.20.3) (2026-09-08)
+
+
+### Bug Fixes
+
+* **plugin:** make a missing op branch a build error, and pin every op's route ([#1379](https://github.com/caura-ai/caura/issues/1379)) ([fbf68d0](https://github.com/caura-ai/caura/commit/fbf68d0dfdba7bc3337b04f0c25e012ddf55d3b6))
+* **plugin:** stop an unrecognised op falling through to a write ([#1376](https://github.com/caura-ai/caura/issues/1376)) ([23a9895](https://github.com/caura-ai/caura/commit/23a98953b71575c4744c1991c09ee03975c594f1))
+
+
+### Performance
+
+* **tools:** stop buying five op roll-calls twice in tools/list ([#1381](https://github.com/caura-ai/caura/issues/1381)) ([05f39e8](https://github.com/caura-ai/caura/commit/05f39e8a4d2812b7ea00ac1ac1b6089187d4187f))
+
+## [2.20.2](https://github.com/caura-ai/caura/compare/plugin-v2.20.1...plugin-v2.20.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **tools:** declare the two caura_manage ops the manifest already advertised ([#1373](https://github.com/caura-ai/caura/issues/1373)) ([c14b812](https://github.com/caura-ai/caura/commit/c14b81267961e4af70d12d783f641ba4e4bc2323))
+
+## [2.20.1](https://github.com/caura-ai/caura/compare/plugin-v2.20.0...plugin-v2.20.1) (2026-09-07)
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.4.0 to 26.4.1 in /plugin in the npm-minor-patch group ([#1327](https://github.com/caura-ai/caura/issues/1327)) ([93d9974](https://github.com/caura-ai/caura/commit/93d9974fb60d9a9168252443ee31dc321a8f0d02))
+
 ## [2.20.0](https://github.com/caura-ai/caura/compare/plugin-v2.19.7...plugin-v2.20.0) (2026-09-04)
 
 

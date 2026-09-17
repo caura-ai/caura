@@ -306,3 +306,73 @@ async def test_archive_sweep_handles_none_slots_for_deleted_memories():
     assert archived_ids == {str(a), str(c), str(d)}
     assert str(b) not in archived_ids
     assert result["memories_archived"] == 3
+
+
+async def test_an_archived_row_in_a_cluster_is_never_re_archived():
+    """M-61 race guard. The pairs are computed at the top of the run.
+
+    ``_check_near_duplicates`` runs in the checks loop, with the health, usage
+    and issue passes between it and crystallization — so a row archived by
+    anything else inside that window is still named in a cluster, and the
+    archive step is unconditional.
+
+    The two SQL filters are what close the reported loop; this is the guard that
+    makes the invariant checkable next to the destructive step rather than
+    resting on two remote queries staying right. ``bulk_get_memories`` cannot
+    carry the filter itself — ``entity_service`` reads evidence rows through it
+    and legitimately needs archived ones.
+    """
+    a, b, c, d = uuid4(), uuid4(), uuid4(), uuid4()
+    rows = [_memory_row(a), _memory_row(b), _memory_row(c), _memory_row(d)]
+    # ``b`` was archived between pair computation and here.
+    rows[1]["status"] = "archived"
+
+    sc = _build_storage_mock(rows)
+    hygiene = {
+        "near_duplicates": {
+            "pairs": [
+                _pair(str(a), str(b)),
+                _pair(str(b), str(c)),
+                _pair(str(c), str(d)),
+            ]
+        }
+    }
+
+    with (
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client",
+            return_value=sc,
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            _stub_resolve_config,
+        ),
+        patch(
+            "core_api.services.crystallizer_service._crystallize_cluster",
+            AsyncMock(
+                return_value=[
+                    {"content": "crystallized", "memory_type": "fact", "weight": 0.8}
+                ]
+            ),
+        ) as crystallize,
+        patch(
+            "core_api.services.memory_service.create_memory",
+            AsyncMock(return_value=type("_MemOut", (), {"id": uuid4()})()),
+        ),
+    ):
+        result = await _run_crystallization(
+            tenant_id="t1", fleet_id=None, hygiene=hygiene
+        )
+
+    assert sc.batch_update_status.call_count == 1
+    archived_ids = {
+        u["memory_id"] for u in sc.batch_update_status.call_args.args[0]["updates"]
+    }
+    assert str(b) not in archived_ids, "an already-archived row was archived again"
+    assert archived_ids == {str(a), str(c), str(d)}
+    assert result["memories_archived"] == 3
+
+    # And it was not handed to the LLM as a merge input either — re-merging
+    # content that was already merged away is what produces the churn.
+    merged_ids = {m["id"] for m in crystallize.call_args.args[0]}
+    assert str(b) not in merged_ids, "an archived row was re-sent to the LLM"

@@ -7,7 +7,15 @@
   * ``True``  -> route through ``ContradictionEngine.evaluate_async``.
 
 **Sync on purpose.** ``run_contradiction_detection`` is a *regular* function that
-returns an awaitable. On the legacy path it calls the detector entry
+returns a coroutine.
+
+The return type is spelled ``Coroutine`` rather than ``Awaitable`` deliberately:
+mypy's ``unused-coroutine`` check fires only for ``Coroutine``, so with
+``Awaitable`` a call site that created this and then dropped it type-checked
+clean. Since the coroutine is created eagerly here, dropping it silently
+discards the detection — which is exactly the failure this annotation now makes
+a static error. Every branch below returns a coroutine, so the narrower type is
+also the accurate one. On the legacy path it calls the detector entry
 *synchronously* and returns its coroutine, so a call site that schedules the
 result — ``track_task(run_contradiction_detection(...))`` — keeps the exact
 schedule-time semantics the direct ``detect_contradictions_async(...)`` call had
@@ -24,7 +32,8 @@ differential test pins the detection outcomes.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable
+from collections.abc import Coroutine
+from typing import Any
 from uuid import UUID
 
 from core_api.config import settings
@@ -44,7 +53,7 @@ def run_contradiction_detection(
     content: str | None = None,
     embedding: list[float] | None = None,
     new_memory: dict | None = None,
-) -> Awaitable[None]:
+) -> Coroutine[Any, Any, None]:
     if settings.contradiction_engine_enabled:
         return ContradictionEngine().evaluate_async(
             memory_id,

@@ -12,8 +12,8 @@ from common.storage_auth import read_shared_secret_file
 
 # The "local-dev compatibility default" this preserved is retired: the whole
 # ephemeral local/CI Postgres role+db population (ci.yml, both docker-compose
-# files, .env.example, env.dev, this default) was renamed memclaw -> caura  # legacy-name-floor: historical note on a completed rename
-# together in one sweep, so nothing outside this repo depends on "memclaw"  # legacy-name-floor: historical note on a completed rename
+# files, .env.example, env.dev, this default) was renamed to the Caura spelling
+# together in one sweep, so nothing outside this repo depends on the old value
 # here any more. Not a legacy-name-ok alias — just the current default.
 LOCAL_DATABASE_URL = "postgresql+asyncpg://caura:changeme@localhost:5432/caura"
 

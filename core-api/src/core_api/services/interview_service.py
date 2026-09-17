@@ -1265,12 +1265,27 @@ async def run_interview_schedule() -> dict:
         "skipped_not_due": 0,
     }
     for tenant_id in tenants:
-        settings = await get_settings_for_display(tenant_id)
-        cfg = settings.get("interviewer") or {}
-        period_hours = int(cfg.get("period_hours") or 12)
-        template_id = cfg.get("template_id") or "default-v1"
-
+        # 09/02 M-15. The settings read and its parsing used to sit OUTSIDE
+        # this guard, so a single tenant whose settings could not be read — or
+        # whose ``period_hours`` was non-numeric, which ``int()`` raises on —
+        # propagated out of the loop and out of this function.
+        #
+        # That aborted scheduling for every REMAINING tenant, and worse, it
+        # skipped the persisted-jobs sweep below entirely. That sweep (#665) is
+        # the DURABLE RETRY PATH for jobs whose fire-and-forget processing died
+        # at submit time — the one thing that must not be taken out by a
+        # failure, since failure is what it exists to recover from.
+        #
+        # The isolation was already the documented intent: the per-node handler
+        # says "one node's storage failure must not abort scheduling for the
+        # tenant's remaining nodes (or later tenants)", and ``tenants_failed``
+        # was already here to count exactly this. Only the settings read was
+        # outside the try.
         try:
+            settings = await get_settings_for_display(tenant_id)
+            cfg = settings.get("interviewer") or {}
+            period_hours = int(cfg.get("period_hours") or 12)
+            template_id = cfg.get("template_id") or "default-v1"
             nodes = await sc.list_nodes(tenant_id)
             # High limit so the pending-dedup set is complete for any
             # realistic fleet size — a truncated set would re-queue nodes

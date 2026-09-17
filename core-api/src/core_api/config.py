@@ -4,6 +4,7 @@ from typing import Any, Literal, Self
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
 from common.storage_auth import read_shared_secret_file
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,16 @@ class Settings(BaseSettings):
     # (bypassing the gateway via its public run.app URL) cannot impersonate a
     # tenant by setting identity headers itself. Unset (OSS/standalone/dev) = no-op.
     gateway_shared_secret: str | None = None
-    embedding_provider: str = "openai"  # fake | openai | local
+    # fake | openai | local. The default is the shared constant so this
+    # field can never drift from ``_resolve_provider_name``'s env fallback
+    # again (they disagreed once — "openai" here vs "fake" there — and
+    # tenant-config-less paths silently persisted fake vectors).
+    embedding_provider: str = DEFAULT_EMBEDDING_PROVIDER
+    # C38 — model for ``embedding_provider="local"`` (sentence-transformers).
+    # MUST emit VECTOR_DIM dimensions; the provider now refuses a mismatch at
+    # load rather than failing later at INSERT. Maps to LOCAL_EMBEDDING_MODEL,
+    # which is what common/embedding/_registry.py reads.
+    local_embedding_model: str = "BAAI/bge-large-en-v1.5"
     # Per-deploy control for where embedding + LLM enrichment run.
     #
     # - ``"inline"`` (default): both embed + enrich run on the request
@@ -283,9 +293,8 @@ class Settings(BaseSettings):
     # ``memory_service._get_or_cache_embedding`` (cache hits / in-flight
     # joiners take no slot), so one hot tenant's search storm can't
     # occupy the whole embedding service and starve other tenants
-    # (noisy-neighbor-search). The TEI backend is a fixed pool
-    # (``staging-memclaw-tei``: 2 instances x containerConcurrency 10 =  # legacy-name-floor: live, mid-cutover — staging-caura-tei twin already exists
-    # ~20 slots, no autoscale); with cap N on M core-api instances a
+    # (noisy-neighbor-search). Current TEI capacity assumptions live in
+    # ``common.embedding.constants``; with cap N on M core-api instances a
     # single tenant holds at most ``N * M`` of those, leaving headroom
     # for everyone else. Tighter than ``per_tenant_search_concurrency``
     # on purpose: a tenant may have many searches in flight but only a
@@ -309,6 +318,29 @@ class Settings(BaseSettings):
     # enough that real exhaustion fails before the request hits the
     # worker.
     per_tenant_acquire_timeout_seconds: float = 0.05
+    # Process-wide cap on concurrently RUNNING contradiction-detection
+    # passes (A19). Every trigger — write, bulk fan-out, back-channel
+    # consumers, post-entity-extraction — schedules detection as an
+    # unbounded fire-and-forget task, so the caps above bound how fast
+    # writes are ADMITTED but nothing bounds how many detections then
+    # run at once: 8 concurrent 100-item bulks leave ~1,600 detection
+    # coroutines racing the moment they commit. Each pass holds up to
+    # ``_ENTITY_CTX_FANOUT_LIMIT`` (8) storage connections during its
+    # Path C context fetch and one LLM judge call for seconds, on the
+    # SAME storage pool (200 conns, 5s pool budget) and provider quota
+    # the foreground request path uses — a big enough burst turns into
+    # foreground PoolTimeouts and judge abstains (#821), i.e. dropped
+    # detections. Global rather than per-tenant because the resources
+    # being protected are process-global; detection is post-commit
+    # background work, so excess passes QUEUE (never shed) and drain in
+    # FIFO order. Sizing: 16 x 8 = 128 worst-instant storage conns
+    # (< 200 with headroom for foreground), 16 concurrent judge calls
+    # is below the enrichment path's accepted worst case (CAURA-627),
+    # and at a ~2s batch judge that sustains ~8 detections/s per
+    # process — comfortably above one saturated tenant's admitted
+    # write rate. Matches ``per_tenant_write_concurrency`` on purpose:
+    # one process keeps pace with one saturated tenant.
+    contradiction_detection_concurrency: int = 16
     # Idempotency-Key inbox TTL. 24h matches Stripe's default and is
     # longer than any realistic client retry budget. Cached responses
     # older than this are treated as absent and the request re-runs.
@@ -774,6 +806,28 @@ def bridge_credentials_to_environ() -> None:
         ),
         "PLATFORM_LLM_GCP_PROJECT_ID": settings.platform_llm_gcp_project_id or "",
         "PLATFORM_LLM_GCP_LOCATION": settings.platform_llm_gcp_location or "",
+        # Platform-tier EMBEDDING singleton read by ``common.embedding._platform``
+        # (OSS 08/14 M-28). The docstring above has always claimed this bridge
+        # covers "the platform-tier singletons configured by ``PLATFORM_*``
+        # settings"; only the LLM half was ever here, so a deployment that put
+        # ``PLATFORM_EMBEDDING_PROVIDER=openai`` in ``.env`` — the documented
+        # shape — had it loaded into ``Settings`` and never exported, leaving
+        # ``_build_platform_embedder`` to read "" and hand back no platform
+        # embedder at all. The fallback is silent and its failure mode is the
+        # expensive kind: vectors that embed and persist fine, in the wrong
+        # space, discoverable only as bad recall.
+        "PLATFORM_EMBEDDING_PROVIDER": settings.platform_embedding_provider or "",
+        "PLATFORM_EMBEDDING_MODEL": settings.platform_embedding_model or "",
+        "PLATFORM_EMBEDDING_API_KEY": (
+            settings.platform_embedding_api_key.get_secret_value()
+            if settings.platform_embedding_api_key
+            else ""
+        ),
+        # ``PLATFORM_EMBEDDING_BASE_URL`` and ``PLATFORM_EMBEDDING_TRUNCATE_TO_DIM``
+        # are read by the same builder but have no ``Settings`` field to bridge
+        # from, so they stay env-only. Left alone deliberately: inventing
+        # settings for them is a config-surface change, not this fix, and the
+        # three above are the ones ``.env.example`` documents.
     }
     for env_name, value in bridges.items():
         if value and not os.environ.get(env_name):

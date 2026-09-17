@@ -143,6 +143,22 @@ export const STATUSES = [
   "outdated", "conflicted", "archived", "deleted",
 ] as const;
 
+// The ops each op-dispatched tool OFFERS on this surface. Hoisted for the
+// same reason as the two lists above: the schema a caller is validated
+// against and the refusal naming the alternatives now read one identifier,
+// so they cannot drift. Deliberately NOT `tools.json`'s `ops[]`, which is
+// what the MCP handler ACCEPTS and legitimately differs — see MCP_ONLY_OPS
+// in tool-definitions.test.ts.
+const MANAGE_OPS = ["read", "update", "transition", "delete"] as const;
+const DOC_OPS = [
+  "write", "read", "query", "delete", "search", "list_collections",
+] as const;
+
+// Derived, so the dispatcher below is checked against the same tuple the
+// inputSchema publishes rather than against a second hand-written list.
+type ManageOp = (typeof MANAGE_OPS)[number];
+type DocOp = (typeof DOC_OPS)[number];
+
 const MEMORY_TYPE_SCHEMA = {
   type: "string",
   enum: [...MEMORY_TYPES],
@@ -169,7 +185,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       status: STATUS_SCHEMA,
       fleet_ids: { type: "array", items: { type: "string" }, description: "Restrict to fleets" },
       include_brief: { type: "boolean", description: "Append LLM-synthesized summary paragraph" },
-      top_k: { type: "integer", description: "Max results (1-20)" },
+      top_k: { type: "integer", description: "Max results (1-200)" },
     },
   },
 
@@ -211,7 +227,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: ["op", "memory_id"],
     properties: {
-      op: { type: "string", enum: ["read", "update", "transition", "delete"] },
+      op: { type: "string", enum: [...MANAGE_OPS] },
       memory_id: { type: "string", description: "UUID of memory to act on" },
       status: { type: "string", enum: [...STATUSES], description: "Required for op=transition" },
       content: { type: "string", description: "For op=update" },
@@ -228,10 +244,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: ["op"],
     properties: {
-      op: {
-        type: "string",
-        enum: ["write", "read", "query", "delete", "search", "list_collections"],
-      },
+      op: { type: "string", enum: [...DOC_OPS] },
       collection: {
         type: "string",
         description:
@@ -310,7 +323,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: [],
     properties: {
-      top_k: { type: "integer", description: "Max results per search (1-20)" },
+      top_k: { type: "integer", description: "Max results per search (1-200)" },
       min_similarity: { type: "number", description: "Min similarity threshold (0.1-0.9)" },
       fts_weight: { type: "number", description: "Keyword vs semantic blend (0=semantic, 1=keyword)" },
       freshness_floor: { type: "number" },
@@ -417,6 +430,31 @@ const SINGLE_WRITE_ONLY_FIELDS = [
   "write_mode",
 ] as const;
 
+/**
+ * Terminal guard for an op-dispatched tool: every op it serves returns from
+ * its own branch, so reaching the end means the op was not one of them.
+ *
+ * Not a no-op. Until this existed the last branch doubled as the else, and an
+ * unrecognised op became a write — see `tool-op-dispatch.test.ts`, which
+ * records what that cost and pins it.
+ *
+ * `op` is typed `never` so that adding an op to MANAGE_OPS/DOC_OPS without a
+ * branch fails `tsc` here rather than reaching this line at runtime — the
+ * callers cast `op` to the derived union, so an exhausted chain narrows it to
+ * `never` and a leftover member does not.
+ *
+ * The throw is still load-bearing, and deleting it as unreachable would
+ * restore the original defect: that cast is a runtime lie. Nothing in this
+ * package validates `op` — the enum in `PARAM_SCHEMAS` is enforced by the
+ * host, so any string can arrive here.
+ */
+function unsupportedOp(tool: string, op: never, offered: readonly string[]): never {
+  throw new Error(
+    `[caura] ${tool}: unsupported op ${JSON.stringify(op)}. ` +
+      `Expected one of: ${offered.join(", ")}`,
+  );
+}
+
 const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_recall: async (params, signal) => {
     const body = await enrichBody(searchBody(params));
@@ -467,7 +505,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_manage: async (params, signal) => {
     // op=update sends ``agent_id`` as a query param; the other ops ignore it.
     const enriched = await enrichBody(params, { resolveIdentity: true });
-    const op = enriched.op as string;
+    const op = enriched.op as ManageOp;
     const memory_id = enriched.memory_id as string;
     assertSafePathSegment(memory_id, "memory_id");
     const tenant_id = enriched.tenant_id as string;
@@ -487,26 +525,28 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     if (op === "delete") {
       return apiCall("DELETE", `/memories/${id}`, undefined, { tenant_id }, signal);
     }
-    // op === "update"
-    const agent_id = enriched.agent_id as string;
-    const updateFields: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(enriched)) {
-      if (v === undefined) continue;
-      if (k === "op" || k === "memory_id" || k === "tenant_id" || k === "agent_id" || k === "fleet_id") continue;
-      updateFields[k] = v;
+    if (op === "update") {
+      const agent_id = enriched.agent_id as string;
+      const updateFields: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(enriched)) {
+        if (v === undefined) continue;
+        if (k === "op" || k === "memory_id" || k === "tenant_id" || k === "agent_id" || k === "fleet_id") continue;
+        updateFields[k] = v;
+      }
+      return apiCall(
+        "PATCH",
+        `/memories/${id}`,
+        updateFields,
+        { tenant_id, agent_id },
+        signal,
+      );
     }
-    return apiCall(
-      "PATCH",
-      `/memories/${id}`,
-      updateFields,
-      { tenant_id, agent_id },
-      signal,
-    );
+    unsupportedOp("caura_manage", op, MANAGE_OPS);
   },
 
   caura_doc: async (params, signal) => {
     const enriched = await enrichBody(params);
-    const op = enriched.op as string;
+    const op = enriched.op as DocOp;
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
@@ -559,14 +599,16 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       if (enriched.fleet_id) query.fleet_id = String(enriched.fleet_id);
       return apiCall("GET", "/documents/collections", undefined, query, signal);
     }
-    // op === "delete"
-    return apiCall(
-      "DELETE",
-      `/documents/${encodeURIComponent(enriched.doc_id as string)}`,
-      undefined,
-      { tenant_id, collection: collection as string },
-      signal,
-    );
+    if (op === "delete") {
+      return apiCall(
+        "DELETE",
+        `/documents/${encodeURIComponent(enriched.doc_id as string)}`,
+        undefined,
+        { tenant_id, collection: collection as string },
+        signal,
+      );
+    }
+    unsupportedOp("caura_doc", op, DOC_OPS);
   },
 
   caura_list: async (params, signal) => {

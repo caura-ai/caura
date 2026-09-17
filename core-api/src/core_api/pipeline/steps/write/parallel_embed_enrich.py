@@ -80,7 +80,7 @@ class ParallelEmbedEnrich:
         ch = ctx.data.get("content_hash")
         resolved_write_mode = ctx.data.get("resolved_write_mode")
         # CAURA-682 Phase 1: per-phase latency capture. The summary emit
-        # lives in ``_create_memory_pipeline`` after pipeline.run; each
+        # lives in ``_run_write_pipeline`` after pipeline.run; each
         # phase deposits its duration here.
         timings: dict = ctx.data.setdefault("phase_timings", {})
 

@@ -1,6 +1,6 @@
 """C33 — OpenAPI completeness guarantees.
 
-Three invariants:
+Four invariants:
 
 1. Every endpoint annotated via ``openapi_responses`` actually surfaces a
    non-empty success schema in the generated spec (the ``responses=``
@@ -11,6 +11,11 @@ Three invariants:
 3. The ``servers`` block is driven by ``public_api_url``: absent when the
    setting is empty (OSS default — spec byte-identical to pre-C33), present
    with the trailing-slash-normalized URL when set.
+4. Spec-only models cover what the handler actually serializes, where the
+   drift already happened once: every key ``/recall`` puts in ``diagnostic``
+   must be a declared ``RecallDiagnostic`` field (oss-0902-l-16 — WT-1 added
+   ``recall_raw`` to the handler and the model was never widened, so the
+   spec and generated clients understated the response).
 """
 
 import pytest
@@ -115,6 +120,88 @@ def test_empty_success_schema_ratchet():
         f"core_api/openapi_responses.py or raise the ceiling with justification. "
         f"Full list: {empty}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Invariant 4 — RecallDiagnostic covers the wire (oss-0902-l-16).
+#
+# ``openapi_responses`` models are spec-only (never ``response_model=``), so
+# nothing at runtime drops or flags an undeclared key; its module docstring
+# makes handler↔model sync a same-PR rule instead. These tests are that rule's
+# teeth for the one payload that already drifted: ``summarize_memories``
+# builds ``diagnostic`` at three sites (no-memories, recall-disabled, LLM
+# path) which are kept in lockstep by hand — every key each of them emits
+# must be a declared ``RecallDiagnostic`` field.
+# ---------------------------------------------------------------------------
+
+
+def test_recall_diagnostic_documents_recall_raw():
+    import typing
+
+    from core_api.openapi_responses import RecallDiagnostic
+
+    field = RecallDiagnostic.model_fields.get("recall_raw")
+    assert field is not None, (
+        "RecallDiagnostic must declare recall_raw — /recall has returned it in "
+        "diagnostic since WT-1 (recall_service.summarize_memories)"
+    )
+    # Nullable: the no-memories and recall-disabled branches emit null.
+    assert type(None) in typing.get_args(field.annotation), (
+        f"recall_raw must be nullable (str | None), got {field.annotation!r}"
+    )
+
+
+async def test_recall_diagnostic_covers_every_wire_key(monkeypatch):
+    """Keys serialized into ``diagnostic`` ⊆ declared ``RecallDiagnostic`` fields,
+    on all three builder branches."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import core_api.services.recall_service as rs_mod
+    from core_api.openapi_responses import RecallDiagnostic
+
+    def _mem():
+        return SimpleNamespace(
+            content="The platform database is PostgreSQL 16.",
+            memory_type="fact",
+            title=None,
+            status="active",
+            ts_valid_start=None,
+            model_dump=lambda mode=None: {"content": "c", "memory_type": "fact"},
+        )
+
+    # No-memories branch (no LLM, no config reads).
+    empty = await rs_mod.summarize_memories([], "q", SimpleNamespace(), diagnostic=True)
+    # Recall-disabled branch.
+    disabled = await rs_mod.summarize_memories(
+        [_mem()],
+        "q",
+        SimpleNamespace(recall_enabled=False, recall_provider="p"),
+        diagnostic=True,
+    )
+    # LLM branch — the one that populates recall_raw with the completion.
+    monkeypatch.setattr(
+        rs_mod, "call_with_fallback", AsyncMock(return_value="**Answer:** 16")
+    )
+    llm = await rs_mod.summarize_memories(
+        [_mem()],
+        "q",
+        SimpleNamespace(recall_enabled=True, recall_provider="p", recall_model="m"),
+        diagnostic=True,
+    )
+
+    model_keys = set(RecallDiagnostic.model_fields)
+    for branch, resp in {
+        "no_memories": empty,
+        "recall_disabled": disabled,
+        "llm": llm,
+    }.items():
+        undocumented = set(resp["diagnostic"]) - model_keys
+        assert not undocumented, (
+            f"/recall ({branch} branch) serializes diagnostic keys missing from "
+            f"RecallDiagnostic: {sorted(undocumented)} — declare them in "
+            f"core_api/openapi_responses.py (spec-only; see its module docstring)"
+        )
 
 
 def test_servers_block_absent_by_default(monkeypatch):

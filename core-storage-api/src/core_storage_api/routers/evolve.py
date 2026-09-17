@@ -83,10 +83,11 @@ async def evolve_filter_by_scope(request: Request) -> dict:
 async def evolve_apply_weights(request: Request) -> dict:
     """Clamp-and-adjust weights and (atomically) backfill the rule→outcome link.
 
-    Body ``{tenant_id, ids:[...], delta, floor, cap, rule_id?, outcome_id?}``.
-    Returns ``{adjustments:[{id, old_weight, new_weight}], backfilled: bool}``.
-    The clamp CTE and the conditional ``jsonb_set`` backfill commit in ONE
-    transaction."""
+    Body ``{tenant_id, ids:[...], delta, floor, cap, rule_id?, outcome_id?,
+    mark_used?}``. Returns ``{adjustments:[{id, old_weight, new_weight}],
+    backfilled: bool}``. The clamp CTE, the conditional ``jsonb_set`` backfill
+    and (when ``mark_used`` is true) the A41 confirmed-use counter bump commit
+    in ONE transaction."""
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     ids = body.get("ids")
@@ -103,4 +104,7 @@ async def evolve_apply_weights(request: Request) -> dict:
         cap=cap,
         rule_id=body.get("rule_id"),
         outcome_id=body.get("outcome_id"),
+        # ``bool(...)`` rather than trusting the wire value: a truthy string
+        # ("false") must not silently enable the bump for a hand-rolled caller.
+        mark_used=body.get("mark_used") is True,
     )

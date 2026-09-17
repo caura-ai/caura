@@ -58,6 +58,14 @@ class Relation(Base):
     )
 
 
+# Who created a ``memory_entity_links`` row. Not a free-form string: one
+# predicate deletes by it (``_delete_entity_artifacts`` on the reset path) and
+# three service methods write it, so a typo at any writer would silently make
+# that writer's links undeletable — or deletable — with nothing failing.
+LINK_SOURCE_CALLER = "caller"
+LINK_SOURCE_EXTRACTION = "extraction"
+
+
 class MemoryEntityLink(Base):
     __tablename__ = "memory_entity_links"
 
@@ -68,6 +76,16 @@ class MemoryEntityLink(Base):
         ForeignKey("entities.id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(Text, nullable=False)
+    # Provenance, and the reason a content edit can clear the graph without
+    # destroying links a caller curated. ``entity_links`` on
+    # ``PATCH /memories/{id}`` is a caller-owned additive API — a way to tag a
+    # memory with a project or person its text never names — and extraction,
+    # which mines text, will never recreate such a link. So the edit-time reset
+    # deletes only ``extraction`` rows; see migration 048 for why the default is
+    # the conservative ``caller`` rather than the more accurate ``extraction``.
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text(f"'{LINK_SOURCE_CALLER}'")
+    )
 
     __table_args__ = (
         # The PK ``(memory_id, entity_id)`` covers the memories-side FK on its
@@ -75,4 +93,11 @@ class MemoryEntityLink(Base):
         # so deleting an entity scanned this whole table, across every tenant.
         # See migration 035.
         Index("ix_memory_entity_links_entity_id", "entity_id"),
+        # The reset's delete predicate. Partial because that is the only query
+        # that reads ``source``. See migration 048.
+        Index(
+            "ix_memory_entity_links_extraction",
+            "memory_id",
+            postgresql_where=text(f"source = '{LINK_SOURCE_EXTRACTION}'"),
+        ),
     )

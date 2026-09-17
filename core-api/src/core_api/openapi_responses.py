@@ -87,12 +87,22 @@ class MemoryStatusPatchResponse(BaseModel):
 
 class RecallDiagnostic(BaseModel):
     recall_prompt: str | None
+    # WT-1 — ``summary`` carries only the extracted final answer; the raw
+    # completion stays inspectable here.
+    recall_raw: str | None = Field(
+        description="Unfiltered LLM completion (reasoning scaffold + answer marker) that summary "
+        "was extracted from; null when no LLM ran (no matches, or summarization disabled)."
+    )
     recall_model: str | None
     recall_provider: str | None
     all_candidates: list
     top_k_used: int | None
     retrieval_strategy: str | None
     search_params: dict
+    # CAURA-722 — documented on ``SearchDiagnostic``. ``None`` on the count
+    # means entity FTS never ran, which is a different answer from ``0``.
+    entity_matches: int | None = None
+    entity_match_declined: bool = False
 
 
 class RecallResponse(BaseModel):
@@ -532,3 +542,24 @@ class HealthResponse(BaseModel):
         default=None,
         description="Only on 503: names of failing dependencies.",
     )
+
+
+class ConflictOut(BaseModel):
+    """D11 — a detected conflict with its human-review state."""
+
+    id: str
+    tenant_id: str
+    new_memory_id: str
+    old_memory_id: str
+    relationship: str
+    diagnosis: str | None = None
+    action: str | None = Field(default=None, description="What the detector proposed.")
+    review_status: str = Field(description="pending | resolved | dismissed")
+    resolution_action: str | None = Field(default=None, description="What the reviewer chose.")
+    resolution_note: str | None = None
+    resolved_by: str | None = None
+    resolved_at: str | None = None
+
+
+class ConflictListResponse(BaseModel):
+    items: list[ConflictOut]

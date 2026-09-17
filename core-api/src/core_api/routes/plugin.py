@@ -57,8 +57,8 @@ _plugin_files = [
 
 # Plugin-root-relative files served alongside the src/*.ts files.
 # - tools.json: tool SoT, loaded by tool-specs.ts.
-# - skills/memclaw/SKILL.md, skills/caura/SKILL.md: shared plugin skill.  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
-#   Both are served during the rebrand transition (dual-path: "memclaw"  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+# - skills/memclaw/SKILL.md, skills/caura/SKILL.md: shared plugin skill.  # legacy-name-floor: documents the dual-path transition tracked in docs/plans/skills-dual-path-transition.md
+#   Both are served during the rebrand transition (dual-path: "memclaw"  # legacy-name-floor: documents the dual-path transition tracked in docs/plans/skills-dual-path-transition.md
 #   is the historical bundled skill already on disk on every existing
 #   install; "caura" is the new one). Discovered by OpenClaw via
 #   openclaw.plugin.json:skills (one copy per node). Removing either
@@ -504,10 +504,10 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
 if (!config.plugins) config.plugins = {{}};
 if (!Array.isArray(config.plugins.allow)) config.plugins.allow = [];
-if (!config.plugins.allow.includes('memclaw')) config.plugins.allow.push('memclaw');
+if (!config.plugins.allow.includes('memclaw')) config.plugins.allow.push('memclaw'); // legacy-name-ok: frozen plugin id; changing it makes restrictive allowlists refuse to load the plugin
 
 if (!config.plugins.entries) config.plugins.entries = {{}};
-config.plugins.entries.memclaw = {{ enabled: true, config: {{}} }};
+config.plugins.entries.memclaw = {{ enabled: true, config: {{}} }}; // legacy-name-ok: frozen plugin id; changing it leaves the manifest-id plugin disabled
 
 // Disable memory-core — OpenClaw only loads one kind:"memory" plugin at a time.
 // Without this, the memory slot stays with memory-core and register() is never called.
@@ -524,8 +524,8 @@ if (config.plugins.entries['memory-core']) {{
 // even though the tool surface is registered. Confirmed against
 // OpenClaw 2026.5.4 dist/registry-DFFgCbcm.js:241 resolveContextEngine.
 if (!config.plugins.slots) config.plugins.slots = {{}};
-config.plugins.slots.memory = 'memclaw';
-config.plugins.slots.contextEngine = 'memclaw';
+config.plugins.slots.memory = 'memclaw'; // legacy-name-ok: frozen plugin id; changing it loses the memory slot
+config.plugins.slots.contextEngine = 'memclaw'; // legacy-name-ok: frozen plugin id; changing it stops keystone injection
 
 if (!config.plugins.load) config.plugins.load = {{}};
 if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];
@@ -566,7 +566,7 @@ case "$CAURA_API_URL" in
       # One release only: remove the pre-rename drop-in so re-running
       # install-plugin doesn't leave both files behind, each declaring the
       # same Environment= line redundantly.
-      rm -f "$_SD_DIR/memclaw-tls.conf"  # legacy-name-ok: removes the pre-rename drop-in for exactly one caura-client release, then drop this line (docs/plans/rebrand-alias-retirement-policy.md)
+      rm -f "$_SD_DIR/memclaw-tls.conf"  # legacy-name-ok: removes the pre-rename drop-in for exactly one caura-client release, then drop this line (docs/plans/rebrand-alias-migration-notes.md)
       cat > "$_SD_DIR/caura-tls.conf" << SDEOF
 [Service]
 Environment="NODE_EXTRA_CA_CERTS=$PLUGIN_DIR/onprem-ca.pem"
@@ -701,7 +701,7 @@ _VALID_SKILL_AGENTS = {"claude-code", "codex", "both"}
 # Skills installable via ``/install-skill?skill=…`` and served at
 # ``/skill/{skill}``. Strictly allowlisted — the value is interpolated into a
 # filesystem path and the generated script, so an arbitrary value must never
-# reach either. ``memclaw`` is the default (the operational manual, still  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+# reach either. ``memclaw`` is the default (the operational manual, still  # legacy-name-floor: documents the dual-path transition tracked in docs/plans/skills-dual-path-transition.md
 # the default during the rebrand transition — see
 # docs/plans/skills-dual-path-transition.md); ``caura`` is the same
 # operational manual under its new name, served independently so both

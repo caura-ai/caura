@@ -35,7 +35,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from common import permanent_failure
 from common.events.factory import get_event_bus
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
-from core_api.constants import VERSION, is_mcp_path
+from core_api.constants import STM_WRITE_ROUTE_NOTE, VERSION, is_mcp_path
 from core_api.consumer import register_consumers
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
 from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
@@ -48,6 +48,7 @@ from core_api.middleware.request_timeout import (
 )
 from core_api.routes.agents import router as agents_router
 from core_api.routes.audit import router as audit_router
+from core_api.routes.conflicts import router as conflicts_router
 from core_api.routes.crystallizer import router as crystallizer_router
 from core_api.routes.documents import router as documents_router
 from core_api.routes.entities import router as entities_router
@@ -64,6 +65,7 @@ from core_api.routes.org_deletion import router as org_deletion_router
 from core_api.routes.plugin import plugin_bootstrap_router
 from core_api.routes.plugin import router as plugin_router
 from core_api.routes.reports import router as reports_router
+from core_api.routes.scheduler_lease import router as scheduler_lease_router
 from core_api.routes.settings import router as settings_router
 from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
@@ -245,7 +247,7 @@ async def lifespan(app):
     # imported AFTER that call (slowapi / mcp_server below, uvicorn by the
     # server) — so the import-time pass no-ops for them (it logs a "rerouting
     # was a no-op" warning) and their records never reach the JSON/GCP handler.
-    # Most consequentially, FastMCP's "Error executing tool ..." tool-error
+    # Most consequentially, the MCP SDK's "Error executing tool ..." tool-error
     # lines were invisible in prod logs. The re-route is idempotent, so this
     # post-import re-run from the ASGI lifespan startup safely routes them.
     reroute_third_party_loggers()
@@ -605,9 +607,11 @@ async def lifespan(app):
 # CAP-01 / F6. Tag-level labelling for capabilities whose REST surface is not
 # what its presence in this spec implies. Only STM qualifies today: it is
 # advertised here, gated on a server setting hosted tenants cannot reach, and
-# has no REST write route at all. The per-operation text lives in
+# has no DEDICATED REST write route. The per-operation text lives in
 # ``routes/stm.py``; this is what a reader sees in the docs sidebar before
-# they open an operation.
+# they open an operation — which is why the sentence about the write path is
+# shared with that module rather than restated here. It used to be restated,
+# and said something untrue for longer than the copy that got corrected.
 OPENAPI_TAGS = [
     {
         "name": "stm",
@@ -615,8 +619,8 @@ OPENAPI_TAGS = [
             "**Plugin-only — not available over hosted REST.** Short-term "
             "memory is served by the OpenClaw plugin. These operations are "
             "gated on the server-side `USE_STM` setting, which is off in the "
-            "hosted deployment and is not per-tenant, and there is no REST "
-            "write route for STM at all. Use `/memories` and `/search` for "
+            "hosted deployment and is not per-tenant. "
+            f"{STM_WRITE_ROUTE_NOTE} Use `/memories` and `/search` for "
             "durable memory."
         ),
     },
@@ -1038,10 +1042,10 @@ app.include_router(reports_router, prefix="/api/v1")
 # change until they explicitly enable the feature.
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
-# PERMANENT legacy alias (rebrand, 2026-08-14): the keystones REST surface
+# Rename compatibility (2026-08-14): the keystones REST surface
 # shipped as /api/v1/memclaw/keystones and customer scripts call it. The
 # canonical path is now the brand-neutral /api/v1/keystones (matching every
-# other route); the old prefix keeps serving forever, hidden from the schema.
+# other route); the old prefix remains accepted, hidden from the schema.
 app.include_router(
     keystones_router,
     prefix="/api/v1/memclaw",  # legacy-name-floor: floor
@@ -1056,7 +1060,9 @@ app.include_router(stm_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(interview_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
+app.include_router(conflicts_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
+app.include_router(scheduler_lease_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
@@ -1065,7 +1071,7 @@ if _os.getenv("TESTING") == "1":
 
     app.include_router(testing_router, prefix="/api/v1")
 
-# Mount at /mcp; FastMCP's internal Route("/") handles the canonical /mcp/.
+# Mount at /mcp; the SDK app's internal Route("/") handles the canonical /mcp/.
 # Bare /mcp (no trailing slash) doesn't match Mount's regex, so the parent
 # router would issue a 307 — streaming MCP clients (e.g. Anthropic's
 # remote-MCP integration) hang on the initialize handshake when a redirect
@@ -1116,16 +1122,46 @@ app.router.routes.append(
 # paths are no longer top-level ``APIRoute.path`` entries — which is exactly what
 # silently broke this guard when 0.137 shipped. ``app.openapi()`` is the stable,
 # public surface and lists the prefixed paths under both old (flatten) and new
-# (mount) FastAPI. Every core-api route is ``include_in_schema=True``, so none is
-# hidden from this check.
+# (mount) FastAPI.
+#
+# The schema is NOT the whole served surface, though, so this guard constrains
+# what may go in the opt-out set: an opt-out path must be schema-visible. Four
+# operations are served and undocumented — the PERMANENT legacy keystones
+# alias, registered with ``include_in_schema=False`` immediately after the
+# canonical ``keystones_router`` above (three operations), and the trailing-slash
+# ``GET /api/v1/skills-inbox/`` in ``routes/skills_inbox.py``. Naming any of
+# them here would raise below even though the route exists.
+#
+# (An earlier revision of this comment claimed "every core-api route is
+# include_in_schema=True, so none is hidden from this check". It was true when
+# written in #364, 2026-06-15, and stopped being true twice: #582 on
+# 2026-07-20 added the trailing-slash inbox route, then #782 on 2026-08-14
+# added the alias. Worth noting which way that went — the first falsification
+# came from a different file, so nothing a reviewer of #582 was looking at
+# would have pointed here. That is the argument for the claim being narrow
+# enough to check, which is what the paragraph above now aims at.)
+#
+# DELIBERATELY not fixed by unioning the schema with a walk of ``app.routes``.
+# The walk needs the private ``_IncludedRouter`` internals this comment exists
+# to warn about, and putting them in import-time app construction trades a
+# false RuntimeError for a service that will not boot on the next FastAPI
+# upgrade — a worse failure for a case with no live bug: all three current
+# entries are documented. The realistic way to reach it is a timeout opt-out on
+# ``/keystones``, since ``_is_opted_out`` matches exactly and the alias is a
+# distinct path that would need its own entry. If that day comes, exempt the
+# canonical path and handle the alias in ``_is_opted_out`` rather than widening
+# this guard.
 _registered_paths = set(app.openapi().get("paths", {}))
 for _opt_out in _TIMEOUT_OPT_OUT_PATHS:
     if _opt_out not in _registered_paths:
         raise RuntimeError(
-            f"RequestTimeoutMiddleware opt-out path {_opt_out!r} is not "
-            "registered on the FastAPI app. Either the route was renamed/"
-            "removed or _TIMEOUT_OPT_OUT_PATHS in middleware/request_timeout.py "
-            "is stale; both are silent-create regressions waiting to happen."
+            f"RequestTimeoutMiddleware opt-out path {_opt_out!r} is not in the "
+            "OpenAPI schema. Either the route was renamed/removed or "
+            "_TIMEOUT_OPT_OUT_PATHS in middleware/request_timeout.py is stale — "
+            "both are silent-create regressions waiting to happen. If instead "
+            "the route exists but is registered include_in_schema=False (the "
+            "legacy keystones alias, or GET /api/v1/skills-inbox/), this guard "
+            "cannot see it: opt out of the canonical path instead."
         )
 
 

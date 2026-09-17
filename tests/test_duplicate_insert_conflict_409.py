@@ -218,31 +218,25 @@ async def test_the_write_pipeline_returns_409_not_a_pipeline_failure() -> None:
     nothing about which row now owns the content.
     """
     from core_api.clients import storage_client as sc_mod
+    from core_api.schemas import MemoryCreate
+    from core_api.services.memory_service import create_memory
 
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    try:
-        from core_api.schemas import MemoryCreate
-        from core_api.services.memory_service import create_memory
-
-        refuse = AsyncMock(
-            side_effect=DuplicateMemoryError(f"Duplicate memory exists: {WINNER}")
-        )
-        with patch.object(sc_mod.CoreStorageClient, "create_memory", new=refuse):
-            with pytest.raises(HTTPException) as caught:
-                await create_memory(
-                    MemoryCreate(
-                        tenant_id="t-pipeline-409",
-                        fleet_id="f1",
-                        agent_id="a",
-                        content=(
-                            "content long enough to clear the quality gate on the "
-                            f"write pipeline for this duplicate-race test {uuid.uuid4().hex}"
-                        ),
-                    )
+    refuse = AsyncMock(
+        side_effect=DuplicateMemoryError(f"Duplicate memory exists: {WINNER}")
+    )
+    with patch.object(sc_mod.CoreStorageClient, "create_memory", new=refuse):
+        with pytest.raises(HTTPException) as caught:
+            await create_memory(
+                MemoryCreate(
+                    tenant_id="t-pipeline-409",
+                    fleet_id="f1",
+                    agent_id="a",
+                    content=(
+                        "content long enough to clear the quality gate on the "
+                        f"write pipeline for this duplicate-race test {uuid.uuid4().hex}"
+                    ),
                 )
-    finally:
-        memory_service._USE_PIPELINE_WRITE = original
+            )
 
     assert caught.value.status_code == 409, (
         f"a duplicate race surfaced as {caught.value.status_code}, not the 409 the "

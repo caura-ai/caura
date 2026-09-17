@@ -2,8 +2,8 @@
 
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
-<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-ok: taught as legacy alias -->
-Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env vars and URLs keep working unchanged. The <code>memclaw-client</code>/<code>@caura/memclaw-client</code> package names and the <code>MemClaw</code> class alias inside <code>caura-client</code> were all retired.</p> <!-- legacy-name-ok: taught as legacy alias -->
+<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-floor: taught as legacy alias -->
+Existing <code>memclaw_*</code> tool calls and supported <code>MEMCLAW_*</code> environment aliases continue to work; use <code>caura_*</code> names and current Caura URLs for new configuration. The yanked PyPI release <code>memclaw-client==0.5.0</code> still installs <code>caura-client</code> for exact pins, but it does not provide the retired <code>memclaw_client</code> import or <code>MemClaw</code> class aliases. The npm package <code>@caura/memclaw-client</code> was never published.</p> <!-- legacy-name-floor: migration guidance and package evidence -->
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
@@ -26,9 +26,9 @@ Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env v
 
 ---
 
-## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets <!-- legacy-name-ok: taught as legacy alias -->
+## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets <!-- legacy-name-floor: taught as legacy alias -->
 
-Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes. <!-- legacy-name-ok: taught as legacy alias -->
+Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes. <!-- legacy-name-floor: taught as legacy alias -->
 
 Agents write plain text. Caura turns it into searchable, governed, self-improving memory.
 
@@ -118,13 +118,14 @@ Ready for semantic recall, multi-tenant, a managed host, or an OpenClaw fleet? P
 
 ---
 
-Three paths — pick the one that matches your setup:
+Four paths — pick the one that matches your setup:
 
 | Path | When | Time to first memory |
 |---|---|---|
 | **Managed platform** | Quickest. We host the DB + scaling. | ~2 min |
 | **Self-hosted (Docker)** | Privacy / on-prem / air-gapped. | ~5 min |
 | **OpenClaw plugin** | You already run an OpenClaw fleet — install Caura as a plugin against any of the above. | ~3 min |
+| **Rail SDK** | You write the agent yourself, in Python or TypeScript, and want it to recall rules and facts before every turn and store what it learned after. Works against any of the above. | ~2 min |
 
 ### Managed Platform
 
@@ -204,6 +205,51 @@ npm install @caura/client
 See the [TypeScript client guide](clients/typescript/) for installation and
 package-name compatibility details.
 
+### Rail SDK
+
+Give an agent memory around every turn. Rail fetches the governance rules and
+the facts relevant to the current message before your agent runs, hands you
+prompt-ready context, then extracts and stores what the turn taught. Python
+and TypeScript share the same semantics; both work against managed and
+self-hosted Caura.
+
+```bash
+pip install caura-rail        # Python 3.10+
+npm install @caura/rail       # Node.js 22+
+```
+
+Point it at any Caura with `CAURA_URL` and `CAURA_API_KEY` (for the standalone
+Docker server above: `http://localhost:8000` and `standalone`), then wrap each
+agent turn:
+
+```python
+from caura_rail import MemoryScope, Rail, RestMemoryStore
+
+with RestMemoryStore.from_env() as store:
+    rail = Rail(store, MemoryScope(agent_id="support-1", fleet_id="support"))
+    with rail.turn("Remember: We deploy in eu-west-1.") as turn:
+        # Call your model here; turn.context.text holds rules first, then facts.
+        turn.reply = "Noted. " + turn.context.text
+    print([w.status for w in turn.writes])   # ['written'], or ['deduplicated'] on a rerun
+```
+
+```js
+import { MemoryScope, Rail, RestMemoryStore } from "@caura/rail";
+
+const rail = new Rail({
+  store: RestMemoryStore.fromEnv(process.env),
+  scope: new MemoryScope({ agentId: "support-1", fleetId: "support" }),
+});
+const turn = await rail.turn("Remember: We deploy in eu-west-1.", (_, ctx) => "Noted. " + ctx.text);
+console.log(turn.writes.map(w => w.status));   // ['written'], or ['deduplicated'] on a rerun
+```
+
+Each turn recalls, runs your code, extracts, and writes; a turn whose code
+raises writes nothing, and writes that fail on a temporary error wait in an
+outbox you replay. Use the clients above when you only need to call the API;
+use Rail when an agent should remember and follow rules. Guide, API reference,
+and reliability semantics live in the [Rail repository](https://github.com/caura-ai/caura-rail).
+
 ---
 
 ⭐ **If Caura just worked for you,
@@ -278,8 +324,8 @@ Benchmarked against the two most-cited public agent-memory benchmarks. Full resu
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **72.5%** | — |
-| Token savings vs full context | **96.6%** | **98.2%** | — |
+| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
+| Token savings vs full context | **96.6%** | **79.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** |
 
 Accuracy sits inside the leading cluster across the field (Mem0, Zep, Caura — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.
@@ -433,7 +479,7 @@ wiring, and the protocol are in the
 
 ### The Caura Broker
 
-The **Caura Broker** is a local daemon (`caura-daemon`, formerly `memclawd`, <!-- legacy-name-ok: taught as legacy alias -->
+The **Caura Broker** is a local daemon (`caura-daemon`, formerly `memclawd`, <!-- legacy-name-floor: taught as legacy alias -->
 driven by the `caura` CLI) that runs on a developer's machine and connects coding agents — Claude
 Code, Codex, Cursor, Gemini — to Caura. Its job is to be the trust boundary
 on the developer side: it enforces policy, applies redaction, and keeps a
@@ -656,7 +702,7 @@ API key where one is present and by remote IP otherwise. It is applied per route
 
 | Route | Default | Setting |
 |---|---|---|
-| `POST /memories`, `POST /documents`, `POST /ingest/commit` | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories`, `POST /documents`, `POST /ingest/commit`, `POST /stm/promote` | 10/second | `RATE_LIMIT_WRITE` |
 | `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
 | `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
 

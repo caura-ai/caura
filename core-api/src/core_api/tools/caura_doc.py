@@ -12,7 +12,6 @@ from ._types import OpSpec, ToolSpec
 
 _DESCRIPTION = (
     "Structured-document CRUD in named collections. "
-    "op: write|read|query|delete|list_collections|search. "
     "write upserts by collection+doc_id — include data['summary'] (1-3 dense "
     "sentences, intent-focused) to make the doc semantically searchable; "
     "omit it to store without indexing. query filters by where dict; "
@@ -84,7 +83,14 @@ _SPEC = ToolSpec(
             required_params=("query",),
         ),
     ),
-    error_codes=("INVALID_ARGUMENTS",),
+    error_codes=(
+        "FORBIDDEN",
+        "INTERNAL_ERROR",
+        "INVALID_ARGUMENTS",
+        "MISSING_AGENT_ID",
+        "UNAUTHORIZED",
+        "UPSTREAM_ERROR",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

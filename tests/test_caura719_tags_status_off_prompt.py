@@ -60,8 +60,9 @@ def test_json_template_omits_field(field: str):
 
 
 def test_prompt_still_requests_every_field_the_schema_needs():
-    """Guard the other direction: removing two fields must not have
-    disturbed the eleven that remain."""
+    """Guard the other direction: removing fields must not disturb the ones
+    that remain. ``retrieval_hint`` left this list in CAURA-720 — see
+    ``test_caura720_weight_band.py`` and ``test_retrieval_hint.py``."""
     prompt = _prompt()
     for field in (
         "memory_type",
@@ -72,7 +73,6 @@ def test_prompt_still_requests_every_field_the_schema_needs():
         "ts_valid_end",
         "contains_pii",
         "pii_types",
-        "retrieval_hint",
         "atomic_facts",
         "business_relevance",
     ):
@@ -92,19 +92,27 @@ def test_field_numbering_is_contiguous():
     )
 
 
-def test_atomic_facts_cross_reference_points_at_retrieval_hint():
-    """``atomic_facts`` says "same guidance as field N" for its per-fact
-    hint. After renumbering, N must still be ``retrieval_hint``."""
+def test_atomic_facts_cross_reference_resolves_correctly():
+    """``atomic_facts`` refers to another field BY NUMBER for its per-fact
+    ``suggested_type``, so renumbering has to keep that pointer valid.
+
+    It used to carry a second cross-reference, to ``retrieval_hint`` for the
+    per-fact hint; CAURA-720 removed both the hint field and that reference.
+    """
     import re
 
     prompt = _prompt()
-    ref = re.search(r"same guidance as field (\d+)", prompt)
-    assert ref, "atomic_facts lost its retrieval_hint cross-reference"
+    assert "same guidance as field" not in prompt, (
+        "the retrieval_hint cross-reference should have gone with the field"
+    )
+
+    ref = re.search(r"same vocabulary as field (\d+)", prompt)
+    assert ref, "atomic_facts lost its suggested_type cross-reference"
     target = int(ref.group(1))
     heading = re.search(rf'^{target}\. "(\w+)"', prompt, re.MULTILINE)
-    assert heading and heading.group(1) == "retrieval_hint", (
+    assert heading and heading.group(1) == "memory_type", (
         f"cross-reference points at field {target} "
-        f"({heading.group(1) if heading else 'missing'}), not retrieval_hint"
+        f"({heading.group(1) if heading else 'missing'}), not memory_type"
     )
 
 

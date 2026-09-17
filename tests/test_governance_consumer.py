@@ -47,6 +47,12 @@ def sc(monkeypatch):
     c.get_memory = AsyncMock()
     c.soft_delete_memory = AsyncMock()
     c.update_memory = AsyncMock()
+    # H-02: a drop now also purges the graph rows mined from the row. Returns
+    # explicit zero counts rather than a bare AsyncMock so the caller's log
+    # branch reads real numbers instead of a truthy mock.
+    c.purge_entity_artifacts = AsyncMock(
+        return_value={"links": 0, "relations": 0, "entities": 0}
+    )
     monkeypatch.setattr("core_api.consumer.get_storage_client", lambda: c)
     monkeypatch.setattr(
         "core_api.services.governance_remediation.get_storage_client", lambda: c

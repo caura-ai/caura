@@ -66,7 +66,7 @@ _SEED_CONTENTS = [
 
 
 async def _seed_memories(count: int = 3) -> list[MemoryOut]:
-    """Insert test memories via the legacy write path and return them."""
+    """Insert test memories through ``create_memory`` and return them."""
     from core_api.services.memory_service import create_memory
 
     # Use a unique tenant per call to avoid cross-test dedup collisions

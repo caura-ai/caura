@@ -296,13 +296,81 @@ def parse(text: str) -> list[Block]:
 # ---------------------------------------------------------------------------
 
 
+# Token headroom left for UTF-8 bytes carried between slices in
+# ``_hard_split_on_tokens``. See the comment at its use.
+_CARRY_TOKEN_HEADROOM = 4
+
+
+def _hard_split_on_tokens(text: str, hard_tokens: int) -> list[str]:
+    """Split ``text`` into pieces of at most ``hard_tokens`` tokens.
+
+    09/02 M-41. The last resort BELOW the last resort: sentence packing can
+    only split BETWEEN sentences, so it cannot help when a single sentence is
+    already over the cap, or when the text has no sentence boundaries at all
+    (a minified blob, a CSV line, a wall of prose without terminators). Those
+    inputs came back as one oversized piece and silently broke the caller's
+    size contract.
+
+    Splits on the tiktoken encoding rather than on words, because the cap is
+    counted in tokens: a word-boundary split still overshoots on text that
+    tokenises densely (CJK, base64, long identifiers), which is exactly the
+    shape that reaches this path.
+
+    Cutting between tokens can land MID-CHARACTER: one CJK character spans
+    several cl100k_base tokens, and ``decode`` on such a slice yields U+FFFD —
+    silently corrupting the text this function exists to preserve. So pieces
+    are assembled from ``decode_bytes`` and any trailing bytes that do not yet
+    form a complete UTF-8 sequence are carried into the next piece rather than
+    decoded in place. The carry is at most three bytes, which is nothing
+    against a cap counted in thousands of tokens.
+    """
+    enc = _encoder()
+    ids = enc.encode(text)
+    if len(ids) <= hard_tokens:
+        return [text]
+
+    # Reserve a few tokens of headroom. Bytes carried from the previous slice
+    # complete a character there, and completing it can merge into a token, so
+    # a full-width slice plus a carry re-encodes marginally OVER the cap — the
+    # one thing this function must never do. Four tokens against a cap in the
+    # thousands is noise; being over by one is a broken contract.
+    step = max(1, hard_tokens - _CARRY_TOKEN_HEADROOM)
+
+    out: list[str] = []
+    carry = b""
+    for start in range(0, len(ids), step):
+        chunk = carry + enc.decode_bytes(ids[start : start + step])
+        carry = b""
+        # Peel trailing bytes until what remains is valid UTF-8; the peeled
+        # bytes are the head of a character that continues into the next slice.
+        while chunk:
+            try:
+                piece = chunk.decode("utf-8")
+                break
+            except UnicodeDecodeError:
+                carry = chunk[-1:] + carry
+                chunk = chunk[:-1]
+        else:
+            piece = ""
+        if piece.strip():
+            out.append(piece.strip())
+    if carry:
+        # Unreachable for well-formed input, but never drop bytes silently.
+        tail = carry.decode("utf-8", "replace").strip()
+        if tail:
+            out.append(tail)
+    return out
+
+
 def _split_oversized_paragraph(text: str, hard_tokens: int) -> list[str]:
     """Last-resort sub-split for a single paragraph that exceeds the hard cap.
 
     Uses pysbd for sentence boundaries (handles abbreviations correctly).
     Falls back to a naive `. ` split if pysbd raises.
 
-    Returns one or more substrings, each under ``hard_tokens`` tokens.
+    Returns one or more substrings, each at most ``hard_tokens`` tokens —
+    enforced, not assumed. Sentence packing alone cannot guarantee it (see
+    ``_hard_split_on_tokens``).
     """
     try:
         # Import inside the function — pysbd warmup is non-trivial and
@@ -329,7 +397,19 @@ def _split_oversized_paragraph(text: str, hard_tokens: int) -> list[str]:
             current_tokens += sent_tokens
     if current:
         out.append(current.strip())
-    return out
+
+    # 09/02 M-41 — enforce the contract this function's docstring states.
+    # Everything above packs sentences, which can only split BETWEEN them. A
+    # single sentence longer than the cap, or text pysbd finds no boundaries
+    # in, still comes back oversized. Previously that piece was returned as-is
+    # and the caller's size guarantee was silently false.
+    enforced: list[str] = []
+    for piece in out:
+        if _count_tokens(piece) > hard_tokens:
+            enforced.extend(_hard_split_on_tokens(piece, hard_tokens))
+        else:
+            enforced.append(piece)
+    return enforced
 
 
 def chunk_blocks(

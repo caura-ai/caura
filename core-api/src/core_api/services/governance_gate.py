@@ -109,8 +109,9 @@ def mark_pii_flagged(metadata: dict, findings: list[Finding]) -> None:
 
     C25: routed through ``set_system_value`` so the flags land in the
     ``_system`` namespace too (legacy top-level keys kept for one release).
-    Caller forgeries of these keys are stripped at the ``create_memory``
-    chokepoint before this gate runs.
+    Caller forgeries of these keys are stripped by ``sanitize_caller_metadata``
+    on whichever write path reached this gate — each one applies it before
+    calling here, which is what makes the flags written below trustworthy.
     """
     from core_api.services.system_metadata import set_system_value
 

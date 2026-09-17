@@ -6,9 +6,12 @@ PostgreSQL instance with pgvector — configure via TEST_DATABASE_URL env var
 or the defaults below.
 """
 
+import asyncio
+import inspect
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest.mock import DEFAULT
 
 # Set test-friendly defaults before any backend imports read settings.
 # These can be overridden by the caller via environment variables.
@@ -41,9 +44,9 @@ for _k, _v in _TEST_DEFAULTS.items():
 
 # Defensively unset env vars that change auth shape and routinely leak in
 # from developers' shells (the OSS plugin onboarding writes
-# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many  # legacy-name-ok: rule 3 env alias
+# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many  # legacy-name-floor: documents the live env alias
 # rc files source it for the openclaw CLI). A leaked value flips
-# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``  # legacy-name-ok: rule 3 dual-read field
+# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``  # legacy-name-floor: documents the dual-read field exercised below
 # enforce the gate at Path 2 with 401s before any standalone-mode
 # bypass — silently failing every test that doesn't sniff the env
 # itself (e.g. test_rate_limit's auth-gated burst test, which gets all
@@ -113,6 +116,58 @@ def get_admin_headers() -> dict:
 def uid() -> str:
     """Short unique suffix — for distinct content (409s) and distinct tenant ids."""
     return uuid.uuid4().hex[:8]
+
+
+def close_scheduled_coro(coro, *_args, **_kwargs):
+    """``side_effect`` for a mocked scheduler: dispose of the coroutine it is handed.
+
+    ``track_task(coro)`` receives an already-created coroutine, so a plain
+    ``MagicMock`` in its place leaves that coroutine unstarted — which the
+    ``filterwarnings`` gate in ``pytest.ini`` fails the run for, and whose
+    comment carries the reasoning.
+
+    Using an ``AsyncMock`` instead does NOT help: the object being dropped is
+    the argument, not the mock's return value.
+
+    Closing walks the nest rather than only the outermost coroutine, because
+    the real call is
+    ``track_task(tracked_task(detect_contradictions_async(...)))`` — closing
+    just the wrapper leaves the inner one unstarted, trading one dropped
+    coroutine for another.
+
+    ``iscoroutine`` guards the ``None`` case, which is live: several tests stub
+    ``tracked_task`` with something that returns ``None``, so this is reached
+    as ``track_task(None)``.
+
+    Returns ``mock.DEFAULT`` so the patched mock keeps its ordinary
+    ``return_value`` rather than returning ``None``. Call recording —
+    ``call_count``, ``assert_called_*``, ``call_args`` — is unaffected either
+    way, so that is not what ``DEFAULT`` is buying.
+    """
+    if inspect.iscoroutine(coro):
+        _close_coroutine_tree(coro)
+    return DEFAULT
+
+
+def _close_coroutine_tree(coro) -> None:
+    """Close ``coro``, and first any coroutine it holds as an argument.
+
+    An unstarted coroutine still has its ``cr_frame``, whose ``f_locals`` are
+    its arguments. A closed one has ``cr_frame is None``, which is what keeps
+    this from revisiting anything — and ``close()`` is idempotent besides.
+
+    Known limit, measured: only coroutines held *directly* as arguments are
+    found. One inside a tuple or list local is missed and still leaks. That is
+    fine for every scheduler in this codebase today — ``tracked_task``'s first
+    parameter is the coroutine itself — but a future wrapper taking ``*coros``
+    would need this widened rather than trusted.
+    """
+    frame = coro.cr_frame
+    if frame is not None:
+        for value in frame.f_locals.values():
+            if inspect.iscoroutine(value):
+                _close_coroutine_tree(value)
+    coro.close()
 
 
 def new_tenant_id() -> str:
@@ -332,6 +387,60 @@ async def _patch_storage_client(_engine, _setup_schema):
         sc_mod._client = old_client
 
 
+@pytest.fixture(autouse=True)
+async def _drain_background_tasks(_patch_storage_client):
+    """Stop one test's fire-and-forget work from running during a later test.
+
+    ``track_task`` registers every background task in
+    ``core_api.tasks._background_tasks`` and nothing awaits them, while
+    ``asyncio_default_test_loop_scope = session`` keeps one loop for the whole
+    run — so a task scheduled by one test keeps running through the tests that
+    follow it. Measured on this suite before this fixture existed: 207 distinct
+    tasks outlived the test that created them, and one of them was still
+    pending 746 tests later.
+
+    The damage is not theoretical:
+
+    * Log records land in a later test's ``caplog``. #1349 went red exactly
+      this way, and #1352 and #1353 had to teach four assertions to ignore
+      records they never emitted.
+    * ``tracked_task``'s failure path calls ``get_storage_client()``. Fire
+      that after ``_patch_storage_client`` has restored the original client
+      and it memoises a REAL client into the module singleton, pointed at a
+      storage server no test is running — which every later test then pays
+      for in connection errors and retries.
+
+    The dependency on ``_patch_storage_client`` is for ORDERING, not for a
+    value: it makes this fixture set up second and therefore tear down FIRST,
+    so tasks drained here still see the in-process ASGI bridge instead of
+    reaching for a real client.
+
+    Cancelled outright, with no grace period. Waiting was never an option —
+    2 of those 207 tasks never finished at all, so an unconditional await
+    hangs the run — and a bounded wait was worse than either: it spends real
+    time to make completion *likely* for whichever tasks happen to be nearly
+    done, which is a race dressed up as a courtesy. A test that needs its
+    background work to complete must await it itself, as
+    ``test_governance_bulk_inline_remediation`` does. This fixture promises
+    isolation, not completion.
+    """
+    yield
+
+    from core_api.tasks import _background_tasks
+
+    pending = [task for task in _background_tasks if not task.done()]
+    if not pending:
+        return
+
+    for task in pending:
+        task.cancel()
+    # Awaited so cancellation has actually landed before the next test starts;
+    # ``Task.cancel()`` only requests it. ``return_exceptions`` so a task that
+    # fails, or refuses to die politely, cannot turn an unrelated test's
+    # teardown into an error.
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
 @pytest.fixture
 async def db(_engine, _setup_schema) -> AsyncSession:
     """Per-test transactional session that rolls back after each test.
@@ -473,6 +582,29 @@ from tests._mcp_test_helpers import (  # noqa: F401
     parse_envelope,
     strip_latency,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_provider_cache():
+    """Drop cached LLM providers between tests (09/02 M-36).
+
+    ``get_llm_provider`` memoises OpenAI-compatible providers in a module-level
+    LRU so each call stops minting an unclosed ``httpx`` pool. That cache is
+    process-wide by design, which in a test process means one test's provider —
+    built under that test's monkeypatched credentials, env and patched classes —
+    would otherwise be handed to the next test that happens to resolve the same
+    configuration. The symptom is nasty: every affected test passes in
+    isolation and fails in a full run.
+
+    Same reasoning and same shape as ``_patch_storage_client`` resetting
+    ``sc_mod._client`` and ``_reset_hooks`` resetting hooks: a module singleton
+    that production wants and test isolation does not.
+    """
+    from common.llm.registry import reset_provider_cache
+
+    reset_provider_cache()
+    yield
+    reset_provider_cache()
 
 
 @pytest.fixture(autouse=True)

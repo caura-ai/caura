@@ -154,6 +154,30 @@ class TestVertexCompleteJson:
         with pytest.raises(json.JSONDecodeError):
             await p.complete_json("prompt")
 
+    @pytest.mark.asyncio
+    async def test_singleton_array_response_is_unwrapped(self):
+        # gemini-3.1-flash-lite sometimes wraps the valid response object
+        # in a one-element array (prod 2026-09-03→06, ~3.8% of
+        # enrichments) — that's a valid answer in disguise, not garbage.
+        p = self._provider()
+        p._client.models.canned_response = _response(
+            json.dumps([{"memory_type": "fact", "title": "t"}])
+        )
+        assert await p.complete_json("prompt") == {
+            "memory_type": "fact",
+            "title": "t",
+        }
+
+    @pytest.mark.asyncio
+    async def test_multi_element_and_scalar_arrays_still_raise(self):
+        from common.llm.providers.vertex import VertexResponseShapeError
+
+        p = self._provider()
+        for bad in ('[{"a": 1}, {"b": 2}]', "[1]", "[]"):
+            p._client.models.canned_response = _response(bad)
+            with pytest.raises(VertexResponseShapeError):
+                await p.complete_json("prompt")
+
     def test_multi_region_location_pins_bare_host(self, monkeypatch):
         # ``us``/``eu`` are served from the bare aiplatform host; the SDK's
         # own endpoint logic builds ``us-aiplatform.googleapis.com``, which
@@ -263,6 +287,23 @@ class TestGeminiCompleteJson:
             '{"partial": "tru', _FinishReason.MAX_TOKENS
         )
         with pytest.raises(ValueError, match="truncated at max_output_tokens"):
+            await p.complete_json("prompt")
+
+    @pytest.mark.asyncio
+    async def test_singleton_array_response_is_unwrapped(self):
+        # Same quirk as the Vertex provider — see its test for the prod
+        # evidence.
+        p = self._provider()
+        p._client.models.canned_response = _response(json.dumps([{"ok": 1}]))
+        assert await p.complete_json("prompt") == {"ok": 1}
+
+    @pytest.mark.asyncio
+    async def test_multi_element_array_still_raises(self):
+        from common.llm.providers.gemini import GeminiResponseShapeError
+
+        p = self._provider()
+        p._client.models.canned_response = _response('[{"a": 1}, {"b": 2}]')
+        with pytest.raises(GeminiResponseShapeError):
             await p.complete_json("prompt")
 
 

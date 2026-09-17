@@ -57,6 +57,10 @@ def captured(monkeypatch):
     state = SimpleNamespace(
         writes=[],
         bulk_calls=[],
+        # CAURA-703 provenance, one entry per call. It travels as an argument
+        # rather than in item metadata, because C25 sanitation strips
+        # PLATFORM_ONLY_KEYS from anything arriving alongside caller content.
+        memory_type_is_agent_set=[],
         # One entry per ``create_memories_bulk`` call. H-07 made a commit of
         # >BULK_MAX_ITEMS facts issue several, and every one of them must
         # carry the SAME attempt id — see the batching comment in
@@ -97,7 +101,9 @@ def captured(monkeypatch):
             if h in state.bulk_find_result
         }
 
-    async def fake_create_memories_bulk(data, *, bulk_attempt_id):
+    async def fake_create_memories_bulk(
+        data, *, bulk_attempt_id, memory_type_is_agent_set=None
+    ):
         """Stand-in for ``create_memories_bulk`` — translates the audit
         scenarios the legacy per-fact tests modelled (409 from
         create_memory, generic raise from create_memory) into the bulk
@@ -112,6 +118,7 @@ def captured(monkeypatch):
         batch_no = len(state.bulk_calls)
         state.bulk_calls.append(data)
         state.bulk_attempt_ids.append(bulk_attempt_id)
+        state.memory_type_is_agent_set.append(memory_type_is_agent_set)
         if batch_no in state.raise_http_on_batch:
             raise state.raise_http_on_batch[batch_no]
         if state.write_delay_ms:
@@ -200,6 +207,12 @@ def captured(monkeypatch):
     # ``upsert_document`` is called by ``_write_parent_ingest_document``
     # after the bulk write. Capture the payload + give callers access
     # via ``state.parent_doc_writes`` so they can assert on it.
+    #
+    # 09/02 M-45: BOTH endpoints are stubbed, because the parent write now
+    # picks between them — a payload carrying an ``embedding`` must go to
+    # ``upsert-xmax``, the only one whose handler accepts a vector. Stubbing
+    # only the plain one would let a regression that silently drops the vector
+    # pass as green.
     state.parent_doc_writes = []  # list[dict]
 
     async def fake_upsert_document(payload):
@@ -216,6 +229,7 @@ def captured(monkeypatch):
     mock_sc = MagicMock()
     mock_sc.bulk_find_by_content_hashes = AsyncMock(side_effect=fake_bulk_find)
     mock_sc.upsert_document = AsyncMock(side_effect=fake_upsert_document)
+    mock_sc.upsert_document_xmax = AsyncMock(side_effect=fake_upsert_document)
     monkeypatch.setattr(ingest_service, "get_storage_client", lambda: mock_sc)
     return state
 
@@ -262,16 +276,66 @@ async def test_run_id_on_column_and_source_in_metadata(captured):
 @pytest.mark.asyncio
 async def test_ingest_marks_memory_type_not_agent_set(captured):
     """CAURA-703: an ingested fact's type comes from the extraction LLM's
-    ``suggested_type``, not the calling agent, so each write is stamped
-    ``metadata.memory_type_agent_set = False``. ``create_memories_bulk``
-    honours this pre-stamped value instead of inferring ``True`` from the
-    (LLM-supplied) ``memory_type`` on the item."""
+    ``suggested_type``, not the calling agent, so the write must record
+    ``memory_type_agent_set = False``.
+
+    This used to be pre-stamped into each item's ``metadata``. It is now an
+    argument to ``create_memories_bulk``: C25 sanitation treats item metadata
+    as caller input and strips ``PLATFORM_ONLY_KEYS`` from it, so a platform
+    flag left there would be deleted before the row was written — silently,
+    since nothing reads the field back.
+
+    Note the limit of this assertion: the fixture replaces
+    ``create_memories_bulk``, so it can only show what ingest PASSES.
+    ``test_bulk_honours_memory_type_is_agent_set`` covers the other half —
+    that the real function acts on it.
+    """
     req = _request("t1", "fact one", "fact two")
     await ingest_service.ingest_commit(request=req)
 
     assert len(captured.writes) == 2
+    assert captured.memory_type_is_agent_set == [False], (
+        "ingest must tell the bulk writer the type was not agent-set: "
+        f"{captured.memory_type_is_agent_set}"
+    )
     for mc in captured.writes:
-        assert mc.metadata["memory_type_agent_set"] is False
+        assert "memory_type_agent_set" not in (mc.metadata or {}), (
+            "platform provenance is riding in caller-adjacent metadata again, "
+            "where C25 sanitation will strip it: "
+            f"{mc.metadata}"
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_ingest_item_metadata_holds_no_reserved_platform_key(captured):
+    """Generalises the assertion above to the whole registry.
+
+    ``create_memories_bulk`` treats item metadata as caller input, so ANY key
+    ingest puts there that is (or later becomes) reserved is silently deleted
+    before the row is written. That is how ``memory_type_agent_set`` was lost:
+    the flag had no in-repo consumer, so nothing failed.
+
+    This fails for the next such key too — whether it is added to ingest, or
+    added to ``PLATFORM_ONLY_KEYS`` while ingest is still stamping it — which
+    the key-specific test above cannot do.
+    """
+    from core_api.services.system_metadata import PLATFORM_ONLY_KEYS, SYSTEM_NAMESPACE
+
+    req = _request("t1", "fact one", "fact two")
+    await ingest_service.ingest_commit(request=req)
+
+    assert captured.writes, "ingest wrote nothing; the assertion below is vacuous"
+    for mc in captured.writes:
+        reserved = (set(mc.metadata or {}) & PLATFORM_ONLY_KEYS) | (
+            {SYSTEM_NAMESPACE} & set(mc.metadata or {})
+        )
+        assert not reserved, (
+            f"ingest is stamping reserved platform key(s) {sorted(reserved)} into "
+            f"item metadata, where C25 sanitation deletes them before the write. "
+            f"Pass them as an argument to create_memories_bulk instead. "
+            f"metadata={mc.metadata}"
+        )
 
 
 @pytest.mark.unit

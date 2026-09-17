@@ -2,7 +2,7 @@
 
 ---
 
-> **For server setup, configuration, endpoints, Web UI, deployment, and smoke tests, see the [README](../README.md).**
+> **For server setup, configuration, endpoints, Web UI, deployment, and smoke tests, see the [README](../../README.md).**
 > This guide covers only MCP client setup, OpenClaw plugin installation, agent trust levels, agent prompts, and usage examples.
 
 ## 1. Overview
@@ -35,12 +35,12 @@ Tool descriptions are derived from the tool registry (`core-api/src/core_api/too
 | Tool | MCP | OpenClaw | Purpose |
 |---|---|---|---|
 | `caura_write` | Yes | Yes | Single or batch write. Send `content` for one memory, or `items` (≤100) for a batch — the batch path batches embeddings and parallelizes enrichment. LLM auto-infers type, weight, status, title, summary, tags, temporal dates, PII flags. Contradiction detection auto-marks conflicting memories. `visibility` = `scope_agent` / `scope_team` (default) / `scope_org`. Content >2,000 chars is auto-chunked |
-| `caura_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` adds a `brief` alongside the raw results, whose `summary` is the LLM's answer to your query — it reasons step by step internally and only the final answer is surfaced. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 20 |
+| `caura_recall` | Yes | Yes | Hybrid semantic + keyword search with graph-enhanced retrieval (expands through entity relations up to 2 hops). `include_brief=true` adds a `brief` alongside the raw results, whose `summary` is the LLM's answer to your query — it reasons step by step internally and only the final answer is surfaced. Supports `fleet_ids` for multi-fleet queries. Respects visibility. Default `top_k=5`, max 200 |
 | `caura_manage` | Yes | Yes | Per-memory lifecycle, op-dispatched. `op=read` returns the memory; `op=update` patches fields (re-embeds if content changes); `op=transition` sets status; `op=delete` soft-deletes. Trust-enforced |
 | `caura_list` | Yes | Yes | Non-semantic enumeration — filter by type/status/agent/weight/date, sort by `created_at`/`weight`/`recall_count`, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2. Trust 3 unlocks `include_deleted` |
 | `caura_doc` | Yes | Yes | Document CRUD, op-dispatched. `op=write` upserts a JSON doc in a named collection (include `data["summary"]` to index it for semantic search); `op=read` fetches by `doc_id`; `op=query` filters by field equality with ordering and pagination; `op=delete` removes by `doc_id`; `op=list_collections` enumerates every collection this tenant has (with counts); `op=search` runs semantic retrieval over `data["summary"]` vectors. Use for customer records, config, inventory — anything needing exact-field lookups |
 | `caura_entity_get` | Yes | Yes | Look up an entity with linked memories and relations |
-| `caura_tune` | Yes | Yes | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
+| `caura_tune` | Yes | Yes | Persist per-agent retrieval defaults (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) until changed again |
 | `caura_insights` | Yes | Yes | Analyze the memory store. `focus`: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. `scope`: `agent`, `fleet`, `all`. Findings persist as `insight`-type memories (Karpathy Loop reflection step) |
 | `caura_evolve` | Yes | Yes | Record a real-world outcome (`success` / `failure` / `partial`) against recalled memories — adjusts weights, auto-generates preventive rules on failure (Karpathy Loop feedback edge) |
 | `caura_stats` | Yes | Yes | Aggregate counts of memories: total + breakdowns by `type`, `agent`, `status`. Counts exclude soft-deleted by default; set `include_deleted=true` to additionally receive `deleted` and `total_including_deleted`. Read-only — useful for dashboards (REST) and agent self-introspection (MCP) |
@@ -134,7 +134,7 @@ The MCP server exposes 12 tools that clients discover automatically. Description
 | `caura_list` | Non-semantic enumeration — filter by type/status/agent/weight/date, sort, cursor-paginate. `scope=agent` (default) trust ≥ 1; `scope=fleet`/`all` trust ≥ 2 |
 | `caura_doc` | Document CRUD, op-dispatched: `write`, `read`, `query`, `delete`, `list_collections`, `search` (semantic) on named JSON collections |
 | `caura_entity_get` | Look up an entity by UUID — returns linked memories and relationships |
-| `caura_tune` | Tune per-agent retrieval parameters (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) |
+| `caura_tune` | Persist per-agent retrieval defaults (top_k, min_similarity, fts_weight, freshness, recall boost, graph hops, similarity blend) until changed again |
 | `caura_insights` | Analyze the store. Focus: `contradictions`, `failures`, `stale`, `divergence`, `patterns`, `discover`. Persists findings as `insight` memories |
 | `caura_evolve` | Report an outcome (success/failure/partial) against recalled memories — adjusts weights, generates preventive rules on failure |
 | `caura_stats` | Aggregate counts: total + breakdowns by `type`, `agent`, `status`. Read-only |
@@ -172,7 +172,7 @@ Once configured, the MCP client handles tool discovery. Agents can use Caura too
 | Works with | Any MCP client | OpenClaw agents only |
 | Tools | 12 (write, recall, manage, list, doc, entity_get, tune, insights, evolve, stats, keystones, keystones_set) | 11 (all except `keystones_set`) |
 | RDF triples | Not exposed (contradiction detection via semantic similarity only) | Yes — `subject_entity_id`, `predicate`, `object_value` on write |
-| Temporal filter | Not exposed | Yes — `valid_at` on search |
+| Temporal filter | Yes — `valid_at` on `caura_recall` | Yes — `valid_at` on search |
 | Visibility | Passed per-call (`scope_agent` / `scope_team` / `scope_org`) | Passed per-call (`scope_agent` / `scope_team` / `scope_org`) |
 | Multi-fleet search | Yes — `fleet_ids` parameter | Yes — `fleet_ids` parameter |
 | Fleet ID | Passed per-call (optional) | Auto-stamped from gateway env |
@@ -229,7 +229,7 @@ CAURA_NODE_NAME=my-gateway                              # friendly name shown in
 # CAURA_AUTO_FIX_CONFIG=false                           # set true to auto-fix openclaw.json on startup
 ```
 
-The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The pre-rename `MEMCLAW_*` spelling of every name above keeps working; where both are set the first **non-empty** one wins, so a half-filled template cannot blank out a working value. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-ok: rule 3 dual-read alias -->
+The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The pre-rename `MEMCLAW_*` spelling of every name above keeps working; where both are set the first **non-empty** one wins, so a half-filled template cannot blank out a working value. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-floor: rule 3 dual-read alias -->
 
 **Configure OpenClaw** — edit `~/.openclaw/openclaw.json`:
 
@@ -381,7 +381,7 @@ BEFORE starting any task:
   model's working)
 - Include fleet_id to scope to this fleet, omit for tenant-wide search
 - Filter by status="active" to skip deleted/archived memories
-- Use valid_at for point-in-time queries (OpenClaw plugin and REST API only)
+- Use `valid_at` for point-in-time queries (REST `/search`, MCP `caura_recall`, and the OpenClaw plugin all accept it)
 
 AFTER completing work:
 - Store findings with caura_write — just provide content
@@ -664,7 +664,8 @@ Togglable per tenant via `lifecycle_automation_enabled` setting.
 ### Temporal validity
 
 - `ts_valid_start` / `ts_valid_end` — auto-extracted from content by LLM, or set explicitly
-- Search with `valid_at` to return only memories valid at a point in time
+- Search with `valid_at` to return only memories valid at a point in time; relative dates in the query ("last month") resolve against it
+- For backfilled corpora whose `ts_valid_start` is the time the event happened, set `search.default_profile.freshness_reference` to `1` in tenant settings — freshness and the temporal window are then measured from `valid_at` against event time instead of from now against ingest time. Off by default; inert on requests without `valid_at`
 - Memories without temporal bounds are always considered valid
 
 ### Batch Write

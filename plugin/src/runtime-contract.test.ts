@@ -29,7 +29,7 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import cauraPlugin from "./index.js";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 import {
   _resetReachabilityForTests,
   getReachability,

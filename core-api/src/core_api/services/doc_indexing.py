@@ -98,6 +98,17 @@ def resolve_embed_source(collection: str, data: dict) -> str | None:
     return summary
 
 
+def doc_provenance(collection: str, doc_id: str) -> dict[str, str]:
+    """The metadata pair that marks a memory as minted from one document.
+
+    One definition because it is written by the mint and matched by the
+    un-mint, in different modules. Re-typing the two key names at the matching
+    end is how a filter silently stops matching: the mint keeps writing, the
+    un-mint keeps reporting zero rows, and nothing fails.
+    """
+    return {"doc_collection": collection, "doc_id": doc_id}
+
+
 @dataclass(frozen=True)
 class DocMemorySpec:
     """The memory to mint for one document write.
@@ -267,7 +278,7 @@ def resolve_doc_memory(
         )
         return None
 
-    metadata: dict = {"doc_collection": collection, "doc_id": doc_id}
+    metadata: dict = dict(doc_provenance(collection, doc_id))
     summary = data.get("summary")
     if isinstance(summary, str) and summary.strip():
         metadata["doc_summary"] = summary

@@ -6,6 +6,7 @@ Real FastAPI app + in-process storage (see conftest). Validates:
 - period validation.
 """
 
+import json
 import uuid
 
 import pytest
@@ -288,7 +289,14 @@ async def test_report_group_counts_private_writes_but_hides_content(client):
     """Agent-private (``scope_agent``) durable writes are COUNTED in the group
     aggregates — durable_memories_written / by_type / per_agent / trend — but
     their CONTENT is never surfaced (value_highlights). Visibility is an audience
-    attribute, not a measure of whether a memory is knowledge produced."""
+    attribute, not a measure of whether a memory is knowledge produced.
+
+    The counting half is what this test really pins. Its caller is an admin
+    credential with no agent identity, so the content half holds here for a
+    reason unrelated to the route's audience logic and would have passed against
+    the M-31 leak — see
+    ``test_report_group_hides_private_content_from_an_agent_caller``.
+    """
     tag = _uid()
     tenant_id, headers = get_test_auth(f"rep-tenant-{tag}")
     fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
@@ -335,6 +343,155 @@ async def test_report_group_counts_private_writes_but_hides_content(client):
     ]
 
 
+async def _seed_private_insight(client, headers, tenant_id, fleet, agent, title):
+    """A ``scope_agent`` ``insight`` with an exact title.
+
+    ``_seed_titled`` (below) is the ``scope_team`` equivalent; the whole point
+    here is the private one. Both PATCH the title for the same reason — so the
+    assertion does not depend on what enrichment chose to call the row.
+
+    ``insight`` is set the same way rather than on the write: it is in
+    ``SERVER_RESERVED_MEMORY_TYPES``, which the route refuses on a write, and
+    the report's ``learning`` section selects on exactly that type — so a row
+    of that type has to be made after the fact.
+    """
+    r = await client.post(
+        "/api/v1/memories",
+        json={
+            "tenant_id": tenant_id,
+            "agent_id": agent,
+            "fleet_id": fleet,
+            "visibility": "scope_agent",
+            "content": f"{title} {_uid()}",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 201, r.text
+    await get_storage_client().update_memory(
+        r.json()["id"], tenant_id, {"title": title, "memory_type": "insight"}
+    )
+
+
+async def test_report_group_hides_private_content_from_an_agent_caller(client):
+    """M-31. The same invariant as the test above, asserted against a caller
+    that can actually violate it.
+
+    That test passes for a reason unrelated to the route's logic: it calls with
+    ``get_test_auth()``, an ADMIN credential with no agent identity, so
+    ``asserted_agent`` is None, ``caller_agent_id`` stays None, and the storage
+    predicate then drops every ``scope_agent`` row regardless of what the
+    route's audience handling decided. The invariant is real; that caller cannot
+    violate it, so it cannot test it either.
+
+    An AGENT caller can. ``list_query`` set ``caller_agent_id`` on every detail
+    path, and the predicate admits ``scope_agent`` rows authored by that agent —
+    so an agent asking for an ``internal_group`` report got its OWN private
+    titles back in the content sections, which is the audience-class narrowing
+    the two-check design exists to enforce. The agent then relays that verbatim
+    into a group channel.
+
+    The breakdown path already got this right (it sets ``agent_id`` only on the
+    self branch); only ``list_query`` did not.
+    """
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-tenant-{tag}")
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+
+    await _seed(client, headers, tenant_id, fleet, a1, "decision", 2)
+    private_title = f"private runway concern {tag}"
+    await _seed_private_insight(client, headers, tenant_id, fleet, a1, private_title)
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            # The difference that matters: this makes the caller an AGENT, so
+            # ``caller_agent_id`` is set and the private row becomes visible to
+            # the storage predicate.
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    # The caller really did resolve to an agent. Without this the test passes
+    # VACUOUSLY if identity resolution ever breaks — ``caller_agent_id`` would
+    # be None, the storage predicate would exclude private rows for that reason
+    # instead of this fix, and the assertions below would prove nothing. That is
+    # the exact failure mode of the test this one exists to supplement, so it
+    # gets an explicit witness. ``meta.fleet_id`` is ``caller.get("fleet_id")``
+    # and stays None unless an agent row was fetched.
+    assert body["meta"]["fleet_id"] == fleet, (
+        f"caller did not resolve to an agent; this test would prove nothing: {body['meta']}"
+    )
+
+    # Counted — unchanged, and the reason the leak is not visible in the totals.
+    assert body["summary"]["durable_memories_written"] == 3, body["summary"]
+
+    # Not surfaced, anywhere. Checked against the whole serialized body rather
+    # than section by section, because the title reaches learning,
+    # value_highlights, the working-on lanes and the spotlight headline by four
+    # separate routes and a per-section list would rot as sections are added.
+    assert private_title not in json.dumps(body), (
+        "an agent's own scope_agent title reached an internal_group report: "
+        f"{json.dumps(body)}"
+    )
+    # Independent of the check above: catches a private row surfacing under a
+    # DIFFERENT string, since ``_title()`` falls back to metadata.summary and
+    # then "(untitled)".
+    assert all(h["type"] == "decision" for h in body["value_highlights"]), body[
+        "value_highlights"
+    ]
+
+    # Over-refusal guard: the team-visible rows must still be there. Dropping
+    # ``caller_agent_id`` must narrow visibility, not empty the report.
+    assert len(body["value_highlights"]) == 2, body["value_highlights"]
+
+
+@pytest.mark.parametrize("destination", ["owner_1to1", "private_session"])
+async def test_report_self_view_still_shows_the_agent_its_own_private_rows(
+    client, destination
+):
+    """The other side of M-31: the self audiences are the caller's OWN view.
+
+    Narrowing the group path must not narrow these — an agent asking for its
+    self report is entitled to its private rows, and that is exactly what
+    ``caller_agent_id`` is for. Without this, "fix the leak" could be satisfied
+    by never passing the visibility identity at all, which is a fix in the sense
+    that a disconnected cable fixes a noisy line.
+
+    Both members of ``_SELF_AUDIENCES`` are covered, not just the common one.
+    """
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-tenant-{tag}")
+    fleet, a1 = f"rep-fleet-{tag}", f"rep-a1-{tag}"
+    await _register(tenant_id, fleet, a1)
+
+    private_title = f"private runway concern {tag}"
+    await _seed_private_insight(client, headers, tenant_id, fleet, a1, private_title)
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": destination,
+            "agent_id": a1,
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["meta"]["scope"] == "self", body["meta"]
+    assert any(item["title"] == private_title for item in body["learning"]), (
+        f"the self view lost the caller's own private row: {body['learning']}"
+    )
+
+
 async def test_report_org_scope_aggregates_across_tenants(client):
     """scope=org with a cross-tenant read credential aggregates across the
     readable tenant set and returns a per-tenant breakdown."""
@@ -367,6 +524,53 @@ async def test_report_org_scope_aggregates_across_tenants(client):
         assert body["summary"]["by_tenant"] == {t1: 2, t2: 3}, body["summary"][
             "by_tenant"
         ]
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+
+async def test_report_org_scope_hides_private_content_from_an_agent_caller(client):
+    """M-31, org half. ``scope=org`` carried the same defect as internal_group.
+
+    Reachable because ``asserted_agent`` falls back to the ``agent_id`` QUERY
+    PARAM: a cross-tenant reader supplying it resolves a ``caller_agent_id``,
+    and that agent's private rows then flowed into a report aggregated across
+    every readable tenant — the widest audience the endpoint produces.
+    """
+    tag = _uid()
+    t1, t2 = f"rep-org1-{tag}", f"rep-org2-{tag}"
+    a1 = f"a1-{tag}"
+    _, headers = get_test_auth(t1)
+    await _register(t1, f"f1-{tag}", a1)
+    await _register(t2, f"f2-{tag}", f"a2-{tag}")
+    await _seed(client, headers, t1, f"f1-{tag}", a1, "decision", 2)
+
+    private_title = f"private runway concern {tag}"
+    await _seed_private_insight(client, headers, t1, f"f1-{tag}", a1, private_title)
+
+    ctx = AuthContext(tenant_id=t1, readable_tenant_ids=[t1, t2])
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports",
+            params={
+                "tenant_id": t1,
+                "period": "week",
+                "destination": "internal_group",
+                "scope": "org",
+                "agent_id": a1,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["meta"]["scope"] == "org", body["meta"]
+        # Counted, as on every other path.
+        assert body["summary"]["durable_memories_written"] == 3, body["summary"]
+        assert private_title not in json.dumps(body), (
+            "an agent's own scope_agent title reached an ORG-scope report: "
+            f"{json.dumps(body)}"
+        )
+        # Over-refusal guard: the team-visible rows survive.
+        assert len(body["value_highlights"]) == 2, body["value_highlights"]
     finally:
         app.dependency_overrides.pop(get_auth_context, None)
 
