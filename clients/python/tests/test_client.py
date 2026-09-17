@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -15,6 +18,7 @@ from caura_client import (
     NotFoundError,
     RateLimitError,
     RecallResult,
+    __version__,
 )
 
 
@@ -27,6 +31,25 @@ def make_client(handler, **kwargs):
         transport=transport,
         **kwargs,
     )
+
+
+def test_every_request_names_the_sdk_in_user_agent():
+    seen = {}
+
+    def handler(request):
+        seen["ua"] = request.headers["User-Agent"]
+        return httpx.Response(200, json={"status": "ok"})
+
+    make_client(handler).health()
+    py = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert seen["ua"] == f"caura-client-python/{__version__} (python/{py})"
+    assert re.fullmatch(r"caura-client-python/\d+\.\d+\.\d+ \(python/\d+\.\d+\)", seen["ua"])
+
+
+def test_version_matches_pyproject():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    match = re.search(r'^version = "([^"]+)"', pyproject.read_text(), re.MULTILINE)
+    assert match and match.group(1) == __version__
 
 
 def test_write_returns_memory():

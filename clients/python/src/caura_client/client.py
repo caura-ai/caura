@@ -6,15 +6,27 @@ A thin wrapper over the Caura REST API. Point it at a managed
 
 from __future__ import annotations
 
+import sys
 import urllib.parse
 from typing import Any
 
 import httpx
 
+from ._version import __version__
 from .exceptions import AuthError, CauraAPIError, NotFoundError, RateLimitError, TransportError
 from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
+
+USER_AGENT = (
+    f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
+)
+"""Sent on every request so a server can tell SDK families apart.
+
+It names the package, its version and the Python major.minor, nothing more;
+no other identifying information is added and the client never contacts
+anything but ``base_url``.
+"""
 
 
 class Caura:
@@ -48,7 +60,11 @@ class Caura:
         self.agent_id = agent_id
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            headers={
+                "X-API-Key": api_key,
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
             timeout=timeout,
             transport=transport,
         )

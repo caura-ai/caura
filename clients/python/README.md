@@ -94,6 +94,15 @@ finally:
     mc.close()
 ```
 
+### Request headers
+
+Every request carries `X-API-Key` (your key), `Content-Type: application/json`
+and a `User-Agent` of the form
+`caura-client-python/<version> (python/<major>.<minor>)`. The `User-Agent`
+lets a Caura server count which SDK families talk to it; it names only the
+package, its version and the Python release. The client sends nothing to any
+host other than the `base_url` you configure.
+
 ### `submit_interview()` is an Interviewer-internal surface
 
 `submit_interview()` is used by the `caura-interviewer` adapter below to

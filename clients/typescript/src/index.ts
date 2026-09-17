@@ -6,7 +6,23 @@
  * (`http://localhost:8000`) deployment.
  */
 
+import { VERSION } from "./version.js";
+
+export { VERSION };
+
 export const DEFAULT_BASE_URL = "https://caura.ai";
+
+/**
+ * Sent on every request so a server can tell SDK families apart. Names the
+ * package, its version and, under Node, the Node major; nothing else. In a
+ * browser `fetch` ignores a caller-supplied User-Agent, which is fine.
+ */
+export const USER_AGENT = `caura-client-node/${VERSION}${runtimeTag()}`;
+
+function runtimeTag(): string {
+  const node = (globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node;
+  return node ? ` (node/${node.split(".")[0]})` : "";
+}
 
 export class CauraError extends Error {}
 
@@ -128,7 +144,11 @@ export class Caura {
     this.agentId = options.agentId;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     this.timeoutMs = options.timeoutMs ?? 30000;
-    this.headers = { "X-API-Key": apiKey, "Content-Type": "application/json" };
+    this.headers = {
+      "X-API-Key": apiKey,
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT,
+    };
     const f = options.fetch ?? globalThis.fetch;
     if (!f) throw new Error("global fetch is unavailable; pass options.fetch or use Node 18+");
     this.fetchImpl = f;
