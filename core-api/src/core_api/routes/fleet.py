@@ -1112,7 +1112,11 @@ async def list_commands(
     auth.enforce_tenant(tenant_id)
 
     sc = get_storage_client()
-    commands = await sc.list_commands(tenant_id=tenant_id)
+    # OSS 09/02 M-26 — ``node_id`` is forwarded. Both the parameter and this
+    # function's docstring ("optionally filtered by node") promised a filter
+    # that was never applied: every call returned every command in the tenant,
+    # so a caller polling for one node's work saw the whole fleet's.
+    commands = await sc.list_commands(tenant_id=tenant_id, node_id=str(node_id) if node_id else None)
 
     return [
         {

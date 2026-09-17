@@ -167,12 +167,18 @@ async def create_command(request: Request) -> dict:
 async def list_commands(
     tenant_id: str,
     node_name: str | None = None,
+    node_id: UUID | None = None,
     status: str | None = None,
     command: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    node_id: UUID | None = None
-    if node_name:
+    # ``node_id`` accepted directly (OSS 09/02 M-26) as well as by name. The
+    # service has always filtered on the id; only ``node_name`` was reachable
+    # from outside, so core-api's ``GET /fleet/commands?node_id=...`` — which
+    # takes a UUID — had nothing to send it to and dropped the filter.
+    # An explicit id wins over a name: it needs no lookup and cannot be
+    # ambiguous.
+    if node_id is None and node_name:
         node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
     # status/command are filtered in SQL (pre-limit) — the previous
     # post-limit status filter could silently hide matching rows older

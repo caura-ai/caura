@@ -16,6 +16,26 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 
+def cursor_sortable(sort: str | None, order: str | None) -> bool:
+    """Whether keyset pagination is defined for this sort/order pair.
+
+    The cursor encodes ``(created_at, id)``, so it can only resolve a position
+    in a query ordered by exactly that. Widening it to other sorts means a
+    different cursor payload, not a looser check here.
+
+    Lives beside ``encode_cursor``/``decode_cursor`` because it belongs to the
+    cursor FORMAT, not to any one endpoint, and because both halves of the
+    contract have to agree: the gate that REFUSES an incoming cursor and the
+    mint that hands one out. They were written as three pairs of independent
+    expressions across two modules and drifted (OSS 09/02 L-23) — every gate
+    was conditional on ``created_at``/``desc`` while every mint was
+    unconditional, so any other sort returned a ``next_cursor`` that the very
+    next request rejected with a 400. Following the documented pagination
+    contract was itself the way to trigger the error.
+    """
+    return sort == "created_at" and order == "desc"
+
+
 def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
     """Decode a base64 cursor into ``(created_at, id)``.
 

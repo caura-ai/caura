@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
-from core_api.constants import EVOLVE_OUTCOME_TYPES, VALID_SCOPES
+from core_api.constants import EVOLVE_MAX_RELATED_IDS, EVOLVE_OUTCOME_TYPES, VALID_SCOPES
 from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
@@ -32,8 +32,17 @@ class EvolveRequest(BaseModel):
     )
     related_ids: list[str] | None = Field(
         default=None,
+        # OSS 09/02 L-22 — bounded at the boundary, where the caller can be
+        # told. The 50-id cap is applied inside ``_adjust_weights``, which runs
+        # AFTER ``_persist_outcome``: an oversized list was scope-checked and
+        # written verbatim into the outcome memory's metadata first, so the row
+        # kept hundreds of ids while only 50 were ever acted on. Rejecting is
+        # better than silently truncating — the caller learns which of their
+        # ids were not used, instead of inferring it later from a mismatch.
+        max_length=EVOLVE_MAX_RELATED_IDS,
         description=(
-            "Memory UUIDs that influenced your action. Use IDs from your most recent caura_recall results."
+            "Memory UUIDs that influenced your action. Use IDs from your most "
+            f"recent caura_recall results. At most {EVOLVE_MAX_RELATED_IDS}."
         ),
     )
     scope: str = Field(

@@ -1533,7 +1533,7 @@ async def list_by_filters(request: Request) -> list[dict]:
     Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
     status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
     include_deleted, sort, order, limit, offset, cursor_ts?, cursor_id?,
-    readable_tenant_ids?}``. ``limit`` is the caller's desired page size; this
+    readable_tenant_ids?, visibility?}``. ``limit`` is the caller's desired page size; this
     endpoint over-fetches ``limit+1`` rows internally for has_more detection and
     the caller slices to ``limit`` / builds the next cursor. Distinct from
     ``/admin-list`` which has NO visibility scoping.
@@ -1597,6 +1597,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         cursor_ts=cursor_ts,
         cursor_id=cursor_id,
         readable_tenant_ids=body.get("readable_tenant_ids"),
+        visibility=body.get("visibility"),
     )
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 

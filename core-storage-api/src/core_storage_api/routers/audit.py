@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -171,8 +172,13 @@ async def list_audit_logs(
     offset: int = 0,
     action: str | None = None,
     resource_type: str | None = None,
+    since: datetime | None = None,
 ) -> list[dict]:
-    logs = await _svc.audit_list_by_tenant(tenant_id, limit=limit)
+    # ``since`` filters in SQL, where ``audit_list_by_tenant`` has always
+    # supported it (OSS 08/14 M-11). It was simply unreachable: neither this
+    # route nor core-api's client accepted the parameter, so core-api's
+    # ``GET /audit-log?since=...`` silently returned the unfiltered tail.
+    logs = await _svc.audit_list_by_tenant(tenant_id, limit=limit, since=since)
     results = [orm_to_dict(log, AUDIT_LOG_FIELDS) for log in logs]
     if action:
         results = [r for r in results if r.get("action") == action]
