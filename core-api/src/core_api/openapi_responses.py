@@ -117,6 +117,16 @@ class RecallResponse(BaseModel):
     diagnostic: RecallDiagnostic | None = Field(
         default=None, description="Only when the request sets diagnostic=true."
     )
+    # A28 / CAURA-723 — /search has carried this since A28; /recall parses the
+    # same request and had the same silent failures, so it reports them too.
+    warnings: list[dict] | None = Field(
+        default=None,
+        description=(
+            "Coded, non-fatal caveats about the result set — e.g. "
+            "'filter_agent_unknown' when the agent filter names an id this "
+            "tenant has never seen. Null when there is nothing to say."
+        ),
+    )
 
 
 class VersionResponse(BaseModel):
