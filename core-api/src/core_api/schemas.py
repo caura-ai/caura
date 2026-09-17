@@ -884,6 +884,22 @@ class SearchRequest(TenantScopedBody):
     # why the two sides differ. ``tests/test_unknown_field_rejection.py`` pins an
     # unknown field on /search returning 2xx precisely so a later pass that
     # "finishes the job" fails loudly instead of quietly breaking integrators.
+    #
+    # ax-0917-h-05 — ``extra="allow"``, not the inherited ``extra="ignore"``.
+    # Permissive still means 2xx (that product decision stands), but pydantic's
+    # ``ignore`` DISCARDS the unknown keys, so the route cannot tell that a
+    # caller sent ``limit: 2`` or ``bogus_param_xyz: 2`` and cannot say a word
+    # about it. ``allow`` keeps them in ``model_extra`` so the route can warn —
+    # accepting a key and never mentioning it again is what turned a reasonable
+    # guess into a silent 3.5x payload. Nothing dumps this model wholesale (the
+    # routes read fields individually), so carrying the extras costs nothing.
+    #
+    # ``tenant_id`` is NOT redeclared here: AX-M12 moved it to
+    # ``TenantScopedBody`` so an omitted tenant resolves from the credential.
+    # Restating it as a bare ``str`` would shadow that default and make the
+    # field required again, undoing the round-trip that change removes.
+    model_config = ConfigDict(extra="allow")
+
     fleet_ids: list[str] | None = None
     query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
     filter_agent_id: str | None = None
@@ -959,6 +975,25 @@ class SearchRequest(TenantScopedBody):
         default=DEFAULT_SEARCH_TOP_K,
         ge=1,
         le=MAX_SEARCH_TOP_K,
+        # ax-0917-h-05 — ``limit`` is the same trap C31/D2 fixed for
+        # ``memory_type``: a spelling agents reasonably guess, dropped in
+        # silence by the ``extra`` contract. ``GET /memories`` DOES take
+        # ``limit``, so an agent that has used the list endpoint sends
+        # ``limit: 2`` here and gets the default 5 rows back with nothing
+        # saying why (audit measurement on live traffic: top_k:2 -> 2 rows /
+        # 34 KB, limit:2 -> 5 rows / 120 KB, and bogus_param_xyz:2 identical to
+        # limit — which is what proved the mechanism was "unknown keys vanish"
+        # rather than anything about ``limit``). Absorbed as an alias rather
+        # than rejected, for the same
+        # reason ``memory_type`` was: rejecting unknown keys on this surface is
+        # a breaking change for integrators already sending junk, and this
+        # model's own note calls the permissiveness a compatibility promise.
+        # ``top_k`` stays first, so it wins when both spellings arrive.
+        #
+        # This does NOT make ``limit`` a synonym for the list endpoint's
+        # ``limit``: there it is a page size, here it is the recall budget that
+        # successor injection is allowed to exceed (see below).
+        validation_alias=AliasChoices("top_k", "limit"),
         # D16 — top_k bounds what the query RECALLS, not the response length:
         # successor injection is additive on purpose (suppressing a correction
         # to honor a count would return stale claims as current), so the
@@ -969,7 +1004,9 @@ class SearchRequest(TenantScopedBody):
             f"{DEFAULT_SEARCH_TOP_K}). Not the response ceiling: each returned "
             "outdated/conflicted row also carries its newest correction, "
             "injected beyond this budget and marked injected: true (with "
-            "score: null), so a response holds at most 2*top_k items."
+            "score: null), so a response holds at most 2*top_k items. "
+            "Also accepted as 'limit'; when both are sent, top_k wins and the "
+            "response warns that 'limit' was not read."
         ),
     )
     # D12 — per-request cosine floor. Overrides the resolved profile/tenant
@@ -990,6 +1027,35 @@ class SearchRequest(TenantScopedBody):
     # (full candidate set, score factors, exclusion reasons, applied knobs).
     # Results are unchanged and no recall_count is bumped on a diagnostic call.
     diagnostic: bool = False
+
+
+class RecallRequest(SearchRequest):
+    """``/recall``'s body: ``SearchRequest`` plus the envelope-shape knob.
+
+    A subclass rather than another field on ``SearchRequest`` because
+    ``items_alias`` means nothing on ``/search``, where ``items`` is the
+    canonical key rather than an alias — putting it there would publish a
+    no-op field on the busier surface.
+    """
+
+    # ax-0917-h-03 — /recall returns the identical result set under BOTH
+    # ``memories`` and ``items``. The Python list is shared, but JSON
+    # serialises it twice: measured 49.6% of a 5-row brief and 49.9% of a
+    # 20-row one. Set false when you read ``memories`` (both first-party SDKs
+    # do) and the response halves.
+    #
+    # Default True, not False. ``RecallResponse.items`` is in the published
+    # OpenAPI schema and ``docs/public-api-stability.md`` makes REST response
+    # shapes part of the SemVer contract, so flipping the default is a MAJOR
+    # release's change to make, not a perf patch's. The MCP brief — whose
+    # response shape that document does not pin — already opts out.
+    items_alias: bool = Field(
+        default=True,
+        description=(
+            "Emit the back-compat 'items' alias of 'memories' (C4). Set false "
+            "to halve the response; 'memories' is unaffected either way."
+        ),
+    )
 
 
 # --- Entity ---

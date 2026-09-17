@@ -1439,6 +1439,20 @@ async def caura_recall(
                 query,
                 config,
                 top_k=capped_top_k,
+                # ax-0917-h-03 — no ``items`` inside the brief. This payload
+                # ALREADY carries the identical rows twice, under ``results``
+                # and its permanent ``items`` alias above; the brief used to add
+                # two more, so one ``include_brief=true`` call shipped the same
+                # result set FOUR times into an agent's context window. The
+                # brief keeps ``memories``, which is /recall's canonical key and
+                # the one both first-party SDKs read.
+                #
+                # Safe to change here in a way the REST default is not:
+                # ``docs/public-api-stability.md`` pins MCP tool names,
+                # parameter names and op-dispatch values — not the shape of a
+                # tool's JSON body — while it explicitly makes REST response
+                # shapes part of the contract.
+                items_alias=False,
             )
         return _with_latency(_dumps(payload), t0)
     except HTTPException as e:
