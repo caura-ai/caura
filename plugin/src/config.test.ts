@@ -15,6 +15,7 @@ import {
   PLUGIN_ID,
 } from "./config.js";
 import { getPluginDir } from "./paths.js";
+import { CAURA_TOOLS } from "./tools.js";
 import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 describe("PLUGIN_ID", () => {
@@ -596,6 +597,163 @@ describe("ensureExtraSkillDirs", () => {
       assert.deepEqual(ctx.result.added, []);
     } finally {
       ctx.cleanup();
+    }
+  });
+});
+
+// ---- autoFixAllowlist — the fresh install with no openclaw.json yet ----
+//
+// ax-0917-h-10. `tools.alsoAllow` is what makes a registered tool survive an
+// OpenClaw `tools.profile`, and exactly two things in the product ever write
+// it: the install script's step 7, and this function. Both used to give up on
+// the same input — a box where `~/.openclaw/openclaw.json` does not exist yet.
+// The install script prints "you will need to configure allowlist manually"
+// and skips; `autoFixAllowlist` returned `openclaw.json not found` and skipped
+// too, on that boot and on every boot after it (the drift gate re-runs, the
+// read fails again). The result was a fresh install whose 11 tools registered
+// and none of which an agent could call, with the only trace a line in
+// gateway.log naming a file the operator then had to hand-write.
+//
+// The distinction that matters: MISSING is safe to create, UNPARSEABLE is not
+// — `readOpenClawConfig` returns null for both, and overwriting the second
+// would destroy a config we cannot read.
+
+function _autoFixWithoutConfigFile(opts?: { makeOpenClawDir?: boolean }): {
+  written: Record<string, unknown> | null;
+  result: ReturnType<typeof autoFixAllowlist>;
+  /** The temp HOME the call ran under — `getPluginDir()` resolves against
+   *  `homedir()` at call time, so the expected plugin dir has to be built
+   *  from this rather than read back after HOME is restored. */
+  home: string;
+  cleanup: () => void;
+} {
+  const tmp = mkdtempSync(join(tmpdir(), "caura-autofix-nocfg-"));
+  if (opts?.makeOpenClawDir !== false) {
+    mkdirSync(join(tmp, ".openclaw"), { recursive: true });
+  }
+  const cfgPath = join(tmp, ".openclaw", "openclaw.json");
+  const prevHome = process.env.HOME;
+  process.env.HOME = tmp;
+  const result = autoFixAllowlist({ forceSlotOverride: false });
+  process.env.HOME = prevHome;
+  let written: Record<string, unknown> | null = null;
+  try {
+    written = JSON.parse(readFileSync(cfgPath, "utf-8"));
+  } catch {
+    written = null;
+  }
+  return {
+    written,
+    result,
+    home: tmp,
+    cleanup: () => {
+      try {
+        rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    },
+  };
+}
+
+describe("autoFixAllowlist — no openclaw.json yet (ax-0917-h-10)", () => {
+  test("creates the config and leaves every declared tool callable", () => {
+    const ctx = _autoFixWithoutConfigFile();
+    try {
+      assert.equal(
+        ctx.result.error,
+        undefined,
+        `auto-fix must not fail on a missing config; got: ${ctx.result.error}`,
+      );
+      assert.equal(ctx.result.changed, true);
+      const alsoAllow: string[] = (ctx.written as any)?.tools?.alsoAllow ?? [];
+      assert.deepEqual(
+        [...CAURA_TOOLS].filter((t) => !alsoAllow.includes(t)),
+        [],
+        "every tool the plugin registers must be in tools.alsoAllow — a name " +
+          "that is missing here is a tool no agent can call on a fresh install",
+      );
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("the created config also claims both slots and the load path", () => {
+    // alsoAllow alone is not a working install: without the memory slot
+    // register() is never called, and without contextEngine the keystone
+    // block never reaches the prompt. The created file must be the same
+    // config the install script writes, so no hand-editing is left over.
+    const ctx = _autoFixWithoutConfigFile();
+    try {
+      const w = ctx.written as any;
+      assert.equal(w?.plugins?.slots?.memory, FROZEN_PLUGIN_ID);
+      assert.equal(w?.plugins?.slots?.contextEngine, FROZEN_PLUGIN_ID);
+      assert.equal(w?.plugins?.entries?.[FROZEN_PLUGIN_ID]?.enabled, true);
+      const expectedPluginDir = join(ctx.home, ".openclaw", "plugins", FROZEN_PLUGIN_ID);
+      assert.ok(
+        (w?.plugins?.load?.paths ?? []).includes(expectedPluginDir),
+        `expected ${expectedPluginDir} on load.paths; got ${JSON.stringify(w?.plugins?.load?.paths)}`,
+      );
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("creating the config still does NOT create plugins.allow (CAURA-000)", () => {
+    // The create path must not be a back door around the non-creation
+    // invariant: a one-entry `plugins.allow` would flip a permissive
+    // OpenClaw install into a restrictive one that locks out every other
+    // plugin, which is the customer-reported "openai disabled" crash.
+    const ctx = _autoFixWithoutConfigFile();
+    try {
+      const allow = (ctx.written as any)?.plugins?.allow;
+      assert.ok(
+        allow === undefined || (Array.isArray(allow) && allow.length === 0),
+        `expected no plugins.allow on the created config; got: ${JSON.stringify(allow)}`,
+      );
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("creates ~/.openclaw when the directory does not exist either", () => {
+    const ctx = _autoFixWithoutConfigFile({ makeOpenClawDir: false });
+    try {
+      assert.equal(ctx.result.error, undefined);
+      const alsoAllow: string[] = (ctx.written as any)?.tools?.alsoAllow ?? [];
+      assert.equal(alsoAllow.length, CAURA_TOOLS.length);
+    } finally {
+      ctx.cleanup();
+    }
+  });
+
+  test("refuses to overwrite a config that is present but unparseable", () => {
+    // The other half of the null return. Creating here would silently
+    // replace a config we could not read — losing every unrelated
+    // OpenClaw setting in it.
+    const tmp = mkdtempSync(join(tmpdir(), "caura-autofix-bad-"));
+    mkdirSync(join(tmp, ".openclaw"), { recursive: true });
+    const cfgPath = join(tmp, ".openclaw", "openclaw.json");
+    const corrupt = '{ "plugins": { "allow": ["browser"] ';
+    writeFileSync(cfgPath, corrupt, "utf-8");
+    const prevHome = process.env.HOME;
+    process.env.HOME = tmp;
+    const result = autoFixAllowlist({ forceSlotOverride: false });
+    process.env.HOME = prevHome;
+    try {
+      assert.equal(result.changed, false);
+      assert.match(String(result.error), /could not be parsed/);
+      assert.equal(
+        readFileSync(cfgPath, "utf-8"),
+        corrupt,
+        "the unreadable config must be left byte-for-byte alone",
+      );
+    } finally {
+      try {
+        rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
     }
   });
 });
