@@ -1,5 +1,5 @@
 # Dockerfile for Core Worker service
-# Async-embed event consumer — subscribes to memclaw.memory.embed-requested
+# Async-embed event consumer — subscribes to caura.memory.embed-requested
 # and PATCHes the resulting embedding back to core-storage-api.
 
 # Optional Datadog serverless-init source (CAURA-0000 observability POC).

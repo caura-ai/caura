@@ -97,11 +97,13 @@ MEMORY_FIELDS: list[str] = [
     "scope",
 ]
 
-# Same as MEMORY_FIELDS minus the two large columns (a 1536-dim ``embedding``
-# vector + the ``search_vector`` tsvector). Use for list/bundle endpoints whose
-# core-api consumers don't read the vector (admin list, contradiction rows):
-# serialising the full vector ships ~hundreds of KB per row over the internal
-# network only for ``_memory_to_out`` to discard it.
+# Same as MEMORY_FIELDS minus the two large columns (the 1024-dim ``embedding``
+# vector + the ``search_vector`` tsvector). Use for multi-row endpoints whose
+# core-api consumers don't read the vector (scored-search, admin list,
+# contradiction rows): serialising the full vector ships ~20 KB of JSON floats
+# per row over the internal network only for the consumer to discard it.
+# ``has_embedding`` (a projected boolean, where a route provides it) is the
+# presence signal; the vector itself is fetched by id when actually needed.
 MEMORY_LIST_FIELDS: list[str] = [f for f in MEMORY_FIELDS if f not in ("embedding", "search_vector")]
 
 ENTITY_FIELDS: list[str] = [

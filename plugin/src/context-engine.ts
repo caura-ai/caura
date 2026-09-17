@@ -107,6 +107,32 @@ export function _resetBootstrapForTests(): void {
 }
 
 /**
+ * Test-only: drive the per-session buffer directly.
+ *
+ * ``pushToBuffer`` is module-private and ``ingest()`` reaches it only after
+ * ``bootstrap()``, so exercising the eviction policy through the public API
+ * would mean mocking the network to assert an in-memory Map. Same precedent
+ * and same caveat as ``_resetBootstrapForTests``: NOT for production use.
+ */
+export function _pushToBufferForTests(
+  sessionKey: string,
+  message: IngestMessage,
+): void {
+  pushToBuffer(sessionKey, message);
+}
+
+/** Test-only: session keys in eviction order (front = next to be dropped). */
+export function _sessionKeysForTests(): string[] {
+  return [...sessionBuffers.keys()];
+}
+
+/** Test-only: clear all session state between cases. */
+export function _resetSessionBuffersForTests(): void {
+  sessionBuffers.clear();
+  sessionIngestCounts.clear();
+}
+
+/**
  * True iff the error is the content-hash dedup rejection from
  * ``POST /memories`` (the backend's idempotency guard against re-writing
  * identical content under the same ``(tenant_id, fleet_id, agent_id)``
@@ -130,8 +156,18 @@ export function isDuplicateMemoryError(e: unknown): boolean {
 
 function pushToBuffer(sessionKey: string, message: IngestMessage): void {
   let buffer = sessionBuffers.get(sessionKey);
-  if (!buffer) {
-    // LRU eviction: if we have too many sessions, drop the oldest
+  if (buffer) {
+    // Mark recency. A Map yields keys in INSERTION order and a plain `get`
+    // does not move one, so without this delete+set the eviction below is
+    // FIFO wearing an LRU comment: at MAX_SESSIONS it drops the
+    // longest-RUNNING session — the one most likely to be mid-conversation
+    // with the deepest buffer — while newer idle sessions survive. Re-setting
+    // on every push moves the active session to the back of the queue, which
+    // is what the eviction was always documented to assume.
+    sessionBuffers.delete(sessionKey);
+    sessionBuffers.set(sessionKey, buffer);
+  } else {
+    // LRU eviction: if we have too many sessions, drop the least recently used
     if (sessionBuffers.size >= MAX_SESSIONS) {
       const oldest = sessionBuffers.keys().next().value!;
       sessionBuffers.delete(oldest);

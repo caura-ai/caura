@@ -1,6 +1,6 @@
 # Maintainers
 
-This file lists the current maintainers of Caura (formerly MemClaw). Maintainers have write <!-- legacy-name-ok: taught as legacy alias -->
+This file lists the current maintainers of Caura (formerly MemClaw). Maintainers have write <!-- legacy-name-floor: taught as legacy alias -->
 access to the repository, review and merge pull requests, and are responsible
 for releases.
 

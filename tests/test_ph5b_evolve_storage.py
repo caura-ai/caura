@@ -308,6 +308,69 @@ async def test_apply_weights_empty_ids(sc):
 
 
 # ===========================================================================
+# B2. apply-weights — A41 confirmed-use counter (mark_used)
+# ===========================================================================
+
+
+async def test_apply_weights_default_leaves_metadata_untouched(sc):
+    """Without ``mark_used`` the call is byte-identical to today: no counter."""
+    tenant = _t()
+    mid = await _seed_memory(tenant_id=tenant, agent_id="a", weight=0.5)
+    await sc.evolve_apply_weights(
+        tenant_id=tenant, ids=[mid], delta=0.1, floor=0.05, cap=1.0
+    )
+    meta = await _metadata(mid)
+    assert meta is None or "_system" not in meta
+
+
+async def test_apply_weights_mark_used_bumps_counter_and_stamp(sc):
+    tenant = _t()
+    mid = await _seed_memory(tenant_id=tenant, agent_id="a", weight=0.5)
+    await sc.evolve_apply_weights(
+        tenant_id=tenant, ids=[mid], delta=0.1, floor=0.05, cap=1.0, mark_used=True
+    )
+    meta = await _metadata(mid)
+    assert meta["_system"]["recall_used_count"] == 1
+    assert meta["_system"]["recall_used_at"]  # ISO timestamptz string
+    # Second outcome naming the same memory increments, not resets.
+    await sc.evolve_apply_weights(
+        tenant_id=tenant, ids=[mid], delta=-0.15, floor=0.05, cap=1.0, mark_used=True
+    )
+    meta = await _metadata(mid)
+    assert meta["_system"]["recall_used_count"] == 2
+
+
+async def test_apply_weights_mark_used_preserves_sibling_keys(sc):
+    """The ``_system`` sub-object is merged with ``||`` and the top-level keys
+    with ``jsonb_set`` — neither user metadata nor sibling platform keys may be
+    clobbered (the B7 x C25 contract this namespace exists for)."""
+    tenant = _t()
+    mid = await _seed_memory(
+        tenant_id=tenant,
+        agent_id="a",
+        weight=0.5,
+        metadata={"source": "ingest", "_system": {"write_mode": "bulk"}},
+    )
+    await sc.evolve_apply_weights(
+        tenant_id=tenant, ids=[mid], delta=0.1, floor=0.05, cap=1.0, mark_used=True
+    )
+    meta = await _metadata(mid)
+    assert meta["source"] == "ingest"
+    assert meta["_system"]["write_mode"] == "bulk"
+    assert meta["_system"]["recall_used_count"] == 1
+
+
+async def test_apply_weights_mark_used_is_tenant_scoped(sc):
+    t_a, t_b = _t(), _t()
+    mid = await _seed_memory(tenant_id=t_a, agent_id="a", weight=0.5)
+    await sc.evolve_apply_weights(
+        tenant_id=t_b, ids=[mid], delta=0.1, floor=0.05, cap=1.0, mark_used=True
+    )
+    meta = await _metadata(mid)
+    assert meta is None or "_system" not in meta
+
+
+# ===========================================================================
 # C. 422 input-validation guards (raw httpx — typed client never sends these)
 # ===========================================================================
 

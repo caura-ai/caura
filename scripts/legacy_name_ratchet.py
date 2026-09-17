@@ -30,11 +30,11 @@ gate is pointed at. On a ``pull_request`` the checkout is already the merge
 commit, so the comparison against the base branch is exactly this PR's
 contribution and there is nothing to maintain.
 
-**The escape hatch, and the two claims it can make.** A line carrying either
-marker is not counted. The gate cannot tell them apart — the pass/fail decision
-never reads which one is there, and nothing that failed before passes now. They
-differ only in what a reviewer has to check, which is the only thing a marker
-was ever for. Put one on the line with a reason and it lands in the diff.
+**The escape hatch, and the three claims it can make.** A line carrying any of
+these markers is not counted. The gate cannot tell them apart — the pass/fail
+decision never reads which one is there, and nothing that failed before passes
+now. They differ only in what a reviewer has to check, which is the only thing a
+marker was ever for. Put one on the line with a reason and it lands in the diff.
 
 ``legacy-name-ok`` is rule 3's hatch: something new that BEARS the old name — a
 compat alias, a redirect, a test pinning the old wire format.
@@ -43,14 +43,30 @@ compat alias, a redirect, a test pinning the old wire format.
 reach, and cannot be correct without the literal: a pasteable command, an on-disk
 path, a served mirror path. Nothing is declared and the footprint does not grow.
 
-``legacy-name-deferred`` is deliberately not a third escape hatch. It records a
+``legacy-name-absent`` is a line that names the old brand only so a test can
+assert it is NOT there. The literal exists to be searched for and not found, so
+no alias is declared and nothing bears the name — but the line still cannot be
+written without it. It is separated from the two above because the claim a
+reviewer must check is the opposite one: that the assertion is negative.
+
+It exists because its absence was itself minting old-brand debt. Audited
+2026-09-16: fourteen sites across three repositories assembled the name from
+fragments (``"mem" + "claw"``, ``"".join(("mem", "claw_client"))``, an escaped
+``mem\u0063law``) specifically so the line would not carry the literal this gate
+searches for. One of them says so outright: the only marker then available would
+have made a claim its author knew was false, so the string was disguised
+instead. A gate that leaves no truthful way to pass is a gate that teaches
+people to hide from it, and a ratchet defeated by construction is not a ratchet.
+
+``legacy-name-deferred`` is deliberately not a fourth escape hatch. It records a
 rename that a decision document or issue postpones, while the line remains in the
 gated headline. Its mandatory ``(<doc path or issue URL>)`` keeps the claim
 falsifiable. A new line carrying it still fails exactly as the unmarked line
 would; adding it to an existing counted line changes no count.
 
 A permanent marker combined with ``legacy-name-deferred`` is a hard error. The
-alias/floor pair can both be true of one permanent line, which is why
+alias/floor pair can both be true of one permanent line, while an absence
+assertion contradicts both rather than joining them — which is why
 :func:`_kind` has a measured precedence rule. Permanent and deferred are
 mutually exclusive states: letting the permanent marker win silently would
 exempt the line and make the deferred annotation — and its headline count — a
@@ -100,7 +116,21 @@ there is nothing to charge; the swap adds non-exempt text the repo never had.
 Every newly exempted line is still printed, on the passing path too, because the
 report is what made the hole visible and stays useful when the swap is deliberate.
 
-**What this still does not enforce.** The move check pairs an addition with a
+**What this still does not enforce.** A name assembled at runtime is invisible
+here. The scan compares the literal text of a line, so ``"mem" + "claw"``,
+``"".join(("mem", "claw_client"))`` and an escaped ``mem\u0063law`` all pass
+while evaluating to the very name this gate exists to stop. That is not
+hypothetical: an audit on 2026-09-16 found fourteen such sites across three
+repositories. ``legacy-name-absent`` removes the commonest MOTIVE for writing
+one — see above — but the hole itself is open to any motive, including a
+genuinely new minted name. Closing it means normalising a line before
+comparison (decoding character escapes, folding adjacent and ``+``-joined
+literal fragments) rather than parsing it, since the one ``git grep`` over every
+file type is the property the rest of this design rests on. Deliberately not
+done here: it trades exactness for a heuristic, and that is a decision of its
+own rather than a rider on a vocabulary change.
+
+The move check pairs an addition with a
 deletion by text, so it cannot know the two are the same line: adding a genuinely
 new occurrence while coincidentally deleting a byte-identical one elsewhere comes
 out flat and is excused. That one is identical in every number AND in every text,
@@ -150,6 +180,7 @@ NEW_NAME = "caura"
 # decision rather than a formatting artifact.
 EXEMPT_MARKER = "legacy-name-ok"
 FLOOR_MARKER = "legacy-name-floor"
+ABSENT_MARKER = "legacy-name-absent"
 DEFERRED_MARKER = "legacy-name-deferred"
 _DEFERRED_LABEL = "deferred line(s)"
 
@@ -213,7 +244,7 @@ class _Kind(NamedTuple):
 # eyes on, so their position must not depend on a tally. The label carries its
 # own ``(s)`` the way every other count in this file does.
 #
-# The gate never reads this. Both markers exempt a line identically — see
+# The gate never reads this. Every marker here exempts a line identically — see
 # :func:`_kind` — and the split exists purely so the report can say "4 compat
 # aliases and 6 floor mentions" where it used to say "11 exemptions".
 #
@@ -250,6 +281,21 @@ _KINDS: dict[str, _Kind] = {
             "marker at all:",
         ),
     ),
+    # Last on purpose, and the order is the precedence rule -- see :func:`_kind`.
+    # This claim contradicts both above rather than coexisting with either, so it
+    # must never win a tie against them: a line marked both is one where the alias
+    # or floor claim is the one wanting review.
+    ABSENT_MARKER: _Kind(
+        "absence assertion(s)",
+        (
+            "a name written only so a test can prove it is NOT there.",
+            "Check the assertion is negative — the literal exists to be",
+            "searched for and not found. If the line pins something the",
+            "product still answers to, that is an alias and belongs above;",
+            "if it names a path or command the rename never reaches, that",
+            "is a floor mention:",
+        ),
+    ),
 }
 
 # Matched as a bounded token, not a bare substring. A substring test exempts any
@@ -267,12 +313,13 @@ _KINDS: dict[str, _Kind] = {
 # types this scans, and JSON has none at all while still being somewhere an alias
 # can legitimately live.
 #
-# One pattern for both markers rather than one each, so those boundaries are
+# One pattern for every marker rather than one each, so those boundaries are
 # stated once and cannot drift apart: the lookbehind and lookahead sit outside
 # the alternation, so every marker gets both. Alternation order is not load
-# bearing here because neither marker is a prefix of the other — if a third is
-# ever added that IS a prefix of another, list the longer one first, since Python
-# takes the first alternative that matches rather than the longest.
+# bearing here because no marker is a prefix of another — the three share only
+# ``legacy-name-``. If one is ever added that IS a prefix of another, list the
+# longer one first, since Python takes the first alternative that matches
+# rather than the longest.
 EXEMPT_RE = re.compile(
     rf"(?<![\w-])(?P<marker>{'|'.join(re.escape(m) for m in _KINDS)})(?=[\s:]|$)",
     re.IGNORECASE,
@@ -458,13 +505,14 @@ def _kind(text: str) -> str | None:
     is written down.
 
     The gate's decision reads only whether this is ``None``. That is what keeps
-    the two markers interchangeable at the point of failure: a line that passed
+    the markers interchangeable at the point of failure: a line that passed
     before passes now, and a marker a reviewer thinks is the wrong KIND is still
     a marker, so mislabelling one can never turn a red build green or a green one
     red. Only the report reads which.
 
-    **When both claims are true of one line, the alias wins.** This is not the
-    degenerate case it looks like: 28 lines across the fleet name a permanent
+    **When more than one marker is on a line, the earliest in :data:`_KINDS`
+    wins, which puts the alias first.** This is not the degenerate case it
+    looks like: 28 lines across the fleet name a permanent
     thing AND declare a dual-read in the same breath, e.g. an image tag whose
     repository name is frozen while its version is read from both spellings.
     Both claims are true, one line can only carry one marker, and picking by
@@ -476,6 +524,14 @@ def _kind(text: str) -> str | None:
     floor mention reported as an alias is one extra line in the list that most
     wants reading anyway. Under-counting the aliases is the expensive direction,
     so the tie breaks away from it.
+
+    :data:`ABSENT_MARKER` is ordered last for a different reason, and it is not
+    a tie-break at all. An absence assertion does not coexist with the other
+    two, it contradicts them: an alias or floor mention says something still
+    answers to the name, an absence assertion says nothing on that line does.
+    So a line carrying both is a mistake rather than two true claims, and
+    resolving it toward the absence assertion would file a rule 3 decision in
+    the one list nobody reads looking for new names.
 
     The lowercasing is what keeps the result a usable :data:`_KINDS` key, and it
     is load bearing rather than tidiness. A kind that does not match a key is
@@ -2706,10 +2762,15 @@ def main() -> int:
         "different claim: nothing is declared there, so it is counted apart and the\n"
         "aliases stay readable. Check the claim before you make it — if rewording the\n"
         "line would leave it correct, reword it rather than marking it.\n\n"
+        "If the line names the old brand only so a test can assert it is ABSENT — a\n"
+        "negative assertion, where the literal exists to be searched for and not\n"
+        f"found — append '{ABSENT_MARKER}: <reason>'. Same exemption again, and the\n"
+        "opposite claim to the two above: nothing bears the name on that line. Check\n"
+        "the assertion really is negative before marking it.\n\n"
         "If the rename is deliberately postponed rather than permanent, append\n"
         f"'{DEFERRED_MARKER}: <reason> (<doc path or issue URL>)'. This marker stays\n"
         "inside the gated count: it annotates deferred work and does not make this build green.\n"
-        "The reference is mandatory, and combining deferred with either permanent marker fails."
+        "The reference is mandatory, and combining deferred with any permanent marker fails."
     )
     return 1
 

@@ -65,7 +65,7 @@ ENV=$HOME/.openclaw/plugins/memclaw/.env
 # present but blank in a hand-edited .env, and blank here silently re-installs
 # the node with no identity at all.
 read_env() {
-  for _p in CAURA MEMCLAW; do  # legacy-name-ok: dual-prefix read, both are live
+  for _p in CAURA MEMCLAW; do  # legacy-name-floor: dual-prefix read, both are live
     _v=$(grep -m1 "^${_p}_$1=" "$ENV" | cut -d= -f2-)
     if [ -n "$_v" ]; then printf '%s\n' "$_v"; return; fi
   done

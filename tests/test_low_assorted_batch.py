@@ -32,9 +32,18 @@ def _revert_block() -> str:
 def test_revert_only_touches_a_status_detection_set():
     """Detection marks a loser "outdated" or "conflicted". Anything else means
     another writer moved the row, and stamping "active" over that undoes their
-    decision to undo ours."""
+    decision to undo ours.
+
+    Asserted against ``CONTRADICTED_STATUSES`` rather than the literal pair: the
+    tuple was inline at four sites with a comment telling readers to hand-sync
+    it, and is now one constant. What must not regress is the GUARD, so this
+    checks the guard reads the shared set and that the set still holds both.
+    """
+    from core_api.constants import CONTRADICTED_STATUSES
+
+    assert CONTRADICTED_STATUSES == ("outdated", "conflicted")
     b = _revert_block()
-    assert 'if cand_status in ("outdated", "conflicted"):' in b
+    assert "if cand_status in CONTRADICTED_STATUSES:" in b
 
 
 def test_the_unconditional_write_is_gone():
@@ -62,11 +71,16 @@ def test_a_skipped_revert_is_logged_with_the_status_it_found():
 def test_it_matches_the_content_edit_reset_guard():
     """The two paths clear the same state and had no business disagreeing — the
     content-edit reset has always been guarded, which is why only this site was
-    losing statuses."""
+    losing statuses.
+
+    They now agree by construction: both read ``CONTRADICTED_STATUSES``. This
+    pins that the edit path still has a guard AND that it is the shared one, so
+    the two cannot drift back apart.
+    """
     from core_api.services import memory_service as ms
 
     src = inspect.getsource(ms)
-    assert 'if mem.get("status") in ("outdated", "conflicted"):' in src
+    assert 'if mem.get("status") in CONTRADICTED_STATUSES:' in src
 
 
 # ── oss-0814-l-48 ─────────────────────────────────────────────────────────

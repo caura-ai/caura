@@ -5,7 +5,8 @@ One row is pre-published in the core-api fanout endpoint with
 core-worker consumer flips it to ``in_progress`` on receipt and to
 ``success`` / ``failure`` on completion. DLQ'd or never-consumed
 messages remain observable as ``pending`` rows past their expected
-finish time.
+finish time, and the reconcile sweep republishes those rows' messages
+so the work completes rather than sitting observable-but-ignored.
 
 ``org_id`` is ``text`` and unconstrained — pure-OSS deployments key by
 the standalone tenant id, enterprise deployments by the real org id.
@@ -38,6 +39,19 @@ class LifecycleAudit(Base):
             "action",
             text("started_at DESC"),
         ),
+        # The reconcile sweep looks for rows still at ``pending`` past
+        # their expected finish. ``status='pending'`` is the selective
+        # half of that predicate: ``started_at < now() - interval``
+        # matches nearly the entire append-only history, so the recency
+        # index above scans almost all of it to find the handful of rows
+        # that never advanced. Partial on the status keeps this index
+        # proportional to the stranded backlog -- normally zero rows --
+        # rather than to the table.
+        Index(
+            "idx_lifecycle_audit_stranded",
+            text("started_at"),
+            postgresql_where=text("status = 'pending'"),
+        ),
         # Partial index for the CAURA-657 dedup-gate query. Only
         # successful rows are indexed (status='success' partial),
         # keeping the index small while matching the dedup query
@@ -62,5 +76,21 @@ class LifecycleAudit(Base):
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'pending'")
     )
+    # When a consumer last claimed this row by moving it to ``in_progress``.
+    # NULL means never claimed. The claim is what makes the transition
+    # single-winner: two deliveries of the same ``audit_id`` -- an original
+    # that was merely slow and the reconcile sweep's republish of it -- would
+    # otherwise both flip ``pending`` to ``in_progress`` and run the primitive
+    # at once. A stale value is re-claimable so a consumer that died mid-run
+    # does not park the row forever.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Who holds the claim above. One value per consumer INVOCATION, not per
+    # HTTP request: the storage client retries a PATCH on ReadTimeout and 5xx,
+    # so a claim that succeeded server-side but whose response was lost is
+    # re-sent verbatim. Without an identity the compare-and-swap would read
+    # that retry as a competing consumer and make the handler nack a delivery
+    # it had in fact won. A genuine second delivery is a new invocation and
+    # carries a different token, so it still loses.
+    claim_token: Mapped[str | None] = mapped_column(Text)
     stats: Mapped[dict | None] = mapped_column(JSONB)
     error_message: Mapped[str | None] = mapped_column(Text)

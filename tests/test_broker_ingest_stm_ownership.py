@@ -106,7 +106,10 @@ async def _drive_stm(monkeypatch, *, agent_id, auth):
     # through FastAPI, so the parameter default would be the ``Query(None)``
     # marker object rather than None — and a non-None explicit tenant reads
     # as a cross-tenant request to ``_require_tenant`` (403).
-    await stm.promote_stm(body, auth, tenant_id=None)
+    # request/response args: required since /stm/promote grew ``@write_limit``
+    # and its ``request: Request`` / ``response: Response`` parameters (H-17
+    # residual, M-35) — same shape as the ``/ingest/commit`` call above.
+    await stm.promote_stm(SimpleNamespace(), body, Response(), auth, tenant_id=None)
     return captured["agent_id"], gate
 
 

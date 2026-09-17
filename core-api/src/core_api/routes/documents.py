@@ -686,11 +686,19 @@ async def delete_document(
     deleted = await sc.delete_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Document not found")
+    # Un-mint the memory this document minted — the inverse of the
+    # ``safe_sync_doc_memory`` call on the write path above, and stated once in
+    # the module that owns both. MCP ``caura_doc op=delete`` calls the same
+    # function, which is the point: the mint has two entry points and so does
+    # the delete.
+    from core_api.services.doc_memory import safe_unmint_doc_memory
+
+    unminted = await safe_unmint_doc_memory(collection, doc_id, tenant_id=tenant_id)
     await log_action(
         tenant_id=tenant_id,
         action="doc_delete",
         resource_type="document",
-        detail={"collection": collection, "doc_id": doc_id},
+        detail={"collection": collection, "doc_id": doc_id, "memories_unminted": unminted},
     )
 
 

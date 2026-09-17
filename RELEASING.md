@@ -1,6 +1,6 @@
 # Release Process
 
-Caura (formerly MemClaw) follows [Semantic Versioning](https://semver.org/) and uses <!-- legacy-name-ok: taught as legacy alias -->
+Caura (formerly MemClaw) follows [Semantic Versioning](https://semver.org/) and uses <!-- legacy-name-floor: taught as legacy alias -->
 [release-please](https://github.com/googleapis/release-please) to manage
 releases automatically from [Conventional Commits](https://www.conventionalcommits.org/).
 

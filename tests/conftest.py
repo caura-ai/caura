@@ -44,9 +44,9 @@ for _k, _v in _TEST_DEFAULTS.items():
 
 # Defensively unset env vars that change auth shape and routinely leak in
 # from developers' shells (the OSS plugin onboarding writes
-# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many  # legacy-name-ok: rule 3 env alias
+# ``~/.config/caura-keys.env`` with ``MEMCLAW_API_KEY=...`` and many  # legacy-name-floor: documents the live env alias
 # rc files source it for the openclaw CLI). A leaked value flips
-# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``  # legacy-name-ok: rule 3 dual-read field
+# ``settings.memclaw_api_key`` to truthy, which makes ``get_auth_context``  # legacy-name-floor: documents the dual-read field exercised below
 # enforce the gate at Path 2 with 401s before any standalone-mode
 # bypass — silently failing every test that doesn't sniff the env
 # itself (e.g. test_rate_limit's auth-gated burst test, which gets all
@@ -582,6 +582,29 @@ from tests._mcp_test_helpers import (  # noqa: F401
     parse_envelope,
     strip_latency,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_llm_provider_cache():
+    """Drop cached LLM providers between tests (09/02 M-36).
+
+    ``get_llm_provider`` memoises OpenAI-compatible providers in a module-level
+    LRU so each call stops minting an unclosed ``httpx`` pool. That cache is
+    process-wide by design, which in a test process means one test's provider —
+    built under that test's monkeypatched credentials, env and patched classes —
+    would otherwise be handed to the next test that happens to resolve the same
+    configuration. The symptom is nasty: every affected test passes in
+    isolation and fails in a full run.
+
+    Same reasoning and same shape as ``_patch_storage_client`` resetting
+    ``sc_mod._client`` and ``_reset_hooks`` resetting hooks: a module singleton
+    that production wants and test isolation does not.
+    """
+    from common.llm.registry import reset_provider_cache
+
+    reset_provider_cache()
+    yield
+    reset_provider_cache()
 
 
 @pytest.fixture(autouse=True)

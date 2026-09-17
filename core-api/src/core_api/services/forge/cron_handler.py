@@ -49,6 +49,7 @@ from core_api.services.forge.forge_service import (
 from core_api.services.forge.poison import is_fingerprint_poisoned
 from core_api.services.organization_settings import get_settings_for_display
 from core_api.services.skill_promoter import (
+    PromoterRunResult,
     make_db_live_data_fetcher,
     make_db_poison_checker,
     make_db_status_updater,
@@ -183,7 +184,16 @@ def _make_status_checker() -> StatusChecker:
     sc = get_storage_client()
 
     async def _check(tenant_id: str, collection: str, doc_id: str) -> str | None:
-        doc = await sc.get_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id)
+        # 09/02 L-33: read=False — the PRIMARY. This is the clobber guard: it
+        # exists to skip writes against a slug an operator has already moved to
+        # active / rejected / quarantined. Reading the replica means a recent
+        # status flip may not have arrived, the check returns the OLD status (or
+        # None), and the write it was meant to prevent goes through — the guard
+        # fails in the unsafe direction, silently.
+        #
+        # ``skill_promoter``'s equivalent existence check already passes
+        # read=False for exactly this reason; only this one did not.
+        doc = await sc.get_document(tenant_id=tenant_id, collection=collection, doc_id=doc_id, read=False)
         if doc is None:
             return None
         data = doc.get("data") if isinstance(doc, dict) else None
@@ -339,18 +349,56 @@ async def run_forge_cron_tick(
     # ``staged`` without waiting for a second cron firing. Failures
     # (poison hit, scan dirty, hash-binding stale) are held — they
     # surface on the next tick if conditions change.
-    promote_result = await promote_pending_candidates(
-        tenant_id=tenant_id,
-        fleet_id=fleet_id,
-        poison_checker=make_db_poison_checker(),
-        live_data_fetcher=make_db_live_data_fetcher(),
-        status_updater=make_db_status_updater(expected_status="candidate"),
-        min_cluster_size=cfg.min_cluster_size,
-        min_distinct_agents=cfg.min_distinct_agents,
-        freshness_window_days=cfg.freshness_window_days,
-        now=now,
-        auto_promote_clean=auto_promote_clean,
-    )
+    #
+    # 09/02 L-34: guarded, because an exception here used to propagate out of
+    # the tick, and the bus REDELIVERS a failed tick — which re-runs the mining
+    # half above and re-pays its LLM cost for candidates that are already
+    # written and durable. A transient storage blip in the promotion half is
+    # not a reason to buy the distillation twice.
+    #
+    # Held candidates are already designed to surface on a later tick, so
+    # deferring them costs a cron interval and nothing else. Promotion is the
+    # cheap, retryable half; mining is the expensive, already-completed one.
+    #
+    # Reported the same way the interview sweep reports its jobs half
+    # (``jobs_sweep_ok`` / ``jobs_sweep_error``): keep the successful tick, but
+    # say which of the two happened — otherwise a promotion that raises on
+    # every tick is indistinguishable from one with nothing to promote, for as
+    # long as nobody reads the logs.
+    promotion_ok = True
+    try:
+        promote_result = await promote_pending_candidates(
+            tenant_id=tenant_id,
+            fleet_id=fleet_id,
+            poison_checker=make_db_poison_checker(),
+            live_data_fetcher=make_db_live_data_fetcher(),
+            status_updater=make_db_status_updater(expected_status="candidate"),
+            min_cluster_size=cfg.min_cluster_size,
+            min_distinct_agents=cfg.min_distinct_agents,
+            freshness_window_days=cfg.freshness_window_days,
+            now=now,
+            auto_promote_clean=auto_promote_clean,
+        )
+    except Exception as exc:
+        logger.exception(
+            "forge cron tick: promotion half failed (tenant=%s fleet=%s "
+            "error=%s) — %d candidate(s) from this tick are written and will "
+            "be promoted on a later tick; the mining half is NOT re-run",
+            tenant_id,
+            fleet_id,
+            # Type name, not ``str(exc)``: the full exception is already in
+            # this record's traceback, and some ``__str__`` implementations
+            # carry hostnames, URLs or request fragments.
+            type(exc).__name__,
+            forge_result.candidates_written,
+        )
+        promotion_ok = False
+        # Zeroed rather than omitted, so ``stats`` keeps one shape whether the
+        # half ran or not — the log line and any downstream reader index these
+        # keys directly.
+        promote_result = PromoterRunResult(
+            tenant_id=tenant_id, fleet_id=fleet_id, scanned=0, promoted=0, held=0
+        )
 
     stats = {
         "candidates_written": forge_result.candidates_written,
@@ -381,6 +429,19 @@ async def run_forge_cron_tick(
         # alerting on.
         "skipped_internal_error": forge_result.candidates_skipped_internal_error,
         "skipped_existing": forge_result.candidates_skipped_existing,
+        # 09/02 L-34. Without this, a promotion half that raises every tick
+        # returns the same zeros as one with nothing to promote — the mining
+        # counters above still look healthy, so the tick reads fine.
+        #
+        # The bool only. The interview sweep carries a companion
+        # ``jobs_sweep_error`` string, but its summary is an untyped HTTP
+        # response body; this dict is ``dict[str, int]`` and feeds
+        # ``lifecycle_audit``, which does ``int(stats.get(...))``. Widening it
+        # to admit a string just moves the type error to that caller. ``bool``
+        # is an ``int`` subtype, so the alertable signal fits as-is, and the
+        # exception TYPE is in the log line below next to the full traceback —
+        # which is where a reader chasing it would look anyway.
+        "promotion_ok": promotion_ok,
     }
     logger.info(
         "forge cron tick: tenant=%s fleet=%s window=[%s,%s] %s",

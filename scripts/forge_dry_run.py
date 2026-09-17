@@ -211,64 +211,47 @@ def _fake_distill_json() -> str:
     return json.dumps(payload)
 
 
-async def _wire_memory_fetcher(db):
-    """Return an async fetcher that loads memory content by id from
-    the live database."""
-    from sqlalchemy import text
+async def _wire_memory_fetcher(sc, tenant_id: str):
+    """Return an async fetcher that loads memory content by id.
+
+    09/02 M-07. This used to run raw SQL on a ``core_api.db.session``
+    ``AsyncSession``. That module was deleted by #491, which routed every
+    core-api DB access through core-storage-api, and storage grew the
+    forge-shaped endpoint this needs at the same time — the script just was
+    never moved over. The index-friendly ``id = ANY(CAST(:ids AS uuid[]))``
+    reasoning the old comment preserved now lives server-side, in the handler
+    behind ``/forge/memories-content``.
+    """
 
     async def fetcher(memory_ids: list[str]) -> dict[str, str]:
         if not memory_ids:
             return {}
-        rows = (
-            await db.execute(
-                # Cast the PARAMETER (text[] → uuid[]), not the column.
-                # ``WHERE id::text = ANY(:ids)`` wraps the column in
-                # a function call and disables any btree index on
-                # ``memories.id``. Casting the bind variable instead
-                # keeps the index usable — same pattern as the bulk
-                # entity-id lookup in session_trace._query_entity_ids_for_memories.
-                text(
-                    "SELECT id::text AS id, content FROM memories "
-                    "WHERE id = ANY(CAST(:ids AS uuid[]))"
-                ),
-                {"ids": list(memory_ids)},
-            )
-        ).fetchall()
-        # NULL-safe: memories.content is nullable, but downstream
-        # ``_distill_cluster`` slices the value as a string. Returning
-        # None would TypeError and get swallowed into the io_error bucket.
-        return {row.id: row.content if row.content is not None else "" for row in rows}
+        rows = await sc.forge_memory_content_by_ids(
+            tenant_id=tenant_id, memory_ids=memory_ids
+        )
+        return {str(r["id"]): (r.get("content") or "") for r in rows}
 
     return fetcher
 
 
-async def _wire_poison_checker(db, tenant_id: str, fleet_id: str | None):
-    """Async fp → bool against the forge_rejected_fingerprints
-    table (migration 020). Honors the per-row cooloff_days."""
-    from sqlalchemy import text
+async def _wire_poison_checker(sc, tenant_id: str, fleet_id: str | None):
+    """Async fp → bool over ``forge_rejected_fingerprints`` (migration 020),
+    honouring each row's ``cooloff_days``.
+
+    09/02 M-07: the cooloff predicate that used to be inlined here as SQL is
+    the same one storage applies behind ``/forge/rejected-fingerprints/check``,
+    so this is a move, not a behaviour change.
+    """
 
     async def checker(fp: str) -> bool:
-        row = (
-            await db.execute(
-                text(
-                    """
-                    SELECT 1 FROM forge_rejected_fingerprints
-                    WHERE tenant_id = :tenant_id
-                      AND cluster_fingerprint = :fp
-                      AND (fleet_id IS NULL OR fleet_id = :fleet_id)
-                      AND rejected_at + (interval '1 day' * cooloff_days) > now()
-                    LIMIT 1
-                    """
-                ),
-                {"tenant_id": tenant_id, "fleet_id": fleet_id, "fp": fp},
-            )
-        ).fetchone()
-        return row is not None
+        return await sc.forge_is_fingerprint_poisoned(
+            tenant_id=tenant_id, fleet_id=fleet_id, cluster_fingerprint=fp
+        )
 
     return checker
 
 
-async def _wire_candidate_writer(db):
+async def _wire_candidate_writer():
     """Persist a Forge-generated candidate via the SF-002
     ``caura_doc`` write path so all 7 adjustments + Sentinel scan
     + audit fire as they would for an external write."""
@@ -276,6 +259,10 @@ async def _wire_candidate_writer(db):
     # Forge worker is internal (not an HTTP caller); the SF-002
     # validator's checks that pertain to internal callers are
     # already satisfied by the doc shape Forge builds.
+    #
+    # 09/02 M-07: this helper took a ``db`` parameter it never used — it was
+    # already storage-routed. Dropped, so the signature stops implying a DB
+    # dependency the body does not have.
     from core_api.clients.storage_client import get_storage_client
 
     sc = get_storage_client()
@@ -286,7 +273,7 @@ async def _wire_candidate_writer(db):
     return writer
 
 
-async def _wire_status_checker(db):
+async def _wire_status_checker():
     """No-overwrite guard wiring. Returns the current ``data.status``
     of an existing doc, or ``None`` if no doc with that id exists.
     Forge skips persistence when the target slug already exists
@@ -312,7 +299,7 @@ async def _wire_status_checker(db):
 
 async def _run(args: argparse.Namespace) -> int:
     # Lazy imports for `--help` ergonomics on dependency-light envs.
-    from core_api.db.session import async_session
+    from core_api.clients.storage_client import get_storage_client
     from core_api.services.forge.forge_service import (
         ForgeConfig,
         run_forge_distill,
@@ -326,39 +313,49 @@ async def _run(args: argparse.Namespace) -> int:
     # the Forge invocation that minted it.
     run_label = f"forge-dry-run-{args.tenant}-{window_end.strftime('%Y%m%dT%H%M')}"
 
-    async with async_session() as db:
-        llm_fn = await _wire_llm_fn()
-        memory_fetcher = await _wire_memory_fetcher(db)
-        poison_checker = await _wire_poison_checker(db, args.tenant, args.fleet)
-        candidate_writer = await _wire_candidate_writer(db)
-        status_checker = await _wire_status_checker(db)
+    # 09/02 M-07. This was ``async with async_session() as db:``, importing
+    # ``core_api.db.session`` — a module #491 deleted when it routed every
+    # core-api DB access through core-storage-api. The import is lazy, so the
+    # script still parsed and ``--help`` still worked; every real invocation
+    # died on ImportError. Storage already exposed the two forge-shaped
+    # endpoints this needs, so the fix is a move, not a redesign.
+    #
+    # No session and no ``db.commit()``: each storage call commits server-side.
+    # That does cost the old all-or-nothing property — a failure midway now
+    # leaves earlier candidate writes persisted. Acceptable here specifically
+    # because Forge is idempotent against ``session_traces`` (a re-run
+    # re-upserts rather than duplicating), which is the same bet the
+    # storage-routed production path already makes.
+    sc = get_storage_client()
+    llm_fn = await _wire_llm_fn()
+    memory_fetcher = await _wire_memory_fetcher(sc, args.tenant)
+    poison_checker = await _wire_poison_checker(sc, args.tenant, args.fleet)
+    candidate_writer = await _wire_candidate_writer()
+    status_checker = await _wire_status_checker()
 
-        cfg = ForgeConfig(
-            min_cluster_size=args.min_cluster_size,
-            min_distinct_agents=args.min_distinct_agents,
-            max_writes_per_run=args.max_writes_per_run,
-        )
+    cfg = ForgeConfig(
+        min_cluster_size=args.min_cluster_size,
+        min_distinct_agents=args.min_distinct_agents,
+        max_writes_per_run=args.max_writes_per_run,
+    )
 
-        # No positional argument: ``run_forge_distill`` is keyword-only and takes
-        # none. The session used to be its first parameter; when that was removed
-        # this call site was not updated, so every real invocation died on
-        # ``TypeError: too many positional arguments``. ``db`` is still needed —
-        # the wiring helpers above close over it — just not here.
-        result = await run_forge_distill(
-            tenant_id=args.tenant,
-            fleet_id=args.fleet,
-            window_start=window_start,
-            window_end=window_end,
-            run_label=run_label,
-            llm_fn=llm_fn,
-            memory_fetcher=memory_fetcher,
-            poison_checker=poison_checker,
-            candidate_writer=candidate_writer,
-            status_checker=status_checker,
-            config=cfg,
-        )
-        # Commit any session_trace upserts + candidate writes.
-        await db.commit()
+    # No positional argument: ``run_forge_distill`` is keyword-only and
+    # takes none. The session used to be its first parameter; when that was
+    # removed this call site was not updated, so every real invocation died
+    # on ``TypeError: too many positional arguments``.
+    result = await run_forge_distill(
+        tenant_id=args.tenant,
+        fleet_id=args.fleet,
+        window_start=window_start,
+        window_end=window_end,
+        run_label=run_label,
+        llm_fn=llm_fn,
+        memory_fetcher=memory_fetcher,
+        poison_checker=poison_checker,
+        candidate_writer=candidate_writer,
+        status_checker=status_checker,
+        config=cfg,
+    )
 
     if args.json:
         payload = {

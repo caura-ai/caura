@@ -584,9 +584,20 @@ async def test_the_degrade_policy_lives_in_one_place() -> None:
     the shared helpers, as it did while there were two.
 
     What is still worth pinning is the shape that made the fix hold: the raw
-    child batch embed appears in exactly one place, and each helper has
-    exactly one caller. Re-inlining the raw call, or growing a second caller
-    that skips the degrade handling, is how H-09 would come back.
+    child batch embed appears in exactly one place. Re-inlining that call is
+    how H-09 would come back — a second batch embed with its own, unfixed,
+    error handling.
+
+    ``_embed_children_or_degrade`` is checked for callers but NOT held to
+    exactly one. It gained a second when the atomic-fact fan-out stopped
+    embedding one fact at a time (OSS 08/14 L-38) and routed its batch through
+    this helper. That is the opposite of the H-09 shape: H-09 was two
+    implementations of the degrade decision, of which one got fixed, and a
+    caller reusing the single implementation cannot reproduce it. The assertion
+    that actually forbids H-09 is the ``raw == 1`` check above, which a
+    second-implementation caller would fail no matter how many call sites were
+    permitted. The other two helpers stay pinned at one caller because they are
+    still auto-chunk-only; a second caller there would be a real new path.
     """
     import inspect
 
@@ -597,19 +608,27 @@ async def test_the_degrade_policy_lives_in_one_place() -> None:
         f"expected the child batch embed to be called in exactly one place "
         f"(the shared helper); found {raw}"
     )
-    for helper in (
-        "_embed_children_or_degrade",
-        "_queue_child_reembeds",
-        "_mark_child_embedding_pending",
+    # helper -> exact call-site count, or None for "at least one".
+    for helper, expected_calls in (
+        ("_embed_children_or_degrade", None),
+        ("_queue_child_reembeds", 1),
+        ("_mark_child_embedding_pending", 1),
     ):
         defs = src.count(f"def {helper}(")
         calls = src.count(f"{helper}(") - defs
         assert defs == 1, f"{helper} is defined {defs} times, expected 1"
-        assert calls == 1, (
-            f"{helper} has {calls} call sites, expected exactly 1. A second "
-            f"caller is the H-09 shape: two copies of the auto-chunk path, one "
-            f"of which gets fixed."
-        )
+        if expected_calls is None:
+            assert calls >= 1, (
+                f"{helper} has no call sites — the degrade policy is defined "
+                f"but nothing routes through it, which is H-09 with the fix "
+                f"orphaned rather than duplicated."
+            )
+        else:
+            assert calls == expected_calls, (
+                f"{helper} has {calls} call sites, expected exactly "
+                f"{expected_calls}. A second caller is the H-09 shape: two "
+                f"copies of the auto-chunk path, one of which gets fixed."
+            )
 
 
 async def test_the_no_id_log_carries_no_memory_content(caplog) -> None:

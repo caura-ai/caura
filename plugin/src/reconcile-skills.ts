@@ -65,7 +65,7 @@ import { logError } from "./logger.js";
  * tenant or a fleet with zero shared skills should NOT wipe the
  * agent's onboarding skill).
  *
- * Both slugs are protected during the rebrand transition: "memclaw" is — legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+ * Both slugs are protected during the rebrand transition: "memclaw" is — legacy-name-floor: documents the dual-path transition tracked in docs/plans/skills-dual-path-transition.md
  * the historical bundled skill (still on disk on every existing
  * install), "caura" is the new one shipped alongside it starting this
  * release. This set MUST be updated in the same commit/deploy as any

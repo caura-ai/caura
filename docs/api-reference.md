@@ -119,7 +119,7 @@ routes expose generic software or identity-probe data, not tenant data.
 | Header | Effect |
 |---|---|
 | `X-Agent-ID` | Scopes the request to this agent |
-| `X-Org-Read-Only: true` | Read-only mode — creates/updates return 403 |
+| `X-Org-Read-Only: true` | Plan-limit read-only mode — creates and other writes that grow the store return 403 `PLAN_LIMIT_READ_ONLY`. Deletes, memory status transitions, agent trust changes and `PUT /settings` stay allowed so an over-limit org can get back under its plan |
 | `X-Tenant-ID` | Tenant identity when using the shared `CAURA_API_KEY` gate |
 
 The identity headers are trusted on the gateway-header auth path. Set

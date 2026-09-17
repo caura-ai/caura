@@ -106,6 +106,23 @@ class Memory(Base):
         DateTime(timezone=True)
     )
 
+    # 09/02 M-55. When ``status`` last changed. NULL on every row written
+    # before this column existed, and on any row whose status has never been
+    # touched — readers must COALESCE to ``created_at``.
+    #
+    # Exists because a contradiction is a status FLIP on an existing row, and
+    # that event had no timestamp anywhere. ``outcome_contradiction_signals``
+    # therefore windowed on ``created_at``, so a memory written weeks ago and
+    # contradicted today fell outside the current scan window and its failure
+    # evidence was dropped — silently, since "no rows" and "no contradictions"
+    # are the same answer. The source extractor's docstring always described
+    # windowing on the transition time and anticipated exactly this column.
+    #
+    # Distinct from supersession, which needs no such field: there the event IS
+    # the creation of the superseding memory, so ``new_mem.created_at`` is
+    # already the right timestamp.
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # Contradiction tracking
     supersedes_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),

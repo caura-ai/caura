@@ -322,6 +322,10 @@ async def _run_auto_chunk(chunks: list[str], live: dict[str, dict]) -> list[dict
     )
     ctx = SimpleNamespace(
         data={
+            # What ``create_memory`` puts on every real context. Omitting it
+            # worked only while no step this handler runs reached for it; the
+            # parent's dedup gate does.
+            "input": data,
             "memory_fields": {
                 "memory_type": "fact",
                 "title": "t",
@@ -401,6 +405,10 @@ async def test_the_parent_child_count_is_the_number_of_children_that_exist() -> 
     )
     ctx = SimpleNamespace(
         data={
+            # What ``create_memory`` puts on every real context. Omitting it
+            # worked only while no step this handler runs reached for it; the
+            # parent's dedup gate does.
+            "input": data,
             "memory_fields": {
                 "memory_type": "fact",
                 "title": "t",
@@ -481,6 +489,10 @@ async def test_a_dropped_child_is_never_embedded() -> None:
     )
     ctx = SimpleNamespace(
         data={
+            # What ``create_memory`` puts on every real context. Omitting it
+            # worked only while no step this handler runs reached for it; the
+            # parent's dedup gate does.
+            "input": data,
             "memory_fields": {
                 "memory_type": "fact",
                 "title": "t",

@@ -433,6 +433,130 @@ SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
     }
 )
 
+# ── Predicate aliasing under paraphrase (A36) ──
+# ``SINGLE_VALUE_PREDICATES`` says WHICH attributes can hold only one value.
+# It does not say which of its own members are the SAME attribute — so
+# ``status`` and ``current_status`` are two keys, and a subject carrying one of
+# each is never compared. The RDF contradiction path keys on
+# ``(subject_entity_id, predicate)`` with an exact predicate match, so
+# "deploy target is staging" written as ``deployed_to`` and later contradicted
+# as ``deployed_on: production`` produces no conflict at all: both rows stay
+# live, both stay unpenalised, and a reader gets whichever ranks higher.
+#
+# Each key below is an alias; each value is the canonical member of its cluster
+# (itself always a member of ``SINGLE_VALUE_PREDICATES``). Consumers should go
+# through ``predicate_cluster()`` rather than reading this map directly.
+#
+# THE INCLUSION RULE, and why it is deliberately narrow. On the OBJECT side of
+# this query (A35) a wrong equivalence SUPPRESSES a real contradiction, so
+# normalising aggressively was safe. Here the failure runs the other way: a
+# wrong alias MANUFACTURES a contradiction between two facts that were never in
+# competition, and the loser takes a 0.5 ranking penalty. So a cluster is
+# admitted only when its members differ by a function word, an abbreviation, or
+# a form of the same word — never by a content word.
+#
+# What that rule REFUSES, and why each refusal is load-bearing:
+#
+#   * INVERSES. The set contains ``manager``/``manager_of``,
+#     ``head_of``/``headed_by``, ``ceo``/``ceo_of``,
+#     ``maintainer``/``maintainer_of``. These are not paraphrases — they point
+#     the other way. Aliasing "X's manager is Y" to "X is the manager of Y"
+#     would read an org chart as self-contradictory. Only the side that makes
+#     the value an attribute OF the subject joins a cluster.
+#   * ``title`` → ``job_title``. ``title`` is also a document's title, and the
+#     predicate carries no subject type to tell the two apart.
+#   * ``cost`` → ``price``. What a thing costs to make and what it sells for
+#     are two numbers that are SUPPOSED to differ.
+#   * ``latest_version`` / ``running_version`` → ``version``. Latest-released
+#     and currently-deployed differ on every system mid-rollout; that gap is
+#     the fact, not a conflict.
+#   * ``start_date`` / ``started_at`` and the ``end_date`` family. Planned vs
+#     actual. A slipped schedule would read as a contradiction.
+#   * ``resides_at`` / ``stationed_at`` / ``address`` / ``city`` / ``country``
+#     / ``region``. These differ from the location cluster in GRANULARITY, and
+#     "Boston" vs "12 Main St" is not a disagreement.
+#
+# Granularity note: this exposure is not new and is not created here —
+# ``located_in: Boston`` already conflicts with ``located_in: Massachusetts``
+# under a single predicate. The rule above keeps aliasing from WIDENING it.
+_PREDICATE_ALIAS_CLUSTERS: tuple[tuple[str, ...], ...] = (
+    # Identity & status. ``state``/``current_state`` sit in the set's own
+    # "Identity & status" section — geography is carried by ``region`` /
+    # ``country`` / ``city``, which stay out of every cluster.
+    ("status", "has_status", "current_status", "state", "current_state"),
+    ("phase", "current_phase"),
+    ("role", "has_role", "current_role"),
+    ("type", "has_type"),
+    # Where a thing is. One cluster on purpose: for a person "lives in" and
+    # "is located in" answer the same question, and the predicate does not
+    # know whether its subject is a person or a company.
+    (
+        "located_in",
+        "is_located_in",
+        "based_in",
+        "is_based_in",
+        "headquartered_in",
+        "hq_in",
+        "lives_in",
+        "resides_in",
+        "location",
+        "current_location",
+    ),
+    # Where a workload runs. Preposition-only differences.
+    ("deployed_to", "is_deployed_to", "deployed_at", "deployed_on"),
+    ("hosted_on", "is_hosted_on", "hosted_at"),
+    ("runs_on", "running_on"),
+    ("stored_in", "stored_at"),
+    ("registered_in", "registered_at"),
+    # Hierarchy — attribute-of-subject side only (see INVERSES above).
+    ("reports_to", "reporting_to", "supervisor", "supervised_by", "manager"),
+    ("led_by", "headed_by"),
+    ("assigned_to", "is_assigned_to", "assignee"),
+    ("maintained_by", "maintainer"),
+    # Metrics. ``price`` and ``cost`` are separate clusters, not one.
+    ("score", "has_score", "scored"),
+    ("rating", "has_rating", "rated"),
+    ("price", "has_price", "priced_at", "current_price"),
+    ("cost", "has_cost", "costs"),
+    ("rank", "has_rank", "ranked", "ranking"),
+    ("value", "has_value"),
+    ("version", "has_version", "current_version"),
+    ("due_date", "due_by", "due_on", "deadline", "has_deadline"),
+    # Contact & personal.
+    ("email", "has_email", "email_address"),
+    ("phone", "has_phone", "phone_number"),
+    ("birthdate", "date_of_birth"),
+    ("spouse", "married_to"),
+    ("employer", "employed_by"),
+)
+
+# alias → canonical. The first member of each tuple is the canonical form.
+PREDICATE_ALIASES: dict[str, str] = {
+    alias: cluster[0] for cluster in _PREDICATE_ALIAS_CLUSTERS for alias in cluster[1:]
+}
+
+# Any member → every member of its cluster, canonical included. This is the
+# lookup the query path wants: it turns one predicate into the set of spellings
+# a stored row might legitimately have used for the same attribute.
+_PREDICATE_CLUSTER_BY_MEMBER: dict[str, frozenset[str]] = {
+    member: frozenset(cluster)
+    for cluster in _PREDICATE_ALIAS_CLUSTERS
+    for member in cluster
+}
+
+
+def predicate_cluster(predicate: str) -> frozenset[str]:
+    """Every spelling that means the same attribute as ``predicate``.
+
+    Returns ``{predicate}`` (lowercased) for a predicate in no cluster, so a
+    caller can use the result unconditionally and an unaliased predicate keeps
+    exactly today's behaviour — a single-member IN is the same query as an
+    equality.
+    """
+    normalized = (predicate or "").strip().lower()
+    return _PREDICATE_CLUSTER_BY_MEMBER.get(normalized, frozenset({normalized}))
+
+
 # ── Lifecycle automation (CAURA-655) ──
 # Weight threshold for archive-stale: memories below this with zero
 # recalls are eligible for archival. Lives in common/ so the threshold
@@ -555,6 +679,60 @@ SEARCH_KNOBS: dict[str, SearchKnob] = {
     "candidate_pool_size": SearchKnob(int, (0, 200), sql=True),
     # A50 unified: 0 = legacy multiplicative score; 1 = unified relevance-dominant formula.
     "score_formula": SearchKnob(int, (0, 1), sql=True),
+    # HNSW two-stage retrieval (PR2 of docs/plans/hnsw-two-stage-retrieval.md):
+    # 0 = off (full-scan candidate window, unchanged); >0 = storage admits
+    # candidates through index-served pool arms (ANN top-N by cosine via the
+    # memories HNSW index, FTS, recency, date window, entity-boosted ids) and
+    # runs the scoring formula over that pool only. Needs pgvector >= 0.8 at
+    # runtime (iterative scans); storage probes once and silently keeps the
+    # full scan below that. Mutually exclusive with ``candidate_pool_size`` —
+    # storage lets ann win if both arrive, but don't set both.
+    "ann_pool_size": SearchKnob(int, (0, 1000), sql=True),
+    # Shadow-compare mode for the ANN pool (PR3): when 1 AND ann_pool_size > 0,
+    # core-api SERVES the legacy full-scan result and runs the pooled query in
+    # the background, logging rank overlap / score deltas / latency — the
+    # rollout gate's evidence on real traffic. Core-api-side only (sql=False:
+    # storage never reads it; the primary call crosses the wire with
+    # ann_pool_size forced to 0 and the shadow call with the configured size).
+    # Inert when ann_pool_size is 0.
+    "ann_pool_shadow": SearchKnob(int, (0, 1)),
+    # A41: which counter feeds ``recall_boost``. 0 = ``recall_count`` (bumped on
+    # RETURN by TrackRecalls — current behaviour, the returned→boosted→returned
+    # loop A26/#411 could only dampen). 1 = the confirmed-use counter
+    # (``metadata._system.recall_used_count``, bumped when an agent REPORTS an
+    # outcome naming the memory in ``related_ids`` via evolve) — the boost then
+    # compounds only retrievals an agent actually acted on. The boost's shape,
+    # cap and window are IDENTICAL under both sources; only the counter (and its
+    # recency anchor) switches, so flipping is reversible and both counters keep
+    # accruing regardless of the setting (returned = recall_count, confirmed =
+    # the metadata counter) — the counterfactual stays measurable either way.
+    # Storage reads it (sql=True). Per TENANT via ``search.default_profile``,
+    # deliberately not agent-tunable: like ``score_formula`` it reshuffles
+    # ranking for every caller in the tenant and is held at the global default
+    # until the returned-vs-used measurement validates the flip (A50: every
+    # boost must earn its weight on the workload that needs it).
+    "recall_boost_source": SearchKnob(int, (0, 1), sql=True),
+    # Reference clock for freshness and the temporal window when the request
+    # carries ``valid_at`` (the as-of time of the question). 0 = ``now()`` —
+    # byte-identical to today. 1 = age is measured from ``valid_at``, and the
+    # row's anchor is ``coalesce(ts_valid_start, created_at)`` instead of
+    # ``greatest(created_at, ts_valid_start)``. Inert without ``valid_at`` on
+    # the request; ``valid_at`` without the knob keeps today's behaviour, so
+    # only the conjunction retargets the clock and no existing caller moves.
+    #
+    # Per TENANT on purpose, not per agent or per request: whether
+    # ``ts_valid_start`` means "when the event happened" (a backfilled history,
+    # a benchmark whose questions carry an as-of date) or "start of a validity
+    # window" (a price effective from a date) is a property of the tenant's
+    # data, and only the former wants freshness anchored to it. The
+    # ``greatest()`` in the default anchor is exactly the guard that protects
+    # the latter — a validity-window row must never rank as older than its
+    # ingest — which is why this is a switch and not a new default.
+    #
+    # Storage reads it (sql=True). The recall-usage decay is deliberately NOT
+    # retargeted: "recently recalled" is a system-time fact, not an event-time
+    # one, and stays on ``now()`` under either setting.
+    "freshness_reference": SearchKnob(int, (0, 1), sql=True),
 }
 
 # The wire contract, derived. Core-api's two search-path builders project

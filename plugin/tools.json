@@ -740,14 +740,14 @@
       },
       {
         "default": 5,
-        "description": "Max results, default 5. Values above 200 are capped to 200.",
+        "description": "Max results, default 5. Values above 200 are capped to 200. Superseded hits add their newest correction beyond this cap, marked injected:true.",
         "name": "top_k",
         "required": false,
         "type": "int"
       },
       {
         "default": null,
-        "description": "As-of ISO 8601 date: filter to rows valid at that time.",
+        "description": "As-of ISO 8601 date: filter to rows valid then; relative dates resolve against it. Tenant freshness_reference=1 anchors freshness too.",
         "name": "valid_at",
         "required": false,
         "type": "str | None"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
@@ -12,6 +13,58 @@ from core_api.services.task_tracker import tracked_task
 from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
+
+
+async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) -> None:
+    """Retire the near-duplicate this write supersedes (A71).
+
+    Two writes, and the ORDER is the safety property:
+
+      1. point the NEW row at the candidate (``supersedes_id``), leaving both
+         live for an instant;
+      2. mark the CANDIDATE ``outdated``.
+
+    Done the other way round, a failure between them leaves a row retired with
+    nothing standing in its place — the claim disappears from recall with no
+    successor to find. In this order the same failure leaves both rows live and
+    linked, which is exactly what an in-flight contradiction chain looks like
+    and which the existing lineage already tolerates.
+
+    ``update_memory_status`` guards the link with a CAS against NULL, so if a
+    contradiction verdict claimed this row between the write and here, that
+    verdict wins and this becomes a no-op rather than a second opinion.
+
+    Never raises: the memory is already committed and the caller returned 201.
+    A merge that fails leaves an ordinary near-duplicate pair — the state every
+    tenant without this flag is in — so degrading is strictly better than
+    failing a write that succeeded.
+    """
+    sc = get_storage_client()
+    try:
+        await sc.update_memory_status(new_id, "active", supersedes_id=candidate_id, tenant_id=tenant_id)
+    except Exception:
+        logger.warning(
+            "near-duplicate merge: could not link %s -> %s; leaving both rows live",
+            new_id,
+            candidate_id,
+            exc_info=True,
+        )
+        return
+    try:
+        await sc.update_memory_status(candidate_id, "outdated", tenant_id=tenant_id)
+    except Exception:
+        # The link landed, so the pair is discoverable and a later contradiction
+        # pass can finish the job. Logged at WARNING rather than swallowed
+        # because until then the superseded row still ranks as current.
+        logger.warning(
+            "near-duplicate merge: linked %s -> %s but could not retire the "
+            "candidate; it still reads as current",
+            new_id,
+            candidate_id,
+            exc_info=True,
+        )
+        return
+    logger.info("near_duplicate_merged new=%s superseded=%s tenant_id=%s", new_id, candidate_id, tenant_id)
 
 
 class ScheduleBackgroundTasks:
@@ -28,6 +81,13 @@ class ScheduleBackgroundTasks:
         resolved_write_mode = ctx.data.get("resolved_write_mode")
         memory_id = memory["id"] if isinstance(memory, dict) else memory.id
 
+        # A71 — perform the merge ``DetectNearDuplicate`` decided on. It runs
+        # before the row exists, so it can only record the intent; this is the
+        # first point at which there is an id to link.
+        merge_target = ctx.data.get("merge_supersedes_id")
+        if merge_target:
+            await _merge_near_duplicate(str(memory_id), str(merge_target), data.tenant_id)
+
         # Fast mode fan-out. The fast branch returns BEFORE the strong-mode
         # entity-extraction + Path A blocks below, so historically each had
         # to be wired through ``_enrich_memory_background`` indirectly —
@@ -37,7 +97,19 @@ class ScheduleBackgroundTasks:
         # gaps by mirroring the strong branch's direct fan-out below for
         # extraction and Path A.
         if resolved_write_mode == "fast":
-            if tenant_config.enrichment_enabled:
+            # OSS 09/02 M-18 — ``enrichment_provider != "none"`` belongs here
+            # too. Every other enrichment gate in the write path carries it
+            # (the strong branch below, ``ParallelEmbedEnrich``, and the bulk
+            # path); this one did not, and "none" is not a no-op provider:
+            # ``enrich_memory`` answers it with a bare ``EnrichmentResult()``
+            # (common/enrichment/service.py) whose Pydantic defaults are real
+            # values — ``weight=0.7``, ``status="active"``, ``memory_type=fact``,
+            # empty title/summary/tags. Those survive
+            # ``model_dump(exclude_none=True)`` and are PATCHed onto the row, so
+            # a tenant with enrichment explicitly provider-less had every fast
+            # write silently reweighted 0.5 -> 0.7 and its ``enrichment_pending``
+            # marker cleared as though an LLM had looked at it.
+            if tenant_config.enrichment_enabled and tenant_config.enrichment_provider != "none":
                 from core_api.services.memory_service import (
                     _agent_provided_enrichment_fields,
                     _schedule_enrich_or_inline,
@@ -66,13 +138,16 @@ class ScheduleBackgroundTasks:
 
             # Entity extraction (Gap 01). Extraction reads only ``content`` —
             # no dependency on the embedding being available — so it fires
-            # regardless of embed deferral. ``_enrich_memory_background``
-            # may also fire extraction in some profiles (OSS+fast inline
-            # path); ``process_entity_extraction`` is idempotent
-            # (``find_entity_link`` short-circuits link creation) so the
-            # potential second fire is a wasted LLM call, not a data
-            # integrity issue. Cleaning up the redundant fire is a
-            # follow-up once ``_enrich_memory_background`` is decomposed.
+            # regardless of embed deferral.
+            #
+            # OSS 09/02 L-20 — this is now the SOLE trigger on this path. It
+            # used to be one of two: ``_enrich_memory_background`` fired
+            # extraction as well, so a fast+inline write paid for two LLM
+            # extraction passes. The redundant one was removed there rather
+            # than here, because this fire is the one that does not depend on
+            # enrichment succeeding — the other sat past an ``enrich_memory``
+            # call whose failure returns early, so on that path a failed
+            # enrichment silently cost the row its extraction too.
             if tenant_config.entity_extraction_enabled:
                 track_task(
                     tracked_task(
@@ -188,8 +263,7 @@ class ScheduleBackgroundTasks:
         # write load, extraction LLM calls compete with live traffic
         # (scaling doc §10 bottleneck #7). Full worker-fleet migration
         # waits on CAURA-593 (Pub/Sub publisher/subscriber wiring) +
-        # a new worker service that subscribes to
-        # Topics.Pipeline.ENTITY_EXTRACT_REQUESTED.
+        # a new worker service and a deliberately provisioned topic contract.
         if tenant_config.entity_extraction_enabled:
             track_task(
                 tracked_task(

@@ -1,8 +1,19 @@
 """Redis-backed short-term memory backend.
 
 Uses the shared Redis connection from ``core_api.cache``.
-All operations are wrapped in try/except so STM degrades gracefully
-when Redis is unavailable — callers get empty lists instead of errors.
+
+READS degrade gracefully: every one is wrapped in try/except and answers with
+an empty list when Redis is unavailable, which is an honest answer to "what is
+in short-term memory" — nothing the caller can reach.
+
+MUTATIONS — writes and clears alike — report whether they happened, and this
+is the distinction the module previously did not make. They were wrapped in the same try/except and returned
+None on both paths, so a dropped entry and a stored one were indistinguishable
+to the caller; the route above went on to answer 200 with an entry id and a TTL
+for a write that never happened. Degrading a read is graceful. Degrading a
+write and saying nothing is fabricating a receipt. A dropped CLEAR is the
+same lie told about a delete: the caller is told the notes are gone, and they
+are still there on the next read.
 """
 
 from __future__ import annotations
@@ -51,10 +62,14 @@ class RedisSTM:
             logger.debug("RedisSTM.get_notes failed", exc_info=True)
             return []
 
-    async def post_note(self, tenant_id: str, agent_id: str, entry: dict[str, Any]) -> None:
+    async def post_note(self, tenant_id: str, agent_id: str, entry: dict[str, Any]) -> bool:
         r = await self._redis()
         if r is None:
-            return
+            # Not an error condition to Redis — there is simply no connection.
+            # It still means the note was not stored, which is what the caller
+            # needs to know, so it answers the same False as a failed write.
+            logger.warning("RedisSTM.post_note: no Redis connection; note not stored")
+            return False
         key = f"stm:notes:{tenant_id}:{agent_id}"
         try:
             pipe = r.pipeline(transaction=False)
@@ -62,17 +77,25 @@ class RedisSTM:
             pipe.ltrim(key, 0, self._notes_max - 1)
             pipe.expire(key, self._notes_ttl)
             await pipe.execute()
+            return True
         except Exception:
-            logger.debug("RedisSTM.post_note failed", exc_info=True)
+            # WARNING, not DEBUG: this is a dropped write. At DEBUG it was
+            # invisible in every deployment that does not run debug logging,
+            # which is the reason the drop went unnoticed.
+            logger.warning("RedisSTM.post_note failed; note not stored", exc_info=True)
+            return False
 
-    async def clear_notes(self, tenant_id: str, agent_id: str) -> None:
+    async def clear_notes(self, tenant_id: str, agent_id: str) -> bool:
         r = await self._redis()
         if r is None:
-            return
+            logger.warning("RedisSTM.clear_notes: no Redis connection; nothing cleared")
+            return False
         try:
             await r.delete(f"stm:notes:{tenant_id}:{agent_id}")
+            return True
         except Exception:
-            logger.debug("RedisSTM.clear_notes failed", exc_info=True)
+            logger.warning("RedisSTM.clear_notes failed; nothing cleared", exc_info=True)
+            return False
 
     # -- bulletin (per-fleet shared) -----------------------------------------
 
@@ -88,10 +111,11 @@ class RedisSTM:
             logger.debug("RedisSTM.get_bulletin failed", exc_info=True)
             return []
 
-    async def post_bulletin(self, tenant_id: str, fleet_id: str, entry: dict[str, Any]) -> None:
+    async def post_bulletin(self, tenant_id: str, fleet_id: str, entry: dict[str, Any]) -> bool:
         r = await self._redis()
         if r is None:
-            return
+            logger.warning("RedisSTM.post_bulletin: no Redis connection; entry not stored")
+            return False
         key = f"stm:bul:{tenant_id}:{fleet_id}"
         try:
             pipe = r.pipeline(transaction=False)
@@ -99,14 +123,19 @@ class RedisSTM:
             pipe.ltrim(key, 0, self._bulletin_max - 1)
             pipe.expire(key, self._bulletin_ttl)
             await pipe.execute()
+            return True
         except Exception:
-            logger.debug("RedisSTM.post_bulletin failed", exc_info=True)
+            logger.warning("RedisSTM.post_bulletin failed; entry not stored", exc_info=True)
+            return False
 
-    async def clear_bulletin(self, tenant_id: str, fleet_id: str) -> None:
+    async def clear_bulletin(self, tenant_id: str, fleet_id: str) -> bool:
         r = await self._redis()
         if r is None:
-            return
+            logger.warning("RedisSTM.clear_bulletin: no Redis connection; nothing cleared")
+            return False
         try:
             await r.delete(f"stm:bul:{tenant_id}:{fleet_id}")
+            return True
         except Exception:
-            logger.debug("RedisSTM.clear_bulletin failed", exc_info=True)
+            logger.warning("RedisSTM.clear_bulletin failed; nothing cleared", exc_info=True)
+            return False

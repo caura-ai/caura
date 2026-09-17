@@ -729,6 +729,89 @@ async def test_settings_still_refuses_the_demo_sandbox(client, as_auth):
     assert resp.status_code == 403, resp.text
 
 
+async def test_settings_still_works_when_over_usage_limits(client, as_auth):
+    """Pins a deliberate omission, so nobody "fixes" it by adding the gate.
+
+    H-15 also named the missing ``enforce_usage_limits`` on ``PUT /settings``.
+    It is NOT applied, on purpose: plan-limit read-only mode stops an over-plan
+    org GROWING the store (``usage_service`` policy record), and a settings
+    row grows nothing. More to the point this is a mitigation route — turning
+    enrichment off, rotating a leaked provider key, requiring agent approval —
+    and quota state must not stand between an operator and a mitigation. Same
+    carve-out as ``test_agent_trust_still_works_when_over_usage_limits``.
+    """
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant, is_read_only=True)
+    resp = await client.put(
+        "/api/v1/settings",
+        json={"tenant_id": tenant, "agents": {"require_agent_approval": True}},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agents"]["require_agent_approval"] is True
+
+
+# ---------------------------------------------------------------------------
+# L-39 — /settings derived "admin" from ``tenant_id is None``
+#
+# The shared ``CAURA_API_KEY`` gate (auth Path 2) builds a tenant-less,
+# non-admin context when the request names no ``X-Tenant-ID`` — and, having
+# no tenant, that path runs no suppression check. ``_resolve_tenant`` read
+# "no tenant" as "admin", so such a caller could pick ANY tenant with
+# ``?tenant_id=`` and read or rewrite its settings, past the suppression guard.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def as_tenantless(monkeypatch):
+    """Install a Path-2-shaped context: authenticated, no tenant, not admin."""
+    from core_api.app import app
+    from core_api.auth import AuthContext, get_auth_context
+    from core_api.tenant_context import set_current_tenant
+
+    def _install(*, is_admin: bool = False):
+        async def _dep():
+            set_current_tenant(None)
+            return AuthContext(tenant_id=None, is_admin=is_admin)
+
+        app.dependency_overrides[get_auth_context] = _dep
+
+    yield _install
+    from core_api.app import app as _app
+    from core_api.auth import get_auth_context as _gac
+
+    _app.dependency_overrides.pop(_gac, None)
+
+
+async def test_tenantless_non_admin_cannot_pick_a_tenants_settings(
+    client, as_tenantless
+):
+    victim = f"tenant-{_uid()}"
+    as_tenantless()
+    read = await client.get(f"/api/v1/settings?tenant_id={victim}")
+    write = await client.put(
+        f"/api/v1/settings?tenant_id={victim}",
+        json={"agents": {"require_agent_approval": False}},
+    )
+    assert read.status_code == 400, read.text
+    assert write.status_code == 400, write.text
+    assert "tenant_id required" in write.text
+
+
+async def test_admin_still_targets_a_named_tenant(client, as_tenantless):
+    """The admin credential (auth Path 1) is ALSO tenant-less; it keeps the
+    selector — the fix narrows the derivation, it does not remove the feature."""
+    tenant = f"tenant-{_uid()}"
+    as_tenantless(is_admin=True)
+    resp = await client.put(
+        f"/api/v1/settings?tenant_id={tenant}",
+        json={"agents": {"require_agent_approval": True}},
+    )
+    assert resp.status_code == 200, resp.text
+    reread = await client.get(f"/api/v1/settings?tenant_id={tenant}")
+    assert reread.status_code == 200, reread.text
+    assert reread.json()["agents"]["require_agent_approval"] is True
+
+
 # ---------------------------------------------------------------------------
 # PATCH /memories/{id} — the capability gate its own neighbours already apply
 #

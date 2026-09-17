@@ -1,8 +1,8 @@
 """Phase 5.1: every server-side env read accepts the new name and the old one.
 
-Rule 3 makes the old spellings permanent, so each case here is asserted in both
-directions — a test that only proves the new name works would pass just as well
-after someone deleted the fallback.
+The compatibility register's environment-prefix row currently protects both
+spellings, so each case here is asserted in both directions — a test that only
+proves the new name works would pass just as well after someone deleted the fallback.
 
 Each line that has to spell the old name carries its own ``legacy-name-ok``
 marker, and they are kept to a minimum: two env-name constants plus the one
@@ -17,8 +17,8 @@ import pytest
 from core_api import constants
 from core_api.config import Settings
 
-OLD_API_KEY_ENV = "MEMCLAW_API_KEY"  # legacy-name-ok: rule 3 — the alias under test
-OLD_VERSION_ENV = "MEMCLAW_VERSION"  # legacy-name-ok: rule 3 — the alias under test
+OLD_API_KEY_ENV = "MEMCLAW_API_KEY"  # legacy-name-ok: env-prefix alias under test
+OLD_VERSION_ENV = "MEMCLAW_VERSION"  # legacy-name-ok: env-prefix alias under test
 NEW_API_KEY_ENV = "CAURA_API_KEY"
 NEW_VERSION_ENV = "CAURA_VERSION"
 
@@ -32,7 +32,7 @@ def clean_env(monkeypatch):
 
 def _resolved_api_key(**overrides):
     """The api-key setting, whichever spelling supplied it."""
-    return Settings(**overrides).memclaw_api_key  # legacy-name-ok: rule 3 — field the aliases feed
+    return Settings(**overrides).memclaw_api_key  # legacy-name-ok: field the env-prefix aliases feed
 
 
 class TestApiKeyResolution:
@@ -63,7 +63,7 @@ class TestApiKeyResolution:
         assert _resolved_api_key() == "real-key"
 
     def test_field_name_construction_still_works(self, clean_env):
-        assert _resolved_api_key(memclaw_api_key="kw") == "kw"  # legacy-name-ok: rule 3 — field-name path
+        assert _resolved_api_key(memclaw_api_key="kw") == "kw"  # legacy-name-ok: compatibility field-name path
 
 
 class TestVersionResolution:

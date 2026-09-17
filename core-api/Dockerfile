@@ -66,7 +66,7 @@ RUN if [ "$WITH_RERANK_LOCAL" = "1" ]; then \
 
 # Stamp the service version into a file the app reads at runtime. Source of
 # truth is pyproject.toml; an optional CAURA_VERSION build-arg (e.g. the
-# release tag) overrides it (MEMCLAW_VERSION keeps working — legacy-name-ok: rule 3 dual-read alias).
+# release tag) overrides it (MEMCLAW_VERSION keeps working — legacy-name-floor: documents the live dual-read alias).
 # Deterministic and independent of installed-
 # package metadata — deps install via ``--no-emit-project`` so core-api is
 # never installed as a package, leaving importlib.metadata with no version

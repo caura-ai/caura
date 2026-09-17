@@ -161,10 +161,16 @@ async def list_reports(
     offset: int = Query(default=0, ge=0),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """List crystallization reports for a tenant."""
+    """List crystallization reports for a tenant, newest first.
+
+    09/02 M-12 — ``limit`` and ``offset`` are now actually applied. They were
+    declared and validated here but never passed on, so the storage service ran
+    its own default window: every request returned the same first 10 reports,
+    ``offset`` did nothing, and a caller paging through got page 1 forever.
+    """
     auth.enforce_tenant(tenant_id)
     sc = get_storage_client()
-    reports = await sc.list_reports(tenant_id)
+    reports = await sc.list_reports(tenant_id, limit=limit, offset=offset)
     return [
         ReportSummaryOut(
             id=str(r.get("id", "")),

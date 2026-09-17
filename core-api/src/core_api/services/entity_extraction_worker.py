@@ -3,9 +3,10 @@
 import asyncio
 import logging
 import re
-from typing import Any, Literal
+from typing import Any, Final, Literal
 from uuid import UUID
 
+from common.constants import SINGLE_VALUE_PREDICATES
 from common.embedding import get_embedding
 from common.entity_naming import canonical_match_key
 from core_api.clients.storage_client import get_storage_client
@@ -21,8 +22,53 @@ from core_api.schemas import RelationUpsert
 from core_api.services.audit_service import log_action
 from core_api.services.entity_extraction import extract_entities_from_content
 from core_api.services.entity_service import upsert_relation
+from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
+
+# A65 — map the extractor's free-form ``relation_type`` onto the canonical
+# predicate vocabulary, so two rows that state the same attribute in different
+# words compare equal on the deterministic RDF path.
+#
+# The extractor is asked for "a short verb phrase like works_on, uses,
+# belongs_to" and answers in whatever shape it likes: "Managed By", "reports-to",
+# "is located in". None of those equal ``managed_by`` / ``reports_to`` /
+# ``located_in`` as strings, so without normalisation the write-back below would
+# populate ``predicate`` with values that never match another row's.
+#
+# Deliberately conservative. It normalises SHAPE (case, spaces, hyphens, a
+# leading "is_"/"has_" where the bare form is canonical) and nothing else — no
+# synonym table, no stemming, no inference. A predicate that does not land in
+# ``SINGLE_VALUE_PREDICATES`` after that is returned as None and the row keeps a
+# NULL predicate, because a wrong predicate is worse than none: the RDF path
+# treats (subject, predicate) as authoritative and would compare two unrelated
+# attributes as if they were the same one.
+_PREDICATE_PREFIXES: Final[tuple[str, ...]] = ("is_", "has_", "was_", "the_")
+
+
+def _canonical_predicate(raw: str | None) -> str | None:
+    """The canonical single-value predicate for an extracted relation, or None."""
+    if not raw:
+        return None
+    norm = re.sub(r"[\s\-]+", "_", str(raw).strip().lower())
+    norm = re.sub(r"[^a-z0-9_]", "", norm).strip("_")
+    if not norm:
+        return None
+    # Strip FIRST, not last. The canonical set contains both spellings of
+    # several predicates — ``is_located_in`` AND ``located_in``,
+    # ``is_based_in`` AND ``based_in``, ``has_status`` AND ``status`` — so
+    # returning the raw form when it happens to be canonical would let two rows
+    # stating the SAME attribute land on two different canonical predicates and
+    # never match. That is precisely the failure this function exists to remove,
+    # so the bare form always wins and both spellings converge on it.
+    for prefix in _PREDICATE_PREFIXES:
+        if norm.startswith(prefix):
+            stripped = norm[len(prefix) :]
+            if stripped in SINGLE_VALUE_PREDICATES:
+                return stripped
+    if norm in SINGLE_VALUE_PREDICATES:
+        return norm
+    return None
 
 
 # CAURA graph-build fix (A): reject literal VALUES and attribute/field NAMES so they
@@ -264,8 +310,8 @@ async def process_entity_extraction(
     # the scaling plan, which was to land the work on a dedicated worker
     # fleet so core-api isn't CPU/memory-contended by burst-time LLM
     # calls. Full migration: CAURA-593 lands Pub/Sub first, then a new
-    # worker service subscribes to ``Topics.Pipeline.ENTITY_EXTRACT_REQUESTED``
-    # and this function becomes its handler body.
+    # worker service and topic contract land together, with this function as
+    # the handler body.
     #
     # H-02. Guards both of the trailing liveness checks — the one at the end of
     # the ``try`` and the one in the ``except``. It means "this memory MAY have
@@ -777,21 +823,123 @@ async def process_entity_extraction(
         # that names the collapsed form must still land on the merged row.
         key_to_id: dict[str, UUID] = {canonical_match_key(n): i for n, i in name_to_id.items()}
         rel_count = 0
+        rel_failed = 0
         for rel in graph.relations:
             from_id = name_to_id.get(rel.from_entity) or key_to_id.get(canonical_match_key(rel.from_entity))
             to_id = name_to_id.get(rel.to_entity) or key_to_id.get(canonical_match_key(rel.to_entity))
             if from_id and to_id:
-                await upsert_relation(
-                    RelationUpsert(
+                # Guarded PER RELATION, matching ``subject_writeback`` /
+                # ``predicate_writeback`` below. Unguarded, ONE failing upsert
+                # threw out of this whole function into the outer "(non-fatal)"
+                # handler — and everything after this loop is what actually
+                # feeds the deterministic contradiction path: the A65 predicate
+                # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY
+                # thing that runs A40's RDF pass. So a single transient storage
+                # error on one relation out of dozens left that memory with a
+                # NULL predicate forever and no Path C detection at all, and
+                # said "non-fatal" while doing it. Nothing retries.
+                #
+                # Observed, not hypothesised: a storage 500 on
+                # ``POST /entities/relations`` produced exactly this — every
+                # later stage skipped, one warning line, predicate never set.
+                try:
+                    await upsert_relation(
+                        RelationUpsert(
+                            tenant_id=tenant_id,
+                            fleet_id=fleet_id,
+                            from_entity_id=from_id,
+                            relation_type=rel.relation_type,
+                            to_entity_id=to_id,
+                            evidence_memory_id=memory_id,
+                        ),
+                    )
+                    rel_count += 1
+                except Exception:
+                    rel_failed += 1
+                    logger.warning(
+                        "relation_upsert failed for memory %s (%s -[%s]-> %s) (non-fatal)",
+                        memory_id,
+                        rel.from_entity,
+                        rel.relation_type,
+                        rel.to_entity,
+                        exc_info=True,
+                    )
+        if rel_failed:
+            # Surfaced as its own line so a partial graph is visible as a
+            # COUNT rather than N scattered warnings — a spike here means the
+            # entity graph is degrading quietly.
+            logger.warning(
+                "relation_upsert_partial memory=%s created=%d failed=%d",
+                memory_id,
+                rel_count,
+                rel_failed,
+            )
+
+        # ---- A65: predicate write-back ----
+        #
+        # A63 filled in ``subject_entity_id`` from the extractor and stopped
+        # there, so ``predicate`` and ``object_value`` stayed NULL on nearly
+        # every row — and the deterministic RDF contradiction path keys on
+        # (subject, predicate), so populating one of the three columns left it
+        # exactly as dormant as before. This is the same write-back for the
+        # other two.
+        #
+        # Only when EXACTLY ONE relation canonicalises, and it starts at the
+        # subject we just wrote back. The ambiguity rule is A63's, for A63's
+        # reason: downstream gates treat these columns as authoritative, so a
+        # wrong predicate is worse than none — it makes two unrelated attributes
+        # compare as the same one. Two canonical relations about one subject is
+        # exactly that risk, so it skips.
+        # Recomputed here rather than reused from the subject write-back above:
+        # that block is nested inside a conditional, so reaching into its locals
+        # would NameError on every path where it did not run. Same expression,
+        # same inputs, no cross-scope dependency.
+        subject_names = {name for name, _et, role in filtered if role == "subject" and name in name_to_id}
+        if len(subject_names) == 1:
+            subject_name = next(iter(subject_names))
+            canonical_rels = [
+                (p, rel.to_entity)
+                for rel in graph.relations
+                if rel.from_entity == subject_name and (p := _canonical_predicate(rel.relation_type))
+            ]
+            if len(canonical_rels) == 1:
+                pred, obj = canonical_rels[0]
+                try:
+                    updated = await sc.set_predicate_if_null(
+                        memory_id=str(memory_id),
                         tenant_id=tenant_id,
-                        fleet_id=fleet_id,
-                        from_entity_id=from_id,
-                        relation_type=rel.relation_type,
-                        to_entity_id=to_id,
-                        evidence_memory_id=memory_id,
-                    ),
+                        predicate=pred,
+                        object_value=str(obj),
+                    )
+                    logger.info(
+                        "predicate_writeback memory=%s predicate=%s outcome=%s",
+                        memory_id,
+                        pred,
+                        "set" if updated else "kept_existing",
+                    )
+                except Exception:
+                    # Non-fatal, exactly like the subject write-back: the row
+                    # simply keeps a NULL predicate, which is today's behaviour.
+                    logger.warning(
+                        "predicate_writeback failed for memory %s (non-fatal)",
+                        memory_id,
+                        exc_info=True,
+                    )
+            elif canonical_rels:
+                logger.info(
+                    "predicate_writeback memory=%s outcome=skipped_ambiguous n_predicates=%d",
+                    memory_id,
+                    len(canonical_rels),
                 )
-                rel_count += 1
+            else:
+                # The common case: the extractor named relations, none of which
+                # are single-valued attributes. Logged so "no canonical
+                # predicate" stays distinguishable from "never ran".
+                logger.info(
+                    "predicate_writeback memory=%s outcome=skipped_no_canonical n_relations=%d",
+                    memory_id,
+                    len(graph.relations),
+                )
 
         # Audit log
         await log_action(
@@ -878,8 +1026,29 @@ async def process_entity_extraction(
         if wrote_graph_rows:
             await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
+        # 09/02 M-40 — make the failure a ROW, not just a LINE.
+        #
+        # Every call site wraps this coroutine in ``tracked_task``, but that
+        # wrapper writes a ``BackgroundTaskLog`` row ONLY when the coroutine
+        # raises. This handler catches and returns normally — deliberately, and
+        # several tests pin that — so the wrapper saw success, the table an
+        # operator actually inspects stayed empty, the memory kept no entities,
+        # and nothing retried it or knew to.
+        #
+        # Recording here rather than re-raising keeps the non-raising contract
+        # intact. Raising would also work for the six production call sites,
+        # which are all wrapped, but it would turn a documented "logged
+        # non-fatal failure" into an unhandled task exception for any caller
+        # that is not — a distinction this module's handler comments reason
+        # about repeatedly.
+        #
+        # Observed cost of the silence: a storage 500 on
+        # ``POST /entities/relations`` killed the predicate write-back and the
+        # whole ``Trigger.ENTITY`` path for that memory, and presented as "A40
+        # does not work" — because nothing anywhere recorded a task had failed.
+        await record_task_failure("entity_extraction", memory_id, tenant_id, exc)
         # H-02, and the reason the check below is duplicated rather than moved
         # into a ``finally``. The normal-path call at the end of the ``try`` is
         # unreachable once anything between the link upsert and it raises — the

@@ -209,6 +209,15 @@ async def start_crystallization(
                 {
                     "status": "failed",
                     "completed_at": datetime.now(UTC).isoformat(),
+                    # 09/02 M-38. Storage reads this one with a bare subscript
+                    # (``duration_ms=body["duration_ms"]`` in the PATCH handler)
+                    # while its neighbours use ``.get`` with defaults, so
+                    # omitting it raised KeyError INSIDE the handler that exists
+                    # to un-wedge the report — leaving the row 'running'
+                    # forever, which is the exact failure this block was written
+                    # to prevent. Zero is the honest value: the publish never
+                    # landed, so no run occurred to time.
+                    "duration_ms": 0,
                     "summary": {"error": "could not queue the crystallization run"},
                 },
                 tenant_id=tenant_id,
@@ -595,7 +604,18 @@ async def _run_crystallization(
 
     # Build clusters from overlapping pairs
     clusters = _build_clusters(dup_pairs)
-    clusters = [c for c in clusters if len(c) >= CRYSTALLIZER_MIN_CLUSTER_SIZE]
+    # A72 — per-tenant, defaulting to the constant. At the default (3) the most
+    # common overlap, a PAIR, is skipped entirely, so two rows saying the same
+    # thing survive every sweep. A tenant that lowers it to 2 closes that and
+    # accepts the cost: admitting pairs multiplies the cluster count, and each
+    # cluster is an LLM re-extraction.
+    # ``getattr`` with the constant as the floor, matching
+    # ``getattr(tenant_config, "merge_near_duplicates", False)`` in
+    # DetectNearDuplicate: a config object that predates this knob — an older
+    # deploy's, or a test double — resolves to today's behaviour instead of
+    # raising.
+    min_cluster = getattr(config, "crystallizer_min_cluster_size", CRYSTALLIZER_MIN_CLUSTER_SIZE)
+    clusters = [c for c in clusters if len(c) >= min_cluster]
     result["clusters_found"] = len(clusters)
 
     if not clusters:
@@ -645,7 +665,9 @@ async def _run_crystallization(
             for mid in cluster_ids
             if mid in memories_by_id and memories_by_id[mid].get("status") in LIVE_MEMORY_STATUSES
         ]
-        if len(cluster_memories) < CRYSTALLIZER_MIN_CLUSTER_SIZE:
+        # Same floor as the filter above — re-checked because the live-status
+        # filter directly above can shrink a cluster below it.
+        if len(cluster_memories) < min_cluster:
             continue
 
         # Call LLM to crystallize
@@ -685,6 +707,12 @@ async def _run_crystallization(
                         status="confirmed",
                         metadata={"crystallized_from": [str(m.get("id")) for m in cluster_memories]},
                     ),
+                    # A62 — a crystallized fact is materialised by the system: an
+                    # LLM re-extraction that merges a cluster into a claim nobody
+                    # stated in those words. ``resolution.resolve`` uses this to
+                    # refuse letting it destructively overturn a fact a user did
+                    # state. Server-set; the flag is not on the wire.
+                    is_inferred=True,
                 )
                 new_ids.append(str(mem_out.id))
             except HTTPException as exc:
@@ -941,13 +969,44 @@ async def _check_orphaned_entities(
 async def _check_near_duplicates(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    threshold: float | None = None,
 ) -> dict:
-    """Find near-duplicate memory pairs via batch ANN neighbor queries."""
+    """Find near-duplicate memory pairs via batch ANN neighbor queries.
+
+    Audit oss-0814-m-37 — this loop was the N+1. It fetched a page of
+    candidates as ``(id, embedding)`` and then issued one
+    ``find_neighbors_by_embedding`` POST **per candidate**, awaited in-loop,
+    with that candidate's embedding copied back up in the request body. At
+    ``CRYSTALLIZER_DEDUP_BATCH_SIZE`` = 500 that is 501 serial HTTP round-trips
+    per batch and ~22 MB of vector JSON on the wire (a 1024-dim pgvector is
+    ~22 KB of JSON floats; it travelled down as the candidate and up again as
+    the query). Nothing here ever read ``embedding`` — it was relayed
+    unexamined, because the similarity is pgvector's ``<=>`` on the storage
+    side. Both halves now happen in one statement behind one POST.
+
+    Deliberately unchanged, because the perf half of the finding ships ahead of
+    the parked crystallizer retune (reg-a72): the thresholds, the neighbour
+    fan-out, the pair cap, the pair-key normalisation, the first-write-wins on
+    similarity, and the order pairs are discovered in. Storage returns pairs in
+    the same order the loop visited them — candidate by candidate,
+    nearest-neighbour first — so the cap still bites on exactly the same pairs.
+    """
     sc = get_storage_client()
 
     pairs: dict[tuple[str, str], float] = {}  # (id1, id2) -> similarity
     checked_ids: list[str] = []
     offset = 0
+
+    if threshold is None:
+        # Resolved here rather than passed down, because the hygiene checks are
+        # dispatched through a uniform ``fn(tenant_id, fleet_id)`` loop and
+        # special-casing one of them there would put this knob somewhere nobody
+        # looks for it. The parameter stays for tests.
+        from core_api.services.organization_settings import resolve_config
+
+        cfg = await resolve_config(tenant_id)
+        threshold = getattr(cfg, "crystallizer_dedup_threshold", CRYSTALLIZER_DEDUP_THRESHOLD)
 
     while len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
         batch = await sc.check_near_duplicates(
@@ -956,33 +1015,34 @@ async def _check_near_duplicates(
                 "fleet_id": fleet_id,
                 "batch_size": CRYSTALLIZER_DEDUP_BATCH_SIZE,
                 "offset": offset,
+                # Sent rather than left to the storage defaults so the sweep's
+                # tuning stays in core-api's constants, where reg-a72 will look
+                # for it, instead of being split across two services.
+                # A72 — per-tenant, defaulting to the constant. At 0.95 the
+                # sweep only catches near-verbatim copies, while the composites
+                # that actually crowd recall sit around 0.75-0.90 and pass
+                # underneath it. Lowering the floor is what makes this a
+                # crowding janitor rather than a copy detector — and it is
+                # opt-in because every extra pair the band admits is another
+                # LLM mergeability judgement.
+                "threshold": threshold,
+                "neighbor_limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
             }
         )
-        candidates = batch.get("candidates", [])
-        if not candidates:
+        # Every swept row, not just the ones that turned out to have a
+        # duplicate — this is the stamp set, and the old loop appended here
+        # before it knew whether the candidate had neighbours.
+        candidate_ids = batch.get("candidate_ids", [])
+        if not candidate_ids:
             break
 
-        for cand in candidates:
-            mem_id = cand["id"]
-            embedding = cand["embedding"]
-            checked_ids.append(mem_id)
+        checked_ids.extend(candidate_ids)
 
-            neighbors = await sc.find_neighbors_by_embedding(
-                {
-                    "tenant_id": tenant_id,
-                    "fleet_id": fleet_id,
-                    "query_embedding": embedding,
-                    "exclude_id": mem_id,
-                    "threshold": CRYSTALLIZER_DEDUP_THRESHOLD,
-                    "limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
-                }
-            )
-
-            for nb in neighbors:
-                id1, id2 = sorted([mem_id, nb["id"]])
-                pair_key = (id1, id2)
-                if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
-                    pairs[pair_key] = nb["similarity"]
+        for pair in batch.get("pairs", []):
+            id1, id2 = sorted([pair["id"], pair["neighbor_id"]])
+            pair_key = (id1, id2)
+            if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
+                pairs[pair_key] = pair["similarity"]
 
         offset += CRYSTALLIZER_DEDUP_BATCH_SIZE
 

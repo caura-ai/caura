@@ -4,6 +4,34 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.22.2](https://github.com/caura-ai/caura/compare/plugin-v2.22.1...plugin-v2.22.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **plugin:** evict the least recently used session, not the oldest one (F1) ([#1507](https://github.com/caura-ai/caura/issues/1507)) ([138b2d9](https://github.com/caura-ai/caura/commit/138b2d9ac452ff54e99c227dd099223ed0da24d8))
+
+## [2.22.1](https://github.com/caura-ai/caura/compare/plugin-v2.22.0...plugin-v2.22.1) (2026-09-14)
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.4.1 to 26.5.1 in /plugin in the npm-minor-patch group ([#1482](https://github.com/caura-ai/caura/issues/1482)) ([5caf8ef](https://github.com/caura-ai/caura/commit/5caf8ef04cffb10e01a7abe2692f5468ea74eff8))
+
+## [2.22.0](https://github.com/caura-ai/caura/compare/plugin-v2.21.1...plugin-v2.22.0) (2026-09-10)
+
+
+### Features
+
+* **search:** freshness_reference — As-Of Recall for backfilled corpora ([#1471](https://github.com/caura-ai/caura/issues/1471)) ([c13b720](https://github.com/caura-ai/caura/commit/c13b720336bdcf926d6dc43fb93347693570ec69))
+
+## [2.21.1](https://github.com/caura-ai/caura/compare/plugin-v2.21.0...plugin-v2.21.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **search:** budget and label successor injection (D16) ([#1439](https://github.com/caura-ai/caura/issues/1439)) ([b17771f](https://github.com/caura-ai/caura/commit/b17771f5ebf65aaec3fda67533b1301ace31b094))
+
 ## [2.21.0](https://github.com/caura-ai/caura/compare/plugin-v2.20.3...plugin-v2.21.0) (2026-09-09)
 
 

@@ -31,6 +31,10 @@ from pydantic import BaseModel, Field
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings as app_settings
 from core_api.constants import INTERVIEW_EVENT_MAX_CHARS, INTERVIEW_MAX_EVENTS_PER_SUBMIT
+from core_api.errors import (
+    AUTH_FEATURE_DISABLED,
+    coded_detail,
+)
 from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.interview_service import (
     InterviewJobPermanentlyFailedError,
@@ -163,7 +167,10 @@ async def submit_interview(
     if not interviewer_cfg.get("enabled"):
         # Defense in depth: the scheduler shouldn't have queued a command
         # for a disabled tenant; refuse rather than silently ingest.
-        raise HTTPException(status_code=403, detail="interviewer is not enabled for this tenant")
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(AUTH_FEATURE_DISABLED, "interviewer is not enabled for this tenant"),
+        )
 
     if app_settings.interview_async_submit:
         # Persist-and-accept (#665). The 60-90s inline synthesis outlived

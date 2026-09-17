@@ -38,7 +38,7 @@ schedule: "0 */6 * * *"   # every 6 hours
 time_zone: "UTC"
 http_target:
   http_method: POST
-  uri: https://<core-api-host>/admin/lifecycle/fanout/forge-distill
+  uri: https://<core-api-host>/api/v1/admin/lifecycle/fanout/forge-distill
   oidc_token:
     service_account_email: <core-operations-sa>@<project>.iam.gserviceaccount.com
   headers:
@@ -68,7 +68,7 @@ spec:
                   curl -fsS \
                     -X POST \
                     -H "X-API-Key: $ADMIN_API_KEY" \
-                    "$CORE_API_BASE_URL/admin/lifecycle/fanout/forge-distill"
+                    "$CORE_API_BASE_URL/api/v1/admin/lifecycle/fanout/forge-distill"
               envFrom:
                 # whichever secret you use, it must expose ADMIN_API_KEY
                 - secretRef: { name: caura-admin }
@@ -143,9 +143,17 @@ rollback), and the inbox resumes as the gate.
 ## Dedup safety
 
 The shared lifecycle handler uses
-`_PIPELINE_DEDUP_WINDOW_HOURS` (currently 1 hour) — re-curling the
-fanout endpoint within the window is a no-op for any tenant whose
-prior tick succeeded. Manual `python scripts/forge_dry_run.py` invocations
+`_PIPELINE_DEDUP_WINDOW_HOURS` (currently **23 hours** —
+`common/events/lifecycle_handlers.py`) — re-curling the fanout endpoint
+within the window is a no-op for any tenant whose prior tick succeeded.
+
+**This is why the 6-hourly schedule above is deliberate, not arbitrary.**
+With a 23-hour dedup window, ticks 2, 3 and 4 of each day are expected
+no-ops; the schedule is oversampling so that a single failed or missed
+tick does not cost a whole day. If you shorten the cron interval hoping
+for more frequent distillation, nothing changes — the window, not the
+schedule, sets the real cadence. Change `_PIPELINE_DEDUP_WINDOW_HOURS`
+instead. Manual `python scripts/forge_dry_run.py` invocations
 bypass the lifecycle path entirely and are not affected.
 
 ## Opt-in / opt-out

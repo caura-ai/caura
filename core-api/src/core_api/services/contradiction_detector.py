@@ -18,12 +18,13 @@ import logging
 import time
 import uuid as _uuid
 from datetime import datetime
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.constants import SINGLE_VALUE_PREDICATES
+from core_api.constants import CONTRADICTED_STATUSES, SINGLE_VALUE_PREDICATES
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 from core_api.schemas import ContradictionInfo
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
@@ -207,202 +208,136 @@ def _merge_status_update(acc: dict[str, dict], row: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# A19 — process-wide admission gate for detection passes.
+# ---------------------------------------------------------------------------
+
+# Every trigger site schedules detection with ``track_task`` (a bare
+# ``asyncio.create_task``), so the per-tenant bulkheads bound how fast writes
+# are ADMITTED while nothing bounds how many detections then RUN at once: the
+# tasks outlive the requests that spawned them, and 8 concurrent 100-item
+# bulks leave ~1,600 detection coroutines racing the moment they commit. Each
+# pass holds up to ``_ENTITY_CTX_FANOUT_LIMIT`` (8) connections of the SAME
+# 200-connection / 5s-pool-budget storage pool the foreground request path
+# uses, plus one LLM judge call for seconds — a big enough burst surfaces as
+# foreground PoolTimeouts (the 2026-06-16 incident shape) and judge abstains
+# (#821), i.e. silently dropped detections. This gate turns that collapse
+# into bounded concurrency + FIFO queueing.
+#
+# Queue, never shed: detection is post-commit background work with no caller
+# waiting on it, and a shed pass is a contradiction nobody ever looks for.
+# Waiting coroutines cost ~KBs; the resources the cap protects (storage pool,
+# provider quota, event loop) are what actually collapse. ONE shared gate for
+# every entry point — mirroring ``interview_service.synthesis_sem`` — because
+# two independent Semaphore(N)s would allow 2N whenever Path A bursts overlap
+# Path C bursts, exactly the stampede the cap exists to prevent. Global
+# rather than per-tenant (unlike ``per_tenant_concurrency``) because the
+# protected resources are process-global; a hot tenant delaying another
+# tenant's BACKGROUND detection is acceptable in a way that pool exhaustion
+# for everyone is not.
+#
+# The semaphore is cached per running loop rather than created at import:
+# asyncio primitives bind to the first loop that awaits them, and the test
+# suite runs one loop per test — a module-level instance would poison every
+# later test with "bound to a different event loop" (same reason
+# ``_bounded_gather`` builds a fresh semaphore per call). Production has one
+# loop per process, so the cached instance is process-wide there.
+_DETECTION_GATE: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+
+
+def _detection_gate() -> asyncio.Semaphore:
+    global _DETECTION_GATE
+    loop = asyncio.get_running_loop()
+    if _DETECTION_GATE is None or _DETECTION_GATE[0] is not loop:
+        _DETECTION_GATE = (loop, asyncio.Semaphore(settings.contradiction_detection_concurrency))
+    return _DETECTION_GATE[1]
+
+
+async def _acquire_detection_slot() -> tuple[asyncio.Semaphore, int]:
+    """Take one detection slot, returning ``(gate, queued_ms)``.
+
+    ``queued_ms`` is surfaced in the ``path_a/c_completed`` lines so gate
+    pressure is quantifiable from production logs alone (detection-proper
+    time = ``elapsed_ms - queued_ms``); the pre-acquire DEBUG mirrors
+    ``per_tenant_storage_slot``'s saturation log. Split from the entry
+    points so both share one queue and one instrumentation story.
+    """
+    gate = _detection_gate()
+    if gate.locked():
+        logger.debug(
+            "contradiction-detection gate saturated; queuing",
+            extra={"cap": settings.contradiction_detection_concurrency},
+        )
+    t0 = time.monotonic()
+    await gate.acquire()
+    return gate, round((time.monotonic() - t0) * 1000)
+
+
+# ---------------------------------------------------------------------------
 # Public API: async post-commit entry point (P1-1)
 # ---------------------------------------------------------------------------
 
 
-async def detect_contradictions_async(
-    memory_id: UUID,
-    tenant_id: str,
-    fleet_id: str | None,
-    content: str,
-    embedding: list[float],
-    *,
-    new_memory: dict | None = None,
-) -> None:
-    """Post-commit contradiction detection — runs independently.
-
-    Follows the same fire-and-forget pattern as entity extraction:
-    uses the storage client so it can see all committed data (including
-    concurrent writes that were invisible in the caller's transaction).
-
-    ``new_memory`` is an optional pass-through for callers that already
-    fetched the row (e.g. the CAURA-595 ``handle_memory_enriched``
-    consumer). Passing it skips one HTTP GET per call to core-storage-
-    api on the async write path. We still re-check ``deleted_at`` here
-    so a soft-delete that landed AFTER the caller's fetch but BEFORE
-    detection runs cleanly aborts.
-    """
-    from core_api.services.organization_settings import resolve_config
-
-    # Always-fire completion log (Gap 06): without this, "function ran and
-    # found nothing" is indistinguishable from "function never fired" — the
-    # exact failure mode that hid Gap 01 and Gap 04 for weeks. Memory id is
-    # in the message string itself (rather than ``extra``) so a plain
-    # ``grep path_a_completed <memory_id>`` works regardless of the
-    # structlog renderer's ``extra={}`` behaviour.
-    t_start = time.monotonic()
-    n_conflicts = 0
-    skipped = False
-    lock_held = False
-    concluded = False
-    lock_key = None
-    lock_token = ""
-    try:
-        if new_memory is None:
-            sc = get_storage_client()
-            new_memory = await sc.get_memory(str(memory_id), tenant_id)
-        if not new_memory or new_memory.get("deleted_at") is not None:
-            # Resolved before the lock is taken, so a gone row never holds one.
-            return
-
-        # A4 #14 — back-channel idempotency. Both the ENRICHED and
-        # EMBEDDED handlers fire ``detect_contradictions_async`` for
-        # the same memory; whichever arrives first owns the lock and
-        # runs detection, the other skips. Fail-open: if Redis is
-        # unavailable, ``_acquire_content_lock`` returns True and we
-        # fall back to the prior double-detection behaviour (storage
-        # CAS still keeps writes idempotent).
-        # H-06: keyed on the CONTENT as well as the memory, so an edit
-        # re-fired by ``update_memory`` is not deduped against the run that
-        # checked the previous text.
-        #
-        # Fingerprint the text detection will ACTUALLY examine — ``_detect``
-        # reads ``new_memory``, not the ``content`` parameter. The parameter is
-        # the caller's copy: the back-channel consumers pass the write-time
-        # payload, which a mid-flight update leaves stale. Keying on it would
-        # put a lock on text nobody looked at, and would make the fix depend on
-        # every future caller keeping the two in step. ``content`` remains the
-        # fallback for a row with no content at all.
-        # ``is None``, not ``or``: an EMPTY row content is a real value, and
-        # ``_detect`` reads it as one (``new_memory.get("content", "")``).
-        # Falling back to the caller's copy for it would key the lock on text
-        # detection never looks at — the very divergence this line exists to
-        # close. The caller's ``content`` is only a stand-in for a row that has
-        # no content field at all, and the final ``or ""`` keeps a str reaching
-        # the fingerprint: an AttributeError there lands in the outer handler
-        # and silently costs that memory its detection.
-        raw_content = new_memory.get("content")
-        examined = raw_content if raw_content is not None else (content or "")
-        lock_key = _content_lock_key(memory_id, examined)
-        lock_token = _lock_token()
-        if not await _acquire_content_lock(memory_id, examined, lock_token):
-            skipped = True
-            return
-        lock_held = True
-
-        tenant_config = await resolve_config(tenant_id)
-        contradictions = await _detect(new_memory, embedding, tenant_config)
-        concluded = True
-        n_conflicts = len(contradictions) if contradictions else 0
-
-        # D3 — log EVERY concluded run, not only the ones that found something.
-        # Before this, a run that found nothing was indistinguishable in the logs
-        # from a run that never happened (lock contention, an early return, a
-        # crashed worker), so "did detection run for this memory?" was
-        # unanswerable — and the answer matters most exactly when a contradiction
-        # was expected and none appeared.
-        logger.info(
-            "Async contradiction detection completed for memory %s: %d conflict(s)",
-            memory_id,
-            n_conflicts,
-            extra={
-                "path": "contradiction-detection",
-                "memory_id": str(memory_id),
-                "conflicts_found": n_conflicts,
-            },
-        )
-
-    except Exception:
-        logger.exception("Async contradiction detection failed for memory %s", memory_id)
-    finally:
-        # H-06: keep the lock only for a run that reached a verdict. The lock
-        # is taken BEFORE detection, so without this one transient LLM or
-        # storage failure suppressed every later trigger for this memory for a
-        # full hour, with nothing scheduled to retry. A run that concluded
-        # keeps its lock — that is the duplicate-delivery collapse the lock
-        # exists for. Mirrors the Path C block below.
-        if lock_held and not concluded and lock_key is not None:
-            await _release_lock(lock_key, lock_token)
-        elapsed_ms = round((time.monotonic() - t_start) * 1000)
-        logger.info(
-            "path_a_completed for memory %s n_conflicts=%d skipped=%s elapsed_ms=%d tenant_id=%s",
-            memory_id,
-            n_conflicts,
-            str(skipped).lower(),
-            elapsed_ms,
-            tenant_id,
-        )
+# ── A40 — the deterministic RDF pass, callable from both triggers ─────────
+#
+# Extracted verbatim from ``detect_contradictions_async`` so the SAME pass can
+# also run after entity extraction. It used to be reachable only at write time,
+# and that made it close to dead for the facts this product is actually about.
+#
+# The gate needs ``(subject_entity_id, predicate, object_value)``.
+# ``EmitMemoryTriple`` populates those during the write with no LLM call, but it
+# resolves a SUBJECT from only two sources: a caller-supplied ``entity_links``
+# row, or an identifier-shaped token. Proper nouns deliberately return None
+# ("Alice", "Atlas" — see ``_infer_subject_token``), deferring to the
+# entity-extraction worker's higher-precision output. Measured on this code:
+#
+#     "Maya lives in Boston"             predicate=lives_in          subject=None
+#     "Acme is headquartered in Berlin"  predicate=headquartered_in  subject=None
+#     "Priya reports to Dana"            predicate=reports_to        subject=None
+#     "TOKEN-XYZ has release date 2027"  predicate=release_date      subject=TOKEN-XYZ
+#
+# So for any human- or company-subject fact the row commits with a NULL subject,
+# this gate fails, and Path A falls straight through to the STOCHASTIC raw-text
+# semantic judge — the R7 miss. Extraction then fills the columns in moments and
+# fires Path C, which does entity-overlap plus another LLM judge and never
+# retries the deterministic check. The one non-stochastic verdict in the module
+# was structurally unreachable exactly where it was needed.
+#
+# Running it again post-extraction is also CHEAPER, not more expensive: Path A's
+# semantic judge is gated on ``if not contradictions``, so a deterministic
+# verdict SUPPRESSES an LLM call rather than adding one.
+#
+# Re-running is safe by construction. ``memory_find_rdf_conflicts`` selects only
+# ``active``/``confirmed``/``pending`` rows, so anything an earlier pass already
+# retired is out of scope, and the storage CAS (``WHERE supersedes_id IS NULL``)
+# is the backstop on the chain edge.
+class _RdfPassResult(NamedTuple):
+    contradictions: list[ContradictionInfo]
+    record_pairs: list[tuple[dict, str, float | None]]
+    supersedes_id: Any
+    ran: bool
 
 
-# ---------------------------------------------------------------------------
-# Synchronous API (kept for direct-call use cases, e.g. tests)
-# ---------------------------------------------------------------------------
-
-
-async def detect_contradictions(
-    new_memory,
-    embedding: list[float],
-    tenant_config=None,
-) -> list[ContradictionInfo]:
-    """In-session contradiction detection (caller manages commit).
-
-    Kept for backward compatibility and testing. For production writes,
-    prefer detect_contradictions_async which runs post-commit.
-
-    new_memory can be an ORM Memory object or a dict from the storage client.
-    """
-    # Normalize to dict if ORM object
-    if not isinstance(new_memory, dict):
-        new_memory = {
-            "id": str(new_memory.id),
-            "tenant_id": new_memory.tenant_id,
-            "fleet_id": new_memory.fleet_id,
-            "content": new_memory.content,
-            "subject_entity_id": str(new_memory.subject_entity_id) if new_memory.subject_entity_id else None,
-            "predicate": new_memory.predicate,
-            "object_value": new_memory.object_value,
-            "supersedes_id": str(new_memory.supersedes_id) if new_memory.supersedes_id else None,
-            "status": new_memory.status,
-        }
-    return await _detect(new_memory, embedding, tenant_config)
-
-
-# ---------------------------------------------------------------------------
-# Core detection logic (shared by sync and async paths)
-# ---------------------------------------------------------------------------
-
-
-async def _detect(
+async def _rdf_conflict_pass(
+    sc,
     new_memory: dict,
-    embedding: list[float],
-    tenant_config=None,
-) -> list[ContradictionInfo]:
-    """Find active memories that contradict the new one.
+    *,
+    memory_id,
+    tenant_id: str,
+    supersedes_id,
+) -> _RdfPassResult:
+    """Run the deterministic single-value-predicate contradiction check.
 
-    Two detection paths:
-    1. RDF conflict (single-value predicates only): same subject_entity_id +
-       single-value predicate + different object_value -> old memory outdated.
-       Multi-value predicates skip this path (additive, not contradictory).
-    2. Semantic conflict: high vector similarity, LLM confirms contradiction
-
-    Returns list of contradictions found (may be empty).
-    Side-effect: marks contradicted memories as outdated/conflicted and
-    sets supersession chain (new_memory.supersedes_id -> old memory).
+    ``ran`` reports whether the triple gate passed, so a caller can tell "no
+    conflict" apart from "could not look" — the distinction that hid this bug.
     """
-    sc = get_storage_client()
-    contradictions: list[ContradictionInfo] = []
-    # A55 1d — (candidate_row, kind, confidence) pairs to persist as
-    # memory_conflicts records after the effect is applied (flag-gated below).
-    _record_pairs: list[tuple[dict, str, float | None]] = []
-
-    memory_id = new_memory.get("id")
     subject_entity_id = new_memory.get("subject_entity_id")
     predicate = new_memory.get("predicate")
     object_value = new_memory.get("object_value")
-    tenant_id = new_memory.get("tenant_id")
-    content = new_memory.get("content", "")
-    supersedes_id = new_memory.get("supersedes_id")
+    contradictions: list[ContradictionInfo] = []
+    _record_pairs: list[tuple[dict, str, float | None]] = []
+    ran = bool(
+        subject_entity_id and predicate and object_value and predicate.lower() in SINGLE_VALUE_PREDICATES
+    )
 
     # --- Path 1: RDF triple contradiction (single-value predicates only) ---
     if subject_entity_id and predicate and object_value and predicate.lower() in SINGLE_VALUE_PREDICATES:
@@ -570,6 +505,234 @@ async def _detect(
                     memory_id,
                     rdf_result["skipped"],
                 )
+
+    return _RdfPassResult(contradictions, _record_pairs, supersedes_id, ran)
+
+
+async def detect_contradictions_async(
+    memory_id: UUID,
+    tenant_id: str,
+    fleet_id: str | None,
+    content: str,
+    embedding: list[float],
+    *,
+    new_memory: dict | None = None,
+) -> None:
+    """Post-commit contradiction detection — runs independently.
+
+    Follows the same fire-and-forget pattern as entity extraction:
+    uses the storage client so it can see all committed data (including
+    concurrent writes that were invisible in the caller's transaction).
+
+    ``new_memory`` is an optional pass-through for callers that already
+    fetched the row (e.g. the CAURA-595 ``handle_memory_enriched``
+    consumer). Passing it skips one HTTP GET per call to core-storage-
+    api on the async write path. We still re-check ``deleted_at`` here
+    so a soft-delete that landed AFTER the caller's fetch but BEFORE
+    detection runs cleanly aborts.
+    """
+    from core_api.services.organization_settings import resolve_config
+
+    # Always-fire completion log (Gap 06): without this, "function ran and
+    # found nothing" is indistinguishable from "function never fired" — the
+    # exact failure mode that hid Gap 01 and Gap 04 for weeks. Memory id is
+    # in the message string itself (rather than ``extra``) so a plain
+    # ``grep path_a_completed <memory_id>`` works regardless of the
+    # structlog renderer's ``extra={}`` behaviour.
+    t_start = time.monotonic()
+    n_conflicts = 0
+    skipped = False
+    lock_held = False
+    concluded = False
+    lock_key = None
+    lock_token = ""
+    # A19 — admission gate BEFORE any storage or Redis traffic, so a queued
+    # pass consumes nothing but a waiting coroutine. Acquired before the
+    # idempotency lock on purpose: the lock's 1h TTL must clock detection,
+    # not queue time, and a duplicate back-channel delivery that queued
+    # behind its twin still exits at the lock check in one Redis roundtrip.
+    # Acquire sits OUTSIDE the try so a cancellation mid-wait (shutdown's
+    # ``cancel_all_tasks``) cannot reach a ``release()`` for a slot that was
+    # never taken.
+    _gate, queued_ms = await _acquire_detection_slot()
+    try:
+        if new_memory is None:
+            sc = get_storage_client()
+            new_memory = await sc.get_memory(str(memory_id), tenant_id)
+        if not new_memory or new_memory.get("deleted_at") is not None:
+            # Resolved before the lock is taken, so a gone row never holds one.
+            return
+
+        # A4 #14 — back-channel idempotency. Both the ENRICHED and
+        # EMBEDDED handlers fire ``detect_contradictions_async`` for
+        # the same memory; whichever arrives first owns the lock and
+        # runs detection, the other skips. Fail-open: if Redis is
+        # unavailable, ``_acquire_content_lock`` returns True and we
+        # fall back to the prior double-detection behaviour (storage
+        # CAS still keeps writes idempotent).
+        # H-06: keyed on the CONTENT as well as the memory, so an edit
+        # re-fired by ``update_memory`` is not deduped against the run that
+        # checked the previous text.
+        #
+        # Fingerprint the text detection will ACTUALLY examine — ``_detect``
+        # reads ``new_memory``, not the ``content`` parameter. The parameter is
+        # the caller's copy: the back-channel consumers pass the write-time
+        # payload, which a mid-flight update leaves stale. Keying on it would
+        # put a lock on text nobody looked at, and would make the fix depend on
+        # every future caller keeping the two in step. ``content`` remains the
+        # fallback for a row with no content at all.
+        # ``is None``, not ``or``: an EMPTY row content is a real value, and
+        # ``_detect`` reads it as one (``new_memory.get("content", "")``).
+        # Falling back to the caller's copy for it would key the lock on text
+        # detection never looks at — the very divergence this line exists to
+        # close. The caller's ``content`` is only a stand-in for a row that has
+        # no content field at all, and the final ``or ""`` keeps a str reaching
+        # the fingerprint: an AttributeError there lands in the outer handler
+        # and silently costs that memory its detection.
+        raw_content = new_memory.get("content")
+        examined = raw_content if raw_content is not None else (content or "")
+        lock_key = _content_lock_key(memory_id, examined)
+        lock_token = _lock_token()
+        if not await _acquire_content_lock(memory_id, examined, lock_token):
+            skipped = True
+            return
+        lock_held = True
+
+        tenant_config = await resolve_config(tenant_id)
+        contradictions = await _detect(new_memory, embedding, tenant_config)
+        concluded = True
+        n_conflicts = len(contradictions) if contradictions else 0
+
+        # D3 — log EVERY concluded run, not only the ones that found something.
+        # Before this, a run that found nothing was indistinguishable in the logs
+        # from a run that never happened (lock contention, an early return, a
+        # crashed worker), so "did detection run for this memory?" was
+        # unanswerable — and the answer matters most exactly when a contradiction
+        # was expected and none appeared.
+        logger.info(
+            "Async contradiction detection completed for memory %s: %d conflict(s)",
+            memory_id,
+            n_conflicts,
+            extra={
+                "path": "contradiction-detection",
+                "memory_id": str(memory_id),
+                "conflicts_found": n_conflicts,
+            },
+        )
+
+    except Exception:
+        logger.exception("Async contradiction detection failed for memory %s", memory_id)
+    finally:
+        # A19 — free the slot before the bookkeeping below: the Redis lock
+        # release and the completion log are not the contended work the gate
+        # protects, and a queued pass may as well start during them.
+        _gate.release()
+        # H-06: keep the lock only for a run that reached a verdict. The lock
+        # is taken BEFORE detection, so without this one transient LLM or
+        # storage failure suppressed every later trigger for this memory for a
+        # full hour, with nothing scheduled to retry. A run that concluded
+        # keeps its lock — that is the duplicate-delivery collapse the lock
+        # exists for. Mirrors the Path C block below.
+        if lock_held and not concluded and lock_key is not None:
+            await _release_lock(lock_key, lock_token)
+        elapsed_ms = round((time.monotonic() - t_start) * 1000)
+        logger.info(
+            "path_a_completed for memory %s n_conflicts=%d skipped=%s elapsed_ms=%d queued_ms=%d tenant_id=%s",
+            memory_id,
+            n_conflicts,
+            str(skipped).lower(),
+            elapsed_ms,
+            queued_ms,
+            tenant_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Synchronous API (kept for direct-call use cases, e.g. tests)
+# ---------------------------------------------------------------------------
+
+
+async def detect_contradictions(
+    new_memory,
+    embedding: list[float],
+    tenant_config=None,
+) -> list[ContradictionInfo]:
+    """In-session contradiction detection (caller manages commit).
+
+    Kept for backward compatibility and testing. For production writes,
+    prefer detect_contradictions_async which runs post-commit.
+
+    new_memory can be an ORM Memory object or a dict from the storage client.
+    """
+    # Normalize to dict if ORM object
+    if not isinstance(new_memory, dict):
+        new_memory = {
+            "id": str(new_memory.id),
+            "tenant_id": new_memory.tenant_id,
+            "fleet_id": new_memory.fleet_id,
+            "content": new_memory.content,
+            "subject_entity_id": str(new_memory.subject_entity_id) if new_memory.subject_entity_id else None,
+            "predicate": new_memory.predicate,
+            "object_value": new_memory.object_value,
+            "supersedes_id": str(new_memory.supersedes_id) if new_memory.supersedes_id else None,
+            "status": new_memory.status,
+        }
+    return await _detect(new_memory, embedding, tenant_config)
+
+
+# ---------------------------------------------------------------------------
+# Core detection logic (shared by sync and async paths)
+# ---------------------------------------------------------------------------
+
+
+async def _detect(
+    new_memory: dict,
+    embedding: list[float],
+    tenant_config=None,
+) -> list[ContradictionInfo]:
+    """Find active memories that contradict the new one.
+
+    Two detection paths:
+    1. RDF conflict (single-value predicates only): same subject_entity_id +
+       single-value predicate + different object_value -> old memory outdated.
+       Multi-value predicates skip this path (additive, not contradictory).
+    2. Semantic conflict: high vector similarity, LLM confirms contradiction
+
+    Returns list of contradictions found (may be empty).
+    Side-effect: marks contradicted memories as outdated/conflicted and
+    sets supersession chain (new_memory.supersedes_id -> old memory).
+    """
+    sc = get_storage_client()
+    contradictions: list[ContradictionInfo] = []
+    # A55 1d — (candidate_row, kind, confidence) pairs to persist as
+    # memory_conflicts records after the effect is applied (flag-gated below).
+    _record_pairs: list[tuple[dict, str, float | None]] = []
+
+    memory_id = new_memory.get("id")
+    # A40 — the triple is read inside ``_rdf_conflict_pass`` now, not here. It
+    # is deliberately NOT hoisted back out: the pass is also called after entity
+    # extraction, where the row it must read is a fresher one than this caller
+    # ever holds.
+    tenant_id = new_memory.get("tenant_id")
+    content = new_memory.get("content", "")
+    supersedes_id = new_memory.get("supersedes_id")
+
+    # --- Path 1: RDF triple contradiction (single-value predicates only) ---
+    # A40 — the pass itself now lives in ``_rdf_conflict_pass`` so the SAME
+    # deterministic check can run again once entity extraction has populated
+    # the triple. At write time this gate fails for every proper-noun subject
+    # (``EmitMemoryTriple`` resolves only identifier-shaped ones), which is what
+    # sent those writes to the stochastic semantic judge below.
+    _rdf = await _rdf_conflict_pass(
+        sc,
+        new_memory,
+        memory_id=memory_id,
+        tenant_id=tenant_id,
+        supersedes_id=supersedes_id,
+    )
+    contradictions.extend(_rdf.contradictions)
+    _record_pairs.extend(_rdf.record_pairs)
+    supersedes_id = _rdf.supersedes_id
 
     # --- Path 2: Semantic contradiction (vector similarity + batch LLM check) ---
     if not contradictions:
@@ -1711,6 +1874,12 @@ async def _bounded_gather(coros, limit=_ENTITY_CTX_FANOUT_LIMIT):
     keep-alive pool the calls reuse connections instead of re-handshaking. A
     fresh semaphore per call (bound to the running loop) sidesteps cross-loop
     binding issues in tests. Order is preserved (``gather`` semantics).
+
+    That fan-out is now the FALLBACK shape, not the normal one:
+    ``_fetch_entity_contexts`` batches the whole candidate set into two
+    round-trips and only fans out when a batch call fails. The cap still has
+    to exist for exactly that window — a storage instance that 404s
+    ``/entities/by-ids`` puts every run back on the per-id path at once.
     """
     sem = asyncio.Semaphore(limit)
 
@@ -1734,6 +1903,12 @@ async def _fetch_entity_context(sc, memory_id: str, tenant_id: str) -> list[dict
     Returns ``[]`` (not ``None``) when the memory has no resolved links;
     the caller treats empty as the skip-retraction signal so this
     function never raises on missing data.
+
+    NOT the hot path any more. Both Path C call sites go through
+    ``_fetch_entity_contexts`` (plural), which asks for every memory at
+    once; this stays as that function's per-memory FALLBACK and as the
+    one-memory case. See ``_fetch_entity_contexts`` for the round-trip
+    arithmetic that made the difference worth having.
     """
     try:
         links_by_mem = await sc.get_entity_links_for_memories([memory_id], tenant_id)
@@ -1778,6 +1953,155 @@ async def _fetch_entity_context(sc, memory_id: str, tenant_id: str) -> list[dict
 
     hydrated = await _bounded_gather([_hydrate(link) for link in links])
     return [h for h in hydrated if h is not None]
+
+
+async def _fetch_entity_contexts(sc, memory_ids: list[str], tenant_id: str) -> dict[str, list[dict]]:
+    """Entity context for MANY memories in two storage round-trips, total.
+
+    Same output as calling ``_fetch_entity_context`` once per memory — a
+    ``{memory_id: [{name, entity_type, role, entity_id}, ...]}`` mapping,
+    link order preserved per memory, missing/foreign entities dropped —
+    but with the fan-out collapsed:
+
+      1. ONE ``get_entity_links_for_memories(all_ids)``. That endpoint has
+         always taken a LIST; the per-memory helper just never used it as
+         one, calling it with a single-element list per candidate.
+      2. ONE ``get_entities_by_ids(unique_entity_ids)``, deduplicated
+         across every memory. Entity-overlap candidates are selected
+         BECAUSE they share entities with the new memory, so the same
+         entity row was previously refetched once per candidate that
+         linked it.
+
+    Why it mattered enough to add a storage route (#1461 context): a Path C
+    detection pass fetches context for the new memory plus up to
+    ``_ENTITY_LINKS_DETECTION_FETCH_MAX_CANDIDATES`` (40) candidates, and
+    each of those made 1 links call + one ``get_entity`` per link. At the
+    ~1-5 links per memory documented on ``_format_entity_context`` that is
+    41 + ~120 ≈ 160 HTTP round-trips per run, plus 2 + ~6 more for the
+    retraction phase. This is 2 per phase, flat, independent of candidate
+    count.
+
+    The admission gate (#1461) made this MORE visible, not less: it bounds
+    how many runs contend at once, so a run's round-trips now sit inside a
+    held slot rather than racing other runs for the pool. Round-trips per
+    slot is exactly the term that sets gated throughput.
+
+    Failure handling is deliberately unchanged from the per-memory path,
+    because batching introduces failure modes single fetches did not have
+    (a payload storage rejects wholesale; a route an older core-storage-api
+    deployment does not serve yet — the two services deploy separately):
+
+      * links call raises → fall back to the per-memory
+        ``_fetch_entity_context`` fan-out, i.e. exactly the old code path.
+      * entity batch raises or answers a non-mapping → fall back to
+        per-entity ``get_entity`` hydration (see ``_hydrate_entities``).
+
+    Never raises. Path C is post-commit best-effort; a memory that could
+    not be resolved gets ``[]`` and its caller treats that as "no context",
+    which is what it already did.
+    """
+    # Dedup while preserving first-seen order: the result is keyed by id, so
+    # asking twice for the same memory would only buy a duplicate row in the
+    # request body.
+    ordered_ids = list(dict.fromkeys(str(m) for m in memory_ids))
+    if not ordered_ids:
+        return {}
+
+    try:
+        links_by_mem = await sc.get_entity_links_for_memories(ordered_ids, tenant_id)
+    except Exception as e:
+        logger.warning(
+            "Path C batched entity-context fetch failed (links, %d memories): %s. "
+            "Falling back to per-memory fetch.",
+            len(ordered_ids),
+            e,
+        )
+        per_memory = await _bounded_gather([_fetch_entity_context(sc, mid, tenant_id) for mid in ordered_ids])
+        return dict(zip(ordered_ids, per_memory, strict=False))
+
+    # Same defensive shape check the per-memory helper applies to this
+    # response: a non-dict means the contract drifted, and the honest answer
+    # is "no links" rather than an AttributeError inside a background task.
+    links_map = links_by_mem if isinstance(links_by_mem, dict) else {}
+
+    def _links_for(mid: str) -> list[dict]:
+        raw = links_map.get(mid) or []
+        return [link for link in raw if isinstance(link, dict)]
+
+    unique_entity_ids = list(
+        dict.fromkeys(
+            str(link["entity_id"]) for mid in ordered_ids for link in _links_for(mid) if link.get("entity_id")
+        )
+    )
+    if not unique_entity_ids:
+        return {mid: [] for mid in ordered_ids}
+
+    entities_by_id = await _hydrate_entities(sc, unique_entity_ids, tenant_id)
+
+    contexts: dict[str, list[dict]] = {}
+    for mid in ordered_ids:
+        rows: list[dict] = []
+        for link in _links_for(mid):
+            entity_id = link.get("entity_id")
+            if not entity_id:
+                continue
+            entity = entities_by_id.get(str(entity_id))
+            if not entity:
+                # Absent from the batch == ``get_entity`` returning None:
+                # deleted, or not this tenant's row. Drop the link, keep the
+                # rest — the per-entity path's behaviour, preserved.
+                continue
+            rows.append(
+                {
+                    "name": entity.get("canonical_name") or entity.get("name"),
+                    "entity_type": entity.get("entity_type"),
+                    "role": link.get("role"),
+                    "entity_id": str(entity_id),
+                }
+            )
+        contexts[mid] = rows
+    return contexts
+
+
+async def _hydrate_entities(sc, entity_ids: list[str], tenant_id: str) -> dict[str, dict]:
+    """``{entity_id: row}`` for these ids — one batch call, per-id fallback.
+
+    An EMPTY mapping from the batch route is a real answer (none of the ids
+    are this tenant's) and is returned as-is. Only a raised exception or a
+    response that is not a mapping falls through to the per-id fan-out —
+    the cases where we learned nothing, as opposed to learning "nothing".
+
+    The fallback is load-bearing rather than paranoid: core-api and
+    core-storage-api are deployed separately, so a core-api carrying
+    ``/entities/by-ids`` can reach a storage instance that 404s it, and the
+    detector must keep working across that window on the old per-id route.
+    """
+    try:
+        batch = await sc.get_entities_by_ids(entity_ids, tenant_id)
+    except Exception as e:
+        logger.warning(
+            "Path C batched entity hydration failed (%d entities): %s. Falling back to per-entity fetch.",
+            len(entity_ids),
+            e,
+        )
+    else:
+        if isinstance(batch, dict):
+            return {str(k): v for k, v in batch.items() if isinstance(v, dict)}
+        logger.warning(
+            "Path C batched entity hydration returned %s, not a mapping. Falling back to per-entity fetch.",
+            type(batch).__name__,
+        )
+
+    async def _one(entity_id: str) -> tuple[str, dict] | None:
+        try:
+            entity = await sc.get_entity(entity_id, tenant_id)
+        except Exception as e:
+            logger.warning("Path C entity-context fetch failed (entity %s): %s", entity_id, e)
+            return None
+        return (entity_id, entity) if entity else None
+
+    fetched = await _bounded_gather([_one(eid) for eid in entity_ids])
+    return dict(f for f in fetched if f is not None)
 
 
 async def _llm_entity_aware_contradiction_check(
@@ -2115,14 +2439,18 @@ async def _attempt_entity_retraction(
     # network, storage error), treat as "no context, leave Path A
     # alone" rather than retrying. See ``_CONTEXT_FETCH_TIMEOUT_SECONDS``
     # for the timeout rationale (CAURA-134).
+    new_memory_id = str(new_memory.get("id"))
+    candidate_id = str(candidate.get("id"))
     try:
-        new_entities, old_entities = await asyncio.wait_for(
-            asyncio.gather(
-                _fetch_entity_context(sc, str(new_memory.get("id")), retraction_tenant_id),
-                _fetch_entity_context(sc, str(candidate.get("id")), retraction_tenant_id),
-            ),
+        # One batched fetch for BOTH sides rather than two parallel
+        # per-memory fetches: same contexts, two round-trips instead of
+        # 2 + one per link on each side. See ``_fetch_entity_contexts``.
+        ctx_by_memory = await asyncio.wait_for(
+            _fetch_entity_contexts(sc, [new_memory_id, candidate_id], retraction_tenant_id),
             timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
         )
+        new_entities = ctx_by_memory.get(new_memory_id, [])
+        old_entities = ctx_by_memory.get(candidate_id, [])
     except Exception as e:
         # CAURA-134 — include exception class name in the log. The
         # default str(e) is empty for ``asyncio.TimeoutError``, which
@@ -2230,9 +2558,9 @@ async def _attempt_entity_retraction(
     # that discards someone else's decision to undo our own.
     #
     # Mirrors the guard the content-edit reset already applies for exactly this
-    # reason (``memory_service``: reset to "active" only ``if mem["status"] in
-    # ("outdated", "conflicted")``); the two paths clear the same state and had
-    # no business disagreeing.
+    # reason (``memory_service._revert_superseded_row``); the two paths clear the
+    # same state and had no business disagreeing, which is why the tuple they
+    # both read is now ``CONTRADICTED_STATUSES`` rather than two literals.
     #
     # NOTE this restores "active", not the status the row held BEFORE detection.
     # A row that was "confirmed" and got marked "conflicted" comes back as
@@ -2241,7 +2569,7 @@ async def _attempt_entity_retraction(
     # the write is the part that can be fixed without a migration; recovering the
     # original value cannot.
     cand_status = candidate.get("status")
-    if cand_status in ("outdated", "conflicted"):
+    if cand_status in CONTRADICTED_STATUSES:
         await sc.update_memory_status(str(candidate.get("id")), "active", tenant_id=cand_tenant)
     else:
         logger.info(
@@ -2317,6 +2645,16 @@ async def detect_contradictions_by_entities_async(
     concluded = False
     lock_key = None
     lock_token = ""
+    # A19 — same admission gate as Path A, and deliberately the SAME gate:
+    # Path C is the heavier occupant (it runs the entity-context fetch, and
+    # on the per-id fallback path that still holds up to
+    # ``_ENTITY_CTX_FANOUT_LIMIT`` storage connections at once), so giving it
+    # a second Semaphore(N) would double the very stampede budget the cap
+    # exists to bound. See ``_acquire_detection_slot`` for ordering + the
+    # outside-the-try rationale. The batched fetch (m-05) cut the round-trips
+    # a held slot spends on storage from ~170 to 4 across both phases; it did
+    # not change which gate Path C belongs in.
+    _gate, queued_ms = await _acquire_detection_slot()
     try:
         # The row is fetched BEFORE the lock is taken, unlike Path A. The lock
         # key carries a fingerprint of the content this run will examine (H-06)
@@ -2359,6 +2697,44 @@ async def detect_contradictions_by_entities_async(
             refreshed = await sc.get_memory(str(memory_id), tenant_id)
             if refreshed and refreshed.get("deleted_at") is None:
                 new_memory = refreshed
+
+        # A40 — run the DETERMINISTIC pass here, where the triple finally
+        # exists. This is the whole point of the fix: at write time
+        # ``EmitMemoryTriple`` resolves a subject only for identifier-shaped
+        # tokens, so every proper-noun fact ("Maya lives in Boston") committed
+        # with a NULL subject, Path A's RDF gate failed, and the verdict was
+        # handed to the stochastic raw-text judge. Entity extraction has now
+        # populated ``subject_entity_id`` / ``predicate`` / ``object_value``,
+        # and it is extraction completing that fired this very function — so
+        # this is the first moment the check CAN run for those rows.
+        #
+        # Cheaper, not dearer: a deterministic verdict short-circuits the
+        # entity-overlap LLM judge below, exactly as an RDF hit short-circuits
+        # Path A's semantic judge. Re-running is safe — the query selects only
+        # live rows, so anything Path A already retired is out of scope.
+        rdf = await _rdf_conflict_pass(
+            sc,
+            new_memory,
+            memory_id=memory_id,
+            tenant_id=tenant_id,
+            supersedes_id=new_memory.get("supersedes_id"),
+        )
+        if rdf.contradictions:
+            n_conflicts += len(rdf.contradictions)
+            if rdf.record_pairs and settings.contradiction_write_conflict_record:
+                from core_api.services.contradiction.resolver import (
+                    record_detected_conflicts,
+                )
+
+                await record_detected_conflicts(
+                    new_memory,
+                    rdf.record_pairs,
+                    tenant_id=tenant_id,
+                    fleet_id=new_memory.get("fleet_id"),
+                    tenant_config=tenant_config,
+                )
+            concluded = True
+            return
 
         candidates = await sc.find_entity_overlap_candidates(
             {
@@ -2496,18 +2872,25 @@ async def detect_contradictions_by_entities_async(
             )
         else:
             try:
+                # ONE batched fetch for the new memory and every candidate,
+                # not one fan-out group each. The cost guards above still
+                # bound the candidate count; what changed is that the count
+                # no longer multiplies storage round-trips (1 + N links
+                # calls + one per link became 2 calls, flat). The gate from
+                # #1461 bounds concurrent runs, so round-trips per run is
+                # what sets throughput per slot. See
+                # ``_fetch_entity_contexts``.
                 fetched = await asyncio.wait_for(
-                    _bounded_gather(
-                        [
-                            _fetch_entity_context(sc, str(memory_id), tenant_id),
-                            *(_fetch_entity_context(sc, str(c.get("id")), tenant_id) for c in candidates),
-                        ]
+                    _fetch_entity_contexts(
+                        sc,
+                        [str(memory_id), *(str(c.get("id")) for c in candidates)],
+                        tenant_id,
                     ),
                     timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
                 )
-                new_ctx = fetched[0]
-                for c, ctx in zip(candidates, fetched[1:], strict=False):
-                    contexts[str(c.get("id"))] = ctx
+                new_ctx = fetched.get(str(memory_id), [])
+                for c in candidates:
+                    contexts[str(c.get("id"))] = fetched.get(str(c.get("id")), [])
                 contexts_fetched = True
                 # CAURA-132 diag — context-fetch outcome. Per-candidate
                 # context sizes show which candidates have populated
@@ -2849,6 +3232,8 @@ async def detect_contradictions_by_entities_async(
     except Exception:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)
     finally:
+        # A19 — free the slot before the bookkeeping; see Path A's block.
+        _gate.release()
         # H-06 — see the matching block in ``detect_contradictions_async``.
         # ``concluded`` is set at each legitimate exit rather than once early,
         # so a throw ANYWHERE in the judging loop still releases: a failure
@@ -2859,13 +3244,14 @@ async def detect_contradictions_by_entities_async(
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
         logger.info(
             "path_c_completed for memory %s n_candidates=%d n_conflicts=%d "
-            "n_retractions=%d skipped=%s elapsed_ms=%d tenant_id=%s",
+            "n_retractions=%d skipped=%s elapsed_ms=%d queued_ms=%d tenant_id=%s",
             memory_id,
             n_candidates,
             n_conflicts,
             n_retractions,
             str(skipped).lower(),
             elapsed_ms,
+            queued_ms,
             tenant_id,
         )
 

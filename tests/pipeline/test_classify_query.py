@@ -600,6 +600,119 @@ async def test_expand_per_fleet_partial_failure():
 
 
 # ---------------------------------------------------------------------------
+# Total expansion failure falls back to hop-0 seeds (oss-0814-l-05)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_expand_per_fleet_total_failure_falls_back_to_hop0_seeds():
+    """When EVERY fleet's expand_graph call fails, the already-resolved seed
+    entities must survive as hop-0 / weight 1.0 instead of being dropped.
+
+    Pre-fix this returned ``{}``, which zeroed both consumers at once: the
+    ENTITY_LOOKUP pool had no entities to load links for, and the
+    ``_classified_entity_hops`` stash handed the boost step an empty dict its
+    ``precomputed_hops is not None`` check treats as authoritative — so entity
+    lookup AND hop-boost silently contributed nothing for the request.
+    """
+    eid_a = uuid.uuid4()
+    eid_b = uuid.uuid4()
+
+    sc = AsyncMock()
+    sc.expand_graph = AsyncMock(
+        side_effect=[
+            RuntimeError("storage 503"),
+            RuntimeError("storage 503"),
+        ]
+    )
+
+    result = await ClassifyQuery._expand_per_fleet(
+        sc=sc,
+        seed_ids=[eid_a, eid_b],
+        tenant_id="t1",
+        fleet_ids=["f1", "f2"],
+        max_hops=2,
+    )
+
+    assert result == {eid_a: (0, 1.0), eid_b: (0, 1.0)}
+    assert sc.expand_graph.call_count == 2
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_entity_lookup_survives_expand_graph_failure(mock_get_sc):
+    """Entity match + expand_graph down → ENTITY_LOOKUP still fires off the
+    hop-0 seeds (oss-0814-l-05).
+
+    Pre-fix the seeds were dropped with the failed expansion, so the linked
+    memory was unreachable and the query fell through to semantic search
+    after (misleadingly) logging "entity matched but no linked memories".
+    """
+    ctx = _make_ctx("Alice", top_k=1)
+
+    entity_id = uuid.uuid4()
+    memory_id = uuid.uuid4()
+    eid_str = str(entity_id)
+    mid_str = str(memory_id)
+
+    sc = _mock_sc()
+    sc.fts_search_entities = AsyncMock(return_value=[eid_str])
+    sc.expand_graph = AsyncMock(side_effect=RuntimeError("storage 503"))
+    sc.get_memory_ids_by_entity_ids = AsyncMock(
+        return_value=[{"memory_id": mid_str, "entity_id": eid_str, "role": "subject"}]
+    )
+    sc.load_memories_by_ids = AsyncMock(
+        return_value=[
+            {
+                "id": mid_str,
+                "tenant_id": "t1",
+                "content": "Alice test memory",
+                "memory_type": "fact",
+            }
+        ]
+    )
+    mock_get_sc.return_value = sc
+
+    step = ClassifyQuery()
+    await step.execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.ENTITY_LOOKUP
+    assert len(ctx.data["filtered_rows"]) == 1
+    # The links were looked up for the SEED, not for an empty expansion set.
+    sc.get_memory_ids_by_entity_ids.assert_awaited_once_with([eid_str], "t1")
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_hop_boost_stash_survives_expand_graph_failure(mock_get_sc):
+    """Temporal decline + expand_graph down → ``_classified_entity_hops``
+    still carries the hop-0 seeds, NOT ``{}`` (oss-0814-l-05).
+
+    The boost step's ``precomputed_hops is not None`` check treats an empty
+    dict as an authoritative "no entities" answer and skips its own FTS, so a
+    ``{}`` stash turned an expansion outage into zero hop-boost for a query
+    whose entities were already resolved.
+    """
+    entity_id = uuid.uuid4()
+    eid_str = str(entity_id)
+
+    sc = _mock_sc()
+    sc.fts_search_entities = AsyncMock(return_value=[eid_str])
+    sc.expand_graph = AsyncMock(side_effect=RuntimeError("storage 503"))
+    mock_get_sc.return_value = sc
+
+    ctx = _make_ctx("Alice", temporal_window=timedelta(days=7), top_k=1)
+
+    step = ClassifyQuery()
+    await step.execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.TEMPORAL
+    assert ctx.data["_classified_entity_hops"] == {entity_id: (0, 1.0)}
+
+
+# ---------------------------------------------------------------------------
 # Entity cap tests (Fix G)
 # ---------------------------------------------------------------------------
 

@@ -34,7 +34,12 @@ from core_api.constants import (
     MAX_LIST_LIMIT,
     MEMORY_STATUSES_PATTERN,
 )
-from core_api.errors import coded_detail
+from core_api.errors import (
+    AUTH_AGENT_TRUST_TOO_LOW,
+    AUTH_FLEET_SCOPE_FORBIDDEN,
+    AUTH_TARGET_AGENT_RESTRICTED,
+    coded_detail,
+)
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
     IdempotencyGuard,
@@ -198,6 +203,31 @@ async def list_fleets(
     return await get_storage_client().memory_fleet_distribution(tenant_id, exclude_scope_agent=True)
 
 
+async def _gate_fleet_read(
+    auth: AuthContext,
+    tenant_id: str | None,
+    caller_agent_id: AgentIdentity | None,
+    fleet_id: str | None,
+) -> None:
+    """Apply the fleet-read trust gate, under the condition it needs to be
+    meaningful — in one place, because three read routes had to agree on it.
+
+    The four-term condition is not a style choice. The gate resolves a trust
+    ladder for a *verifiable* caller, so it needs an authenticated tenant, a
+    resolved tenant to check against, an agent identity to resolve, and a fleet
+    to resolve it for. A tenant/user credential has no agent identity and is
+    tenant-wide by design; there is nothing for the ladder to rank.
+
+    ``_resolve_scoped_read`` below states this same condition in prose as the
+    thing its callers are expected to match. This makes the prose executable:
+    the list, stats and count routes now match it by calling one function
+    rather than by three copies staying in step. Count is the route that proves
+    the point — it is the neighbour that never got the gate at all.
+    """
+    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
+        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+
+
 async def _resolve_scoped_read(
     scope: str,
     *,
@@ -257,7 +287,10 @@ async def _resolve_scoped_read(
         # unregistered agent_id is cosmetic here because nothing is persisted.
         _, _, terr = await require_trust(tenant_id, caller_agent_id, min_level=min_level)
         if terr:
-            raise HTTPException(status_code=403, detail=parse_trust_error(terr))
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr)),
+            )
     return author_filter, fleet_id
 
 
@@ -373,8 +406,7 @@ async def list_memories(
     # Not redundant with the ladder above: scope='agent' resolves to L1 WITHOUT
     # inspecting the fleet it was handed, so this is the only thing standing
     # between a constrained caller and `scope=agent&fleet_id=<someone else's>`.
-    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
-        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
 
     # An inverted range matches nothing. Say so rather than serving an empty
     # page the caller reads as "no such memories".
@@ -541,11 +573,9 @@ async def memory_stats(
             written_by=None,
         )
         effective_agent_id = caller_agent_id if scope == "agent" else None
-    # A fleet-scoped aggregate is a fleet-scoped read: gate it exactly as
-    # GET /memories does. Previously absent here, which let a trust-1 agent
-    # read another fleet's breakdown that the list route would have refused.
-    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
-        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+    # Previously absent here, which let a trust-1 agent read another fleet's
+    # breakdown that the list route would have refused.
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
 
     # Type/agent/status breakdown (GROUPING SETS) via core-storage-api. Aggregates
     # across the readable set when the caller has cross-tenant read AND didn't pin
@@ -602,7 +632,27 @@ async def memory_count(
         tenant_id = auth.tenant_id
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
-    count = await get_storage_client().count_active(tenant_id, fleet_id, status=status)
+    # This route sat beside stats and list without the gate, so a trust-1 agent
+    # could count another fleet's rows the list route would have refused to show
+    # it — the same hole that was closed on stats and missed here.
+    caller_agent_id = auth.effective_agent_id(None)
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
+    # Visibility, scoped exactly as ``GET /memories`` scopes the rows this
+    # number summarises: ``scope_agent`` rows count only for their own author.
+    # Counting them all handed back, as a number, what the list route withholds
+    # — peers' private row counts. Excluding them all was the equal and
+    # opposite error: an agent credential's own count would then come in UNDER
+    # the list it can see.
+    #
+    # This route takes no ``agent_id`` param, so there is nothing to forge: the
+    # identity is the authenticated one or nothing.
+    count = await get_storage_client().count_active(
+        tenant_id,
+        fleet_id,
+        status=status,
+        exclude_scope_agent=True,
+        caller_agent_id=caller_agent_id,
+    )
     return {"count": count}
 
 
@@ -1045,7 +1095,20 @@ async def get_contradictions(
     }
 
 
-@router.post("/memories", response_model=MemoryOut, status_code=201)
+# Two shapes, and the document now says so. The STM branch returns
+# ``STMWriteResponse`` through a raw ``JSONResponse``, which bypasses
+# ``response_model`` — so the SERVER was always right here and only the
+# published contract was wrong: it advertised one 201 shape for an endpoint
+# with two, which a generated client discovers by failing to parse a
+# SUCCESSFUL write.
+#
+# Written as a union on ``response_model`` rather than an extra ``responses``
+# entry. Both produce an anyOf, but adding it alongside ``response_model``
+# leaves FastAPI emitting a ``$ref`` WITH an ``anyOf`` sibling, which
+# generators are free to read either way — replacing one ambiguity with
+# another is not a fix. The LTM path still validates: a ``MemoryOut`` cannot
+# satisfy ``STMWriteResponse``, which requires target/ttl/posted_at.
+@router.post("/memories", response_model=MemoryOut | STMWriteResponse, status_code=201)
 @write_limit
 async def write_memory(
     request: Request,
@@ -1146,7 +1209,10 @@ async def _write_memory_inner(
     if agent.get("trust_level", 0) == 0:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            ),
         )
     # Resolve fleet_id from agent's home fleet if not provided
     if not body.fleet_id and agent.get("fleet_id"):
@@ -1634,8 +1700,9 @@ async def delete_memory(
             if not allowed:
                 raise HTTPException(
                     status_code=403,
-                    detail=(
-                        f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.get('fleet_id')}'."
+                    detail=coded_detail(
+                        AUTH_FLEET_SCOPE_FORBIDDEN,
+                        f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.get('fleet_id')}'.",
                     ),
                 )
     # ``soft_delete_memory`` already routes the fetch + delete through the
@@ -1705,7 +1772,10 @@ async def update_memory_status(
         if not allowed:
             raise HTTPException(
                 status_code=403,
-                detail=f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                ),
             )
     old_status = memory.get("status")
     await sc.update_memory_status(str(memory_id), status, tenant_id=tenant_id)
@@ -2324,7 +2394,9 @@ async def redistribute_memories(
     if caller is None or caller.get("trust_level", 0) < 3:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' requires trust_level >= 3 for redistribute.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW, f"Agent '{agent_id}' requires trust_level >= 3 for redistribute."
+            ),
         )
 
     # Verify target agent exists and is not restricted
@@ -2337,8 +2409,11 @@ async def redistribute_memories(
     if target.get("trust_level", 0) < 1:
         raise HTTPException(
             status_code=403,
-            detail=f"Target agent '{body.target_agent_id}' is restricted (trust_level=0). "
-            "Cannot assign memories to a restricted agent.",
+            detail=coded_detail(
+                AUTH_TARGET_AGENT_RESTRICTED,
+                f"Target agent '{body.target_agent_id}' is restricted (trust_level=0). "
+                "Cannot assign memories to a restricted agent.",
+            ),
         )
 
     # Usage quota

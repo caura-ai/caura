@@ -80,7 +80,7 @@ services:
     # when no local image is cached.
     #
     # Pin a specific version with ``CAURA_VERSION=v1.2.3`` in your ``.env``
-    # (``MEMCLAW_VERSION`` is still read); defaults to ``latest``.  # legacy-name-ok: rule 3 dual-read alias
+    # (``MEMCLAW_VERSION`` is still read); defaults to ``latest``.  # legacy-name-floor: documents the live dual-read alias
     #
     # The nested default is deliberate and needs Compose v2, which README.md
     # already requires. Compose v2 resolves a ``${...}`` inside a default

@@ -297,6 +297,19 @@ caura_evolve outcome="deploy succeeded, smoke test passed" \
 
 ---
 
+## If you are code, not an MCP client — Caura Rail
+
+When the agent is a program (Python or TypeScript) rather than a chat runtime
+with `caura_*` tools, the same loop is delivered by the Rail SDK
+(`pip install caura-rail`, `npm install @caura/rail`). Each `turn` runs
+§1 and the Orient step of §2 for you: keystones are fetched first and placed
+ahead of recalled facts in `turn.context.text`; after your code replies, the
+facts an extractor returns are written (§3) with your `agent_id` and
+`fleet_id`. Rail does not call `caura_evolve`; report outcomes yourself over
+REST when a recalled memory changed what you did. Identity rules in §0 apply
+unchanged: set `agent_id` per agent, one agent per fleet. Guide:
+https://github.com/caura-ai/caura-rail.
+
 ## Tool reference
 
 Tool names, parameters, and types live in the MCP tool schemas — every

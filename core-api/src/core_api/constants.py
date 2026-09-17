@@ -41,7 +41,7 @@ from common.enrichment.constants import (  # noqa: F401
     SERVER_RESERVED_MEMORY_TYPES,
     MemoryType,
 )
-from common.env_utils import read_float_env
+from common.env_utils import read_float_env, read_int_env
 
 # Re-export LLM provider constants from common.llm (CAURA-595).
 from common.llm.constants import (  # noqa: F401
@@ -146,6 +146,21 @@ MEMORY_STATUSES_PATTERN = (
     r"|outdated|conflicted|archived|deleted)$"
 )
 
+# The two statuses contradiction detection writes on a losing row — and the only
+# two any retraction path may revert FROM. Anything else on a contradicted row
+# means another writer has moved it since (a human confirmed it, the crystallizer
+# archived it, a different chain superseded it), so stamping "active" over that
+# would discard someone else's decision.
+#
+# One definition because four call sites read it and every one of them is a
+# destructive-write guard: ``contradiction_detector``'s Path-C retraction,
+# ``memory_service``'s edit-time revert, the supersedes-chain follow in
+# ``pipeline.steps.search.load_and_serialize``, and outcome inference's failure
+# evidence. It previously lived in ``outcome_inference.contradictions`` under a
+# comment telling readers to keep it in sync BY HAND with the detector's writes —
+# which is the strongest possible argument that it belongs in one place.
+CONTRADICTED_STATUSES: tuple[str, ...] = ("outdated", "conflicted")
+
 # ── Health / status probe timeouts ──
 # The storage pool's per-attempt connect ceiling (``storage_client._make_pool``
 # reads it from here). Named rather than inlined because PROBE_TIMEOUT_SECONDS
@@ -221,6 +236,50 @@ MEMORY_VISIBILITIES = (
 )
 MEMORY_VISIBILITIES_PATTERN = (
     f"^({MEMORY_VISIBILITY_SCOPE_AGENT}|{MEMORY_VISIBILITY_SCOPE_TEAM}|{MEMORY_VISIBILITY_SCOPE_ORG})$"
+)
+
+# The refusal both STM doors give when ``use_stm`` is off — the read/clear/
+# promote routes (``routes.stm._check_stm_enabled``) and the write path
+# (``services.memory_service``, reached by POST /memories with
+# write_mode='stm').
+#
+# ONE constant because the two had drifted. The read door's text was rewritten
+# once already, on the grounds that "Set USE_STM=true" is advice the reader it
+# reaches cannot act on — USE_STM is a server setting and the caller hitting
+# this is a hosted one. The write door kept the old wording, so a single
+# capability had two doors telling the caller different things to do next.
+# Sharing the string is what stops that recurring; agreement enforced by
+# comparing two copies of the text can only ever notice the drift after it
+# happens.
+# How short-term memory is written over REST — one sentence, because it was
+# three, and two of them were wrong.
+#
+# "There is no REST write route for STM at all" was published in the OpenAPI
+# TAG (app.py, what a reader sees in the sidebar before opening an operation),
+# in the per-operation description (routes/stm.py) and in a test's own
+# docstring. It was true of the dedicated routes and false of the capability:
+# POST /memories with write_mode='stm' runs the STM write pipeline. It is gated
+# on the same USE_STM setting, so the claim held for the hosted deployment and
+# was false for exactly the self-hosted readers its last sentence addressed.
+#
+# app.py's SAFE-01 note already argues this case for its own text: "the same
+# fact written twenty-five times has twenty-five chances to go stale, and the
+# copy that gets forgotten is the one someone reads."
+STM_WRITE_ROUTE_NOTE = (
+    "There are no dedicated STM write routes (`POST /stm/notes` and "
+    "`POST /stm/bulletin` return 405). Short-term memory is written over REST "
+    "with `POST /memories` and `write_mode='stm'`, which returns an "
+    "`STMWriteResponse` rather than a `MemoryOut`, and is gated on the same "
+    "`USE_STM` setting as these operations."
+)
+
+STM_DISABLED_DETAIL = (
+    "Short-term memory is not available on this deployment. STM is "
+    "plugin-only: it is served by the OpenClaw plugin, and the hosted "
+    "REST API cannot enable it (USE_STM is a server setting, not a "
+    "per-tenant one). Self-hosted operators can set USE_STM=true; "
+    "hosted callers should use the durable memory endpoints "
+    "(/memories, /search) instead."
 )
 
 MAX_CONTENT_LENGTH = 10000
@@ -319,6 +378,32 @@ CANDIDATE_POOL_SIZE = 0
 # tenant via default_search_profile.score_formula to A/B old vs new on the benchmark.
 # Rationale + offline calibration: docs/ranking/unified-ranking-formula.md.
 SCORE_FORMULA = 0
+# HNSW two-stage retrieval (PR2, docs/plans/hnsw-two-stage-retrieval.md).
+# 0 = OFF: storage keeps the full-scan candidate window (current behaviour).
+# >0 = storage admits candidates through index-served pool arms (ANN top-N by
+# cosine via the memories HNSW index, plus FTS / recency / date-window /
+# entity-boosted arms) and runs the scoring formula over that pool only —
+# O(log N + pool) instead of O(tenant rows) per search. Needs pgvector >= 0.8
+# at runtime; storage probes once and silently keeps the full scan below that.
+# Enable per-tenant via ``default_search_profile.ann_pool_size``; keep 0
+# globally until the offline harness validates result parity (see the plan
+# doc's crowding-regime analysis). Mutually exclusive with
+# ``candidate_pool_size`` — storage lets ann win if both arrive.
+ANN_POOL_SIZE = 0
+# Shadow-compare for the ANN pool: serve legacy, run pooled in the background,
+# log the comparison (see ExecuteScoredSearch). Enable per-tenant together with
+# ann_pool_size via default_search_profile; inert while ann_pool_size is 0.
+ANN_POOL_SHADOW = 0
+# Reference clock for freshness when the request carries ``valid_at`` (see
+# ``common.constants.SEARCH_KNOBS["freshness_reference"]`` for the full
+# contract). 0 = now(); 1 = the request's ``valid_at``, with the row anchored to
+# ``coalesce(ts_valid_start, created_at)``. Off by default; enable per tenant via
+# ``default_search_profile.freshness_reference`` for corpora whose
+# ``ts_valid_start`` is EVENT time — a backfilled history, a benchmark whose
+# questions ask "as of" a date. Without it a corpus ingested in one sitting has
+# every row the same age, so the time signal is uniform noise and "last month"
+# resolves against the ingest date rather than the question's.
+FRESHNESS_REFERENCE = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_BOOST_FACTOR = 1.3
@@ -700,13 +785,32 @@ FTS_RESERVED_RESULTS = 1  # result slots held for full-text matches; includes #6
 # A26: recall_count is bumped for every RETURNED row, used or not (see
 # TrackRecalls + memory_increment_recall), and feeds recall_boost back into the
 # rank score — a self-reinforcing "returned → boosted → returned" loop with no
-# usefulness signal. Until a confirmation-gated bump lands (the real fix, tied to
-# D5/D1), the cap is dialed down so the boost can no longer hijack rankings: at
-# cap=1.1 a popular-but-useless row can only overtake a more-relevant one whose
-# base score is <10% higher (was <50% at cap=1.5), and the shorter decay window
-# lets stale popularity fade in ~2 weeks instead of a quarter.
+# usefulness signal. The cap stays dialed down so the boost cannot hijack
+# rankings while the counter is return-fed: at cap=1.1 a popular-but-useless row
+# can only overtake a more-relevant one whose base score is <10% higher (was
+# <50% at cap=1.5), and the shorter decay window lets stale popularity fade in
+# ~2 weeks instead of a quarter.
+#
+# A41 — the confirmation-gated path the A26 interim pointed at now exists,
+# behind ``recall_boost_source`` (below / SEARCH_KNOBS): 1 feeds the boost from
+# ``metadata._system.recall_used_count`` — bumped only when an agent reports an
+# outcome naming the memory in ``related_ids`` (evolve, the platform's explicit
+# "I acted on these memories" signal) — instead of from recall_count. The
+# returned counter keeps accruing under either source (lifecycle/insights
+# consumers read it as "was returned", and it is the counterfactual for the
+# returned-vs-used measurement), so the flip is measured, not assumed, and
+# reversible. Held at 0 until that measurement validates it per tenant.
 RECALL_BOOST_CAP = 1.1  # max multiplier from frequent recall (A26: dialed down from 1.5)
 RECALL_DECAY_WINDOW_DAYS = 14  # only recalls within this window contribute to boost (A26: from 90)
+# A41: which counter feeds recall_boost. 0 = recall_count (bump-on-return —
+# current behaviour, byte-identical scoring SQL). 1 = the confirmed-use counter
+# (see the block above). Global default; flip per tenant via
+# ``search.default_profile.recall_boost_source``, or fleet-wide for an on-prem
+# install via the env var (defensive parse — a garbage value falls back to the
+# default with a stderr WARN instead of crashing import, #1441 pattern; any
+# value other than 1 keeps the return-fed source, mirroring storage's own
+# ``== 1`` read so a typo fails closed to today's behaviour).
+RECALL_BOOST_SOURCE = 1 if read_int_env("CAURA_RECALL_BOOST_SOURCE", 0, minimum=0) == 1 else 0
 
 # ── Recall summary ──
 MEMORY_RECALL_SUMMARY_TEMPERATURE = 0.3
@@ -977,3 +1081,28 @@ def _relation_weight(relation_type: str, row_weight: float) -> float:
     """
     type_w = RELATION_TYPE_WEIGHTS.get(relation_type.lower(), DEFAULT_RELATION_TYPE_WEIGHT)
     return type_w * row_weight
+
+
+# F9 — what an empty keystone set should say. Shared by the REST envelope and
+# the MCP tool so the two surfaces cannot drift into saying different things
+# about the same state.
+#
+# Agents are taught to call keystones at every session start and obey what comes
+# back. A tenant that never authored a rule pays that round-trip and receives
+# ``count: 0`` — which is indistinguishable, to the caller, from "this tenant
+# has no standing policy", from "authoring failed", and from "you asked the
+# wrong scope". The agent's reasonable inference is the first, so it stops
+# asking and carries standing constraints in recall instead, which is the exact
+# thing keystones exist to prevent.
+#
+# Emitted ONLY on the empty result, so tenants with rules pay nothing, and it is
+# a RESPONSE field rather than schema — it does not touch the ``tools/list``
+# token ceiling that ``_AGENT_ID_DESC`` had to respect
+# (tests/test_mcp_token_budget.py).
+KEYSTONES_EMPTY_HINT = (
+    "No keystone rules are authored for this scope. Authoring is a separate, "
+    "trust-gated step (caura_keystones_set, trust >= 1 for a self-authored "
+    "agent-scoped rule, >= 2 otherwise) — an empty result does not mean the "
+    "call failed. Until rules exist, standing constraints have to travel in "
+    "recall instead of being pinned here."
+)

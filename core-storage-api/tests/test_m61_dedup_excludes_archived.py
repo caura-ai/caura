@@ -9,9 +9,15 @@ F is written with ``last_dedup_checked_at`` NULL, so run 2 picks F as a candidat
 finds the ARCHIVED S1/S2 as neighbours, re-forms {F,S1,S2}, re-sends it to the
 LLM, and then archives F, because the archive step takes every cluster member.
 
-A pair is (candidate, neighbour), so both queries need the filter: an archived row
+A pair is (candidate, neighbour), so both ends need the filter: an archived row
 excluded from one end still reaches a cluster through the other. There is a test
 for each end.
+
+Both ends now live in one statement — ``memory_find_near_duplicate_pairs``,
+which oss-0814-m-37 fused out of the candidate query and the per-candidate
+neighbour query. These tests moved onto it rather than being retired: the
+predicates are the same two, and asserting them through the query the sweep
+actually runs is what the M-61 guard is for.
 """
 
 import uuid
@@ -27,6 +33,21 @@ pytestmark = pytest.mark.asyncio
 # which is the only thing they are about.
 _VEC_A = [0.1] * 1024
 _VEC_B = [0.1] * 1023 + [0.1001]
+
+
+def _candidates(rows) -> set:
+    """The swept set: the distinct left side of the LEFT JOIN.
+
+    A candidate repeats once per neighbour and appears once with a NULL
+    neighbour when it has none, so membership here is exactly "was offered to
+    the sweep" — independent of whether anything matched it.
+    """
+    return {r[0] for r in rows}
+
+
+def _neighbours_of(rows, candidate_id) -> set:
+    """The non-NULL right side for one candidate."""
+    return {r[1] for r in rows if r[0] == candidate_id and r[1] is not None}
 
 
 async def _memory(svc: PostgresService, tenant: str, *, status: str, embedding=None):
@@ -56,8 +77,8 @@ async def test_an_archived_row_is_not_a_dedup_candidate():
     live = await _memory(svc, tenant, status="active")
     archived = await _memory(svc, tenant, status="archived")
 
-    rows = await svc.memory_find_near_duplicate_candidates(tenant_id=tenant, fleet_id=None, batch_size=50)
-    ids = {r[0] for r in rows}
+    rows = await svc.memory_find_near_duplicate_pairs(tenant_id=tenant, fleet_id=None, batch_size=50)
+    ids = _candidates(rows)
 
     assert live.id in ids, "a live unchecked row must still be swept"
     assert archived.id not in ids, "an archived row was offered as a dedup candidate"
@@ -76,15 +97,17 @@ async def test_an_archived_neighbour_is_not_returned():
     live_peer = await _memory(svc, tenant, status="active", embedding=_VEC_B)
     archived_source = await _memory(svc, tenant, status="archived", embedding=_VEC_B)
 
-    rows = await svc.memory_find_neighbors_by_embedding(
+    rows = await svc.memory_find_near_duplicate_pairs(
         tenant_id=tenant,
         fleet_id=None,
-        query_embedding=_VEC_A,
-        exclude_id=crystal.id,
+        batch_size=50,
         threshold=0.5,
-        limit=50,
+        neighbor_limit=50,
     )
-    ids = {r[0] for r in rows}
+    # The crystal is itself a candidate (confirmed, unchecked, embedded), so its
+    # neighbour list is the LATERAL's output for that row — the same list the
+    # per-candidate query used to return for it.
+    ids = _neighbours_of(rows, crystal.id)
 
     assert live_peer.id in ids, "a live neighbour must still be found"
     assert archived_source.id not in ids, (
@@ -107,8 +130,8 @@ async def test_confirmed_and_pending_are_live_for_this_sweep():
     confirmed = await _memory(svc, tenant, status="confirmed")
     pending = await _memory(svc, tenant, status="pending")
 
-    rows = await svc.memory_find_near_duplicate_candidates(tenant_id=tenant, fleet_id=None, batch_size=50)
-    ids = {r[0] for r in rows}
+    rows = await svc.memory_find_near_duplicate_pairs(tenant_id=tenant, fleet_id=None, batch_size=50)
+    ids = _candidates(rows)
 
     assert {confirmed.id, pending.id} <= ids, f"a live status was dropped from the sweep: {ids}"
 
@@ -125,8 +148,8 @@ async def test_non_live_statuses_other_than_archived_are_excluded_too():
     outdated = await _memory(svc, tenant, status="outdated")
     conflicted = await _memory(svc, tenant, status="conflicted")
 
-    rows = await svc.memory_find_near_duplicate_candidates(tenant_id=tenant, fleet_id=None, batch_size=50)
-    ids = {r[0] for r in rows}
+    rows = await svc.memory_find_near_duplicate_pairs(tenant_id=tenant, fleet_id=None, batch_size=50)
+    ids = _candidates(rows)
 
     assert outdated.id not in ids
     assert conflicted.id not in ids

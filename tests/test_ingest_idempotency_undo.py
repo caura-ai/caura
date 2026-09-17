@@ -90,6 +90,16 @@ async def test_cache_hit_returns_cached_facts_without_llm(
 
     monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _fake_lookup)
 
+    # 09/02 M-44 — a cache hit now also requires PROOF that the run which
+    # populated it committed every fact. That proof is the parent Document's
+    # ``errored`` count, so the happy path has to supply a clean one; without
+    # it the cache is refused by design, because an unprovable cache is exactly
+    # what made partial extractions permanent.
+    async def _complete_prior(tenant_id, run_id):
+        return True
+
+    monkeypatch.setattr(ingest_service, "_prior_ingest_was_complete", _complete_prior)
+
     # Track that the LLM was NOT called
     llm_called = False
 

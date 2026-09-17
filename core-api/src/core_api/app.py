@@ -35,7 +35,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from common import permanent_failure
 from common.events.factory import get_event_bus
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
-from core_api.constants import VERSION, is_mcp_path
+from core_api.constants import STM_WRITE_ROUTE_NOTE, VERSION, is_mcp_path
 from core_api.consumer import register_consumers
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
 from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
@@ -65,6 +65,7 @@ from core_api.routes.org_deletion import router as org_deletion_router
 from core_api.routes.plugin import plugin_bootstrap_router
 from core_api.routes.plugin import router as plugin_router
 from core_api.routes.reports import router as reports_router
+from core_api.routes.scheduler_lease import router as scheduler_lease_router
 from core_api.routes.settings import router as settings_router
 from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
@@ -246,7 +247,7 @@ async def lifespan(app):
     # imported AFTER that call (slowapi / mcp_server below, uvicorn by the
     # server) — so the import-time pass no-ops for them (it logs a "rerouting
     # was a no-op" warning) and their records never reach the JSON/GCP handler.
-    # Most consequentially, FastMCP's "Error executing tool ..." tool-error
+    # Most consequentially, the MCP SDK's "Error executing tool ..." tool-error
     # lines were invisible in prod logs. The re-route is idempotent, so this
     # post-import re-run from the ASGI lifespan startup safely routes them.
     reroute_third_party_loggers()
@@ -606,9 +607,11 @@ async def lifespan(app):
 # CAP-01 / F6. Tag-level labelling for capabilities whose REST surface is not
 # what its presence in this spec implies. Only STM qualifies today: it is
 # advertised here, gated on a server setting hosted tenants cannot reach, and
-# has no REST write route at all. The per-operation text lives in
+# has no DEDICATED REST write route. The per-operation text lives in
 # ``routes/stm.py``; this is what a reader sees in the docs sidebar before
-# they open an operation.
+# they open an operation — which is why the sentence about the write path is
+# shared with that module rather than restated here. It used to be restated,
+# and said something untrue for longer than the copy that got corrected.
 OPENAPI_TAGS = [
     {
         "name": "stm",
@@ -616,8 +619,8 @@ OPENAPI_TAGS = [
             "**Plugin-only — not available over hosted REST.** Short-term "
             "memory is served by the OpenClaw plugin. These operations are "
             "gated on the server-side `USE_STM` setting, which is off in the "
-            "hosted deployment and is not per-tenant, and there is no REST "
-            "write route for STM at all. Use `/memories` and `/search` for "
+            "hosted deployment and is not per-tenant. "
+            f"{STM_WRITE_ROUTE_NOTE} Use `/memories` and `/search` for "
             "durable memory."
         ),
     },
@@ -1039,10 +1042,10 @@ app.include_router(reports_router, prefix="/api/v1")
 # change until they explicitly enable the feature.
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
-# PERMANENT legacy alias (rebrand, 2026-08-14): the keystones REST surface
+# Rename compatibility (2026-08-14): the keystones REST surface
 # shipped as /api/v1/memclaw/keystones and customer scripts call it. The
 # canonical path is now the brand-neutral /api/v1/keystones (matching every
-# other route); the old prefix keeps serving forever, hidden from the schema.
+# other route); the old prefix remains accepted, hidden from the schema.
 app.include_router(
     keystones_router,
     prefix="/api/v1/memclaw",  # legacy-name-floor: floor
@@ -1059,6 +1062,7 @@ app.include_router(interview_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
 app.include_router(conflicts_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
+app.include_router(scheduler_lease_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
@@ -1067,7 +1071,7 @@ if _os.getenv("TESTING") == "1":
 
     app.include_router(testing_router, prefix="/api/v1")
 
-# Mount at /mcp; FastMCP's internal Route("/") handles the canonical /mcp/.
+# Mount at /mcp; the SDK app's internal Route("/") handles the canonical /mcp/.
 # Bare /mcp (no trailing slash) doesn't match Mount's regex, so the parent
 # router would issue a 307 — streaming MCP clients (e.g. Anthropic's
 # remote-MCP integration) hang on the initialize handshake when a redirect

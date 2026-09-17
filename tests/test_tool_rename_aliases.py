@@ -1,12 +1,12 @@
-"""Permanent-alias contract for the 2026-08-14 memclaw_* → caura_* rename.
+"""Dispatch-alias contract for the 2026-08-14 tool rename.
 
-Three guarantees, each load-bearing forever:
+Three guarantees, each load-bearing while the register retains the tool-alias row:
 
 1. ``tools/list`` advertises ONLY ``caura_*`` names — the old names must
    never reappear in the listing (dual-listing doubles the client's
    tool-schema token budget, which is why the alias lives at dispatch).
-2. Every listed tool is callable under its legacy ``memclaw_*`` name —
-   the ``_InstrumentedFastMCP.call_tool`` shim translates before
+2. Every listed tool is callable under its pre-rename name —
+   the ``_InstrumentedMCPServer.call_tool`` shim translates before
    dispatch, so saved prompts, keystone rules, and published tutorials
    written against the old names keep working.
 3. The set of alias-covered tools is derived from the LIVE registry, not
@@ -15,16 +15,16 @@ Three guarantees, each load-bearing forever:
 
 The calls go through ``mcp.call_tool`` — the same dispatch point JSON-RPC
 ``tools/call`` uses. Because handlers check auth in their bodies (after
-FastMCP's argument validation), per-tool coverage asserts *equivalence*:
+MCPServer's argument validation), per-tool coverage asserts *equivalence*:
 whatever the canonical name produces for a given call (an envelope, a
 validation ToolError), the legacy name must produce the same — no
-per-tool argument fixtures needed, and never FastMCP's "Unknown tool".
+per-tool argument fixtures needed, and never the SDK's "Unknown tool".
 """
 
 from __future__ import annotations
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from core_api import mcp_server
 from tests._mcp_test_helpers import as_text, parse_envelope
@@ -44,11 +44,11 @@ async def _outcome(name: str) -> tuple[str, str]:
     # matters is the error class (validation vs unknown-tool), not which
     # spelling was used.
     suffix = name.removeprefix("caura_")
-    suffix = suffix.removeprefix("memclaw_")  # legacy-name-ok: rule 3 dispatch alias
+    suffix = suffix.removeprefix("memclaw_")  # legacy-name-ok: supported dispatch alias
 
     def _normalize(text: str) -> str:
         text = text.replace(f"caura_{suffix}", "<tool>")
-        legacy_marker = f"memclaw_{suffix}"  # legacy-name-ok: rule 3 dispatch alias
+        legacy_marker = f"memclaw_{suffix}"  # legacy-name-ok: supported dispatch alias
         return text.replace(legacy_marker, "<tool>")
 
     try:
@@ -65,24 +65,24 @@ async def test_listing_exposes_only_caura_names():
     offenders = [n for n in names if not n.startswith("caura_")]
     assert not offenders, (
         f"tools/list must advertise only caura_* names, got {offenders}. "
-        "Legacy memclaw_* names are dispatch aliases, never listed — "  # legacy-name-ok: rule 3
+        "Legacy memclaw_* names are dispatch aliases, never listed — "  # legacy-name-ok: supported dispatch alias
         "dual-listing doubles every client's tool-schema token budget."
     )
 
 
 @pytest.mark.asyncio
 async def test_every_tool_dispatches_under_its_legacy_name():
-    """memclaw_<suffix> must behave exactly like caura_<suffix>, for every
+    """Pre-rename and canonical spellings must behave identically for every
     registered tool — including tools that did not exist at rename time.
     """
     for name in await _listed_tool_names():
         suffix = name.removeprefix("caura_")
-        legacy = "memclaw_" + suffix  # legacy-name-ok: rule 3 dispatch alias
+        legacy = "memclaw_" + suffix  # legacy-name-ok: supported dispatch alias
         canonical_kind, canonical_detail = await _outcome(name)
         legacy_kind, legacy_detail = await _outcome(legacy)
         assert "unknown tool" not in legacy_detail.lower(), (
             f"legacy alias {legacy!r} did not reach the {name!r} handler — "
-            "the permanent rename shim in _InstrumentedFastMCP.call_tool "
+            "the supported rename shim in _InstrumentedMCPServer.call_tool "
             "is broken, and every pre-rename saved prompt breaks with it"
         )
         assert (legacy_kind, legacy_detail) == (canonical_kind, canonical_detail), (
@@ -100,7 +100,7 @@ async def test_legacy_alias_reaches_the_handler_body(monkeypatch):
     monkeypatch.setattr(mcp_server, "_check_auth", lambda: mcp_server._AUTH_ERROR)
 
     result = await mcp_server.mcp.call_tool(
-        "memclaw_write",  # legacy-name-ok: rule 3 dispatch alias
+        "memclaw_write",  # legacy-name-ok: supported dispatch alias
         {"content": "alias probe body", "agent_id": "claude-eldad"},
     )
     envelope = parse_envelope(result)
@@ -112,7 +112,7 @@ async def test_unknown_names_still_fail_under_both_prefixes():
     """The shim must not turn nonexistent tools into false positives."""
     for bogus in (
         "caura_nonexistent",
-        "memclaw_nonexistent",  # legacy-name-ok: rule 3 dispatch alias
+        "memclaw_nonexistent",  # legacy-name-ok: supported dispatch alias
     ):
         with pytest.raises(ToolError):
             await mcp_server.mcp.call_tool(bogus, {})

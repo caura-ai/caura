@@ -52,9 +52,9 @@ cat > .env << 'EOF'
 ENVIRONMENT=development
 POSTGRES_HOST=127.0.0.1
 POSTGRES_PORT=5432
-POSTGRES_USER=memclaw
+POSTGRES_USER=caura
 POSTGRES_PASSWORD=changeme
-POSTGRES_DB=memclaw
+POSTGRES_DB=caura
 POSTGRES_REQUIRE_SSL=false
 IS_STANDALONE=true
 EMBEDDING_PROVIDER=fake
@@ -64,9 +64,9 @@ CORS_ORIGINS=http://localhost:8000,http://localhost:3000
 EOF
 
 # 5. Create the database (if it doesn't exist)
-psql -U postgres -c "CREATE USER memclaw WITH PASSWORD 'changeme';"
-psql -U postgres -c "CREATE DATABASE memclaw OWNER memclaw;"
-psql -U memclaw -d memclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql -U postgres -c "CREATE USER caura WITH PASSWORD 'changeme';"
+psql -U postgres -c "CREATE DATABASE caura OWNER caura;"
+psql -U caura -d caura -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
 # 6. Run migrations
 alembic upgrade head
@@ -165,6 +165,42 @@ This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims th
 
 Use MCP if your agent supports it. Use the plugin if you're running on OpenClaw.
 
+## Connect via Rail SDK (agents you write yourself)
+
+If the agent is your own Python or TypeScript code rather than an MCP client,
+use Rail. It calls the same API: rules and relevant facts are recalled before
+each turn, and facts the turn taught are stored after it.
+
+```bash
+export CAURA_URL=http://localhost:8000
+export CAURA_API_KEY=standalone     # or your admin / gate key
+pip install caura-rail              # or: npm install @caura/rail
+```
+
+```python
+from caura_rail import MemoryScope, Rail, RestMemoryStore
+
+with RestMemoryStore.from_env() as store:
+    rail = Rail(store, MemoryScope(agent_id="my-agent", fleet_id="my-fleet"))
+    with rail.turn("Remember: We deploy in eu-west-1.") as turn:
+        turn.reply = "Noted. " + turn.context.text
+    print([w.status for w in turn.writes])   # ['written'], or ['deduplicated'] on a rerun
+```
+
+```js
+import { MemoryScope, Rail, RestMemoryStore } from "@caura/rail";
+
+const rail = new Rail({
+  store: RestMemoryStore.fromEnv(process.env),
+  scope: new MemoryScope({ agentId: "my-agent", fleetId: "my-fleet" }),
+});
+const turn = await rail.turn("Remember: We deploy in eu-west-1.", (_, ctx) => "Noted. " + ctx.text);
+console.log(turn.writes.map(w => w.status));    // ['written'], or ['deduplicated'] on a rerun
+```
+
+In standalone mode Rail discovers the `default` tenant by itself; with a gate
+key set `CAURA_TENANT` as well. Full guide: https://github.com/caura-ai/caura-rail.
+
 ## Verify Your Connection
 
 ```bash
@@ -246,8 +282,9 @@ Then restart the server (`docker compose restart app` or re-run uvicorn).
 On our reference benchmarks (warm cache, single tenant):
 
 - **Search latency:** 23 ms p50, 27 ms p95
-- **Recall accuracy:** 77.6% (LoCoMo) / 72.5% (LongMemEval), LLM-judge
-- **Token savings vs full context:** 96–98%
+- **Recall accuracy:** 77.6% (LoCoMo, 2026-04-19) / 92.2% (LongMemEval, 2026-09-15,
+  the benchmark's reference judge; 90.2% under a stricter second judge)
+- **Token savings vs full context:** 79% (LongMemEval) to 97% (LoCoMo)
 
 If you see search latency materially above ~50 ms p50 after warm-up, the pgvector index is likely cold or your embedding-provider roundtrip is the bottleneck — see [`docs/performance.md`](docs/performance.md) for the methodology and the operator-scale notes.
 

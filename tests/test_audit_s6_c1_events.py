@@ -47,8 +47,11 @@ def _search_ctx(tenant_id: str, readable: list[str] | None):
         "boosted_memory_ids": [],
         "memory_boost_factor": {},
         "readable_tenant_ids": readable,
-        # Skip the per-tenant slot context manager (already-acquired path).
-        "_storage_slot_acquired": True,
+        # No slot shortcut here: the C10 ``_storage_slot_acquired`` sentinel
+        # was retired (oss-0814-l-06 — it let the fall-through scored_search
+        # run outside the per-tenant cap), so the step always takes the real
+        # ``storage_search`` slot. Uncontended acquire on a fresh per-test
+        # (scope, tenant) key — instant, nothing to mock away.
     }
     return PipelineContext(data=data)
 

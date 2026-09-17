@@ -6,6 +6,8 @@ import time
 from datetime import UTC, datetime
 from uuid import uuid4
 
+from fastapi import HTTPException
+
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 
@@ -36,12 +38,31 @@ class WriteSTMNote:
         }
 
         if target == "notes":
-            await stm.post_note(data.tenant_id, data.agent_id, entry)
+            stored = await stm.post_note(data.tenant_id, data.agent_id, entry)
             ttl = settings.stm_notes_ttl
         else:
             fleet_id = ctx.data.get("stm_fleet_id") or data.fleet_id or "default"
-            await stm.post_bulletin(data.tenant_id, fleet_id, entry)
+            stored = await stm.post_bulletin(data.tenant_id, fleet_id, entry)
             ttl = settings.stm_bulletin_ttl
+
+        # The receipt below is only true if the entry is actually in the
+        # backend. This step used to build it unconditionally: a fresh uuid, a
+        # TTL read from settings, and 201 — for a write the backend had
+        # silently dropped because Redis was unreachable. The caller was left
+        # holding an id that resolves to nothing, and a 2xx is the one answer
+        # that stops it retrying.
+        #
+        # 503, not 500: nothing about the request was wrong and re-sending it
+        # is the right move once the backend is back. ``STATUS_TO_CODE`` maps
+        # it to UNAVAILABLE, which says that.
+        if not stored:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Short-term memory is temporarily unavailable and the entry "
+                    "was not stored. Retry shortly; nothing was written."
+                ),
+            )
 
         t0 = ctx.data.get("t0", time.perf_counter())
         latency_ms = round((time.perf_counter() - t0) * 1000)

@@ -16,9 +16,11 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import HTTPException
 
+from common.embedding import get_embedding
+from common.enrichment.constants import DEFAULT_MEMORY_TYPE
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES
+from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES, MEMORY_TYPES_WRITE
 from core_api.providers._retry import call_with_fallback
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -250,21 +252,16 @@ later without the surrounding document.
      - 0.0 = filler / restatement
    Be honest. Anything below 0.5 will be dropped automatically.
 
-7. **memory_type.** Pick the most specific tag. When in doubt prefer the
-   left option in each pair:
-     - fact         — a stable proposition about the world ("Iron melts at 1538°C")
-     - decision     — a chosen course of action by an identified actor
-     - task         — work item assigned but not yet finished
-     - plan         — intended future action stated as plan
-     - outcome      — past event/result; if you'd write "X happened" or "Y
-                      was completed", use this (not "fact")
-     - preference   — a stated like/dislike
-     - intention    — what someone aims to do
-     - commitment   — explicit promise
-     - action       — something done (granular than outcome)
-     - episode      — narrative event tied to a specific moment
-     - semantic     — definitional/conceptual relationship
-     - cancellation — explicit revocation of a prior plan/commitment
+7. **memory_type.** Pick the most specific tag. Use ONLY these values:
+     - fact       — a stable proposition about the world ("Iron melts at 1538°C"),
+                    including definitional and conceptual relationships
+     - decision   — a chosen course of action by an identified actor
+     - task       — work item assigned but not yet finished
+     - plan       — intended future action, an aim, or an explicit promise
+     - preference — a stated like/dislike
+     - action     — something done; also use this for a completed past
+                    event or result ("X happened", "Y was completed")
+     - episode    — narrative event tied to a specific moment
 
 ## Quantity guidance
 
@@ -934,6 +931,46 @@ async def _walk_redirects_and_fetch(url: str) -> str:
         )
 
 
+async def _prior_ingest_was_complete(tenant_id: str, run_id: str) -> bool:
+    """True only when the run that populated the cache committed every fact.
+
+    09/02 M-44. ``ingest_commit`` tolerates partial failure: it counts
+    ``created`` and ``errored`` and, when facts fail, logs a warning suggesting
+    the operator wipe the batch by ``ingest_run_id``. The rows that DID land
+    still carry ``metadata["doc_hash"]``, so the next preview of the same
+    document found them, returned ``cached: True``, and served an incomplete
+    extraction as the finished one — permanently, because the cache
+    short-circuits before any LLM call, so re-previewing could never recover the
+    missing facts.
+
+    The signal already existed and simply was not read: the parent Document
+    records ``errored`` alongside ``doc_hash``. This consults it.
+
+    A MISSING parent is treated as NOT complete. The parent write is
+    best-effort (its own handler says so), so absence means "cannot prove this
+    cache is whole" — and the whole point here is to stop serving a result we
+    cannot prove. The cost of being wrong that way is one extraction; the cost
+    of the other way is a document that is permanently missing facts.
+    """
+    try:
+        doc = await get_storage_client().get_document(tenant_id, INGEST_DOCUMENTS_COLLECTION, run_id)
+    except Exception:
+        logger.warning(
+            "ingest_preview: could not read parent Document for run %s; "
+            "treating the doc-hash cache as unproven",
+            run_id,
+            exc_info=True,
+        )
+        return False
+    if not doc:
+        return False
+    data = doc.get("data") or {}
+    errored = data.get("errored")
+    # ``errored`` absent means the parent predates this field — same "cannot
+    # prove" reasoning as a missing parent.
+    return errored == 0
+
+
 async def _find_prior_ingest_by_doc_hash(tenant_id: str, doc_hash: str) -> list[dict]:
     """A2 cache lookup. Returns memory rows from the most recent prior ingest of
     the same content for the same tenant — or empty list if no cache hit.
@@ -996,6 +1033,21 @@ async def ingest_preview(request: IngestRequest) -> dict:
     source_uri_default = request.source_uri or url or "text-input"
     doc_hash = _doc_hash(request.tenant_id, content)
     cached_memories = await _find_prior_ingest_by_doc_hash(request.tenant_id, doc_hash)
+    if cached_memories and not await _prior_ingest_was_complete(
+        request.tenant_id, cached_memories[0]["run_id"]
+    ):
+        # 09/02 M-44 — the prior run did not commit every fact, so its rows are
+        # a partial extraction. Fall through and re-extract rather than serve
+        # them as finished; the cache is an optimisation, and an optimisation
+        # that makes missing data permanent is not one.
+        logger.info(
+            "ingest_preview: doc-hash cache REFUSED (tenant=%s prior_run=%s) — "
+            "the prior commit was partial or unprovable; re-extracting",
+            request.tenant_id,
+            cached_memories[0]["run_id"],
+        )
+        cached_memories = []
+
     if cached_memories:
         prior_run_id = cached_memories[0]["run_id"]
         cached_facts = []
@@ -1178,6 +1230,7 @@ async def _write_parent_ingest_document(
     errored: int,
     skipped: int,
     ingest_ms: int,
+    tenant_config: object | None = None,
 ) -> None:
     """Upsert one row into ``documents (collection='ingest-sources')`` so each
     ingest batch has a queryable parent record. Each persisted memory joins
@@ -1217,9 +1270,6 @@ async def _write_parent_ingest_document(
         "agent_id": request.agent_id,
     }
     summary = _summarize_batch_for_embedding(survivors)
-    if summary is not None:
-        data["summary"] = summary  # triggers embedding population in storage
-
     payload: dict = {
         "tenant_id": request.tenant_id,
         "fleet_id": request.fleet_id,
@@ -1227,9 +1277,59 @@ async def _write_parent_ingest_document(
         "doc_id": run_id,
         "data": data,
     }
+    if summary is not None:
+        data["summary"] = summary
+        # 09/02 M-45. The line this replaces set ``data["summary"]`` with the
+        # comment "triggers embedding population in storage". It does not.
+        # Storage computes no vector of its own, and the endpoint this parent
+        # was written to — ``POST /documents`` — has no ``embedding`` parameter
+        # AT ALL; only ``POST /documents/upsert-xmax`` does. Nor does the parent
+        # pass through the REST/MCP doc path that calls ``resolve_embed_source``
+        # and embeds, a fact ``doc_indexing``'s own docstring states about
+        # server-written collections. So the summary was stored as text and
+        # never indexed, and the promised semantic search over ingest batches
+        # could not work for any batch.
+        #
+        # Hence the endpoint switch below when a vector exists: the same
+        # if/else ``routes/documents.py`` already makes for exactly this reason.
+        #
+        # ``background=True``, unlike the REST doc route's ``background=False``:
+        # there the client blocks on the write and gets a 502 if the vector is
+        # missing, so it must not sit on the reduced deferred budget. Here
+        # nobody is waiting, and the parent write is explicitly best-effort.
+        #
+        # Which is also why a failure degrades instead of raising. The ingest
+        # itself has already committed by this point; losing the batch over its
+        # index entry would trade a missing search result for lost memories.
+        #
+        # ``tenant_config`` is threaded in from ``ingest_commit`` rather than
+        # re-resolved: that call happens exactly once, to pre-warm the cache so
+        # the per-fact pipeline does not race on the shared session.
+        try:
+            embedding = await get_embedding(summary, tenant_config, background=True)
+        except Exception:
+            logger.warning(
+                "ingest_commit: embedding the parent summary failed (run_id=%s); "
+                "the document is still written, but this batch will not be "
+                "reachable by semantic search over ingest batches",
+                run_id,
+                exc_info=True,
+            )
+            embedding = None
+        if embedding is not None:
+            payload["embedding"] = embedding
+        else:
+            logger.warning(
+                "ingest_commit: no embedding vector for the parent summary "
+                "(run_id=%s); document written unindexed",
+                run_id,
+            )
     try:
         sc = get_storage_client()
-        await sc.upsert_document(payload)
+        if "embedding" in payload:
+            await sc.upsert_document_xmax(payload)
+        else:
+            await sc.upsert_document(payload)
         logger.info(
             "ingest_commit: parent Document written (run_id=%s collection=%s memory_count=%d)",
             run_id,
@@ -1296,12 +1396,51 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
             ),
         )
 
+    # ---- 09/02 M-42: coerce types a caller may not WRITE ----
+    # The gate above rejects slugs outside the vocabulary entirely. It does not
+    # catch the band between: ``outcome``/``insight``/``rule`` are server-
+    # reserved ("authored only by internal flows and rejected at the write
+    # boundary") and ``semantic``/``intention``/``commitment``/``cancellation``
+    # are classifier-deprecated, yet all seven are valid ``MEMORY_TYPES``. They
+    # passed straight through to ``memory_type=fact.suggested_type``, so
+    # auto-chunk children minted reserved-type rows from caller content — the
+    # exact thing ``MEMORY_TYPES_WRITE`` exists to prevent.
+    #
+    # COERCED, not rejected, and deliberately so: the ingest prompt itself
+    # offered these types (``outcome`` even preferentially), so a 422 here
+    # would reject the server's OWN prior output and break every preview
+    # generated before this fix that is still being round-tripped. The prompt
+    # is corrected in the same change, which stops new ones appearing.
+    #
+    # Same rule and same reason as ``crystallizer_service`` (CAURA-717): a type
+    # outside ``MEMORY_TYPES_WRITE`` is coerced to the default so a stray LLM
+    # completion cannot smuggle a reserved slug past the write pipeline.
+    coerced = [
+        (i, f.suggested_type) for i, f in enumerate(facts) if f.suggested_type not in MEMORY_TYPES_WRITE
+    ]
+    if coerced:
+        for i, _ in coerced:
+            facts[i] = facts[i].model_copy(update={"suggested_type": DEFAULT_MEMORY_TYPE})
+        logger.info(
+            "ingest_commit: coerced %d non-writeable suggested_type value(s) to %r (run_id=%s): %s",
+            len(coerced),
+            DEFAULT_MEMORY_TYPE,
+            run_id,
+            sorted({t for _, t in coerced}),
+        )
+
     t0 = time.perf_counter()
 
     # Pre-warm the tenant-config cache so every per-fact pipeline below hits
     # the in-process TTLCache instead of each issuing its own storage fetch
     # when the concurrent writes fan out.
-    await resolve_config(request.tenant_id)
+    #
+    # 09/02 M-45: the result is KEPT now and handed to the parent-document
+    # write, which needs a tenant config to resolve the embedding provider.
+    # Calling ``resolve_config`` again there would be the cheap-looking change
+    # and the wrong one — this call is documented as happening exactly once,
+    # and ``test_resolve_config_called_once_before_loop`` pins that.
+    tenant_config = await resolve_config(request.tenant_id)
 
     # ----- P1.4: pre-loop dedup -----
     # Compute the same content-hash the write pipeline uses for its 409
@@ -1551,6 +1690,7 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
         errored=errored,
         skipped=skipped,
         ingest_ms=ingest_ms,
+        tenant_config=tenant_config,
     )
 
     return {

@@ -49,6 +49,21 @@ calls a handler makes, and which module-local guard helpers it calls — and the
 allowlists carry the JUDGMENTS, one line each, with a name attached. Same split
 as ``core-storage-api/tenant_scope_allowlist.json``.
 
+KNOWN UNCOVERED AXIS — the fleet-read gate on READ routes. #1552 found
+``GET /memories/count`` reading another fleet's rows with no
+``enforce_fleet_read``, and nothing here was supposed to catch it: the write
+and plane invariants run over mutating routes, and the self-plane invariant is
+scoped by ``SELF_ID_PARAMS``, which ``fleet_id`` is not. A fourth axis —
+"a read route taking ``fleet_id`` reaches ``enforce_fleet_read`` /
+``enforce_fleet_read_many``" — is the mechanism-level fix and ``_Axis`` already
+anticipates one. It is not written yet, and the reason is content rather than
+mechanism: a good many routes take that param, ``_classify`` does not follow
+imported helpers (``enforce_fleet_read_many`` is already named in its
+blind-spot list), so the axis has to credit ``imported_calls`` — a weaker
+attribution than the other three use, needing its own argument and a
+route-by-route pass to build the allowlist. Recorded here so a reader does not
+mistake three passing invariants for coverage of this one.
+
 WHY A TEST AND NOT A SCRIPT. ``scripts/tenant_scope_gate.py`` needs its own CI
 step and degrades to a report when the environment cannot import the app. This
 needs neither: it runs in the suite that already imports ``core_api.app``, so
@@ -222,7 +237,8 @@ IDENTITY_BINDERS = frozenset(
 )
 
 # Routers whose mutating surface is admin-plane: operations on the fleet, on
-# agent identity, on tenant settings, on the org itself. This is where
+# agent identity, on tenant settings, on the org itself, and on the schedule
+# that drives them. This is where
 # ``enforce_not_agent_credential`` is the house rule, and where M-25 and #1335
 # both landed.
 #
@@ -239,7 +255,15 @@ IDENTITY_BINDERS = frozenset(
 # new router cannot become exempt by default, which is how ``keystones``
 # escaped an earlier draft of this file.
 ADMIN_PLANE_ROUTERS = frozenset(
-    {"agents", "fleet", "settings", "org_deletion", "lifecycle", "skills_inbox"}
+    {
+        "agents",
+        "fleet",
+        "settings",
+        "org_deletion",
+        "lifecycle",
+        "skills_inbox",
+        "scheduler_lease",
+    }
 )
 
 # Routers with mutating routes that are deliberately NOT admin-plane. The
@@ -401,7 +425,7 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
     # than written here: an allowlist key must equal the path the app
     # serves, so the legacy spelling is mandatory, and a marker on this
     # line would be displaced the first time ``ruff format`` wrapped it.
-    LEGACY_KEYSTONES_ROUTE: "filter: the permanent legacy alias of the line above",
+    LEGACY_KEYSTONES_ROUTE: "filter: the supported legacy route of the line above",
     "GET /api/v1/reports/agent-activity": (
         "filter: narrows a digest on a surface that is cross-agent by design — "
         "GET /reports builds a per_agent breakdown of the tenant"
