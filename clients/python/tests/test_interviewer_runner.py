@@ -97,7 +97,7 @@ def _transcript(tmp_path, n_events=12, name="abc123.jsonl"):
 
 
 def _cfg(**kw):
-    defaults = dict(agent_id="cc-test@host", machine12="abcdef123456", min_events=1)
+    defaults = {"agent_id": "cc-test@host", "machine12": "abcdef123456", "min_events": 1}
     defaults.update(kw)
     return RunConfig(**defaults)
 

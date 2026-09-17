@@ -26,7 +26,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 # Marker comment appended to our managed cron line so uninstall/idempotent
 # re-install can find and remove exactly our entry, never the user's others.
@@ -100,7 +99,7 @@ def resolve_cmd() -> str:
 
 
 def build_run_command(
-    *, harness: str, all_projects: bool, env_file: Path, log_file: Path, cmd: Optional[str] = None
+    *, harness: str, all_projects: bool, env_file: Path, log_file: Path, cmd: str | None = None
 ) -> str:
     """The shell the cron line executes: source env, then drain.
 
@@ -121,7 +120,7 @@ def build_cron_line(schedule: str, command: str) -> str:
     return f"{schedule} {command} {CRON_MARKER}"
 
 
-def merge_crontab(existing: str, new_line: Optional[str]) -> str:
+def merge_crontab(existing: str, new_line: str | None) -> str:
     """Remove any prior managed line (idempotent), then optionally append.
 
     ``new_line=None`` is the uninstall case (strip only). Preserves every
@@ -158,6 +157,7 @@ def read_crontab() -> str:
         proc = subprocess.run(
             ["crontab", "-l"],
             capture_output=True,
+            check=False,
             text=True,
             # Force C locale so the empty-crontab sentinel below ("no crontab
             # for <user>") is always English, not localized under LANG=fr_FR
