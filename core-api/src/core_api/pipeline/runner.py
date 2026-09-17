@@ -91,6 +91,25 @@ class Pipeline:
             result.step_count += 1
             if step_result.outcome == StepOutcome.SKIPPED:
                 result.skipped_count += 1
+            elif step_result.outcome == StepOutcome.FAILED:
+                # OSS 08/14 M-06 — a step that RETURNS ``FAILED`` used to land
+                # here and be counted as an ordinary step: ``result.failed``
+                # stayed False and the pipeline reported success. Only the
+                # ``except`` arm above set it, so the flag meant "a step raised"
+                # rather than "a step failed", and the one step that reports its
+                # failure by returning (``ResolveEntities``, mapping storage's
+                # "all clusters failed to merge" back from an ``error`` key it
+                # cannot raise across HTTP) was invisible to every caller.
+                #
+                # Recorded, but NOT a break, and the asymmetry with the raise
+                # path is the contract rather than an oversight: a step that
+                # returns ``FAILED`` has caught its own error and chosen to
+                # report it, so the steps after it still run — for the nightly
+                # entity-linking pipeline that keeps cross-link discovery and
+                # relation inference working when only the merge stage failed.
+                # Raising still aborts. "I failed" and "stop the pipeline" are
+                # different statements, and a step now has a way to say each.
+                result.failed = True
 
         result.total_ms = (time.perf_counter() - t_pipeline) * 1000
         if logger.isEnabledFor(logging.INFO):

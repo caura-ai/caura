@@ -277,6 +277,7 @@ class _CoreApiLifecycleAdapter:
             build_full_entity_linking_pipeline,
         )
         from core_api.pipeline.context import PipelineContext
+        from core_api.pipeline.step import StepOutcome
 
         ctx = PipelineContext(
             db=None,
@@ -286,9 +287,33 @@ class _CoreApiLifecycleAdapter:
             },
         )
         pipeline = build_full_entity_linking_pipeline()
-        await pipeline.run(ctx)
-        links_created = ctx.data.get("links_created", 0)
-        return int(links_created)
+        result = await pipeline.run(ctx)
+        links_created = int(ctx.data.get("links_created", 0))
+        # OSS 08/14 M-06 — the docstring above promises the row "will be marked
+        # failure by the caller, not success". Nothing made that true: this
+        # discarded the ``PipelineResult``, and ``Pipeline.run`` does not
+        # re-raise — it catches a step's exception INTO ``result.failed`` — so
+        # neither a raised nor a returned failure could reach the handler that
+        # sets the audit status. A nightly run whose steps all failed recorded
+        # SUCCESS with ``links_created=0``, indistinguishable from a healthy run
+        # of an org with nothing left to link, which is the reading an operator
+        # would reasonably take.
+        #
+        # Raising is what the caller is already watching for, so that is what it
+        # gets. The count travels in the message because a partial run is the
+        # interesting case: steps after the failed one still ran (see the runner),
+        # so some links may well have landed before the failure.
+        if result.failed:
+            # ``StepResult`` carries no step name — only outcome/error/detail —
+            # so the message reports what each failure said: ``detail`` for a
+            # returned failure (``ResolveEntities`` puts the storage-side error
+            # and cluster count there), the exception for a raised one.
+            failures = [s.detail or repr(s.error) for s in result.steps if s.outcome == StepOutcome.FAILED]
+            raise RuntimeError(
+                f"entity-linking pipeline failed for org {org_id}: "
+                f"failures={failures or ['<unreported>']} links_created={links_created}"
+            )
+        return links_created
 
     async def forge_distill(self, *, org_id: str, fleet_id: str | None, run_label: str) -> int:
         """Skill Factory cron tick (SF-CR3).

@@ -97,7 +97,19 @@ class ScheduleBackgroundTasks:
         # gaps by mirroring the strong branch's direct fan-out below for
         # extraction and Path A.
         if resolved_write_mode == "fast":
-            if tenant_config.enrichment_enabled:
+            # OSS 09/02 M-18 — ``enrichment_provider != "none"`` belongs here
+            # too. Every other enrichment gate in the write path carries it
+            # (the strong branch below, ``ParallelEmbedEnrich``, and the bulk
+            # path); this one did not, and "none" is not a no-op provider:
+            # ``enrich_memory`` answers it with a bare ``EnrichmentResult()``
+            # (common/enrichment/service.py) whose Pydantic defaults are real
+            # values — ``weight=0.7``, ``status="active"``, ``memory_type=fact``,
+            # empty title/summary/tags. Those survive
+            # ``model_dump(exclude_none=True)`` and are PATCHed onto the row, so
+            # a tenant with enrichment explicitly provider-less had every fast
+            # write silently reweighted 0.5 -> 0.7 and its ``enrichment_pending``
+            # marker cleared as though an LLM had looked at it.
+            if tenant_config.enrichment_enabled and tenant_config.enrichment_provider != "none":
                 from core_api.services.memory_service import (
                     _agent_provided_enrichment_fields,
                     _schedule_enrich_or_inline,
@@ -126,13 +138,16 @@ class ScheduleBackgroundTasks:
 
             # Entity extraction (Gap 01). Extraction reads only ``content`` —
             # no dependency on the embedding being available — so it fires
-            # regardless of embed deferral. ``_enrich_memory_background``
-            # may also fire extraction in some profiles (OSS+fast inline
-            # path); ``process_entity_extraction`` is idempotent
-            # (``find_entity_link`` short-circuits link creation) so the
-            # potential second fire is a wasted LLM call, not a data
-            # integrity issue. Cleaning up the redundant fire is a
-            # follow-up once ``_enrich_memory_background`` is decomposed.
+            # regardless of embed deferral.
+            #
+            # OSS 09/02 L-20 — this is now the SOLE trigger on this path. It
+            # used to be one of two: ``_enrich_memory_background`` fired
+            # extraction as well, so a fast+inline write paid for two LLM
+            # extraction passes. The redundant one was removed there rather
+            # than here, because this fire is the one that does not depend on
+            # enrichment succeeding — the other sat past an ``enrich_memory``
+            # call whose failure returns early, so on that path a failed
+            # enrichment silently cost the row its extraction too.
             if tenant_config.entity_extraction_enabled:
                 track_task(
                     tracked_task(

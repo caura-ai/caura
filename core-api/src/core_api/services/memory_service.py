@@ -3356,8 +3356,17 @@ async def _enrich_memory_background(
 ) -> dict | None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
-    After enrichment completes, fires entity extraction and contradiction detection
-    as sub-tasks.
+    After enrichment completes, applies the patch to the row and — when
+    configured — runs governance remediation and the atomic-fact fan-out.
+
+    It does NOT schedule entity extraction or contradiction detection.
+    ``ScheduleBackgroundTasks`` owns both: extraction unconditionally, and Path A
+    contradiction detection gated on ``embedding is not None``. This docstring
+    claimed otherwise for as long as it has existed — half wrongly even before
+    OSS 09/02 L-20 removed the duplicate extraction fire from here, since the
+    contradiction trigger had already moved out under F3 Phase 3 — and a reader
+    who believed it would conclude a second extraction pass still happens on
+    this path.
 
     Returns the enriched row as governance needs to see it — ``id``, ``content``,
     ``tenant_id``, ``agent_id`` and the merged ``metadata_`` — or ``None`` when
@@ -3395,7 +3404,6 @@ async def _enrich_memory_background(
     """
     from core_api.services.memory_enrichment import enrich_memory
     from core_api.services.organization_settings import resolve_config
-    from core_api.services.task_tracker import tracked_task
 
     if run_governance_remediation and governance_config is None:
         # Programming error, raised before any work: the two parameters are
@@ -3574,8 +3582,6 @@ async def _enrich_memory_background(
 
     # ── Derive: rows and links built out of the governed content ──────────────
     try:
-        memory_type = patch.get("memory_type") or mem.get("memory_type")
-
         # Hint-based re-embed removed (CAURA-222): the hot path embeds raw
         # ``content`` and the search side embeds raw query, so the stored
         # vector is already on the correct surface by the time enrichment
@@ -3618,23 +3624,20 @@ async def _enrich_memory_background(
                 tenant_config=tenant_config,
             )
 
-        # Fire sub-tasks outside the session
-        if tenant_config.entity_extraction_enabled:
-            track_task(
-                tracked_task(
-                    process_entity_extraction(
-                        memory_id,
-                        tenant_id,
-                        fleet_id,
-                        agent_id,
-                        content,
-                        memory_type,
-                    ),
-                    "entity_extraction",
-                    memory_id,
-                    tenant_id,
-                )
-            )
+        # OSS 09/02 L-20 — the entity-extraction fan-out that stood here is
+        # gone, not moved: ``ScheduleBackgroundTasks`` already fires it for
+        # every write that can reach this function, so this was a second,
+        # duplicate LLM extraction pass on every fast+inline write.
+        #
+        # "every write that can reach this function" is the whole claim, so:
+        # the only caller is ``_schedule_enrich_or_inline``'s
+        # ``settings.inline_enrichment`` branch, and its three call sites are
+        # the fast branch of ``ScheduleBackgroundTasks`` (which fires
+        # extraction itself, unconditionally), its strong branch (gated on
+        # ``not settings.inline_enrichment``, so it publishes instead of
+        # arriving here) and the auto-chunk multi-fact exit (gated on
+        # ``defer_enrichment``, likewise). Only the first reaches this code,
+        # and it has already scheduled extraction by the time it does.
         # F3 Phase 3 removed the asymmetric ``(embed=deferred,
         # enrich=inline)`` race-guard branch that previously lived here.
         # Under ``deployment_mode`` the two axes co-vary, so the branch
@@ -4502,6 +4505,7 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
     """
     import os
 
+    from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
     from core_api.cache import cache_get, cache_set
 
     _model = (
@@ -4515,16 +4519,33 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
     # the provider's ``embed_query`` short-circuits the instruction
     # prefix).
     _instruction = os.environ.get("EMBEDDING_QUERY_INSTRUCTION") or ""
+    # OSS 09/02 L-40 — the resolved PROVIDER is part of the key, not just the
+    # model. Resolved the same way ``common.embedding._service`` resolves it for
+    # the call this caches, so the two cannot disagree.
+    #
+    # Without it the key was not merely incomplete, it was frequently invariant
+    # across the switch it needed to notice: ``_model`` falls back to
+    # ``OPENAI_EMBEDDING_MODEL`` whenever the tenant sets no ``embedding_model``,
+    # so flipping ``EMBEDDING_PROVIDER`` on a tenant with no model override left
+    # every component of the hash byte-identical. Cached vectors from the old
+    # provider then answered queries for ``EMBEDDING_CACHE_TTL`` while documents
+    # embedded in the new provider's space — a query and its corpus in two
+    # different vector spaces, which does not error anywhere. It reads as recall
+    # quietly getting worse for three days and then fixing itself.
+    _provider = (
+        getattr(tenant_config, "embedding_provider", None) if tenant_config is not None else None
+    ) or os.environ.get("EMBEDDING_PROVIDER", DEFAULT_EMBEDDING_PROVIDER)
     _qhash = hashlib.sha256(
-        f"{_model}:{VECTOR_DIM}:{_instruction}:{tenant_id}:{_normalized}".encode()
+        f"{_provider}:{_model}:{VECTOR_DIM}:{_instruction}:{tenant_id}:{_normalized}".encode()
     ).hexdigest()
-    # Prefix bumped from ``qemb3:`` → ``qemb4:`` because the hash input
-    # changed (added ``EMBEDDING_QUERY_INSTRUCTION``). The bump makes the
-    # cache-generation boundary explicit in Redis key stats so an
-    # operator can see the cold-start at deploy time and confirm the
-    # embedding provider can absorb the working-set re-fetch. Old
-    # ``qemb3:*`` entries expire naturally via ``EMBEDDING_CACHE_TTL``.
-    _cache_key = f"qemb4:{_qhash}"
+    # Prefix bumped ``qemb4:`` → ``qemb5:`` because the hash input changed again
+    # (added the resolved provider). Same reasoning as the previous two bumps:
+    # it makes the cache-generation boundary visible in Redis key stats, so an
+    # operator sees the cold-start at deploy time and can confirm the embedding
+    # provider absorbs the working-set re-fetch. Old ``qemb4:*`` entries expire
+    # naturally via ``EMBEDDING_CACHE_TTL`` — and must not be read in the
+    # meantime, since they are exactly the entries whose provider is unknown.
+    _cache_key = f"qemb5:{_qhash}"
     _cached_raw = await cache_get(_cache_key)
     if _cached_raw is not None:
         try:

@@ -806,6 +806,28 @@ def bridge_credentials_to_environ() -> None:
         ),
         "PLATFORM_LLM_GCP_PROJECT_ID": settings.platform_llm_gcp_project_id or "",
         "PLATFORM_LLM_GCP_LOCATION": settings.platform_llm_gcp_location or "",
+        # Platform-tier EMBEDDING singleton read by ``common.embedding._platform``
+        # (OSS 08/14 M-28). The docstring above has always claimed this bridge
+        # covers "the platform-tier singletons configured by ``PLATFORM_*``
+        # settings"; only the LLM half was ever here, so a deployment that put
+        # ``PLATFORM_EMBEDDING_PROVIDER=openai`` in ``.env`` — the documented
+        # shape — had it loaded into ``Settings`` and never exported, leaving
+        # ``_build_platform_embedder`` to read "" and hand back no platform
+        # embedder at all. The fallback is silent and its failure mode is the
+        # expensive kind: vectors that embed and persist fine, in the wrong
+        # space, discoverable only as bad recall.
+        "PLATFORM_EMBEDDING_PROVIDER": settings.platform_embedding_provider or "",
+        "PLATFORM_EMBEDDING_MODEL": settings.platform_embedding_model or "",
+        "PLATFORM_EMBEDDING_API_KEY": (
+            settings.platform_embedding_api_key.get_secret_value()
+            if settings.platform_embedding_api_key
+            else ""
+        ),
+        # ``PLATFORM_EMBEDDING_BASE_URL`` and ``PLATFORM_EMBEDDING_TRUNCATE_TO_DIM``
+        # are read by the same builder but have no ``Settings`` field to bridge
+        # from, so they stay env-only. Left alone deliberately: inventing
+        # settings for them is a config-surface change, not this fix, and the
+        # three above are the ones ``.env.example`` documents.
     }
     for env_name, value in bridges.items():
         if value and not os.environ.get(env_name):
