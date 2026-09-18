@@ -10,6 +10,22 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.16.1](https://github.com/caura-ai/caura/compare/backend-v3.16.0...backend-v3.16.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **core-storage-api:** make POSTGRES_REQUIRE_SSL real, and stop .env.example overriding the pool baseline ([#1595](https://github.com/caura-ai/caura/issues/1595)) ([5aafb8a](https://github.com/caura-ai/caura/commit/5aafb8ae3687f2cb9b686c33d3a912b02deed330))
+* **core-storage-api:** make status writes respect soft-delete, and the org purge report what it deletes ([#1594](https://github.com/caura-ai/caura/issues/1594)) ([781a5be](https://github.com/caura-ai/caura/commit/781a5bebfacc72223f682e824406fa64beeb8e43))
+* **dead-code:** drop four unreachable helpers, and make IS_STANDALONE reach the flag it names ([#1600](https://github.com/caura-ai/caura/issues/1600)) ([b52f88e](https://github.com/caura-ai/caura/commit/b52f88eeb00cdd395600c560b24c7cc8b8f2f0d1))
+* **events:** hold the Pub/Sub lease while a batch drains, instead of letting finished work redeliver ([#1592](https://github.com/caura-ai/caura/issues/1592)) ([479dcf6](https://github.com/caura-ai/caura/commit/479dcf629e74e8dccea75420cad76a6aa3790c38))
+* **reports:** delete the dead report_type filter, make fleet_id on /reports/latest real ([#1599](https://github.com/caura-ai/caura/issues/1599)) ([7811a33](https://github.com/caura-ai/caura/commit/7811a334f11e226819e1ed2d7febe490d7635d7f))
+
+
+### Dependencies
+
+* update pydantic requirement from &lt;3,&gt;=2.0 to &gt;=2.13.5,&lt;3 ([#1571](https://github.com/caura-ai/caura/issues/1571)) ([6fe9fdb](https://github.com/caura-ai/caura/commit/6fe9fdb926f39ef4c7e374d0448d084d301fdb8e))
+
 ## [3.16.0](https://github.com/caura-ai/caura/compare/backend-v3.15.1...backend-v3.16.0) (2026-09-18)
 
 
