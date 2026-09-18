@@ -82,10 +82,22 @@ class Settings(BaseSettings):
     # retention vs. staleness archival), so it gets its own hour and can
     # be moved off the archive slot.
     lifecycle_purge_run_at_hour: int = 2
-    # Pipeline ops (crystallize + entity-link) — LLM-heavy, so an operator
-    # may want these in their own off-peak slot away from the lighter SQL
-    # ops. The consumer-side dedup gate still filters double-fires.
+    # Pipeline ops — LLM-heavy, so an operator may want these in their own
+    # off-peak slot away from the lighter SQL ops. The consumer-side dedup
+    # gate still filters double-fires.
     lifecycle_pipeline_run_at_hour: int = 2
+    # Entity-link used to share the hour above with crystallize, which made
+    # the two heaviest sweeps of the night unseparable: one knob moved both
+    # or neither. On 2026-09-18 that pairing put one staging tenant's
+    # cross-link discovery past its 120s storage budget, and the message
+    # dead-lettered after ten 120s attempts.
+    #
+    # Defaults to the pipeline hour's own default (2) rather than to
+    # ``lifecycle_pipeline_run_at_hour``: a default that TRACKED the other
+    # setting would silently re-pair them for any operator who moved the
+    # pipeline hour, which is the failure this exists to make impossible.
+    # Deployments stagger these explicitly; see the deploy workflow.
+    lifecycle_entity_link_run_at_hour: int = 2
     # A72 — how often the crystallize tick fires, in hours. 24 keeps today's
     # single 02:00 run; lower values are the retune's third ground: a heavy
     # writing day outruns a daily sweep entirely, so everything written after
@@ -133,6 +145,7 @@ class Settings(BaseSettings):
         "lifecycle_archive_run_at_hour",
         "lifecycle_purge_run_at_hour",
         "lifecycle_pipeline_run_at_hour",
+        "lifecycle_entity_link_run_at_hour",
         "lifecycle_insights_run_at_hour",
         "agent_digest_run_at_hour",
         "agent_digest_weekly_run_at_hour",

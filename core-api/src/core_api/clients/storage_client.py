@@ -18,7 +18,7 @@ from common.storage_auth import is_storage_shared_secret_rejection
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
-from core_api.constants import STORAGE_CONNECT_TIMEOUT_SECONDS
+from core_api.constants import STORAGE_CONNECT_TIMEOUT_SECONDS, STORAGE_READ_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +296,12 @@ class CoreStorageClient:
         fallback for the remaining 1%.
         """
         return httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=STORAGE_CONNECT_TIMEOUT_SECONDS, read=120.0, write=120.0, pool=5.0),
+            timeout=httpx.Timeout(
+                connect=STORAGE_CONNECT_TIMEOUT_SECONDS,
+                read=STORAGE_READ_TIMEOUT_SECONDS,
+                write=120.0,
+                pool=5.0,
+            ),
             # CAURA-682: pre-fix values 100/50 caused TCP ConnectTimeout
             # retries (3x 5s ~= 13s tail per affected request) during
             # noisy-neighbor write storms — concurrent core-api → storage

@@ -150,7 +150,9 @@ def _register_scheduled_tasks() -> None:
         "lifecycle-entity-link",
         24 * 3600,
         run_entity_link_tick,
-        delay_provider=_daily_at("lifecycle_pipeline_run_at_hour"),
+        # Its OWN hour, not the pipeline hour crystallize uses — see
+        # ``lifecycle_entity_link_run_at_hour`` for why the two were split.
+        delay_provider=_daily_at("lifecycle_entity_link_run_at_hour"),
     )
     scheduler.register(
         "lifecycle-insights",
