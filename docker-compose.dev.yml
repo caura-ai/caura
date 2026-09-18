@@ -11,7 +11,10 @@ services:
       POSTGRES_PASSWORD: changeme
       POSTGRES_DB: caura
     ports:
-      - "5432:5432"
+      # Loopback, same reason as the quickstart compose: caura/changeme, no
+      # TLS. This file already binds core-storage-api to 127.0.0.1 (below);
+      # the two datastores were the ones still on 0.0.0.0.
+      - "${DB_BIND:-127.0.0.1}:${DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +27,8 @@ services:
     image: redis:7-alpine
     command: redis-server --appendonly yes
     ports:
-      - "6379:6379"
+      # Loopback — Redis runs with no password at all here.
+      - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:

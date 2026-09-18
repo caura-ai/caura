@@ -4,6 +4,7 @@ from typing import Any, Literal, Self
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from common.embedding._registry import DEFAULT_LOCAL_EMBEDDING_MODEL
 from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
 from common.storage_auth import read_shared_secret_file
 
@@ -55,9 +56,19 @@ class Settings(BaseSettings):
     embedding_provider: str = DEFAULT_EMBEDDING_PROVIDER
     # C38 — model for ``embedding_provider="local"`` (sentence-transformers).
     # MUST emit VECTOR_DIM dimensions; the provider now refuses a mismatch at
-    # load rather than failing later at INSERT. Maps to LOCAL_EMBEDDING_MODEL,
-    # which is what common/embedding/_registry.py reads.
-    local_embedding_model: str = "BAAI/bge-large-en-v1.5"
+    # load rather than failing later at INSERT.
+    #
+    # DECLARED, not read: ``common/embedding/_registry.py`` reads
+    # ``LOCAL_EMBEDDING_MODEL`` from ``os.environ`` directly, because that
+    # registry is shared with core-worker and must not import a service's
+    # config. This field exists so the variable appears in core-api's own
+    # settings surface; nothing consults the attribute.
+    #
+    # Default from the shared constant for the reason ``embedding_provider``
+    # above gives: two copies of one literal is how they disagreed last time.
+    # ``test_every_core_api_setting_is_read_by_something`` names this field as
+    # the one declared-but-unread setting, with that distinction.
+    local_embedding_model: str = DEFAULT_LOCAL_EMBEDDING_MODEL
     # Per-deploy control for where embedding + LLM enrichment run.
     #
     # - ``"inline"`` (default): both embed + enrich run on the request
@@ -409,10 +420,6 @@ class Settings(BaseSettings):
     # built (the A58 spike could not be scored because its verdicts only went
     # to logs). Default off.
     type_ii_materializer_shadow: bool = False
-    crystallizer_enabled: bool = True
-    crystallizer_stale_days: int = 180
-    crystallizer_dedup_sample_size: int = 1000
-    crystallizer_dedup_threshold: float = 0.95
     core_storage_api_url: str = "http://localhost:8002"
     core_storage_shared_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     core_storage_shared_secret_file: str = ""

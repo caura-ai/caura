@@ -82,6 +82,58 @@ def _is_org_role_admin_compare(node: ast.AST) -> bool:
     )
 
 
+# Names that DERIVE from the import, not a list kept here. ``core-api`` binds
+# the singleton under at least three spellings — ``settings``, ``app_settings``,
+# and ``global_settings`` in ``organization_settings``, which reads it as the
+# per-org fallback — and a hand-kept set goes stale the first time a fourth
+# appears. A stale set over-reports dead settings: the noisy direction, but
+# still a scan reporting something it cannot see.
+_SETTINGS_MODULE = "core_api.config"
+
+
+def _settings_aliases(tree: ast.AST) -> set[str]:
+    """Local names bound to the ``core_api.config`` settings singleton."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == _SETTINGS_MODULE:
+            names.update(
+                alias.asname or "settings"
+                for alias in node.names
+                if alias.name == "settings"
+            )
+    return names
+
+
+def _names_read_as_settings(chunks: list[tuple[str, str]]) -> set[str]:
+    """Attributes read off a settings object, across (label, source) pairs.
+
+    Matching a bare ``.name`` instead is what let an unrelated object's
+    identically-named property stand in for a ``Settings`` field — see
+    ``_KNOWN_UNREAD_CORE_API_SETTINGS``. ``config.py`` is the one file whose
+    reads are ``self.<name>`` (validators) as well as ``settings.<name>`` (the
+    env-var bridge), so it contributes both spellings.
+    """
+    found: set[str] = set()
+    for label, source in chunks:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+        objects = _settings_aliases(tree)
+        if label == "config":
+            objects |= {"settings", "self"}
+        if not objects:
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in objects
+            ):
+                found.add(node.attr)
+    return found
+
+
 def _settings_fields(path: pathlib.Path) -> dict[str, int]:
     """``{field_name: lineno}`` for the ``Settings`` class in *path*."""
     fields: dict[str, int] = {}
@@ -95,23 +147,27 @@ def _settings_fields(path: pathlib.Path) -> dict[str, int]:
     return fields
 
 
-# Settings core-api declares that nothing reads. Every entry is a live finding,
-# not an exemption: shipping a knob named ``CRYSTALLIZER_ENABLED`` that cannot
-# enable or disable anything is the same defect as the ``PADDLE_*`` block this
-# change removed. They are NOT deleted here because the fix is a decision this
-# change has no business making — whether the crystallizer should honour them
-# (wire them up) or has genuinely outgrown them (delete). See oss-0814-m-47.
+# Settings core-api declares and never reads as attributes. There are two
+# reasons a name can land here and only one of them is acceptable, so each
+# entry states which.
 #
-# ``crystallizer_dedup_threshold``, the fourth knob in the same block, IS read,
-# which is what makes the other three worth naming individually rather than
-# waving at the prefix.
-_KNOWN_UNREAD_CORE_API_SETTINGS = frozenset(
-    {
-        "crystallizer_dedup_sample_size",
-        "crystallizer_enabled",
-        "crystallizer_stale_days",
-    }
-)
+# ``local_embedding_model`` is the acceptable one: it DECLARES an environment
+# variable that ``common/embedding/_registry.py`` reads from ``os.environ``
+# directly — the registry is shared with core-worker and must not import a
+# service's config. The control works; only the attribute is unread.
+#
+# The unacceptable kind is a knob that controls nothing, and this list held
+# three of them (``crystallizer_enabled``, ``_stale_days``,
+# ``_dedup_sample_size``) until oss-0814-m-47. The comment that sat here was
+# itself wrong, which is worth recording: it said ``crystallizer_dedup_threshold``
+# "IS read", because the scan found ``cfg.crystallizer_dedup_threshold`` in the
+# crystallizer service. That ``cfg`` is a ``ResolvedConfig`` — the PER-ORG
+# settings object — which exposes a property of the same name. The ``Settings``
+# field was as dead as the other three. The scan could not tell two objects
+# apart by attribute name, so it reported the one live control surface as
+# evidence that the dead one was live. It now resolves the settings singleton's
+# local aliases from each file's imports.
+_KNOWN_UNREAD_CORE_API_SETTINGS = frozenset({"local_embedding_model"})
 
 
 def test_every_core_api_setting_is_read_by_something() -> None:
@@ -133,20 +189,21 @@ def test_every_core_api_setting_is_read_by_something() -> None:
     config_lines = _CORE_API_CONFIG.read_text().splitlines()
     for lineno in fields.values():
         config_lines[lineno - 1] = ""
-    haystack = ["\n".join(config_lines)]
-    haystack.extend(
-        p.read_text(errors="ignore") for p in _python_files(exclude=_CORE_API_CONFIG)
+    chunks: list[tuple[str, str]] = [("config", "\n".join(config_lines))]
+    chunks.extend(
+        (str(path), path.read_text(errors="ignore"))
+        for path in _python_files(exclude=_CORE_API_CONFIG)
     )
-    blob = "\n".join(haystack)
+    blob = "\n".join(source for _, source in chunks)
 
+    read = _names_read_as_settings(chunks)
     unread = {
         name
         for name in fields
-        # ``.name`` covers settings.name and self.name; the quoted forms cover
-        # getattr()/monkeypatch.setattr() and the env-var bridge's dict keys.
-        if not re.search(rf"\.{re.escape(name)}\b", blob)
-        and f'"{name}"' not in blob
-        and f"'{name}'" not in blob
+        # An attribute access on a settings object, or the name quoted —
+        # getattr(), monkeypatch.setattr(), and the env-var bridge's dict keys
+        # all spell it that way.
+        if name not in read and f'"{name}"' not in blob and f"'{name}'" not in blob
     }
     assert unread == _KNOWN_UNREAD_CORE_API_SETTINGS, (
         f"unread core-api settings changed: unexpected={sorted(unread - _KNOWN_UNREAD_CORE_API_SETTINGS)}, "
