@@ -116,7 +116,7 @@ async def _reserve_report(sc, tenant_id: str, fleet_id: str | None, trigger: str
     Returns ``(report_id, is_new)``. ``is_new=False`` means a run is already in
     flight and this call must not start a second one.
     """
-    running = await sc.find_running_report(tenant_id, fleet_id, report_type="crystallization")
+    running = await sc.find_running_report(tenant_id, fleet_id)
     if running:
         return running.get("id"), False
     report = await sc.create_report(
@@ -125,7 +125,6 @@ async def _reserve_report(sc, tenant_id: str, fleet_id: str | None, trigger: str
             "fleet_id": fleet_id,
             "trigger": trigger,
             "status": "running",
-            "report_type": "crystallization",
         }
     )
     return report.get("id"), True
@@ -318,11 +317,21 @@ async def _type_ii_watermark(sc, tenant_id: str, fleet_id: str | None, report_id
     watermark at now and skip every subject — turning an overspend into a sweep
     that silently does nothing, which is the worse failure.
 
-    Guards, in order: it must not be this run's row; it must be terminal
-    (``completed_at`` set — a crashed 'running' row from a previous attempt has
-    none); and it must be a non-empty string, because ``select_candidates``
-    compares it to ``created_at`` with ``>`` and a non-string would raise inside
-    the sweep.
+    Guards, in order: it must belong to THIS run's fleet; it must not be this
+    run's row; it must be terminal (``completed_at`` set — a crashed 'running'
+    row from a previous attempt has none); and it must be a non-empty string,
+    because ``select_candidates`` compares it to ``created_at`` with ``>`` and a
+    non-string would raise inside the sweep.
+
+    The fleet guard is belt-and-braces with storage, not a substitute for it.
+    ``GET /reports/latest`` filters when it is given a ``fleet_id``, and that is
+    what makes the watermark USEFUL — without it a fleet whose sibling ran more
+    recently would fall through to None and re-scan everything. What it cannot
+    cover is the tenant-wide run, which passes no ``fleet_id`` and so is
+    answered across all fleets on purpose (that route also backs a user-facing
+    "my latest report" with no fleet concept). So the scope check happens here,
+    where the run knows its own scope, in the same safe direction as every
+    other guard.
 
     Returns None on ANY doubt, and None means "scan everything" — the behaviour
     this fix exists to reduce. That asymmetry is deliberate: paying twice is a
@@ -330,7 +339,7 @@ async def _type_ii_watermark(sc, tenant_id: str, fleet_id: str | None, report_id
     those is recoverable on the next run.
     """
     try:
-        latest = await sc.get_latest_report(tenant_id, fleet_id, report_type="crystallization")
+        latest = await sc.get_latest_report(tenant_id, fleet_id)
     except Exception:
         logger.warning(
             "type_ii watermark lookup failed for tenant %s; scanning all subjects",
@@ -339,6 +348,8 @@ async def _type_ii_watermark(sc, tenant_id: str, fleet_id: str | None, report_id
         )
         return None
     if not isinstance(latest, dict):
+        return None
+    if latest.get("fleet_id") != fleet_id:
         return None
     if str(latest.get("id", "")) == str(report_id):
         return None

@@ -3210,26 +3210,26 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
-        report_type: str | None = None,
     ) -> dict | None:
+        """09/02 L-48 — ``report_type`` dropped: storage never filtered on it.
+
+        ``analysis_reports`` has no such column, so forwarding it advertised a
+        scope neither lookup applied.
+        """
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
-        if report_type is not None:
-            params["report_type"] = report_type
         return await self._get("/reports/running", **params)
 
     async def get_latest_report(
         self,
         tenant_id: str,
         fleet_id: str | None = None,
-        report_type: str | None = None,
     ) -> dict | None:
+        """``fleet_id`` now reaches a WHERE clause — see ``/reports/latest``."""
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
-        if report_type is not None:
-            params["report_type"] = report_type
         return await self._get("/reports/latest", **params)
 
     async def list_reports(self, tenant_id: str, *, limit: int = 10, offset: int = 0) -> list[dict]:

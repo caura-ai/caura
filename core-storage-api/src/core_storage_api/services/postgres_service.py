@@ -12591,14 +12591,43 @@ class PostgresService:
     async def report_get_latest_completed(
         self,
         tenant_id: str,
+        fleet_id: str | None = None,
     ) -> CrystallizationReport | None:
+        """The most recently STARTED completed report, optionally one fleet's.
+
+        ``fleet_id`` was accepted by ``GET /reports/latest`` and dropped on the
+        floor, which made this the wrong clock for the only caller that passes
+        it. ``_type_ii_watermark`` uses the returned ``completed_at`` to skip
+        subjects with nothing new since the last sweep; handed a *different*
+        fleet's more recent run, a fleet whose own sweep is older skips
+        subjects that did change. Its own docstring calls that the
+        unrecoverable direction.
+
+        Absent ``fleet_id`` means ANY fleet, deliberately unlike the sibling
+        ``report_find_running``, where absent means ``fleet_id IS NULL``. The
+        two answer different questions: that one asks "is a run in flight for
+        exactly this scope", where the tenant-wide run is its own scope and
+        must not be blocked by a fleet's. This one backs
+        ``GET /crystallize/latest``, a user-facing "show me my most recent
+        report" that has no fleet concept in its API at all — filtering to
+        ``IS NULL`` here would 404 every tenant that only ever runs
+        fleet-scoped crystallization.
+
+        That leaves one gap this cannot close from the server side: a
+        tenant-wide run (``fleet_id=None``) still reads across fleets.
+        ``_type_ii_watermark`` closes it by discarding a report whose scope is
+        not its own — see there.
+        """
+        report_filter = [
+            CrystallizationReport.tenant_id == tenant_id,
+            CrystallizationReport.status == "completed",
+        ]
+        if fleet_id is not None:
+            report_filter.append(CrystallizationReport.fleet_id == fleet_id)
         async with get_session() as session:
             result = await session.execute(
                 select(CrystallizationReport)
-                .where(
-                    CrystallizationReport.tenant_id == tenant_id,
-                    CrystallizationReport.status == "completed",
-                )
+                .where(*report_filter)
                 .order_by(CrystallizationReport.started_at.desc())
                 .limit(1)
             )

@@ -26,8 +26,20 @@ async def create_report(request: Request) -> dict:
 async def find_running_report(
     tenant_id: str,
     fleet_id: str | None = None,
-    report_type: str | None = None,
 ) -> dict:
+    """08/14 L-30 + 09/02 L-48 — ``report_type`` was a filter that filtered nothing.
+
+    Both report routes declared it, core-api's storage client forwarded it, and
+    ``_reserve_report`` even wrote ``"report_type": "crystallization"`` into the
+    create body. ``analysis_reports`` has no such column, so ``report_add``'s
+    ``_filter_fields`` dropped it on insert and neither lookup ever mentioned
+    it. A parameter that is accepted, plumbed through three layers and ignored
+    reads as a scoping guarantee to everyone downstream — there is one report
+    type and the model is named after it, so the honest form is to not claim a
+    filter exists. Removed rather than implemented: FastAPI ignores unknown
+    query params, so an older core-api still sending ``?report_type=`` is
+    unaffected.
+    """
     report_id = await _svc.report_find_running(tenant_id, fleet_id)
     if report_id is None:
         raise HTTPException(status_code=404, detail="No running report found")
@@ -45,9 +57,18 @@ async def find_running_report(
 async def get_latest_report(
     tenant_id: str,
     fleet_id: str | None = None,
-    report_type: str | None = None,
 ) -> dict:
-    report = await _svc.report_get_latest_completed(tenant_id)
+    """09/02 L-48 — ``report_type`` removed here too, and ``fleet_id`` made real.
+
+    ``fleet_id`` was the more damaging of the two: also accepted, also ignored,
+    but with a caller that depends on it. ``_type_ii_watermark`` reads this
+    route's ``completed_at`` to decide which subjects the nightly sweep may
+    skip, so answering with another fleet's newer run makes a fleet with an
+    older sweep skip subjects that have changed since. See
+    ``report_get_latest_completed`` for why absent means "any fleet" here and
+    "IS NULL" in the sibling route.
+    """
+    report = await _svc.report_get_latest_completed(tenant_id, fleet_id)
     if report is None:
         raise HTTPException(status_code=404, detail="No completed report found")
     return orm_to_dict(report, REPORT_FIELDS)
