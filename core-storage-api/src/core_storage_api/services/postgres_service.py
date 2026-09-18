@@ -11220,7 +11220,19 @@ class PostgresService:
         *,
         tenant_id: str,
         node_name: str,
-    ) -> UUID:
+    ) -> UUID | None:
+        """The node's id, or ``None`` when this tenant has no such node.
+
+        ``scalar_one_or_none`` rather than ``scalar_one``: an unknown name is
+        an ordinary answer to a lookup, not a server fault. Under
+        ``scalar_one`` it raised ``NoResultFound`` straight out of all four
+        callers in ``routers/fleet.py``, so every by-name endpoint answered a
+        typo with a 500 — and the ``if node is None: 404`` two lines below two
+        of those calls could never run, because nothing returned to compare.
+        ``GET /commands`` had already been written against the None-returning
+        contract this now actually provides (``if node_id is None and
+        node_name``).
+        """
         async with get_session() as session:
             result = await session.execute(
                 select(FleetNode.id).where(
@@ -11228,7 +11240,7 @@ class PostgresService:
                     FleetNode.node_name == node_name,
                 )
             )
-            return result.scalar_one()
+            return result.scalar_one_or_none()
 
     async def fleet_get_node_by_id(
         self,
@@ -11281,6 +11293,35 @@ class PostgresService:
                 )
             )
             return result.scalar() or 0
+
+    async def fleet_delete_node(
+        self,
+        *,
+        tenant_id: str,
+        node_id: UUID,
+    ) -> bool:
+        """Delete one node and its commands. True when the node existed.
+
+        Commands first: ``fleet_commands.node_id`` carries an FK to
+        ``fleet_nodes.id``, so the reverse order fails on the constraint.
+        Same ordering ``fleet_delete`` uses for the whole-fleet case, and one
+        session so a crash between the two cannot leave commands orphaned
+        against a node that is gone.
+        """
+        async with get_session() as session:
+            await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id == node_id))
+            result = await session.execute(
+                _table(FleetNode)
+                .delete()
+                .where(
+                    FleetNode.tenant_id == tenant_id,
+                    FleetNode.id == node_id,
+                )
+            )
+            # rowcount lives on CursorResult; the async execute is typed
+            # as returning the base Result. Same ignore as the other
+            # delete/update paths in this file.
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def fleet_get_node_ids_for_fleet(
         self,
