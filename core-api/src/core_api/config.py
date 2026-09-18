@@ -422,13 +422,6 @@ class Settings(BaseSettings):
     public_api_url: str = ""
     settings_encryption_key: str = ""  # Required in production (Fernet key)
     jwt_secret: str = "change-me-in-production"  # Required in production
-    paddle_client_token: str | None = None
-    paddle_environment: str = "sandbox"
-    paddle_webhook_secret: str | None = None
-    paddle_pro_monthly_price_id: str | None = None
-    paddle_pro_annual_price_id: str | None = None
-    paddle_business_monthly_price_id: str | None = None
-    paddle_business_annual_price_id: str | None = None
     use_stm: bool = False
     # D13 — meter /recall and MCP caura_recall against the "recall" counter
     # instead of "search". Off by default because the recalls counter feeds
@@ -477,7 +470,6 @@ class Settings(BaseSettings):
     stm_backend: str = "memory"  # memory | redis
     stm_notes_ttl: int = 86400  # 24h
     stm_bulletin_ttl: int = 172800  # 48h
-    payment_provider: str = "paddle"
 
     # Platform default providers — Caura's own API keys for tenants without credentials.
     # Set these in enterprise deployments; leave empty for OSS self-hosted.

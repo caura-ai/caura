@@ -99,12 +99,16 @@ MUTATING_VERBS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # context is constructed, not on a bypass inside the gate.
 WRITE_GATE_EXEMPT = frozenset({"enforce_admin"})
 
-# ``enforce_org_admin`` is in NEITHER set, and the reasoning is worth keeping
-# because it is not obvious in either direction.
+# Org-admin status is in NEITHER set, and the reasoning is worth keeping
+# because it is not obvious in either direction. It is now spelled
+# ``AuthContext.is_org_admin`` — a predicate three routes branch on, not a
+# gate. The ``enforce_org_admin()`` raiser this paragraph used to name was
+# deleted: no route ever called it, and the three routes that DID need the
+# predicate had each written it out by hand instead.
 #
 # Not write-gate-exempt: ``org_role`` (``auth.py``, Path 4) and ``capabilities``
 # arrive as independent gateway headers, so an org admin holding a
-# capabilities={'read'} key clears ``enforce_org_admin`` while
+# capabilities={'read'} key satisfies ``is_org_admin`` while
 # ``enforce_read_only`` refuses it.
 #
 # Not plane-exempt either, which is the part I first got wrong. The tempting
@@ -113,8 +117,10 @@ WRITE_GATE_EXEMPT = frozenset({"enforce_admin"})
 # THIS branch only", and Path 2 (standalone) returns
 # ``AuthContext(tenant_id=..., org_role="admin", agent_id=agent_id)``: an agent
 # credential that IS an org admin. So the exemption would hold on the gateway
-# and not in standalone. No route calls ``enforce_org_admin`` today, so leaving
-# it unexempted costs nothing and the first route to use it gets looked at.
+# and not in standalone. That is why ``_require_inbox_admin`` — the one live
+# org-admin gate — carries its own allowlist line below rather than an
+# exemption: a route that refuses on ``is_org_admin`` alone still owes the
+# write and plane axes their own answers.
 PLANE_GATE_EXEMPT = frozenset({"enforce_admin"})
 
 # The SELF plane is the third axis, and its exemptions are the widest of the
