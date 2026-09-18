@@ -43,6 +43,21 @@ except ImportError:
     sys.exit(1)
 
 TIMEOUT = 30.0
+
+# The tool list this test's heartbeat reports, and the source of the count that
+# goes with it. One list, so the body and the assertion cannot disagree — which
+# is what happened when they were written out separately.
+_HEARTBEAT_TOOLS = [
+    "caura_recall",
+    "caura_write",
+    "caura_manage",
+    "caura_doc",
+    "caura_list",
+    "caura_entity_get",
+    "caura_tune",
+    "caura_insights",
+    "caura_evolve",
+]
 FROZEN_PLUGIN_ID = (
     "memclaw"  # legacy-name-ok: existing on-disk plugin and skill identifier
 )
@@ -445,21 +460,15 @@ class GatewayIntegrationTest:
             "fleet_id": self.fleet_id or None,
             "hostname": "gateway-integration-test",
             "plugin_version": "0.9.10-test",
-            "tools": [
-                "caura_recall",
-                "caura_write",
-                "caura_manage",
-                "caura_doc",
-                "caura_list",
-                "caura_entity_get",
-                "caura_tune",
-                "caura_insights",
-                "caura_evolve",
-            ],
+            "tools": _HEARTBEAT_TOOLS,
             "metadata": {
                 "setup_status": {
                     "plugin_loaded": True,
-                    "tools_registered": 9,
+                    # Derived, not restated. The two used to be written out
+                    # separately and had drifted: the body declared 9 while the
+                    # assertion below demanded 13, so the check could not pass
+                    # whatever the server did.
+                    "tools_registered": len(_HEARTBEAT_TOOLS),
                     "tools_allowed": True,
                     "fully_configured": True,
                     "agents_educated": True,
@@ -505,8 +514,8 @@ class GatewayIntegrationTest:
                     f"setup_status={json.dumps(ss)[:200]}",
                 )
                 self.check(
-                    "Heartbeat: setup_status.tools_registered=13",
-                    ss.get("tools_registered") == 13,
+                    f"Heartbeat: setup_status.tools_registered={len(_HEARTBEAT_TOOLS)}",
+                    ss.get("tools_registered") == len(_HEARTBEAT_TOOLS),
                     f"tools_registered={ss.get('tools_registered')}",
                 )
             else:

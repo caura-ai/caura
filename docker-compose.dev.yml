@@ -126,7 +126,6 @@ services:
     volumes:
       - ./common:/app/common
       - ./core-api/src:/app/core-api/src
-      - ./migrations:/app/migrations
       - ./plugin:/app/plugin
       - ./static:/app/static
       - storage_secret:/run/caura-storage:ro

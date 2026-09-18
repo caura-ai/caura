@@ -91,7 +91,12 @@ def measure(func, *args, **kwargs) -> tuple:
 
 def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str | None):
     tenant = f"latency-bench-{uuid.uuid4().hex[:8]}"
-    api = f"{base_url.rstrip('/')}/api"
+    # ``/api/v1``, not ``/api``: every router is mounted under the versioned
+    # prefix (``app.py``), so the unversioned form 404s on the very first call
+    # — the health probe below — and the script exits before measuring
+    # anything. It had been doing that against its own documented default
+    # target, ``http://localhost:8000``.
+    api = f"{base_url.rstrip('/')}/api/v1"
     headers = {}
     if api_key:
         headers["X-API-Key"] = api_key
@@ -201,8 +206,15 @@ def run_benchmark(base_url: str, api_key: str | None, runs: int, fleet_id: str |
     print()
 
     # ── Cleanup ──
-    client.delete(f"{api}/memories", params={"tenant_id": tenant})
-    client.delete(f"{api}/admin/tenants/{tenant}")
+    # Deleting the benchmark tenant's memories IS the cleanup: core-api has no
+    # tenant-delete route, and never had one. This used to follow up with
+    # ``DELETE /admin/tenants/{tenant}``, whose 404 went unread because the
+    # response is discarded.
+    r = client.delete(f"{api}/memories", params={"tenant_id": tenant})
+    if r.status_code >= 300:
+        print(
+            f"  WARNING: cleanup failed ({r.status_code}); tenant {tenant} still holds rows"
+        )
 
     # ── Report ──
     print("=" * 64)
