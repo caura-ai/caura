@@ -1,7 +1,7 @@
 import uuid
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Float, ForeignKey, Index, Text, text
+from sqlalchemy import Float, ForeignKey, Index, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,6 +22,31 @@ class Entity(Base):
     attributes: Mapped[dict | None] = mapped_column(JSONB)
     name_embedding = mapped_column(Vector(VECTOR_DIM))
     search_vector = mapped_column(TSVECTOR)
+
+    __table_args__ = (
+        # The dedup constraint ``entity_add`` relies on. Created in migration
+        # 001 and, until now, declared NOWHERE ELSE — so a schema built from
+        # this metadata instead of the migration chain (``tests/conftest.py``
+        # uses ``Base.metadata.create_all``) had no unique index on entities at
+        # all, and ``entity_add`` silently inserted duplicates there rather than
+        # deduping. Declared here for the same reasons
+        # ``uq_memories_live_content_hash`` is: reflection/autogen round-trip
+        # against the live schema, and the create_all suites exercise the
+        # constraint the write path advertises.
+        #
+        # ``COALESCE(fleet_id, '')`` because PostgreSQL treats NULLs as
+        # distinct: without it two fleetless entities of the same name would
+        # both insert. ``lower(canonical_name)`` because the dedup contract is
+        # case-insensitive.
+        Index(
+            "uq_entities_tenant_type_name_fleet",
+            "tenant_id",
+            "entity_type",
+            func.lower(text("canonical_name")),
+            func.coalesce(text("fleet_id"), ""),
+            unique=True,
+        ),
+    )
 
 
 class Relation(Base):

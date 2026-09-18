@@ -1109,6 +1109,19 @@ class DuplicateContentHashError(ValueError):
         self.fields: dict = fields or {}
 
 
+def _fleet_scope(column, fleet_id: str | None):
+    """Fleet predicate matching an index that groups on ``COALESCE(fleet_id, '')``.
+
+    Every unique index here that spans a nullable ``fleet_id`` groups it that
+    way — ``uq_memories_live_content_hash``, ``ix_memories_attempt_unique``,
+    ``uq_entities_tenant_type_name_fleet`` — so every lookup that has to agree
+    with one of them needs THIS predicate rather than a falsiness branch. One
+    function for all three tables so a caller cannot half-remember the rule; see
+    :func:`_content_hash_fleet_scope` for the full argument and the reproduction.
+    """
+    return func.coalesce(column, "") == (fleet_id or "")
+
+
 def _content_hash_fleet_scope(fleet_id: str | None):
     """Fleet predicate matching ``uq_memories_live_content_hash``'s grouping.
 
@@ -1133,7 +1146,7 @@ def _content_hash_fleet_scope(fleet_id: str | None):
     Also index-friendly: equality on the same ``COALESCE`` expression the index
     is built over remains usable by the planner.
     """
-    return func.coalesce(Memory.fleet_id, "") == (fleet_id or "")
+    return _fleet_scope(Memory.fleet_id, fleet_id)
 
 
 def _divergent_keys(key_sets: list[frozenset[str]]) -> list[str]:
@@ -1632,9 +1645,17 @@ class PostgresService:
                 # asyncpg's 32k bind-arg ceiling. 500 mirrors the bulk
                 # batch ceiling so a single-batch retry is one query;
                 # larger calls (auto-chunk) split cleanly.
-                fleet_predicate = (
-                    Memory.fleet_id == fleet_id if fleet_id is not None else Memory.fleet_id.is_(None)
-                )
+                # Must group ``fleet_id`` the way the ARBITER does — this
+                # lookup exists to find the rows that index swallowed, so a
+                # different grouping asks a different question. It branched on
+                # NULL-ness while the ON CONFLICT above groups on
+                # ``COALESCE(fleet_id, '')``, and the two disagree exactly where
+                # the index says "duplicate": a caller passing ``""`` against a
+                # row stored NULL (or the reverse) conflicts in the index and
+                # then misses here, so the item fell through to the ``id: None``
+                # branch below and was reported as a per-item error for a write
+                # that had in fact already committed.
+                fleet_predicate = _fleet_scope(Memory.fleet_id, fleet_id)
                 for chunk_start in range(0, len(unresolved), 500):
                     chunk = unresolved[chunk_start : chunk_start + 500]
                     result = await session.execute(
@@ -7011,40 +7032,79 @@ class PostgresService:
     async def entity_add(self, data: dict) -> Entity:
         """Create new entity — handle race with concurrent extraction tasks.
 
-        The uq_entities_tenant_type_name_fleet unique index rejects
-        duplicates at INSERT time; on conflict we re-SELECT and merge.
-        """
-        from sqlalchemy.exc import IntegrityError
+        ``INSERT ... ON CONFLICT DO NOTHING RETURNING`` against
+        ``uq_entities_tenant_type_name_fleet``, paired with a same-session
+        re-SELECT for the conflicted case — the shape ``agent_add`` and
+        ``memory_add_all`` already use.
 
+        NOT ``flush() → IntegrityError → rollback() → re-SELECT``, which is
+        what this did and which could not work: ``get_session`` yields inside
+        ``session.begin()``, so the mid-block ``rollback()`` closed the
+        transaction the context manager still owned and the re-SELECT died on
+        "Can't operate on closed transaction inside context manager". The
+        recovery path was unreachable — every dedup race 500'd, and the
+        ``winner is None`` guard below it had never run. ``agent_add``'s
+        docstring already warned this pattern was brittle; it was simply never
+        applied here.
+        """
         async with get_session() as session:
-            entity = Entity(**data)
-            session.add(entity)
-            try:
-                await session.flush()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    "Entity dedup race: '%s' already exists, re-selecting",
-                    data.get("canonical_name"),
+            # Mirrors migration 001's CREATE INDEX expression-for-expression.
+            # ``text()`` for the two computed elements for the reason spelled
+            # out on ``memory_add_all``: conflict inference matches on the
+            # rendered expression, and an unmatched target silently degrades to
+            # "no inferred constraint" — here that would resurrect the 500.
+            stmt = (
+                pg_insert(Entity)
+                .values(**data)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        Entity.tenant_id,
+                        Entity.entity_type,
+                        text("lower(canonical_name)"),
+                        text("COALESCE(fleet_id, '')"),
+                    ]
                 )
-                # Re-SELECT the entity that won the race
-                result = await session.execute(
-                    select(Entity).where(
-                        Entity.tenant_id == data["tenant_id"],
-                        Entity.entity_type == data["entity_type"],
-                        func.lower(Entity.canonical_name) == data["canonical_name"].lower(),
-                        Entity.fleet_id == data.get("fleet_id")
-                        if data.get("fleet_id")
-                        else Entity.fleet_id.is_(None),
-                    )
-                )
-                winner = result.scalar_one_or_none()
-                if winner is None:
+                .returning(Entity.id)
+            )
+            inserted_id = (await session.execute(stmt)).scalar_one_or_none()
+
+            if inserted_id is not None:
+                entity = await session.scalar(select(Entity).where(Entity.id == inserted_id))
+                if entity is None:
                     raise ValueError(
-                        f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
+                        f"Entity row {inserted_id} vanished after INSERT — concurrent delete during entity_add"
                     )
-                entity = winner
-            return entity
+                return entity
+
+            logger.info(
+                "Entity dedup race: '%s' already exists, re-selecting",
+                data.get("canonical_name"),
+            )
+            # ``_fleet_scope`` rather than a NULL branch: the index groups
+            # ``COALESCE(fleet_id, '')``, so the row that just won the conflict
+            # may be stored NULL while the caller passed ``""`` (or the
+            # reverse). Branching on NULL-ness would miss it and raise the
+            # ValueError below for a row that is plainly there.
+            #
+            # ``.with_for_update()`` serialises against a concurrent
+            # ``entity_delete`` — we either see the live row or wait for that
+            # delete to commit, closing the window where the row was visible to
+            # ON CONFLICT and gone by the time we read it.
+            winner = await session.scalar(
+                select(Entity)
+                .where(
+                    Entity.tenant_id == data["tenant_id"],
+                    Entity.entity_type == data["entity_type"],
+                    func.lower(Entity.canonical_name) == data["canonical_name"].lower(),
+                    _fleet_scope(Entity.fleet_id, data.get("fleet_id")),
+                )
+                .with_for_update()
+            )
+            if winner is None:
+                raise ValueError(
+                    f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
+                )
+            return winner
 
     async def entity_update(self, entity_id: UUID, tenant_id: str, data: dict) -> Entity | None:
         """Update an existing entity by ID, scoped to its home tenant.
@@ -12193,13 +12253,67 @@ class PostgresService:
         keys / leaf types / governance enums / cron before calling.
         """
         async with get_session() as session:
-            result = await session.execute(
-                select(OrganizationSettings.settings)
-                .where(OrganizationSettings.org_id == org_id)
-                .with_for_update()
-            )
-            current_row = result.scalar_one_or_none()
-            current: dict = current_row if isinstance(current_row, dict) else {}
+
+            async def _locked_overrides() -> dict | None:
+                """The row's overrides under ``FOR UPDATE``; ``None`` if absent."""
+                row = (
+                    await session.execute(
+                        select(OrganizationSettings.settings)
+                        .where(OrganizationSettings.org_id == org_id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                return row if isinstance(row, dict) else ({} if row is not None else None)
+
+            async def _write_audit(diff: dict) -> None:
+                await session.execute(
+                    pg_insert(OrganizationSettingsAudit).values(
+                        org_id=org_id, changed_by=changed_by, diff=diff
+                    )
+                )
+
+            current = await _locked_overrides()
+
+            if current is None:
+                # No row yet, so the FOR UPDATE above locked NOTHING — that gap
+                # is the entire first-time race, and it used to be papered over
+                # with ``ON CONFLICT DO UPDATE SET settings = settings ||
+                # EXCLUDED.settings``. JSONB ``||`` is SHALLOW, so that was only
+                # safe under the claim that top-level keys are independent — true
+                # of two writers touching DIFFERENT namespaces, and false of the
+                # case that actually happens: two first-time writers under the
+                # SAME namespace, where ``||`` replaces the whole nested object
+                # and drops the loser's sub-keys. It also disagreed with
+                # ``deep_merge`` directly above it, so the row's contents
+                # depended on whether the write took the insert or the conflict
+                # path. Both writers were then told ``changed: True`` and handed
+                # back their own ``merged`` — a success response quoting a value
+                # that was never stored, plus an audit row for a diff that did
+                # not survive.
+                #
+                # So: claim the row instead of merging in SQL. One writer wins
+                # the INSERT; every other writer falls through to a lock that now
+                # has a row to hold and redoes the read-merge-write against what
+                # is actually stored, through the same ``deep_merge`` as every
+                # other path.
+                seed_diff = diff_settings({}, new_settings)
+                if not seed_diff:
+                    return {"settings": {}, "changed": False}
+                seeded = deep_merge({}, new_settings)
+                claimed = (
+                    await session.execute(
+                        pg_insert(OrganizationSettings)
+                        .values(org_id=org_id, settings=seeded)
+                        .on_conflict_do_nothing(index_elements=["org_id"])
+                        .returning(OrganizationSettings.org_id)
+                    )
+                ).scalar_one_or_none()
+                if claimed is not None:
+                    await _write_audit(seed_diff)
+                    return {"settings": seeded, "changed": True}
+                # Lost the claim. The winner's row exists and is committed (our
+                # INSERT blocked on their uncommitted one), so this lock holds.
+                current = await _locked_overrides() or {}
 
             diff = diff_settings(current, new_settings)
             if not diff:
@@ -12207,25 +12321,12 @@ class PostgresService:
                 return {"settings": current, "changed": False}
 
             merged = deep_merge(current, new_settings)
-
-            # FOR UPDATE serialises writes once the row exists. Concurrent
-            # first-time inserts (no row yet) use JSONB || to merge at the DB
-            # level so two racing inserts don't silently overwrite each other;
-            # the shallow || is safe because top-level schema keys (enrichment,
-            # recall, …) are independent.
-            upsert = pg_insert(OrganizationSettings).values(org_id=org_id, settings=merged)
             await session.execute(
-                upsert.on_conflict_do_update(
-                    index_elements=["org_id"],
-                    set_={
-                        "settings": text("organization_settings.settings || EXCLUDED.settings"),
-                        "updated_at": func.now(),
-                    },
-                )
+                sql_update(OrganizationSettings)
+                .where(OrganizationSettings.org_id == org_id)
+                .values(settings=merged, updated_at=func.now())
             )
-            await session.execute(
-                pg_insert(OrganizationSettingsAudit).values(org_id=org_id, changed_by=changed_by, diff=diff)
-            )
+            await _write_audit(diff)
             return {"settings": merged, "changed": True}
 
     # ══════════════════════════════════════════════════════════════════════
