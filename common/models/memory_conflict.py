@@ -73,7 +73,13 @@ class MemoryConflict(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    # No ``index=True``: the tenant index is declared by name in
+    # ``__table_args__`` below as ``ix_memory_conflicts_tenant``, which is what
+    # the migration chain creates. ``index=True`` ALSO declared one, under
+    # SQLAlchemy's generated name ``ix_memory_conflicts_tenant_id`` — a second
+    # index on the same column that no migration has ever created, so the model
+    # described two and the database had one (09/02 L-14).
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     fleet_id: Mapped[str | None] = mapped_column(Text)
 
     # The two competing propositions. new = the later / triggering memory.

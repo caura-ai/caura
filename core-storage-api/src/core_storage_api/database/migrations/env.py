@@ -16,20 +16,21 @@ _alembic_cfg = context.config
 if _alembic_cfg.config_file_name is not None:
     fileConfig(_alembic_cfg.config_file_name)
 
-# Import all models so Base.metadata is populated (required for --autogenerate)
-from common.models.memory import Memory  # noqa: F401
-from common.models.memory_conflict import MemoryConflict  # noqa: F401
-from common.models.memory_derivation import MemoryDerivation  # noqa: F401
-from common.models.entity import Entity, MemoryEntityLink, Relation  # noqa: F401
-from common.models.audit import AuditLog  # noqa: F401
-from common.models.agent import Agent  # noqa: F401
-from common.models.agent_activity_digest import AgentActivityDigest  # noqa: F401
-from common.models.analysis_report import CrystallizationReport  # noqa: F401
-from common.models.fleet import FleetNode, FleetCommand  # noqa: F401
-from common.models.document import Document  # noqa: F401
-from common.models.background_task import BackgroundTaskLog  # noqa: F401
-from common.models.capability_usage import CapabilityUsage  # noqa: F401
-from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit  # noqa: F401
+# Import all models so Base.metadata is populated (required for --autogenerate).
+#
+# The PACKAGE, not a hand-kept list of thirteen modules. 09/02 L-13: that list
+# omitted ``recall_log``, so ``recall_event`` and ``recall_candidate`` — both
+# created by migration 027, both present in every deployed database — were
+# invisible to ``Base.metadata`` here. Autogenerate compares metadata against
+# the live schema and emits a DROP for anything it cannot see, so the next
+# ``alembic revision --autogenerate`` proposed dropping both tables. Measured,
+# not inferred: running it produced ``op.drop_table('recall_candidate')`` and
+# ``op.drop_table('recall_event')``.
+#
+# Importing the package makes that failure impossible to reintroduce by
+# forgetting a line here: a new model registers by being exported from
+# ``common/models/__init__.py``, which is where a new model is added anyway.
+import common.models  # noqa: F401
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
