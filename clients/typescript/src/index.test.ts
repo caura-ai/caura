@@ -153,23 +153,16 @@ test("recall throws when 200 body is a bare scalar", async () => {
   });
 });
 
-test("recall posts caller extras into the request body", async () => {
+test("recall translates topK and forwards only the extras", async () => {
   let captured: Record<string, unknown> = {};
   const client = makeClient((_url, init) => {
     captured = JSON.parse(init.body as string);
     return jsonResponse(200, liveRecallBody([]));
   });
-  await client.recall("q", { topK: 7 });
+  await client.recall("q", { topK: 7, diagnostic: true });
   assert.equal(captured.top_k, 7);
-  const probe = "x-extra-probe";
-  try {
-    await client.recall("q", { [probe]: "v" });
-  } catch {
-    // response parsing is validated by the other recall tests; here we only
-    // check that the extra key reached the request body
-  }
-  assert.equal(captured[probe], "v");
-});
+  assert.equal(captured.diagnostic, true);
+  assert.equal("topK" in captured, false);
 });
 
 test("health hits /health", async () => {
