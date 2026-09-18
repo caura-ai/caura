@@ -927,7 +927,12 @@ _PURGE_FLEET_TABLES: tuple[str, ...] = (
 
 
 def _verify_audit_chain_rows(
-    tenant_id: str, rows: list[AuditLog], head: AuditChainHead | None, limit: int
+    tenant_id: str,
+    rows: list[AuditLog],
+    head: AuditChainHead | None,
+    limit: int,
+    start_seq: int = 1,
+    seed_prev: bytes | None = GENESIS_PREV_HASH,
 ) -> dict:
     """Walk pre-fetched chain rows and verify integrity (pure CPU, no I/O).
 
@@ -936,8 +941,24 @@ def _verify_audit_chain_rows(
     ``asyncio.to_thread`` instead of blocking the event loop. Operates only on
     already-loaded ORM attributes, so it's safe off the event loop.
     """
-    expected_prev = GENESIS_PREV_HASH
-    expected_seq = 1
+    if seed_prev is None:
+        # Asked to resume from ``start_seq`` but row ``start_seq - 1`` is gone.
+        # Reported rather than tolerated: verifying this window against genesis
+        # would declare it sound while the rows it should have been anchored to
+        # are missing, which is precisely the deletion a chain walk exists to
+        # catch.
+        return {
+            "tenant_id": tenant_id,
+            "valid": False,
+            "verified_count": 0,
+            "first_broken": {
+                "seq": start_seq,
+                "reason": "missing_predecessor",
+            },
+        }
+
+    expected_prev = seed_prev
+    expected_seq = start_seq
     for row in rows:
         reason: str | None = None
         if row.seq != expected_seq:
@@ -961,7 +982,10 @@ def _verify_audit_chain_rows(
             return {
                 "tenant_id": tenant_id,
                 "valid": False,
-                "verified_count": expected_seq - 1,
+                # Rows verified in THIS window, not since genesis — with a
+                # ``start_seq`` above 1 the two differ, and the caller already
+                # knows how far the earlier windows got.
+                "verified_count": expected_seq - start_seq,
                 "first_broken": {
                     "seq": row.seq,
                     "id": str(row.id),
@@ -979,7 +1003,27 @@ def _verify_audit_chain_rows(
 
     truncated = len(rows) >= limit
     head_seq, head_hash = (head.last_seq, head.last_hash) if head is not None else (0, GENESIS_PREV_HASH)
-    last_seq, last_hash = (rows[-1].seq, rows[-1].event_hash) if rows else (0, GENESIS_PREV_HASH)
+    if rows:
+        last_seq, last_hash = rows[-1].seq, rows[-1].event_hash
+    elif start_seq > 1:
+        # An empty window above genesis is how a paginated walk terminates: the
+        # caller followed ``next_seq`` one step past the final row. The chain
+        # tail is therefore row ``start_seq - 1``, whose hash we are holding in
+        # ``seed_prev`` — so ANCHOR the tail check to it rather than skipping
+        # the check.
+        #
+        # Skipping the check here instead — the obvious reading of "past the
+        # end" — is a hole, not a shortcut. ``truncated`` ALSO skips this
+        # check, so a chain whose length is an exact multiple of ``limit`` ends
+        # its last non-empty window truncated (check skipped) and its next
+        # window empty (check skipped again) — no window runs it, and a walk
+        # over a chain with rows DELETED off the tail reports ``valid: true``.
+        # ``DELETE ... WHERE seq > 100000`` reaches that, 100_000 being the
+        # default ``limit``, and a contiguous tail deletion raises no seq_gap,
+        # so this check is the only thing that catches it.
+        last_seq, last_hash = start_seq - 1, seed_prev
+    else:
+        last_seq, last_hash = 0, GENESIS_PREV_HASH
     if not truncated and (head_seq != last_seq or head_hash != last_hash):
         return {
             "tenant_id": tenant_id,
@@ -997,6 +1041,16 @@ def _verify_audit_chain_rows(
         "verified_count": len(rows),
         "head_seq": last_seq,
         "truncated": truncated,
+        # The cursor for the next window, present only when there is one. The
+        # caller previously had to infer it from ``head_seq``, which worked
+        # only because the walk always started at genesis.
+        #
+        # ``last_seq`` is ``int | None`` because the COLUMN is nullable, but it
+        # cannot be NULL here: the query filters ``seq IS NOT NULL``, and
+        # ``truncated`` (``len(rows) >= limit``, with ``limit >= 1``) implies a
+        # non-empty page. Narrowed rather than asserted so a future change that
+        # breaks either of those produces no cursor instead of a crash.
+        **({"next_seq": last_seq + 1} if truncated and last_seq is not None else {}),
     }
 
 
@@ -6925,7 +6979,26 @@ class PostgresService:
         offset: int = 0,
     ) -> list[Entity]:
         async with get_session() as session:
-            stmt = select(Entity).where(Entity.tenant_id == tenant_id).offset(offset).limit(limit)
+            # ORDER BY is what makes OFFSET/LIMIT mean anything. Postgres
+            # guarantees no row order without it, so it is free to return the
+            # same physical rows in a different sequence for page 2 than it did
+            # for page 1 — a caller walking the pages then sees some entities
+            # twice and never sees others, with nothing in the response to show
+            # it happened. Plan changes (a fresh ANALYZE, a seq-scan becoming an
+            # index scan as the table grows) are enough to shift it.
+            #
+            # ``id`` and not ``canonical_name``: the primary key is the only
+            # column here that is unique, and uniqueness is the property a
+            # stable sort needs. It is also already indexed, so this adds no
+            # sort node. A human-friendlier display order is a presentation
+            # decision and would still need ``id`` appended to be stable.
+            stmt = (
+                select(Entity)
+                .where(Entity.tenant_id == tenant_id)
+                .order_by(Entity.id)
+                .offset(offset)
+                .limit(limit)
+            )
             if fleet_id:
                 stmt = stmt.where(Entity.fleet_id == fleet_id)
             if entity_type:
@@ -7381,6 +7454,25 @@ class PostgresService:
                 .where(
                     MemoryEntityLink.entity_id.in_(entity_ids),
                     _link_within_tenant(tenant_id),
+                    # Soft-deleted memories are excluded HERE rather than in
+                    # ``_link_within_tenant``, which answers a different
+                    # question: that predicate is about TENANCY (may this
+                    # caller see this link at all), and liveness is a separate
+                    # axis — folding one into the other would silently change
+                    # its two other callers.
+                    #
+                    # The count is rendered beside ``entity_get_linked_memories``,
+                    # which filters ``Memory.deleted_at IS NULL`` and says so in
+                    # its own docstring. Without this the two endpoints disagree
+                    # about the same entity: the list reports a memory_count of
+                    # 5 while /with-memories returns 3, and the gap is exactly
+                    # the memories the caller deleted.
+                    select(Memory.id)
+                    .where(
+                        Memory.id == MemoryEntityLink.memory_id,
+                        Memory.deleted_at.is_(None),
+                    )
+                    .exists(),
                 )
                 .group_by(MemoryEntityLink.entity_id)
             )
@@ -11517,19 +11609,54 @@ class PostgresService:
             head.last_hash = prev_hash
             head.updated_at = now
 
-    async def audit_verify_chain(self, tenant_id: str, *, limit: int = 100_000) -> dict:
+    async def audit_verify_chain(self, tenant_id: str, *, limit: int = 100_000, start_seq: int = 1) -> dict:
         """Walk a tenant's hash chain in ``seq`` order and verify integrity.
 
         Recomputes each ``event_hash`` and checks ``prev_hash`` linkage +
         genesis; stops at and reports the first broken link (everything
         after it is untrustworthy). A final tail-check against
         ``audit_chain_head`` catches rows deleted off the END of the chain
-        (a forward walk alone can't see a missing tail). ``limit`` bounds
-        the walk — when hit, the tail-check is skipped and ``truncated`` is
-        set so the caller knows to paginate.
+        (a forward walk alone can't see a missing tail).
+
+        ``limit`` bounds one window and ``start_seq`` resumes the next: when a
+        result comes back ``truncated``, its ``next_seq`` is the ``start_seq``
+        for the following call. This used to say ``truncated`` was set "so the
+        caller knows to paginate" while offering nothing to paginate WITH —
+        there was no cursor parameter, so a chain longer than the route's 500k
+        cap could never have its tail verified at all.
+
+        A walk of every contiguous window is NOT equivalent to one full pass,
+        and the difference is worth stating precisely because it is easy to
+        assume otherwise.
+
+        What DOES carry across windows is the linkage. A window above genesis
+        seeds ``expected_prev`` from row ``start_seq - 1``'s stored
+        ``event_hash`` rather than recomputing it, but the previous window
+        recomputed that row's hash, so the chain holds transitively — and the
+        terminal (empty) window anchors its tail check to that same seed, so a
+        deleted tail is still caught no matter how the chain length divides by
+        ``limit``.
+
+        What does NOT carry is atomicity. One pass reads every row in a single
+        REPEATABLE READ snapshot (below); a walk is N transactions across N
+        snapshots, and under ``read_database_url`` possibly N replicas at
+        differing lag. So a walk proves each window was intact WHEN IT WAS
+        READ, not that the chain was intact at any single instant. An attacker
+        with write access can therefore tamper with a region the cursor has
+        already passed and have every window come back valid. That is a
+        detection DELAY, not permanent evasion — the next verification that
+        covers the region catches it — but a walk is the weaker statement and
+        should not be reported as "chain verified" the way a full pass can be.
+
+        Contiguity is also entirely the caller's obligation and is not
+        enforced here: ``start_seq`` is a plain integer, not an opaque cursor
+        bound to the previous window's ``next_seq``, and nothing records that a
+        caller ever started from genesis. Verifying one window in isolation
+        proves only that it is internally consistent and correctly attached to
+        a row it did not itself check.
         """
         async with get_read_session() as session:
-            # Pin one snapshot across BOTH reads (rows + head). Under READ
+            # Pin one snapshot across ALL THREE reads (rows + seed + head). Under READ
             # COMMITTED each statement gets its own snapshot, so a concurrent
             # same-tenant insert committing between the two reads makes the head
             # look one seq ahead of the fetched rows and fires a FALSE
@@ -11541,7 +11668,11 @@ class PostgresService:
                 (
                     await session.execute(
                         select(AuditLog)
-                        .where(AuditLog.tenant_id == tenant_id, AuditLog.seq.isnot(None))
+                        .where(
+                            AuditLog.tenant_id == tenant_id,
+                            AuditLog.seq.isnot(None),
+                            AuditLog.seq >= start_seq,
+                        )
                         .order_by(AuditLog.seq.asc())
                         .limit(limit)
                     )
@@ -11549,6 +11680,23 @@ class PostgresService:
                 .scalars()
                 .all()
             )
+            # The link this window attaches to. Read inside the same pinned
+            # snapshot as the rows, so a concurrent write cannot make the seed
+            # and the window disagree. A missing row here means the caller
+            # asked to resume from a seq whose predecessor does not exist —
+            # left as ``None`` and reported below rather than silently
+            # verifying against genesis, which would accept a chain whose head
+            # had been cut off exactly at ``start_seq``.
+            seed_prev: bytes | None = GENESIS_PREV_HASH
+            if start_seq > 1:
+                seed_prev = (
+                    await session.execute(
+                        select(AuditLog.event_hash).where(
+                            AuditLog.tenant_id == tenant_id,
+                            AuditLog.seq == start_seq - 1,
+                        )
+                    )
+                ).scalar_one_or_none()
             head = (
                 await session.execute(select(AuditChainHead).where(AuditChainHead.tenant_id == tenant_id))
             ).scalar_one_or_none()
@@ -11557,24 +11705,50 @@ class PostgresService:
         # cover up to `limit` (≤ 500k) rows — offload it so it doesn't block the
         # event loop and starve concurrent requests. The rows/head are already
         # fully loaded, so the thread only touches in-memory attributes.
-        return await asyncio.to_thread(_verify_audit_chain_rows, tenant_id, rows, head, limit)
+        return await asyncio.to_thread(
+            _verify_audit_chain_rows, tenant_id, rows, head, limit, start_seq, seed_prev
+        )
 
     async def audit_list_by_tenant(
         self,
         tenant_id: str,
         *,
         limit: int = 50,
+        offset: int = 0,
+        action: str | None = None,
+        resource_type: str | None = None,
         since: datetime | None = None,
     ) -> list[AuditLog]:
+        """One page of a tenant's audit log, newest first.
+
+        Every filter is applied in SQL, and that is the whole point of the
+        signature. ``action`` / ``resource_type`` / ``offset`` used to be
+        applied by the route, in Python, to the rows this method had ALREADY
+        truncated with ``LIMIT`` — so a filter could only ever match within the
+        newest ``limit`` rows, and returned ``[]`` when the matches were older
+        than that however many existed. ``offset`` was worse: slicing a list
+        that was itself capped at ``limit`` made page 2 (``offset=limit``)
+        empty for every tenant, always, so the endpoint could not paginate at
+        all.
+
+        ``(created_at DESC, id)`` rather than ``created_at`` alone: the column
+        is not unique, and a stable tiebreak is what makes OFFSET paging
+        coherent — without it two rows sharing a timestamp can swap between
+        pages and be served twice or skipped.
+        """
         async with get_session() as session:
-            q = (
-                select(AuditLog)
-                .where(AuditLog.tenant_id == tenant_id)
-                .order_by(AuditLog.created_at.desc())
-                .limit(limit)
-            )
+            # Filters first, then order/offset/limit. SQLAlchemy builds the same
+            # statement either way — WHERE always precedes LIMIT in the emitted
+            # SQL — but written in this order the code reads the way it runs,
+            # which is the whole point of the change above it.
+            q = select(AuditLog).where(AuditLog.tenant_id == tenant_id)
             if since:
                 q = q.where(AuditLog.created_at > since)
+            if action:
+                q = q.where(AuditLog.action == action)
+            if resource_type:
+                q = q.where(AuditLog.resource_type == resource_type)
+            q = q.order_by(AuditLog.created_at.desc(), AuditLog.id).offset(offset).limit(limit)
             result = await session.execute(q)
             return list(result.scalars().all())
 

@@ -2906,14 +2906,23 @@ class CoreStorageClient:
             params["since"] = since.isoformat()
         return await self._get_list("/audit-logs", **params)
 
-    async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000) -> dict:
+    async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000, start_seq: int = 1) -> dict:
         """Verify a tenant's tamper-evident audit hash chain.
 
-        Returns ``{valid, verified_count, head_seq}`` (or ``first_broken``
-        on a detected break). Used by the enterprise governance UI's
-        "chain intact" check.
+        Returns ``{valid, verified_count, head_seq, truncated}`` (or
+        ``first_broken`` on a detected break). Used by the enterprise
+        governance UI's "chain intact" check.
+
+        **``valid: true`` alone does not mean the chain is intact.** A result
+        with ``truncated: true`` covers only ``limit`` rows starting at
+        ``start_seq`` and SKIPS the tail-vs-head check, so a caller that renders
+        "chain intact" from ``valid`` alone reports a chain with rows deleted
+        off its end as sound. Check ``truncated`` and, when set, resume from the
+        returned ``next_seq`` until a window comes back un-truncated. Note that
+        such a walk is weaker than one un-truncated pass — each window is read
+        in its own snapshot; see the service method for why.
         """
-        result = await self._get("/audit-logs/verify", tenant_id=tenant_id, limit=limit)
+        result = await self._get("/audit-logs/verify", tenant_id=tenant_id, limit=limit, start_seq=start_seq)
         # Propagate failures: a None here means a network/5xx error. Returning
         # {} would hand callers a dict with no "valid" key, turning the real
         # error into a confusing KeyError downstream.
