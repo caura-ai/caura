@@ -83,6 +83,23 @@ SOURCE_ENV_ATTRIBUTE = "source_env"
 # Pub/Sub minimum for ``expiration_policy``.
 BROADCAST_SUBSCRIPTION_TTL_SECONDS = 86400
 
+# How long a lease extension asks for, and how often ``_hold_leases``
+# refreshes it while a batch drains.
+#
+# Subscriptions are created with ``ack_deadline_seconds: 30`` and an existing
+# subscription keeps whatever it was created with (see
+# ``_ensure_broadcast_subscription``), so raising that constant would not reach
+# a single deployment already running. Extending the lease per batch does.
+#
+# 60 rather than the 600 the API permits, because an extension is also how long
+# a message stays invisible when THIS process dies holding it: at 600 a pod kill
+# would strand every in-flight message for ten minutes. 15s between refreshes
+# leaves 15s of slack against the initial 30s deadline on the first refresh and
+# 45s on every one after it, which is room for a slow RPC without ever letting
+# the lease lapse.
+LEASE_EXTENSION_SECONDS = 60
+LEASE_REFRESH_INTERVAL_SECONDS = 15.0
+
 # Per-call ceiling on the delete RPC in ``release_broadcast_subscriptions()``.
 #
 # The SDK's generated default is 60s, with a retry deadline also 60s — six times
@@ -1054,6 +1071,95 @@ class PubSubEventBus(EventBus):
             return None
         return source_env
 
+    async def _hold_leases(
+        self,
+        subscriber: Any,
+        pull_executor: Any,
+        sub_path: str,
+        ack_ids: list[str],
+        subscription_name: str,
+        stop: asyncio.Event,
+    ) -> None:
+        """Keep one pulled batch leased until ``stop`` is set.
+
+        ``_pull_loop`` dispatches a batch of up to ``max_messages``
+        sequentially and acks only once the whole batch is done, so the message
+        dispatched FIRST stays unacked for the entire drain. Nothing extended
+        the ack deadline, so a batch whose aggregate drain passed 30s had its
+        completed work redelivered — and the redelivered copy takes just as
+        long, so a subscription that falls behind this way stays behind.
+
+        The per-message case matters as much as the aggregate one, which is why
+        this refreshes on a timer rather than between messages: a single
+        handler that pages through a whole org (the embed-backfill sweep) can
+        outlast the deadline on its own, and a between-messages refresh would
+        never run during it.
+
+        Handlers are required to be idempotent, so the cost of the lapse was
+        duplicated work and duplicated provider spend rather than corruption —
+        but two instances running the same sweep concurrently is not a cost
+        anyone chose.
+
+        Deliberately unbounded in total: a handler that hangs forever keeps its
+        message leased forever. Capping the extensions would hand that message
+        to another instance while this one is still inside the handler, which
+        is the duplicate-sweep outcome this exists to prevent. A hung handler
+        also stalls this loop outright — the dispatch is sequential — so it
+        surfaces as a stopped subscription rather than as a lost message.
+        """
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                await asyncio.wait_for(
+                    stop.wait(), timeout=LEASE_REFRESH_INTERVAL_SECONDS
+                )
+            except TimeoutError:
+                pass  # the interval elapsed with no stop: refresh below
+            else:
+                # Asked to stop, and we are between refreshes rather than
+                # inside one — the only point at which leaving is free.
+                return
+            try:
+                await loop.run_in_executor(
+                    pull_executor,
+                    functools.partial(
+                        subscriber.modify_ack_deadline,
+                        request={
+                            "subscription": sub_path,
+                            "ack_ids": ack_ids,
+                            "ack_deadline_seconds": LEASE_EXTENSION_SECONDS,
+                        },
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Never take the pull loop down over a failed extension. Losing
+                # the lease means redelivery, which is exactly the behaviour
+                # this guards against and which handlers already tolerate —
+                # strictly better than halting consumption.
+                if stop.is_set():
+                    # This refresh was already in flight when the caller asked
+                    # us to stop, so it landed beside the ``acknowledge`` and
+                    # named ids that ack was retiring. Expected, harmless, and
+                    # NOT the operator's problem — at warning it would fire on
+                    # ordinary batches and teach on-call to ignore the level.
+                    logger.debug(
+                        "event-bus: ack-deadline extension lost a race with "
+                        "the batch ack; nothing to do",
+                        extra={"subscription": subscription_name},
+                    )
+                else:
+                    # A genuine failure: the lease is lapsing and this batch
+                    # will redeliver. Logged rather than swallowed so it shows
+                    # up as a warning instead of as unexplained slowness.
+                    logger.warning(
+                        "event-bus: ack-deadline extension failed; messages "
+                        "may redeliver while this batch drains",
+                        extra={"subscription": subscription_name},
+                        exc_info=True,
+                    )
+
     async def _pull_loop(
         self, subscription_name: str, handlers: list[EventHandler]
     ) -> None:
@@ -1091,6 +1197,10 @@ class PubSubEventBus(EventBus):
             )
 
         while not self._stopping:
+            # Declared out here so the ``finally`` can always see them,
+            # including when the pull itself raises before a batch exists.
+            lease_keeper: asyncio.Task[Any] | None = None
+            stop_extending = asyncio.Event()
             try:
                 response = await loop.run_in_executor(
                     pull_executor,
@@ -1105,6 +1215,22 @@ class PubSubEventBus(EventBus):
                 )
                 ack_ids: list[str] = []
                 nack_ids: list[str] = []
+                # Every id this pull returned, whatever its eventual outcome.
+                # The keeper holds ALL of them until the acks go out, because
+                # the point is precisely that a message which finished first
+                # stays unacked for the rest of the drain.
+                leased_ids = [r.ack_id for r in response.received_messages]
+                if leased_ids:
+                    lease_keeper = self._spawn_background_task(
+                        self._hold_leases(
+                            subscriber,
+                            pull_executor,
+                            sub_path,
+                            leased_ids,
+                            subscription_name,
+                            stop_extending,
+                        )
+                    )
                 for received in response.received_messages:
                     # Hoisted: proto-plus re-wraps the nested message on every
                     # ``.message`` access, so reading it three times costs
@@ -1145,6 +1271,29 @@ class PubSubEventBus(EventBus):
                         continue
                     success = await self._dispatch_all(handlers, event)
                     (ack_ids if success else nack_ids).append(received.ack_id)
+
+                # Stop refreshing before the acks go out. This NARROWS the
+                # window in which a refresh overlaps an ``acknowledge`` naming
+                # the same ids; it does not close it, and claiming otherwise
+                # would be wrong: ``cancel()`` only interrupts the keeper while
+                # it is waiting, so a refresh already inside
+                # ``run_in_executor`` runs to completion on its thread whatever
+                # we do here (measured, not assumed). That leftover refresh is
+                # harmless — it names ids the ack is retiring — and
+                # ``_hold_leases`` reads ``stop_extending`` to log it as the
+                # expected race rather than as a lapsing lease.
+                #
+                # Signalled AND cancelled: the event is what lets the keeper
+                # leave cleanly between refreshes, the cancel is the backstop
+                # for a keeper parked in a refresh. Not awaited — awaiting here
+                # would fold an outer cancellation (``stop()`` cancelling this
+                # pull task) into the keeper's own ``CancelledError`` and
+                # swallow it. The keeper holds nothing that needs draining: its
+                # only in-flight work is one RPC on the shared pull executor,
+                # which ``stop()`` already drains.
+                stop_extending.set()
+                if lease_keeper is not None:
+                    lease_keeper.cancel()
 
                 # Ack/nack must stay inside this try: a transient network
                 # error during acknowledge would otherwise escape, kill
@@ -1248,6 +1397,16 @@ class PubSubEventBus(EventBus):
                 )
                 await asyncio.sleep(self._error_backoff)
                 continue
+            finally:
+                # Every exit that skips the cancel above — a permanent halt, a
+                # cancellation, a transient error looping back for another pull
+                # — would otherwise leave a keeper extending messages nothing
+                # is processing any more. ``cancel()`` on a task that has
+                # already been cancelled is a no-op, so this and the cancel
+                # above are not in conflict.
+                stop_extending.set()
+                if lease_keeper is not None:
+                    lease_keeper.cancel()
 
     @staticmethod
     def _decode(data: bytes, *, subscription: str, message_id: str) -> Event | None:
