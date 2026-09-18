@@ -2030,6 +2030,7 @@ async def test_a_draining_batch_has_its_ack_deadline_extended(
         return fn(*args)
 
     with (
+        patch.object(pubsub_module, "LEASE_FIRST_REFRESH_SECONDS", 0.01),
         patch.object(pubsub_module, "LEASE_REFRESH_INTERVAL_SECONDS", 0.01),
         patch.object(bus, "_dispatch_all", new=_blocks_until_extended),
         patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)),
@@ -2083,6 +2084,7 @@ async def test_extension_stops_before_the_batch_is_acked(bus: PubSubEventBus) ->
         return fn(*args)
 
     with (
+        patch.object(pubsub_module, "LEASE_FIRST_REFRESH_SECONDS", 0.01),
         patch.object(pubsub_module, "LEASE_REFRESH_INTERVAL_SECONDS", 0.01),
         patch.object(bus, "_dispatch_all", new=_blocks_until_extended),
         patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)),
@@ -2132,6 +2134,7 @@ async def test_a_failing_extension_does_not_stop_consumption(
         return fn(*args)
 
     with (
+        patch.object(pubsub_module, "LEASE_FIRST_REFRESH_SECONDS", 0.01),
         patch.object(pubsub_module, "LEASE_REFRESH_INTERVAL_SECONDS", 0.01),
         patch.object(bus, "_dispatch_all", new=_blocks_until_attempted),
         patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)),
@@ -2206,6 +2209,7 @@ async def test_a_refresh_that_loses_the_race_to_the_ack_is_not_warned_about(
         return fn(*args)
 
     with (
+        patch.object(pubsub_module, "LEASE_FIRST_REFRESH_SECONDS", 0.01),
         patch.object(pubsub_module, "LEASE_REFRESH_INTERVAL_SECONDS", 0.01),
         patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)),
         caplog.at_level("DEBUG", logger="common.events.pubsub"),
@@ -2254,6 +2258,7 @@ async def test_a_genuine_extension_failure_is_still_warned_about(
         return fn(*args)
 
     with (
+        patch.object(pubsub_module, "LEASE_FIRST_REFRESH_SECONDS", 0.01),
         patch.object(pubsub_module, "LEASE_REFRESH_INTERVAL_SECONDS", 0.01),
         patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)),
         caplog.at_level("DEBUG", logger="common.events.pubsub"),
@@ -2265,4 +2270,157 @@ async def test_a_genuine_extension_failure_is_still_warned_about(
     assert any(r.levelname == "WARNING" for r in caplog.records), (
         "a real extension failure must stay at WARNING — it means this batch "
         "redelivers"
+    )
+
+
+async def test_the_first_refresh_does_not_wait_the_steady_interval(
+    bus: PubSubEventBus,
+) -> None:
+    """A durable subscription's initial deadline can be as low as 10s.
+
+    Only the ephemeral subscriptions this module creates are guaranteed 30s.
+    Waiting the STEADY interval before the first refresh means that on a 10s
+    subscription the lease has already lapsed by the time the keeper first
+    acts, and it stays a step behind for the rest of the batch — the keeper
+    runs, issues its RPCs, and fixes nothing.
+
+    The steady interval is patched out of reach here, so an extension observed
+    at all can only have come from the shorter first-refresh delay.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    import common.events.pubsub as pubsub_module
+
+    _fake, calls = _lease_harness(bus, message_count=1)
+    extended = asyncio.Event()
+
+    def _note(request: dict[str, Any]) -> None:
+        calls.append(("modify", request))
+        if request.get("ack_deadline_seconds") == pubsub_module.LEASE_EXTENSION_SECONDS:
+            extended.set()
+
+    bus._subscriber.modify_ack_deadline = MagicMock(side_effect=_note)
+
+    async def _blocks_until_extended(_handlers: Any, _event: Any) -> bool:
+        await asyncio.wait_for(extended.wait(), timeout=5)
+        return True
+
+    loop = asyncio.get_running_loop()
+
+    async def _direct_run(_executor: Any, fn: Any, *args: Any) -> Any:
+        return fn(*args)
+
+    with (
+        patch.object(pubsub_module, "LEASE_FIRST_REFRESH_SECONDS", 0.01),
+        patch.object(pubsub_module, "LEASE_REFRESH_INTERVAL_SECONDS", 3600.0),
+        patch.object(bus, "_dispatch_all", new=_blocks_until_extended),
+        patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)),
+    ):
+        await bus._pull_loop("test-sub", [lambda _e: None])
+
+    assert any(
+        req.get("ack_deadline_seconds") == pubsub_module.LEASE_EXTENSION_SECONDS
+        for kind, req in calls
+        if kind == "modify"
+    ), (
+        "no extension was issued before the steady interval elapsed; on a "
+        "subscription whose ack deadline is below it, the lease lapses first"
+    )
+
+
+async def test_no_lease_extension_lands_after_the_batch_is_nacked(
+    bus: PubSubEventBus,
+) -> None:
+    """A nack must be the LAST word on a failed message's deadline.
+
+    A nack is ``modify_ack_deadline`` of 0 — redeliver now. A lease extension
+    still in flight when the batch ends carries ``LEASE_EXTENSION_SECONDS`` for
+    the WHOLE leased batch, ``nack_ids`` included, so landing behind the nack
+    it returns the failed message to a minute of invisibility and inverts the
+    nack silently.
+
+    Real threads, deliberately, rather than the inline ``run_in_executor``
+    stand-in the other lease tests use: the entire defect is that cancelling
+    the keeper does not stop work already running on a pool thread, which an
+    inline stand-in cannot express — under one it would pass either way.
+    """
+    import threading
+    from unittest.mock import patch
+
+    import common.events.pubsub as pubsub_module
+
+    calls: list[str] = []
+    extension_started = threading.Event()
+    release_extension = threading.Event()
+
+    fake = MagicMock()
+    fake.subscription_path = lambda proj, sub: f"projects/{proj}/subscriptions/{sub}"
+
+    msg = MagicMock()
+    msg.message.data = EMBEDDED_EVENT_BYTES
+    msg.message.attributes = {}
+    msg.ack_id = "ack-0"
+
+    def _pull_once(*_a: Any, **_kw: Any) -> Any:
+        bus._stopping = True
+        return MagicMock(received_messages=[msg])
+
+    fake.pull = MagicMock(side_effect=_pull_once)
+    fake.acknowledge = MagicMock(side_effect=lambda request: calls.append("ack"))
+
+    def _modify(request: dict[str, Any]) -> None:
+        if request.get("ack_deadline_seconds") == pubsub_module.LEASE_EXTENSION_SECONDS:
+            extension_started.set()
+            # Hold the RPC in flight on this thread, exactly as a real one
+            # would be. Bounded, so a regression fails the assertion below
+            # rather than hanging the suite.
+            release_extension.wait(timeout=5)
+            calls.append("extend")
+        else:
+            calls.append("nack")
+
+    fake.modify_ack_deadline = MagicMock(side_effect=_modify)
+
+    executor = ThreadPoolExecutor(max_workers=4)
+    bus._subscriber = fake
+    bus._pull_executor = executor
+
+    async def _dispatch_fails(_handlers: Any, _event: Any) -> bool:
+        # Do not let the batch finish before an extension is in flight —
+        # otherwise there is no race to observe and the test proves nothing.
+        # ``to_thread`` rather than polling: this is a ``threading`` event, set
+        # from the pool thread running the RPC, so the loop cannot await it
+        # directly. Bounded, so a regression fails the assertion below instead
+        # of hanging the suite.
+        await asyncio.to_thread(extension_started.wait, 5)
+        return False  # nack
+
+    async def _release_once_in_flight() -> None:
+        if await asyncio.to_thread(extension_started.wait, 5):
+            await asyncio.sleep(0.05)  # keep it in flight a beat longer
+        release_extension.set()
+
+    releaser = asyncio.create_task(_release_once_in_flight())
+    try:
+        with (
+            patch.object(pubsub_module, "LEASE_FIRST_REFRESH_SECONDS", 0.01),
+            patch.object(bus, "_dispatch_all", new=_dispatch_fails),
+        ):
+            await bus._pull_loop("test-sub", [lambda _e: None])
+    finally:
+        # Cancel, never plain-await: the releaser waits on ``extension_started``,
+        # so if no extension ever fired it would hang the suite here instead of
+        # letting the assertions report what actually happened.
+        release_extension.set()
+        releaser.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await releaser
+        executor.shutdown(wait=True)
+
+    assert "extend" in calls, "no extension was issued; this test proves nothing"
+    assert "nack" in calls, "the failed message was never nacked"
+    assert calls.index("extend") < calls.index("nack"), (
+        "a lease extension landed AFTER the nack, returning the failed message "
+        f"to {pubsub_module.LEASE_EXTENSION_SECONDS}s of invisibility instead "
+        f"of redelivering it now: {calls}"
     )

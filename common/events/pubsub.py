@@ -86,19 +86,33 @@ BROADCAST_SUBSCRIPTION_TTL_SECONDS = 86400
 # How long a lease extension asks for, and how often ``_hold_leases``
 # refreshes it while a batch drains.
 #
-# Subscriptions are created with ``ack_deadline_seconds: 30`` and an existing
+# Subscriptions created HERE use ``ack_deadline_seconds: 30`` and an existing
 # subscription keeps whatever it was created with (see
 # ``_ensure_broadcast_subscription``), so raising that constant would not reach
 # a single deployment already running. Extending the lease per batch does.
 #
 # 60 rather than the 600 the API permits, because an extension is also how long
 # a message stays invisible when THIS process dies holding it: at 600 a pod kill
-# would strand every in-flight message for ten minutes. 15s between refreshes
-# leaves 15s of slack against the initial 30s deadline on the first refresh and
-# 45s on every one after it, which is room for a slow RPC without ever letting
-# the lease lapse.
+# would strand every in-flight message for ten minutes. Once the first extension
+# has landed the lease is 60s, so refreshing every 15s leaves 45s of slack --
+# room for a slow RPC without ever letting it lapse.
 LEASE_EXTENSION_SECONDS = 60
 LEASE_REFRESH_INTERVAL_SECONDS = 15.0
+
+# The FIRST refresh comes sooner than the rest, because the initial deadline is
+# NOT ours to assume. Only the ephemeral subscriptions above are created here;
+# durable ones are provisioned outside this codebase and Pub/Sub permits as
+# little as 10s. Against a 10s deadline a first refresh at 15s arrives after the
+# lease has already lapsed, which leaves the keeper permanently one step behind
+# and the batch redelivering exactly as it did before the keeper existed -- the
+# failure is silent, because the keeper is running and issuing RPCs throughout.
+#
+# 5s clears that 10s floor with room for a slow RPC, and still costs nothing in
+# the common case: the keeper is stopped when the batch ends, so a batch that
+# drains in under 5s issues no extension at all. Refreshing immediately on spawn
+# would also have been correct and is simpler, but it puts an RPC on EVERY
+# non-empty pull including the fast majority that need none.
+LEASE_FIRST_REFRESH_SECONDS = 5.0
 
 # Per-call ceiling on the delete RPC in ``release_broadcast_subscriptions()``.
 #
@@ -1108,17 +1122,21 @@ class PubSubEventBus(EventBus):
         surfaces as a stopped subscription rather than as a lost message.
         """
         loop = asyncio.get_running_loop()
+        # Short before the first refresh, then the steady cadence: see
+        # ``LEASE_FIRST_REFRESH_SECONDS`` for why the initial deadline cannot be
+        # assumed. Reassigned after the wait rather than before the refresh, so
+        # a stop during the first interval still leaves without an RPC.
+        delay = LEASE_FIRST_REFRESH_SECONDS
         while True:
             try:
-                await asyncio.wait_for(
-                    stop.wait(), timeout=LEASE_REFRESH_INTERVAL_SECONDS
-                )
+                await asyncio.wait_for(stop.wait(), timeout=delay)
             except TimeoutError:
                 pass  # the interval elapsed with no stop: refresh below
             else:
                 # Asked to stop, and we are between refreshes rather than
                 # inside one — the only point at which leaving is free.
                 return
+            delay = LEASE_REFRESH_INTERVAL_SECONDS
             try:
                 await loop.run_in_executor(
                     pull_executor,
@@ -1272,28 +1290,39 @@ class PubSubEventBus(EventBus):
                     success = await self._dispatch_all(handlers, event)
                     (ack_ids if success else nack_ids).append(received.ack_id)
 
-                # Stop refreshing before the acks go out. This NARROWS the
-                # window in which a refresh overlaps an ``acknowledge`` naming
-                # the same ids; it does not close it, and claiming otherwise
-                # would be wrong: ``cancel()`` only interrupts the keeper while
-                # it is waiting, so a refresh already inside
-                # ``run_in_executor`` runs to completion on its thread whatever
-                # we do here (measured, not assumed). That leftover refresh is
-                # harmless — it names ids the ack is retiring — and
-                # ``_hold_leases`` reads ``stop_extending`` to log it as the
-                # expected race rather than as a lapsing lease.
+                # DRAIN the keeper before the acks, and above all before the
+                # nack. Signalled and AWAITED, not cancelled: ``cancel()`` only
+                # interrupts the keeper while it is WAITING, so a refresh
+                # already inside ``run_in_executor`` runs to completion on its
+                # thread regardless and can land after whatever follows here.
                 #
-                # Signalled AND cancelled: the event is what lets the keeper
-                # leave cleanly between refreshes, the cancel is the backstop
-                # for a keeper parked in a refresh. Not awaited — awaiting here
-                # would fold an outer cancellation (``stop()`` cancelling this
-                # pull task) into the keeper's own ``CancelledError`` and
-                # swallow it. The keeper holds nothing that needs draining: its
-                # only in-flight work is one RPC on the shared pull executor,
-                # which ``stop()`` already drains.
+                # On the ack path that leftover is harmless — it names ids the
+                # ack is retiring. On the nack path it is not. A nack is a
+                # ``modify_ack_deadline`` of 0, so an extension arriving behind
+                # it returns the FAILED message to ``LEASE_EXTENSION_SECONDS``
+                # of invisibility and silently inverts "redeliver now" into a
+                # minute of nothing. The original reasoning was sound for the
+                # case it considered and simply did not reach this one.
+                #
+                # Awaiting is what closes it. ``stop`` is already set, so the
+                # keeper finishes at most the one refresh it is inside, sees the
+                # event on the next pass and returns; and because the keeper
+                # AWAITS its own ``run_in_executor``, the task completing means
+                # that RPC has already RETURNED. A lock would not have done it:
+                # mutual exclusion orders nothing, so a nack and a refresh
+                # queued onto this multi-worker executor together could still
+                # take it in either order.
+                #
+                # ``suppress(Exception)`` deliberately, not ``BaseException``: a
+                # keeper that somehow escaped its own handler must not take the
+                # acks below down with it, but ``CancelledError`` is a
+                # ``BaseException``, so an outer ``stop()`` cancelling this pull
+                # task still propagates. The ``finally`` stays the backstop for
+                # every path that never reaches this line.
                 stop_extending.set()
                 if lease_keeper is not None:
-                    lease_keeper.cancel()
+                    with contextlib.suppress(Exception):
+                        await lease_keeper
 
                 # Ack/nack must stay inside this try: a transient network
                 # error during acknowledge would otherwise escape, kill
