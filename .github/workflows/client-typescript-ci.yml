@@ -14,6 +14,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["18", "20", "22"]
     defaults:
       run:
         working-directory: clients/typescript
@@ -23,8 +27,8 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node-version }}
       - name: Install
-        run: npm install
+        run: npm ci
       - name: Build + test
         run: npm test
