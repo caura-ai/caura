@@ -34,13 +34,21 @@ class Settings(BaseSettings):
             )
         return self
 
-    # Event bus — `inprocess` for tests/standalone OSS, `pubsub` for SaaS.
-    event_bus_backend: Literal["inprocess", "pubsub"] = "inprocess"
-    gcp_project_id: str = "local-dev"
-    # One subscription per consumer service so a single topic can fan
-    # out to multiple distinct subscribers; this prefix uniquely names
-    # the worker's subscription on shared topics.
-    event_bus_subscription_prefix: str = "core-worker"
+    # NO event-bus fields here, deliberately. ``EVENT_BUS_BACKEND``,
+    # ``GCP_PROJECT_ID`` and ``EVENT_BUS_SUBSCRIPTION_PREFIX`` are read from the
+    # PROCESS ENVIRONMENT by ``common.events.factory.get_event_bus``, which is
+    # shared and cannot import this module. Neither core-api nor
+    # core-storage-api declares them either.
+    #
+    # Declaring them here was worse than absent: ``env_file=".env"`` loads a
+    # value onto the settings OBJECT without exporting it to ``os.environ``, so
+    # ``EVENT_BUS_BACKEND=pubsub`` in .env produced a worker that looked
+    # configured and silently ran the in-process bus. A field the code does not
+    # read is how that stays invisible; ``lifespan`` now logs the backend the
+    # factory actually resolved instead.
+    #
+    # Containers are unaffected either way: compose/Cloud Run put env_file
+    # entries into the real environment, which is what the factory reads.
 
     # HTTP timeout for the storage PATCH. The worker is off the request
     # hot path so a longer timeout is fine; we'd rather wait + succeed

@@ -70,9 +70,7 @@ async def publish_memory_enrich_request(
         memory_id=memory_id,
         tenant_id=tenant_id,
         content=content,
-        reference_datetime=(
-            reference_datetime.isoformat() if reference_datetime else None
-        ),
+        reference_datetime=reference_datetime,
         enrichment_provider=getattr(tenant_config, "enrichment_provider", None),
         enrichment_model=getattr(tenant_config, "enrichment_model", None),
         openai_api_key=getattr(tenant_config, "openai_api_key", None),
