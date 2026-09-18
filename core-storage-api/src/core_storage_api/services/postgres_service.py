@@ -820,6 +820,17 @@ _ADMIN_LIST_SORTABLE = frozenset(
 _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "relations",
     "fleet_commands",
+    # Both ride the ON DELETE CASCADE from ``memories`` (all four foreign keys
+    # are CASCADE and NOT NULL, verified on the model and in the database), so
+    # unlisted they were still DELETED — this is a reporting gap, not surviving
+    # data. Listed anyway, ahead of their parent, for the reason ``relations``
+    # and ``fleet_commands`` above are: a cascade hides the row count, and the
+    # per-table breakdown is a reported feature of both the purge and its
+    # preview. Unlisted they also read as an oversight rather than a decision,
+    # which is precisely what ``_RETAINED_TENANT_TABLES`` below exists to
+    # prevent. Added by migration 036, after H-09 swept for exactly this.
+    "memory_conflicts",
+    "memory_derivations",
     "memories",
     "entities",
     "agents",
@@ -906,6 +917,14 @@ _PURGE_ORG_KEYED_TABLES: tuple[str, ...] = (
 # fleet-scoped run data.
 _PURGE_FLEET_TABLES: tuple[str, ...] = (
     "relations",
+    # Carries its own ``fleet_id``, so once it joined the tenant purge it had
+    # to join this one: a fleet teardown that skipped it would leave the
+    # fleet's conflict rows behind in a SHARED tenant, which is the one thing
+    # this tuple exists to prevent. ``memory_derivations`` is correctly absent
+    # — it has no ``fleet_id``, so a fleet-scoped DELETE cannot address it and
+    # it rides the CASCADE from ``memories`` the way ``memory_entity_links``
+    # does. Caught by ``test_the_fleet_purge_covers_every_fleet_scoped_purged_table``.
+    "memory_conflicts",
     "memories",
     "entities",
     "agents",
@@ -1988,6 +2007,20 @@ class PostgresService:
             stmt = sql_update(Memory).where(
                 Memory.id == memory_id,
                 Memory.tenant_id == tenant_id,
+                # A soft-deleted row is gone as far as every read path is
+                # concerned, and its sibling ``memory_update`` has always said
+                # so. Without this, a delete racing a supersession flip let the
+                # flip land on the deleted row — rewriting ``status`` and
+                # ``supersedes_id``, and so the lineage, of a memory nothing
+                # can read back.
+                #
+                # It also makes the caller's contract true rather than
+                # aspirational: ``routers/memories.py`` states that this
+                # "returns False when the target row doesn't exist (or was
+                # already deleted); surface as 404". It did not — a deleted row
+                # matched, updated, and returned True, so the route answered
+                # 200 for a write the caller is told is impossible.
+                Memory.deleted_at.is_(None),
             )
             if expected_supersedes_id is not None:
                 stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
