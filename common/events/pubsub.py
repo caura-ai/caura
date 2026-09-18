@@ -1313,16 +1313,35 @@ class PubSubEventBus(EventBus):
                 # queued onto this multi-worker executor together could still
                 # take it in either order.
                 #
-                # ``suppress(Exception)`` deliberately, not ``BaseException``: a
-                # keeper that somehow escaped its own handler must not take the
-                # acks below down with it, but ``CancelledError`` is a
-                # ``BaseException``, so an outer ``stop()`` cancelling this pull
-                # task still propagates. The ``finally`` stays the backstop for
-                # every path that never reaches this line.
+                # Caught, not suppressed. A keeper that escaped its own
+                # handler must not take the acks below down with it -- but it
+                # must not vanish either, and suppressing is how it would.
+                # Ordinary RPC failures never reach here: ``_hold_leases``
+                # catches and logs those itself. What reaches here is a BUG in
+                # the keeper, the one thing worth waking someone for.
+                #
+                # Awaiting is what makes the log necessary. While the task was
+                # only cancelled and never awaited, an exception it had already
+                # raised stayed unretrieved and asyncio reported it at GC as
+                # "Task exception was never retrieved" -- late, untargeted, and
+                # only in that one ordering, but not nothing. Retrieving it
+                # here ends that, so this takes over the job and does it
+                # properly, naming the subscription.
+                #
+                # ``except Exception``, not ``BaseException``: ``CancelledError``
+                # is a ``BaseException``, so an outer ``stop()`` cancelling this
+                # pull task still propagates. The ``finally`` stays the backstop
+                # for every path that never reaches this line.
                 stop_extending.set()
                 if lease_keeper is not None:
-                    with contextlib.suppress(Exception):
+                    try:
                         await lease_keeper
+                    except Exception:
+                        logger.exception(
+                            "event-bus: lease keeper raised unexpectedly while "
+                            "draining before ack/nack",
+                            extra={"subscription": subscription_name},
+                        )
 
                 # Ack/nack must stay inside this try: a transient network
                 # error during acknowledge would otherwise escape, kill

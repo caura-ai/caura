@@ -2424,3 +2424,61 @@ async def test_no_lease_extension_lands_after_the_batch_is_nacked(
         f"to {pubsub_module.LEASE_EXTENSION_SECONDS}s of invisibility instead "
         f"of redelivering it now: {calls}"
     )
+
+
+async def test_a_keeper_that_raises_unexpectedly_is_logged_not_swallowed(
+    bus: PubSubEventBus, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Draining the keeper must not become a place bugs go to die.
+
+    ``_hold_leases`` catches and logs its own RPC failures, so anything that
+    escapes it is a bug in the keeper rather than a flaky dependency — the one
+    failure here actually worth waking someone for. Awaiting the task is what
+    makes this necessary: while it was only cancelled, an exception it had
+    already raised stayed unretrieved and asyncio reported it at GC. Retrieving
+    it here ends that, so this has to do the reporting instead.
+
+    The ack is asserted too. Logging the escape is only half the requirement —
+    a keeper bug must not cost the batch its acknowledgement and send finished
+    work round again.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    import common.events.pubsub as pubsub_module
+
+    _fake, calls = _lease_harness(bus, message_count=1)
+
+    async def _raises(*_a: Any, **_kw: Any) -> None:
+        raise RuntimeError("keeper bug")
+
+    async def _dispatch_ok(_handlers: Any, _event: Any) -> bool:
+        # Patched like every other lease test, and here it is load-bearing:
+        # ``_lease_harness`` sets ``_stopping`` during the pull, and the
+        # loop's own ``except Exception`` RETURNS silently while stopping.
+        # A dispatch that raised would therefore look exactly like a keeper
+        # escape that went unlogged -- the very thing under test.
+        return True
+
+    loop = asyncio.get_running_loop()
+
+    async def _direct_run(_executor: Any, fn: Any, *args: Any) -> Any:
+        return fn(*args)
+
+    with (
+        patch.object(pubsub_module, "LEASE_FIRST_REFRESH_SECONDS", 0.01),
+        patch.object(bus, "_hold_leases", new=_raises),
+        patch.object(bus, "_dispatch_all", new=_dispatch_ok),
+        patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)),
+        caplog.at_level("ERROR", logger="common.events.pubsub"),
+    ):
+        await bus._pull_loop("test-sub", [lambda _e: None])
+
+    assert any("keeper bug" in r.getMessage() or r.exc_info for r in caplog.records), (
+        "a keeper that raised out of its own handler left no trace at all"
+    )
+    assert any("lease keeper raised unexpectedly" in r.getMessage() for r in caplog.records), (
+        f"the escape was not reported: {[r.getMessage() for r in caplog.records]}"
+    )
+    assert [kind for kind, _ in calls] == ["ack"], (
+        f"a keeper bug must not cost the batch its ack: {calls}"
+    )
