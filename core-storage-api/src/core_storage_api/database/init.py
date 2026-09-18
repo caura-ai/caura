@@ -9,7 +9,7 @@ from pathlib import Path
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from core_storage_api.config import settings
+from core_storage_api.config import db_connect_args, settings
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,10 @@ def _schema_is_at_head(connection: Connection, head: str | None) -> bool:
 def _build_engine(url: str) -> AsyncEngine:
     return create_async_engine(
         url,
+        # Empty unless POSTGRES_REQUIRE_SSL is on, so the default deployment's
+        # call is unchanged. ``url`` is passed so a DSN that already asks for
+        # verification keeps it instead of being downgraded to ``require``.
+        connect_args=db_connect_args(url),
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_timeout=settings.db_pool_timeout,

@@ -49,9 +49,13 @@ def do_run_migrations(connection):
 
 async def run_migrations_cli():
     """CLI mode: create engine from settings and run migrations."""
-    from core_storage_api.config import settings
+    from core_storage_api.config import db_connect_args, settings
 
-    engine = create_async_engine(settings.database_url.get_secret_value())
+    # Same TLS policy as the app's engines: a migration is the one connection
+    # that carries schema changes, so letting it fall back to cleartext while
+    # the service runs over TLS would be the worst of the three sites to miss.
+    url = settings.database_url.get_secret_value()
+    engine = create_async_engine(url, connect_args=db_connect_args(url))
     async with engine.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await engine.dispose()

@@ -9,6 +9,7 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from common.storage_auth import read_shared_secret_file
+from core_storage_api.db_tls import tls_connect_args
 
 # The "local-dev compatibility default" this preserved is retired: the whole
 # ephemeral local/CI Postgres role+db population (ci.yml, both docker-compose
@@ -67,6 +68,26 @@ class Settings(BaseSettings):
     # ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW`` explicitly; the source
     # default is now the safe baseline rather than a value that
     # requires environment-side correction.
+    # Require TLS on every connection this service opens to Postgres.
+    #
+    # Documented in ``.env.example``, ``AGENT-INSTALL.md`` and both compose
+    # files as "Set true in production" since it was introduced, and read by
+    # nothing: no ``connect_args``, no ``sslmode``, no ``ssl=`` existed
+    # anywhere in the tree. ``extra="ignore"`` above is why that was silent —
+    # pydantic-settings accepted the variable and dropped it, so an operator
+    # who set it got neither TLS nor an error. A security control that cannot
+    # be switched on is worse than an absent one: the absent one does not tell
+    # you it is protecting you.
+    #
+    # ``"require"`` encrypts and refuses a server that will not upgrade, which
+    # is what the name promises. It deliberately does NOT verify the
+    # certificate — that is ``"verify-full"``, and it needs a CA bundle
+    # shipped and configured, so offering it here without one would be the
+    # same empty promise in a new place. Operators who need verification pass
+    # it on the DSN (``?ssl=verify-full``); ``db_tls.tls_connect_args`` leaves
+    # such a DSN alone rather than downgrading it, which takes an explicit
+    # check — see there.
+    postgres_require_ssl: bool = False
     db_pool_size: int = 5
     db_max_overflow: int = 5
     db_pool_timeout: int = 60
@@ -179,3 +200,21 @@ class Settings(BaseSettings):
 
 
 settings = Settings()  # type: ignore[call-arg]
+
+
+def db_connect_args(dsn: str | None = None) -> dict[str, object]:
+    """asyncpg connect kwargs carrying the configured TLS policy.
+
+    One helper rather than a flag read at each call site, because the sites
+    that matter are easy to miss: the app's engines, the migration runner, and
+    the preflight script all open their own connections, and a migration
+    running in cleartext against a database the app reaches over TLS would
+    defeat the setting while looking configured.
+
+    The policy itself lives in ``core_storage_api.db_tls``, which constructs no
+    ``Settings``. This module cannot be imported without doing so, and the
+    preflight script is documented as runnable (via ``--dsn``) in environments
+    where that construction fails — so the two need one shared implementation
+    reachable from both, not a copy each.
+    """
+    return tls_connect_args(dsn, require=settings.postgres_require_ssl)
