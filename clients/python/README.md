@@ -53,7 +53,10 @@ with Caura("standalone", tenant_id="default", base_url="http://localhost:8000") 
 | `close()` | — | `None` |
 
 The client is a context manager (`with Caura(...) as mc:`) and raises
-`AuthError` (401/403), `NotFoundError` (404), or `CauraAPIError` on failures.
+`AuthError` (401/403), `NotFoundError` (404), or `CauraAPIError` on HTTP failures.
+Network failures and timeouts raise `TransportError`, with the original `httpx`
+exception in `__cause__`. Catch `CauraError` to handle both HTTP and transport
+failures. Transport errors have no HTTP status code; requests are not retried.
 Every result also exposes the full API payload on `.raw`.
 
 ### Unknown fields on writes are rejected

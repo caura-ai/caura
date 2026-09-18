@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { Caura, CauraApiError, AuthError, NotFoundError, RateLimitError } from "./index.js";
+import {
+  Caura, CauraError, TransportError, CauraApiError, AuthError, NotFoundError, RateLimitError,
+} from "./index.js";
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -248,4 +250,55 @@ test("500 maps to CauraApiError", async () => {
 test("constructor validates apiKey and tenantId", () => {
   assert.throws(() => new Caura("", { tenantId: "t" }));
   assert.throws(() => new Caura("k", { tenantId: "" } as never));
+});
+
+for (const operation of ["write", "search", "recall", "health", "getDocument"] as const) {
+  test(`${operation} wraps fetch failures and preserves the cause`, async () => {
+    const cause = new TypeError("fetch failed");
+    let calls = 0;
+    const client = makeClient(() => {
+      calls++;
+      return Promise.reject(cause);
+    });
+    const request = operation === "getDocument"
+      ? client.getDocument("doc-1", { collection: "interviews" })
+      : client[operation]("query");
+    await assert.rejects(request, (error: unknown) => {
+      assert.ok(error instanceof CauraError);
+      assert.ok(error instanceof TransportError);
+      assert.equal(error.cause, cause);
+      assert.match(error.message, /fetch failed/);
+      return true;
+    });
+    assert.equal(calls, 1);
+  });
+}
+
+test("the configured timeout wraps the abort reason", { timeout: 1000 }, async () => {
+  let signal: AbortSignal | null | undefined;
+  const client = makeClient((_url, init) => {
+    signal = init.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+    });
+  }, { timeoutMs: 0 });
+  await assert.rejects(client.search("query"), (error: unknown) => {
+    assert.ok(signal?.aborted);
+    assert.ok(error instanceof CauraError);
+    assert.ok(error instanceof TransportError);
+    assert.equal(error.cause, signal.reason);
+    return true;
+  });
+});
+
+test("transport mapping does not wrap serialization errors", async () => {
+  const client = makeClient(() => assert.fail("serialization must fail before fetch"));
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  await assert.rejects(client.write("hello", { metadata: circular }), TypeError);
+});
+
+test("transport mapping does not wrap invalid JSON", async () => {
+  const client = makeClient(() => new Response("not json"));
+  await assert.rejects(client.health(), SyntaxError);
 });

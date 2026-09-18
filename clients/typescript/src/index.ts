@@ -10,6 +10,14 @@ export const DEFAULT_BASE_URL = "https://caura.ai";
 
 export class CauraError extends Error {}
 
+/** Raised on network failures or timeouts, retaining the original error as cause. */
+export class TransportError extends CauraError {
+  constructor(cause: unknown) {
+    super(`Request failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = "TransportError";
+  }
+}
+
 export class CauraApiError extends CauraError {
   readonly statusCode: number;
   readonly details: unknown;
@@ -202,6 +210,7 @@ export class Caura {
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<any> {
+    const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let res: Response;
@@ -209,9 +218,11 @@ export class Caura {
       res = await this.fetchImpl(this.baseUrl + path, {
         method,
         headers: this.headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        body: serializedBody,
         signal: controller.signal,
       });
+    } catch (cause) {
+      throw new TransportError(cause);
     } finally {
       clearTimeout(timer);
     }
