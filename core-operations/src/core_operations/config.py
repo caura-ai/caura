@@ -22,12 +22,18 @@ class Settings(BaseSettings):
     # defensive short-circuit so that an accidentally-started instance
     # exits cleanly rather than firing cron jobs against a single-tenant
     # standalone DB.
-    standalone: bool = False
-
-    # core-storage-api URL for cron tasks that mutate data — the only
-    # service permitted to touch the OSS DB directly. Defaults to the
-    # local docker-compose service name.
-    core_storage_api_url: str = "http://oss-core-storage-api:8002"
+    #
+    # 09/02 L-45 — was ``standalone``, which binds the env var ``STANDALONE``.
+    # Nothing sets that name. The variable every operator actually sets is
+    # ``IS_STANDALONE``: .env.example, env.dev, .env.test, README, AGENT-INSTALL,
+    # docs/, CI and core-api's own ``is_standalone`` all use it, and nothing in
+    # the tree sets the bare spelling. With ``extra="ignore"`` above, pydantic
+    # accepted ``IS_STANDALONE`` and discarded it — so the short-circuit below
+    # could not fire, and a standalone deployment that started this image by
+    # accident fired cron jobs at a single-tenant DB while the log line said
+    # ``standalone: False``. Renaming loses no override precisely because the
+    # old name was never set.
+    is_standalone: bool = False
 
     # Timeout for this service's HTTP calls, all of which go to core-api.
     #

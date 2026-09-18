@@ -54,25 +54,3 @@ def encode_cursor(created_at: datetime, memory_id: UUID) -> str:
     """Encode ``(created_at, id)`` into a base64 cursor string."""
     raw = f"{created_at.isoformat()}:{memory_id}"
     return base64.b64encode(raw.encode()).decode()
-
-
-def paginated_order_by(primary, id_col, order: str) -> tuple:
-    """Return the ORDER BY clause for cursor-stable pagination.
-
-    Pairs the primary sort column with ``id`` as a same-direction
-    tiebreaker so rows that share the primary value (a single bulk-
-    write tranche collides on ``created_at`` to ms precision; low-
-    cardinality columns like ``status`` collide trivially) keep a
-    deterministic order across paginated requests. Without it
-    Postgres returns same-key rows in implementation-defined order
-    and consecutive pages yield duplicates and skips — the load-test
-    ``pagination-duplicates`` finding.
-
-    Both pagination call sites — the repository's ``list_by_filters``
-    and the admin route's inline query — must call this helper so the
-    tiebreaker stays in sync with the ``tuple_(created_at, id)``
-    cursor predicate.
-    """
-    if order == "desc":
-        return (primary.desc(), id_col.desc())
-    return (primary.asc(), id_col.asc())

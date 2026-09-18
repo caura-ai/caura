@@ -37,13 +37,18 @@ async def _audit(client, tenant: str, *, action: str, resource_type: str = "memo
     assert r.status_code == 200, r.text
 
 
-async def _captured_sql(monkeypatch, call) -> str:
+async def _captured_sql(monkeypatch, call, *, session_name: str = "get_session") -> str:
     """Compile the first statement ``call`` sends to the DB, without a DB.
 
     Both ordering fixes are statement-shape properties: the damage only shows
     when Postgres picks a different row order between two executions, which it
     is free to do and rarely does on a small test table, so a behavioural test
     would pass against the bug almost every time.
+
+    ``session_name`` selects which session factory to intercept. Read paths open
+    ``get_read_session`` (a replica when one is configured), so patching only
+    ``get_session`` for those captures nothing and the assert below fires rather
+    than the test passing on an empty string.
     """
     captured: list = []
 
@@ -59,7 +64,7 @@ async def _captured_sql(monkeypatch, call) -> str:
     async def _fake_session():
         yield _Session()
 
-    monkeypatch.setattr(ps, "get_session", _fake_session)
+    monkeypatch.setattr(ps, session_name, _fake_session)
     with contextlib.suppress(_Stop):
         await call()
 
@@ -522,3 +527,47 @@ async def test_entity_memory_count_excludes_soft_deleted_memories(client):
         f"count says {count_after} while the list shows {listed_after} — the two "
         "endpoints disagree about the same entity"
     )
+
+
+# ---------------------------------------------------------------------------
+# 08/14 L-47 + 09/02 L-17 — the deleted helper's requirement, kept where it
+# applies.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("order", ["desc", "asc"])
+@pytest.mark.parametrize(
+    ("label", "call"),
+    [
+        ("memory_admin_list", lambda order: ps.PostgresService().memory_admin_list(order=order)),
+        (
+            "memory_list_by_filters",
+            lambda order: ps.PostgresService().memory_list_by_filters(tenant_id="t", order=order),
+        ),
+    ],
+)
+async def test_both_memory_pages_break_ties_on_id(monkeypatch, label, call, order):
+    """Guard, not a bug demonstration — the tiebreaker is already present.
+
+    ``core_api.pagination.paginated_order_by`` existed to keep it that way, and
+    its docstring said "both pagination call sites ... must call this helper".
+    Neither did, and neither could: the helper lived in core-api while both
+    sites are here in core-storage-api, left behind when the SQL moved services.
+    Each inlines the pairing instead, which is correct and is what makes the
+    helper safe to delete — but it is also two copies, 180 lines apart, with
+    nothing left asserting they agree. This is that assertion.
+
+    The invariant is the primary sort column paired with ``id`` in the SAME
+    direction, because the cursor predicate is a row-value comparison on
+    ``(created_at, id)``. A page ordered by ``created_at`` alone puts rows that
+    share a timestamp — a bulk-write tranche collides to ms precision, and
+    ``status`` collides trivially — in an order Postgres may change between
+    executions, so consecutive pages duplicate some rows and skip others.
+    """
+    sql = await _captured_sql(monkeypatch, lambda: call(order), session_name="get_read_session")
+
+    # Explicit ASC in both halves: the sites call ``.asc()``/``.desc()`` rather
+    # than leaving the default, so SQLAlchemy emits the keyword either way.
+    direction = "DESC" if order == "desc" else "ASC"
+    expected = f"ORDER BY memories.created_at {direction}, memories.id {direction}"
+    assert expected in sql, f"{label} ({order}) must pair the sort column with id:\n{sql}"
