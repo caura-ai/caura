@@ -67,7 +67,6 @@ pytest tests/ -v
 `core-storage-api` has a second suite that needs a **separate database**:
 
 ```bash
-createdb memclaw_storage && psql -d memclaw_storage -c 'CREATE EXTENSION IF NOT EXISTS vector'  # legacy-name-floor: the database ci.yml already provisions; a pasteable command naming anything else is wrong
 pytest core-storage-api/tests/ -v
 ```
 
@@ -80,7 +79,16 @@ and any migration-only table (one with no ORM model, e.g. `tenant_suppression`)
 is missing from a database whose stamp claims it is current. Run them the other
 way round and the migrated schema is the one that gets polluted.
 
-Each suite defaults to its own database, so no environment variable is needed;
+Each suite defaults to its own database — `caura_test` for `tests/` and
+`caura_storage` for `core-storage-api/tests/` — so no environment variable is
+needed, and neither suite touches the `caura` database the local stack runs
+against. Create them once:
+
+```bash
+createdb caura_test    && psql -d caura_test    -c 'CREATE EXTENSION IF NOT EXISTS vector'
+createdb caura_storage && psql -d caura_storage -c 'CREATE EXTENSION IF NOT EXISTS vector'
+```
+
 `DATABASE_URL` (storage suite) and `TEST_DATABASE_URL` (root suite) override
 them. CI provisions and passes both explicitly.
 
