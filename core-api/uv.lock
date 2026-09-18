@@ -366,7 +366,7 @@ wheels = [
 
 [[package]]
 name = "core-api"
-version = "3.16.1"
+version = "3.16.2"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
