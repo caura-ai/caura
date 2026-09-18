@@ -182,10 +182,6 @@ class Settings(BaseSettings):
     # CORS — internal service, restrict to known callers
     cors_origins: str = "http://localhost:8000"
 
-    # Server
-    host: str = "0.0.0.0"
-    port: int = 8002
-
     # Scoring
     # Soft boost applied to memories whose anchor date falls inside the
     # query-extracted date range.  Replaces the old hard WHERE filter so
