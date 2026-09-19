@@ -692,8 +692,19 @@ class PubSubEventBus(EventBus):
 
     @property
     def is_healthy(self) -> bool:
-        """True when the bus is in a state where it can still deliver
-        events end-to-end.
+        """True when the bus is in a state where it can still CONSUME events.
+
+        Not end-to-end, and this docstring used to say end-to-end. Every
+        condition below is about the pull side; a publisher-only bus whose
+        every publish is failing with a 403 on the topic reports healthy
+        here, because nothing in this function looks at publishing.
+
+        That is deliberate rather than an oversight to fix by widening the
+        flag. This drives readiness, and draining a pod from the load
+        balancer on a transient publish failure trades a lost event for an
+        outage, and flaps. Publish failures are surfaced instead by
+        ``_report_publish_result``, which logs them with ``dropped=True``
+        for the same log-based alerting the rest of ``common/events`` uses.
 
         False in three cases:
 
@@ -798,6 +809,16 @@ class PubSubEventBus(EventBus):
         # publisher-side failures (e.g. a 403 on the topic) land in the
         # SDK's background-thread log instead.
         # For a fire-and-forget audit path that is the right shape.
+        #
+        # What the SDK-log-only arrangement lacked was an APP-level signal.
+        # A sustained publisher-side failure — a 403 on the topic, an
+        # exhausted quota — produced log lines from a google.cloud logger
+        # and nothing this platform watches, while ``is_healthy`` stayed
+        # true because it tracks pull-loop state only. The done-callback
+        # below closes that without reintroducing the blocking this comment
+        # exists to prevent: it fires on the SDK's own commit thread when
+        # the batch settles, so publish() still returns as soon as the
+        # message is queued.
         # Stamp the publishing environment so sibling environments that
         # share this project's topics can drop our fan-out copies (see
         # ``_pull_loop`` and the module docstring). Passed as a Pub/Sub
@@ -807,10 +828,46 @@ class PubSubEventBus(EventBus):
         # format is unchanged for single-env deployments.
         attributes = {SOURCE_ENV_ATTRIBUTE: self._env} if self._env else {}
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
+        future = await loop.run_in_executor(
             self._get_publish_executor(),
             functools.partial(publisher.publish, topic_path, payload, **attributes),
         )
+        future.add_done_callback(
+            functools.partial(self._report_publish_result, topic, event.event_id)
+        )
+
+    @staticmethod
+    def _report_publish_result(topic: str, event_id: uuid.UUID, future: Any) -> None:
+        """Turn a failed publish into a signal this platform can alert on.
+
+        Runs on the SDK's publish-callback thread once the batch settles, not
+        on the event loop, so it must do nothing but log — and must not
+        raise, since an exception here is swallowed by the SDK and would
+        make the failure MORE invisible rather than less.
+
+        ``dropped=True`` deliberately, matching the five other places in
+        ``common/events`` that mark an event lost. A publish that failed is
+        an event nothing will retry: there is no queue to return it to,
+        because it never reached one. Reusing the field means existing
+        log-based alerting on it covers this path with no new rule.
+
+        Not flipped into ``is_healthy``. That drives readiness, and draining
+        a service from the load balancer on one transient publish failure
+        trades a lost event for an outage — and would flap. The distinction
+        this restores is between "the SDK logged something under its own
+        logger name" and "the platform knows an event was lost".
+        """
+        try:
+            future.result()
+        except Exception:
+            logger.exception(
+                "pubsub publish failed — event dropped, nothing will retry it",
+                extra={
+                    "topic": topic,
+                    "event_id": str(event_id),
+                    "dropped": True,
+                },
+            )
 
     # ── subscriber ─────────────────────────────────────────────────
 
