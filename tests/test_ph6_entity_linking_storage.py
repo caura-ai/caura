@@ -477,6 +477,127 @@ async def test_discover_logs_its_summary_after_the_commit():
     )
 
 
+async def test_cross_link_entity_cte_is_materialized():
+    """``AS MATERIALIZED`` is a planner instruction and its removal is SILENT.
+
+    Postgres 12+ inlines a CTE by default, and an inlined one puts
+    ``ix_entities_name_embedding_hnsw`` back in reach of the planner — a global
+    index with ``tenant_id`` as a post-filter, which is the caura#1616
+    pathology. Nothing about the returned rows changes, so no behavioural test
+    can see it; only the source can.
+
+    Note what this test does and does not claim. It does NOT assert that this
+    is the fastest shape — #1635 pinned a shape on exactly that belief and the
+    belief was wrong. It asserts that IF the query is built on this CTE, the
+    CTE is materialized, because a reviewer 'simplifying' the keyword away
+    would silently restore the slow plan. If the CTE approach itself turns out
+    to be wrong, the query and this test go together; what must not happen is
+    the keyword going on its own."""
+    from core_storage_api.services.postgres_service import PostgresService
+
+    src = inspect.getsource(PostgresService.entity_discover_cross_links)
+    start = src.index("lateral_query = text(")
+    lateral = src[start : src.index('""")', start)]
+
+    if "tenant_entities" not in lateral:
+        pytest.skip("cross-link no longer builds on the tenant-entity CTE")
+    assert "AS MATERIALIZED" in lateral, (
+        "the tenant-entity CTE must be MATERIALIZED; inlined, the planner can "
+        "reach the global HNSW index again and walk it per candidate (caura#1616)"
+    )
+
+
+async def test_discover_caps_links_at_the_ten_nearest(sc):
+    """Equivalence guard — passes on every shape this query has had.
+
+    Twelve entities share the memory's embedding, so all twelve sit at
+    similarity 1.0 and clear the floor; exactly ten may be linked. Carried
+    forward from #1635 (and back through its revert) because it guards
+    behaviour that does not depend on which plan wins."""
+    tenant = _t()
+    emb = fake_embedding("edgar")
+    for i in range(12):
+        await _seed_entity(
+            tenant_id=tenant,
+            canonical_name=f"Edgar {i}",
+            entity_type="person",
+            name_embedding=emb,
+        )
+    mem = await _seed_memory(tenant_id=tenant, content="Edgar wrote it", embedding=emb)
+
+    resp = await sc.discover_cross_links(
+        tenant_id=tenant,
+        fleet_id=None,
+        batch_size=200,
+        threshold=0.75,
+        text_verify=False,
+        target_memory_ids=[mem],
+    )
+    assert resp["links_created"] == 10
+    assert len(await _link_entity_ids(mem)) == 10
+
+
+async def test_discover_still_excludes_entities_below_the_threshold(sc):
+    """The other equivalence guard: the floor must still exclude.
+
+    One entity matches the memory exactly (similarity 1.0); one is unrelated
+    (fake_embedding puts it near 0.12, well under the 0.75 floor). Only the
+    match may be linked — whichever plan serves the query."""
+    tenant = _t()
+    emb = fake_embedding("fiona")
+    match = await _seed_entity(
+        tenant_id=tenant,
+        canonical_name="Fiona",
+        entity_type="person",
+        name_embedding=emb,
+    )
+    await _seed_entity(
+        tenant_id=tenant,
+        canonical_name="Unrelated Thing",
+        entity_type="organization",
+        name_embedding=fake_embedding("zebra-unrelated-token"),
+    )
+    mem = await _seed_memory(tenant_id=tenant, content="Fiona again", embedding=emb)
+
+    resp = await sc.discover_cross_links(
+        tenant_id=tenant,
+        fleet_id=None,
+        batch_size=200,
+        threshold=0.75,
+        text_verify=False,
+        target_memory_ids=[mem],
+    )
+    assert resp["links_created"] == 1
+    assert await _link_entity_ids(mem) == {match}
+
+
+async def test_discover_cte_does_not_leak_across_tenants(sc):
+    """The CTE is scoped by ``tenant_id`` and that scoping is now the ONLY
+    thing separating tenants in this query — previously ``tenant_id`` also sat
+    in the LATERAL's own WHERE. Losing it would not merely be slow, it would
+    link a memory to another tenant's entity."""
+    mine, theirs = _t(), _t()
+    emb = fake_embedding("gemma")
+    await _seed_entity(
+        tenant_id=theirs,
+        canonical_name="Gemma",
+        entity_type="person",
+        name_embedding=emb,
+    )
+    mem = await _seed_memory(tenant_id=mine, content="Gemma speaks", embedding=emb)
+
+    resp = await sc.discover_cross_links(
+        tenant_id=mine,
+        fleet_id=None,
+        batch_size=200,
+        threshold=0.75,
+        text_verify=False,
+        target_memory_ids=[mem],
+    )
+    assert resp["links_created"] == 0
+    assert await _link_entity_ids(mem) == set()
+
+
 # ===========================================================================
 # C. infer-relations — create + reinforce
 # ===========================================================================

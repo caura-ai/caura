@@ -8598,20 +8598,58 @@ class PostgresService:
             # when text-verify is off.
             content_map = {row[0]: row[1] for row in candidates} if text_verify else {}
 
+            # ``AS MATERIALIZED`` is the fix for caura#1616 and it is a PLANNER
+            # instruction, not a readability refactor. Deleting it -- or letting
+            # Postgres 12+ inline the CTE, which is the default -- restores the
+            # 143s.
+            #
+            # What went wrong without it: ``ix_entities_name_embedding_hnsw``
+            # (migration 033) indexes ``name_embedding`` ALONE, so ``tenant_id``
+            # is a post-filter on a GLOBAL index. For a tenant holding a thin
+            # slice of the entity table, walking that index to find ten of ITS
+            # rows means traversing most of everyone else's first -- once per
+            # candidate memory. Measured at ``lateral=143.1s`` for 100
+            # candidates, returning zero links.
+            #
+            # Materializing cuts the index out of the plan entirely. The CTE is
+            # computed ONCE into a tuplestore that has no index, so the LATERAL
+            # can only scan it, and it scans this tenant's entities rather than
+            # the world's. Exact, not approximate, which is a recall improvement
+            # on top of the latency one: no ANN, so no missed neighbours.
+            #
+            # The threshold deliberately stays INSIDE the LIMIT here. #1635
+            # moved it out on the theory that it prevented the scan stopping
+            # early; measured, that DOUBLED the cost to 282s, because removing
+            # the unindexable predicate is what made the planner reach for the
+            # HNSW index in the first place. Against a materialized scan its
+            # placement no longer affects the plan, so it sits where it
+            # preserves the original semantics exactly: the ten nearest AMONG
+            # those clearing the floor.
+            #
+            # The trade this makes: cost is now linear in the tenant's entity
+            # count times the candidate batch, with no index to shortcut it. It
+            # is the right shape for a sparse tenant and it has NOT been
+            # measured against a dense one -- see the PR. That is the open risk
+            # in this change, and it is the same class of mistake #1635 made, so
+            # it is written down rather than assumed away.
             lateral_query = text(f"""
+                WITH tenant_entities AS MATERIALIZED (
+                    SELECT e.id, e.canonical_name, e.attributes, e.name_embedding
+                    FROM entities e
+                    WHERE e.tenant_id = :tenant_id
+                      AND e.name_embedding IS NOT NULL
+                      {entity_fleet_clause}
+                )
                 SELECT m.id AS memory_id,
                        e.id AS entity_id, e.canonical_name, e.attributes, e.sim
                 FROM (SELECT id, embedding FROM memories
                       WHERE id = ANY(CAST(:memory_ids AS uuid[])) AND tenant_id = :tenant_id) m
                 JOIN LATERAL (
-                    SELECT e.id, e.canonical_name, e.attributes,
-                           1 - (e.name_embedding <=> m.embedding) AS sim
-                    FROM entities e
-                    WHERE e.tenant_id = :tenant_id
-                      AND e.name_embedding IS NOT NULL
-                      AND (1 - (e.name_embedding <=> m.embedding)) >= :threshold
-                      {entity_fleet_clause}
-                    ORDER BY e.name_embedding <=> m.embedding
+                    SELECT te.id, te.canonical_name, te.attributes,
+                           1 - (te.name_embedding <=> m.embedding) AS sim
+                    FROM tenant_entities te
+                    WHERE (1 - (te.name_embedding <=> m.embedding)) >= :threshold
+                    ORDER BY te.name_embedding <=> m.embedding
                     LIMIT 10
                 ) e ON true
                 ORDER BY m.id, e.sim DESC
