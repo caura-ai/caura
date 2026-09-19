@@ -12,13 +12,13 @@ ARG DD_APM_ENABLED=false
 # Pinned by digest (tag :1 floats) so the embedded binary is reproducible.
 # datadog/serverless-init:1 as of 2026-06-30; bump deliberately.
 FROM datadog/serverless-init:1@sha256:2f498f4b1165ac3551c34129b4f0c0c7bd99d82c55c4e95cf494b55dad8d05d0 AS dd-bin
-FROM python:3.12-slim AS dd-apm-true
+FROM python:3.14-slim AS dd-apm-true
 COPY --from=dd-bin /datadog-init /dd/datadog-init
-FROM python:3.12-slim AS dd-apm-false
+FROM python:3.14-slim AS dd-apm-false
 RUN mkdir -p /dd
 FROM dd-apm-${DD_APM_ENABLED} AS dd-apm-src
 
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /app
 
@@ -86,7 +86,7 @@ COPY static/ /app/static/
 
 
 # ── Production image ──
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \

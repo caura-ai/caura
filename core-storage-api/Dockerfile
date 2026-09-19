@@ -9,13 +9,13 @@
 # docker-entrypoint.sh on DD_API_KEY.
 ARG DD_APM_ENABLED=false
 FROM datadog/serverless-init:1@sha256:f4943347f155505156ba5f594317ea64b59678b3a6522e8c0993581af20956ff AS dd-bin
-FROM python:3.12-slim AS dd-apm-true
+FROM python:3.14-slim AS dd-apm-true
 COPY --from=dd-bin /datadog-init /dd/datadog-init
-FROM python:3.12-slim AS dd-apm-false
+FROM python:3.14-slim AS dd-apm-false
 RUN mkdir -p /dd
 FROM dd-apm-${DD_APM_ENABLED} AS dd-apm-src
 
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /app
 
@@ -47,7 +47,7 @@ COPY core-storage-api/src/ /app/core-storage-api/src/
 
 
 # ── Production image ──
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
