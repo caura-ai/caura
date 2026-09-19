@@ -941,6 +941,7 @@ class ResolvedConfig:
             (ProviderName.ANTHROPIC.value, self.anthropic_api_key),
             (ProviderName.GEMINI.value, self.gemini_api_key),
             (ProviderName.OPENROUTER.value, self.openrouter_api_key),
+            (ProviderName.ATLASCLOUD.value, self.atlascloud_api_key),
         ]
         for prov, key in candidates:
             if prov != primary and key:
@@ -959,6 +960,10 @@ class ResolvedConfig:
     @property
     def openrouter_api_key(self) -> str | None:
         return self._ts.get("api_keys", {}).get("openrouter_api_key") or global_settings.openrouter_api_key
+
+    @property
+    def atlascloud_api_key(self) -> str | None:
+        return self._ts.get("api_keys", {}).get("atlascloud_api_key") or global_settings.atlascloud_api_key
 
     @property
     def gemini_api_key(self) -> str | None:

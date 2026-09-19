@@ -109,7 +109,12 @@ def reset_provider_cache() -> None:
 
 _LLM_FAKE_SENTINELS = frozenset({ProviderName.FAKE, ProviderName.NONE})
 _OPENAI_COMPATIBLE = frozenset(
-    {ProviderName.OPENAI, ProviderName.ANTHROPIC, ProviderName.OPENROUTER}
+    {
+        ProviderName.OPENAI,
+        ProviderName.ANTHROPIC,
+        ProviderName.OPENROUTER,
+        ProviderName.ATLASCLOUD,
+    }
 )
 
 
