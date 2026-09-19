@@ -441,8 +441,11 @@ class MemoryOut(BaseModel):
     # (OSS local default) never sets embedding_pending, even in fast mode.
     #
     # `BulkMemoryItem.write_mode` is narrower: there 'strong' governs the
-    # embedding only, enrichment defers either way, and the bulk path sets neither
-    # flag — so a bulk caller cannot read pendingness off its own write response.
+    # embedding only and enrichment defers either way. ax-0917-h-06: the bulk
+    # path now DOES set `embedding_pending` on items written without a vector,
+    # so a bulk caller can read pendingness off its own write response. It
+    # still sets no `enrichment_pending`, because bulk enrichment defers
+    # unconditionally — there is no inline case for that flag to distinguish.
     metadata: dict | None
     # C25 — platform-written telemetry/enrichment (llm_ms, write_latency_ms,
     # semantic_dedup_ms, summary, tags, pii flags, write-mode flags …) exposed

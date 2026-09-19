@@ -2061,6 +2061,27 @@ async def create_memories_bulk(
             {"entity_id": str(link.entity_id), "role": link.role} for link in item.entity_links
         ]
 
+        # ax-0917-h-06. ``embedding_pending`` is public API — ``MemoryOut``
+        # documents it, ``caura_write``'s tool description tells agents to read
+        # it, and core-worker clears it when the vector lands. The single-write
+        # path sets it in ``write_memory_row``; the BULK path never did, and
+        # ``MemoryOut``'s own comment said so: "the bulk path sets neither flag
+        # — so a bulk caller cannot read pendingness off its own write
+        # response."
+        #
+        # That is the wrong way round. Bulk is where the deferred window is
+        # LONGEST — thousands of rows queued behind one backfill — so it is the
+        # caller most in need of the signal, and it was the only one without
+        # it. An agent probe wrote, searched two minutes later, found other
+        # memories but not its own, and had nothing in the write response to
+        # explain why.
+        #
+        # Until the vector lands the row is reachable by FTS and by the
+        # non-semantic list, but not by semantic similarity — so a paraphrase
+        # search comes back empty while an exact-words search does not.
+        if embeddings[i] is None:
+            set_system_value(metadata, "embedding_pending", True)
+
         mem_data = {
             "tenant_id": data.tenant_id,
             "fleet_id": data.fleet_id,
