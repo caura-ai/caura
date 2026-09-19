@@ -182,15 +182,23 @@ def test_the_writer_session_population_is_pinned() -> None:
     """Counts, so the population cannot grow quietly.
 
     Not an instruction to drain it — see this module's docstring for why a
-    mechanical conversion is unsafe. If you convert some methods to
-    ``get_read_session`` after doing the caller analysis, these numbers go
-    down and you update them here.
+    mechanical conversion is unsafe. Two things legitimately move these numbers
+    DOWN, and both mean updating them here: converting a method to
+    ``get_read_session`` after doing the caller analysis, and deleting one that
+    turns out to have no callers at all.
+
+    138 -> 136 on 2026-09-19 by the second route (OSS-0814-L-53): ``relation_list``
+    and ``fleet_get_node_ids_for_fleet`` were removed as zero-caller surfaces.
+    Both were in the ``pure`` subset — readers holding a writer session — so
+    they were part of the backlog this file pins, and deleting them retires two
+    entries without anyone having to do the per-caller analysis first. The
+    cheapest way off this list is not to need the method.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 138, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 65, f"{len(pure)} of them show no write marker"
+    assert len(methods) == 136, f"{len(methods)} methods open a writer session"
+    assert len(pure) == 63, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(

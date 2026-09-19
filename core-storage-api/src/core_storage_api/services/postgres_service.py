@@ -5100,56 +5100,6 @@ class PostgresService:
                 "avg_recall_count": avg_recall,
             }
 
-    async def memory_compute_usage_stats(
-        self,
-        tenant_id: str,
-        fleet_id: str | None,
-    ) -> dict:
-        async with get_read_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id)
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.id, m.title, m.recall_count
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL
-                ORDER BY m.recall_count DESC
-                LIMIT 10
-            """),
-                params,
-            )
-            most_recalled = [{"id": str(row[0]), "title": row[1], "recall_count": row[2]} for row in r.all()]
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.id, m.title, m.recall_count
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL AND m.status = 'active'
-                ORDER BY m.recall_count ASC
-                LIMIT 10
-            """),
-                params,
-            )
-            least_recalled = [{"id": str(row[0]), "title": row[1], "recall_count": row[2]} for row in r.all()]
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.fleet_id, COUNT(*) AS cnt
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL
-                GROUP BY m.fleet_id
-                ORDER BY cnt DESC
-            """),
-                params,
-            )
-            fleet_activity = [{"fleet_id": row[0], "memory_count": row[1]} for row in r.all()]
-
-            return {
-                "most_recalled": most_recalled,
-                "least_recalled": least_recalled,
-                "fleet_activity": fleet_activity,
-            }
-
     async def memory_list_recent(
         self,
         tenant_id: str,
@@ -7313,23 +7263,6 @@ class PostgresService:
             )
             result = await session.execute(select_stmt)
             return result.scalar_one()
-
-    async def relation_list(
-        self,
-        tenant_id: str,
-        *,
-        fleet_id: str | None = None,
-        include_null_fleet: bool = False,
-    ) -> list[Relation]:
-        async with get_session() as session:
-            stmt = select(Relation).where(Relation.tenant_id == tenant_id)
-            if fleet_id:
-                if include_null_fleet:
-                    stmt = stmt.where(or_(Relation.fleet_id == fleet_id, Relation.fleet_id.is_(None)))
-                else:
-                    stmt = stmt.where(Relation.fleet_id == fleet_id)
-            result = await session.execute(stmt)
-            return list(result.scalars().all())
 
     async def relation_get_outgoing(
         self,
@@ -11322,21 +11255,6 @@ class PostgresService:
             # as returning the base Result. Same ignore as the other
             # delete/update paths in this file.
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
-
-    async def fleet_get_node_ids_for_fleet(
-        self,
-        *,
-        tenant_id: str,
-        fleet_id: str,
-    ) -> list[UUID]:
-        async with get_session() as session:
-            result = await session.execute(
-                select(FleetNode.id).where(
-                    FleetNode.tenant_id == tenant_id,
-                    FleetNode.fleet_id == fleet_id,
-                )
-            )
-            return list(result.scalars().all())
 
     # -- Commands --
 
