@@ -10,6 +10,38 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.17.0](https://github.com/caura-ai/caura/compare/backend-v3.16.3...backend-v3.17.0) (2026-09-19)
+
+
+### Features
+
+* **clients:** identify the SDK with a User-Agent header ([#1561](https://github.com/caura-ai/caura/issues/1561)) ([42e537b](https://github.com/caura-ai/caura/commit/42e537b23bcdda8d5e0ae4335218c0490baed40c))
+* **core-api:** send an anonymous daily heartbeat from self-hosted servers ([#1577](https://github.com/caura-ai/caura/issues/1577)) ([35ef4ca](https://github.com/caura-ai/caura/commit/35ef4ca2a0884c31c7a56c6e3962eb78e4ead82e))
+* **plugin:** identify the plugin with a User-Agent header ([#1578](https://github.com/caura-ai/caura/issues/1578)) ([3cdb2f7](https://github.com/caura-ai/caura/commit/3cdb2f73e6a2ead2a2d4de23b70fcb9683d4d734))
+
+
+### Bug Fixes
+
+* **clients:** wrap network failures in the SDK error hierarchy ([#1588](https://github.com/caura-ai/caura/issues/1588)) ([99ee1ea](https://github.com/caura-ai/caura/commit/99ee1eae25063906cb5eef247eaaeb97a5645c43))
+* **events:** make a failed publish visible to the platform, not just the SDK ([#1617](https://github.com/caura-ai/caura/issues/1617)) ([f26e45d](https://github.com/caura-ai/caura/commit/f26e45d5e4dceb47161a0b3a62f6bb36dd4d7bfa))
+* **storage:** name the phase when cross-link discovery times out ([#1620](https://github.com/caura-ai/caura/issues/1620)) ([7d3fbcb](https://github.com/caura-ai/caura/commit/7d3fbcbd3f5452cbaf73c06b7832535449a3a28e))
+
+
+### Dependencies
+
+* update alembic requirement from &lt;2,&gt;=1.19.1 to &gt;=1.20.0,&lt;2 ([#1569](https://github.com/caura-ai/caura/issues/1569)) ([3f07940](https://github.com/caura-ai/caura/commit/3f079409f339baf10370586a0cd20cd9cde5df46))
+* update google-cloud-aiplatform requirement from &lt;3,&gt;=2.0.1 to &gt;=2.1.0,&lt;3 ([#1570](https://github.com/caura-ai/caura/issues/1570)) ([132981b](https://github.com/caura-ai/caura/commit/132981b437a3c6bf61ae78e966639c5773ed00a2))
+
+
+### Documentation
+
+* **clients:** make the PyPI pages answer what Caura is and how to use it ([#1587](https://github.com/caura-ai/caura/issues/1587)) ([f5e4c5c](https://github.com/caura-ai/caura/commit/f5e4c5c354317f73a6833498d52414b4d0b28013))
+
+
+### Code Refactoring
+
+* **storage:** drop three zero-caller service methods, and gate the topic registry ([#1618](https://github.com/caura-ai/caura/issues/1618)) ([1c206e0](https://github.com/caura-ai/caura/commit/1c206e0b0354f6b933248a7afad88abd99fb9547))
+
 ## [3.16.3](https://github.com/caura-ai/caura/compare/backend-v3.16.2...backend-v3.16.3) (2026-09-19)
 
 
