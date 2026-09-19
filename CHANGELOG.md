@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.16.3](https://github.com/caura-ai/caura/compare/backend-v3.16.2...backend-v3.16.3) (2026-09-19)
+
+
+### Bug Fixes
+
+* **api:** three operations that reported success for something else ([#1612](https://github.com/caura-ai/caura/issues/1612)) ([4bc3e15](https://github.com/caura-ai/caura/commit/4bc3e15bf75059bdbfdd930223c1005884e8337e))
+* **events:** close the gaps between what the bus promises and what it does ([#1611](https://github.com/caura-ai/caura/issues/1611)) ([e93cf2d](https://github.com/caura-ai/caura/commit/e93cf2d8cba2226787636091f6dca27e6e6c2f5d))
+* **events:** log the lease keeper's escapes instead of suppressing them ([#1607](https://github.com/caura-ai/caura/issues/1607)) ([cad6014](https://github.com/caura-ai/caura/commit/cad60141bb6456bbeda2114fdf7a3edf90c606c8))
+* **lifecycle:** unpair entity-link from crystallize, and give cross-link a budget it can name ([#1604](https://github.com/caura-ai/caura/issues/1604)) ([a87663f](https://github.com/caura-ai/caura/commit/a87663f8850b435d9accba5fe448389212aa0d57))
+* **migrations:** stop reporting work that was never done ([#1608](https://github.com/caura-ai/caura/issues/1608)) ([7741e37](https://github.com/caura-ai/caura/commit/7741e373cd56aa49457603d01a669da3dced13fb))
+* **quickstart:** stop publishing default credentials, and delete a control surface that controls nothing ([#1613](https://github.com/caura-ai/caura/issues/1613)) ([fd51860](https://github.com/caura-ai/caura/commit/fd5186052994677bb7275172c64990a3e5e75b44))
+* **scripts:** repair developer tooling that cannot run as shipped ([#1610](https://github.com/caura-ai/caura/issues/1610)) ([911b62b](https://github.com/caura-ai/caura/commit/911b62ba93151cf34eadb90bb8138f3adc8617a2))
+
 ## [3.16.2](https://github.com/caura-ai/caura/compare/backend-v3.16.1...backend-v3.16.2) (2026-09-18)
 
 
