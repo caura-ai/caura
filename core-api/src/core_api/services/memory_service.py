@@ -114,6 +114,7 @@ from core_api.services.governance_gate import (
 from core_api.services.hooks import get_hooks
 from core_api.services.organization_settings import validate_search_profile
 from core_api.services.system_metadata import (
+    CALLER_OWNABLE_KEYS,
     extract_system_metadata,
     sanitize_caller_metadata,
     set_system_value,
@@ -1394,6 +1395,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                         data.agent_id,
                         tenant_config,
                         agent_provided_fields=_agent_provided_enrichment_fields(data),
+                        caller_owned_metadata_keys=_caller_owned_enrichment_metadata_keys(data),
                         reference_datetime=getattr(data, "reference_datetime", None),
                         # ``_schedule_enrich_or_inline`` warns that a THIRD call
                         # site must pass this unless ``GovernanceDecision`` has
@@ -2004,6 +2006,21 @@ async def create_memories_bulk(
         # report nothing while a single write reports a source.
         weight_source = "caller" if weight is not None else "default"
 
+        # C25 — the caller/platform metadata boundary, same as the single-write
+        # path's ``MergeEnrichmentFields``. Captured BEFORE the enrichment merge
+        # below, so it cannot name a key enrichment is about to add. Bulk items
+        # go through this merge rather than the pipeline, so without this the
+        # boundary held for a single write and not for the same payload sent as
+        # a batch of one.
+        #
+        # Not purely the caller's keys: ``memory_type_agent_set`` was assigned
+        # above, into the same dict. Harmless for the same reason
+        # ``MergeEnrichmentFields`` gives — ``set_system_value`` consults this
+        # set only for ``CALLER_OWNABLE_KEYS``, which no platform step writes
+        # before this point, so any ``summary`` / ``tags`` here are
+        # authentically the caller's.
+        caller_keys = frozenset(metadata.keys())
+
         if enrichment:
             if memory_type is None:
                 memory_type = enrichment.memory_type
@@ -2012,11 +2029,11 @@ async def create_memories_bulk(
                 weight_source = "llm"
             title = enrichment.title or None
             if enrichment.summary:
-                metadata["summary"] = enrichment.summary
+                set_system_value(metadata, "summary", enrichment.summary, caller_keys=caller_keys)
             if enrichment.tags:
-                metadata["tags"] = enrichment.tags
+                set_system_value(metadata, "tags", enrichment.tags, caller_keys=caller_keys)
             if enrichment.llm_ms:
-                metadata["llm_ms"] = enrichment.llm_ms
+                set_system_value(metadata, "llm_ms", enrichment.llm_ms, caller_keys=caller_keys)
             if ts_valid_start is None and enrichment.ts_valid_start:
                 ts_valid_start = datetime.fromisoformat(enrichment.ts_valid_start.replace("Z", "+00:00"))
             if ts_valid_end is None and enrichment.ts_valid_end:
@@ -2357,6 +2374,9 @@ async def create_memories_bulk(
                             tenant_config=tenant_config,
                             reference_datetime=items[orig_idx].reference_datetime,
                             agent_provided_fields=_agent_provided_enrichment_fields(items[orig_idx]),
+                            caller_owned_metadata_keys=_caller_owned_enrichment_metadata_keys(
+                                items[orig_idx]
+                            ),
                         ),
                         "enrich_publish",
                         mem_id,
@@ -2564,6 +2584,37 @@ def _agent_provided_enrichment_fields(
     return overlap or None
 
 
+def _caller_owned_enrichment_metadata_keys(data: object) -> list[str] | None:
+    """Snapshot which CALLER-OWNABLE metadata keys the caller supplied.
+
+    The metadata-side counterpart of
+    :func:`_agent_provided_enrichment_fields`, and needed for the same reason:
+    enrichment that runs AFTER the write has no other way to tell a caller's
+    own ``metadata["summary"]`` from a platform-written one.
+
+    Narrowed to ``CALLER_OWNABLE_KEYS`` rather than shipping the caller's whole
+    key set. ``set_system_value`` consults it for no other key, so the rest
+    would be inert — and the deferred path puts this on the wire, where an
+    arbitrary caller's metadata key NAMES are worth not carrying.
+
+    Returns ``None`` (not ``[]``) when the caller owns nothing here, matching
+    the sibling's "trust enrichment for everything" convention.
+
+    INVARIANT: every call site reaches this while ``enrichment is None`` — the
+    deferred/inline branches are mutually exclusive with an inline enrichment
+    result — so ``data.metadata`` cannot yet hold a PLATFORM ``summary`` or
+    ``tags``. If that ever stops holding, this would report a platform value as
+    caller-owned and the worker would skip the legacy mirror permanently. The
+    durable fix would be to snapshot the key set at the ``sanitize_caller_metadata``
+    chokepoint instead of re-deriving it here.
+    """
+    metadata = getattr(data, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    owned = sorted(CALLER_OWNABLE_KEYS & metadata.keys())
+    return owned or None
+
+
 async def _schedule_enrich_or_inline(
     memory_id: UUID,
     content: str,
@@ -2573,6 +2624,7 @@ async def _schedule_enrich_or_inline(
     tenant_config: object,
     *,
     agent_provided_fields: list[str] | None = None,
+    caller_owned_metadata_keys: list[str] | None = None,
     reference_datetime: datetime | None = None,
     run_governance_remediation: bool = False,
 ) -> None:
@@ -2619,6 +2671,7 @@ async def _schedule_enrich_or_inline(
             fleet_id,
             agent_id,
             agent_provided_fields=agent_provided_fields,
+            caller_owned_metadata_keys=caller_owned_metadata_keys,
             governance_config=tenant_config,
             run_governance_remediation=run_governance_remediation,
         )
@@ -2669,6 +2722,7 @@ async def _schedule_enrich_or_inline(
             tenant_config=tenant_config,
             reference_datetime=reference_datetime,
             agent_provided_fields=agent_provided_fields,
+            caller_owned_metadata_keys=caller_owned_metadata_keys,
         )
 
 
@@ -3351,6 +3405,7 @@ async def _enrich_memory_background(
     agent_id: str,
     *,
     agent_provided_fields: list[str] | None = None,
+    caller_owned_metadata_keys: list[str] | None = None,
     governance_config: object | None = None,
     run_governance_remediation: bool = False,
 ) -> dict | None:
@@ -3471,12 +3526,21 @@ async def _enrich_memory_background(
         raw_meta = mem.get("metadata_")
         existing = raw_meta if raw_meta is not None else mem.get("metadata")
         meta = dict(existing) if existing is not None else {}
+        # C25 — route the caller-ownable keys through the same boundary the
+        # synchronous path uses. ``meta`` here is the row's MERGED metadata, so
+        # a caller's ``summary`` and a platform-written one are indistinguishable
+        # by inspection; the key set has to come from the write, which is why
+        # ``_schedule_enrich_or_inline`` forwards it. Without it this path wrote
+        # the LLM's summary straight over the caller's, seconds after the write
+        # that set it — the same clobber C25 closed for the synchronous path,
+        # left open on the one that runs on every inline deployment.
+        caller_keys = frozenset(caller_owned_metadata_keys or ())
         if enrichment.summary:
-            meta["summary"] = enrichment.summary
+            set_system_value(meta, "summary", enrichment.summary, caller_keys=caller_keys)
         if enrichment.tags:
-            meta["tags"] = enrichment.tags
+            set_system_value(meta, "tags", enrichment.tags, caller_keys=caller_keys)
         if enrichment.llm_ms:
-            meta["llm_ms"] = enrichment.llm_ms
+            set_system_value(meta, "llm_ms", enrichment.llm_ms, caller_keys=caller_keys)
         if enrichment.contains_pii:
             meta["contains_pii"] = True
             if enrichment.pii_types:

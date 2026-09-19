@@ -112,6 +112,7 @@ class ScheduleBackgroundTasks:
             if tenant_config.enrichment_enabled and tenant_config.enrichment_provider != "none":
                 from core_api.services.memory_service import (
                     _agent_provided_enrichment_fields,
+                    _caller_owned_enrichment_metadata_keys,
                     _schedule_enrich_or_inline,
                 )
 
@@ -125,6 +126,7 @@ class ScheduleBackgroundTasks:
                             data.agent_id,
                             tenant_config,
                             agent_provided_fields=_agent_provided_enrichment_fields(data),
+                            caller_owned_metadata_keys=_caller_owned_enrichment_metadata_keys(data),
                             reference_datetime=getattr(data, "reference_datetime", None),
                             # H-18: nothing applies the LLM governance verdict on
                             # an inline deployment — see ``_schedule_enrich_or_inline``.
@@ -234,6 +236,7 @@ class ScheduleBackgroundTasks:
         ):
             from core_api.services.memory_service import (
                 _agent_provided_enrichment_fields,
+                _caller_owned_enrichment_metadata_keys,
                 _schedule_enrich_or_inline,
             )
 
@@ -247,6 +250,7 @@ class ScheduleBackgroundTasks:
                         data.agent_id,
                         tenant_config,
                         agent_provided_fields=_agent_provided_enrichment_fields(data),
+                        caller_owned_metadata_keys=_caller_owned_enrichment_metadata_keys(data),
                         reference_datetime=getattr(data, "reference_datetime", None),
                     ),
                     "enrich_or_publish",

@@ -2171,7 +2171,20 @@ async def ingest_commit_endpoint(
     if auth.is_install_credential and body.agent_id:
         body.agent_id = await broker_owned_agent_id(body.agent_id, auth.install_uuid, body.tenant_id)
     if auth.tenant_id:  # skip for admin
-        await check_and_increment(body.tenant_id, "write")
+        # One unit PER FACT, not one per request. A commit writes
+        # ``len(body.facts)`` memories, and every other multi-item write path
+        # meters the count — ``caura_write``'s bulk branch calls
+        # ``bulk_check_and_increment(tenant_id, len(bulk_items))``. Charging a
+        # flat 1 here made a 50-fact ingest cost the same as a 1-fact one,
+        # which is both a billing gap and a plan-limit hole: the recalls/writes
+        # counter feeds ``_is_over_plan_limits``, so the cheapest way past a
+        # write cap was to ingest in bulk.
+        #
+        # Before the write, matching the ordering
+        # ``test_billing_happens_before_the_write`` pins for the MCP surface: a
+        # batch that fails partway still costs what it attempted, and two
+        # orderings for one operation is the drift that test exists to stop.
+        await bulk_check_and_increment(body.tenant_id, len(body.facts))
     return await ingest_commit(body)
 
 

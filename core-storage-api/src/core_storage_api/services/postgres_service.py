@@ -820,6 +820,17 @@ _ADMIN_LIST_SORTABLE = frozenset(
 _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "relations",
     "fleet_commands",
+    # Both ride the ON DELETE CASCADE from ``memories`` (all four foreign keys
+    # are CASCADE and NOT NULL, verified on the model and in the database), so
+    # unlisted they were still DELETED — this is a reporting gap, not surviving
+    # data. Listed anyway, ahead of their parent, for the reason ``relations``
+    # and ``fleet_commands`` above are: a cascade hides the row count, and the
+    # per-table breakdown is a reported feature of both the purge and its
+    # preview. Unlisted they also read as an oversight rather than a decision,
+    # which is precisely what ``_RETAINED_TENANT_TABLES`` below exists to
+    # prevent. Added by migration 036, after H-09 swept for exactly this.
+    "memory_conflicts",
+    "memory_derivations",
     "memories",
     "entities",
     "agents",
@@ -906,6 +917,14 @@ _PURGE_ORG_KEYED_TABLES: tuple[str, ...] = (
 # fleet-scoped run data.
 _PURGE_FLEET_TABLES: tuple[str, ...] = (
     "relations",
+    # Carries its own ``fleet_id``, so once it joined the tenant purge it had
+    # to join this one: a fleet teardown that skipped it would leave the
+    # fleet's conflict rows behind in a SHARED tenant, which is the one thing
+    # this tuple exists to prevent. ``memory_derivations`` is correctly absent
+    # — it has no ``fleet_id``, so a fleet-scoped DELETE cannot address it and
+    # it rides the CASCADE from ``memories`` the way ``memory_entity_links``
+    # does. Caught by ``test_the_fleet_purge_covers_every_fleet_scoped_purged_table``.
+    "memory_conflicts",
     "memories",
     "entities",
     "agents",
@@ -927,7 +946,12 @@ _PURGE_FLEET_TABLES: tuple[str, ...] = (
 
 
 def _verify_audit_chain_rows(
-    tenant_id: str, rows: list[AuditLog], head: AuditChainHead | None, limit: int
+    tenant_id: str,
+    rows: list[AuditLog],
+    head: AuditChainHead | None,
+    limit: int,
+    start_seq: int = 1,
+    seed_prev: bytes | None = GENESIS_PREV_HASH,
 ) -> dict:
     """Walk pre-fetched chain rows and verify integrity (pure CPU, no I/O).
 
@@ -936,8 +960,24 @@ def _verify_audit_chain_rows(
     ``asyncio.to_thread`` instead of blocking the event loop. Operates only on
     already-loaded ORM attributes, so it's safe off the event loop.
     """
-    expected_prev = GENESIS_PREV_HASH
-    expected_seq = 1
+    if seed_prev is None:
+        # Asked to resume from ``start_seq`` but row ``start_seq - 1`` is gone.
+        # Reported rather than tolerated: verifying this window against genesis
+        # would declare it sound while the rows it should have been anchored to
+        # are missing, which is precisely the deletion a chain walk exists to
+        # catch.
+        return {
+            "tenant_id": tenant_id,
+            "valid": False,
+            "verified_count": 0,
+            "first_broken": {
+                "seq": start_seq,
+                "reason": "missing_predecessor",
+            },
+        }
+
+    expected_prev = seed_prev
+    expected_seq = start_seq
     for row in rows:
         reason: str | None = None
         if row.seq != expected_seq:
@@ -961,7 +1001,10 @@ def _verify_audit_chain_rows(
             return {
                 "tenant_id": tenant_id,
                 "valid": False,
-                "verified_count": expected_seq - 1,
+                # Rows verified in THIS window, not since genesis — with a
+                # ``start_seq`` above 1 the two differ, and the caller already
+                # knows how far the earlier windows got.
+                "verified_count": expected_seq - start_seq,
                 "first_broken": {
                     "seq": row.seq,
                     "id": str(row.id),
@@ -979,7 +1022,27 @@ def _verify_audit_chain_rows(
 
     truncated = len(rows) >= limit
     head_seq, head_hash = (head.last_seq, head.last_hash) if head is not None else (0, GENESIS_PREV_HASH)
-    last_seq, last_hash = (rows[-1].seq, rows[-1].event_hash) if rows else (0, GENESIS_PREV_HASH)
+    if rows:
+        last_seq, last_hash = rows[-1].seq, rows[-1].event_hash
+    elif start_seq > 1:
+        # An empty window above genesis is how a paginated walk terminates: the
+        # caller followed ``next_seq`` one step past the final row. The chain
+        # tail is therefore row ``start_seq - 1``, whose hash we are holding in
+        # ``seed_prev`` — so ANCHOR the tail check to it rather than skipping
+        # the check.
+        #
+        # Skipping the check here instead — the obvious reading of "past the
+        # end" — is a hole, not a shortcut. ``truncated`` ALSO skips this
+        # check, so a chain whose length is an exact multiple of ``limit`` ends
+        # its last non-empty window truncated (check skipped) and its next
+        # window empty (check skipped again) — no window runs it, and a walk
+        # over a chain with rows DELETED off the tail reports ``valid: true``.
+        # ``DELETE ... WHERE seq > 100000`` reaches that, 100_000 being the
+        # default ``limit``, and a contiguous tail deletion raises no seq_gap,
+        # so this check is the only thing that catches it.
+        last_seq, last_hash = start_seq - 1, seed_prev
+    else:
+        last_seq, last_hash = 0, GENESIS_PREV_HASH
     if not truncated and (head_seq != last_seq or head_hash != last_hash):
         return {
             "tenant_id": tenant_id,
@@ -997,6 +1060,16 @@ def _verify_audit_chain_rows(
         "verified_count": len(rows),
         "head_seq": last_seq,
         "truncated": truncated,
+        # The cursor for the next window, present only when there is one. The
+        # caller previously had to infer it from ``head_seq``, which worked
+        # only because the walk always started at genesis.
+        #
+        # ``last_seq`` is ``int | None`` because the COLUMN is nullable, but it
+        # cannot be NULL here: the query filters ``seq IS NOT NULL``, and
+        # ``truncated`` (``len(rows) >= limit``, with ``limit >= 1``) implies a
+        # non-empty page. Narrowed rather than asserted so a future change that
+        # breaks either of those produces no cursor instead of a crash.
+        **({"next_seq": last_seq + 1} if truncated and last_seq is not None else {}),
     }
 
 
@@ -1055,6 +1128,19 @@ class DuplicateContentHashError(ValueError):
         self.fields: dict = fields or {}
 
 
+def _fleet_scope(column, fleet_id: str | None):
+    """Fleet predicate matching an index that groups on ``COALESCE(fleet_id, '')``.
+
+    Every unique index here that spans a nullable ``fleet_id`` groups it that
+    way — ``uq_memories_live_content_hash``, ``ix_memories_attempt_unique``,
+    ``uq_entities_tenant_type_name_fleet`` — so every lookup that has to agree
+    with one of them needs THIS predicate rather than a falsiness branch. One
+    function for all three tables so a caller cannot half-remember the rule; see
+    :func:`_content_hash_fleet_scope` for the full argument and the reproduction.
+    """
+    return func.coalesce(column, "") == (fleet_id or "")
+
+
 def _content_hash_fleet_scope(fleet_id: str | None):
     """Fleet predicate matching ``uq_memories_live_content_hash``'s grouping.
 
@@ -1079,7 +1165,7 @@ def _content_hash_fleet_scope(fleet_id: str | None):
     Also index-friendly: equality on the same ``COALESCE`` expression the index
     is built over remains usable by the planner.
     """
-    return func.coalesce(Memory.fleet_id, "") == (fleet_id or "")
+    return _fleet_scope(Memory.fleet_id, fleet_id)
 
 
 def _divergent_keys(key_sets: list[frozenset[str]]) -> list[str]:
@@ -1578,9 +1664,17 @@ class PostgresService:
                 # asyncpg's 32k bind-arg ceiling. 500 mirrors the bulk
                 # batch ceiling so a single-batch retry is one query;
                 # larger calls (auto-chunk) split cleanly.
-                fleet_predicate = (
-                    Memory.fleet_id == fleet_id if fleet_id is not None else Memory.fleet_id.is_(None)
-                )
+                # Must group ``fleet_id`` the way the ARBITER does — this
+                # lookup exists to find the rows that index swallowed, so a
+                # different grouping asks a different question. It branched on
+                # NULL-ness while the ON CONFLICT above groups on
+                # ``COALESCE(fleet_id, '')``, and the two disagree exactly where
+                # the index says "duplicate": a caller passing ``""`` against a
+                # row stored NULL (or the reverse) conflicts in the index and
+                # then misses here, so the item fell through to the ``id: None``
+                # branch below and was reported as a per-item error for a write
+                # that had in fact already committed.
+                fleet_predicate = _fleet_scope(Memory.fleet_id, fleet_id)
                 for chunk_start in range(0, len(unresolved), 500):
                     chunk = unresolved[chunk_start : chunk_start + 500]
                     result = await session.execute(
@@ -1913,6 +2007,20 @@ class PostgresService:
             stmt = sql_update(Memory).where(
                 Memory.id == memory_id,
                 Memory.tenant_id == tenant_id,
+                # A soft-deleted row is gone as far as every read path is
+                # concerned, and its sibling ``memory_update`` has always said
+                # so. Without this, a delete racing a supersession flip let the
+                # flip land on the deleted row — rewriting ``status`` and
+                # ``supersedes_id``, and so the lineage, of a memory nothing
+                # can read back.
+                #
+                # It also makes the caller's contract true rather than
+                # aspirational: ``routers/memories.py`` states that this
+                # "returns False when the target row doesn't exist (or was
+                # already deleted); surface as 404". It did not — a deleted row
+                # matched, updated, and returned True, so the route answered
+                # 200 for a write the caller is told is impossible.
+                Memory.deleted_at.is_(None),
             )
             if expected_supersedes_id is not None:
                 stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
@@ -6925,7 +7033,26 @@ class PostgresService:
         offset: int = 0,
     ) -> list[Entity]:
         async with get_session() as session:
-            stmt = select(Entity).where(Entity.tenant_id == tenant_id).offset(offset).limit(limit)
+            # ORDER BY is what makes OFFSET/LIMIT mean anything. Postgres
+            # guarantees no row order without it, so it is free to return the
+            # same physical rows in a different sequence for page 2 than it did
+            # for page 1 — a caller walking the pages then sees some entities
+            # twice and never sees others, with nothing in the response to show
+            # it happened. Plan changes (a fresh ANALYZE, a seq-scan becoming an
+            # index scan as the table grows) are enough to shift it.
+            #
+            # ``id`` and not ``canonical_name``: the primary key is the only
+            # column here that is unique, and uniqueness is the property a
+            # stable sort needs. It is also already indexed, so this adds no
+            # sort node. A human-friendlier display order is a presentation
+            # decision and would still need ``id`` appended to be stable.
+            stmt = (
+                select(Entity)
+                .where(Entity.tenant_id == tenant_id)
+                .order_by(Entity.id)
+                .offset(offset)
+                .limit(limit)
+            )
             if fleet_id:
                 stmt = stmt.where(Entity.fleet_id == fleet_id)
             if entity_type:
@@ -6938,40 +7065,79 @@ class PostgresService:
     async def entity_add(self, data: dict) -> Entity:
         """Create new entity — handle race with concurrent extraction tasks.
 
-        The uq_entities_tenant_type_name_fleet unique index rejects
-        duplicates at INSERT time; on conflict we re-SELECT and merge.
-        """
-        from sqlalchemy.exc import IntegrityError
+        ``INSERT ... ON CONFLICT DO NOTHING RETURNING`` against
+        ``uq_entities_tenant_type_name_fleet``, paired with a same-session
+        re-SELECT for the conflicted case — the shape ``agent_add`` and
+        ``memory_add_all`` already use.
 
+        NOT ``flush() → IntegrityError → rollback() → re-SELECT``, which is
+        what this did and which could not work: ``get_session`` yields inside
+        ``session.begin()``, so the mid-block ``rollback()`` closed the
+        transaction the context manager still owned and the re-SELECT died on
+        "Can't operate on closed transaction inside context manager". The
+        recovery path was unreachable — every dedup race 500'd, and the
+        ``winner is None`` guard below it had never run. ``agent_add``'s
+        docstring already warned this pattern was brittle; it was simply never
+        applied here.
+        """
         async with get_session() as session:
-            entity = Entity(**data)
-            session.add(entity)
-            try:
-                await session.flush()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    "Entity dedup race: '%s' already exists, re-selecting",
-                    data.get("canonical_name"),
+            # Mirrors migration 001's CREATE INDEX expression-for-expression.
+            # ``text()`` for the two computed elements for the reason spelled
+            # out on ``memory_add_all``: conflict inference matches on the
+            # rendered expression, and an unmatched target silently degrades to
+            # "no inferred constraint" — here that would resurrect the 500.
+            stmt = (
+                pg_insert(Entity)
+                .values(**data)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        Entity.tenant_id,
+                        Entity.entity_type,
+                        text("lower(canonical_name)"),
+                        text("COALESCE(fleet_id, '')"),
+                    ]
                 )
-                # Re-SELECT the entity that won the race
-                result = await session.execute(
-                    select(Entity).where(
-                        Entity.tenant_id == data["tenant_id"],
-                        Entity.entity_type == data["entity_type"],
-                        func.lower(Entity.canonical_name) == data["canonical_name"].lower(),
-                        Entity.fleet_id == data.get("fleet_id")
-                        if data.get("fleet_id")
-                        else Entity.fleet_id.is_(None),
-                    )
-                )
-                winner = result.scalar_one_or_none()
-                if winner is None:
+                .returning(Entity.id)
+            )
+            inserted_id = (await session.execute(stmt)).scalar_one_or_none()
+
+            if inserted_id is not None:
+                entity = await session.scalar(select(Entity).where(Entity.id == inserted_id))
+                if entity is None:
                     raise ValueError(
-                        f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
+                        f"Entity row {inserted_id} vanished after INSERT — concurrent delete during entity_add"
                     )
-                entity = winner
-            return entity
+                return entity
+
+            logger.info(
+                "Entity dedup race: '%s' already exists, re-selecting",
+                data.get("canonical_name"),
+            )
+            # ``_fleet_scope`` rather than a NULL branch: the index groups
+            # ``COALESCE(fleet_id, '')``, so the row that just won the conflict
+            # may be stored NULL while the caller passed ``""`` (or the
+            # reverse). Branching on NULL-ness would miss it and raise the
+            # ValueError below for a row that is plainly there.
+            #
+            # ``.with_for_update()`` serialises against a concurrent
+            # ``entity_delete`` — we either see the live row or wait for that
+            # delete to commit, closing the window where the row was visible to
+            # ON CONFLICT and gone by the time we read it.
+            winner = await session.scalar(
+                select(Entity)
+                .where(
+                    Entity.tenant_id == data["tenant_id"],
+                    Entity.entity_type == data["entity_type"],
+                    func.lower(Entity.canonical_name) == data["canonical_name"].lower(),
+                    _fleet_scope(Entity.fleet_id, data.get("fleet_id")),
+                )
+                .with_for_update()
+            )
+            if winner is None:
+                raise ValueError(
+                    f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
+                )
+            return winner
 
     async def entity_update(self, entity_id: UUID, tenant_id: str, data: dict) -> Entity | None:
         """Update an existing entity by ID, scoped to its home tenant.
@@ -7381,6 +7547,25 @@ class PostgresService:
                 .where(
                     MemoryEntityLink.entity_id.in_(entity_ids),
                     _link_within_tenant(tenant_id),
+                    # Soft-deleted memories are excluded HERE rather than in
+                    # ``_link_within_tenant``, which answers a different
+                    # question: that predicate is about TENANCY (may this
+                    # caller see this link at all), and liveness is a separate
+                    # axis — folding one into the other would silently change
+                    # its two other callers.
+                    #
+                    # The count is rendered beside ``entity_get_linked_memories``,
+                    # which filters ``Memory.deleted_at IS NULL`` and says so in
+                    # its own docstring. Without this the two endpoints disagree
+                    # about the same entity: the list reports a memory_count of
+                    # 5 while /with-memories returns 3, and the gap is exactly
+                    # the memories the caller deleted.
+                    select(Memory.id)
+                    .where(
+                        Memory.id == MemoryEntityLink.memory_id,
+                        Memory.deleted_at.is_(None),
+                    )
+                    .exists(),
                 )
                 .group_by(MemoryEntityLink.entity_id)
             )
@@ -11035,7 +11220,19 @@ class PostgresService:
         *,
         tenant_id: str,
         node_name: str,
-    ) -> UUID:
+    ) -> UUID | None:
+        """The node's id, or ``None`` when this tenant has no such node.
+
+        ``scalar_one_or_none`` rather than ``scalar_one``: an unknown name is
+        an ordinary answer to a lookup, not a server fault. Under
+        ``scalar_one`` it raised ``NoResultFound`` straight out of all four
+        callers in ``routers/fleet.py``, so every by-name endpoint answered a
+        typo with a 500 — and the ``if node is None: 404`` two lines below two
+        of those calls could never run, because nothing returned to compare.
+        ``GET /commands`` had already been written against the None-returning
+        contract this now actually provides (``if node_id is None and
+        node_name``).
+        """
         async with get_session() as session:
             result = await session.execute(
                 select(FleetNode.id).where(
@@ -11043,7 +11240,7 @@ class PostgresService:
                     FleetNode.node_name == node_name,
                 )
             )
-            return result.scalar_one()
+            return result.scalar_one_or_none()
 
     async def fleet_get_node_by_id(
         self,
@@ -11096,6 +11293,35 @@ class PostgresService:
                 )
             )
             return result.scalar() or 0
+
+    async def fleet_delete_node(
+        self,
+        *,
+        tenant_id: str,
+        node_id: UUID,
+    ) -> bool:
+        """Delete one node and its commands. True when the node existed.
+
+        Commands first: ``fleet_commands.node_id`` carries an FK to
+        ``fleet_nodes.id``, so the reverse order fails on the constraint.
+        Same ordering ``fleet_delete`` uses for the whole-fleet case, and one
+        session so a crash between the two cannot leave commands orphaned
+        against a node that is gone.
+        """
+        async with get_session() as session:
+            await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id == node_id))
+            result = await session.execute(
+                _table(FleetNode)
+                .delete()
+                .where(
+                    FleetNode.tenant_id == tenant_id,
+                    FleetNode.id == node_id,
+                )
+            )
+            # rowcount lives on CursorResult; the async execute is typed
+            # as returning the base Result. Same ignore as the other
+            # delete/update paths in this file.
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def fleet_get_node_ids_for_fleet(
         self,
@@ -11517,19 +11743,54 @@ class PostgresService:
             head.last_hash = prev_hash
             head.updated_at = now
 
-    async def audit_verify_chain(self, tenant_id: str, *, limit: int = 100_000) -> dict:
+    async def audit_verify_chain(self, tenant_id: str, *, limit: int = 100_000, start_seq: int = 1) -> dict:
         """Walk a tenant's hash chain in ``seq`` order and verify integrity.
 
         Recomputes each ``event_hash`` and checks ``prev_hash`` linkage +
         genesis; stops at and reports the first broken link (everything
         after it is untrustworthy). A final tail-check against
         ``audit_chain_head`` catches rows deleted off the END of the chain
-        (a forward walk alone can't see a missing tail). ``limit`` bounds
-        the walk — when hit, the tail-check is skipped and ``truncated`` is
-        set so the caller knows to paginate.
+        (a forward walk alone can't see a missing tail).
+
+        ``limit`` bounds one window and ``start_seq`` resumes the next: when a
+        result comes back ``truncated``, its ``next_seq`` is the ``start_seq``
+        for the following call. This used to say ``truncated`` was set "so the
+        caller knows to paginate" while offering nothing to paginate WITH —
+        there was no cursor parameter, so a chain longer than the route's 500k
+        cap could never have its tail verified at all.
+
+        A walk of every contiguous window is NOT equivalent to one full pass,
+        and the difference is worth stating precisely because it is easy to
+        assume otherwise.
+
+        What DOES carry across windows is the linkage. A window above genesis
+        seeds ``expected_prev`` from row ``start_seq - 1``'s stored
+        ``event_hash`` rather than recomputing it, but the previous window
+        recomputed that row's hash, so the chain holds transitively — and the
+        terminal (empty) window anchors its tail check to that same seed, so a
+        deleted tail is still caught no matter how the chain length divides by
+        ``limit``.
+
+        What does NOT carry is atomicity. One pass reads every row in a single
+        REPEATABLE READ snapshot (below); a walk is N transactions across N
+        snapshots, and under ``read_database_url`` possibly N replicas at
+        differing lag. So a walk proves each window was intact WHEN IT WAS
+        READ, not that the chain was intact at any single instant. An attacker
+        with write access can therefore tamper with a region the cursor has
+        already passed and have every window come back valid. That is a
+        detection DELAY, not permanent evasion — the next verification that
+        covers the region catches it — but a walk is the weaker statement and
+        should not be reported as "chain verified" the way a full pass can be.
+
+        Contiguity is also entirely the caller's obligation and is not
+        enforced here: ``start_seq`` is a plain integer, not an opaque cursor
+        bound to the previous window's ``next_seq``, and nothing records that a
+        caller ever started from genesis. Verifying one window in isolation
+        proves only that it is internally consistent and correctly attached to
+        a row it did not itself check.
         """
         async with get_read_session() as session:
-            # Pin one snapshot across BOTH reads (rows + head). Under READ
+            # Pin one snapshot across ALL THREE reads (rows + seed + head). Under READ
             # COMMITTED each statement gets its own snapshot, so a concurrent
             # same-tenant insert committing between the two reads makes the head
             # look one seq ahead of the fetched rows and fires a FALSE
@@ -11541,7 +11802,11 @@ class PostgresService:
                 (
                     await session.execute(
                         select(AuditLog)
-                        .where(AuditLog.tenant_id == tenant_id, AuditLog.seq.isnot(None))
+                        .where(
+                            AuditLog.tenant_id == tenant_id,
+                            AuditLog.seq.isnot(None),
+                            AuditLog.seq >= start_seq,
+                        )
                         .order_by(AuditLog.seq.asc())
                         .limit(limit)
                     )
@@ -11549,6 +11814,23 @@ class PostgresService:
                 .scalars()
                 .all()
             )
+            # The link this window attaches to. Read inside the same pinned
+            # snapshot as the rows, so a concurrent write cannot make the seed
+            # and the window disagree. A missing row here means the caller
+            # asked to resume from a seq whose predecessor does not exist —
+            # left as ``None`` and reported below rather than silently
+            # verifying against genesis, which would accept a chain whose head
+            # had been cut off exactly at ``start_seq``.
+            seed_prev: bytes | None = GENESIS_PREV_HASH
+            if start_seq > 1:
+                seed_prev = (
+                    await session.execute(
+                        select(AuditLog.event_hash).where(
+                            AuditLog.tenant_id == tenant_id,
+                            AuditLog.seq == start_seq - 1,
+                        )
+                    )
+                ).scalar_one_or_none()
             head = (
                 await session.execute(select(AuditChainHead).where(AuditChainHead.tenant_id == tenant_id))
             ).scalar_one_or_none()
@@ -11557,24 +11839,50 @@ class PostgresService:
         # cover up to `limit` (≤ 500k) rows — offload it so it doesn't block the
         # event loop and starve concurrent requests. The rows/head are already
         # fully loaded, so the thread only touches in-memory attributes.
-        return await asyncio.to_thread(_verify_audit_chain_rows, tenant_id, rows, head, limit)
+        return await asyncio.to_thread(
+            _verify_audit_chain_rows, tenant_id, rows, head, limit, start_seq, seed_prev
+        )
 
     async def audit_list_by_tenant(
         self,
         tenant_id: str,
         *,
         limit: int = 50,
+        offset: int = 0,
+        action: str | None = None,
+        resource_type: str | None = None,
         since: datetime | None = None,
     ) -> list[AuditLog]:
+        """One page of a tenant's audit log, newest first.
+
+        Every filter is applied in SQL, and that is the whole point of the
+        signature. ``action`` / ``resource_type`` / ``offset`` used to be
+        applied by the route, in Python, to the rows this method had ALREADY
+        truncated with ``LIMIT`` — so a filter could only ever match within the
+        newest ``limit`` rows, and returned ``[]`` when the matches were older
+        than that however many existed. ``offset`` was worse: slicing a list
+        that was itself capped at ``limit`` made page 2 (``offset=limit``)
+        empty for every tenant, always, so the endpoint could not paginate at
+        all.
+
+        ``(created_at DESC, id)`` rather than ``created_at`` alone: the column
+        is not unique, and a stable tiebreak is what makes OFFSET paging
+        coherent — without it two rows sharing a timestamp can swap between
+        pages and be served twice or skipped.
+        """
         async with get_session() as session:
-            q = (
-                select(AuditLog)
-                .where(AuditLog.tenant_id == tenant_id)
-                .order_by(AuditLog.created_at.desc())
-                .limit(limit)
-            )
+            # Filters first, then order/offset/limit. SQLAlchemy builds the same
+            # statement either way — WHERE always precedes LIMIT in the emitted
+            # SQL — but written in this order the code reads the way it runs,
+            # which is the whole point of the change above it.
+            q = select(AuditLog).where(AuditLog.tenant_id == tenant_id)
             if since:
                 q = q.where(AuditLog.created_at > since)
+            if action:
+                q = q.where(AuditLog.action == action)
+            if resource_type:
+                q = q.where(AuditLog.resource_type == resource_type)
+            q = q.order_by(AuditLog.created_at.desc(), AuditLog.id).offset(offset).limit(limit)
             result = await session.execute(q)
             return list(result.scalars().all())
 
@@ -12019,13 +12327,67 @@ class PostgresService:
         keys / leaf types / governance enums / cron before calling.
         """
         async with get_session() as session:
-            result = await session.execute(
-                select(OrganizationSettings.settings)
-                .where(OrganizationSettings.org_id == org_id)
-                .with_for_update()
-            )
-            current_row = result.scalar_one_or_none()
-            current: dict = current_row if isinstance(current_row, dict) else {}
+
+            async def _locked_overrides() -> dict | None:
+                """The row's overrides under ``FOR UPDATE``; ``None`` if absent."""
+                row = (
+                    await session.execute(
+                        select(OrganizationSettings.settings)
+                        .where(OrganizationSettings.org_id == org_id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                return row if isinstance(row, dict) else ({} if row is not None else None)
+
+            async def _write_audit(diff: dict) -> None:
+                await session.execute(
+                    pg_insert(OrganizationSettingsAudit).values(
+                        org_id=org_id, changed_by=changed_by, diff=diff
+                    )
+                )
+
+            current = await _locked_overrides()
+
+            if current is None:
+                # No row yet, so the FOR UPDATE above locked NOTHING — that gap
+                # is the entire first-time race, and it used to be papered over
+                # with ``ON CONFLICT DO UPDATE SET settings = settings ||
+                # EXCLUDED.settings``. JSONB ``||`` is SHALLOW, so that was only
+                # safe under the claim that top-level keys are independent — true
+                # of two writers touching DIFFERENT namespaces, and false of the
+                # case that actually happens: two first-time writers under the
+                # SAME namespace, where ``||`` replaces the whole nested object
+                # and drops the loser's sub-keys. It also disagreed with
+                # ``deep_merge`` directly above it, so the row's contents
+                # depended on whether the write took the insert or the conflict
+                # path. Both writers were then told ``changed: True`` and handed
+                # back their own ``merged`` — a success response quoting a value
+                # that was never stored, plus an audit row for a diff that did
+                # not survive.
+                #
+                # So: claim the row instead of merging in SQL. One writer wins
+                # the INSERT; every other writer falls through to a lock that now
+                # has a row to hold and redoes the read-merge-write against what
+                # is actually stored, through the same ``deep_merge`` as every
+                # other path.
+                seed_diff = diff_settings({}, new_settings)
+                if not seed_diff:
+                    return {"settings": {}, "changed": False}
+                seeded = deep_merge({}, new_settings)
+                claimed = (
+                    await session.execute(
+                        pg_insert(OrganizationSettings)
+                        .values(org_id=org_id, settings=seeded)
+                        .on_conflict_do_nothing(index_elements=["org_id"])
+                        .returning(OrganizationSettings.org_id)
+                    )
+                ).scalar_one_or_none()
+                if claimed is not None:
+                    await _write_audit(seed_diff)
+                    return {"settings": seeded, "changed": True}
+                # Lost the claim. The winner's row exists and is committed (our
+                # INSERT blocked on their uncommitted one), so this lock holds.
+                current = await _locked_overrides() or {}
 
             diff = diff_settings(current, new_settings)
             if not diff:
@@ -12033,25 +12395,12 @@ class PostgresService:
                 return {"settings": current, "changed": False}
 
             merged = deep_merge(current, new_settings)
-
-            # FOR UPDATE serialises writes once the row exists. Concurrent
-            # first-time inserts (no row yet) use JSONB || to merge at the DB
-            # level so two racing inserts don't silently overwrite each other;
-            # the shallow || is safe because top-level schema keys (enrichment,
-            # recall, …) are independent.
-            upsert = pg_insert(OrganizationSettings).values(org_id=org_id, settings=merged)
             await session.execute(
-                upsert.on_conflict_do_update(
-                    index_elements=["org_id"],
-                    set_={
-                        "settings": text("organization_settings.settings || EXCLUDED.settings"),
-                        "updated_at": func.now(),
-                    },
-                )
+                sql_update(OrganizationSettings)
+                .where(OrganizationSettings.org_id == org_id)
+                .values(settings=merged, updated_at=func.now())
             )
-            await session.execute(
-                pg_insert(OrganizationSettingsAudit).values(org_id=org_id, changed_by=changed_by, diff=diff)
-            )
+            await _write_audit(diff)
             return {"settings": merged, "changed": True}
 
     # ══════════════════════════════════════════════════════════════════════
@@ -12283,14 +12632,43 @@ class PostgresService:
     async def report_get_latest_completed(
         self,
         tenant_id: str,
+        fleet_id: str | None = None,
     ) -> CrystallizationReport | None:
+        """The most recently STARTED completed report, optionally one fleet's.
+
+        ``fleet_id`` was accepted by ``GET /reports/latest`` and dropped on the
+        floor, which made this the wrong clock for the only caller that passes
+        it. ``_type_ii_watermark`` uses the returned ``completed_at`` to skip
+        subjects with nothing new since the last sweep; handed a *different*
+        fleet's more recent run, a fleet whose own sweep is older skips
+        subjects that did change. Its own docstring calls that the
+        unrecoverable direction.
+
+        Absent ``fleet_id`` means ANY fleet, deliberately unlike the sibling
+        ``report_find_running``, where absent means ``fleet_id IS NULL``. The
+        two answer different questions: that one asks "is a run in flight for
+        exactly this scope", where the tenant-wide run is its own scope and
+        must not be blocked by a fleet's. This one backs
+        ``GET /crystallize/latest``, a user-facing "show me my most recent
+        report" that has no fleet concept in its API at all — filtering to
+        ``IS NULL`` here would 404 every tenant that only ever runs
+        fleet-scoped crystallization.
+
+        That leaves one gap this cannot close from the server side: a
+        tenant-wide run (``fleet_id=None``) still reads across fleets.
+        ``_type_ii_watermark`` closes it by discarding a report whose scope is
+        not its own — see there.
+        """
+        report_filter = [
+            CrystallizationReport.tenant_id == tenant_id,
+            CrystallizationReport.status == "completed",
+        ]
+        if fleet_id is not None:
+            report_filter.append(CrystallizationReport.fleet_id == fleet_id)
         async with get_session() as session:
             result = await session.execute(
                 select(CrystallizationReport)
-                .where(
-                    CrystallizationReport.tenant_id == tenant_id,
-                    CrystallizationReport.status == "completed",
-                )
+                .where(*report_filter)
                 .order_by(CrystallizationReport.started_at.desc())
                 .limit(1)
             )

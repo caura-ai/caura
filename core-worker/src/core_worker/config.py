@@ -99,9 +99,6 @@ class Settings(BaseSettings):
             )
         return v
 
-    # Cloud Run port.
-    port: int = 8080
-
 
 # Module-level singleton — matches core-api's ``core_api.config.settings``
 # pattern. Modules that need a config value should ``from core_worker.config

@@ -64,7 +64,21 @@ async def _fire_fanout(action: str) -> None:
             },
         )
         return
-    body = resp.json()
+    try:
+        body = resp.json()
+    except ValueError:
+        # A 2xx whose body is not JSON — an intermediary's HTML success page,
+        # a truncated response. The fanout ALREADY FIRED; core-api dispatched
+        # the work before writing this body. Raising here would carry that out
+        # of ``_fire_fanout``, out of the tick, and be logged as a failed cron
+        # tick for work that succeeded — and the scheduler would fan out again
+        # on the next tick. This function's docstring says it does not raise;
+        # this is the one path that did.
+        logger.exception(
+            "lifecycle fanout returned a non-JSON 2xx; fanout fired but its result is unreadable",
+            extra={"action": action, "status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
     # ``failed`` is the count of orgs whose ``audit_begin + publish`` pair
     # raised; core-api logs each one and keeps going, so the fanout still
     # returns 200. Logging only ``published`` made a partial sweep read as a

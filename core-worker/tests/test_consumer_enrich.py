@@ -845,3 +845,135 @@ async def test_a_valid_reference_datetime_still_reaches_the_enricher(monkeypatch
     ref = captured["reference_datetime"]
     assert ref is not None, "reference_datetime was dropped"
     assert (ref.year, ref.month, ref.day) == (2026, 9, 2)
+
+
+# ---------------------------------------------------------------------------
+# C25 — the caller/platform metadata boundary on the deferred path.
+#
+# ``agent_provided_fields`` covers ORM COLUMNS only, so nothing told this worker
+# that ``metadata["summary"]`` was the caller's own, and the row's merged
+# metadata cannot answer it — a caller's summary and a platform-written one are
+# the same key. So the worker wrote the LLM's summary over the caller's on every
+# deferred enrichment, while the synchronous path had honoured the boundary
+# since C25. ``caller_owned_metadata_keys`` carries the decision core-api makes.
+#
+# Note the asymmetry with ``tags`` above: ``tags`` is unrouted outright (the LLM
+# produces nothing for it since CAURA-719, so there is never anything worth
+# writing), whereas a ``summary`` IS real output — it just must not displace the
+# caller's. Different fixes because they are different problems.
+# ---------------------------------------------------------------------------
+
+
+def test_a_caller_owned_summary_keeps_its_row_value():
+    """The legacy top-level key is what the caller reads back as their own
+    metadata, so that is the one the worker must not touch."""
+    _, meta, _ = _homes(EnrichmentResult(summary="PLATFORM", llm_ms=42))
+    assert meta["summary"] == "PLATFORM"  # control: not caller-owned
+
+    patch = consumer._build_patch(
+        EnrichmentResult(summary="PLATFORM", llm_ms=42),
+        None,
+        ["summary"],
+    )
+    mp = patch["metadata_patch"]
+    assert "summary" not in mp, "the caller's own metadata['summary'] was overwritten"
+    assert mp["_system"]["summary"] == "PLATFORM", (
+        "the platform's summary must still be recorded under _system — that is "
+        "what extract_system_metadata reads back as the platform view"
+    )
+
+
+def test_a_caller_owned_key_does_not_pin_the_others():
+    """Ownership is per key. Pinning ``summary`` must not suppress unrelated
+    platform metadata, or the fix would trade one silent loss for another."""
+    patch = consumer._build_patch(
+        EnrichmentResult(summary="PLATFORM", retrieval_hint="rh", llm_ms=42),
+        None,
+        ["summary"],
+    )
+    mp = patch["metadata_patch"]
+    assert "summary" not in mp
+    assert mp["retrieval_hint"] == "rh"
+    assert mp["_system"]["retrieval_hint"] == "rh"
+
+
+def test_no_caller_keys_writes_both_homes_as_before():
+    """The boundary must not become "never write summary": with no caller
+    claim, the legacy mirror is still how a C25-unaware reader sees it."""
+    for keys in (None, []):
+        mp = consumer._build_patch(EnrichmentResult(summary="PLATFORM", llm_ms=42), None, keys)[
+            "metadata_patch"
+        ]
+        assert mp["summary"] == "PLATFORM", f"regressed for caller keys {keys!r}"
+        assert mp["_system"]["summary"] == "PLATFORM"
+
+
+def test_a_platform_key_cannot_be_suppressed_from_the_wire():
+    """The worker must intersect the payload's list with the keys that are
+    ACTUALLY caller-ownable, not trust it wholesale.
+
+    ``contains_pii`` is chosen deliberately: it is routed metadata (unlike
+    ``enrichment_pending``, which is pre-seeded outside the loop and so proves
+    nothing here), and ``governance_remediation`` reads it from the TOP LEVEL
+    only — ``md.get("contains_pii")``, never ``_system``. A payload naming it
+    as caller-owned would therefore write the verdict to ``_system`` alone and
+    silently disable the DROP / KEEP_PRIVATE remediation, while an auditor
+    reading ``system_metadata`` still sees PII flagged. That is exactly the
+    forgery ``PLATFORM_ONLY_KEYS`` exists to prevent.
+
+    This is NOT symmetric with ``agent_provided_fields``, which pins only ORM
+    columns the caller could have set directly at write time — suppressing one
+    of those grants no capability the caller lacked. Suppressing a governance
+    verdict does.
+    """
+    mp = consumer._build_patch(
+        EnrichmentResult(contains_pii=True, pii_types=["email"], llm_ms=42),
+        None,
+        ["contains_pii", "business_relevance"],
+    )["metadata_patch"]
+    assert mp["contains_pii"] is True, (
+        "a non-caller-ownable key was suppressed from the legacy top-level "
+        "position that governance_remediation reads"
+    )
+    assert mp["business_relevance"] == "business"
+
+
+def test_the_enrichment_pending_clear_is_never_suppressed():
+    """Pre-seeded outside the routing loop, so no payload can reach it. The
+    fast-mode write path polls on this key."""
+    mp = consumer._build_patch(
+        EnrichmentResult(summary="s", llm_ms=42),
+        None,
+        ["enrichment_pending", "summary"],
+    )["metadata_patch"]
+    assert mp["enrichment_pending"] is False
+    assert mp["_system"]["enrichment_pending"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_handler_forwards_the_caller_keys_from_the_event(monkeypatch, mock_storage_client):
+    """End-to-end: the gate is useless if the payload's list never reaches
+    ``_build_patch``."""
+    consumer.configure(mock_storage_client)
+    patch_call = AsyncMock(return_value=None)
+    monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
+
+    async def _enrich(content, tenant_config=None, *, reference_datetime=None):
+        return EnrichmentResult(title="x", summary="PLATFORM", llm_ms=42)
+
+    monkeypatch.setattr(consumer, "enrich_memory", AsyncMock(side_effect=_enrich))
+
+    await consumer.handle_enrich_request(
+        _make_event(
+            {
+                "memory_id": str(uuid4()),
+                "tenant_id": "tenant-A",
+                "content": "anything",
+                "caller_owned_metadata_keys": ["summary"],
+            }
+        )
+    )
+
+    mp = patch_call.await_args.kwargs["fields"]["metadata_patch"]
+    assert "summary" not in mp
+    assert mp["_system"]["summary"] == "PLATFORM"

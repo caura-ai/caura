@@ -10,7 +10,7 @@ third-party loggers once they're all imported.
 
 Lifespan ordering:
 1. Re-route third-party loggers (uvicorn / scheduler) onto the JSON handler.
-2. If ``settings.standalone``: skip scheduler entirely. The service runs
+2. If ``settings.is_standalone``: skip scheduler entirely. The service runs
    as a no-op; OSS standalone deployments should not deploy this image
    at all, but the flag is a defensive short-circuit.
 3. Otherwise: register cron jobs via ``scheduler.register(...)`` and call
@@ -150,7 +150,9 @@ def _register_scheduled_tasks() -> None:
         "lifecycle-entity-link",
         24 * 3600,
         run_entity_link_tick,
-        delay_provider=_daily_at("lifecycle_pipeline_run_at_hour"),
+        # Its OWN hour, not the pipeline hour crystallize uses — see
+        # ``lifecycle_entity_link_run_at_hour`` for why the two were split.
+        delay_provider=_daily_at("lifecycle_entity_link_run_at_hour"),
     )
     scheduler.register(
         "lifecycle-insights",
@@ -228,10 +230,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info(
         "Starting core-operations",
-        extra={"environment": settings.environment, "standalone": settings.standalone},
+        extra={"environment": settings.environment, "standalone": settings.is_standalone},
     )
 
-    if settings.standalone:
+    if settings.is_standalone:
         # OSS standalone deployments shouldn't deploy this image at all.
         # If we're here it's a misconfiguration — escalate so it shows up
         # in alerts rather than silently consuming a Cloud Run slot.

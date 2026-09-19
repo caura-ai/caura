@@ -1,9 +1,7 @@
 """Redis cache client with graceful fallback to in-memory."""
 
-import json
 import logging
 import time
-from typing import Any
 
 from redis.asyncio import from_url
 
@@ -113,19 +111,6 @@ async def cache_set(key: str, value: str, ttl: int = 120) -> bool:
         return False
 
 
-async def cache_delete(key: str) -> bool:
-    """Delete a key from Redis. Returns True on success."""
-    r = await _get_redis()
-    if r is None:
-        return False
-    try:
-        await r.delete(key)
-        return True
-    except Exception:
-        logger.debug("cache_delete failed for key=%s", key, exc_info=True)
-        return False
-
-
 # Release-if-owner. GET-then-DEL from the client would be two round trips with a
 # window in between, which is the whole bug this guards against; the compare and
 # the delete have to be one atomic step, so they run server-side.
@@ -185,25 +170,6 @@ async def cache_set_nx(key: str, value: str, ttl: int) -> bool:
 
 
 # ── JSON helpers ──
-
-
-async def cache_get_json(key: str) -> Any | None:
-    """Get and deserialize a JSON value."""
-    raw = await cache_get(key)
-    if raw is None:
-        return None
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
-async def cache_set_json(key: str, value: Any, ttl: int = 120) -> bool:
-    """Serialize and set a JSON value."""
-    try:
-        return await cache_set(key, json.dumps(value), ttl)
-    except (TypeError, ValueError):
-        return False
 
 
 # ── Health check ──

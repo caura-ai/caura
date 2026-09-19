@@ -471,9 +471,55 @@ def _build_tenant_config(request: MemoryEnrichRequest) -> SimpleNamespace | None
     )
 
 
+# The keys a caller may own, mirroring
+# ``core_api.services.system_metadata.CALLER_OWNABLE_KEYS``. Duplicated because
+# this worker cannot import core-api; ``tests/test_c25_caller_owned_metadata_all_paths.py``
+# asserts the two sets are equal, in the one pytest root that can import both.
+#
+# Load-bearing, not decoration. ``_record_metadata`` intersects against it so a
+# payload cannot suppress the legacy write for a key outside this set. Every
+# other routed metadata field is platform-owned, and some are read from the
+# TOP LEVEL only — ``governance_remediation`` does ``md.get("contains_pii")``
+# and ``md.get("business_relevance")``, never ``_system``. Honouring an
+# arbitrary list would let a malformed or hostile payload write a PII verdict
+# to ``_system`` alone, leaving the DROP / KEEP_PRIVATE remediation silently
+# disabled while an auditor reading ``system_metadata`` still sees it flagged.
+#
+# This is NOT symmetric with ``agent_provided_fields``, which pins only ORM
+# columns the caller could have set directly at write time — suppressing one of
+# those grants no capability the caller lacked. Suppressing a verdict does.
+_CALLER_OWNABLE_KEYS: frozenset[str] = frozenset({"summary", "tags"})
+
+
+def _record_metadata(
+    metadata_patch: dict,
+    field: str,
+    value: object,
+    caller_owned: frozenset[str],
+) -> None:
+    """Write one platform metadata value, honouring the C25 caller boundary.
+
+    A port of ``core_api.services.system_metadata.set_system_value`` — the
+    canonical one lives in core-api, which this worker does not import. The
+    platform's value ALWAYS lands in ``_system``; the legacy top-level key is
+    mirrored unless the caller owns it. Both halves matter: ``_system`` is what
+    ``extract_system_metadata`` reads back as the platform view, and the legacy
+    key is what the caller reads back as their own metadata. Writing only one
+    would break a different reader than the bug this closes.
+
+    ``setdefault`` on ``_system`` rather than a bare subscript, matching the
+    canonical implementation, so this does not depend on the caller having
+    pre-seeded the key.
+    """
+    metadata_patch.setdefault("_system", {})[field] = value
+    if not (field in _CALLER_OWNABLE_KEYS and field in caller_owned):
+        metadata_patch[field] = value
+
+
 def _build_patch(
     result: EnrichmentResult,
     agent_provided_fields: list[str] | None = None,
+    caller_owned_metadata_keys: list[str] | None = None,
 ) -> dict:
     """Translate an ``EnrichmentResult`` into the storage PATCH body.
 
@@ -504,6 +550,10 @@ def _build_patch(
     until 2026-04-26 — see PR <CAURA-595-ts-valid-iso-coercion>.
     """
     skip = frozenset(agent_provided_fields or ())
+    # core-api narrows this to ``CALLER_OWNABLE_KEYS`` before publishing;
+    # ``_record_metadata`` narrows it AGAIN on arrival rather than trusting the
+    # payload, for the reason recorded at ``_CALLER_OWNABLE_KEYS``.
+    caller_owned = frozenset(caller_owned_metadata_keys or ())
     dump = result.model_dump(mode="json", exclude_none=True)
 
     # ``ts_valid_*`` are semantically meaningful as ``None`` ("this
@@ -578,8 +628,7 @@ def _build_patch(
             # same one ``ts_valid_*`` uses; ``fake_enrich`` hard-codes
             # ``llm_ms=0`` so the proxy is reliable.
             if result.llm_ms > 0 and value is not None:
-                metadata_patch[field] = value
-                metadata_patch["_system"][field] = value
+                _record_metadata(metadata_patch, field, value, caller_owned)
             continue
         # Other metadata fields: drop the specific defaults that carry
         # no information — heuristic-fallback ``"summary": ""``,
@@ -588,8 +637,7 @@ def _build_patch(
         # ``dict``-typed field isn't accidentally silenced.
         if value is None or value in (False, 0, "", []):
             continue
-        metadata_patch[field] = value
-        metadata_patch["_system"][field] = value
+        _record_metadata(metadata_patch, field, value, caller_owned)
     if metadata_patch:
         patch["metadata_patch"] = metadata_patch
 
@@ -644,7 +692,11 @@ async def handle_enrich_request(event: Event) -> None:
         reference_datetime=request.reference_datetime,
     )
 
-    patch = _build_patch(result, request.agent_provided_fields)
+    patch = _build_patch(
+        result,
+        request.agent_provided_fields,
+        request.caller_owned_metadata_keys,
+    )
 
     # The sync/async gap, now HALF closed. ``memory_service.py`` fans
     # ``atomic_facts`` out into child memories on the synchronous path; this

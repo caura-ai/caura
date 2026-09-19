@@ -4,6 +4,7 @@ from typing import Any, Literal, Self
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
+from common.embedding._registry import DEFAULT_LOCAL_EMBEDDING_MODEL
 from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
 from common.storage_auth import read_shared_secret_file
 
@@ -55,9 +56,19 @@ class Settings(BaseSettings):
     embedding_provider: str = DEFAULT_EMBEDDING_PROVIDER
     # C38 — model for ``embedding_provider="local"`` (sentence-transformers).
     # MUST emit VECTOR_DIM dimensions; the provider now refuses a mismatch at
-    # load rather than failing later at INSERT. Maps to LOCAL_EMBEDDING_MODEL,
-    # which is what common/embedding/_registry.py reads.
-    local_embedding_model: str = "BAAI/bge-large-en-v1.5"
+    # load rather than failing later at INSERT.
+    #
+    # DECLARED, not read: ``common/embedding/_registry.py`` reads
+    # ``LOCAL_EMBEDDING_MODEL`` from ``os.environ`` directly, because that
+    # registry is shared with core-worker and must not import a service's
+    # config. This field exists so the variable appears in core-api's own
+    # settings surface; nothing consults the attribute.
+    #
+    # Default from the shared constant for the reason ``embedding_provider``
+    # above gives: two copies of one literal is how they disagreed last time.
+    # ``test_every_core_api_setting_is_read_by_something`` names this field as
+    # the one declared-but-unread setting, with that distinction.
+    local_embedding_model: str = DEFAULT_LOCAL_EMBEDDING_MODEL
     # Per-deploy control for where embedding + LLM enrichment run.
     #
     # - ``"inline"`` (default): both embed + enrich run on the request
@@ -179,6 +190,20 @@ class Settings(BaseSettings):
     # the 300s unconfigured default before the platform service was
     # pinned at 120s).
     bulk_request_timeout_seconds: float = 90.0
+    # Cross-link discovery budget, and the same race the bulk cap above
+    # exists to settle. ``POST /entities/discover-cross-links`` had NO
+    # application-level cap, so its only limit was the writer's 120s Cloud
+    # Run request timeout -- EQUAL to the storage client's 120s httpx read.
+    # The storage client's own docstring calls that out: "Equal values would
+    # 50/50 race." Whichever fired first, the caller learned nothing; the
+    # 2026-09-18 staging failure recorded exactly `ReadTimeout('')`, an empty
+    # string where the reason should be, ten times over.
+    #
+    # 100s sits below BOTH 120s limits, so this cancellation wins and the
+    # failure names the tenant and the budget it exceeded. It does not make
+    # slow runs succeed -- the smaller CROSS_LINK_MEMORY_BATCH_SIZE and the
+    # entity-link hour split do that. It makes them legible.
+    cross_link_request_timeout_seconds: float = 100.0
     # Interview-submit budget (Interviewer Phase 1). The route runs the
     # full map-reduce LLM interview SYNCHRONOUSLY — a realistic window
     # (400 events, ~4 chunks) measured ~63s in the real-LLM pilot, so the
@@ -395,10 +420,6 @@ class Settings(BaseSettings):
     # built (the A58 spike could not be scored because its verdicts only went
     # to logs). Default off.
     type_ii_materializer_shadow: bool = False
-    crystallizer_enabled: bool = True
-    crystallizer_stale_days: int = 180
-    crystallizer_dedup_sample_size: int = 1000
-    crystallizer_dedup_threshold: float = 0.95
     core_storage_api_url: str = "http://localhost:8002"
     core_storage_shared_secret: SecretStr = Field(default=SecretStr(""), repr=False, exclude=True)
     core_storage_shared_secret_file: str = ""
@@ -422,13 +443,6 @@ class Settings(BaseSettings):
     public_api_url: str = ""
     settings_encryption_key: str = ""  # Required in production (Fernet key)
     jwt_secret: str = "change-me-in-production"  # Required in production
-    paddle_client_token: str | None = None
-    paddle_environment: str = "sandbox"
-    paddle_webhook_secret: str | None = None
-    paddle_pro_monthly_price_id: str | None = None
-    paddle_pro_annual_price_id: str | None = None
-    paddle_business_monthly_price_id: str | None = None
-    paddle_business_annual_price_id: str | None = None
     use_stm: bool = False
     # D13 — meter /recall and MCP caura_recall against the "recall" counter
     # instead of "search". Off by default because the recalls counter feeds
@@ -477,7 +491,6 @@ class Settings(BaseSettings):
     stm_backend: str = "memory"  # memory | redis
     stm_notes_ttl: int = 86400  # 24h
     stm_bulletin_ttl: int = 172800  # 48h
-    payment_provider: str = "paddle"
 
     # Platform default providers — Caura's own API keys for tenants without credentials.
     # Set these in enterprise deployments; leave empty for OSS self-hosted.
@@ -540,6 +553,7 @@ class Settings(BaseSettings):
             BULK_STRONG_EMBED_TIMEOUT_SECONDS,
             PROBE_TIMEOUT_SECONDS,
             STORAGE_CONNECT_TIMEOUT_SECONDS,
+            STORAGE_READ_TIMEOUT_SECONDS,
         )
 
         if self.request_timeout_seconds < BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS:
@@ -575,6 +589,34 @@ class Settings(BaseSettings):
                 f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
                 "timeout (nginx proxy_read_timeout / Cloud Run) and update "
                 "the constant before raising this budget."
+            )
+        binding_ceiling = min(PLATFORM_REQUEST_CEILING_SECONDS, STORAGE_READ_TIMEOUT_SECONDS)
+        if self.cross_link_request_timeout_seconds >= binding_ceiling:
+            # ``>=``, not ``>`` as the interview check above uses, and the
+            # difference is the whole point of this budget rather than a
+            # slip. That budget only has to FIT under the ceiling; this one
+            # has to WIN against it. Cross-link discovery is an outbound call
+            # this process cancels itself, so at equality the two timers race
+            # -- and that race is the defect being fixed: the storage client's
+            # own docstring records the same lesson from CAURA-602 ("equal
+            # values would 50/50 race"), and on 2026-09-18 a staging batch lost
+            # it fifty times, each one surfacing as ``ReadTimeout('')`` with no
+            # tenant, no budget and nothing to act on.
+            #
+            # ``min`` because the budget must fire before whichever ceiling
+            # binds first. The two are equal today; if one is raised alone the
+            # check follows the other, which is exactly the misconfiguration
+            # that would otherwise pass review as "we raised the timeout".
+            raise ValueError(
+                f"cross_link_request_timeout_seconds "
+                f"({self.cross_link_request_timeout_seconds}s) must be < "
+                f"{binding_ceiling}s -- the lower of "
+                f"STORAGE_READ_TIMEOUT_SECONDS ({STORAGE_READ_TIMEOUT_SECONDS}s) "
+                f"and PLATFORM_REQUEST_CEILING_SECONDS "
+                f"({PLATFORM_REQUEST_CEILING_SECONDS}s). At or above it the "
+                "step's own cancellation stops winning the race and the "
+                "failure goes back to an opaque ReadTimeout; raise the "
+                "ceiling that binds before raising this budget."
             )
         if (
             self.storage_bulk_timeout_seconds

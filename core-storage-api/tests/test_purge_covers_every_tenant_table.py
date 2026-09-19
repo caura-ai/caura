@@ -262,3 +262,96 @@ async def test_the_fleet_purge_leaves_a_sibling_fleet_alone(_ensure_schema) -> N
                 text(f"SELECT count(*) FROM {table} WHERE fleet_id = :f"), {"f": kept}
             )
             assert survived.scalar() == 1, f"{table} lost a SIBLING fleet's rows"
+
+
+async def test_a_table_with_its_own_tenant_id_is_listed_rather_than_left_to_cascade(
+    _ensure_schema,
+) -> None:
+    """A cascade is a valid FATE. It is not a valid excuse for a missing COUNT.
+
+    The test above accepts a cascade because it asks whether rows SURVIVE. This
+    one asks the narrower question the module's own rule answers: a table with
+    its own ``tenant_id`` is listed explicitly, and a table without one is left
+    to ride a cascade. That is why ``relations`` and ``fleet_commands`` are
+    listed ("so their per-table counts are reported rather than hidden inside a
+    cascade") while ``memory_entity_links`` and ``recall_candidate``, which have
+    no ``tenant_id``, are not.
+
+    ``memory_conflicts`` and ``memory_derivations`` (migration 036) had a
+    ``tenant_id`` and were unlisted, so they fell in the gap between the two
+    rules: never at risk of surviving, but invisible in the purge result AND in
+    the deletion preview that an operator reads before destroying an org. The
+    test above could not catch that — the cascade exemption is exactly what it
+    is designed to allow.
+    """
+    purged = set(_PURGE_TENANT_TABLES) | set(_PURGE_ORG_KEYED_TABLES)
+    retained = set(_RETAINED_TENANT_TABLES)
+
+    unlisted = sorted(await _tables_with_column("tenant_id") - purged - retained)
+
+    assert not unlisted, (
+        "these carry their own tenant_id but are left to a cascade, so neither "
+        "the purge result nor the deletion preview reports their rows: "
+        f"{unlisted}. List each in _PURGE_TENANT_TABLES (ahead of its parent), "
+        "or record the reason in _RETAINED_TENANT_TABLES."
+    )
+
+
+async def test_the_preview_and_purge_report_the_derived_memory_tables(
+    _ensure_schema,
+) -> None:
+    """End-to-end for the two tables this fix adds.
+
+    They cascade from ``memories``, so before the fix their rows were deleted
+    and simply never counted — the operator's preview said the org held less
+    than it did. Seeded through real parent memories rather than
+    ``_insert_minimal_row``, whose random uuid fillers cannot satisfy their
+    NOT NULL foreign keys.
+    """
+    suffix = uuid.uuid4().hex[:8]
+    tenant = f"t-derived036-{suffix}"
+    old_id, new_id = uuid.uuid4(), uuid.uuid4()
+
+    async with get_session() as session:
+        for mid in (old_id, new_id):
+            await session.execute(
+                text(
+                    "INSERT INTO memories (id, tenant_id, agent_id, memory_type, content) "
+                    "VALUES (:id, :t, 'purge-probe', 'semantic', 'probe')"
+                ),
+                {"id": mid, "t": tenant},
+            )
+        await session.execute(
+            text(
+                "INSERT INTO memory_conflicts "
+                "(tenant_id, old_memory_id, new_memory_id, relationship) "
+                # ``relationship`` is CHECK-constrained (see
+                # ck_memory_conflicts_relationship); 'negation' is a member.
+                "VALUES (:t, :old, :new, 'negation')"
+            ),
+            {"t": tenant, "old": old_id, "new": new_id},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO memory_derivations (tenant_id, memory_id, source_memory_id) VALUES (:t, :m, :s)"
+            ),
+            {"t": tenant, "m": new_id, "s": old_id},
+        )
+
+    preview = await PostgresService().count_tenant_data(tenant)
+    for table in ("memory_conflicts", "memory_derivations"):
+        assert preview.get(table) == 1, (
+            f"the deletion preview omits {table}, so an operator sizing an org "
+            f"hard-delete never sees these rows: {preview.get(table)!r}"
+        )
+
+    deleted = await PostgresService().purge_tenant_data(tenant)
+    for table in ("memory_conflicts", "memory_derivations"):
+        assert deleted.get(table) == 1, f"purge did not report deleting from {table}: {deleted.get(table)!r}"
+
+    async with get_session() as session:
+        for table in ("memory_conflicts", "memory_derivations"):
+            remaining = await session.execute(
+                text(f"SELECT count(*) FROM {table} WHERE tenant_id = :t"), {"t": tenant}
+            )
+            assert remaining.scalar() == 0, f"{table} still holds the tenant's rows"

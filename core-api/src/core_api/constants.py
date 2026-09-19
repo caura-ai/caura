@@ -177,6 +177,24 @@ CONTRADICTED_STATUSES: tuple[str, ...] = ("outdated", "conflicted")
 # this value governs every storage call, not just the probe.
 STORAGE_CONNECT_TIMEOUT_SECONDS = 5.0
 
+# httpx read ceiling on every storage call (``StorageClient._make_pool``). See
+# that docstring for why it sits above the bulk route's own budget rather than
+# level with it.
+#
+# Named rather than inline because it is now a CONSTRAINT as well as a setting:
+# an application-level budget that means to cancel a slow storage call itself
+# has to fire before this, or httpx fires first and the caller gets an opaque
+# ``ReadTimeout('')`` instead of an error naming the tenant and the budget.
+# ``Settings._validate_timeout_ordering`` enforces that at startup.
+#
+# It is NOT ``PLATFORM_REQUEST_CEILING_SECONDS``. Both are 120.0 today and the
+# equality is a coincidence -- one is this process's client, the other is what
+# Cloud Run/nginx sever inbound. Raising either alone must not be read as
+# raising the other, which is why the validator checks against both.
+# Only ``read`` is named: ``write`` happens to share the value and has no
+# ordering contract to enforce.
+STORAGE_READ_TIMEOUT_SECONDS = 120.0
+
 # Upper bound on a single dependency probe (storage / redis / event_bus).
 # Shared between ``/health`` (binary 503 deploy gate) and ``/stats`` /
 # ``/status`` (public endpoints with the same posture — return ``0`` /
@@ -1065,7 +1083,18 @@ ENTITY_EMBEDDING_BACKFILL_BATCH_SIZE = 100
 ENTITY_RESOLUTION_BATCH_SIZE = 100
 CROSS_LINK_SIMILARITY_THRESHOLD = 0.75
 CROSS_LINK_TEXT_VERIFY = True
-CROSS_LINK_MEMORY_BATCH_SIZE = 200
+# Halved from 200 on 2026-09-18. ``LifecycleAudit.entity_link`` runs the
+# pipeline ONCE per org per tick with no batch loop, so this is the entire
+# per-run budget for the sweep, and 200 candidates x a per-candidate ANN
+# search over the tenant's entities outran the 120s storage budget on the
+# largest staging tenant. The other consumer
+# (``_discover_cross_links_for_memory``) passes a single
+# ``target_memory_ids``, so this cap never binds there.
+#
+# The cost is convergence, not coverage: a tenant with more than this many
+# under-linked memories now needs more nightly ticks to finish. Acceptable
+# for a daily janitor whose activity gate already no-ops idle tenants.
+CROSS_LINK_MEMORY_BATCH_SIZE = 100
 MIN_COOCCURRENCE_FOR_RELATION = 2
 RELATION_REINFORCE_DELTA = 0.1
 MAX_RELATION_WEIGHT = 1.0
