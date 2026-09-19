@@ -45,7 +45,7 @@ caura-interviewer = "caura_client.interviewer.cli:main"
 # client CI installs ruff from this extra and `ruff>=0.6` floated to 0.16, whose
 # new default rules (RUF022, C408, …) fail on existing code. Adopting 0.16 is a
 # deliberate follow-up (fix the 18 findings), not a silent CI-breaking float.
-dev = ["pytest>=8", "ruff>=0.15.4,<0.16"]
+dev = ["pytest>=8", "ruff>=0.15.4,<0.17"]
 
 [project.urls]
 Homepage = "https://caura.ai"
