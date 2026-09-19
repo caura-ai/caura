@@ -198,10 +198,7 @@ export class Caura {
   }
 
   /** Fetch one structured document. GET /api/v1/documents/{docId} */
-  async getDocument(
-    docId: string,
-    options: GetDocumentOptions,
-  ): Promise<Record<string, unknown>> {
+  async getDocument(docId: string, options: GetDocumentOptions): Promise<Record<string, unknown>> {
     const encoded = encodeURIComponent(docId);
     const tenant = options.tenantId || this.tenantId;
     const params = new URLSearchParams({
@@ -265,8 +262,12 @@ async function raiseForStatus(res: Response): Promise<void> {
   if (res.status === 429) {
     const retryAfter = res.headers.get("retry-after");
     const parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
-    throw new RateLimitError(res.status, message || "rate limit exceeded", details,
-      Number.isFinite(parsed) ? parsed : null);
+    throw new RateLimitError(
+      res.status,
+      message || "rate limit exceeded",
+      details,
+      Number.isFinite(parsed) ? parsed : null,
+    );
   }
   throw new CauraApiError(res.status, message || "request failed", details);
 }
