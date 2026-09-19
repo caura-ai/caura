@@ -2052,6 +2052,11 @@ class CoreStorageClient:
             **params,
         )
 
+    async def count_unindexed_documents(self, data: dict) -> int:
+        """Documents in scope that vector search cannot see (ax-0917-h-08)."""
+        result = await self._post("/documents/count-unindexed", data, read=True)
+        return int((result or {}).get("count", 0))  # type: ignore[union-attr]
+
     async def document_count_in_collection(
         self,
         tenant_id: str,
