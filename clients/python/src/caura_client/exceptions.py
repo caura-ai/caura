@@ -9,6 +9,10 @@ class CauraError(Exception):
     """Base class for all Caura client errors."""
 
 
+class TransportError(CauraError):
+    """Raised on network failures or timeouts, with the original error as ``__cause__``."""
+
+
 class CauraAPIError(CauraError):
     """Raised when the Caura API returns a non-success status code.
 

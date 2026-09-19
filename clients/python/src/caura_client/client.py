@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from .exceptions import AuthError, CauraAPIError, NotFoundError, RateLimitError
+from .exceptions import AuthError, CauraAPIError, NotFoundError, RateLimitError, TransportError
 from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
@@ -115,7 +115,7 @@ class Caura:
 
     def health(self) -> dict[str, Any]:
         """Liveness probe (GET /api/v1/health)."""
-        response = self._http.get("/api/v1/health")
+        response = self._request("GET", "/api/v1/health")
         self._raise_for_status(response)
         return response.json()
 
@@ -135,7 +135,8 @@ class Caura:
         # paths, so a doc_id containing '/' would hit a different route and
         # '?' would inject query params.
         encoded = urllib.parse.quote(doc_id, safe="")
-        response = self._http.get(
+        response = self._request(
+            "GET",
             f"/api/v1/documents/{encoded}",
             params={"tenant_id": tenant_id or self.tenant_id, "collection": collection},
         )
@@ -175,7 +176,7 @@ class Caura:
             body["fleet_id"] = fleet_id
         if command_id:
             body["command_id"] = command_id
-        response = self._http.post("/api/v1/interview/submit", json=body, timeout=timeout)
+        response = self._request("POST", "/api/v1/interview/submit", json=body, timeout=timeout)
         self._raise_for_status(response)
         result = response.json()
         if isinstance(result, dict):
@@ -184,9 +185,15 @@ class Caura:
 
     # ------------------------------------------------------------- internals
     def _post(self, path: str, body: dict[str, Any]) -> Any:
-        response = self._http.post(path, json=body)
+        response = self._request("POST", path, json=body)
         self._raise_for_status(response)
         return response.json()
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        try:
+            return self._http.request(method, path, **kwargs)
+        except httpx.TransportError as exc:
+            raise TransportError(f"Request failed: {exc}") from exc
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
