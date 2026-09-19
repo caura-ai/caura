@@ -108,9 +108,9 @@ For operators with many nodes (and SSH or OpenClaw-agent reach to all of them), 
 Identifying which nodes need re-install:
 
 ```bash
-curl -s "https://your-caura-server/api/v1/fleet/stats?tenant_id=$TENANT_ID&fleet_id=$FLEET_ID" \
+curl -s "https://your-caura-server/api/v1/fleet/nodes?tenant_id=$TENANT_ID&fleet_id=$FLEET_ID" \
   -H "Authorization: Bearer $JWT" \
-  | jq '.nodes[]
+  | jq '.[]
         | select((.plugin_version // "0") | split(".") | map(tonumber? // 0) | . < [2,6,0])
         | {node_name, plugin_version, last_heartbeat}'
 ```

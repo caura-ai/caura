@@ -127,7 +127,7 @@ with **422** and names it:
 try:
     mc.write("a memory", tags=["alpha"])   # `tags` is not a write field
 except CauraAPIError as exc:
-    exc.payload["error"]["details"]["unknown_fields"]   # ["tags"]
+    exc.details["unknown_fields"]   # ["tags"]
 ```
 
 This used to return `201` with the field silently discarded, so an integration
