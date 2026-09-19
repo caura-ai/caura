@@ -689,8 +689,8 @@ auth modes, and contributor requirements live in the
 
 ## Telemetry
 
-*Updated 2026-09-17.* A self-hosted server sends **one anonymous heartbeat a
-day** to `telemetry.caura.ai`: its version, Python/OS/arch, deploy kind
+*Updated 2026-09-19.* A self-hosted server sends **one anonymous heartbeat a
+day per container**, whatever its worker count, to `telemetry.caura.ai`: its version, Python/OS/arch, deploy kind
 (docker or source), uptime bucket, provider *kinds* (never model names or
 keys), whether Redis and Sentry are configured (never the values), bucketed
 counts of memories, agents, tenants and recently-seen plugin nodes, and
@@ -705,13 +705,16 @@ Every way to turn it off, each permanent for that install:
 - `CAURA_TELEMETRY=off` in `core-api`'s environment (`.env`, or the commented
   line under `core-api` in `docker-compose.yml`).
 - `DO_NOT_TRACK=1` (the [Console Do Not Track](https://consoledonottrack.com/) convention).
-- `CI` set to any value: pipelines are never counted.
+- `CI` set to a non-empty value: pipelines are never counted.
 - Block `telemetry.caura.ai:443` at the firewall: one attempt a day, 5 s timeout, no retry.
 - Running behind the enterprise gateway or with platform providers switches it off automatically.
 
-Inspect what your server would send with `GET /api/v1/telemetry`; start over
-with a fresh id via `POST /api/v1/telemetry/rotate`. The boot log prints the
-ON/OFF decision, the reason and the disable hint on every start.
+Inspect what your server would send, when it last tried and whether that
+worked with `GET /api/v1/telemetry`; start over with a fresh id via
+`POST /api/v1/telemetry/rotate`. The boot log prints the ON/OFF decision, the
+reason and the disable hint on every start; a mistyped `CAURA_TELEMETRY_URL`
+(plain `http://` to anything but localhost) turns the heartbeat off with a
+warning rather than sending in clear text.
 
 Error tracking stays opt-in: set `SENTRY_DSN` to enable optional
 [Sentry](https://sentry.io) integration for error tracking and performance

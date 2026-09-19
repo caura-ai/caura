@@ -9,7 +9,6 @@ the normal API-key auth; see ``docs/telemetry.md``.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -25,13 +24,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["System"])
 
 
-def _iso(dt: datetime | None) -> str | None:
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
-
-
 @router.get("/telemetry")
 async def telemetry_status(_auth: AuthContext = Depends(get_auth_context)) -> dict[str, Any]:
-    """What the heartbeat does on this server, and what it would send next."""
+    """What the heartbeat does on this server, and what it would send next.
+
+    Every worker of a container answers the same way: a follower worker copies
+    the loop fields from the leader's published state, and the preview it
+    builds itself uses the client counts summed over all workers.
+    """
     # Prefer the decision the lifespan recorded; fall back to evaluating now
     # (tests build the app without running the lifespan).
     decision = get_decision() or evaluate(settings)
@@ -41,8 +41,10 @@ async def telemetry_status(_auth: AuthContext = Depends(get_auth_context)) -> di
         "reason": decision.reason,
         "deployment_id": None,
         "endpoint": settings.caura_telemetry_url,
+        "last_attempt_at": None,
         "last_sent_at": None,
         "last_status": None,
+        "last_error": None,
         "next_send_at": None,
         "payload_preview": None,
         "disable": DISABLE_HINT,
@@ -51,15 +53,14 @@ async def telemetry_status(_auth: AuthContext = Depends(get_auth_context)) -> di
         # Off means zero work: no identity is generated and no counts are
         # read on a disabled install, so there is nothing to preview.
         return body
-    body["last_sent_at"] = _iso(sender.last_sent_at)
-    body["last_status"] = sender.last_status
-    body["next_send_at"] = _iso(sender.next_send_at)
+    body.update(sender.status())
     try:
         body["payload_preview"] = await sender.preview()
-        body["deployment_id"] = sender.deployment_id
     except Exception:
         logger.warning("telemetry preview failed", exc_info=True)
-        body["deployment_id"] = sender.deployment_id
+    # ``build`` resolves the identity, so a worker that has not sent yet still
+    # knows the id after the preview.
+    body["deployment_id"] = body["deployment_id"] or sender.deployment_id
     return body
 
 

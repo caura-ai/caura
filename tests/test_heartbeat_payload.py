@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -189,6 +190,36 @@ def test_uptime_bucket(seconds, expected):
 )
 def test_major_minor(raw, expected):
     assert major_minor(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("3.17.0", "3.17.0"),
+        (
+            "v3.17.0",
+            "3.17.0",
+        ),  # CAURA_VERSION=v3.17.0, the pinning form docs/self-hosting.md uses
+        ("V2.0", "2.0"),
+        (" v1.2.3 ", "1.2.3"),
+        ("dev", "dev"),
+        ("vendor-build", "vendor-build"),
+        ("", "dev"),
+        (None, "dev"),
+    ],
+)
+def test_normalise_version(raw, expected):
+    assert payload_mod.normalise_version(raw) == expected
+
+
+def test_payload_version_strips_the_tag_prefix():
+    payload = build_payload(
+        settings=_settings(),
+        deployment_id=str(uuid.uuid4()),
+        counts=Counts(),
+        version="v3.17.0",
+    )
+    assert payload["version"] == "3.17.0"
 
 
 def test_deploy_kind(tmp_path):

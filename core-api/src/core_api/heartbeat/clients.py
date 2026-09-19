@@ -15,6 +15,8 @@ raw header is never stored — only the family it mapped to.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 FAMILY_OPENCLAW_PLUGIN = "openclaw-plugin"
 FAMILY_CLIENT_PYTHON = "caura-client-python"
 FAMILY_CLIENT_NODE = "caura-client-node"
@@ -96,3 +98,12 @@ def reset() -> None:
     """Zero every family. The sender calls this after a successful send only."""
     for family in FAMILIES:
         _counts[family] = 0
+
+
+def subtract(counts: Mapping[str, int]) -> None:
+    """Drop counts that another worker already reported (see ``state.flush``).
+
+    Clamped at zero: a subtraction can never leave a negative count behind.
+    """
+    for family in FAMILIES:
+        _counts[family] = max(0, _counts[family] - int(counts.get(family, 0)))

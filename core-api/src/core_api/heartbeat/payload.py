@@ -114,6 +114,19 @@ def process_uptime_seconds() -> float:
     return time.monotonic() - _PROCESS_STARTED_MONOTONIC
 
 
+def normalise_version(version: str | None) -> str:
+    """``"v3.17.0"`` -> ``"3.17.0"``; empty -> ``"dev"``.
+
+    ``docs/self-hosting.md`` tells operators to pin with ``CAURA_VERSION=v3.17.0``
+    in ``.env``, which core-api also reads, so the tag form must not reach the
+    payload (or the ``User-Agent``) as the version string.
+    """
+    v = (version or "").strip()
+    if len(v) > 1 and v[0] in "vV" and v[1].isdigit():
+        v = v[1:]
+    return v or "dev"
+
+
 def major_minor(version: str | None) -> str | None:
     """``"2.21.3"`` → ``"2.21"``; anything unparseable → ``None``."""
     if not version:
@@ -263,7 +276,7 @@ def build_payload(
         "product": PRODUCT,
         "deployment_id": deployment_id,
         "sent_at": now.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "version": version,
+        "version": normalise_version(version),
         "runtime": runtime(),
         "mode": {"standalone": bool(settings.is_standalone)},
         "uptime_bucket": uptime_bucket(up),

@@ -11,6 +11,8 @@ Module map:
 * :mod:`.payload`  — the payload builder plus the shared bucketing function.
 * :mod:`.clients`  — the in-process User-Agent family counter.
 * :mod:`.identity` — the persisted ``deployment_id`` / ``deployment_token``.
+* :mod:`.state`    — per-container coordination between uvicorn workers
+  (leader lock, summed client counters, shared status).
 * :mod:`.sender`   — the loop, the HTTP call and the boot log lines.
 
 Named ``heartbeat`` rather than ``telemetry`` so it does not collide with
