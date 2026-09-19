@@ -8598,48 +8598,21 @@ class PostgresService:
             # when text-verify is off.
             content_map = {row[0]: row[1] for row in candidates} if text_verify else {}
 
-            # The threshold is applied OUTSIDE the ``LIMIT``, and that placement
-            # is the whole fix for caura#1616 -- it is not a refactor.
-            #
-            # Inside, it is a predicate the executor has to satisfy BEFORE the
-            # limit is reached: it keeps pulling tuples from the HNSW index
-            # until ten of them clear the floor, and when few or none do, that
-            # is a walk of the entire graph. Once per candidate memory. Measured
-            # on the tenant in that issue: ``lateral=143.1s`` for 100
-            # candidates, returning zero links -- the empty result is not
-            # incidental to the slowness, it IS the slowness.
-            #
-            # Outside, the limit is satisfiable from the first ten tuples the
-            # index yields and the scan stops there.
-            #
-            # This returns the SAME rows. The threshold constrains the very
-            # quantity the ORDER BY sorts on, so the entities clearing it are a
-            # PREFIX of the ordered list: taking ten then filtering, or
-            # filtering then taking ten, select the same prefix either way --
-            # if ten or more clear the floor the nearest ten all clear it, and
-            # if fewer do they all sit inside the nearest ten. That argument
-            # holds only because the two expressions are the same distance.
-            # A predicate on anything else (``entity_type``, a date) would NOT
-            # be safe to move out here, and moving one would silently start
-            # dropping links.
             lateral_query = text(f"""
                 SELECT m.id AS memory_id,
                        e.id AS entity_id, e.canonical_name, e.attributes, e.sim
                 FROM (SELECT id, embedding FROM memories
                       WHERE id = ANY(CAST(:memory_ids AS uuid[])) AND tenant_id = :tenant_id) m
                 JOIN LATERAL (
-                    SELECT nearest.id, nearest.canonical_name, nearest.attributes, nearest.sim
-                    FROM (
-                        SELECT e.id, e.canonical_name, e.attributes,
-                               1 - (e.name_embedding <=> m.embedding) AS sim
-                        FROM entities e
-                        WHERE e.tenant_id = :tenant_id
-                          AND e.name_embedding IS NOT NULL
-                          {entity_fleet_clause}
-                        ORDER BY e.name_embedding <=> m.embedding
-                        LIMIT 10
-                    ) nearest
-                    WHERE nearest.sim >= :threshold
+                    SELECT e.id, e.canonical_name, e.attributes,
+                           1 - (e.name_embedding <=> m.embedding) AS sim
+                    FROM entities e
+                    WHERE e.tenant_id = :tenant_id
+                      AND e.name_embedding IS NOT NULL
+                      AND (1 - (e.name_embedding <=> m.embedding)) >= :threshold
+                      {entity_fleet_clause}
+                    ORDER BY e.name_embedding <=> m.embedding
+                    LIMIT 10
                 ) e ON true
                 ORDER BY m.id, e.sim DESC
             """)
