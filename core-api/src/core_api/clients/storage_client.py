@@ -1938,8 +1938,21 @@ class CoreStorageClient:
     async def create_or_update_agent(self, data: dict) -> dict:
         return await self._post("/agents", data)  # type: ignore[return-value]
 
-    async def get_agent(self, agent_id: str, tenant_id: str) -> dict | None:
-        return await self._get(f"/agents/{agent_id}", tenant_id=tenant_id)
+    async def get_agent(self, agent_id: str, tenant_id: str, *, read: bool = True) -> dict | None:
+        """Fetch an agent. ``read=False`` forces the PRIMARY.
+
+        Use it for a re-fetch that follows a write to the same row, and for a
+        read whose value is merged back into one. Both were being served from
+        the reader: the re-fetches in ``patch_agent_tune`` and
+        ``update_trust_level`` would return the agent as it was BEFORE the
+        update they exist to report, so a PATCH would answer with the value it
+        had just replaced and look like it had not applied.
+
+        The default stays ``True``. Most callers here are plain lookups — trust
+        gates, fleet resolution, 404 checks — and sending those to the primary
+        would give up the read split entirely to fix four call sites.
+        """
+        return await self._get(f"/agents/{agent_id}", read=read, tenant_id=tenant_id)
 
     async def list_agents(
         self,

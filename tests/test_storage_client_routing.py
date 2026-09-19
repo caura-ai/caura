@@ -501,3 +501,66 @@ async def test_403_response_keeps_cached_id_token() -> None:
     refreshes of a token that was authoritatively authed — the real
     fix is IAM-side (grant the caller's SA the right role)."""
     await _run_auth_status_test(403, expect_evicted=False)
+
+
+# ── oss-0902-l-52 follow-up: agent re-fetches that follow a write ──────────
+
+
+async def test_get_agent_defaults_to_the_reader() -> None:
+    """Non-regression. Most ``get_agent`` callers are plain lookups — trust
+    gates, fleet resolution, 404 checks — and the point of the opt-out is to
+    leave those on the reader rather than give up the split for four sites."""
+    client, writer, reader = await _fresh_client(
+        writer_url="http://writer:8002", reader_url="http://reader:8002"
+    )
+    await client.get_agent("agent-1", "t1")
+    assert len(reader.requests) == 1
+    assert len(writer.requests) == 0
+
+
+async def test_get_agent_read_false_goes_to_the_writer() -> None:
+    """``read=False`` forces the primary, as it does for ``get_document``.
+
+    Before this existed, ``get_agent`` took no ``read`` argument at all, so a
+    re-fetch issued immediately after a write was served from the replica. Under
+    lag it returns the row as it was BEFORE the update it exists to report.
+    """
+    client, writer, reader = await _fresh_client(
+        writer_url="http://writer:8002", reader_url="http://reader:8002"
+    )
+    await client.get_agent("agent-1", "t1", read=False)
+    assert len(writer.requests) == 1
+    assert len(reader.requests) == 0
+    assert writer.requests[0].url.host == "writer"
+
+
+async def test_the_trust_level_refetch_asks_for_the_primary() -> None:
+    """Pins the CALL SITE, not just the capability.
+
+    Adding ``read=`` to the client fixes nothing on its own — the bug was that
+    the re-fetch did not ask for the primary. ``update_trust_level``'s own
+    docstring calls ``agents.trust_level`` the single source of truth that every
+    gate reads live; answering with the previous value reports a promotion that
+    has already been applied as not having happened.
+    """
+    from unittest.mock import AsyncMock
+    from unittest.mock import patch as _patch
+
+    from core_api.services import agent_service
+
+    sc = AsyncMock()
+    sc.update_trust_level = AsyncMock(return_value=None)
+    sc.get_agent = AsyncMock(return_value={"agent_id": "a1", "trust_level": 2})
+
+    with (
+        _patch.object(agent_service, "get_storage_client", return_value=sc),
+        _patch.object(
+            agent_service, "lookup_agent", AsyncMock(return_value={"agent_id": "a1"})
+        ),
+    ):
+        await agent_service.update_trust_level("t1", "a1", 2)
+
+    sc.get_agent.assert_awaited_once()
+    assert sc.get_agent.await_args.kwargs.get("read") is False, (
+        "the re-fetch after update_trust_level must come from the primary"
+    )
