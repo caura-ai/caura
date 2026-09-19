@@ -32,4 +32,4 @@ __all__ = [
     "DEFAULT_BASE_URL",
 ]
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
