@@ -27,6 +27,15 @@ export class AuthError extends CauraApiError {}
 /** Raised on 404. */
 export class NotFoundError extends CauraApiError {}
 
+/** Raised on 429, with the optional retry delay in seconds. */
+export class RateLimitError extends CauraApiError {
+  readonly retryAfter: number | null;
+  constructor(statusCode: number, message: string, details?: unknown, retryAfter: number | null = null) {
+    super(statusCode, message, details);
+    this.retryAfter = retryAfter;
+  }
+}
+
 export interface Memory {
   id: string | null;
   content: string;
@@ -68,6 +77,11 @@ export interface SearchOptions {
   topK?: number;
   fleetIds?: string[];
   filterAgentId?: string;
+  [extra: string]: unknown;
+}
+
+export interface RecallOptions {
+  topK?: number;
   [extra: string]: unknown;
 }
 
@@ -147,9 +161,14 @@ export class Caura {
   }
 
   /** Search + LLM-synthesized context brief. POST /api/v1/recall */
-  async recall(query: string, options: { topK?: number } = {}): Promise<RecallResult> {
-    const body = { tenant_id: this.tenantId, query, top_k: options.topK ?? 5 };
+  async recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
+    const { topK = 5, ...extra } = options;
+    const body: Record<string, unknown> = { tenant_id: this.tenantId, query, top_k: topK };
+    Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/recall", body);
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new CauraApiError(200, "recall response must be a JSON object");
+    }
     // Wire key is `memories`; the server aliases the identical list under
     // `items` too, for consumers written against /search's shape.
     //
@@ -159,9 +178,10 @@ export class Caura {
     // test below mocked the invented shape so CI stayed green. The RESULT FIELD
     // keeps its name (`supportingMemories`) since that is published API; only
     // the wire key was wrong.
-    const supporting: unknown = data?.memories ?? data?.items;
+    const payload = data as Record<string, unknown>;
+    const supporting: unknown = payload.memories ?? payload.items;
     return {
-      summary: data?.summary ?? null,
+      summary: typeof payload.summary === "string" ? payload.summary : null,
       supportingMemories: Array.isArray(supporting)
         ? supporting.map((m) => toMemory(m as Record<string, any>))
         : [],
@@ -230,6 +250,12 @@ async function raiseForStatus(res: Response): Promise<void> {
   }
   if (res.status === 404) {
     throw new NotFoundError(res.status, message || "not found", details);
+  }
+  if (res.status === 429) {
+    const retryAfter = res.headers.get("retry-after");
+    const parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
+    throw new RateLimitError(res.status, message || "rate limit exceeded", details,
+      Number.isFinite(parsed) ? parsed : null);
   }
   throw new CauraApiError(res.status, message || "request failed", details);
 }

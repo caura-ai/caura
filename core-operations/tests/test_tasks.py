@@ -170,6 +170,30 @@ async def test_tick_swallows_non_2xx(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_tick_swallows_non_json_2xx(monkeypatch: pytest.MonkeyPatch):
+    """A 2xx whose body is not JSON must not raise either, and this is the
+    worse case of the three: the fanout ALREADY FIRED.
+
+    core-api dispatched the work before writing the body, so an intermediary's
+    HTML success page or a truncated response would carry a ``JSONDecodeError``
+    out of ``_fire_fanout``, out of the tick, and be logged as a FAILED cron
+    tick for work that had succeeded — after which the scheduler fans the same
+    action out again on the next tick.
+
+    ``_StubResponse`` raises ``ValueError`` from ``json()`` for a string body,
+    which is what ``httpx`` does (``json.JSONDecodeError`` subclasses it).
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    response = _StubResponse(200, "<html>200 OK</html>")
+    async with _patch_client(monkeypatch, response=response) as stub:
+        await tasks.run_archive_expired_tick()  # no raise
+
+    assert stub.calls, "the fanout POST did not happen"
+
+
+@pytest.mark.asyncio
 async def test_tick_swallows_network_error(monkeypatch: pytest.MonkeyPatch):
     settings.core_api_url = "http://core-api"
     settings.core_api_admin_api_key = "admin-key-xyz"

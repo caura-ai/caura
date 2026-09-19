@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.22.3](https://github.com/caura-ai/caura/compare/plugin-v2.22.2...plugin-v2.22.3) (2026-09-18)
+
+
+### Bug Fixes
+
+* **plugin:** create openclaw.json so a fresh install has callable tools ([#1556](https://github.com/caura-ai/caura/issues/1556)) ([9df2379](https://github.com/caura-ai/caura/commit/9df2379ad41df98ba1b791d3208a7a7056f1dd8a))
+
 ## [2.22.2](https://github.com/caura-ai/caura/compare/plugin-v2.22.1...plugin-v2.22.2) (2026-09-14)
 
 

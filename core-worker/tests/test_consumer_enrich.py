@@ -107,7 +107,11 @@ async def test_happy_path_runs_enricher_and_patches(monkeypatch, mock_storage_cl
     assert fields["memory_type"] == "decision"
     assert fields["weight"] == 0.85
     assert fields["title"] == "Postgres over Mongo"
-    assert fields["status"] == "active"
+    # ``status`` is NOT patched (M-65). It is a lifecycle field owned by
+    # explicit setters, and CAURA-719 left ``EnrichmentResult`` emitting only
+    # its schema default — so routing it could revert a transition that
+    # happened after the write, never improve the row.
+    assert "status" not in fields
     # ts_valid_* are explicitly preserved as ``None`` even when the
     # enrichment didn't produce them, so a re-delivery / second LLM
     # run can null-clear stale dates a previous run wrote. (The
@@ -121,7 +125,9 @@ async def test_happy_path_runs_enricher_and_patches(monkeypatch, mock_storage_cl
     # the worker clears it on every successful PATCH.
     assert mp["enrichment_pending"] is False
     assert mp["summary"] == "Decided to use PostgreSQL."
-    assert mp["tags"] == ["db", "decision"]
+    # ``tags`` is NOT patched (M-66) — caller-owned key, see the test below.
+    assert "tags" not in mp
+    assert "tags" not in mp["_system"]
     assert mp["retrieval_hint"] == "database technology decision"
     assert mp["llm_ms"] == 42
     # PII fields always pass through (non-None) so a redelivery can
@@ -172,11 +178,22 @@ async def test_tenant_config_reconstructs_from_payload(monkeypatch, mock_storage
 
 
 @pytest.mark.asyncio
-async def test_tags_can_be_cleared_on_redelivery(monkeypatch, mock_storage_client):
-    """``tags=[]`` from a real LLM run is intentional ("no tags") and must
-    overwrite a prior non-empty list. The enrichment prompt instructs
-    the LLM to populate 2-6 tags, so an empty list is a deliberate
-    signal — not a heuristic-fallback artefact to filter out."""
+async def test_tags_are_not_cleared_on_redelivery(monkeypatch, mock_storage_client):
+    """M-66 — the inverse of what this test used to assert.
+
+    It was built on the premise that "the enrichment prompt instructs the LLM
+    to populate 2-6 tags, so an empty list is a deliberate signal". CAURA-719
+    retired that instruction: the prompt no longer asks for tags at all, so
+    ``tags=[]`` is now the schema default that EVERY run emits, and reading it
+    as "the LLM decided there are none" would wipe the caller's own list on
+    every deferred enrichment.
+
+    ``tags`` is a caller-owned key (C25 ``CALLER_OWNABLE_KEYS``);
+    ``common/enrichment/_prompts.py`` states the contract outright — a caller
+    who supplies ``metadata["tags"]`` keeps them untouched. The inline path
+    honours it with ``if enrichment.tags:``; this path now honours it by not
+    routing the field at all.
+    """
     consumer.configure(mock_storage_client)
     patch_call = AsyncMock(return_value=None)
     monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
@@ -192,8 +209,12 @@ async def test_tags_can_be_cleared_on_redelivery(monkeypatch, mock_storage_clien
     await consumer.handle_enrich_request(_make_event())
 
     fields = patch_call.await_args.kwargs["fields"]
-    # tags=[] is in the metadata_patch — will overwrite any stale list.
-    assert fields["metadata_patch"]["tags"] == []
+    # Absent from BOTH homes. ``_system`` is the one that wins on read
+    # (``extract_system_metadata``: nested over legacy), so clearing only the
+    # legacy key would still clobber.
+    mp = fields["metadata_patch"]
+    assert "tags" not in mp
+    assert "tags" not in mp["_system"]
 
 
 @pytest.mark.asyncio
@@ -336,7 +357,9 @@ async def test_agent_provided_fields_skip_orm_overwrite(monkeypatch, mock_storag
             weight=0.85,
             title="x",
             summary="y",
-            tags=["t"],
+            # Control for "other fields still flow". Was ``tags`` until M-66
+            # stopped routing it, which would have made this assert vacuous.
+            retrieval_hint="rh",
             llm_ms=42,
         )
 
@@ -360,7 +383,7 @@ async def test_agent_provided_fields_skip_orm_overwrite(monkeypatch, mock_storag
     # Other fields still flow
     assert fields["title"] == "x"
     assert fields["metadata_patch"]["summary"] == "y"
-    assert fields["metadata_patch"]["tags"] == ["t"]
+    assert fields["metadata_patch"]["retrieval_hint"] == "rh"
 
 
 @pytest.mark.asyncio
@@ -375,7 +398,7 @@ async def test_agent_provided_metadata_field_skipped(monkeypatch, mock_storage_c
             memory_type="decision",
             title="x",
             summary="enricher-summary",
-            tags=["a"],
+            retrieval_hint="rh",
             llm_ms=42,
         )
 
@@ -393,10 +416,12 @@ async def test_agent_provided_metadata_field_skipped(monkeypatch, mock_storage_c
     await consumer.handle_enrich_request(event)
 
     fields = patch_call.await_args.kwargs["fields"]
-    # Summary skipped — but tags still flowed through
+    # Summary skipped — but an unrelated metadata field still flowed through.
+    # (``tags`` was the control here until M-66 stopped routing it; it would
+    # now be absent whether or not the skip worked.)
     mp = fields.get("metadata_patch", {})
     assert "summary" not in mp
-    assert mp.get("tags") == ["a"]
+    assert mp.get("retrieval_hint") == "rh"
 
 
 @pytest.mark.asyncio
@@ -668,3 +693,287 @@ async def test_empty_fields_skip_patch(monkeypatch, caplog):
         )
 
     client.patch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# OSS audit 09/02 M-65 / M-66 — what the routing tables refuse to write.
+#
+# The handler-level tests above pin the common case. These pin the PROPERTY:
+# the two fields are UNROUTED, not merely empty-skipped, so no arrangement of
+# inputs gets either past the tables. ``_build_patch`` is called directly
+# because the distinguishing inputs (a non-default ``status``, a non-empty
+# ``tags``, a heuristic run) are awkward to reach through the handler.
+# ---------------------------------------------------------------------------
+
+
+def _homes(result: EnrichmentResult, agent_provided: list[str] | None = None):
+    """``(top_level, metadata, _system)`` — every place a field can land.
+
+    ``_system`` is checked separately because it is the copy that WINS on read
+    (``extract_system_metadata``: nested over legacy), so a field cleared from
+    the legacy key alone would still clobber.
+    """
+    patch = consumer._build_patch(result, agent_provided)
+    meta = patch.get("metadata_patch", {})
+    return patch, meta, meta.get("_system", {})
+
+
+@pytest.mark.parametrize("llm_ms", [0, 42])
+def test_status_never_reaches_the_patch(llm_ms):
+    """Both timings. ``status`` sat in ``_ENRICHMENT_ORM_FIELDS``, which — unlike
+    the always-write metadata branch — has no ``llm_ms > 0`` guard, so the
+    HEURISTIC path wrote it too. That path is the worse one: ``fake_enrich``
+    picks ``status`` from a keyword guess (``"pending"`` for task/plan/
+    commitment, ``"confirmed"`` for outcome), so an LLM outage meant a guessed
+    lifecycle state landing on a real one."""
+    top, meta, system = _homes(EnrichmentResult(llm_ms=llm_ms))
+    assert "status" not in top
+    assert "status" not in meta
+    assert "status" not in system
+
+
+def test_a_heuristic_status_guess_never_reaches_the_patch():
+    """The concrete shape of the above: ``fake_enrich``'s own output."""
+    top, _, _ = _homes(EnrichmentResult(memory_type="commitment", status="pending", llm_ms=0))
+    assert "status" not in top
+
+
+def test_an_explicitly_set_status_is_also_not_routed():
+    """Pins UNROUTED, not "the default is skipped". A fix that only dropped
+    ``"active"`` would still let a replayed result write ``status``, and would
+    silently start writing again the day the field returns to the prompt. The
+    worker has no business setting lifecycle state at all: it never reads the
+    row, so it cannot know the current state."""
+    top, _, _ = _homes(EnrichmentResult(status="archived", llm_ms=42))
+    assert "status" not in top
+
+
+def test_status_is_not_routed_even_when_the_caller_set_nothing_at_write_time():
+    """The case ``agent_provided_fields`` cannot cover — and the common one.
+
+    It is ``model_fields_set`` on the write request body, so a caller who set
+    no status contributes nothing (``_agent_provided_enrichment_fields``
+    returns ``None`` for an empty overlap). A transition that happens AFTER the
+    write is invisible to it, and enrichment is deferred, so "after the write"
+    is the whole delivery window plus every redelivery.
+    """
+    top, _, _ = _homes(EnrichmentResult(llm_ms=42), agent_provided=[])
+    assert "status" not in top
+
+
+def test_non_empty_tags_are_not_routed():
+    """Same UNROUTED-not-emptiness point, and it matters more here: the inline
+    path's guard IS emptiness (``if enrichment.tags:``), so "skip when empty"
+    is a plausible-looking wrong fix that would leave this path overwriting a
+    caller's list the moment the field returns to the prompt."""
+    top, meta, system = _homes(EnrichmentResult(tags=["from-the-model"], llm_ms=42))
+    assert "tags" not in top
+    assert "tags" not in meta
+    assert "tags" not in system
+
+
+# ---------------------------------------------------------------------------
+# OSS audit 08/14 L-21 — a malformed reference_datetime is poison, not
+# transient. Sits beside ``test_validation_error_drops_silently`` above, which
+# pins the same ``dropped=True`` marker for a missing required field.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_reference_datetime_is_ack_dropped(monkeypatch, caplog):
+    """``reference_datetime`` is typed ``datetime`` on the request model, so
+    pydantic rejects a bad value at construction — inside the guard that
+    already ack-drops malformed payloads.
+
+    It was a ``str`` the worker parsed with ``fromisoformat`` further down, so
+    the ``ValueError`` escaped the handler, nacked, and redelivered until the
+    DLQ took it — for a payload that can never parse, since every redelivery
+    re-parses the same bytes.
+    """
+
+    def _boom():
+        raise AssertionError("storage client requested after a poison payload")
+
+    monkeypatch.setattr(consumer, "_storage_client_factory", _boom)
+
+    event = _make_event(
+        {
+            "memory_id": str(uuid4()),
+            "tenant_id": "tenant-A",
+            "content": "anything",
+            "reference_datetime": "not-a-timestamp",
+        }
+    )
+
+    with caplog.at_level("ERROR"):
+        await consumer.handle_enrich_request(event)
+
+    assert any(getattr(rec, "dropped", False) is True for rec in caplog.records), (
+        "expected an alert-hook log record (dropped=True)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_valid_reference_datetime_still_reaches_the_enricher(monkeypatch, mock_storage_client):
+    """The happy path, because the fix changed a field's TYPE.
+
+    A schema that rejected good timestamps would silently drift every prompt's
+    ``today`` back to the worker's own clock — the exact drift the field exists
+    to prevent, and invisible in output.
+    """
+    consumer.configure(mock_storage_client)
+    monkeypatch.setattr(consumer, "update_memory_enrichment", AsyncMock(return_value=None))
+    captured: dict = {}
+
+    async def _capture(content, tenant_config=None, *, reference_datetime=None):
+        captured["reference_datetime"] = reference_datetime
+        return EnrichmentResult(title="x", llm_ms=42)
+
+    monkeypatch.setattr(consumer, "enrich_memory", AsyncMock(side_effect=_capture))
+
+    await consumer.handle_enrich_request(
+        _make_event(
+            {
+                "memory_id": str(uuid4()),
+                "tenant_id": "tenant-A",
+                "content": "anything",
+                "reference_datetime": "2026-09-02T10:30:00+00:00",
+            }
+        )
+    )
+
+    ref = captured["reference_datetime"]
+    assert ref is not None, "reference_datetime was dropped"
+    assert (ref.year, ref.month, ref.day) == (2026, 9, 2)
+
+
+# ---------------------------------------------------------------------------
+# C25 — the caller/platform metadata boundary on the deferred path.
+#
+# ``agent_provided_fields`` covers ORM COLUMNS only, so nothing told this worker
+# that ``metadata["summary"]`` was the caller's own, and the row's merged
+# metadata cannot answer it — a caller's summary and a platform-written one are
+# the same key. So the worker wrote the LLM's summary over the caller's on every
+# deferred enrichment, while the synchronous path had honoured the boundary
+# since C25. ``caller_owned_metadata_keys`` carries the decision core-api makes.
+#
+# Note the asymmetry with ``tags`` above: ``tags`` is unrouted outright (the LLM
+# produces nothing for it since CAURA-719, so there is never anything worth
+# writing), whereas a ``summary`` IS real output — it just must not displace the
+# caller's. Different fixes because they are different problems.
+# ---------------------------------------------------------------------------
+
+
+def test_a_caller_owned_summary_keeps_its_row_value():
+    """The legacy top-level key is what the caller reads back as their own
+    metadata, so that is the one the worker must not touch."""
+    _, meta, _ = _homes(EnrichmentResult(summary="PLATFORM", llm_ms=42))
+    assert meta["summary"] == "PLATFORM"  # control: not caller-owned
+
+    patch = consumer._build_patch(
+        EnrichmentResult(summary="PLATFORM", llm_ms=42),
+        None,
+        ["summary"],
+    )
+    mp = patch["metadata_patch"]
+    assert "summary" not in mp, "the caller's own metadata['summary'] was overwritten"
+    assert mp["_system"]["summary"] == "PLATFORM", (
+        "the platform's summary must still be recorded under _system — that is "
+        "what extract_system_metadata reads back as the platform view"
+    )
+
+
+def test_a_caller_owned_key_does_not_pin_the_others():
+    """Ownership is per key. Pinning ``summary`` must not suppress unrelated
+    platform metadata, or the fix would trade one silent loss for another."""
+    patch = consumer._build_patch(
+        EnrichmentResult(summary="PLATFORM", retrieval_hint="rh", llm_ms=42),
+        None,
+        ["summary"],
+    )
+    mp = patch["metadata_patch"]
+    assert "summary" not in mp
+    assert mp["retrieval_hint"] == "rh"
+    assert mp["_system"]["retrieval_hint"] == "rh"
+
+
+def test_no_caller_keys_writes_both_homes_as_before():
+    """The boundary must not become "never write summary": with no caller
+    claim, the legacy mirror is still how a C25-unaware reader sees it."""
+    for keys in (None, []):
+        mp = consumer._build_patch(EnrichmentResult(summary="PLATFORM", llm_ms=42), None, keys)[
+            "metadata_patch"
+        ]
+        assert mp["summary"] == "PLATFORM", f"regressed for caller keys {keys!r}"
+        assert mp["_system"]["summary"] == "PLATFORM"
+
+
+def test_a_platform_key_cannot_be_suppressed_from_the_wire():
+    """The worker must intersect the payload's list with the keys that are
+    ACTUALLY caller-ownable, not trust it wholesale.
+
+    ``contains_pii`` is chosen deliberately: it is routed metadata (unlike
+    ``enrichment_pending``, which is pre-seeded outside the loop and so proves
+    nothing here), and ``governance_remediation`` reads it from the TOP LEVEL
+    only — ``md.get("contains_pii")``, never ``_system``. A payload naming it
+    as caller-owned would therefore write the verdict to ``_system`` alone and
+    silently disable the DROP / KEEP_PRIVATE remediation, while an auditor
+    reading ``system_metadata`` still sees PII flagged. That is exactly the
+    forgery ``PLATFORM_ONLY_KEYS`` exists to prevent.
+
+    This is NOT symmetric with ``agent_provided_fields``, which pins only ORM
+    columns the caller could have set directly at write time — suppressing one
+    of those grants no capability the caller lacked. Suppressing a governance
+    verdict does.
+    """
+    mp = consumer._build_patch(
+        EnrichmentResult(contains_pii=True, pii_types=["email"], llm_ms=42),
+        None,
+        ["contains_pii", "business_relevance"],
+    )["metadata_patch"]
+    assert mp["contains_pii"] is True, (
+        "a non-caller-ownable key was suppressed from the legacy top-level "
+        "position that governance_remediation reads"
+    )
+    assert mp["business_relevance"] == "business"
+
+
+def test_the_enrichment_pending_clear_is_never_suppressed():
+    """Pre-seeded outside the routing loop, so no payload can reach it. The
+    fast-mode write path polls on this key."""
+    mp = consumer._build_patch(
+        EnrichmentResult(summary="s", llm_ms=42),
+        None,
+        ["enrichment_pending", "summary"],
+    )["metadata_patch"]
+    assert mp["enrichment_pending"] is False
+    assert mp["_system"]["enrichment_pending"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_handler_forwards_the_caller_keys_from_the_event(monkeypatch, mock_storage_client):
+    """End-to-end: the gate is useless if the payload's list never reaches
+    ``_build_patch``."""
+    consumer.configure(mock_storage_client)
+    patch_call = AsyncMock(return_value=None)
+    monkeypatch.setattr(consumer, "update_memory_enrichment", patch_call)
+
+    async def _enrich(content, tenant_config=None, *, reference_datetime=None):
+        return EnrichmentResult(title="x", summary="PLATFORM", llm_ms=42)
+
+    monkeypatch.setattr(consumer, "enrich_memory", AsyncMock(side_effect=_enrich))
+
+    await consumer.handle_enrich_request(
+        _make_event(
+            {
+                "memory_id": str(uuid4()),
+                "tenant_id": "tenant-A",
+                "content": "anything",
+                "caller_owned_metadata_keys": ["summary"],
+            }
+        )
+    )
+
+    mp = patch_call.await_args.kwargs["fields"]["metadata_patch"]
+    assert "summary" not in mp
+    assert mp["_system"]["summary"] == "PLATFORM"

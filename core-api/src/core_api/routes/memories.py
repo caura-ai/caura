@@ -48,7 +48,7 @@ from core_api.middleware.idempotency import (
 )
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 from core_api.middleware.rate_limit import search_limit, write_bulk_limit, write_limit
-from core_api.pagination import decode_cursor, encode_cursor
+from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
@@ -114,6 +114,33 @@ from core_api.services.usage_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _require_uuid_list(values: object, field: str) -> list:
+    """Return ``values`` once it is a list of parseable UUIDs, else 422 (OSS 09/02 L-24).
+
+    Owns the shape check as well as the element check so a caller cannot honour
+    one and forget the other — that split is what let ``{"ids": "abc"}`` through
+    as a 3-item iterable of characters. Validates at the boundary rather than at
+    the storage call, so a caller's typo is their 422 instead of our 500, and
+    names the offending value because these lists run to hundreds of ids and
+    "one of them is bad" is not an actionable error message.
+
+    Only ``ValueError`` is caught: ``str(value)`` always yields a ``str`` for any
+    JSON-representable input, and ``UUID(<str>)`` raises nothing else.
+    """
+    if not isinstance(values, list):
+        raise HTTPException(status_code=422, detail=f"'{field}' must be a list")
+    for value in values:
+        try:
+            UUID(str(value))
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"'{field}' must contain only UUID strings (got {value!r})",
+            ) from None
+    return values
+
 
 router = APIRouter(tags=["Memory"])
 
@@ -417,7 +444,7 @@ async def list_memories(
         )
 
     # Cursor-based pagination (only applies to created_at descending sort)
-    if cursor and (sort != "created_at" or order != "desc"):
+    if cursor and not cursor_sortable(sort, order):
         raise HTTPException(
             status_code=400,
             detail="Cursor pagination is only supported with sort=created_at and order=desc",
@@ -461,6 +488,12 @@ async def list_memories(
         "offset": offset,
         "cursor_ts": c_ts.isoformat() if c_ts else None,
         "cursor_id": str(c_id) if c_id else None,
+        # OSS 09/02 M-27 — declared on this route since it was written and
+        # never put in the payload, so ``?visibility=scope_org`` returned the
+        # unfiltered page. Narrowing only: storage ANDs it onto a query the
+        # visibility-scoping predicate has already bounded, so it cannot reach
+        # a row the caller could not already see.
+        "visibility": visibility,
         # scope='agent' never widens across tenants — it means "my own memories",
         # which live in the home tenant. Mirrors the MCP handler, which passes
         # ``readable_tenant_ids`` only when scope != 'agent'.
@@ -476,7 +509,12 @@ async def list_memories(
     items = [_memory_to_out(m) for m in rows[:limit]]
 
     next_cursor = None
-    if has_more and items:
+    # OSS 09/02 L-23 — only mint a cursor this endpoint would accept back.
+    # The gate above 400s a cursor unless ``sort=created_at`` and
+    # ``order=desc``, but the mint was unconditional, so any other sort handed
+    # the caller a token and then refused it on the very next request. Following
+    # the documented pagination contract was the way to hit it.
+    if has_more and items and cursor_sortable(sort, order):
         last = rows[limit - 1]
         next_cursor = encode_cursor(datetime.fromisoformat(last["created_at"]), UUID(last["id"]))
 
@@ -714,7 +752,11 @@ async def delete_all_memories(
     # owner) keep full reach (dashboard reset, tagged cleanup) unchanged.
     if auth.tenant_id and auth.agent_id:
         await enforce_delete(tenant_id, auth.agent_id)
-    exclude_ids = (body or {}).get("exclude_ids", [])
+    # OSS 09/02 L-24 — the same validation ``bulk_delete_by_ids`` applies below.
+    # This one also feeds the ``is_tenant_wide`` test further down, so a
+    # malformed value did not merely 500 later: a non-empty string counted as
+    # "narrowed", quietly disarming the unbounded-delete guard.
+    exclude_ids = _require_uuid_list((body or {}).get("exclude_ids", []), "exclude_ids")
     metadata_filter = (body or {}).get("metadata_filter") or {}
     # SAFE-03 / C28. "Unbounded" means every narrowing input is absent, so the
     # filter set degenerates to the tenant alone. Listed explicitly rather than
@@ -820,6 +862,12 @@ async def bulk_delete_by_ids(
     # closes the cross-fleet/agent delete (the ids are otherwise unscoped).
     if auth.tenant_id and auth.agent_id:
         await enforce_delete(tenant_id, auth.agent_id)
+    # OSS 09/02 L-24 — shape and elements, not just size. ``len()`` answers for
+    # a str as readily as for a list, so ``{"ids": "abc"}`` passed the size gate
+    # and reached storage as a 3-item iterable of characters; a non-UUID element
+    # got as far as ``UUID(...)`` storage-side. Both surfaced to the caller as a
+    # gateway 500 for what is plainly their own malformed input.
+    ids = _require_uuid_list(ids, "ids")
     if not ids or len(ids) > 1000:
         raise HTTPException(status_code=400, detail="ids must be 1-1000 items")
 
@@ -2123,7 +2171,20 @@ async def ingest_commit_endpoint(
     if auth.is_install_credential and body.agent_id:
         body.agent_id = await broker_owned_agent_id(body.agent_id, auth.install_uuid, body.tenant_id)
     if auth.tenant_id:  # skip for admin
-        await check_and_increment(body.tenant_id, "write")
+        # One unit PER FACT, not one per request. A commit writes
+        # ``len(body.facts)`` memories, and every other multi-item write path
+        # meters the count — ``caura_write``'s bulk branch calls
+        # ``bulk_check_and_increment(tenant_id, len(bulk_items))``. Charging a
+        # flat 1 here made a 50-fact ingest cost the same as a 1-fact one,
+        # which is both a billing gap and a plan-limit hole: the recalls/writes
+        # counter feeds ``_is_over_plan_limits``, so the cheapest way past a
+        # write cap was to ingest in bulk.
+        #
+        # Before the write, matching the ordering
+        # ``test_billing_happens_before_the_write`` pins for the MCP surface: a
+        # batch that fails partway still costs what it attempted, and two
+        # orderings for one operation is the drift that test exists to stop.
+        await bulk_check_and_increment(body.tenant_id, len(body.facts))
     return await ingest_commit(body)
 
 
@@ -2514,7 +2575,7 @@ async def admin_list_memories(
     """Admin: list memories across all tenants with full pagination."""
     auth.enforce_admin()
 
-    if cursor and (sort != "created_at" or order != "desc"):
+    if cursor and not cursor_sortable(sort, order):
         raise HTTPException(
             status_code=400,
             detail="Cursor pagination is only supported with sort=created_at and order=desc",
@@ -2559,7 +2620,9 @@ async def admin_list_memories(
     items = [_memory_to_out(r) for r in page]
 
     next_cursor = None
-    if has_more and page:
+    # OSS 09/02 L-23 — same pairing as ``GET /memories``: mint only what the
+    # gate above would take back.
+    if has_more and page and cursor_sortable(sort, order):
         last = page[limit - 1]
         next_cursor = encode_cursor(
             datetime.fromisoformat(last["created_at"]),

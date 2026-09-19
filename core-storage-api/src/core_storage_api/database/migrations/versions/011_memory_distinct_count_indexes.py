@@ -29,6 +29,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
+from core_storage_api.database.migration_helpers import drop_invalid_indexes
+
 revision: str = "011"
 down_revision: str | None = "010"
 branch_labels: str | Sequence[str] | None = None
@@ -46,6 +48,7 @@ def upgrade() -> None:
     # prior run that already created one of the two indexes — matches
     # the pattern in 009_restore_unscoped_memory_indexes.py.
     with op.get_context().autocommit_block():
+        drop_invalid_indexes("ix_memories_tenant_id_active", "ix_memories_agent_id_active")
         op.execute(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_memories_tenant_id_active "
             "ON memories (tenant_id) WHERE deleted_at IS NULL"

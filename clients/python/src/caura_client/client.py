@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from .exceptions import AuthError, CauraAPIError, NotFoundError
+from .exceptions import AuthError, CauraAPIError, NotFoundError, RateLimitError
 from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
@@ -108,7 +108,10 @@ class Caura:
         """Search + LLM summary. Returns a ``RecallResult`` context brief (POST /api/v1/recall)."""
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "query": query, "top_k": top_k}
         body.update(extra)
-        return RecallResult.from_dict(self._post("/api/v1/recall", body))
+        data = self._post("/api/v1/recall", body)
+        if not isinstance(data, dict):
+            raise CauraAPIError(200, "recall response must be a JSON object")
+        return RecallResult.from_dict(data)
 
     def health(self) -> dict[str, Any]:
         """Liveness probe (GET /api/v1/health)."""
@@ -207,6 +210,17 @@ class Caura:
             raise AuthError(response.status_code, message or "authentication failed", details=details)
         if response.status_code == 404:
             raise NotFoundError(response.status_code, message or "not found", details=details)
+        if response.status_code == 429:
+            try:
+                retry_after = float(response.headers["Retry-After"])
+            except (KeyError, ValueError):
+                retry_after = None
+            raise RateLimitError(
+                response.status_code,
+                message or "rate limit exceeded",
+                details=details,
+                retry_after=retry_after,
+            )
         raise CauraAPIError(response.status_code, message or "request failed", details=details)
 
     # ------------------------------------------------------------- lifecycle

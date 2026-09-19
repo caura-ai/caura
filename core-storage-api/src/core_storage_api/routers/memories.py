@@ -1533,7 +1533,7 @@ async def list_by_filters(request: Request) -> list[dict]:
     Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
     status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
     include_deleted, sort, order, limit, offset, cursor_ts?, cursor_id?,
-    readable_tenant_ids?}``. ``limit`` is the caller's desired page size; this
+    readable_tenant_ids?, visibility?}``. ``limit`` is the caller's desired page size; this
     endpoint over-fetches ``limit+1`` rows internally for has_more detection and
     the caller slices to ``limit`` / builds the next cursor. Distinct from
     ``/admin-list`` which has NO visibility scoping.
@@ -1597,6 +1597,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         cursor_ts=cursor_ts,
         cursor_id=cursor_id,
         readable_tenant_ids=body.get("readable_tenant_ids"),
+        visibility=body.get("visibility"),
     )
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
@@ -2064,7 +2065,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         # Status + pointer update must be atomic — a partial update
         # (status advances but pointer clear is rejected) would leave
         # the row in an invalid state. Caught wet-testing 2026-05-19.
-        from sqlalchemy import or_
+        from sqlalchemy import or_, select
         from sqlalchemy import update as sql_update
 
         from common.models import Memory
@@ -2077,6 +2078,10 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 .where(
                     Memory.id == memory_id,
                     Memory.tenant_id == tenant_id,
+                    # Same liveness rule the status path below relies on: a
+                    # retraction must not rewrite the pointer of a row that has
+                    # been soft-deleted out from under the caller.
+                    Memory.deleted_at.is_(None),
                     or_(
                         Memory.supersedes_id == expected_uuid,
                         Memory.supersedes_id.is_(None),
@@ -2085,6 +2090,42 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 .values(supersedes_id=None, status=status)
             )
             if result.rowcount == 0:  # type: ignore[attr-defined]
+                # Three different situations reach zero rows, and answering
+                # ``stale_retraction`` for all of them would be a lie for two:
+                # the row may not exist, may be deleted, or may genuinely have
+                # been taken by another writer. Only the last is a conflict the
+                # caller can resolve by re-reading, so classify before
+                # answering. One extra SELECT, on the failure path only.
+                #
+                # This is a second statement, and ``get_session`` runs under
+                # READ COMMITTED, so it takes a NEW snapshot: a commit landing
+                # between the UPDATE and this SELECT is visible here and the
+                # classification can disagree with the reason the UPDATE
+                # matched nothing. Accepted rather than locked, because the
+                # answer stays correct ABOUT THE ROW AS IT NOW STANDS and every
+                # interleaving is self-correcting on the caller's retry:
+                #
+                #   stale pointer, then deleted -> 404, and the row IS deleted;
+                #   deleted, then pointer moved  -> 404, still deleted;
+                #   stale pointer, then restored -> 409, and a re-read now
+                #                                   shows the expected pointer,
+                #                                   so the retry succeeds.
+                #
+                # The one answer that would be plainly wrong — live row, pointer
+                # never moved, yet the UPDATE matched nothing — cannot arise:
+                # that is the case the UPDATE succeeds in. Closing the window
+                # properly means taking a row lock before the UPDATE, which
+                # costs a lock on every retraction to sharpen a status code on
+                # a rare one.
+                live = await session.scalar(
+                    select(Memory.id).where(
+                        Memory.id == memory_id,
+                        Memory.tenant_id == tenant_id,
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+                if live is None:
+                    raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -2120,6 +2161,11 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 .where(
                     Memory.id == memory_id,
                     Memory.tenant_id == tenant_id,
+                    # Unreachable today — ``memory_update_status`` above now
+                    # 404s on a deleted row before we get here — but this
+                    # statement should not depend on the liveness of a check
+                    # someone could reorder or make conditional later.
+                    Memory.deleted_at.is_(None),
                     Memory.supersedes_id.is_(None),
                 )
                 .values(supersedes_id=UUID(supersedes_id))

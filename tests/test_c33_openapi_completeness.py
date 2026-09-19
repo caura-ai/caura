@@ -16,7 +16,16 @@ Four invariants:
    must be a declared ``RecallDiagnostic`` field (oss-0902-l-16 — WT-1 added
    ``recall_raw`` to the handler and the model was never widened, so the
    spec and generated clients understated the response).
+5. No routed handler declares a parameter it never reads. A declared-and-
+   ignored parameter is worse than an absent one: it is documented, it is
+   accepted, and it silently does nothing. Three shipped that way at once
+   (oss-0814-m-11 ``since``, oss-0902-m-26 ``node_id``, oss-0902-m-27
+   ``visibility``), each an unapplied FILTER — so the caller got MORE rows
+   than they asked for and no indication the narrowing had been dropped.
 """
+
+import ast
+import pathlib
 
 import pytest
 
@@ -218,3 +227,64 @@ def test_servers_block_present_when_configured(monkeypatch):
     monkeypatch.setattr(settings, "public_api_url", "https://api.caura.ai/")
     spec = _fresh_spec()
     assert spec.get("servers") == [{"url": "https://api.caura.ai"}]
+
+
+# --- 5: declared parameters must actually be read -----------------------------
+
+_ROUTES_DIR = (
+    pathlib.Path(__file__).resolve().parents[1] / "core-api/src/core_api/routes"
+)
+_ROUTE_DECORATORS = {"get", "post", "put", "patch", "delete"}
+# Framework-injected parameters a handler may legitimately declare without
+# naming again: FastAPI populates them for their side effects (DI, auth
+# enforcement via a dependency, request/response objects reached implicitly).
+_INJECTED = {"request", "response", "background_tasks", "auth", "self"}
+
+
+def _is_route(fn: ast.AST) -> bool:
+    for deco in fn.decorator_list:
+        target = deco.func if isinstance(deco, ast.Call) else deco
+        if isinstance(target, ast.Attribute) and target.attr in _ROUTE_DECORATORS:
+            return True
+    return False
+
+
+def _unused_params(fn) -> list[str]:
+    body = ast.Module(body=fn.body, type_ignores=[])
+    # Attribute names count as uses: a parameter reached only as ``body.field``
+    # still appears as a Name, but this also tolerates the reverse spelling.
+    used = {n.id for n in ast.walk(body) if isinstance(n, ast.Name)}
+    used |= {n.attr for n in ast.walk(body) if isinstance(n, ast.Attribute)}
+    declared = [a.arg for a in fn.args.args + fn.args.kwonlyargs]
+    return [
+        name
+        for name in declared
+        if name not in used and name not in _INJECTED and not name.startswith("_")
+    ]
+
+
+def test_no_route_declares_a_parameter_it_never_reads():
+    """A declared parameter that is never read is a promise the route breaks.
+
+    Deliberately has no ceiling constant, unlike the ratchet above: this one is
+    at zero and every entry is a live bug, so there is nothing to grandfather.
+    If a route genuinely needs an unread parameter, name it with a leading
+    underscore and the check will skip it.
+    """
+    offenders = []
+    for path in sorted(_ROUTES_DIR.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)
+                and _is_route(node)
+                and (unused := _unused_params(node))
+            ):
+                offenders.append(
+                    f"{path.name}:{node.lineno} {node.name}() ignores {unused}"
+                )
+
+    assert not offenders, (
+        "routed handlers declare parameters they never read — each is accepted, "
+        "documented, and silently ignored:\n  " + "\n  ".join(offenders)
+    )

@@ -1,4 +1,3 @@
-import hashlib
 import hmac
 import logging
 
@@ -21,10 +20,6 @@ api_key_header = APIKeyHeader(name=API_KEY_HEADER, auto_error=False)
 def get_admin_key() -> str | None:
     """Return the configured admin key (prefers admin_api_key, falls back to legacy api_key)."""
     return settings.admin_api_key or settings.api_key
-
-
-def hash_key(key: str) -> str:
-    return hashlib.sha256(key.encode()).hexdigest()
 
 
 class AuthContext:
@@ -216,19 +211,28 @@ class AuthContext:
                 ),
             )
 
-    def enforce_org_admin(self) -> None:
-        """Raise 403 unless the caller is an org admin (or super admin)."""
-        if self.is_admin:
-            return
-        if self.org_role != "admin":
-            raise HTTPException(
-                status_code=403,
-                detail=coded_detail(
-                    errors.AUTH_ORG_ADMIN_REQUIRED,
-                    "Org admin access required",
-                    remediation="Your credential is authenticated but its org role is not 'admin'.",
-                ),
-            )
+    @property
+    def is_org_admin(self) -> bool:
+        """Whether the caller may act on org-admin surfaces.
+
+        Two credentials qualify and they arrive by different routes: the
+        system admin key (``is_admin``, auth Path 1) and a user principal the
+        gateway stamped ``X-Org-Role: admin`` (``org_role``, Path 4). Callers
+        that need one of these needed BOTH checks, and wrote them inline —
+        ``skills_inbox`` twice and ``documents`` once, each as
+        ``bool(getattr(auth, "is_admin", False)) or getattr(auth, "org_role",
+        None) == "admin"``.
+
+        Three hand-written copies of one predicate is how the two halves drift
+        apart, and the ``getattr`` spelling hid that ``auth`` is always a real
+        ``AuthContext`` here. There was also a fourth copy — an
+        ``enforce_org_admin()`` raiser that every one of those callers bypassed
+        in favour of its own error code, and that no route ever called. It is
+        gone; this property is what the live callers share. A route that wants
+        to REFUSE rather than branch should raise its own coded 403, which is
+        what all three already do.
+        """
+        return bool(self.is_admin) or self.org_role == "admin"
 
     def enforce_not_agent_credential(self, action: str = "perform this action") -> None:
         """Raise 403 if the caller is an agent-scoped credential.

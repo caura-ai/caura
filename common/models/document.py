@@ -20,7 +20,6 @@ class Document(Base):
             name="uq_documents_tenant_collection_doc",
         ),
         Index("ix_documents_tenant_collection", "tenant_id", "collection"),
-        Index("ix_documents_data", "data", postgresql_using="gin"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

@@ -26,8 +26,8 @@ class _SC:
         self._latest = latest
         self.calls = []
 
-    async def get_latest_report(self, tenant_id, fleet_id=None, report_type=None):
-        self.calls.append((tenant_id, fleet_id, report_type))
+    async def get_latest_report(self, tenant_id, fleet_id=None):
+        self.calls.append((tenant_id, fleet_id))
         if isinstance(self._latest, Exception):
             raise self._latest
         return self._latest
@@ -71,12 +71,54 @@ async def test_lookup_failure_scans_everything_rather_than_skipping():
     assert await _wm(RuntimeError("storage down")) is None
 
 
-async def test_watermark_is_scoped_to_this_fleet_and_report_type():
-    """A different fleet's (or a non-crystallization) report would be the wrong
-    clock — it says nothing about when THESE subjects were last swept."""
-    sc = _SC({"id": "prev", "completed_at": "2026-09-08T02:00:00Z"})
-    await cs._type_ii_watermark(sc, "t1", "fleet-a", "cur")
-    assert sc.calls == [("t1", "fleet-a", "crystallization")]
+async def test_watermark_is_scoped_to_this_fleet():
+    """A different fleet's report would be the wrong clock — it says nothing
+    about when THESE subjects were last swept.
+
+    08/14 L-30 + 09/02 L-48: this used to assert only that ``fleet_id`` and
+    ``report_type`` were PASSED, and they were — but ``GET /reports/latest``
+    accepted both and filtered on neither, so the property named in this
+    docstring was false the whole time the test was green. ``report_type`` is
+    gone (no such column ever existed); ``fleet_id`` now reaches a WHERE
+    clause, and the two tests below assert the EFFECT rather than the call.
+    """
+    sc = _SC(
+        {"id": "prev", "fleet_id": "fleet-a", "completed_at": "2026-09-08T02:00:00Z"}
+    )
+    assert (
+        await cs._type_ii_watermark(sc, "t1", "fleet-a", "cur")
+        == "2026-09-08T02:00:00Z"
+    )
+    assert sc.calls == [("t1", "fleet-a")]
+
+
+async def test_another_fleets_run_is_not_this_fleets_clock():
+    """The harm the scoping exists to prevent, stated as an outcome.
+
+    Fleet B swept an hour ago; fleet A last swept a week ago. Taking B's
+    ``completed_at`` makes A skip every subject changed in that week —
+    ``select_candidates`` compares it to ``created_at`` with ``>``. Storage
+    filters this out when it is given a ``fleet_id``; the guard here is what
+    covers the tenant-wide case it cannot (see the next test).
+    """
+    sc = _SC(
+        {"id": "prev", "fleet_id": "fleet-b", "completed_at": "2026-09-09T01:00:00Z"}
+    )
+    assert await cs._type_ii_watermark(sc, "t1", "fleet-a", "cur") is None
+
+
+async def test_a_tenant_wide_run_does_not_borrow_a_fleets_clock():
+    """The case storage answers across fleets on purpose.
+
+    A tenant-wide run passes no ``fleet_id``, and ``/reports/latest`` without
+    one means "any fleet" — it also backs a user-facing "my latest report" that
+    has no fleet concept. So the scope check has to happen here, where the run
+    knows its own scope.
+    """
+    sc = _SC(
+        {"id": "prev", "fleet_id": "fleet-b", "completed_at": "2026-09-09T01:00:00Z"}
+    )
+    assert await cs._type_ii_watermark(sc, "t1", None, "cur") is None
 
 
 def test_the_sweep_actually_passes_the_watermark():

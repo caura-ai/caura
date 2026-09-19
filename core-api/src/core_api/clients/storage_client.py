@@ -18,7 +18,7 @@ from common.storage_auth import is_storage_shared_secret_rejection
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
-from core_api.constants import STORAGE_CONNECT_TIMEOUT_SECONDS
+from core_api.constants import STORAGE_CONNECT_TIMEOUT_SECONDS, STORAGE_READ_TIMEOUT_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +296,12 @@ class CoreStorageClient:
         fallback for the remaining 1%.
         """
         return httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=STORAGE_CONNECT_TIMEOUT_SECONDS, read=120.0, write=120.0, pool=5.0),
+            timeout=httpx.Timeout(
+                connect=STORAGE_CONNECT_TIMEOUT_SECONDS,
+                read=STORAGE_READ_TIMEOUT_SECONDS,
+                write=120.0,
+                pool=5.0,
+            ),
             # CAURA-682: pre-fix values 100/50 caused TCP ConnectTimeout
             # retries (3x 5s ~= 13s tail per affected request) during
             # noisy-neighbor write storms — concurrent core-api → storage
@@ -2669,10 +2674,16 @@ class CoreStorageClient:
         status: str | None = None,
         command: str | None = None,
         limit: int = 50,
+        node_id: str | None = None,
     ) -> list[dict]:
         params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
         if node_name is not None:
             params["node_name"] = node_name
+        if node_id is not None:
+            # OSS 09/02 M-26 — callers holding the id (the public
+            # ``GET /fleet/commands?node_id=``) no longer have to resolve it to
+            # a name first; storage filters on the id either way.
+            params["node_id"] = node_id
         if status is not None:
             params["status"] = status
         if command is not None:
@@ -2883,6 +2894,7 @@ class CoreStorageClient:
         offset: int = 0,
         action: str | None = None,
         resource_type: str | None = None,
+        since: datetime | None = None,
     ) -> list[dict]:
         params: dict[str, Any] = {
             "tenant_id": tenant_id,
@@ -2893,16 +2905,29 @@ class CoreStorageClient:
             params["action"] = action
         if resource_type is not None:
             params["resource_type"] = resource_type
+        if since is not None:
+            # OSS 08/14 M-11 — forwarded as ISO-8601; the storage route parses
+            # it back to a datetime and the filter runs in SQL.
+            params["since"] = since.isoformat()
         return await self._get_list("/audit-logs", **params)
 
-    async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000) -> dict:
+    async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000, start_seq: int = 1) -> dict:
         """Verify a tenant's tamper-evident audit hash chain.
 
-        Returns ``{valid, verified_count, head_seq}`` (or ``first_broken``
-        on a detected break). Used by the enterprise governance UI's
-        "chain intact" check.
+        Returns ``{valid, verified_count, head_seq, truncated}`` (or
+        ``first_broken`` on a detected break). Used by the enterprise
+        governance UI's "chain intact" check.
+
+        **``valid: true`` alone does not mean the chain is intact.** A result
+        with ``truncated: true`` covers only ``limit`` rows starting at
+        ``start_seq`` and SKIPS the tail-vs-head check, so a caller that renders
+        "chain intact" from ``valid`` alone reports a chain with rows deleted
+        off its end as sound. Check ``truncated`` and, when set, resume from the
+        returned ``next_seq`` until a window comes back un-truncated. Note that
+        such a walk is weaker than one un-truncated pass — each window is read
+        in its own snapshot; see the service method for why.
         """
-        result = await self._get("/audit-logs/verify", tenant_id=tenant_id, limit=limit)
+        result = await self._get("/audit-logs/verify", tenant_id=tenant_id, limit=limit, start_seq=start_seq)
         # Propagate failures: a None here means a network/5xx error. Returning
         # {} would hand callers a dict with no "valid" key, turning the real
         # error into a confusing KeyError downstream.
@@ -3190,26 +3215,26 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
-        report_type: str | None = None,
     ) -> dict | None:
+        """09/02 L-48 — ``report_type`` dropped: storage never filtered on it.
+
+        ``analysis_reports`` has no such column, so forwarding it advertised a
+        scope neither lookup applied.
+        """
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
-        if report_type is not None:
-            params["report_type"] = report_type
         return await self._get("/reports/running", **params)
 
     async def get_latest_report(
         self,
         tenant_id: str,
         fleet_id: str | None = None,
-        report_type: str | None = None,
     ) -> dict | None:
+        """``fleet_id`` now reaches a WHERE clause — see ``/reports/latest``."""
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
-        if report_type is not None:
-            params["report_type"] = report_type
         return await self._get("/reports/latest", **params)
 
     async def list_reports(self, tenant_id: str, *, limit: int = 10, offset: int = 0) -> list[dict]:

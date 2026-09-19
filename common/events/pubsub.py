@@ -83,6 +83,37 @@ SOURCE_ENV_ATTRIBUTE = "source_env"
 # Pub/Sub minimum for ``expiration_policy``.
 BROADCAST_SUBSCRIPTION_TTL_SECONDS = 86400
 
+# How long a lease extension asks for, and how often ``_hold_leases``
+# refreshes it while a batch drains.
+#
+# Subscriptions created HERE use ``ack_deadline_seconds: 30`` and an existing
+# subscription keeps whatever it was created with (see
+# ``_ensure_broadcast_subscription``), so raising that constant would not reach
+# a single deployment already running. Extending the lease per batch does.
+#
+# 60 rather than the 600 the API permits, because an extension is also how long
+# a message stays invisible when THIS process dies holding it: at 600 a pod kill
+# would strand every in-flight message for ten minutes. Once the first extension
+# has landed the lease is 60s, so refreshing every 15s leaves 45s of slack --
+# room for a slow RPC without ever letting it lapse.
+LEASE_EXTENSION_SECONDS = 60
+LEASE_REFRESH_INTERVAL_SECONDS = 15.0
+
+# The FIRST refresh comes sooner than the rest, because the initial deadline is
+# NOT ours to assume. Only the ephemeral subscriptions above are created here;
+# durable ones are provisioned outside this codebase and Pub/Sub permits as
+# little as 10s. Against a 10s deadline a first refresh at 15s arrives after the
+# lease has already lapsed, which leaves the keeper permanently one step behind
+# and the batch redelivering exactly as it did before the keeper existed -- the
+# failure is silent, because the keeper is running and issuing RPCs throughout.
+#
+# 5s clears that 10s floor with room for a slow RPC, and still costs nothing in
+# the common case: the keeper is stopped when the batch ends, so a batch that
+# drains in under 5s issues no extension at all. Refreshing immediately on spawn
+# would also have been correct and is simpler, but it puts an RPC on EVERY
+# non-empty pull including the fast majority that need none.
+LEASE_FIRST_REFRESH_SECONDS = 5.0
+
 # Per-call ceiling on the delete RPC in ``release_broadcast_subscriptions()``.
 #
 # The SDK's generated default is 60s, with a retry deadline also 60s — six times
@@ -1054,6 +1085,99 @@ class PubSubEventBus(EventBus):
             return None
         return source_env
 
+    async def _hold_leases(
+        self,
+        subscriber: Any,
+        pull_executor: Any,
+        sub_path: str,
+        ack_ids: list[str],
+        subscription_name: str,
+        stop: asyncio.Event,
+    ) -> None:
+        """Keep one pulled batch leased until ``stop`` is set.
+
+        ``_pull_loop`` dispatches a batch of up to ``max_messages``
+        sequentially and acks only once the whole batch is done, so the message
+        dispatched FIRST stays unacked for the entire drain. Nothing extended
+        the ack deadline, so a batch whose aggregate drain passed 30s had its
+        completed work redelivered — and the redelivered copy takes just as
+        long, so a subscription that falls behind this way stays behind.
+
+        The per-message case matters as much as the aggregate one, which is why
+        this refreshes on a timer rather than between messages: a single
+        handler that pages through a whole org (the embed-backfill sweep) can
+        outlast the deadline on its own, and a between-messages refresh would
+        never run during it.
+
+        Handlers are required to be idempotent, so the cost of the lapse was
+        duplicated work and duplicated provider spend rather than corruption —
+        but two instances running the same sweep concurrently is not a cost
+        anyone chose.
+
+        Deliberately unbounded in total: a handler that hangs forever keeps its
+        message leased forever. Capping the extensions would hand that message
+        to another instance while this one is still inside the handler, which
+        is the duplicate-sweep outcome this exists to prevent. A hung handler
+        also stalls this loop outright — the dispatch is sequential — so it
+        surfaces as a stopped subscription rather than as a lost message.
+        """
+        loop = asyncio.get_running_loop()
+        # Short before the first refresh, then the steady cadence: see
+        # ``LEASE_FIRST_REFRESH_SECONDS`` for why the initial deadline cannot be
+        # assumed. Reassigned after the wait rather than before the refresh, so
+        # a stop during the first interval still leaves without an RPC.
+        delay = LEASE_FIRST_REFRESH_SECONDS
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=delay)
+            except TimeoutError:
+                pass  # the interval elapsed with no stop: refresh below
+            else:
+                # Asked to stop, and we are between refreshes rather than
+                # inside one — the only point at which leaving is free.
+                return
+            delay = LEASE_REFRESH_INTERVAL_SECONDS
+            try:
+                await loop.run_in_executor(
+                    pull_executor,
+                    functools.partial(
+                        subscriber.modify_ack_deadline,
+                        request={
+                            "subscription": sub_path,
+                            "ack_ids": ack_ids,
+                            "ack_deadline_seconds": LEASE_EXTENSION_SECONDS,
+                        },
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Never take the pull loop down over a failed extension. Losing
+                # the lease means redelivery, which is exactly the behaviour
+                # this guards against and which handlers already tolerate —
+                # strictly better than halting consumption.
+                if stop.is_set():
+                    # This refresh was already in flight when the caller asked
+                    # us to stop, so it landed beside the ``acknowledge`` and
+                    # named ids that ack was retiring. Expected, harmless, and
+                    # NOT the operator's problem — at warning it would fire on
+                    # ordinary batches and teach on-call to ignore the level.
+                    logger.debug(
+                        "event-bus: ack-deadline extension lost a race with "
+                        "the batch ack; nothing to do",
+                        extra={"subscription": subscription_name},
+                    )
+                else:
+                    # A genuine failure: the lease is lapsing and this batch
+                    # will redeliver. Logged rather than swallowed so it shows
+                    # up as a warning instead of as unexplained slowness.
+                    logger.warning(
+                        "event-bus: ack-deadline extension failed; messages "
+                        "may redeliver while this batch drains",
+                        extra={"subscription": subscription_name},
+                        exc_info=True,
+                    )
+
     async def _pull_loop(
         self, subscription_name: str, handlers: list[EventHandler]
     ) -> None:
@@ -1091,6 +1215,10 @@ class PubSubEventBus(EventBus):
             )
 
         while not self._stopping:
+            # Declared out here so the ``finally`` can always see them,
+            # including when the pull itself raises before a batch exists.
+            lease_keeper: asyncio.Task[Any] | None = None
+            stop_extending = asyncio.Event()
             try:
                 response = await loop.run_in_executor(
                     pull_executor,
@@ -1105,6 +1233,22 @@ class PubSubEventBus(EventBus):
                 )
                 ack_ids: list[str] = []
                 nack_ids: list[str] = []
+                # Every id this pull returned, whatever its eventual outcome.
+                # The keeper holds ALL of them until the acks go out, because
+                # the point is precisely that a message which finished first
+                # stays unacked for the rest of the drain.
+                leased_ids = [r.ack_id for r in response.received_messages]
+                if leased_ids:
+                    lease_keeper = self._spawn_background_task(
+                        self._hold_leases(
+                            subscriber,
+                            pull_executor,
+                            sub_path,
+                            leased_ids,
+                            subscription_name,
+                            stop_extending,
+                        )
+                    )
                 for received in response.received_messages:
                     # Hoisted: proto-plus re-wraps the nested message on every
                     # ``.message`` access, so reading it three times costs
@@ -1145,6 +1289,59 @@ class PubSubEventBus(EventBus):
                         continue
                     success = await self._dispatch_all(handlers, event)
                     (ack_ids if success else nack_ids).append(received.ack_id)
+
+                # DRAIN the keeper before the acks, and above all before the
+                # nack. Signalled and AWAITED, not cancelled: ``cancel()`` only
+                # interrupts the keeper while it is WAITING, so a refresh
+                # already inside ``run_in_executor`` runs to completion on its
+                # thread regardless and can land after whatever follows here.
+                #
+                # On the ack path that leftover is harmless — it names ids the
+                # ack is retiring. On the nack path it is not. A nack is a
+                # ``modify_ack_deadline`` of 0, so an extension arriving behind
+                # it returns the FAILED message to ``LEASE_EXTENSION_SECONDS``
+                # of invisibility and silently inverts "redeliver now" into a
+                # minute of nothing. The original reasoning was sound for the
+                # case it considered and simply did not reach this one.
+                #
+                # Awaiting is what closes it. ``stop`` is already set, so the
+                # keeper finishes at most the one refresh it is inside, sees the
+                # event on the next pass and returns; and because the keeper
+                # AWAITS its own ``run_in_executor``, the task completing means
+                # that RPC has already RETURNED. A lock would not have done it:
+                # mutual exclusion orders nothing, so a nack and a refresh
+                # queued onto this multi-worker executor together could still
+                # take it in either order.
+                #
+                # Caught, not suppressed. A keeper that escaped its own
+                # handler must not take the acks below down with it -- but it
+                # must not vanish either, and suppressing is how it would.
+                # Ordinary RPC failures never reach here: ``_hold_leases``
+                # catches and logs those itself. What reaches here is a BUG in
+                # the keeper, the one thing worth waking someone for.
+                #
+                # Awaiting is what makes the log necessary. While the task was
+                # only cancelled and never awaited, an exception it had already
+                # raised stayed unretrieved and asyncio reported it at GC as
+                # "Task exception was never retrieved" -- late, untargeted, and
+                # only in that one ordering, but not nothing. Retrieving it
+                # here ends that, so this takes over the job and does it
+                # properly, naming the subscription.
+                #
+                # ``except Exception``, not ``BaseException``: ``CancelledError``
+                # is a ``BaseException``, so an outer ``stop()`` cancelling this
+                # pull task still propagates. The ``finally`` stays the backstop
+                # for every path that never reaches this line.
+                stop_extending.set()
+                if lease_keeper is not None:
+                    try:
+                        await lease_keeper
+                    except Exception:
+                        logger.exception(
+                            "event-bus: lease keeper raised unexpectedly while "
+                            "draining before ack/nack",
+                            extra={"subscription": subscription_name},
+                        )
 
                 # Ack/nack must stay inside this try: a transient network
                 # error during acknowledge would otherwise escape, kill
@@ -1248,6 +1445,16 @@ class PubSubEventBus(EventBus):
                 )
                 await asyncio.sleep(self._error_backoff)
                 continue
+            finally:
+                # Every exit that skips the cancel above — a permanent halt, a
+                # cancellation, a transient error looping back for another pull
+                # — would otherwise leave a keeper extending messages nothing
+                # is processing any more. ``cancel()`` on a task that has
+                # already been cancelled is a no-op, so this and the cancel
+                # above are not in conflict.
+                stop_extending.set()
+                if lease_keeper is not None:
+                    lease_keeper.cancel()
 
     @staticmethod
     def _decode(data: bytes, *, subscription: str, message_id: str) -> Event | None:

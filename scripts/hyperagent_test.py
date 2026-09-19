@@ -1190,7 +1190,7 @@ def seed_memories(
 ) -> dict[str, str]:
     """Bulk-write memories via REST. Returns {tag: memory_id} mapping."""
     client = httpx.Client(timeout=TIMEOUT, headers={"X-API-Key": api_key})
-    api = f"{base_url.rstrip('/')}/api"
+    api = f"{base_url.rstrip('/')}/api/v1"
     tag_to_id: dict[str, str] = {}
     total = len(memories)
 
@@ -1540,7 +1540,7 @@ def main():
     print(f"  URL: {args.url}")
     print(f"{'=' * 70}")
 
-    api_url = f"{args.url.rstrip('/')}/api"
+    api_url = f"{args.url.rstrip('/')}/api/v1"
     admin_headers = {"X-API-Key": args.api_key}
 
     # Phase 1: SEED (REST bulk with admin key)
@@ -1562,12 +1562,30 @@ def main():
 
     # Provision a tenant-scoped API key for MCP (MCP rejects admin keys)
     print("\n  Provisioning tenant-scoped API key for MCP...")
+    # ``/admin/agent-keys/provision`` is the route that mints these — the same
+    # one core-api's own MCP error messages name. ``/admin/keys``, which this
+    # used to call, has never existed anywhere.
+    #
+    # It is served by the enterprise admin API, not by stock OSS core-api, so
+    # this step 404s against the default target. That is a real limitation of
+    # the benchmark rather than a bug to paper over: MCP refuses an admin key,
+    # and OSS has no way to mint a tenant-scoped one. Say so instead of
+    # printing a bare 404.
     r = httpx.post(
-        f"{api_url}/admin/keys",
+        f"{api_url}/admin/agent-keys/provision",
         json={"tenant_id": tenant, "label": "hyperagent-bench"},
         headers=admin_headers,
         timeout=TIMEOUT,
     )
+    if r.status_code == 404:
+        print(
+            "  ERROR: no key-provisioning route at "
+            f"{api_url}/admin/agent-keys/provision.\n"
+            "  The MCP phases of this benchmark need a tenant-scoped key, which\n"
+            "  only a deployment with the admin API can mint. Point --url at one,\n"
+            "  or run the REST-only phases."
+        )
+        sys.exit(1)
     if r.status_code != 200:
         print(f"  ERROR: Failed to create tenant key: {r.status_code} {r.text[:200]}")
         sys.exit(1)
