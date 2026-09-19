@@ -10,6 +10,21 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.17.2](https://github.com/caura-ai/caura/compare/backend-v3.17.1...backend-v3.17.2) (2026-09-19)
+
+
+### Bug Fixes
+
+* **bulk:** flag a deferred embedding so bulk callers can see it (ax-0917-h-06) ([#1628](https://github.com/caura-ai/caura/issues/1628)) ([c263ddb](https://github.com/caura-ai/caura/commit/c263ddbc2a854770bd8f61fe5702b867b47d9324))
+* **documents:** let GET accept the `id` that POST returns (ax-0917-h-07) ([#1626](https://github.com/caura-ai/caura/issues/1626)) ([fd3a3f8](https://github.com/caura-ai/caura/commit/fd3a3f88c3dcc03cf21de992ce3fc0292c69b63b))
+* **documents:** say when a document is unsearchable instead of returning a bare 0 (ax-0917-h-08) ([#1627](https://github.com/caura-ai/caura/issues/1627)) ([4a75aef](https://github.com/caura-ai/caura/commit/4a75aefc670e6cffe0bf3c0052055fe7ec4e5c51))
+* **storage:** apply the cross-link threshold outside the LIMIT, not inside it ([#1635](https://github.com/caura-ai/caura/issues/1635)) ([c02e578](https://github.com/caura-ai/caura/commit/c02e578320ff73bb50d9d4ee9e6deea6e9569190))
+
+
+### Performance
+
+* **mcp:** stop pretty-printing and ASCII-escaping MCP responses ([#1631](https://github.com/caura-ai/caura/issues/1631)) ([721038d](https://github.com/caura-ai/caura/commit/721038d8fe1a0b04ecf05e0c63287293ba57634a))
+
 ## [3.17.1](https://github.com/caura-ai/caura/compare/backend-v3.17.0...backend-v3.17.1) (2026-09-19)
 
 
