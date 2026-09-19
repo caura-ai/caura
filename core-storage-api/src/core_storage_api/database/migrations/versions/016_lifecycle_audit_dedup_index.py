@@ -28,6 +28,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
+from core_storage_api.database.migration_helpers import drop_invalid_indexes
+
 revision: str = "016"
 down_revision: str | None = "015"
 branch_labels: str | Sequence[str] | None = None
@@ -36,6 +38,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     with op.get_context().autocommit_block():
+        drop_invalid_indexes("idx_lifecycle_audit_dedup_gate", "ix_memories_purgeable")
         op.execute(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
             "idx_lifecycle_audit_dedup_gate "

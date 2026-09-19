@@ -16,7 +16,8 @@
       "caura.lifecycle.embed-backfill-requested",
       "caura.lifecycle.purge-soft-deleted-requested",
       "caura.memory.embed-requested",
-      "caura.memory.enrich-requested"
+      "caura.memory.enrich-requested",
+      "caura.org.suppression-changed"
     ]
   }
 }

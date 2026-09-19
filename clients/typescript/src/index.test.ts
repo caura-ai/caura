@@ -155,6 +155,18 @@ test("recall throws when 200 body is a bare scalar", async () => {
   });
 });
 
+test("recall translates topK and forwards only the extras", async () => {
+  let captured: Record<string, unknown> = {};
+  const client = makeClient((_url, init) => {
+    captured = JSON.parse(init.body as string);
+    return jsonResponse(200, liveRecallBody([]));
+  });
+  await client.recall("q", { topK: 7, diagnostic: true });
+  assert.equal(captured.top_k, 7);
+  assert.equal(captured.diagnostic, true);
+  assert.equal("topK" in captured, false);
+});
+
 test("health hits /health", async () => {
   const client = makeClient((url) => {
     assert.equal(new URL(url).pathname, "/api/v1/health");

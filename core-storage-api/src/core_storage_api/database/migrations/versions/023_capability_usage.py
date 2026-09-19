@@ -8,8 +8,10 @@ collapses many requests into one row per
 query time — hence NO unique constraint and NO upsert (append-only,
 contention-free).
 
-Deliberately CROSS-TENANT analytics: RLS is intentionally NOT enabled on
-this table (the report aggregates adoption across orgs). It holds only
+Deliberately CROSS-TENANT analytics: this table is not tenant-scoped at all
+(the report aggregates adoption across orgs). Said as "RLS is intentionally NOT
+enabled on this table" until 09/02 L-46, which implied the rest of the schema
+had it; no table does. It holds only
 counts + latency sums and a ``tenant_id`` grouping dimension — no memory
 content. Read access is granted out-of-band to the analytics reader role
 (kept out of this migration so no environment-specific role name is

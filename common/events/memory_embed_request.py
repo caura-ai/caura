@@ -33,7 +33,18 @@ class MemoryEmbedRequest(BaseModel):
             the hash is already embedded for this tenant.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # ``extra="ignore"`` rather than ``"forbid"``, for the reason
+    # :class:`MemoryEnrichRequest` already states and this schema was the last
+    # in ``common/events`` not to follow: it is a Pub/Sub *consumer* schema.
+    # With ``forbid``, a publisher shipped first in a rolling deploy — core-api
+    # adding any optional payload key — fails validation in every worker, and
+    # ``core_worker.consumer.handle_embed_request`` ACK-drops on
+    # ``ValidationError`` by design (raising would nack-loop on a poison
+    # message). So the whole deploy window's embed requests are acknowledged
+    # and discarded, and those memories keep a NULL embedding with nothing
+    # left to retry them. The publisher's call site is the strict-validation
+    # boundary; a typo there is a real bug and still fails loudly.
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
     memory_id: UUID
     tenant_id: str

@@ -11,7 +11,17 @@ services:
       POSTGRES_PASSWORD: changeme
       POSTGRES_DB: caura
     ports:
-      - "${DB_PORT:-5432}:5432"
+      # Loopback by default. A bare "5432:5432" publishes on 0.0.0.0, so this
+      # database — user caura, password changeme, no TLS — was reachable from
+      # anything that could route to the host: other machines on the LAN, and
+      # on a cloud VM with a permissive security group, the internet. The
+      # credentials are fine for a quickstart and indefensible on a network.
+      #
+      # Nothing in the stack loses access: service-to-service traffic goes over
+      # the Compose network, not the published port, and docs/self-hosting.md
+      # already documents this as "localhost:5432". Set DB_BIND=0.0.0.0 to
+      # publish deliberately.
+      - "${DB_BIND:-127.0.0.1}:${DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +34,11 @@ services:
     image: redis:7-alpine
     command: redis-server --appendonly yes
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      # Loopback by default — see the db service above. Redis is the sharper
+      # case of the two: it runs with no password at all, so exposure is not a
+      # weak-credential problem but an open one, and its CONFIG command can
+      # write files. REDIS_BIND=0.0.0.0 to publish deliberately.
+      - "${REDIS_BIND:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
