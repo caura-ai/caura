@@ -252,9 +252,30 @@ def log_request(path: str, **fields: Any) -> None:
     ``slow`` is reserved — it's computed from ``db_ms`` to drive the
     INFO/WARNING split. (``path`` is a positional param, so Python's own
     argument binding already rejects a duplicate.)
+
+    So is every name ``logging`` puts on a ``LogRecord``. ``extra`` cannot
+    overwrite one: ``Logger.makeRecord`` raises ``KeyError: "Attempt to
+    overwrite 'module' in LogRecord"`` instead. This runs on the router-level
+    timing path of hot reads, so an unguarded ``module=``/``message=``/
+    ``process=`` field would turn a request that had already SUCCEEDED into a
+    500 — the log line being the only thing that failed. Rejected here, where
+    it is a one-line fix at the call site, rather than at the ``logger.log``
+    below, where it is an incident.
+
+    Same set and same reasoning as :class:`PhaseTimer`; see
+    ``_RESERVED_LOG_FIELDS`` for why it is derived rather than listed.
     """
     if "slow" in fields:
         raise ValueError("log_request: 'slow' is reserved — do not pass it as a kwarg")
+    # Checked separately from ``slow`` above, whose message says WHY it is
+    # reserved (it is computed here, and a caller passing it would drop the
+    # WARNING upgrade). Collapsing the two would trade that for a generic one.
+    clashes = sorted(set(fields) & _RESERVED_LOG_FIELDS)
+    if clashes:
+        raise ValueError(
+            f"log_request: field name(s) {', '.join(clashes)} are reserved by "
+            "logging — rename them; they cannot be carried on the log record"
+        )
     db_ms = fields.get("db_ms")
     slow = isinstance(db_ms, (int, float)) and db_ms > SLOW_QUERY_THRESHOLD_MS
     fields["path"] = path

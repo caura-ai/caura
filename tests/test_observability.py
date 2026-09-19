@@ -17,6 +17,7 @@ import time
 import pytest
 
 from core_storage_api.observability import (
+    _RESERVED_LOG_FIELDS,
     SLOW_QUERY_THRESHOLD_MS,
     PhaseTimer,
     Timer,
@@ -120,6 +121,64 @@ async def test_log_request_rejects_reserved_kwargs() -> None:
     observability-side test needed.)"""
     with pytest.raises(ValueError, match="reserved"):
         log_request("scored-search", slow=True, db_ms=10.0)
+
+
+@pytest.mark.parametrize("reserved", ["module", "message", "process", "args", "name"])
+async def test_log_request_rejects_names_logging_owns(reserved: str) -> None:
+    """``extra`` cannot overwrite a LogRecord attribute — ``Logger.makeRecord``
+    raises ``KeyError: "Attempt to overwrite 'module' in LogRecord"`` instead.
+
+    Unguarded, a field named after one of these turns a request that had
+    already SUCCEEDED into a 500: ``log_request`` runs on the router-level
+    timing path of hot reads, after the work is done, so the log line is the
+    only thing that failed. Rejecting at the call boundary makes it a one-line
+    fix instead of an incident.
+
+    Parametrised over five of the 23 names rather than all of them: the point
+    is that the guard uses the same derived set ``logging`` enforces, and
+    ``test_the_reserved_set_matches_what_logging_enforces`` below is what pins
+    that. ``message`` and ``asctime`` are worth naming individually — they are
+    not attributes of a fresh record, they are filled in during formatting, so
+    a hand-written list would plausibly have missed them."""
+    with pytest.raises(ValueError, match="reserved"):
+        log_request("scored-search", db_ms=10.0, **{reserved: "x"})
+
+
+async def test_the_reserved_set_matches_what_logging_enforces() -> None:
+    """The guard is only as good as the set it checks against, and that set is
+    derived from a sample record precisely so it cannot drift from the one
+    ``makeRecord`` enforces. This checks the derivation against the real
+    exception rather than against a copy of the list.
+
+    Fails on a Python release that adds a LogRecord attribute, which is the
+    moment the guard would otherwise start silently missing one."""
+    logger_ = logging.getLogger("caura.observability.reserved-probe")
+    for name in _RESERVED_LOG_FIELDS - {"message", "asctime"}:
+        with pytest.raises(KeyError):
+            logger_.warning("probe", extra={name: "x"})
+
+    # The two that are NOT on a fresh record: filled in by the formatter, so
+    # ``makeRecord`` lets them through and they are added to the set by hand.
+    for name in ("message", "asctime"):
+        assert name in _RESERVED_LOG_FIELDS
+
+
+async def test_log_request_still_accepts_ordinary_fields() -> None:
+    """The guard must not have widened into the fields real callers pass —
+    every name used by the three production call sites in routers/memories.py."""
+    log_request(
+        "scored-search",
+        tenant_id="t1",
+        top_k=10,
+        total_ms=12.0,
+        db_ms=10.0,
+        row_count=3,
+        id_count=2,
+        hit=True,
+        has_date_range=False,
+        has_temporal_window=False,
+        error=False,
+    )
 
 
 async def test_log_request_without_db_ms_stays_info(
