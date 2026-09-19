@@ -9474,6 +9474,38 @@ class PostgresService:
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
 
+    async def document_get_by_pk(
+        self,
+        *,
+        tenant_id: str,
+        doc_pk: UUID,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> Document | None:
+        """Fetch one document by its PRIMARY KEY.
+
+        ax-0917-h-07. ``POST /documents`` returns BOTH ``id`` (this primary
+        key) and ``doc_id`` (the caller's own key), and an agent that stores
+        the returned ``id`` — the conventional thing to keep — could not read
+        its own document back: the only lookup was by (tenant, collection,
+        doc_id), so the UUID 404'd.
+
+        Tenant scoping is identical to ``document_get_by_doc_id``: a primary
+        key is globally unique, so WITHOUT the predicate this would be a
+        cross-tenant read for anyone who learned an id. ``collection`` is not
+        part of the lookup because the pk already identifies the row — the
+        caller still passes one, and the route checks it matches rather than
+        silently returning a document from a different collection.
+        """
+        tenant_pred: ColumnElement[bool]
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        async with get_session() as session:
+            stmt = select(Document).where(tenant_pred, Document.id == doc_pk)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
     async def document_query(
         self,
         *,
