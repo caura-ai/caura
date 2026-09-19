@@ -193,12 +193,23 @@ def test_the_writer_session_population_is_pinned() -> None:
     they were part of the backlog this file pins, and deleting them retires two
     entries without anyone having to do the per-caller analysis first. The
     cheapest way off this list is not to need the method.
+
+    136 -> 137 on 2026-09-19 (ax-0917-h-07): ``document_get_by_pk`` is new, and
+    it joins the ``pure`` subset — it only selects. The writer session is the
+    RIGHT choice for it, not a default inherited by copy-paste, and this module's
+    own point 3 is why: read-after-write is a property of the CALLER. This method
+    exists precisely because an agent that POSTs a document and reads it back by
+    the returned ``id`` got a 404; served from a replica it would lag and 404
+    again, reintroducing the bug it was added to fix. Its sibling
+    ``document_get_by_doc_id`` holds the writer for the same reason, and the two
+    document lookups must not disagree about staleness — that would make the
+    ``id`` path unreliable while the ``doc_id`` path was not.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 136, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 63, f"{len(pure)} of them show no write marker"
+    assert len(methods) == 137, f"{len(methods)} methods open a writer session"
+    assert len(pure) == 64, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(
