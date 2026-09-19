@@ -26,7 +26,9 @@ import uuid
 from pathlib import Path
 
 DEFAULT_ENV_FILE = Path("/tmp/e2e.env")
-DEFAULT_CORE_API = "http://localhost:8000"
+DEFAULT_CORE_API = (
+    "http://localhost:8000"  # direct core-api; X-API-Key resolves the tenant
+)
 
 RUN = uuid.uuid4().hex[:8]  # nonce so re-runs don't hit write-dedup
 

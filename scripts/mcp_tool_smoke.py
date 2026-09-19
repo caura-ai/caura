@@ -24,7 +24,9 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_ENV_FILE = Path("/tmp/e2e.env")
-DEFAULT_CORE_API = "http://localhost:8000"
+DEFAULT_CORE_API = (
+    "http://localhost:8000"  # direct core-api (MCP lives here by default)
+)
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -164,26 +166,6 @@ def seed_fleet_and_memories() -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--url",
-        default=DEFAULT_CORE_API,
-        help=f"Direct core-api URL (default: {DEFAULT_CORE_API})",
-    )
-    parser.add_argument(
-        "--env-file",
-        type=Path,
-        default=DEFAULT_ENV_FILE,
-        help=f"Credentials environment file (default: {DEFAULT_ENV_FILE})",
-    )
-    args = parser.parse_args()
-
-    global CORE_API, KEY, TENANT
-    CORE_API = args.url.rstrip("/")
-    env = load_env(args.env_file)
-    TENANT = env["TENANT_ID"]
-    KEY = env["KEY"]
-
     print(f"Tenant: {TENANT}")
     print(f"Fleet:  {FLEET}")
     print()
@@ -306,4 +288,23 @@ def main():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--url",
+        default=DEFAULT_CORE_API,
+        help=f"Direct core-api URL (default: {DEFAULT_CORE_API})",
+    )
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=DEFAULT_ENV_FILE,
+        help=f"Credentials environment file (default: {DEFAULT_ENV_FILE})",
+    )
+    args = parser.parse_args()
+
+    CORE_API = args.url.rstrip("/")
+    env = load_env(args.env_file)
+    TENANT = env["TENANT_ID"]
+    KEY = env["KEY"]
+
     main()
