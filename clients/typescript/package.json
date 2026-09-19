@@ -44,11 +44,14 @@
   },
   "scripts": {
     "build": "tsc",
+    "lint": "prettier --check src",
+    "format": "prettier --write src",
     "test": "tsc && node --test dist/index.test.js",
     "prepublishOnly": "tsc"
   },
   "devDependencies": {
     "@types/node": "^26",
+    "prettier": "^3.6",
     "typescript": "^7.0"
   }
 }
