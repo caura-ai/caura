@@ -15,7 +15,9 @@ real fix; this middleware is the outer safety net.
 """
 
 import asyncio
+import json
 import logging
+import time
 from collections.abc import MutableMapping
 from typing import Any
 
@@ -23,6 +25,7 @@ from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
 from core_api.constants import is_mcp_path
+from core_api.errors import REQUEST_BUDGET_EXCEEDED, make_error_payload
 
 logger = logging.getLogger(__name__)
 
@@ -79,32 +82,64 @@ class RequestTimeoutMiddleware:
                 response_started = True
             await send(message)
 
+        started_at = time.monotonic()
         try:
             async with asyncio.timeout(self.timeout_seconds):
                 await self.app(scope, receive, _send)
         except TimeoutError:
+            elapsed = round(time.monotonic() - started_at, 3)
+            # Structured, not interpolated. The 2026-09-17 incident was
+            # triaged from a log line that carried the path and nothing
+            # else, so "which route, how long, how often" could not be
+            # aggregated without grepping free text.
             logger.warning(
-                "request exceeded %ss budget: %s %s",
-                self.timeout_seconds,
-                scope.get("method", "?"),
-                scope["path"],
+                "request exceeded budget",
+                extra={
+                    "budget_seconds": self.timeout_seconds,
+                    "elapsed_seconds": elapsed,
+                    "method": scope.get("method", "?"),
+                    "path": scope["path"],
+                },
             )
             if response_started:
                 # Headers already sent; synthesizing a 504 here would leave
                 # the response body half-written. Let the ASGI server drop
                 # the connection via normal cancellation propagation.
                 raise
+            payload = make_error_payload(
+                REQUEST_BUDGET_EXCEEDED,
+                (
+                    f"Request exceeded the {self.timeout_seconds}s server budget and was "
+                    f"cancelled. No upstream reported a failure — this deadline is ours. "
+                    f"Retry; if it recurs on the same route, the handler is the slow part."
+                ),
+                details={
+                    "budget_seconds": self.timeout_seconds,
+                    "elapsed_seconds": elapsed,
+                    "path": scope["path"],
+                },
+            )
+            body = json.dumps(payload).encode()
             await send(
                 {
                     "type": "http.response.start",
                     "status": 504,
-                    "headers": [(b"content-type", b"application/json")],
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                        # Same contract as the per-tenant 429 (D14): a
+                        # response that says "retry" must say how soon.
+                        # 1s matches that path's granularity; the budget
+                        # itself is in ``details`` for a caller that wants
+                        # to back off against the real number.
+                        (b"retry-after", b"1"),
+                    ],
                 }
             )
             await send(
                 {
                     "type": "http.response.body",
-                    "body": b'{"detail":"request timeout"}',
+                    "body": body,
                     "more_body": False,
                 }
             )
