@@ -59,6 +59,84 @@ STRICT_WRITE_BODY = ConfigDict(extra="forbid")
 SERVER_OWNED_MEMORY_FIELDS = ("supersedes_id",)
 
 
+# --- tenant_id defaulting (ax-0917-m-12) ---
+
+
+class TenantScopedBody(BaseModel):
+    """Request body whose ``tenant_id`` falls back to the caller's credential.
+
+    ``tenant_id`` was required in every request body even though the
+    credential already resolves one, so the first call any agent could make
+    was never the one it came for: it had to ``GET /whoami``, read the tenant
+    back, and echo it into the body. Both independent probes of this API
+    (Hermes and Codex, 2026-09-17) paid that round-trip before they could
+    write or recall anything, and an agent that skips it gets a 422 naming a
+    field whose value it was never given — a dead end unless it already knows
+    the fix.
+
+    The credential is the authority on which tenant a caller belongs to, so
+    it is also the sensible default. An explicit ``tenant_id`` still wins:
+    a cross-tenant read names its source tenant, and the ``enforce_tenant`` /
+    ``enforce_readable_tenant`` gates in the routes are untouched and run
+    against whichever value resolved. Defaulting therefore grants no access
+    that naming the same tenant would not.
+
+    **Why a validator and not ``str | None``.** Making the field optional at
+    the type level is the obvious move and it is the wrong one here:
+    ``body.tenant_id`` flows from these bodies deep into services typed
+    ``str`` — 77 new mypy errors across governance, entity, contradiction and
+    memory services on the attempt. The value is never actually absent by the
+    time a route runs, so widening the type to describe a state that cannot
+    be observed costs a large edit everywhere and buys nothing.
+
+    **Why the contextvar is populated here.** FastAPI solves dependencies
+    before it validates the body, so ``get_auth_context`` — and its
+    ``set_current_tenant`` call — has already run by the time this validator
+    executes. ``tests/test_ax_m12_tenant_from_credential.py`` pins that
+    ordering, because it is a framework behaviour this depends on and not one
+    we control.
+    """
+
+    # Empty string, not ``None``: the field stays ``str`` for every consumer
+    # downstream. The validator below rejects a body that still has no tenant
+    # after defaulting, so the empty default is never observable from a route.
+    #
+    # The description carries its weight in the published contract, where the
+    # schema can only say ``"default": ""`` — which is true of the field and
+    # false about the behaviour. A reader needs to be told that omitting it
+    # resolves the caller's own tenant, or the contract reads as "send an
+    # empty string".
+    tenant_id: str = Field(
+        default="",
+        description=(
+            "Tenant to operate on. Omit it and the tenant is resolved from the "
+            "credential, which is what a tenant- or agent-scoped key already "
+            "identifies — no prior /whoami call is needed. Supply it to act on "
+            "a different tenant your credential may read (and for an admin key, "
+            "which belongs to no single tenant, it is required)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _default_tenant_from_credential(self):
+        if self.tenant_id:
+            return self
+        from core_api.tenant_context import get_current_tenant
+
+        resolved = get_current_tenant()
+        if not resolved:
+            # The admin-key case: ``AuthContext.tenant_id`` is None by design
+            # (admin bypasses RLS), so an admin caller genuinely has to say
+            # which tenant it means. Say that, rather than "field required".
+            raise ValueError(
+                "tenant_id is required for this credential. A tenant-scoped or "
+                "agent-scoped key supplies it automatically; an admin key does "
+                "not belong to one tenant, so name it in the request body."
+            )
+        object.__setattr__(self, "tenant_id", resolved)
+        return self
+
+
 # --- Memory ---
 
 
@@ -69,10 +147,9 @@ class EntityLinkIn(BaseModel):
     role: str
 
 
-class MemoryCreate(BaseModel):
+class MemoryCreate(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     # Optional like ``BulkMemoryCreate.agent_id``: omitting it is allowed only
     # on the standalone single-tenant path, where ``write_memory`` fills the
@@ -228,13 +305,12 @@ class BulkMemoryItem(BaseModel):
     )
 
 
-class BulkMemoryCreate(BaseModel):
+class BulkMemoryCreate(TenantScopedBody):
     # Strict at the ENVELOPE level only: a typo among the five keys below is a
     # whole-request mistake, so 422-ing the request is the right answer. Per-item
     # unknown keys are handled inside ``BulkMemoryItem`` (see its note).
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     # Optional on the wire so caura-daemon broker calls (cloud-data-plane.md
     # §2.4) can omit it — the route handler defaults to
@@ -736,10 +812,9 @@ class ConflictListResponse(BaseModel):
     items: list[ConflictOut]
 
 
-class ConflictResolveRequest(BaseModel):
+class ConflictResolveRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     review_status: Literal["resolved", "dismissed"] = Field(
         description=(
             "Terminal state only. 'pending' is rejected: this endpoint records a "
@@ -802,14 +877,13 @@ class SearchResponse(BaseModel):
     warnings: list[SearchWarning] | None = None
 
 
-class SearchRequest(BaseModel):
+class SearchRequest(TenantScopedBody):
     # DELIBERATELY PERMISSIVE — do not add ``STRICT_WRITE_BODY`` here. SAFE-01
     # made every WRITE body ``extra="forbid"`` and deliberately left the
     # search/filter/query bodies alone; see the note at the top of this file for
     # why the two sides differ. ``tests/test_unknown_field_rejection.py`` pins an
     # unknown field on /search returning 2xx precisely so a later pass that
     # "finishes the job" fails loudly instead of quietly breaking integrators.
-    tenant_id: str
     fleet_ids: list[str] | None = None
     query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
     filter_agent_id: str | None = None
@@ -921,10 +995,9 @@ class SearchRequest(BaseModel):
 # --- Entity ---
 
 
-class EntityUpsert(BaseModel):
+class EntityUpsert(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     entity_type: str
     canonical_name: str
@@ -958,10 +1031,9 @@ class EntityOut(BaseModel):
 # --- Relation ---
 
 
-class RelationUpsert(BaseModel):
+class RelationUpsert(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     from_entity_id: UUID
     relation_type: str
@@ -973,10 +1045,9 @@ class RelationUpsert(BaseModel):
 # --- Ingest ---
 
 
-class IngestRequest(BaseModel):
+class IngestRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
     url: str | None = None
@@ -1011,10 +1082,9 @@ class IngestFact(BaseModel):
     salience: float | None = None
 
 
-class IngestCommitRequest(BaseModel):
+class IngestCommitRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
     url: str | None = None

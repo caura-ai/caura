@@ -16,7 +16,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
-from core_api.schemas import STRICT_WRITE_BODY
+from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.agent_service import enforce_delete
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 
@@ -89,10 +89,9 @@ SKILLS_ROLLBACK_COLLECTION = "skills_rollback"
 # ── Schemas ──
 
 
-class DocWriteRequest(BaseModel):
+class DocWriteRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     collection: str = Field(min_length=1, max_length=200)
     doc_id: str = Field(min_length=1, max_length=500)
@@ -108,10 +107,9 @@ class DocWriteRequest(BaseModel):
     # back-compat). See core_api.services.doc_indexing.
 
 
-class DocQueryRequest(BaseModel):
+class DocQueryRequest(TenantScopedBody):
     # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
     # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
-    tenant_id: str
     fleet_id: str | None = None
     collection: str = Field(min_length=1, max_length=200)
     where: dict = Field(default_factory=dict)
@@ -121,7 +119,7 @@ class DocQueryRequest(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
-class InstallableSkillsRequest(BaseModel):
+class InstallableSkillsRequest(TenantScopedBody):
     """Request for the agent-harness install surface (`/skills/installable`).
 
     Deliberately narrower than ``DocQueryRequest``: the collection is
@@ -131,12 +129,11 @@ class InstallableSkillsRequest(BaseModel):
 
     # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
     # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
-    tenant_id: str
     fleet_id: str | None = None
     limit: int = Field(default=1000, ge=1, le=1000)
 
 
-class DocSearchRequest(BaseModel):
+class DocSearchRequest(TenantScopedBody):
     """Vector search over indexed documents.
 
     Mirrors MCP ``caura_doc op=search``: when ``collection`` is omitted,
@@ -148,7 +145,6 @@ class DocSearchRequest(BaseModel):
 
     # DELIBERATELY PERMISSIVE (SAFE-01): a QUERY body, not a write. See
     # ``core_api.schemas.STRICT_WRITE_BODY`` for why the two sides differ.
-    tenant_id: str
     fleet_id: str | None = None
     collection: str | None = Field(default=None, min_length=1, max_length=200)
     query: str = Field(min_length=1)

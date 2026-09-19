@@ -50,7 +50,7 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
@@ -62,7 +62,7 @@ from core_api.errors import (
     AUTH_AGENT_TRUST_TOO_LOW,
     coded_detail,
 )
-from core_api.schemas import STRICT_WRITE_BODY
+from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
@@ -80,14 +80,13 @@ router = APIRouter(prefix="/keystones", tags=["Keystones"])
 # ── Schemas ──
 
 
-class KeystoneSetRequest(BaseModel):
+class KeystoneSetRequest(TenantScopedBody):
     """Payload shape mirrors the storage-api validator one-for-one so we
     don't need to re-do the scope/weight/fleet shape checks here — the
     storage 422 propagates through."""
 
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     agent_id: str | None = None
     # Slug shape mirrors ``caura_doc`` collection=skills (filesystem-safe

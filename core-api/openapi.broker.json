@@ -107,6 +107,8 @@
             "type": "array"
           },
           "tenant_id": {
+            "default": "",
+            "description": "Tenant to operate on. Omit it and the tenant is resolved from the credential, which is what a tenant- or agent-scoped key already identifies — no prior /whoami call is needed. Supply it to act on a different tenant your credential may read (and for an admin key, which belongs to no single tenant, it is required).",
             "title": "Tenant Id",
             "type": "string"
           },
@@ -124,7 +126,6 @@
           }
         },
         "required": [
-          "tenant_id",
           "items"
         ],
         "title": "BulkMemoryCreate",
@@ -1684,6 +1685,8 @@
             "title": "Status Filter"
           },
           "tenant_id": {
+            "default": "",
+            "description": "Tenant to operate on. Omit it and the tenant is resolved from the credential, which is what a tenant- or agent-scoped key already identifies — no prior /whoami call is needed. Supply it to act on a different tenant your credential may read (and for an admin key, which belongs to no single tenant, it is required).",
             "title": "Tenant Id",
             "type": "string"
           },
@@ -1710,7 +1713,6 @@
           }
         },
         "required": [
-          "tenant_id",
           "query"
         ],
         "title": "SearchRequest",

@@ -20,7 +20,7 @@ from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
-from core_api.schemas import STRICT_WRITE_BODY
+from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import get_raw_settings
 from core_api.version_compat import (
@@ -159,10 +159,9 @@ router = APIRouter(tags=["Fleet"])
 # ── Schemas ──
 
 
-class FleetCreateIn(BaseModel):
+class FleetCreateIn(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str  # alphanumeric + hyphens, 3-50 chars
     display_name: str | None = None
     description: str | None = None
@@ -234,7 +233,7 @@ def _cap_or_drop(v: dict | None, limit: int, field: str) -> dict | None:
     return v
 
 
-class HeartbeatIn(BaseModel):
+class HeartbeatIn(TenantScopedBody):
     # DELIBERATELY PERMISSIVE (SAFE-01), even though this IS a write. Two
     # reasons, both specific to this endpoint:
     #
@@ -252,7 +251,6 @@ class HeartbeatIn(BaseModel):
     # This model already declares every field the current plugin sends, and it
     # caps the two free-form blobs by DROPPING them rather than rejecting (see
     # the validators below) — the same fail-soft posture as this config.
-    tenant_id: str
     node_name: str
     fleet_id: str | None = None
     hostname: str | None = None
