@@ -22,12 +22,18 @@ class Settings(BaseSettings):
     # defensive short-circuit so that an accidentally-started instance
     # exits cleanly rather than firing cron jobs against a single-tenant
     # standalone DB.
-    standalone: bool = False
-
-    # core-storage-api URL for cron tasks that mutate data — the only
-    # service permitted to touch the OSS DB directly. Defaults to the
-    # local docker-compose service name.
-    core_storage_api_url: str = "http://oss-core-storage-api:8002"
+    #
+    # 09/02 L-45 — was ``standalone``, which binds the env var ``STANDALONE``.
+    # Nothing sets that name. The variable every operator actually sets is
+    # ``IS_STANDALONE``: .env.example, env.dev, .env.test, README, AGENT-INSTALL,
+    # docs/, CI and core-api's own ``is_standalone`` all use it, and nothing in
+    # the tree sets the bare spelling. With ``extra="ignore"`` above, pydantic
+    # accepted ``IS_STANDALONE`` and discarded it — so the short-circuit below
+    # could not fire, and a standalone deployment that started this image by
+    # accident fired cron jobs at a single-tenant DB while the log line said
+    # ``standalone: False``. Renaming loses no override precisely because the
+    # old name was never set.
+    is_standalone: bool = False
 
     # Timeout for this service's HTTP calls, all of which go to core-api.
     #
@@ -76,10 +82,22 @@ class Settings(BaseSettings):
     # retention vs. staleness archival), so it gets its own hour and can
     # be moved off the archive slot.
     lifecycle_purge_run_at_hour: int = 2
-    # Pipeline ops (crystallize + entity-link) — LLM-heavy, so an operator
-    # may want these in their own off-peak slot away from the lighter SQL
-    # ops. The consumer-side dedup gate still filters double-fires.
+    # Pipeline ops — LLM-heavy, so an operator may want these in their own
+    # off-peak slot away from the lighter SQL ops. The consumer-side dedup
+    # gate still filters double-fires.
     lifecycle_pipeline_run_at_hour: int = 2
+    # Entity-link used to share the hour above with crystallize, which made
+    # the two heaviest sweeps of the night unseparable: one knob moved both
+    # or neither. On 2026-09-18 that pairing put one staging tenant's
+    # cross-link discovery past its 120s storage budget, and the message
+    # dead-lettered after ten 120s attempts.
+    #
+    # Defaults to the pipeline hour's own default (2) rather than to
+    # ``lifecycle_pipeline_run_at_hour``: a default that TRACKED the other
+    # setting would silently re-pair them for any operator who moved the
+    # pipeline hour, which is the failure this exists to make impossible.
+    # Deployments stagger these explicitly; see the deploy workflow.
+    lifecycle_entity_link_run_at_hour: int = 2
     # A72 — how often the crystallize tick fires, in hours. 24 keeps today's
     # single 02:00 run; lower values are the retune's third ground: a heavy
     # writing day outruns a daily sweep entirely, so everything written after
@@ -127,6 +145,7 @@ class Settings(BaseSettings):
         "lifecycle_archive_run_at_hour",
         "lifecycle_purge_run_at_hour",
         "lifecycle_pipeline_run_at_hour",
+        "lifecycle_entity_link_run_at_hour",
         "lifecycle_insights_run_at_hour",
         "agent_digest_run_at_hour",
         "agent_digest_weekly_run_at_hour",

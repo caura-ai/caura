@@ -38,6 +38,7 @@ from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_c
 from core_api.constants import (
     DEFAULT_DOC_SEARCH_TOP_K,
     DEFAULT_SEARCH_TOP_K,
+    EVOLVE_MAX_RELATED_IDS,
     EVOLVE_OUTCOME_TYPES,
     INSIGHTS_FOCUS_MODES,
     KEYSTONES_EMPTY_HINT,
@@ -50,7 +51,7 @@ from core_api.constants import (
     VERSION,
 )
 from core_api.errors import AUTH_ORG_SUSPENDED, AUTH_PLAN_LIMIT, code_for_status
-from core_api.pagination import decode_cursor, encode_cursor
+from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
@@ -3236,7 +3237,12 @@ async def caura_list(
             # ``_memory_to_out`` accepts either an ORM row or a storage dict.
             items = [_memory_to_out(m).model_dump(mode="json") for m in rows[:capped_limit]]
             next_cursor = None
-            if has_more and rows:
+            # OSS 09/02 L-23 — mint only what the gate above would take back.
+            # This is the third copy of the pair and was the one still drifted:
+            # the gate rejects a cursor unless ``created_at``/``desc``, and this
+            # minted one for every sort. ``caura_list`` is the agent-facing
+            # surface, so it was also the highest-traffic instance.
+            if has_more and rows and cursor_sortable(sort, order):
                 last = rows[capped_limit - 1]
                 next_cursor = encode_cursor(_dt.fromisoformat(last["created_at"]), UUID(last["id"]))
             # Cross-tenant audit (F2): count per tenant from the served rows.
@@ -3599,7 +3605,20 @@ async def caura_evolve(
     outcome_type: Annotated[str, Field(description="success|failure|partial.")],
     related_ids: Annotated[
         list[str] | None,
-        Field(description="Memory UUIDs that influenced the action."),
+        # OSS 09/02 L-22 — the same cap the REST twin applies. Both boundaries
+        # reach the same ``report_outcome``, and ``test_c31_mcp_rest_parity``
+        # pins that they agree; bounding only REST left an MCP caller with
+        # exactly the behaviour the cap exists to prevent — an oversized list
+        # written verbatim into the outcome memory's metadata by
+        # ``_persist_outcome``, then silently cut to 50 by ``_adjust_weights``.
+        # The cap rides the inputSchema as ``maxItems`` and is deliberately NOT
+        # repeated in the description: tool-surface tokens are paid on every
+        # agent call, and tests/fixtures/README.md asks that anything the
+        # inputSchema already states be trimmed rather than duplicated in prose.
+        Field(
+            description="Memory UUIDs that influenced the action.",
+            max_length=EVOLVE_MAX_RELATED_IDS,
+        ),
     ] = None,
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,

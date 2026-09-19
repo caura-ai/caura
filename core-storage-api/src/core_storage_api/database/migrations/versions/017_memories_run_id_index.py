@@ -31,6 +31,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
+from core_storage_api.database.migration_helpers import drop_invalid_indexes
+
 revision: str = "017"
 down_revision: str | None = "016"
 branch_labels: str | Sequence[str] | None = None
@@ -39,6 +41,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     with op.get_context().autocommit_block():
+        drop_invalid_indexes("ix_memories_run_id")
         op.execute(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
             "ix_memories_run_id "

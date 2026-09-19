@@ -50,7 +50,11 @@ const mc = new Caura("standalone", { tenantId: "default", baseUrl: "http://local
 | `health()` | `GET /api/v1/health` | `object` |
 
 Failures throw `AuthError` (401/403), `NotFoundError` (404), or
-`CauraApiError`. Every result also exposes the full API payload on `.raw`.
+`CauraApiError` for HTTP errors. Network failures and timeouts while awaiting
+response headers throw `TransportError`, with the original fetch rejection in
+`cause`. All extend `CauraError`, so one catch can handle both HTTP and transport
+failures. Transport errors have no HTTP status code; requests are not retried.
+Every result also exposes the full API payload on `.raw`.
 
 ### Fetching a document
 
@@ -86,6 +90,15 @@ fields, deliberately. See
 For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
 [per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
+
+## Request headers
+
+Every request carries `X-API-Key` (your key), `Content-Type: application/json`
+and a `User-Agent` of the form `caura-client-node/<version> (node/<major>)`.
+The `User-Agent` lets a Caura server count which SDK families talk to it; it
+names only the package, its version and the Node major (browsers drop the
+header, which is fine). The client sends nothing to any host other than the
+`baseUrl` you configure. The version is also exported as `VERSION`.
 
 ## Not `npm install caura`
 

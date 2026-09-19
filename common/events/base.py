@@ -34,8 +34,12 @@ class Event(BaseModel):
 
 
 # A handler is an async callable receiving the full Event envelope. Return
-# value is ignored; raising propagates to the bus (in-process buses re-raise
-# in tests, Pub/Sub buses nack for redelivery).
+# value is ignored. What raising costs depends on the backend, and the two
+# differ in a way worth knowing before relying on either:
+#   * Pub/Sub nacks, so the message is redelivered (at-least-once).
+#   * ``InProcessEventBus`` logs and drops it. There is no redelivery and no
+#     dead-letter — the event is gone. This line used to say in-process buses
+#     "re-raise in tests"; no such mechanism has ever existed.
 EventHandler = Callable[[Event], Awaitable[None]]
 
 
@@ -101,6 +105,13 @@ class EventBus(ABC):
         handler raises, gets redelivered. Use `event.event_id` as a
         natural dedup key when the operation isn't inherently
         idempotent.
+
+        ``InProcessEventBus`` is at-MOST-once and cannot be otherwise: it
+        holds events in memory, so a handler that raises, or a process that
+        exits, loses them with nothing to redeliver from. That is the
+        standalone and OSS default. A handler whose work must survive its own
+        failure needs a durable record of its own — the bus will not provide
+        one, whatever it is asked.
 
         ``broadcast``: when True, *every* subscribing process must receive
         each event (fan-out), not just one. The default (False) is the

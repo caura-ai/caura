@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -150,18 +151,35 @@ async def verify_audit_chain(
     # Bounded so an authenticated caller can't pass ?limit=1e9 and force the
     # service to load hundreds of millions of rows into memory (OOM).
     limit: int = Query(default=100_000, ge=1, le=500_000),
+    # Resume point. A chain longer than ``limit`` comes back ``truncated`` with
+    # a ``next_seq``; pass it here to verify the following window. Without this
+    # the tail of any chain past the 500k cap was unverifiable — the result
+    # announced truncation and offered no way to continue.
+    start_seq: int = Query(default=1, ge=1),
 ) -> dict:
     """Verify a tenant's tamper-evident audit hash chain.
 
     Walks the chain in ``seq`` order, recomputes each ``event_hash``, and
     checks linkage + genesis + tail-against-head. Returns
-    ``{valid: true, verified_count, head_seq}`` when intact, else
+    ``{valid: true, verified_count, head_seq, truncated}`` when intact — plus
+    ``next_seq`` when ``truncated`` — else
     ``{valid: false, verified_count, first_broken: {seq, id, reason}}``
     where ``reason`` ∈ {seq_gap, prev_hash_mismatch, event_hash_mismatch,
-    tail_truncated}. Declared before the ``GET ""`` list route so
-    ``/audit-logs/verify`` matches here, not the list handler.
+    tail_truncated, missing_predecessor}. Declared before the ``GET ""`` list
+    route so ``/audit-logs/verify`` matches here, not the list handler.
+
+    A ``truncated`` result verifies only the window it covers, and each window
+    is read in its own snapshot — so walking every contiguous window from seq 1
+    is a WEAKER statement than one un-truncated pass, not an equal one. It
+    shows each window was intact when it was read, which leaves a tamper behind
+    the cursor undetected until a later run covers that region. Prefer a single
+    un-truncated pass where the chain fits inside one; see
+    ``audit_verify_chain`` for the full argument.
+
+    ``missing_predecessor`` carries only ``{seq, reason}`` — there is no row to
+    report an ``id`` for, which is the point of the refusal.
     """
-    return await _svc.audit_verify_chain(tenant_id, limit=limit)
+    return await _svc.audit_verify_chain(tenant_id, limit=limit, start_seq=start_seq)
 
 
 @router.get("")
@@ -171,13 +189,20 @@ async def list_audit_logs(
     offset: int = 0,
     action: str | None = None,
     resource_type: str | None = None,
+    since: datetime | None = None,
 ) -> list[dict]:
-    logs = await _svc.audit_list_by_tenant(tenant_id, limit=limit)
-    results = [orm_to_dict(log, AUDIT_LOG_FIELDS) for log in logs]
-    if action:
-        results = [r for r in results if r.get("action") == action]
-    if resource_type:
-        results = [r for r in results if r.get("resource_type") == resource_type]
-    if offset:
-        results = results[offset:]
-    return results
+    # EVERY parameter filters in SQL. ``since`` already did (OSS 08/14 M-11);
+    # ``action`` / ``resource_type`` / ``offset`` were applied here, in Python,
+    # to rows the query had already truncated with LIMIT — so a filter searched
+    # only the newest ``limit`` rows and returned [] when the matches were older
+    # than that, and ``offset`` sliced a list that was itself capped at
+    # ``limit``, which made page 2 empty for every tenant, always.
+    logs = await _svc.audit_list_by_tenant(
+        tenant_id,
+        limit=limit,
+        offset=offset,
+        action=action,
+        resource_type=resource_type,
+        since=since,
+    )
+    return [orm_to_dict(log, AUDIT_LOG_FIELDS) for log in logs]

@@ -181,12 +181,14 @@ def _require_inbox_admin(auth: AuthContext) -> None:
     unauthenticated bootstrap routes, which take no ``auth`` and write
     nothing tenant-scoped.
     """
-    # Mirror documents.py:215-216 — admin status may come from either
-    # the legacy ``is_admin`` flag OR ``org_role == "admin"``. Keeping
-    # both surfaces in lockstep means an operator authorized to write
-    # admin-gated skills via ``caura_doc`` can also act on the inbox.
-    is_admin = bool(getattr(auth, "is_admin", False)) or (getattr(auth, "org_role", None) == "admin")
-    if not is_admin:
+    # ``AuthContext.is_org_admin`` is the shared spelling of "admin status
+    # may come from either the legacy ``is_admin`` flag OR
+    # ``org_role == 'admin'``". Keeping this surface and ``documents`` on the
+    # same property means an operator authorized to write admin-gated skills
+    # via ``caura_doc`` can also act on the inbox, and stays that way — when
+    # the two were written out by hand in three places, nothing held them
+    # together but the habit of copying.
+    if not auth.is_org_admin:
         raise HTTPException(
             status_code=403,
             detail=coded_detail(
@@ -1212,14 +1214,13 @@ async def edit(
 
     # Re-run the validator — it recomputes content_hash + scan + size
     # caps; same code path as the original write so we get the same
-    # guarantees on the EDITABLE fields. ``is_admin`` mirrors
-    # ``_require_inbox_admin``'s two-part check (is_admin flag OR
-    # org_role='admin') so the validator's admin-only branches
-    # (e.g. setting ``source='forge'`` for re-installs) stay
-    # consistent with what the surrounding endpoint allows.
+    # guarantees on the EDITABLE fields. ``is_admin`` reads the same
+    # ``is_org_admin`` property ``_require_inbox_admin`` gates on, so the
+    # validator's admin-only branches (e.g. setting ``source='forge'`` for
+    # re-installs) stay consistent with what the surrounding endpoint allows.
     ctx = SkillWriteContext(
         caller_agent_id=auth.agent_id,
-        is_admin=bool(getattr(auth, "is_admin", False)) or (getattr(auth, "org_role", None) == "admin"),
+        is_admin=auth.is_org_admin,
         is_internal_forge=False,
         description_max_bytes=desc_max,
         body_max_bytes=body_max,

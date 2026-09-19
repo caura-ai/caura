@@ -1,12 +1,14 @@
-# caura-client
+# Caura — governed shared memory for AI agent fleets
 
-> Formerly `memclaw-client`. Its yanked final release, `memclaw-client==0.5.0`, still installs `caura-client` when exactly pinned, but provides no `memclaw_client` module. Existing code must move its imports and the retired `MemClaw`/`MemClawError`/`MemClawAPIError` names to the canonical package and classes below. <!-- legacy-name-floor: taught as legacy alias -->
+Caura (formerly MemClaw) is an Agent DB — governed shared memory for AI agent fleets. Agents commit what they learn once; every agent in the fleet recalls it through MCP tools, REST, or Caura Rail (preview), subject to tenant isolation, visibility scope (scope_agent / scope_team / scope_org) and caller trust level. <!-- legacy-name-floor: taught as the former name -->
 
-Official Python client for [Caura](https://caura.ai) — governed shared
-memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).
-
-A thin wrapper over the Caura REST API. Point it at a managed
+`caura-client` is the official Python client for Caura and the canonical
+package name; [`caura`](https://pypi.org/project/caura/) and
+[`caura-sdk`](https://pypi.org/project/caura-sdk/) install the same client.
+It is a thin wrapper over the Caura REST API. Point it at a managed
 (`https://caura.ai`) or self-hosted (`http://localhost:8000`) deployment.
+
+> Formerly `memclaw-client`. That package is retired and provides no `memclaw_client` module, so move imports to `caura_client` and the retired `MemClaw`/`MemClawError`/`MemClawAPIError` names to the `Caura` class and `CauraAPIError` below. <!-- legacy-name-floor: taught as legacy alias -->
 
 ## Install
 
@@ -40,6 +42,12 @@ with Caura("standalone", tenant_id="default", base_url="http://localhost:8000") 
     ...
 ```
 
+New to Caura? Start with [what Caura is](https://caura.ai/docs) and the
+[LongMemEval benchmark harness](https://github.com/caura-ai/caura-longmemeval).
+To reach the same memory from an MCP client with no SDK, see the
+[caura](https://pypi.org/project/caura/) page. Source and issues live at
+[github.com/caura-ai/caura](https://github.com/caura-ai/caura).
+
 ## API
 
 | Method | Endpoint | Returns |
@@ -53,29 +61,11 @@ with Caura("standalone", tenant_id="default", base_url="http://localhost:8000") 
 | `close()` | — | `None` |
 
 The client is a context manager (`with Caura(...) as mc:`) and raises
-`AuthError` (401/403), `NotFoundError` (404), or `CauraAPIError` on failures.
+`AuthError` (401/403), `NotFoundError` (404), or `CauraAPIError` on HTTP failures.
+Network failures and timeouts raise `TransportError`, with the original `httpx`
+exception in `__cause__`. Catch `CauraError` to handle both HTTP and transport
+failures. Transport errors have no HTTP status code; requests are not retried.
 Every result also exposes the full API payload on `.raw`.
-
-### Unknown fields on writes are rejected
-
-`write()` forwards any extra keyword arguments straight into the request body
-(`mc.write("...", some_field=1)`). The API rejects a field it does not declare
-with **422** and names it:
-
-```python
-try:
-    mc.write("a memory", tags=["alpha"])   # `tags` is not a write field
-except CauraAPIError as exc:
-    exc.payload["error"]["details"]["unknown_fields"]   # ["tags"]
-```
-
-This used to return `201` with the field silently discarded, so an integration
-that "worked" may start failing here — the data it sent was never being stored.
-Caller-owned keys belong under `metadata` (`mc.write("...", metadata={"tags": [...]})`).
-
-`search()` and `recall()` are unaffected: filter bodies still accept unknown
-fields, deliberately. See
-[api-surfaces.md](https://github.com/caura-ai/caura/blob/main/docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
 
 ### Fetching a document
 
@@ -104,6 +94,15 @@ finally:
     mc.close()
 ```
 
+### Request headers
+
+Every request carries `X-API-Key` (your key), `Content-Type: application/json`
+and a `User-Agent` of the form
+`caura-client-python/<version> (python/<major>.<minor>)`. The `User-Agent`
+lets a Caura server count which SDK families talk to it; it names only the
+package, its version and the Python release. The client sends nothing to any
+host other than the `base_url` you configure.
+
 ### `submit_interview()` is an Interviewer-internal surface
 
 `submit_interview()` is used by the `caura-interviewer` adapter below to
@@ -117,6 +116,27 @@ from a `200` committed. New SDK users should not need it.
 For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
 [per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
+
+### Unknown fields on writes are rejected
+
+`write()` forwards any extra keyword arguments straight into the request body
+(`mc.write("...", some_field=1)`). The API rejects a field it does not declare
+with **422** and names it:
+
+```python
+try:
+    mc.write("a memory", tags=["alpha"])   # `tags` is not a write field
+except CauraAPIError as exc:
+    exc.payload["error"]["details"]["unknown_fields"]   # ["tags"]
+```
+
+This used to return `201` with the field silently discarded, so an integration
+that "worked" may start failing here — the data it sent was never being stored.
+Caller-owned keys belong under `metadata` (`mc.write("...", metadata={"tags": [...]})`).
+
+`search()` and `recall()` are unaffected: filter bodies still accept unknown
+fields, deliberately. See
+[api-surfaces.md](https://github.com/caura-ai/caura/blob/main/docs/api-surfaces.md#request-body-contract-writes-are-strict-searches-are-not).
 
 ## caura-interviewer — Claude Code + Cursor adapter
 

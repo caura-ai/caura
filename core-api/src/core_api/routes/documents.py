@@ -283,9 +283,8 @@ async def upsert_document(
             # external source='forge' attempt.
             is_internal_forge = False
             sf_ctx = SkillWriteContext(
-                caller_agent_id=getattr(auth, "agent_id", None),
-                is_admin=bool(getattr(auth, "is_admin", False))
-                or (getattr(auth, "org_role", None) == "admin"),
+                caller_agent_id=auth.agent_id,
+                is_admin=auth.is_org_admin,
                 is_internal_forge=is_internal_forge,
                 description_max_bytes=int(sf_settings.get("description_max_bytes", 160)),
                 body_max_bytes=int(sf_settings.get("body_max_bytes", 40_000)),

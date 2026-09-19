@@ -8,8 +8,14 @@ below the similarity floor, each carrying the raw cosine + final score. The
 candidate stores only ``memory_id`` (a pointer); content is JOINed from
 ``memories`` on demand, never duplicated here.
 
-Both tables are RLS-scoped by ``tenant_id`` like every other tenant table and
-are written fire-and-forget from the search pipeline (no request latency).
+Both tables carry ``tenant_id`` and every read filters on it in the query —
+the same way every other tenant table in this schema is scoped, which is to say
+at the query layer and nowhere else. 09/02 L-46: this said "RLS-scoped by
+``tenant_id`` like every other tenant table", and the comparison was the only
+accurate half. A reader auditing tenant isolation would have taken it as
+evidence of a database-enforced boundary and stopped looking for the one that
+actually does the work. They are written fire-and-forget from the search
+pipeline (no request latency).
 Logging is gated by the ``observability.recall_logging_enabled`` org setting
 (default off), so existing tenants see zero new rows until they opt in.
 

@@ -7,7 +7,9 @@ What matters here is not that a counter goes up — it is the three properties
 that make buffered counting safe for billing, each pinned separately:
 
 * coalescing must not lose the **count** (a bulk write of 20 is not 1),
-* a failed flush must **return** the counts, not drop them,
+* a flush that failed BEFORE transmission must **return** the counts, while
+  one that failed ambiguously must drop them rather than replay an additive
+  upsert that may already have committed (OSS 09/02 L-44),
 * shutdown must flush, or a clean restart silently costs an interval.
 """
 
@@ -18,6 +20,7 @@ import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from core_api.services.usage_meter import UsageMeter, current_period_start
@@ -113,11 +116,16 @@ async def test_an_empty_buffer_makes_no_call(sc):
 
 
 async def test_a_failed_flush_returns_the_counts_to_the_buffer(sc):
-    """The upsert is additive, so re-sending is safe — and dropping is not.
+    """A blip that never reached storage must cost latency, not billing accuracy.
 
-    A storage blip must cost latency, not billing accuracy.
+    ``ConnectError`` rather than a bare ``RuntimeError`` since OSS 09/02 L-44:
+    "storage down" IS a connection-phase failure, and that class is the one
+    where re-sending an additive upsert is provably safe because the request
+    was never transmitted. The generic exception used to stand in for it, which
+    made this test read as though re-sending were safe after ANY failure — the
+    belief the finding was about.
     """
-    sc.increment_tenant_usage.side_effect = RuntimeError("storage down")
+    sc.increment_tenant_usage.side_effect = httpx.ConnectError("storage down")
     meter = UsageMeter()
     await meter.record(tenant_id="t-1", operation="write", count=7)
     assert await meter.flush() == 0
@@ -126,11 +134,18 @@ async def test_a_failed_flush_returns_the_counts_to_the_buffer(sc):
     sc.increment_tenant_usage.return_value = 1
     await meter.flush()
 
+    # ``await_count`` first: ``_rows`` reads ``await_args``, i.e. the LAST call,
+    # and when the counts are dropped there IS no second call — so the failed
+    # first call's rows (which still carry count=7) satisfied the assertion
+    # below whether or not the replay happened.
+    assert sc.increment_tenant_usage.await_count == 2, (
+        "the buffered counts were never re-sent"
+    )
     assert _rows(sc)[0]["count"] == 7, "counts were dropped by the failed flush"
 
 
 async def test_counts_arriving_during_a_failed_flush_are_merged_not_lost(sc):
-    sc.increment_tenant_usage.side_effect = RuntimeError("storage down")
+    sc.increment_tenant_usage.side_effect = httpx.ConnectError("storage down")
     meter = UsageMeter()
     await meter.record(tenant_id="t-1", operation="write", count=2)
     await meter.flush()
@@ -157,7 +172,7 @@ async def test_stop_flushes_what_is_buffered(sc):
 
 
 async def test_a_failed_final_flush_logs_the_stranded_counter(sc, caplog):
-    sc.increment_tenant_usage.side_effect = RuntimeError("storage down")
+    sc.increment_tenant_usage.side_effect = httpx.ConnectError("storage down")
     meter = UsageMeter()
     await meter.record(tenant_id="tenant-a", operation="search", count=7)
     period_start = next(iter(meter._counts))[2].isoformat()
@@ -175,14 +190,21 @@ async def test_a_failed_final_flush_logs_the_stranded_counter(sc, caplog):
     assert stranded[0].levelno == logging.ERROR
 
 
-async def test_a_shutdown_landing_inside_a_flush_does_not_drop_the_batch(sc):
+async def test_a_shutdown_landing_inside_a_flush_does_not_replay_the_batch(sc):
     """``stop()`` cancels the loop, and the cancel can land in the flush's
-    network call — the one window where the restore-on-failure path is the
-    difference between billing accuracy and silence.
+    network call. CONTRACT REVERSED by OSS 09/02 L-44 — this used to assert the
+    batch was re-sent.
 
-    Regression: ``CancelledError`` is a ``BaseException``, so an
-    ``except Exception:`` restore never fired for it, and the batch — already
-    swapped out of the buffer — was gone before ``stop()``'s final flush looked.
+    ``CoreStorageClient._cancel_safe`` shields every request on purpose, so the
+    cancelled POST runs to completion and may commit after the frame unwinds —
+    including when storage looks wedged, since the shielded request outlives
+    our giving up on it. Re-sending it therefore double-bills. The batch is
+    dropped, logged per row and counted instead, which is the under-count-
+    rather-than-over-count direction the module argues for throughout.
+
+    The original regression this guarded — the batch vanishing with nobody the
+    wiser, because ``CancelledError`` walks past ``except Exception`` — is still
+    pinned, now by ``dropped_rows`` rather than by a re-send.
     """
     in_flight = asyncio.Event()
 
@@ -201,13 +223,14 @@ async def test_a_shutdown_landing_inside_a_flush_does_not_drop_the_batch(sc):
     sc.increment_tenant_usage.return_value = 1
     await meter.stop()
 
-    assert sc.increment_tenant_usage.await_count == 2, (
-        "the cancelled batch was never re-sent — stop() found an empty buffer"
+    assert sc.increment_tenant_usage.await_count == 1, (
+        "the cancelled batch was replayed — the shielded write may already have landed"
     )
+    assert meter.dropped_rows == 1, "dropping it must still be visible"
     assert _rows(sc)[0]["count"] == 9
 
 
-async def test_a_wedged_storage_does_not_hold_shutdown_open(sc):
+async def test_a_wedged_storage_does_not_hold_shutdown_open(sc, caplog):
     """``stop()`` runs inside core-api's shutdown chain, ahead of the event bus
     and the storage client's own close.
 
@@ -224,9 +247,28 @@ async def test_a_wedged_storage_does_not_hold_shutdown_open(sc):
 
     meter = UsageMeter(flush_interval=3600)
     await meter.record(tenant_id="t-1", operation="write", count=6)
-    await meter.stop(timeout=0.05)  # returns rather than hanging
+    with caplog.at_level(logging.WARNING, logger="core_api.services.usage_meter"):
+        await meter.stop(timeout=0.05)  # returns rather than hanging
 
-    assert meter._counts, "the batch was dropped instead of returned to the buffer"
+    # The point of this test is that ``stop()`` RETURNS rather than hanging;
+    # reaching this line at all is the assertion. What happens to the batch
+    # changed with OSS 09/02 L-44: the wedged request is shielded and still
+    # in flight, so it may yet commit, and the counts are dropped rather than
+    # queued for a replay that could double-bill.
+    assert not meter._counts
+    assert meter.dropped_rows == 1, "the shortfall must be counted, not silent"
+
+    # ...and the deadline warning has to SAY how much was lost. It used to read
+    # ``len(self._counts)``, which was right only while a failed flush put its
+    # batch back. Now that the batch is dropped instead, ``_counts`` is empty by
+    # the time this branch runs, so the old line reported "0 rows lost" on
+    # precisely the path that loses the most.
+    deadline = [
+        r for r in caplog.records if "did not complete within" in r.getMessage()
+    ]
+    assert len(deadline) == 1, [r.getMessage() for r in caplog.records]
+    msg = deadline[0].getMessage()
+    assert "1 counter rows dropped" in msg, msg
 
 
 async def test_the_hook_signature_matches_what_usage_service_calls(sc):
@@ -275,3 +317,86 @@ async def test_a_row_missing_period_start_is_a_422_not_a_500():
         await increment_tenant_usage(_Req())
     assert exc.value.status_code == 422
     assert "period_start" in str(exc.value.detail)
+
+
+# ── OSS 09/02 L-44: replay only what provably never landed ───────────────────
+
+
+async def test_an_ambiguous_flush_is_not_replayed(sc):
+    """A ReadTimeout may follow a COMMITTED write; replaying it bills twice.
+
+    ``/tenant-usage/increment`` is an additive upsert with no storage-side
+    dedupe, which is why ``increment_tenant_usage`` goes out at the
+    ``idempotent=False`` default. The meter replayed on any exception one layer
+    up, which is the thing ``common/http_retry``'s policy refuses.
+    """
+    sc.increment_tenant_usage.side_effect = httpx.ReadTimeout("no response")
+    meter = UsageMeter()
+    await meter.record(tenant_id="t-1", operation="write", count=7)
+    assert await meter.flush() == 0
+
+    sc.increment_tenant_usage.side_effect = None
+    await meter.flush()
+
+    assert sc.increment_tenant_usage.await_count == 1, (
+        "the ambiguous batch was replayed and would have double-billed"
+    )
+    assert meter.dropped_rows == 1
+
+
+async def test_a_cancelled_flush_is_not_replayed_either(sc):
+    """The shutdown path is the one that looks safe to exempt, and isn't.
+
+    ``CoreStorageClient._cancel_safe`` shields every request ON PURPOSE, so a
+    cancelled flush's POST runs to completion and very likely COMMITS after
+    this frame unwinds. Re-buffering would hand it to ``stop()``'s final flush
+    and bill it twice — the precise failure this finding is about.
+    """
+    sc.increment_tenant_usage.side_effect = asyncio.CancelledError()
+    meter = UsageMeter()
+    await meter.record(tenant_id="t-1", operation="write", count=7)
+    with pytest.raises(asyncio.CancelledError):
+        await meter.flush()
+
+    assert not meter._counts, (
+        "a cancelled flush must not return its batch to the buffer"
+    )
+    assert meter.dropped_rows == 1
+
+
+async def test_an_ambiguous_flush_logs_every_dropped_row(sc, caplog):
+    """Dropping is only defensible if the shortfall is recoverable by hand."""
+    sc.increment_tenant_usage.side_effect = httpx.ReadTimeout("no response")
+    meter = UsageMeter()
+    await meter.record(tenant_id="tenant-a", operation="search", count=7)
+    period_start = next(iter(meter._counts))[2].isoformat()
+
+    with caplog.at_level(logging.ERROR, logger="core_api.services.usage_meter"):
+        await meter.flush()
+
+    assert any(
+        f"tenant=tenant-a operation=search period_start={period_start} count=7"
+        in r.getMessage()
+        for r in caplog.records
+    ), "a dropped billing row must name itself in the log"
+
+
+async def test_dropped_row_logging_is_capped(sc, caplog):
+    """``tenant_id`` is unbounded, so one flush can carry hundreds of rows.
+
+    ``usage_service`` refuses the uncapped version of this for the same reason
+    (``_METER_FAILURE_LOG_EVERY``); a meter outage must not become a log-volume
+    incident on top of it.
+    """
+    sc.increment_tenant_usage.side_effect = httpx.ReadTimeout("no response")
+    meter = UsageMeter()
+    for i in range(60):
+        await meter.record(tenant_id=f"tenant-{i}", operation="write", count=1)
+
+    with caplog.at_level(logging.ERROR, logger="core_api.services.usage_meter"):
+        await meter.flush()
+
+    per_row = [r for r in caplog.records if "counter row dropped" in r.getMessage()]
+    assert len(per_row) == 20, f"expected the cap, got {len(per_row)} lines for 60 rows"
+    assert any("further counter rows dropped" in r.getMessage() for r in caplog.records)
+    assert meter.dropped_rows == 60, "the counter still sees every row"

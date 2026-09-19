@@ -2,89 +2,39 @@
 
 CAURA-595: ``get_llm_provider`` moved to ``common.llm.registry``
 (re-exported here) so core-worker can construct LLM providers without
-importing core-api. Infrastructure backend factories (storage, job
-queue, identity, conflict resolver, STM) stay here — those are
-core-api-only concerns.
+importing core-api.
+
+Four sibling factories used to live here — ``get_storage_backend``,
+``get_job_queue``, ``get_identity_resolver`` and ``get_conflict_resolver``
+— along with the SqliteBackend, InProcessQueue, ConfigIdentity and
+ManualResolver they returned. Nothing outside their own tests called
+them, and unlike ``get_stm_backend`` no setting selected them: there was
+no ``storage_backend`` / ``job_queue`` / ``identity_resolver`` /
+``conflict_resolver`` name anywhere in ``core_api.config``, so the only
+way to reach one was to call the factory by hand. They were deleted
+rather than kept as extension points: an extension point nothing selects
+is indistinguishable from dead code, and it had already drifted (the
+SQLite backend carried its own ``memories`` DDL, maintained by no
+migration).
 """
 
 from __future__ import annotations
 
 from common.llm.registry import get_llm_provider
-from core_api.protocols import (
-    ConflictResolver,
-    IdentityResolver,
-    JobQueue,
-    STMBackend,
-    StorageBackend,
-)
+from core_api.protocols import STMBackend
 
 __all__ = [
-    "get_conflict_resolver",
-    "get_identity_resolver",
-    "get_job_queue",
     "get_llm_provider",
     "get_stm_backend",
-    "get_storage_backend",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Infrastructure backend factories
-# ---------------------------------------------------------------------------
-
-
-def get_storage_backend(name: str = "sqlite", **kwargs: object) -> StorageBackend:
-    """Construct a storage backend by name.
-
-    Supported names: ``"sqlite"``.
-    """
-    if name == "sqlite":
-        from core_api.providers.sqlite_backend import SqliteBackend
-
-        return SqliteBackend(**kwargs)
-    raise ValueError(f"Unknown storage backend: {name}")
-
-
-def get_job_queue(name: str = "inprocess") -> JobQueue:
-    """Construct a job queue by name.
-
-    Supported names: ``"inprocess"``.
-    """
-    if name == "inprocess":
-        from core_api.providers.inprocess_queue import InProcessQueue
-
-        return InProcessQueue()
-    raise ValueError(f"Unknown job queue: {name}")
-
-
-def get_identity_resolver(name: str = "config", **kwargs: object) -> IdentityResolver:
-    """Construct an identity resolver by name.
-
-    Supported names: ``"config"``.
-    """
-    if name == "config":
-        from core_api.providers.config_identity import ConfigIdentity
-
-        return ConfigIdentity(**kwargs)
-    raise ValueError(f"Unknown identity resolver: {name}")
-
-
-def get_conflict_resolver(name: str = "manual") -> ConflictResolver:
-    """Construct a conflict resolver by name.
-
-    Supported names: ``"manual"``.
-    """
-    if name == "manual":
-        from core_api.providers.manual_resolver import ManualResolver
-
-        return ManualResolver()
-    raise ValueError(f"Unknown conflict resolver: {name}")
 
 
 def get_stm_backend(name: str = "memory", **kwargs: object) -> STMBackend:
     """Construct an STM backend by name.
 
-    Supported names: ``"memory"``.
+    Supported names: ``"memory"``, ``"redis"`` — selected by
+    ``settings.stm_backend`` in :func:`core_api.services.stm_service.
+    get_stm_backend_instance`.
     """
     if name == "memory":
         from core_api.providers.inmemory_stm import InMemorySTM

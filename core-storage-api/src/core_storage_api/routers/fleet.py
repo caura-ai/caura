@@ -97,6 +97,8 @@ async def get_node(
     tenant_id: str,
 ) -> dict:
     node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
+    if node_id is None:
+        raise HTTPException(status_code=404, detail="Node not found")
     node = await _svc.fleet_get_node_by_id(node_id=node_id, tenant_id=tenant_id)
     if node is None:
         raise HTTPException(status_code=404, detail="Node not found")
@@ -109,15 +111,23 @@ async def delete_node(
     tenant_id: str,
 ) -> dict:
     node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
-    node = await _svc.fleet_get_node_by_id(node_id=node_id, tenant_id=tenant_id)
-    if node is None:
+    if node_id is None:
         raise HTTPException(status_code=404, detail="Node not found")
-    fleet_id = getattr(node, "fleet_id", None)
-    if fleet_id:
-        await _svc.fleet_delete_commands_for_nodes(
-            tenant_id=tenant_id,
-            node_ids=[node_id],
-        )
+    # Delete the NODE, which is what a caller asked for. This used to delete
+    # the node's commands and return ``{"ok": True}`` with the row still
+    # there — so the node kept reporting in, kept appearing in
+    # ``GET /nodes``, and a second DELETE succeeded just as loudly. The
+    # command cleanup was real but it was never the operation; the node row
+    # was the operation, and only the commands were ever touched.
+    #
+    # Deleting the commands was also conditional on the node having a
+    # ``fleet_id``, which nothing about a delete depends on: an unfleeted
+    # node's commands were left behind as well.
+    deleted = await _svc.fleet_delete_node(tenant_id=tenant_id, node_id=node_id)
+    if not deleted:
+        # Lost a race with a concurrent delete. The caller's intent holds
+        # either way, so this is not an error — but it is not "I deleted it".
+        raise HTTPException(status_code=404, detail="Node not found")
     return {"ok": True}
 
 
@@ -167,13 +177,27 @@ async def create_command(request: Request) -> dict:
 async def list_commands(
     tenant_id: str,
     node_name: str | None = None,
+    node_id: UUID | None = None,
     status: str | None = None,
     command: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    node_id: UUID | None = None
-    if node_name:
+    # ``node_id`` accepted directly (OSS 09/02 M-26) as well as by name. The
+    # service has always filtered on the id; only ``node_name`` was reachable
+    # from outside, so core-api's ``GET /fleet/commands?node_id=...`` — which
+    # takes a UUID — had nothing to send it to and dropped the filter.
+    # An explicit id wins over a name: it needs no lookup and cannot be
+    # ambiguous.
+    if node_id is None and node_name:
         node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
+        if node_id is None:
+            # The caller named a node this tenant does not have. Returning []
+            # is the only honest answer: falling through with ``node_id=None``
+            # would DROP the filter and list every command in the tenant, so a
+            # typo would read as "here is everything" rather than "no such
+            # node". (Before this lookup could return None it raised, so the
+            # endpoint 500'd instead — neither answer was the right one.)
+            return []
     # status/command are filtered in SQL (pre-limit) — the previous
     # post-limit status filter could silently hide matching rows older
     # than the ``limit`` newest commands.
@@ -193,6 +217,10 @@ async def get_pending_commands(
     node_name: str,
 ) -> list[dict]:
     node_id = await _svc.fleet_get_node_id(tenant_id=tenant_id, node_name=node_name)
+    if node_id is None:
+        # Unknown node has no pending commands — see ``get_commands`` for why
+        # this returns empty rather than querying with a null node filter.
+        return []
     commands = await _svc.fleet_get_pending_commands(node_id=node_id, tenant_id=tenant_id)
     return [orm_to_dict(c, FLEET_COMMAND_FIELDS) for c in commands]
 

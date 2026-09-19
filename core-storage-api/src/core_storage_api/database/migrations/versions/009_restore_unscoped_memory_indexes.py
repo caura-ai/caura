@@ -54,6 +54,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
+from core_storage_api.database.migration_helpers import drop_invalid_indexes
+
 revision: str = "009"
 down_revision: str | None = "008"
 branch_labels: str | Sequence[str] | None = None
@@ -64,6 +66,7 @@ def upgrade() -> None:
     # ``CREATE INDEX CONCURRENTLY`` cannot run inside a transaction —
     # alembic's autocommit_block opens its own connection scope.
     with op.get_context().autocommit_block():
+        drop_invalid_indexes("ix_memories_status", "ix_memories_visibility")
         op.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_memories_status ON memories (status)")
         op.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_memories_visibility ON memories (visibility)")
 

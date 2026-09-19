@@ -578,6 +578,21 @@ async def lifespan(app):
         # and cannot be starved by them. event_bus.stop() still calls it; this
         # is an idempotent hoist, not a move.
         shutdown_steps: list = [event_bus.release_broadcast_subscriptions()]
+        # Background tasks drain BEFORE the queues that collect what they
+        # produce. They are producers: ``process_entity_extraction`` calls
+        # ``log_action`` (entity_extraction_worker.py) which enqueues onto the
+        # audit queue, and metered work calls ``usage_meter.record``. Draining
+        # them after those flushes meant a task that finished handed its audit
+        # event to a flusher that ``stop()`` had already set to None, and its
+        # counters to a buffer nothing would flush again — saving the work and
+        # dropping its trail.
+        #
+        # This also puts the drain where there is budget left to spend. The
+        # three 5s flushes below already over-run Cloud Run's 10s window on any
+        # shutdown with queued work, so as the last-but-one step this was
+        # reached with nothing remaining on exactly the shutdowns that motivated
+        # giving it a grace at all.
+        shutdown_steps.append(cancel_all_tasks())
         if audit_queue is not None:
             shutdown_steps.append(audit_queue.stop(timeout=5.0))
         if capability_usage_agg is not None:
@@ -592,7 +607,6 @@ async def lifespan(app):
         shutdown_steps.extend(
             [
                 event_bus.stop(),
-                cancel_all_tasks(),
                 get_storage_client().close(),
             ]
         )

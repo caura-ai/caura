@@ -32,6 +32,7 @@ async def publish_memory_enrich_request(
     tenant_config: object | None = None,
     reference_datetime: datetime | None = None,
     agent_provided_fields: list[str] | None = None,
+    caller_owned_metadata_keys: list[str] | None = None,
 ) -> None:
     """Publish one enrich-request event for a memory persisted without inline enrichment.
 
@@ -46,6 +47,13 @@ async def publish_memory_enrich_request(
     synchronous path does inline). Pass ``None`` only when the
     publisher genuinely has no idea — defaults to "trust enrichment for
     everything", which is the current pre-PR-C behaviour.
+
+    ``caller_owned_metadata_keys`` is its metadata-side twin: the
+    ``CALLER_OWNABLE_KEYS`` subset the caller supplied. The worker keeps
+    writing the platform's own value into ``metadata["_system"]`` for these
+    and skips only the legacy top-level mirror — the same split
+    ``set_system_value`` makes, so both halves of the C25 read view stay
+    correct.
 
     Fire-and-forget: ``bus.publish`` returns once the transport has
     accepted the message (Pub/Sub) or the in-process subscriber has been
@@ -70,9 +78,7 @@ async def publish_memory_enrich_request(
         memory_id=memory_id,
         tenant_id=tenant_id,
         content=content,
-        reference_datetime=(
-            reference_datetime.isoformat() if reference_datetime else None
-        ),
+        reference_datetime=reference_datetime,
         enrichment_provider=getattr(tenant_config, "enrichment_provider", None),
         enrichment_model=getattr(tenant_config, "enrichment_model", None),
         openai_api_key=getattr(tenant_config, "openai_api_key", None),
@@ -82,6 +88,7 @@ async def publish_memory_enrich_request(
         fallback_provider=fallback_provider,
         fallback_model=fallback_model,
         agent_provided_fields=agent_provided_fields,
+        caller_owned_metadata_keys=caller_owned_metadata_keys,
     )
     event = Event(
         event_type=Topics.Memory.ENRICH_REQUESTED,

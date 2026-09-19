@@ -35,10 +35,22 @@ def test_atomic_facts_route_to_metadata():
     assert "atomic_facts" in wc._ENRICHMENT_METADATA_FIELDS
 
 
-def test_nothing_is_unrouted_any_more():
-    """The drop list is now empty, so the import-time drift guard below covers
-    every field rather than every field except one."""
-    assert not wc._ENRICHMENT_UNROUTED_FIELDS
+def test_the_drop_list_holds_exactly_the_two_deliberate_constants():
+    """Pinned as an exact set, so a THIRD field cannot join them quietly.
+
+    The list was empty after ``atomic_facts`` left it. ``status`` and ``tags``
+    were added back deliberately (OSS 09/02 M-65 / M-66) — the argument for
+    each is at ``_ENRICHMENT_UNROUTED_FIELDS`` itself.
+
+    Equality rather than ``in``: the whole value of this list is that it is
+    short and every entry is argued for. ``assert "x" in ...`` would let a
+    future field be dropped by adding one line.
+    """
+    # Bound to a lowercase local first: SIM300 classifies the SCREAMING_CASE
+    # attribute as a constant and wants it on the right, which would put the
+    # subject of the assertion after the expectation.
+    drop_list = wc._ENRICHMENT_UNROUTED_FIELDS
+    assert drop_list == frozenset({"status", "tags"})
 
 
 def test_every_enrichment_field_still_has_a_home():
@@ -55,7 +67,8 @@ def test_every_enrichment_field_still_has_a_home():
 
 
 def test_a_re_enrichment_can_clear_stale_facts():
-    """Always-write, for the same reason ``tags`` is. A re-run that finds ONE
+    """Always-write. (``tags`` used to be cited here as the parallel case; it
+    is no longer always-write — see M-66.) A re-run that finds ONE
     claim where a previous run found three must be able to clear the stale two,
     or the fan-out would later create children for claims the current content no
     longer makes."""

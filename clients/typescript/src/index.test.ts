@@ -1,7 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
-import { Caura, CauraApiError, AuthError, NotFoundError } from "./index.js";
+import {
+  Caura,
+  CauraError,
+  TransportError,
+  CauraApiError,
+  AuthError,
+  NotFoundError,
+  RateLimitError,
+  USER_AGENT,
+  VERSION,
+} from "./index.js";
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
 
@@ -20,6 +31,23 @@ function makeClient(handler: Handler, options: Record<string, unknown> = {}): Ca
     ...options,
   });
 }
+
+test("VERSION agrees with package.json", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(VERSION, pkg.version);
+});
+
+test("every request names the SDK in User-Agent", async () => {
+  let seen: string | undefined;
+  const client = makeClient((_url, init) => {
+    seen = (init.headers as Record<string, string>)["User-Agent"];
+    return jsonResponse(200, { status: "ok" });
+  });
+  await client.health();
+  assert.equal(seen, USER_AGENT);
+  assert.equal(seen, `caura-client-node/${VERSION} (node/${process.versions.node.split(".")[0]})`);
+  assert.match(seen!, /^caura-client-node\/\d+\.\d+\.\d+ \(node\/\d+\)$/);
+});
 
 test("write posts to /memories and parses the response", async () => {
   const client = makeClient((url, init) => {
@@ -133,6 +161,38 @@ test("recall ignores the key the server never sends", async () => {
   assert.deepEqual(result.supportingMemories, []);
 });
 
+test("recall throws when 200 body is not an object", async () => {
+  const client = makeClient(() => jsonResponse(200, ["not", "a", "dict"]));
+  await assert.rejects(client.recall("q"), (err: unknown) => {
+    assert.ok(err instanceof CauraApiError);
+    assert.equal((err as CauraApiError).statusCode, 200);
+    assert.equal((err as CauraApiError).message, "[200] recall response must be a JSON object");
+    return true;
+  });
+});
+
+test("recall throws when 200 body is a bare scalar", async () => {
+  const client = makeClient(() => jsonResponse(200, "not an object"));
+  await assert.rejects(client.recall("q"), (err: unknown) => {
+    assert.ok(err instanceof CauraApiError);
+    assert.equal((err as CauraApiError).statusCode, 200);
+    assert.equal((err as CauraApiError).message, "[200] recall response must be a JSON object");
+    return true;
+  });
+});
+
+test("recall translates topK and forwards only the extras", async () => {
+  let captured: Record<string, unknown> = {};
+  const client = makeClient((_url, init) => {
+    captured = JSON.parse(init.body as string);
+    return jsonResponse(200, liveRecallBody([]));
+  });
+  await client.recall("q", { topK: 7, diagnostic: true });
+  assert.equal(captured.top_k, 7);
+  assert.equal(captured.diagnostic, true);
+  assert.equal("topK" in captured, false);
+});
+
 test("health hits /health", async () => {
   const client = makeClient((url) => {
     assert.equal(new URL(url).pathname, "/api/v1/health");
@@ -204,6 +264,22 @@ test("404 maps to NotFoundError", async () => {
   await assert.rejects(client.search("q"), NotFoundError);
 });
 
+test("429 maps to RateLimitError and parses retry-after", async () => {
+  const client = makeClient(async () => new Response(JSON.stringify({ detail: "slow down" }), {
+    status: 429, headers: { "content-type": "application/json", "retry-after": "2.5" },
+  }));
+  await assert.rejects(client.search("q"), (err: unknown) =>
+    err instanceof RateLimitError && err.retryAfter === 2.5);
+});
+
+test("429 without retry-after has null retryAfter", async () => {
+  const client = makeClient(async () => new Response(JSON.stringify({ detail: "slow down" }), {
+    status: 429, headers: { "content-type": "application/json" },
+  }));
+  await assert.rejects(client.search("q"), (err: unknown) =>
+    err instanceof RateLimitError && err.retryAfter === null);
+});
+
 test("500 maps to CauraApiError", async () => {
   const client = makeClient(() => jsonResponse(500, { message: "boom" }));
   await assert.rejects(client.recall("q"), CauraApiError);
@@ -212,4 +288,55 @@ test("500 maps to CauraApiError", async () => {
 test("constructor validates apiKey and tenantId", () => {
   assert.throws(() => new Caura("", { tenantId: "t" }));
   assert.throws(() => new Caura("k", { tenantId: "" } as never));
+});
+
+for (const operation of ["write", "search", "recall", "health", "getDocument"] as const) {
+  test(`${operation} wraps fetch failures and preserves the cause`, async () => {
+    const cause = new TypeError("fetch failed");
+    let calls = 0;
+    const client = makeClient(() => {
+      calls++;
+      return Promise.reject(cause);
+    });
+    const request = operation === "getDocument"
+      ? client.getDocument("doc-1", { collection: "interviews" })
+      : client[operation]("query");
+    await assert.rejects(request, (error: unknown) => {
+      assert.ok(error instanceof CauraError);
+      assert.ok(error instanceof TransportError);
+      assert.equal(error.cause, cause);
+      assert.match(error.message, /fetch failed/);
+      return true;
+    });
+    assert.equal(calls, 1);
+  });
+}
+
+test("the configured timeout wraps the abort reason", { timeout: 1000 }, async () => {
+  let signal: AbortSignal | null | undefined;
+  const client = makeClient((_url, init) => {
+    signal = init.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+    });
+  }, { timeoutMs: 0 });
+  await assert.rejects(client.search("query"), (error: unknown) => {
+    assert.ok(signal?.aborted);
+    assert.ok(error instanceof CauraError);
+    assert.ok(error instanceof TransportError);
+    assert.equal(error.cause, signal.reason);
+    return true;
+  });
+});
+
+test("transport mapping does not wrap serialization errors", async () => {
+  const client = makeClient(() => assert.fail("serialization must fail before fetch"));
+  const circular: Record<string, unknown> = {};
+  circular.self = circular;
+  await assert.rejects(client.write("hello", { metadata: circular }), TypeError);
+});
+
+test("transport mapping does not wrap invalid JSON", async () => {
+  const client = makeClient(() => new Response("not json"));
+  await assert.rejects(client.health(), SyntaxError);
 });

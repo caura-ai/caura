@@ -19,6 +19,7 @@ import logging
 import sys
 
 from common.events.factory import get_event_bus
+from common.events.inprocess import InProcessEventBus
 from core_worker.backfill import run_embedding_backfill
 from core_worker.clients.storage_client import close_storage_client
 
@@ -59,6 +60,33 @@ async def _amain(argv: list[str]) -> int:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
     if args.cmd == "backfill-embeddings":
+        # Refuse before doing any work if the bus cannot reach a consumer.
+        # The backfill's whole output is published ``EMBED_REQUESTED`` events;
+        # this process registers no handlers, so on the in-process bus every
+        # one of them is delivered to zero subscribers and dropped — and the
+        # run still prints ``published=N``, which reads as success. That is the
+        # same silent-loss shape as the 2026-06-11 incident below, where a
+        # backfill reported 16 published events and none reached the topic.
+        #
+        # ``--dry-run`` is exempt: it publishes nothing by definition, so it
+        # stays usable for counting rows without any bus configured. That
+        # exemption is why ``get_event_bus()`` sits INSIDE the condition and
+        # after the ``not args.dry_run`` term — it raises on a half-configured
+        # pubsub environment (missing GCP_PROJECT_ID or subscription prefix),
+        # and the only other call is in the ``finally`` below, deliberately
+        # wrapped. Resolving it eagerly would turn a dry run that used to exit
+        # 0 into an uncaught traceback.
+        if not args.dry_run and isinstance(get_event_bus(), InProcessEventBus):
+            print(
+                "refusing to run: EVENT_BUS_BACKEND resolves to the in-process bus, "
+                "which has no subscriber in this process — every published event "
+                "would be dropped and the run would still report published=N. "
+                "Set EVENT_BUS_BACKEND=pubsub (plus GCP_PROJECT_ID and "
+                "EVENT_BUS_SUBSCRIPTION_PREFIX) in the ENVIRONMENT, or pass "
+                "--dry-run to count rows without publishing.",
+                file=sys.stderr,
+            )
+            return 2
         try:
             report = await run_embedding_backfill(
                 tenant_id=args.tenant_id,
