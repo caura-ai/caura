@@ -84,6 +84,24 @@ async def search_documents(request: Request) -> list[dict]:
     return results
 
 
+@router.post("/count-unindexed")
+async def count_unindexed(request: Request) -> dict:
+    """Documents in scope that vector search cannot see (ax-0917-h-08).
+
+    Lets the caller distinguish "your query matched nothing" from "nothing in
+    this scope was searchable" — ``/search`` filters ``embedding IS NOT NULL``
+    and a document is only embedded when its write resolved an embed source.
+    """
+    body: dict = await request.json()
+    count = await _svc.document_count_unindexed(
+        tenant_id=body["tenant_id"],
+        collection=body.get("collection"),
+        fleet_id=body.get("fleet_id"),
+        readable_tenant_ids=body.get("readable_tenant_ids"),
+    )
+    return {"count": count}
+
+
 @router.post("/update-status")
 async def update_document_status(request: Request) -> dict:
     """Conditional (CAS) status flip on a document's ``data`` jsonb.

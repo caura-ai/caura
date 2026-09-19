@@ -9506,6 +9506,43 @@ class PostgresService:
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
 
+    async def document_count_unindexed(
+        self,
+        *,
+        tenant_id: str,
+        collection: str | None = None,
+        fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> int:
+        """Documents in scope that vector search CANNOT see.
+
+        ax-0917-h-08. ``document_search`` filters ``embedding IS NOT NULL``,
+        and a document only gets an embedding when its write resolved an
+        embed source (``data["summary"]``, or ``description`` for skills).
+        Everything else is stored UNINDEXED and is permanently invisible to
+        search — which is correct by design but indistinguishable, from the
+        caller's side, from "your query matched nothing".
+
+        This counts the difference so the two can be told apart. Same scope
+        predicates as the search itself, so the number answers the question
+        the caller actually asked.
+        """
+        tenant_pred: ColumnElement[bool]
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        stmt = select(func.count(Document.id)).where(
+            tenant_pred,
+            Document.embedding.is_(None),
+        )
+        if collection is not None:
+            stmt = stmt.where(Document.collection == collection)
+        if fleet_id:
+            stmt = stmt.where(Document.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            return int((await session.execute(stmt)).scalar_one() or 0)
+
     async def document_query(
         self,
         *,

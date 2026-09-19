@@ -142,6 +142,19 @@ class DocumentSearchResponse(BaseModel):
     count: int
     results: list[DocumentSearchItem] = Field(description="Deprecated alias of items (wire contract D1).")
     items: list[DocumentSearchItem]
+    unindexed_count: int | None = Field(
+        default=None,
+        description=(
+            "Present only on a zero-result search that had unsearchable documents in "
+            "scope. Documents are indexed only when their write supplies data.summary "
+            "(or data.description for skills); without one a document is stored and "
+            "readable by id but never returned by search."
+        ),
+    )
+    note: str | None = Field(
+        default=None,
+        description="Human-readable explanation accompanying unindexed_count.",
+    )
 
 
 class DocumentCollectionInfo(BaseModel):
