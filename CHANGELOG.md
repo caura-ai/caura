@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.17.1](https://github.com/caura-ai/caura/compare/backend-v3.17.0...backend-v3.17.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* **core-api:** send exactly one heartbeat per container and fail loudly on a bad collector URL ([#1623](https://github.com/caura-ai/caura/issues/1623)) ([a9f417b](https://github.com/caura-ai/caura/commit/a9f417b49ada2a498d022b71f9e872799efaab94))
+
 ## [3.17.0](https://github.com/caura-ai/caura/compare/backend-v3.16.3...backend-v3.17.0) (2026-09-19)
 
 
