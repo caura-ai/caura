@@ -93,6 +93,24 @@ class DocWriteRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
     fleet_id: str | None = None
+    # ax-0917-m-14 — who is writing. There was no field for this at all, and
+    # the body is ``extra="forbid"``, so a caller that tried to send one got a
+    # 422. The probe that found this put ``owner`` inside ``data`` instead,
+    # which does not survive: ``data`` is replaced wholesale on every upsert,
+    # so the attribution lasts only as long as each writer remembers to
+    # re-send it, and no query can find it without knowing the convention.
+    #
+    # Omit it and an agent-scoped credential fills it in from its own
+    # identity. A tenant-scoped key has no agent to name, so the document is
+    # stored with no author rather than a guessed one.
+    agent_id: str | None = Field(
+        default=None,
+        description=(
+            "Agent recorded as the author of this version. Omit it and an "
+            "agent-scoped credential supplies its own identity. Replaced on "
+            "each upsert, since an upsert replaces the document."
+        ),
+    )
     collection: str = Field(min_length=1, max_length=200)
     doc_id: str = Field(min_length=1, max_length=500)
     data: dict
@@ -181,6 +199,10 @@ class DocOut(BaseModel):
     # served; ``null`` strictly widens what this endpoint can return.
     created_at: datetime | None
     updated_at: datetime | None
+    # ax-0917-m-14. NULL on every row written before the column existed, and on
+    # any write by a credential with no agent identity to record. Both mean the
+    # same thing and it is the truthful one: nobody knows who wrote this.
+    agent_id: str | None = None
 
 
 # ── Helpers ──
@@ -209,6 +231,7 @@ def _dict_to_out(d: dict) -> DocOut:
         collection=d.get("collection", ""),
         doc_id=d.get("doc_id", ""),
         data=d.get("data", {}),
+        agent_id=d.get("agent_id"),
         created_at=d.get("created_at"),
         updated_at=d.get("updated_at"),
     )
@@ -246,6 +269,11 @@ async def upsert_document(
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
     """Upsert a document. If collection+doc_id exists, data is replaced."""
+    # ax-0917-m-14 — the credential wins over the body, for the same reason
+    # ``caller_agent_id`` on a search does: a caller must not be able to write
+    # a document under a name that is not its own. A tenant-scoped key has no
+    # identity of its own to impose, so there the body is taken at its word.
+    author = auth.agent_id or body.agent_id
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()
     auth.enforce_usage_limits()
@@ -428,6 +456,7 @@ async def upsert_document(
                     "collection": body.collection,
                     "doc_id": body.doc_id,
                     "data": body.data,
+                    "agent_id": author,
                     # C34 — explicit opt-out of the catastrophic-shrink guard.
                     "force": body.force,
                     "embedding": embedding,
@@ -455,6 +484,7 @@ async def upsert_document(
                     "collection": body.collection,
                     "doc_id": body.doc_id,
                     "data": body.data,
+                    "agent_id": author,
                     # C34 — explicit opt-out of the catastrophic-shrink guard.
                     "force": body.force,
                 }

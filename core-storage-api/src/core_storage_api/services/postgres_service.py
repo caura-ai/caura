@@ -9184,6 +9184,7 @@ class PostgresService:
         doc_id: str,
         data: dict,
         fleet_id: str | None = None,
+        agent_id: str | None = None,
         system: bool = False,
         force: bool = False,
     ) -> Document:
@@ -9216,12 +9217,18 @@ class PostgresService:
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    agent_id=agent_id,
                 )
                 .on_conflict_do_update(
                     constraint="uq_documents_tenant_collection_doc",
                     set_={
                         "data": data,
                         "fleet_id": fleet_id,
+                        # ax-0917-m-14 — the upsert replaces the document, so
+                        # the author recorded is whoever wrote THIS version.
+                        # Keeping the original author would attribute someone
+                        # else's edit to the first writer.
+                        "agent_id": agent_id,
                         "updated_at": datetime.now(UTC),
                     },
                 )
@@ -9275,6 +9282,7 @@ class PostgresService:
         doc_id: str,
         data: dict,
         fleet_id: str | None = None,
+        agent_id: str | None = None,
         embedding: list[float] | None = None,
         system: bool = False,
         force: bool = False,
@@ -9308,6 +9316,7 @@ class PostgresService:
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    agent_id=agent_id,
                     embedding=embedding,
                 )
                 .on_conflict_do_update(
@@ -9315,6 +9324,7 @@ class PostgresService:
                     set_={
                         "data": data,
                         "fleet_id": fleet_id,
+                        "agent_id": agent_id,
                         "embedding": embedding,
                         "updated_at": text("now()"),
                     },
