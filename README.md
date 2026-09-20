@@ -3,7 +3,7 @@
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
 <p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-floor: taught as legacy alias -->
-Existing <code>memclaw_*</code> tool calls and supported <code>MEMCLAW_*</code> environment aliases continue to work; use <code>caura_*</code> names and current Caura URLs for new configuration. The yanked PyPI release <code>memclaw-client==0.5.0</code> still installs <code>caura-client</code> for exact pins, but it does not provide the retired <code>memclaw_client</code> import or <code>MemClaw</code> class aliases. The npm package <code>@caura/memclaw-client</code> was never published.</p> <!-- legacy-name-floor: migration guidance and package evidence -->
+Existing <code>memclaw_*</code> tool calls and supported <code>MEMCLAW_*</code> environment aliases continue to work; use <code>caura_*</code> names and current Caura URLs for new configuration. The PyPI name <code>memclaw-client</code> is kept only as a redirect shell (0.5.1) that installs <code>caura-client</code>; it provides no <code>memclaw_client</code> import and no <code>MemClaw</code> class. The npm package <code>@caura/memclaw-client</code> was never published.</p> <!-- legacy-name-floor: migration guidance and package evidence -->
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>

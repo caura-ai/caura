@@ -8,7 +8,7 @@ package name; [`caura`](https://pypi.org/project/caura/) and
 It is a thin wrapper over the Caura REST API. Point it at a managed
 (`https://caura.ai`) or self-hosted (`http://localhost:8000`) deployment.
 
-> Formerly `memclaw-client`. That package is retired and provides no `memclaw_client` module, so move imports to `caura_client` and the retired `MemClaw`/`MemClawError`/`MemClawAPIError` names to the `Caura` class and `CauraAPIError` below. <!-- legacy-name-floor: taught as legacy alias -->
+> Formerly `memclaw-client`. That name is now only a redirect shell: installing it gives you this package and no `memclaw_client` module, so move imports to `caura_client` and the retired `MemClaw`/`MemClawError`/`MemClawAPIError` names to the `Caura` class and `CauraAPIError` below. <!-- legacy-name-floor: taught as legacy alias -->
 
 ## Install
 

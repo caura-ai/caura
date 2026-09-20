@@ -1,0 +1,57 @@
+# The former distribution name, held so that `pip install` of the old name
+# keeps resolving to Caura instead of to whoever would claim a freed name on
+# PyPI. An empty shell that installs caura-client; it ships no import package,
+# no module and no alias of its own, and nothing new will ever ship under it.
+# Every earlier release (0.2.0 to 0.5.0) is yanked; this one is not, so the
+# page carries a true summary and the redirect actually installs.
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memclaw-client"  # legacy-name-ok: the retired distribution name, held as a redirect shell
+version = "0.5.1"
+description = "Caura (formerly MemClaw) — governed shared memory for AI agent fleets. Retired name: this shell installs caura-client, the official Python client."  # legacy-name-ok: taught as legacy alias
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Caura", email = "hello@caura.ai" }]
+dependencies = ["caura-client>=1.0.3"]
+keywords = [
+    "caura",
+    "agent memory",
+    "ai agent memory",
+    "shared memory",
+    "multi-agent",
+    "agent db",
+    "agent fleet memory",
+    "mcp",
+    "mcp-server",
+    "governed memory",
+    "llm memory",
+    "memclaw",  # legacy-name-ok: the former name, kept so searches for it still find Caura
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://caura.ai"
+Documentation = "https://caura.ai/docs"
+Source = "https://github.com/caura-ai/caura"
+Issues = "https://github.com/caura-ai/caura/issues"
+Changelog = "https://github.com/caura-ai/caura/tags"
+Benchmark = "https://github.com/caura-ai/caura-longmemeval"
+
+[tool.setuptools]
+py-modules = []

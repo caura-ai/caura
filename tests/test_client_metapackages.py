@@ -60,6 +60,13 @@ NPM_REEXPORT_TARGET = {
 # Metapackages only — the implementation is excluded, since it is the thing
 # they all depend on.
 PY_METAPACKAGES = ("caura-meta", "caura-sdk-meta")
+
+# The former client name, held on PyPI as an empty redirect shell that installs
+# ``caura-client``. It ships no import package, so the collision check below
+# skips it, but it must still be releasable from CI like every other alias.
+PY_SHELLS = {
+    "memclaw-client-shim": "memclaw-client",  # legacy-name-ok: the retired distribution name held as a redirect
+}
 NPM_METAPACKAGES = ("npm-sdk",)
 
 
@@ -119,7 +126,9 @@ def _run_workflow_step(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("directory,expected_name", sorted(PY_DISTS.items()))
+@pytest.mark.parametrize(
+    "directory,expected_name", sorted({**PY_DISTS, **PY_SHELLS}.items())
+)
 def test_python_distribution_names_are_stable(
     directory: str, expected_name: str
 ) -> None:
@@ -128,7 +137,7 @@ def test_python_distribution_names_are_stable(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("directory", PY_METAPACKAGES)
+@pytest.mark.parametrize("directory", (*PY_METAPACKAGES, *PY_SHELLS))
 def test_python_metapackages_depend_on_the_real_client(directory: str) -> None:
     """A metapackage that installs nothing is a stub — the thing we said these are not."""
     deps = _pyproject(directory)["project"]["dependencies"]
@@ -256,7 +265,7 @@ def test_npm_client_tag_package_agreement_rejects_an_unknown_brand(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "directory", sorted({*PY_DISTS, *NPM_DISTS} - {"typescript", "python"})
+    "directory", sorted({*PY_DISTS, *PY_SHELLS, *NPM_DISTS} - {"typescript", "python"})
 )
 def test_every_metapackage_has_a_publish_workflow(directory: str) -> None:
     """`caura` shipped for a week with no workflow. Nothing else does that."""
