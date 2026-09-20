@@ -30,6 +30,8 @@ configure_logging(
     log_file=settings.log_file or None,
 )
 
+from sqlalchemy import text
+
 from core_storage_api.database.init import get_engine, init_database
 from core_storage_api.middleware import (
     RejectWritesOnReaderMiddleware,
@@ -63,6 +65,48 @@ from core_storage_api.routers import (
 
 logger = logging.getLogger(__name__)
 
+_INVALID_INDEXES = text(
+    """
+    SELECT c.relname
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE NOT i.indisvalid
+      AND n.nspname NOT IN ('pg_catalog', 'pg_toast')
+    ORDER BY c.relname
+    """
+)
+_COSINE_DISTANCE_COST = text(
+    "SELECT procost FROM pg_proc WHERE oid = to_regprocedure('cosine_distance(vector, vector)')"
+)
+
+
+async def report_schema_drift() -> None:
+    """Report known migration soft-failures without blocking startup."""
+    if settings.core_storage_role == "reader":
+        return
+
+    try:
+        async with get_engine().connect() as connection:
+            invalid_indexes = (await connection.execute(_INVALID_INDEXES)).scalars().all()
+            cosine_distance_cost = await connection.scalar(_COSINE_DISTANCE_COST)
+    except Exception:
+        logger.exception("Schema drift report failed; startup will continue")
+        return
+
+    if invalid_indexes:
+        logger.error(
+            "Invalid PostgreSQL indexes detected: %s. Repair with DROP INDEX CONCURRENTLY, "
+            "then CREATE INDEX CONCURRENTLY, from a session that will not be killed mid-build.",
+            ", ".join(invalid_indexes),
+        )
+
+    if cosine_distance_cost == 1:
+        logger.warning(
+            "cosine_distance procost is still 1: migration 044 did not apply and the planner "
+            "is under-pricing <=> by ~100x"
+        )
+
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -77,6 +121,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "and storage data requests will reject authentication"
         )
     await init_database()
+    await report_schema_drift()
     yield
     logger.info("Shutting down core-storage-api")
     # Don't spin up a writer engine just to tear it down — reader-role
