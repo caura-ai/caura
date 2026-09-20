@@ -98,7 +98,7 @@ from common.models.organization_settings import OrganizationSettings, Organizati
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
 from common.organization_settings_merge import deep_merge, diff_settings
-from core_storage_api.observability import db_measure
+from core_storage_api.observability import PhaseTimer, db_measure
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
@@ -5100,56 +5100,6 @@ class PostgresService:
                 "avg_recall_count": avg_recall,
             }
 
-    async def memory_compute_usage_stats(
-        self,
-        tenant_id: str,
-        fleet_id: str | None,
-    ) -> dict:
-        async with get_read_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id)
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.id, m.title, m.recall_count
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL
-                ORDER BY m.recall_count DESC
-                LIMIT 10
-            """),
-                params,
-            )
-            most_recalled = [{"id": str(row[0]), "title": row[1], "recall_count": row[2]} for row in r.all()]
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.id, m.title, m.recall_count
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL AND m.status = 'active'
-                ORDER BY m.recall_count ASC
-                LIMIT 10
-            """),
-                params,
-            )
-            least_recalled = [{"id": str(row[0]), "title": row[1], "recall_count": row[2]} for row in r.all()]
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.fleet_id, COUNT(*) AS cnt
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL
-                GROUP BY m.fleet_id
-                ORDER BY cnt DESC
-            """),
-                params,
-            )
-            fleet_activity = [{"fleet_id": row[0], "memory_count": row[1]} for row in r.all()]
-
-            return {
-                "most_recalled": most_recalled,
-                "least_recalled": least_recalled,
-                "fleet_activity": fleet_activity,
-            }
-
     async def memory_list_recent(
         self,
         tenant_id: str,
@@ -7314,23 +7264,6 @@ class PostgresService:
             result = await session.execute(select_stmt)
             return result.scalar_one()
 
-    async def relation_list(
-        self,
-        tenant_id: str,
-        *,
-        fleet_id: str | None = None,
-        include_null_fleet: bool = False,
-    ) -> list[Relation]:
-        async with get_session() as session:
-            stmt = select(Relation).where(Relation.tenant_id == tenant_id)
-            if fleet_id:
-                if include_null_fleet:
-                    stmt = stmt.where(or_(Relation.fleet_id == fleet_id, Relation.fleet_id.is_(None)))
-                else:
-                    stmt = stmt.where(Relation.fleet_id == fleet_id)
-            result = await session.execute(stmt)
-            return list(result.scalars().all())
-
     async def relation_get_outgoing(
         self,
         entity_id: UUID,
@@ -8579,57 +8512,77 @@ class PostgresService:
         ``{links_created}``.
 
         D4 keeps the single multi-VALUES ``pg_insert(...).values(rows)`` form
-        (CAURA-686) — NOT ``execute(stmt, rows)`` (executemany kills RETURNING)."""
+        (CAURA-686) — NOT ``execute(stmt, rows)`` (executemany kills RETURNING).
+
+        The four steps are timed SEPARATELY because this is the call that times
+        out. caura#1616 has a tenant whose request Cloud Run severs at 120s, and
+        a 504 names only the endpoint: it cannot distinguish a candidate query
+        that aggregates every memory in the tenant from a LATERAL that runs one
+        ANN scan per candidate, and those two want opposite fixes. ``PhaseTimer``
+        reports the step still in flight when the request dies, so ONE failure
+        settles it rather than one guess.
+        """
         # ── 1. Find candidate memories ──────────────────────────────
         fleet_clause = "AND m.fleet_id = :fleet_id" if fleet_id else ""
 
-        async with get_session() as session:
-            if target_memory_ids:
-                # Targeted mode: specific memories (e.g. after entity extraction)
-                candidates = (
-                    await session.execute(
-                        text(f"""
-                            SELECT m.id, m.content, m.embedding
-                            FROM memories m
-                            WHERE m.id = ANY(CAST(:memory_ids AS uuid[]))
-                              AND m.tenant_id = :tenant_id
-                              AND m.deleted_at IS NULL
-                              AND m.status = 'active'
-                              AND m.embedding IS NOT NULL
-                              {fleet_clause}
-                        """),
-                        {
-                            "tenant_id": tenant_id,
-                            "memory_ids": [str(mid) for mid in target_memory_ids],
-                            **({"fleet_id": fleet_id} if fleet_id else {}),
-                        },
-                    )
-                ).all()
-            else:
-                # Batch mode: under-connected memories (lifecycle / scheduled)
-                candidates = (
-                    await session.execute(
-                        text(f"""
-                            SELECT m.id, m.content, m.embedding
-                            FROM memories m
-                            LEFT JOIN memory_entity_links mel ON mel.memory_id = m.id
-                            WHERE m.tenant_id = :tenant_id
-                              AND m.deleted_at IS NULL
-                              AND m.status = 'active'
-                              AND m.embedding IS NOT NULL
-                              {fleet_clause}
-                            GROUP BY m.id
-                            HAVING COUNT(mel.entity_id) < 3
-                            ORDER BY m.created_at DESC
-                            LIMIT :batch_size
-                        """),
-                        {
-                            "tenant_id": tenant_id,
-                            **({"fleet_id": fleet_id} if fleet_id else {}),
-                            "batch_size": batch_size,
-                        },
-                    )
-                ).all()
+        # Built before the session is opened, and both modes reduced to one
+        # execute below, so that "candidates" times the query and not the
+        # branch that chose it.
+        candidate_params: dict[str, Any]
+        if target_memory_ids:
+            # Targeted mode: specific memories (e.g. after entity extraction)
+            candidate_query = text(f"""
+                SELECT m.id, m.content, m.embedding
+                FROM memories m
+                WHERE m.id = ANY(CAST(:memory_ids AS uuid[]))
+                  AND m.tenant_id = :tenant_id
+                  AND m.deleted_at IS NULL
+                  AND m.status = 'active'
+                  AND m.embedding IS NOT NULL
+                  {fleet_clause}
+            """)
+            candidate_params = {
+                "tenant_id": tenant_id,
+                "memory_ids": [str(mid) for mid in target_memory_ids],
+                **({"fleet_id": fleet_id} if fleet_id else {}),
+            }
+        else:
+            # Batch mode: under-connected memories (lifecycle / scheduled)
+            candidate_query = text(f"""
+                SELECT m.id, m.content, m.embedding
+                FROM memories m
+                LEFT JOIN memory_entity_links mel ON mel.memory_id = m.id
+                WHERE m.tenant_id = :tenant_id
+                  AND m.deleted_at IS NULL
+                  AND m.status = 'active'
+                  AND m.embedding IS NOT NULL
+                  {fleet_clause}
+                GROUP BY m.id
+                HAVING COUNT(mel.entity_id) < 3
+                ORDER BY m.created_at DESC
+                LIMIT :batch_size
+            """)
+            candidate_params = {
+                "tenant_id": tenant_id,
+                **({"fleet_id": fleet_id} if fleet_id else {}),
+                "batch_size": batch_size,
+            }
+
+        # ``PhaseTimer`` outermost on purpose: it then also covers connection
+        # acquisition and the COMMIT that ``get_session`` does on the way out,
+        # neither of which is inside a named phase. Both land in ``other`` —
+        # see the summary log below, which has to sit outside this block for
+        # the COMMIT half of that to be true.
+        async with (
+            PhaseTimer(
+                "entity_discover_cross_links",
+                tenant_id=tenant_id,
+                mode="targeted" if target_memory_ids else "batch",
+            ) as phases,
+            get_session() as session,
+        ):
+            with phases.phase("candidates"):
+                candidates = (await session.execute(candidate_query, candidate_params)).all()
 
             if not candidates:
                 # ``skipped`` so the step can reproduce the source's
@@ -8664,62 +8617,74 @@ class PostgresService:
                 ORDER BY m.id, e.sim DESC
             """)
 
-            lateral_rows = (
-                await session.execute(
-                    lateral_query,
-                    {
-                        "tenant_id": tenant_id,
-                        "memory_ids": memory_id_strs,
-                        "threshold": threshold,
-                        **({"fleet_id": fleet_id} if fleet_id else {}),
-                    },
-                )
-            ).all()
+            with phases.phase("lateral"):
+                lateral_rows = (
+                    await session.execute(
+                        lateral_query,
+                        {
+                            "tenant_id": tenant_id,
+                            "memory_ids": memory_id_strs,
+                            "threshold": threshold,
+                            **({"fleet_id": fleet_id} if fleet_id else {}),
+                        },
+                    )
+                ).all()
 
             # Filter candidates in Python, then bulk-insert
             to_insert: list[dict] = []
-            for memory_id, entity_id, canonical_name, attributes, _sim in lateral_rows:
-                if text_verify:
-                    content = content_map.get(memory_id, "")
-                    names_to_check = [canonical_name]
-                    if attributes and isinstance(attributes, dict):
-                        names_to_check.extend(attributes.get("_aliases", []))
-                    content_lower = content.lower() if content else ""
-                    if not any(n.lower() in content_lower for n in names_to_check):
-                        continue
-                to_insert.append({"memory_id": memory_id, "entity_id": entity_id})
+            with phases.phase("text_verify"):
+                for memory_id, entity_id, canonical_name, attributes, _sim in lateral_rows:
+                    if text_verify:
+                        content = content_map.get(memory_id, "")
+                        names_to_check = [canonical_name]
+                        if attributes and isinstance(attributes, dict):
+                            names_to_check.extend(attributes.get("_aliases", []))
+                        content_lower = content.lower() if content else ""
+                        if not any(n.lower() in content_lower for n in names_to_check):
+                            continue
+                    to_insert.append({"memory_id": memory_id, "entity_id": entity_id})
 
             links_created = 0
-            if to_insert:
-                # Single multi-VALUES statement via ``pg_insert(...).values(rows)``
-                # (the CAURA-686 pattern) — NOT ``execute(stmt, rows)``, which
-                # takes SQLAlchemy's executemany path where RETURNING rows are
-                # unavailable and ``result.all()`` raises ResourceClosedError.
-                # memory_entity_links has a composite PK (memory_id, entity_id)
-                # and no surrogate ``id`` column, so RETURNING must reference
-                # real columns; with ON CONFLICT DO NOTHING only actually-
-                # inserted rows return, keeping the count accurate.
-                # Ordered for the same reason as ``memory_add_entity_links``:
-                # this statement carries many pairs, and ``to_insert`` is built
-                # by iterating candidates, so without this its order is
-                # whatever the scan returned.
-                rows = _ordered_link_rows([{**row, "role": "mentioned"} for row in to_insert])
-                insert_link_returning = (
-                    pg_insert(MemoryEntityLink)
-                    .values(rows)
-                    .on_conflict_do_nothing(index_elements=["memory_id", "entity_id"])
-                    .returning(MemoryEntityLink.memory_id, MemoryEntityLink.entity_id)
-                )
-                result = await session.execute(insert_link_returning)
-                links_created = len(result.all())
+            with phases.phase("insert"):
+                if to_insert:
+                    # Single multi-VALUES statement via ``pg_insert(...).values(rows)``
+                    # (the CAURA-686 pattern) — NOT ``execute(stmt, rows)``, which
+                    # takes SQLAlchemy's executemany path where RETURNING rows are
+                    # unavailable and ``result.all()`` raises ResourceClosedError.
+                    # memory_entity_links has a composite PK (memory_id, entity_id)
+                    # and no surrogate ``id`` column, so RETURNING must reference
+                    # real columns; with ON CONFLICT DO NOTHING only actually-
+                    # inserted rows return, keeping the count accurate.
+                    # Ordered for the same reason as ``memory_add_entity_links``:
+                    # this statement carries many pairs, and ``to_insert`` is built
+                    # by iterating candidates, so without this its order is
+                    # whatever the scan returned.
+                    rows = _ordered_link_rows([{**row, "role": "mentioned"} for row in to_insert])
+                    insert_link_returning = (
+                        pg_insert(MemoryEntityLink)
+                        .values(rows)
+                        .on_conflict_do_nothing(index_elements=["memory_id", "entity_id"])
+                        .returning(MemoryEntityLink.memory_id, MemoryEntityLink.entity_id)
+                    )
+                    result = await session.execute(insert_link_returning)
+                    links_created = len(result.all())
 
-            logger.info(
-                "Created %d cross-links for %d candidate memories (tenant %s)",
-                links_created,
-                len(candidates),
-                tenant_id,
-            )
-            return {"links_created": links_created}
+            candidate_count = len(candidates)
+
+        # OUTSIDE the block on purpose. ``get_session`` yields from inside
+        # ``session.begin()``, so COMMIT runs in its ``__aexit__`` — a summary
+        # logged one indent level in is logged BEFORE the commit it is meant to
+        # account for, and ``other`` would silently exclude it. That matters
+        # because a large ``other`` is exactly how a slow commit or a starved
+        # connection pool is supposed to announce itself here.
+        logger.info(
+            "Created %d cross-links for %d candidate memories (tenant %s) [%s]",
+            links_created,
+            candidate_count,
+            tenant_id,
+            phases.breakdown(),
+        )
+        return {"links_created": links_created}
 
     async def entity_infer_relations(
         self,
@@ -9508,6 +9473,75 @@ class PostgresService:
             )
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
+
+    async def document_get_by_pk(
+        self,
+        *,
+        tenant_id: str,
+        doc_pk: UUID,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> Document | None:
+        """Fetch one document by its PRIMARY KEY.
+
+        ax-0917-h-07. ``POST /documents`` returns BOTH ``id`` (this primary
+        key) and ``doc_id`` (the caller's own key), and an agent that stores
+        the returned ``id`` — the conventional thing to keep — could not read
+        its own document back: the only lookup was by (tenant, collection,
+        doc_id), so the UUID 404'd.
+
+        Tenant scoping is identical to ``document_get_by_doc_id``: a primary
+        key is globally unique, so WITHOUT the predicate this would be a
+        cross-tenant read for anyone who learned an id. ``collection`` is not
+        part of the lookup because the pk already identifies the row — the
+        caller still passes one, and the route checks it matches rather than
+        silently returning a document from a different collection.
+        """
+        tenant_pred: ColumnElement[bool]
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        async with get_session() as session:
+            stmt = select(Document).where(tenant_pred, Document.id == doc_pk)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def document_count_unindexed(
+        self,
+        *,
+        tenant_id: str,
+        collection: str | None = None,
+        fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> int:
+        """Documents in scope that vector search CANNOT see.
+
+        ax-0917-h-08. ``document_search`` filters ``embedding IS NOT NULL``,
+        and a document only gets an embedding when its write resolved an
+        embed source (``data["summary"]``, or ``description`` for skills).
+        Everything else is stored UNINDEXED and is permanently invisible to
+        search — which is correct by design but indistinguishable, from the
+        caller's side, from "your query matched nothing".
+
+        This counts the difference so the two can be told apart. Same scope
+        predicates as the search itself, so the number answers the question
+        the caller actually asked.
+        """
+        tenant_pred: ColumnElement[bool]
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        stmt = select(func.count(Document.id)).where(
+            tenant_pred,
+            Document.embedding.is_(None),
+        )
+        if collection is not None:
+            stmt = stmt.where(Document.collection == collection)
+        if fleet_id:
+            stmt = stmt.where(Document.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            return int((await session.execute(stmt)).scalar_one() or 0)
 
     async def document_query(
         self,
@@ -11294,6 +11328,38 @@ class PostgresService:
             )
             return result.scalar() or 0
 
+    async def fleet_nodes_summary(
+        self,
+        *,
+        tenant_id: str,
+        since: datetime,
+    ) -> tuple[int, list[str]]:
+        """Count of this tenant's nodes seen since ``since`` and their distinct
+        ``plugin_version`` values (raw strings, sorted, at most 50).
+
+        Read-only; the anonymous heartbeat calls it once a day per tenant.
+        """
+        async with get_read_session() as session:
+            count = await session.scalar(
+                select(func.count(FleetNode.id)).where(
+                    FleetNode.tenant_id == tenant_id,
+                    FleetNode.last_heartbeat >= since,
+                )
+            )
+            rows = await session.execute(
+                select(FleetNode.plugin_version)
+                .where(
+                    FleetNode.tenant_id == tenant_id,
+                    FleetNode.last_heartbeat >= since,
+                    FleetNode.plugin_version.is_not(None),
+                )
+                .distinct()
+                .order_by(FleetNode.plugin_version)
+                .limit(50)
+            )
+            versions = [row[0] for row in rows.all() if row[0]]
+            return int(count or 0), versions
+
     async def fleet_delete_node(
         self,
         *,
@@ -11322,21 +11388,6 @@ class PostgresService:
             # as returning the base Result. Same ignore as the other
             # delete/update paths in this file.
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
-
-    async def fleet_get_node_ids_for_fleet(
-        self,
-        *,
-        tenant_id: str,
-        fleet_id: str,
-    ) -> list[UUID]:
-        async with get_session() as session:
-            result = await session.execute(
-                select(FleetNode.id).where(
-                    FleetNode.tenant_id == tenant_id,
-                    FleetNode.fleet_id == fleet_id,
-                )
-            )
-            return list(result.scalars().all())
 
     # -- Commands --
 

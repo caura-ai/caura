@@ -51,6 +51,7 @@ from core_api.constants import (
     VERSION,
 )
 from core_api.errors import AUTH_ORG_SUSPENDED, AUTH_PLAN_LIMIT, code_for_status
+from core_api.heartbeat.clients import record_mcp as _record_mcp_client
 from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -120,6 +121,31 @@ from core_api.trust_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ax-0917-m-11. Every MCP response is read by an LLM, not by a person, so the
+# two defaults ``json.dumps`` ships with are both pure cost here.
+#
+# ``indent=2`` spends tokens on whitespace that carries no meaning to the
+# reader. Measured on a 10-item recall payload: 572 -> 462 cl100k tokens, 19%.
+#
+# ``ensure_ascii=True`` is the larger one, and it only bites non-English
+# tenants. It renders every non-ASCII character as ``\uXXXX`` — six ASCII
+# characters where one character was meant — and those escapes tokenise
+# terribly. Measured on Hebrew content: 1,207 -> 422 tokens, 65%.
+#
+# ``doc_indexing._render_value`` already reached the same conclusion for text
+# fed to an embedder and an LLM; this applies it to the transport.
+#
+# Kept as one helper so the compaction cannot drift between call sites — the
+# reason it was inconsistent before is that each site made the choice itself.
+_JSON_COMPACT: dict = {"separators": (",", ":"), "ensure_ascii": False, "default": str}
+
+
+def _dumps(payload) -> str:
+    """Serialise an MCP response body for an LLM consumer."""
+    return json.dumps(payload, **_JSON_COMPACT)
+
 
 # ── Auth via context vars ──
 
@@ -211,7 +237,7 @@ def _error_response(code: str, message: str, **details) -> str:
     from core_api.errors import make_error_payload
 
     payload = make_error_payload(code, message, details=details if details else None)
-    return json.dumps(payload, default=str)
+    return _dumps(payload)
 
 
 def _as_error_result(envelope: str) -> CallToolResult:
@@ -536,6 +562,13 @@ class MCPAuthMiddleware:
                 send, _tenant_id_var.get(_UNAUTH), _readable_tenant_ids_var.get(None)
             ):
                 return
+
+            # Anonymous heartbeat: MCP requests are counted by transport, not
+            # by User-Agent (the REST twin is in ``auth.get_auth_context``).
+            # Only authenticated requests count; a no-op unless the heartbeat
+            # policy enabled the counter at boot.
+            if _tenant_id_var.get(_UNAUTH) not in (_UNAUTH, _NO_AUTH):
+                _record_mcp_client()
 
         await self.app(scope, receive, send)
 
@@ -1010,8 +1043,8 @@ _drop_unserved_handlers()
 
 def _serialize(obj) -> str:
     if isinstance(obj, list):
-        return json.dumps([item.model_dump(mode="json") for item in obj], indent=2, default=str)
-    return json.dumps(obj.model_dump(mode="json"), indent=2, default=str)
+        return _dumps([item.model_dump(mode="json") for item in obj])
+    return _dumps(obj.model_dump(mode="json"))
 
 
 # What every ``caura_*`` handler returns. Not a widening for mypy's benefit:
@@ -1047,7 +1080,7 @@ def _with_latency(result: str, t0: float) -> str | CallToolResult:
         data = json.loads(result)
         if isinstance(data, dict):
             data["_latency_ms"] = ms
-            payload = json.dumps(data, default=str)
+            payload = _dumps(data)
             if isinstance(data.get("error"), dict):
                 return _as_error_result(payload)
             return payload
@@ -1359,7 +1392,7 @@ async def caura_recall(
                 config,
                 top_k=capped_top_k,
             )
-        return _with_latency(json.dumps(payload, indent=2, default=str), t0)
+        return _with_latency(_dumps(payload), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
         return _with_latency(
@@ -1415,7 +1448,7 @@ async def caura_write(
         return err
     if (content is None) == (items is None):
         return _with_latency(
-            json.dumps(
+            _dumps(
                 {
                     "error": {
                         "code": "INVALID_ARGUMENTS",
@@ -1555,7 +1588,7 @@ async def caura_write(
             batch = items or []
             if len(batch) > 100:
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "error": {
                                 "code": "BATCH_TOO_LARGE",
@@ -1570,7 +1603,7 @@ async def caura_write(
                 bulk_items = [BulkMemoryItem(**item) for item in batch]
             except (ValidationError, TypeError) as e:
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "error": {
                                 "code": "INVALID_BATCH_ITEM",
@@ -1686,7 +1719,7 @@ async def caura_write(
                     dup.get("existing_status"),
                     agent_id,
                 )
-                return _with_latency(json.dumps(payload), t0)
+                return _with_latency(_dumps(payload), t0)
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
             return _with_latency(
                 _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
@@ -1722,7 +1755,7 @@ async def caura_manage(
     _valid_ops = {"read", "update", "transition", "delete", "bulk_delete", "lineage"}
     if op not in _valid_ops:
         return _with_latency(
-            json.dumps(
+            _dumps(
                 {
                     "error": {
                         "code": "INVALID_ARGUMENTS",
@@ -1819,7 +1852,7 @@ async def caura_manage(
                     resource_type="memory",
                     detail={"count": deleted_count, "method": "by_ids", "via": "mcp"},
                 )
-                return _with_latency(json.dumps({"deleted": deleted_count, "requested": len(uids)}), t0)
+                return _with_latency(_dumps({"deleted": deleted_count, "requested": len(uids)}), t0)
             if op == "lineage":
                 # HOME-tenant scoped. ``get_memory_contradictions`` bundles the
                 # three reads (this row + supersessors + older) in one storage
@@ -1865,7 +1898,7 @@ async def caura_manage(
                 # Newer rows whose supersedes_id points at this row.
                 supersessors = [_chain_row(m) for m in bundle.get("supersessors", [])]
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "this": {
                                 "id": str(this.get("id")),
@@ -1876,8 +1909,7 @@ async def caura_manage(
                             },
                             "superseded_by": superseded_by,  # the OLDER row this replaced
                             "supersessors": supersessors,  # NEWER rows that replaced this
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -1898,7 +1930,7 @@ async def caura_manage(
                 ):
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "id": str(memory.get("id")),
                             "content": memory.get("content"),
@@ -1914,8 +1946,7 @@ async def caura_manage(
                             "recall_count": memory.get("recall_count", 0),
                             "deleted_at": memory.get("deleted_at"),
                             "metadata": memory.get("metadata_"),
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -1984,15 +2015,14 @@ async def caura_manage(
                 # ``openapi_responses.MemoryStatusPatchResponse``) so the two
                 # surfaces are parseable by one client.
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "memory_id": str(uid),
                             "old_status": old_status,
                             "new_status": status,
                             # The old prose, kept for chat rendering.
                             "message": f"Memory {memory_id} status updated: {old_status} -> {status}",
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -2069,13 +2099,12 @@ async def caura_manage(
             # gone — this is a soft delete, which is why the smoke asserts the
             # read-back 404 rather than trusting the acknowledgement.
             return _with_latency(
-                json.dumps(
+                _dumps(
                     {
                         "memory_id": str(uid),
                         "deleted": True,
                         "message": f"Memory {memory_id} deleted.",
-                    },
-                    default=str,
+                    }
                 ),
                 t0,
             )
@@ -2171,7 +2200,7 @@ async def caura_tune(
             current.update(updates)
             current = validate_search_profile(current)
             await get_storage_client().update_search_profile(agent["id"], tenant_id, current)
-        return _with_latency(json.dumps({"agent_id": agent_id, "search_profile": current}, indent=2), t0)
+        return _with_latency(_dumps({"agent_id": agent_id, "search_profile": current}), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
         return _with_latency(
@@ -2345,7 +2374,7 @@ async def caura_doc(
     _valid_ops = {"write", "read", "query", "delete", "list_collections", "search"}
     if op not in _valid_ops:
         return _with_latency(
-            json.dumps(
+            _dumps(
                 {
                     "error": {
                         "code": "INVALID_ARGUMENTS",
@@ -2420,7 +2449,7 @@ async def caura_doc(
                         (name, active_count if name == SKILLS_COLLECTION else count) for name, count in rows
                     ]
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "collections": [{"name": name, "count": count} for name, count in rows],
                             "count": len(rows),
@@ -2701,7 +2730,7 @@ async def caura_doc(
                     # this feature must never cause.
                     logger.exception("doc memory mint failed for %s/%s", collection, doc_id)
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "ok": True,
                             "collection": collection,
@@ -2747,14 +2776,13 @@ async def caura_doc(
                     ):
                         return _with_latency(f"Not found: {collection}/{doc_id}", t0)
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "collection": _doc_field(doc, "collection"),
                             "doc_id": _doc_field(doc, "doc_id"),
                             "data": _doc_field(doc, "data"),
                             "updated_at": _doc_field(doc, "updated_at"),
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -2841,10 +2869,7 @@ async def caura_doc(
                     ]
                 items = [{"doc_id": _doc_field(d, "doc_id"), "data": _doc_field(d, "data")} for d in docs]
                 return _with_latency(
-                    json.dumps(
-                        {"collection": collection, "count": len(items), "results": items},
-                        default=str,
-                    ),
+                    _dumps({"collection": collection, "count": len(items), "results": items}),
                     t0,
                 )
             if op == "search":
@@ -2960,13 +2985,12 @@ async def caura_doc(
                     for d in pairs
                 ]
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "collection": collection,  # None if broad search
                             "count": len(items),
                             "results": items,
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -3015,7 +3039,7 @@ async def caura_doc(
             )
             if not deleted:
                 return _with_latency(
-                    json.dumps({"error": f"Document '{doc_id}' not found in collection '{collection}'"}),
+                    _dumps({"error": f"Document '{doc_id}' not found in collection '{collection}'"}),
                     t0,
                 )
             # Un-mint, exactly as the REST delete does. ``op=index`` above mints
@@ -3031,7 +3055,7 @@ async def caura_doc(
                 tenant_id=tenant_id,
             )
             return _with_latency(
-                json.dumps(
+                _dumps(
                     {
                         "ok": True,
                         "collection": collection,
@@ -3267,15 +3291,14 @@ async def caura_list(
             # share a response parser across the surfaces. Same list object,
             # two keys; ``results`` stays as a permanent alias.
             return _with_latency(
-                json.dumps(
+                _dumps(
                     {
                         "count": len(items),
                         "results": items,
                         "items": items,
                         "next_cursor": next_cursor,
                         "scope": scope,
-                    },
-                    default=str,
+                    }
                 ),
                 t0,
             )
@@ -3412,7 +3435,7 @@ async def caura_stats(
                     surface="caura_stats",
                     result_count_by_tenant=stats.get("by_tenant") or {},
                 )
-            return _with_latency(json.dumps({**stats, "scope": scope}, default=str), t0)
+            return _with_latency(_dumps({**stats, "scope": scope}), t0)
         except Exception as e:
             logger.exception("Unhandled error in caura_stats")
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
@@ -3536,7 +3559,7 @@ async def caura_insights(
             # no LLM work, no second session, just a stable empty result.
             if not memories_or_clusters:
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "focus": focus,
                             "scope": scope,
@@ -3546,9 +3569,7 @@ async def caura_insights(
                             "insight_memory_ids": [],
                             "gate_rejected": 0,
                             "insights_ms": int((time.perf_counter() - t0) * 1000),
-                        },
-                        indent=2,
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -3590,7 +3611,7 @@ async def caura_insights(
             "gate_rejected": synth.get("gate_rejected", 0),
             "insights_ms": int((time.perf_counter() - t0) * 1000),
         }
-        return _with_latency(json.dumps(result, indent=2, default=str), t0)
+        return _with_latency(_dumps(result), t0)
     except HTTPException as e:
         return _with_latency(
             _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
@@ -3775,7 +3796,7 @@ async def caura_evolve(
                 weight_adjustment_skipped_reason=weight_adjustment_skipped_reason,
                 t0=t0,
             )
-        return _with_latency(json.dumps(result, indent=2, default=str), t0)
+        return _with_latency(_dumps(result), t0)
     except HTTPException as e:
         return _with_latency(
             _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
@@ -3877,7 +3898,7 @@ async def caura_keystones(
     payload: dict = {"count": len(rows), "truncated": truncated, "rules": rows}
     if not rows:
         payload["hint"] = KEYSTONES_EMPTY_HINT
-    return _with_latency(json.dumps(payload, default=str), t0)
+    return _with_latency(_dumps(payload), t0)
 
 
 async def caura_keystones_set(
@@ -4144,7 +4165,7 @@ async def caura_keystones_set(
                     },
                 )
                 return _with_latency(
-                    json.dumps({"ok": True, "action": "set", "doc_id": doc_id}, default=str),
+                    _dumps({"ok": True, "action": "set", "doc_id": doc_id}),
                     t0,
                 )
             # op == "delete"
@@ -4229,7 +4250,7 @@ async def caura_keystones_set(
                 resource_id=None,
                 detail={"doc_id": doc_id, "via": "mcp"},
             )
-            return _with_latency(json.dumps({"ok": True, "action": "delete", "doc_id": doc_id}), t0)
+            return _with_latency(_dumps({"ok": True, "action": "delete", "doc_id": doc_id}), t0)
         except httpx.HTTPStatusError as e:
             # storage_client._post / _delete call raise_for_status(); a
             # storage-side 422 (bad scope/weight) raises this — surface

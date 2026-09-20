@@ -15,6 +15,7 @@ import { tmpdir } from "os";
 import { __DEPLOY_INTERNALS__ } from "./heartbeat.js";
 import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 import { PLUGIN_VERSION } from "./version.js";
+import { USER_AGENT } from "./user-agent.js";
 
 describe("deploy cooldown lifecycle", () => {
   let tmpHome: string;
@@ -245,10 +246,12 @@ describe("processCommand — restart-after-POST ordering (CAURA-000)", () => {
   test("a non-restart command (ping) does NOT schedule a restart", async () => {
     // Pin that the shouldRestart flag is properly gated — only flipped
     // inside the deploy/restart branches, not by ping/unknown commands.
-    globalThis.fetch = (async (input: string | URL | Request) => {
+    const resultHeaders: Array<Record<string, string>> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/fleet/commands/") && url.endsWith("/result")) {
         order.push("post-resolved");
+        resultHeaders.push((init?.headers ?? {}) as Record<string, string>);
       }
       return new Response("{}", {
         status: 200,
@@ -270,6 +273,12 @@ describe("processCommand — restart-after-POST ordering (CAURA-000)", () => {
       ["post-resolved"],
       "ping must not schedule a restart — only deploy / restart / update_plugin do",
     );
+    // The heartbeat's command-result POST goes through the shared
+    // transport, so it must carry the plugin's User-Agent like every
+    // other request to the Caura server (Caura Heartbeat v1 §7).
+    assert.equal(resultHeaders.length, 1);
+    assert.equal(resultHeaders[0]["User-Agent"], USER_AGENT);
+    assert.equal(resultHeaders[0]["Content-Type"], "application/json", "existing headers stay intact");
   });
 
   test("an unknown command does NOT schedule a restart (fails closed)", async () => {

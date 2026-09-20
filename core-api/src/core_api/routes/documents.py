@@ -156,6 +156,20 @@ class DocSearchRequest(BaseModel):
 
 
 class DocOut(BaseModel):
+    # ax-0917-h-08. Whether this document is reachable by ``POST
+    # /documents/search``. A document is embedded — and therefore searchable —
+    # only when its write resolves an embed source (``data["summary"]``, or
+    # ``data["description"]`` for skills). Without one it is stored, readable
+    # by id, and PERMANENTLY invisible to search.
+    #
+    # The write path already recorded this in the audit row as ``indexed``;
+    # the caller was the one party who could not see it. An agent probe wrote
+    # a document, searched for words from its own body, got
+    # ``{count: 0}`` + HTTP 200, and concluded search was broken.
+    #
+    # Optional so READ paths (GET, query, list) that do not know a row's
+    # embedding state keep their existing shape rather than asserting False.
+    indexed: bool | None = None
     id: str
     tenant_id: str
     fleet_id: str | None
@@ -487,6 +501,9 @@ async def upsert_document(
         },
     )
     out = _dict_to_out(doc)
+    # Set on the WRITE response only: this route just resolved the embed
+    # source, so it is the one place that knows the answer for certain.
+    out.indexed = embedding is not None
     if _idem:
         await _idem.record(out.model_dump(mode="json"), 200)
     return out
@@ -792,14 +809,52 @@ async def search_documents(
     # zero-hit-parsing bug (FR-1, ranked #1 by time cost). Dual-emit: both
     # keys reference the same list; ``results`` stays until a separate,
     # announced deprecation wave.
-    return JSONResponse(
-        {
-            "collection": body.collection,
-            "count": len(items),
-            "results": items,
-            "items": items,
-        }
-    )
+    # ax-0917-h-08: a zero here used to be unexplainable. ``/search`` only
+    # considers rows with an embedding, and a document is only embedded when
+    # its write resolved an embed source (``data["summary"]``, or
+    # ``description`` for skills) — so a document written without one is
+    # stored fine, returned fine by GET, and PERMANENTLY invisible to search.
+    # From the caller's side that is indistinguishable from "no match", which
+    # is how an agent probe concluded search was broken for a document it had
+    # created seconds earlier.
+    #
+    # Only computed when there are no hits: on the normal path this costs
+    # nothing, and the number is only interesting when it explains a zero.
+    unindexed = 0
+    if not items:
+        try:
+            unindexed = await sc.count_unindexed_documents(
+                {
+                    "tenant_id": body.tenant_id,
+                    "collection": body.collection,
+                    "fleet_id": body.fleet_id,
+                    "readable_tenant_ids": (auth.readable_tenant_ids if auth.is_cross_tenant_read else None),
+                }
+            )
+        except Exception:
+            # Diagnostics must never turn a successful empty search into an
+            # error — the caller still gets its (correct) zero.
+            logger.warning(
+                "doc search: unindexed-document count failed (tenant=%s)",
+                body.tenant_id,
+                exc_info=True,
+            )
+
+    payload: dict = {
+        "collection": body.collection,
+        "count": len(items),
+        "results": items,
+        "items": items,
+    }
+    if not items and unindexed:
+        payload["unindexed_count"] = unindexed
+        payload["note"] = (
+            f"0 matches, but {unindexed} document(s) in this scope have no embedding "
+            "and are not searchable. A document is indexed only when its write "
+            "supplies data.summary (or data.description for skills); without one it "
+            "is stored and readable by id, but never returned by search."
+        )
+    return JSONResponse(payload)
 
 
 # /documents/collections is registered earlier in the file (before

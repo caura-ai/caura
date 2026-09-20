@@ -91,6 +91,15 @@ For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
 [per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
 
+## Request headers
+
+Every request carries `X-API-Key` (your key), `Content-Type: application/json`
+and a `User-Agent` of the form `caura-client-node/<version> (node/<major>)`.
+The `User-Agent` lets a Caura server count which SDK families talk to it; it
+names only the package, its version and the Node major (browsers drop the
+header, which is fine). The client sends nothing to any host other than the
+`baseUrl` you configure. The version is also exported as `VERSION`.
+
 ## Not `npm install caura`
 
 The unscoped name is unavailable. npm's registry rejects it as too similar to

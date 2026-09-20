@@ -48,8 +48,10 @@ ALLOWED_CONSTRUCTORS: frozenset[tuple[str, str]] = frozenset(
         ("auth.py", "AuthContext.effective_agent_id"),
         # REST: the gateway-verified X-Agent-ID header boundary. ``core_api.auth``
         # is still mypy-exempt, so this construction is what makes the boundary
-        # explicit rather than an unchecked bare string.
-        ("auth.py", "get_auth_context"),
+        # explicit rather than an unchecked bare string. ``get_auth_context`` is
+        # the thin public wrapper (it also feeds the heartbeat's client-family
+        # counter); the resolution itself lives in ``_resolve_auth_context``.
+        ("auth.py", "_resolve_auth_context"),
         # MCP: the gateway-verified X-Agent-ID header boundary — the MCP plane's
         # twin of AuthContext.agent_id.
         ("mcp_server.py", "MCPAuthMiddleware.__call__"),

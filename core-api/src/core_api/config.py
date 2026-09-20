@@ -1,4 +1,6 @@
 import logging
+import tempfile
+from pathlib import Path
 from typing import Any, Literal, Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -161,6 +163,21 @@ class Settings(BaseSettings):
     entity_retrieval_enabled: bool = True
     use_llm_for_memory_creation: bool = True
     sentry_dsn: str = ""  # Set to enable Sentry error tracking
+    # Anonymous daily heartbeat from self-hosted servers (docs/telemetry.md).
+    # ``off`` / ``0`` / ``false`` disables it; so do DO_NOT_TRACK, CI, an
+    # enterprise gateway secret and platform providers (see
+    # core_api.heartbeat.policy). The URL override exists for tests and for
+    # operators pointing the beat at their own collector; plain http is
+    # refused unless the host is localhost.
+    caura_telemetry: str = "on"
+    caura_telemetry_url: str = "https://telemetry.caura.ai/api/telemetry/heartbeat"
+    # Per-container directory the uvicorn workers coordinate through (a leader
+    # lock, per-worker client counters, the leader's status) so a container
+    # sends ONE beat per cycle however many workers it runs and every worker
+    # answers GET /telemetry the same way. Created 0700 on first use. Empty
+    # switches coordination off (one beat per worker); an unwritable path
+    # falls back to the same with a WARNING at boot.
+    caura_telemetry_state_dir: str = str(Path(tempfile.gettempdir()) / "caura-heartbeat")
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.
     cors_origins: str = "http://localhost:3000"
     # Request-wide budget enforced by RequestTimeoutMiddleware. 45s fits

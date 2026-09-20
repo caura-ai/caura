@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -89,6 +89,24 @@ async def count_nodes(
         nodes = await _svc.fleet_list_nodes(tenant_id=tenant_id)
         count = len(nodes)
     return {"count": count}
+
+
+@router.get("/nodes/summary")
+async def nodes_summary(
+    tenant_id: str,
+    days: int = 7,
+) -> dict:
+    """Recently-seen node count and their distinct plugin versions, one tenant.
+
+    Backs ``counts.plugin_nodes_7d`` / ``counts.plugin_versions`` in the
+    anonymous heartbeat (core-api ``heartbeat/payload.py``). Declared before
+    ``/nodes/{node_name}`` so the literal segment wins the match.
+    """
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=422, detail="days must be between 1 and 365")
+    since = datetime.now(UTC) - timedelta(days=days)
+    nodes, versions = await _svc.fleet_nodes_summary(tenant_id=tenant_id, since=since)
+    return {"nodes_7d": nodes, "plugin_versions": versions}
 
 
 @router.get("/nodes/{node_name}")

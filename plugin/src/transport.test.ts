@@ -13,6 +13,7 @@ process.env.CAURA_API_URL = "http://localhost:8000";
 process.env.CAURA_TENANT_ID = "t_test";
 
 const { apiCall, parseSearchItems } = await import("./transport.js");
+const { USER_AGENT } = await import("./user-agent.js");
 
 interface MockCall {
   url: string;
@@ -112,6 +113,7 @@ describe("apiCall — extraHeaders (bulk X-Bulk-Attempt-Id support)", () => {
     // from a local .env rather than the test's process.env.)
     assert.ok(headers["X-API-Key"], "X-API-Key should still be sent");
     assert.equal(headers["Content-Type"], "application/json");
+    assert.equal(headers["User-Agent"], USER_AGENT, "User-Agent should still be sent");
   });
 
   test("omitting extraHeaders leaves only the default headers", async () => {
@@ -119,6 +121,30 @@ describe("apiCall — extraHeaders (bulk X-Bulk-Attempt-Id support)", () => {
     const headers = calls[0].init?.headers as Record<string, string>;
     assert.equal(headers["X-Bulk-Attempt-Id"], undefined);
     assert.ok(headers["X-API-Key"], "X-API-Key should still be sent");
+    assert.equal(headers["User-Agent"], USER_AGENT);
+  });
+});
+
+describe("apiCall — User-Agent identification (Caura Heartbeat v1 §7)", () => {
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    calls = [];
+    installOkFetch();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("every request carries the openclaw-plugin User-Agent", async () => {
+    await apiCall("GET", "/memories");
+    await apiCall("POST", "/search", { q: "x" });
+    assert.equal(calls.length, 2);
+    for (const call of calls) {
+      const headers = call.init?.headers as Record<string, string>;
+      assert.equal(headers["User-Agent"], USER_AGENT, `missing on ${call.url}`);
+      assert.match(headers["User-Agent"], /^openclaw-plugin\//);
+    }
   });
 });
 

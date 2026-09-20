@@ -10,6 +10,7 @@ from __future__ import annotations
 # distributions that once depended on this one -- no transition is owed to
 # pre-rename installs.
 
+from ._version import __version__
 from .client import DEFAULT_BASE_URL, Caura
 from .exceptions import (
     AuthError,
@@ -32,6 +33,5 @@ __all__ = [
     "RateLimitError",
     "TransportError",
     "DEFAULT_BASE_URL",
+    "__version__",
 ]
-
-__version__ = "1.0.3"

@@ -186,7 +186,9 @@ You auto-register at **trust 1** on your first write.
 | 3     | admin       | all                       | all, incl. deletes     |
 
 Operations that escalate the required level:
-- browsing / reflecting with `scope="fleet"` or `"all"` → trust 2
+- `caura_list` / `caura_stats` for another fleet, or either tool with
+  `scope="all"` → trust 2; `scope="fleet"` for your own fleet stays at trust 1
+- `caura_insights` with `scope="fleet"` or `"all"` → trust 2
 - reporting outcomes (`caura_evolve`) at `scope="fleet"` / `"all"` → trust 2 (default `scope="agent"` needs only trust 1)
 - `caura_manage op=delete` → trust 3
 
@@ -207,9 +209,11 @@ than silently retrying at a narrower scope.
 
 **Visibility (on write)** decides who can see a memory: `scope_agent` (private)
 · `scope_team` *(default — your fleet)* · `scope_org` (all fleets in tenant).
-**Scope (on read / `_list` / `_insights`):** `agent` *(default)* · `fleet`
-(trust 2) · `all` (trust 2). Prefer `scope_team` on write and `scope=agent` on
-read unless you need cross-agent context. *Naming caveat:* writes take
+**Scope (on read):** `agent` *(default)* · `fleet` · `all`. For
+`caura_list` / `caura_stats`, your own fleet needs trust 1; another fleet or
+`all` needs trust 2. `caura_insights` requires trust 2 for `fleet` or `all`.
+Prefer `scope_team` on write and `scope=agent` on read unless you need
+cross-agent context. *Naming caveat:* writes take
 `visibility=scope_*`; reads/list/keystone filters take `scope=*` — two axes,
 similar spelling.
 
@@ -386,7 +390,7 @@ for, and the behaviors that aren't visible in a parameter list.
 - **`caura_recall`** excludes superseded memories (`status` ∈ {outdated, conflicted}) by default — pass `status` explicitly to walk the chain.
 - **`caura_write`** can't write `insight` / `outcome` / `rule` types — those are server-generated (via `caura_insights` / `caura_evolve`). `write_mode`: `fast` skips embedding → keyword-only recall afterwards; `strong` forces full LLM enrichment; `auto` is usually right.
 - **`caura_manage op=transition`** targets: `active · pending · confirmed · cancelled · outdated · conflicted · archived · deleted` (also in `TOOLS.md`).
-- **`caura_doc`** — `where` is scalar exact-match only (no array descent). A doc is invisible to `op=search` unless it has a `data["summary"]` (the only embedded field). Scope the search to a collection when you know it; omit `collection` for the single best match across the tenant.
+- **`caura_doc`** — `where` is scalar exact-match only (no array descent). A doc is invisible to `op=search` unless it has a `data["summary"]` (the only embedded field). Scope the search to a collection when you know it; omit `collection` to return up to `top_k` matches across the tenant (default 5).
 - **`caura_tune`** persists and reshapes every later recall — change one or two knobs at a time; call with no arguments to read your current profile (`fts_weight` 0 = pure semantic, 1 = pure keyword).
 - **`caura_insights`** saves findings as `insight` memories; run it at boundaries, not every turn. `focus="divergence"` needs a non-agent scope.
 - **`caura_stats`** is read-only — use it as a readiness/health probe, never a write-then-delete check.

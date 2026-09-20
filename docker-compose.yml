@@ -156,6 +156,8 @@ services:
       CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"
       CORE_STORAGE_SHARED_SECRET_FILE: /run/caura-storage/shared-secret
       REDIS_URL: redis://redis:6379/0
+      # Anonymous daily heartbeat (docs/telemetry.md). Uncomment to disable.
+      # CAURA_TELEMETRY: "off"
       # Provider keys and embedding config (OPENAI_API_KEY, ANTHROPIC_API_KEY,
       # OPENROUTER_API_KEY, OPENAI_EMBEDDING_BASE_URL / _MODEL / _SEND_DIMENSIONS /
       # _TRUNCATE_TO_DIM, EMBEDDING_QUERY_INSTRUCTION) come from ``env_file``

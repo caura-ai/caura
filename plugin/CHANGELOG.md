@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.23.0](https://github.com/caura-ai/caura/compare/plugin-v2.22.3...plugin-v2.23.0) (2026-09-19)
+
+
+### Features
+
+* **plugin:** identify the plugin with a User-Agent header ([#1578](https://github.com/caura-ai/caura/issues/1578)) ([3cdb2f7](https://github.com/caura-ai/caura/commit/3cdb2f73e6a2ead2a2d4de23b70fcb9683d4d734))
+
 ## [2.22.3](https://github.com/caura-ai/caura/compare/plugin-v2.22.2...plugin-v2.22.3) (2026-09-18)
 
 

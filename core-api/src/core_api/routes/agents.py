@@ -145,7 +145,13 @@ async def patch_agent_tune(
     # not a peer's — block cross-agent tamper while leaving self-tune + admin keys.
     auth.enforce_self_agent(agent_id, message="Agents can only tune their own search profile.")
     sc = get_storage_client()
-    agent = await sc.get_agent(agent_id, tenant_id)
+    # ``read=False``: this row is not just inspected, it is MERGED INTO below —
+    # ``current`` starts as the stored profile and only the supplied fields are
+    # overwritten. Served from a replica under lag, the fields this request does
+    # not mention are written back from a stale snapshot, quietly reverting a
+    # tune that had already landed. A read that feeds a write belongs on the
+    # primary for the same reason the re-fetches below do.
+    agent = await sc.get_agent(agent_id, tenant_id, read=False)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
@@ -158,7 +164,12 @@ async def patch_agent_tune(
         # re-reads too but falls back to the stale pre-write row on a miss,
         # where this answers 404 — a reset must not hand back the profile it
         # just cleared.
-        refreshed = await sc.get_agent(agent_id, tenant_id)
+        #
+        # ``read=False`` is what makes that true. From a replica this re-read
+        # can still see the pre-reset profile, which is exactly the value this
+        # branch says it must never hand back — or miss the row entirely and
+        # turn a successful reset into a 404.
+        refreshed = await sc.get_agent(agent_id, tenant_id, read=False)
         if not refreshed:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         return AgentOut.model_validate(refreshed)
@@ -170,8 +181,11 @@ async def patch_agent_tune(
         current.update(updates)
         current = validate_search_profile(current)
         await sc.update_search_profile(agent["id"], tenant_id, current)
-        # Re-fetch to get the updated agent with full fields
-        refreshed = await sc.get_agent(agent_id, tenant_id)
+        # Re-fetch to get the updated agent with full fields. ``read=False``
+        # because this is a read-after-write: from a replica it can return the
+        # profile as it was before the update on the line above, so the PATCH
+        # would answer with the value it just replaced.
+        refreshed = await sc.get_agent(agent_id, tenant_id, read=False)
         if refreshed:
             return AgentOut.model_validate(refreshed)
     return AgentOut.model_validate(agent)

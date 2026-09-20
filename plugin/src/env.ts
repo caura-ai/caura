@@ -9,6 +9,7 @@
 import { readFileSync, existsSync } from "fs";
 import { getPluginEnvPath } from "./paths.js";
 import { warnIfInsecureUrl } from "./validation.js";
+import { withUserAgent } from "./user-agent.js";
 
 /**
  * Keys a plugin ``.env`` file may inject into ``process.env``. Fully anchored
@@ -178,7 +179,7 @@ export async function resolveTenantId(): Promise<string> {
         new URL(`${CAURA_API_PREFIX}/auth/verify`, CAURA_API_URL).toString(),
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: withUserAgent({ "Content-Type": "application/json" }),
           body: JSON.stringify({ key: CAURA_API_KEY }),
           // Bound per-attempt wall-clock; see TENANT_RESOLVE_TIMEOUT_MS
           // docstring above for why this is critical to liveness.
@@ -281,7 +282,7 @@ let toolDescriptions: Record<string, string> = {};
 
 export async function fetchToolDescriptions(): Promise<void> {
   try {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = withUserAgent();
     if (CAURA_API_KEY) headers["X-API-Key"] = CAURA_API_KEY;
     const res = await fetch(
       new URL(`${CAURA_API_PREFIX}/tool-descriptions`, CAURA_API_URL).toString(),

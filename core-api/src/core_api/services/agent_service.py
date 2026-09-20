@@ -653,6 +653,11 @@ async def update_trust_level(
     if fleet_id is not None:
         data["fleet_id"] = fleet_id
     await sc.update_trust_level(agent_id, data)
-    # Re-fetch to get the updated agent dict
-    updated = await sc.get_agent(agent_id, tenant_id)
+    # Re-fetch to get the updated agent dict. ``read=False`` because this is a
+    # read-after-write: from a replica it can return the PREVIOUS trust level,
+    # and this function's own docstring calls that column the single source of
+    # truth that every gate reads live. Returning the old value here would
+    # report a promotion or demotion that had already been applied as not
+    # having happened.
+    updated = await sc.get_agent(agent_id, tenant_id, read=False)
     return updated or agent

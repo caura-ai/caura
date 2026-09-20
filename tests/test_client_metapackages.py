@@ -188,14 +188,26 @@ def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() ->
     assert "if: startsWith(github.ref, 'refs/tags/')" in guard_header
 
 
+# The version the TypeScript client currently declares, so a bump does not
+# have to touch this test: the guard's job is agreement, not a fixed number.
+_TS_CLIENT_VERSION = json.loads((CLIENTS / "typescript" / "package.json").read_text())[
+    "version"
+]
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("tag", "directory", "should_pass", "message"),
     [
-        ("caura-client-ts-v1.0.1", "typescript", True, "both Caura-spelled"),
-        ("caura-npm-v1.0.1", "typescript", True, "both Caura-spelled"),
         (
-            "unrelated-v1.0.1",
+            f"caura-client-ts-v{_TS_CLIENT_VERSION}",
+            "typescript",
+            True,
+            "both Caura-spelled",
+        ),
+        (f"caura-npm-v{_TS_CLIENT_VERSION}", "typescript", True, "both Caura-spelled"),
+        (
+            f"unrelated-v{_TS_CLIENT_VERSION}",
             "typescript",
             False,
             "does not use a supported client prefix",
@@ -204,7 +216,7 @@ def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() ->
             "caura-client-ts-v9.9.9",
             "typescript",
             False,
-            "says 9.9.9 but package.json says 1.0.1",
+            f"says 9.9.9 but package.json says {_TS_CLIENT_VERSION}",
         ),
     ],
 )

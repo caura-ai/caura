@@ -1938,8 +1938,21 @@ class CoreStorageClient:
     async def create_or_update_agent(self, data: dict) -> dict:
         return await self._post("/agents", data)  # type: ignore[return-value]
 
-    async def get_agent(self, agent_id: str, tenant_id: str) -> dict | None:
-        return await self._get(f"/agents/{agent_id}", tenant_id=tenant_id)
+    async def get_agent(self, agent_id: str, tenant_id: str, *, read: bool = True) -> dict | None:
+        """Fetch an agent. ``read=False`` forces the PRIMARY.
+
+        Use it for a re-fetch that follows a write to the same row, and for a
+        read whose value is merged back into one. Both were being served from
+        the reader: the re-fetches in ``patch_agent_tune`` and
+        ``update_trust_level`` would return the agent as it was BEFORE the
+        update they exist to report, so a PATCH would answer with the value it
+        had just replaced and look like it had not applied.
+
+        The default stays ``True``. Most callers here are plain lookups — trust
+        gates, fleet resolution, 404 checks — and sending those to the primary
+        would give up the read split entirely to fix four call sites.
+        """
+        return await self._get(f"/agents/{agent_id}", read=read, tenant_id=tenant_id)
 
     async def list_agents(
         self,
@@ -2051,6 +2064,11 @@ class CoreStorageClient:
             read=read,
             **params,
         )
+
+    async def count_unindexed_documents(self, data: dict) -> int:
+        """Documents in scope that vector search cannot see (ax-0917-h-08)."""
+        result = await self._post("/documents/count-unindexed", data, read=True)
+        return int((result or {}).get("count", 0))  # type: ignore[union-attr]
 
     async def document_count_in_collection(
         self,
@@ -2742,6 +2760,19 @@ class CoreStorageClient:
             params["fleet_id"] = fleet_id
         result = await self._get("/fleet/nodes/count", **params)
         return (result or {}).get("count", 0)
+
+    async def fleet_nodes_summary(self, tenant_id: str, *, days: int = 7) -> dict:
+        """``{"nodes_7d": int, "plugin_versions": [str]}`` for one tenant.
+
+        Nodes whose ``last_heartbeat`` falls inside the last ``days`` days and
+        the distinct raw ``plugin_version`` strings among them. Tenant-scoped
+        like every other fleet read; the anonymous heartbeat fans it out over
+        the active tenants (``core_api.heartbeat.payload``).
+        """
+        result = await self._get("/fleet/nodes/summary", tenant_id=tenant_id, days=days)
+        if not isinstance(result, dict):
+            return {"nodes_7d": 0, "plugin_versions": []}
+        return result
 
     async def delete_fleet(self, tenant_id: str, fleet_id: str) -> bool:
         return await self._delete(f"/fleet/{fleet_id}", tenant_id=tenant_id)

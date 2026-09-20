@@ -1,8 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
-  Caura, CauraError, TransportError, CauraApiError, AuthError, NotFoundError, RateLimitError,
+  Caura,
+  CauraError,
+  TransportError,
+  CauraApiError,
+  AuthError,
+  NotFoundError,
+  RateLimitError,
+  USER_AGENT,
+  VERSION,
 } from "./index.js";
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>;
@@ -22,6 +31,23 @@ function makeClient(handler: Handler, options: Record<string, unknown> = {}): Ca
     ...options,
   });
 }
+
+test("VERSION agrees with package.json", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.equal(VERSION, pkg.version);
+});
+
+test("every request names the SDK in User-Agent", async () => {
+  let seen: string | undefined;
+  const client = makeClient((_url, init) => {
+    seen = (init.headers as Record<string, string>)["User-Agent"];
+    return jsonResponse(200, { status: "ok" });
+  });
+  await client.health();
+  assert.equal(seen, USER_AGENT);
+  assert.equal(seen, `caura-client-node/${VERSION} (node/${process.versions.node.split(".")[0]})`);
+  assert.match(seen!, /^caura-client-node\/\d+\.\d+\.\d+ \(node\/\d+\)$/);
+});
 
 test("write posts to /memories and parses the response", async () => {
   const client = makeClient((url, init) => {

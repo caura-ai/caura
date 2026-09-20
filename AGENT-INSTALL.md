@@ -8,7 +8,7 @@ You need these on your machine:
 
 - **Git** (to clone the repo)
 - **Docker + Docker Compose** (easiest path — handles PostgreSQL + pgvector + Redis)
-- OR: **Python 3.11+** and a **PostgreSQL 16 instance with pgvector** (manual path)
+- OR: **Python 3.12+** and a **PostgreSQL 16 instance with pgvector** (manual path)
 
 ## Option A: Docker (recommended — zero config)
 
@@ -50,12 +50,10 @@ pip install -r requirements.txt
 # 4. Create .env file
 cat > .env << 'EOF'
 ENVIRONMENT=development
-POSTGRES_HOST=127.0.0.1
-POSTGRES_PORT=5432
-POSTGRES_USER=caura
-POSTGRES_PASSWORD=changeme
-POSTGRES_DB=caura
+DATABASE_URL=postgresql+asyncpg://caura:changeme@127.0.0.1:5432/caura
 POSTGRES_REQUIRE_SSL=false
+CORE_STORAGE_API_URL=http://127.0.0.1:8002
+CORE_STORAGE_SHARED_SECRET=dev-only-storage-secret-change-me
 IS_STANDALONE=true
 EMBEDDING_PROVIDER=fake
 ENTITY_EXTRACTION_PROVIDER=fake
@@ -68,11 +66,15 @@ psql -U postgres -c "CREATE USER caura WITH PASSWORD 'changeme';"
 psql -U postgres -c "CREATE DATABASE caura OWNER caura;"
 psql -U caura -d caura -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-# 6. Run migrations
-alembic upgrade head
+# 6. Start the storage service. It applies Alembic migrations during startup.
+PYTHONPATH=.:core-storage-api/src uvicorn core_storage_api.app:app \
+  --host 127.0.0.1 --port 8002
 
-# 7. Start the server (the FastAPI app lives at core-api/src/core_api/app.py)
-PYTHONPATH=core-api/src uvicorn core_api.app:app --host 0.0.0.0 --port 8000
+# 7. In a second terminal, activate the same venv, return to the repo root,
+#    and start core-api. It talks to the storage service on port 8002.
+source venv/bin/activate
+PYTHONPATH=.:core-api/src uvicorn core_api.app:app \
+  --host 127.0.0.1 --port 8000
 
 # 8. Verify (in another terminal)
 curl http://localhost:8000/api/v1/health
@@ -95,15 +97,20 @@ Restart the server. REST and MCP calls work without `X-API-Key`. Supplying a
 placeholder such as `X-API-Key: standalone` is harmless and can make the same
 client configuration easier to reuse with authenticated modes.
 
-**Path 2 — Admin key (multi-tenant, full access).** Set in your `.env`:
+**Path 2 — Admin key (multi-tenant, full REST access).** Set in your `.env`:
 
 ```env
 ADMIN_API_KEY=my-long-random-admin-key
 ```
 
-Use `my-long-random-admin-key` as `X-API-Key`. You pass `tenant_id` explicitly in request bodies / query params.
+Use `my-long-random-admin-key` as `X-API-Key`. You pass `tenant_id`
+explicitly in request bodies / query params. Admin/system keys are
+intentionally rejected by MCP; use standalone mode, a tenant-scoped key, or
+Path 3 for MCP.
 
-**Path 3 — Gate the API with a shared key.** Set `CAURA_API_KEY` in your `.env`. Clients send that key via `X-API-Key` plus `X-Tenant-ID` to pick a tenant. Use this when the OSS API is network-exposed.
+**Path 3 — Gate the API with a shared key.** Set `CAURA_API_KEY` in your
+`.env`. REST and MCP clients send that key via `X-API-Key` plus `X-Tenant-ID`
+to pick a tenant. Use this when the OSS API is network-exposed.
 
 > **Note:** There is no `/ui/pricing.html`, `/api/register`, or `scripts/create_key.py` in OSS. Those are enterprise-plane features. For self-install, use Path 1.
 
@@ -124,7 +131,9 @@ Add this to your MCP client configuration (Claude Code, Claude Desktop, Cursor, 
 }
 ```
 
-Replace `standalone` with your admin key (Path 2) or the shared gate key (Path 3) as appropriate.
+The block above is for Path 1. For Path 3, replace `standalone` with the shared
+gate key and add an `X-Tenant-ID` header. Do not use the Path 2 admin key with
+MCP; the MCP endpoint rejects admin/system credentials.
 
 > **Claude Code** doesn't read MCP servers from `settings.json` — register with `claude mcp add` instead (the block above maps to a project-root `.mcp.json`). Use `-s user` so the server is available in every directory, not just the one you ran the command in:
 > ```bash
@@ -259,14 +268,14 @@ goes through `caura_doc` on the `skills` collection (`op=write` to share,
 The default `fake` providers skip LLM enrichment — memories are stored but not auto-classified. To enable full enrichment (type, weight, title, summary, tags, PII detection, entity extraction, contradiction detection), add an OpenAI key to your `.env`:
 
 ```bash
-# Add to .env (or .env.dev for Docker)
+# Add to .env (or env.dev for Docker)
 EMBEDDING_PROVIDER=openai
 ENTITY_EXTRACTION_PROVIDER=openai
 USE_LLM_FOR_MEMORY_CREATION=true
 OPENAI_API_KEY=sk-...
 ```
 
-Then restart the server (`docker compose restart app` or re-run uvicorn).
+Then restart the server (`docker compose restart core-api` or re-run uvicorn).
 
 ## What You Now Have
 

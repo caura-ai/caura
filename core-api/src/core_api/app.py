@@ -70,6 +70,7 @@ from core_api.routes.settings import router as settings_router
 from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
 from core_api.routes.stm import router as stm_router
+from core_api.routes.telemetry import router as telemetry_router
 
 # CAURA-631: sentinel bucket for audit events that arrive without a
 # ``tenant_id`` field. Routed through the per-tenant flusher's
@@ -328,6 +329,14 @@ async def lifespan(app):
         usage_meter = UsageMeter()
         usage_meter.start()
         configure_hooks(ServiceHooks(audit_log=log_action, usage_meter=usage_meter.record))
+
+        # Anonymous daily heartbeat (docs/telemetry.md). ``install`` evaluates
+        # the policy, prints the ON/OFF boot line and starts the tracked loop
+        # only when the policy says on — off means no task, no HTTP client,
+        # no counter. Cancelled with the other tracked tasks on shutdown.
+        from core_api.heartbeat import install as install_heartbeat
+
+        install_heartbeat(app_settings)
 
         # CAURA-628: bind + start the audit batch flusher. ``log_action``
         # checks for an active queue and falls back to a synchronous
@@ -1070,6 +1079,7 @@ app.include_router(plugin_router, prefix="/api/v1")
 # Bootstrap aliases — see plugin.py:plugin_bootstrap_router for rationale.
 app.include_router(plugin_bootstrap_router, prefix="/api")
 app.include_router(stats_router, prefix="/api/v1")
+app.include_router(telemetry_router, prefix="/api/v1")
 app.include_router(stm_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(interview_router, prefix="/api/v1")

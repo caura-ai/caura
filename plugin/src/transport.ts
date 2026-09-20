@@ -9,6 +9,7 @@
 
 import { CAURA_API_PREFIX, CAURA_API_URL, CAURA_API_KEY } from "./env.js";
 import { resolveAgentKey, evictAgentKey } from "./agent-auth.js";
+import { withUserAgent } from "./user-agent.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -48,7 +49,7 @@ export async function apiCall(
     if (agentKey) effectiveKey = agentKey;
   }
 
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = withUserAgent();
   if (body) headers["Content-Type"] = "application/json";
   if (effectiveKey) headers["X-API-Key"] = effectiveKey;
   // Caller-supplied headers (e.g. the per-attempt `X-Bulk-Attempt-Id`

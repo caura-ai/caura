@@ -269,6 +269,9 @@ ADMIN_PLANE_ROUTERS = frozenset(
         "lifecycle",
         "skills_inbox",
         "scheduler_lease",
+        # POST /telemetry/rotate resets the install's anonymous heartbeat
+        # identity: an operator concern, refused to agent credentials.
+        "telemetry",
     }
 )
 
