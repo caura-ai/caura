@@ -114,7 +114,7 @@ export interface ReconcileSummary {
   installed: string[];
   added: string[];
   removed: string[];
-  skipped: string[];   // catalog entries with bad shape (no doc_id / no content)
+  skipped: string[];   // catalog entries that cannot be materialised safely
   // Slugs not written because an unowned dir already occupies the slot in
   // an ``additive`` target (a foreign skill we refuse to clobber). Distinct
   // from ``skipped`` so a caller can tell a catalog-shape error apart from a
@@ -577,9 +577,11 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   // 2. Build the desired state from the catalog (target-independent).
   //    Skip rows missing doc_id or content — they can't be materialised.
   //    Slug validation (filesystem-safe) was enforced server-side by the
-  //    Phase B ``caura_doc op=write collection=skills`` rule, so every
-  //    doc_id we see here should already be safe — but defense in depth:
-  //    re-validate before touching the filesystem.
+  //    Phase B ``caura_doc op=write collection=skills`` rule. Skill Factory
+  //    rows keep their ``forge/`` or ``agent/`` catalog namespace after
+  //    approval, so strip that known prefix before using the safe suffix as
+  //    a directory name. Defense in depth: re-validate the full catalog id
+  //    and captured suffix before touching the filesystem.
   //
   //    OpenClaw's skill loader rejects any SKILL.md without YAML
   //    frontmatter declaring ``name`` and ``description`` (it returns
@@ -592,8 +594,11 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   //    before writing, unless the content already starts with a ``---``
   //    fence (in which case the author's own frontmatter is preserved).
   const desired = new Map<string, string>();
+  const catalogSourceBySlug = new Map<string, string>();
+  const ambiguousSlugs = new Set<string>();
   for (const doc of catalog) {
-    const slug = typeof doc.doc_id === "string" ? doc.doc_id : "";
+    const docId = typeof doc.doc_id === "string" ? doc.doc_id : "";
+    const slug = filesystemSlugForCatalogId(docId);
     const data = doc.data ?? {};
     const rawContent =
       typeof data["content"] === "string" ? (data["content"] as string) : "";
@@ -604,12 +609,29 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
     const name =
       typeof data["name"] === "string" && (data["name"] as string).trim()
         ? (data["name"] as string).trim()
-        : slug;
-    if (!slug || !isSafeSlug(slug) || !rawContent || !description) {
-      summary.skipped.push(slug || "<missing>");
+        : (slug ?? "");
+    if (!slug || !rawContent || !description) {
+      summary.skipped.push(docId || "<missing>");
       continue;
     }
-    desired.set(slug, ensureFrontmatter(rawContent, name, description));
+    const materializedContent = ensureFrontmatter(rawContent, name, description);
+    if (ambiguousSlugs.has(slug)) {
+      summary.skipped.push(docId);
+      continue;
+    }
+    const priorDocId = catalogSourceBySlug.get(slug);
+    if (priorDocId === docId && desired.get(slug) === materializedContent) {
+      continue;
+    }
+    if (priorDocId !== undefined) {
+      desired.delete(slug);
+      catalogSourceBySlug.delete(slug);
+      ambiguousSlugs.add(slug);
+      summary.skipped.push(priorDocId, docId);
+      continue;
+    }
+    catalogSourceBySlug.set(slug, docId);
+    desired.set(slug, materializedContent);
   }
 
   // 3. Reconcile each configured target. Default is a single ``owned``
@@ -655,9 +677,9 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   summary.removed = [...new Set(removedAll)].sort();
   summary.protected = [...new Set(protectedAll)].sort();
   summary.installed = [...new Set(installedAll)].sort();
-  // ``skipped`` stays catalog-shape errors only (populated above during
+  // ``skipped`` stays catalog-entry failures only (populated above during
   // ``desired`` construction); additive-dir collisions are reported
-  // separately so the two failure modes don't get conflated.
+  // separately so catalog ambiguity isn't conflated with local ownership.
   summary.skipped = [...new Set(summary.skipped)].sort();
   summary.collisions = [...new Set(collisionsAll)].sort();
 
@@ -691,15 +713,13 @@ export async function reconcileSkills(): Promise<ReconcileSummary> {
   return summary;
 }
 
-// Mirrors ``core_api.routes.documents._SKILL_SLUG_RE`` /
-// ``mcp_server._SKILL_SLUG_RE``. Defense in depth — server already
-// validates this on upsert, but the reconciler interpolates the slug
-// into a filesystem path so a regression on either side shouldn't be
-// able to land an unsafe directory name on disk.
-const SAFE_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+// Mirrors ``core_api.routes.documents._SKILL_SLUG_RE``. The optional
+// namespace belongs to the catalog identity, not the filesystem layout;
+// only the captured safe suffix becomes ``<skills>/<slug>/SKILL.md``.
+const SAFE_CATALOG_ID_RE = /^(?:(?:forge|agent)\/)?([a-z0-9][a-z0-9._-]{0,99})$/;
 
-function isSafeSlug(s: string): boolean {
-  return SAFE_SLUG_RE.test(s);
+function filesystemSlugForCatalogId(docId: string): string | null {
+  return SAFE_CATALOG_ID_RE.exec(docId)?.[1] ?? null;
 }
 
 const FRONTMATTER_FENCE_RE = /^---\r?\n/;
@@ -718,9 +738,9 @@ const FRONTMATTER_FENCE_RE = /^---\r?\n/;
  * (the common case for ``caura_doc op=write collection=skills``) get
  * frontmatter prepended from ``data.name`` and ``data.description``.
  *
- * Description is YAML-escaped — wrapped in double quotes with embedded
- * quotes/backslashes escaped — so a multi-word description with
- * punctuation can't trip the YAML parser.
+ * Name and description are emitted as JSON strings, which are valid YAML
+ * double-quoted scalars. This escapes quotes, backslashes, newlines, and
+ * control characters instead of letting catalog text alter the frontmatter.
  */
 function ensureFrontmatter(
   rawContent: string,
@@ -728,16 +748,10 @@ function ensureFrontmatter(
   description: string,
 ): string {
   if (FRONTMATTER_FENCE_RE.test(rawContent)) return rawContent;
-  const escapedDescription = description
-    .replace(/\\/g, "\\\\")
-    .replace(/"/g, '\\"');
-  // Single-line YAML strings — safe across the slug + description
-  // shapes the server already enforces (description ≤ 500 chars per
-  // skill_service validation, no newlines accepted).
   const fm =
     "---\n" +
-    `name: ${name}\n` +
-    `description: "${escapedDescription}"\n` +
+    `name: ${JSON.stringify(name)}\n` +
+    `description: ${JSON.stringify(description)}\n` +
     "---\n\n";
   return fm + rawContent;
 }
