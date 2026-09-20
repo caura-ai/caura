@@ -25,7 +25,12 @@ from fastapi.responses import JSONResponse
 from common import permanent_failure
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
-from core_api.agent_ids import DEFAULT_AGENT_ID, AgentIdentity
+from core_api.agent_ids import (
+    ALWAYS_RESERVED_AGENT_IDS,
+    DEFAULT_AGENT_ID,
+    AgentIdentity,
+    effective_write_agent_id,
+)
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
 from core_api.config import settings as app_settings
@@ -69,6 +74,7 @@ from core_api.schemas import (
     STMWriteResponse,
     UsageSummary,
 )
+from core_api.services.agent_identity import reserved_write_refusal
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_label,
@@ -143,6 +149,51 @@ def _require_uuid_list(values: object, field: str) -> list:
 
 
 router = APIRouter(tags=["Memory"])
+
+_REST_RESERVED_CREDENTIAL_MESSAGE = (
+    'Verified agent identity "{agent_id}" is reserved and cannot authenticate '
+    "a REST write. Re-provision the credential with a unique home agent identity "
+    '(for example, "main-<install_id>") and retry; a body agent_id cannot override '
+    "an authenticated credential."
+)
+
+
+def _resolve_rest_write_agent_id(auth: AuthContext, claimed_id: str) -> str:
+    """Apply REST binding with the staged reserved-``main`` migration.
+
+    The feature flag remains a deliberate emergency rollback. A reserved
+    verified identity follows the existing allow → warn → reject rollout: the
+    caller-named escape hatch survives during observation, including its spoof
+    risk, then fails closed when the reserved-id policy reaches reject.
+    """
+    if not app_settings.bind_write_identity_to_auth or not auth.agent_id:
+        return claimed_id
+    verified_id = auth.agent_id
+    if verified_id in ALWAYS_RESERVED_AGENT_IDS:
+        # Reject is deterministic and must precede idempotency, but a rejected
+        # attempt is not a write and must not increment the rollout counter.
+        if app_settings.reserved_agent_id_policy == "reject":
+            raise HTTPException(
+                status_code=409,
+                detail=_REST_RESERVED_CREDENTIAL_MESSAGE.format(agent_id=verified_id),
+            )
+        return effective_write_agent_id(verified_id, claimed_id) or claimed_id
+    return verified_id
+
+
+def _observe_rest_reserved_write(auth: AuthContext, chosen_id: str) -> None:
+    """Emit one warn event for a gated write that escaped reserved ``main``.
+
+    A reserved final identity is observed by the shared service-layer guard;
+    a unique fallback bypasses that guard, so observe it here instead, alongside
+    the service call and after the same ownership/fleet gates.
+    """
+    if (
+        app_settings.reserved_agent_id_policy == "warn"
+        and auth.agent_id in ALWAYS_RESERVED_AGENT_IDS
+        and chosen_id not in ALWAYS_RESERVED_AGENT_IDS
+    ):
+        reserved_write_refusal(auth.agent_id)
 
 
 def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None = None) -> None:
@@ -1191,6 +1242,10 @@ async def write_memory(
             body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
             raise _missing_agent_id_error()
+    # Deterministic auth rejection must happen before claiming idempotency, or
+    # a bad credential leaves a pending receipt that masks the stable 409.
+    chosen_agent_id = _resolve_rest_write_agent_id(auth, chosen_agent_id)
+    body.agent_id = chosen_agent_id
     # Idempotency replay is short-circuited BEFORE the per-tenant slot —
     # a cached retry must not consume a write-concurrency slot, or a
     # tenant retry storm starves its own legitimate new writes.
@@ -1228,21 +1283,13 @@ async def _write_memory_inner(
     response: Response,
     auth: AuthContext,
     idem: IdempotencyGuard | None,
-    # The write identity the caller asked for, already guarded non-None by
-    # ``write_memory``. Deliberately ``str``, not ``AgentIdentity``: this is
-    # the caller's CLAIM, and ``resolve_write_agent`` is what turns a
-    # claim into an identity.
+    # Non-null write identity, already preflighted against the credential by
+    # ``write_memory`` before it claims idempotency.
     chosen_agent_id: str,
 ):
     from core_api.services.organization_settings import resolve_config
 
     write_config = await resolve_config(body.tenant_id)
-    # Phase 2 (dark, default off): bind to the verified credential identity,
-    # ignoring a client-supplied body override. Enable ONLY after reserved-
-    # `main` creds are re-identified, else it pins them back onto `main`.
-    if app_settings.bind_write_identity_to_auth and auth.agent_id:
-        chosen_agent_id = auth.agent_id
-        body.agent_id = auth.agent_id
     # Ownership boundary (gate + owner stamp + post-create re-check), shared
     # with the bulk path so a broker single-write can't attribute a memory to
     # an agent owned by a different install.
@@ -1273,6 +1320,7 @@ async def _write_memory_inner(
     if usage:
         response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
         response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
+    _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
     result = await create_memory(body)
     # STM writes return STMWriteResponse (different shape from MemoryOut)
     if isinstance(result, STMWriteResponse):
@@ -1428,6 +1476,11 @@ async def write_memories_bulk(
             detail=(f"Invalid {BULK_ATTEMPT_ID_HEADER}: must match ^[A-Za-z0-9._:\\-]{{1,128}}$"),
         )
 
+    # As on the single route, fail deterministic credential errors before an
+    # idempotency receipt is claimed and can be left pending.
+    chosen_agent_id = _resolve_rest_write_agent_id(auth, chosen_agent_id)
+    body.agent_id = chosen_agent_id
+
     # Idempotency replay short-circuits BEFORE the per-tenant slot — a
     # cached retry must not consume a write-concurrency slot.
     _idem = await idempotency_for(request, body.tenant_id, idempotency_key)
@@ -1497,18 +1550,10 @@ async def _write_memories_bulk_inner(
     auth: AuthContext,
     idem: IdempotencyGuard | None,
     bulk_attempt_id: str,
-    # The write identity the caller asked for, already guarded non-None by
-    # ``write_memories_bulk``. Deliberately ``str``, not ``AgentIdentity``: this is
-    # the caller's CLAIM, and ``resolve_write_agent`` is what turns a
-    # claim into an identity.
+    # Non-null write identity, already preflighted against the credential by
+    # ``write_memories_bulk`` before it claims idempotency.
     chosen_agent_id: str,
 ):
-    # Phase 2 (dark, default off): bind to the verified credential identity
-    # (see _write_memory_inner). Enabled only post-re-identification. Runs
-    # before resolve_write_agent so the gate/stamp apply to the bound identity.
-    if app_settings.bind_write_identity_to_auth and auth.agent_id:
-        chosen_agent_id = auth.agent_id
-        body.agent_id = auth.agent_id
     # Ownership boundary (gate + owner stamp + post-create re-check), shared
     # with the single-write path.
     #
@@ -1534,6 +1579,7 @@ async def _write_memories_bulk_inner(
     # Metering deliberately does NOT happen here — see after the write. This
     # used to be ``usage = await bulk_check_and_increment(...)`` on this line,
     # before the try, and no failure path gave it back.
+    _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
     try:
         result = await asyncio.wait_for(
             create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),

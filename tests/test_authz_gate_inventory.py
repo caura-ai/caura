@@ -227,7 +227,10 @@ SELF_ID_PARAMS_EXCLUDED: dict[str, str] = {
 # install's write that names another install's agent) and documents that
 # "non-broker callers pass straight through". Binding a write to the credential
 # is a different mechanism — ``bind_write_identity_to_auth`` — which
-# ``config.py`` defaults to False and describes as shipping dark.
+# ``config.py`` enables by default; reserved verified ``main`` follows the
+# existing allow/warn/reject migration policy. The shipped warn phase still
+# trusts its caller-named body id, so those credentials remain a measured gap
+# until reject; the flag also retains an explicit legacy rollback.
 
 # Imported callables worth naming in the report. Not an exemption and not
 # consulted by the invariant: purely a filter so the failure output shows the
@@ -478,21 +481,19 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
         "KNOWN GAP: node-plane by intent, but persists memories attributed to "
         "a caller-named agent; scope_team caps the blast radius"
     ),
-    # KNOWN GAPs. Write attribution is caller-named on the agent plane today:
-    # an agent credential may write a memory attributed to a peer. This is
-    # acknowledged and staged, not unnoticed — ``config.py`` carries
-    # ``bind_write_identity_to_auth`` ("Phase 2 (spoof hardening), ships dark",
-    # default False), which is exactly this fix, held until the reserved-`main`
-    # credentials are re-identified. resolve_write_agent does NOT close it: it
-    # enforces the broker/install ownership boundary and passes non-broker
-    # callers straight through.
+    # The handlers expose a caller-named ``agent_id`` field. The default-on
+    # ``bind_write_identity_to_auth`` control replaces it for normal verified
+    # identities, but the shipped warn policy deliberately keeps trusting ANY
+    # non-placeholder body id for reserved ``main`` credentials. These stay
+    # gaps until the reserved-id policy reaches reject. ``resolve_write_agent``
+    # is a separate broker/install ownership boundary.
     "POST /api/v1/memories": (
-        "KNOWN GAP: attribution is caller-named; binding is behind "
-        "bind_write_identity_to_auth, which ships dark"
+        "KNOWN GAP: bind_write_identity_to_auth uses normal verified identities, "
+        "but reserved main remains caller-named until policy=reject"
     ),
     "POST /api/v1/memories/bulk": (
-        "KNOWN GAP: attribution is caller-named; binding is behind "
-        "bind_write_identity_to_auth, which ships dark"
+        "KNOWN GAP: bind_write_identity_to_auth uses normal verified identities, "
+        "but reserved main remains caller-named until policy=reject"
     ),
     # Named without the flag, deliberately: this handler never reads it, and
     # ``test_allowlist_reasons_that_name_a_mechanism_are_corroborated`` is what
@@ -750,7 +751,7 @@ def _classify(
     the same terms as ``imported_calls``: a behaviour held behind a feature
     flag is a fact about the handler, and an allowlist line naming the flag
     should be falsifiable. It says nothing about the flag's VALUE —
-    ``bind_write_identity_to_auth`` defaults to False, and a reader who needs
+    ``bind_write_identity_to_auth`` defaults to True, and a reader who needs
     that has to open ``config.py``.
     """
     tree = _parse(fn)
@@ -947,8 +948,8 @@ class _Axis(NamedTuple):
 # Ceilings are PER AXIS, not one number across all three, so headroom cannot be
 # fungible: closing a self-plane gap must not silently license a new write-gate
 # one. The self plane starts at 4 because the axis is newer than the gaps on it
-# — write attribution is caller-named today and ``config.py`` already carries
-# the staged fix — and the ceiling is what stops a fifth joining quietly.
+# — the default-on REST attribution binding narrows two of those gaps, but the
+# reserved-main warn phase keeps both open until policy=reject.
 _ALLOWLISTS = (
     _Axis(
         "WRITE_GATE_ALLOWLIST",

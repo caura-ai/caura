@@ -98,14 +98,16 @@ class Settings(BaseSettings):
     # is the plugin's unset default; many installs collapse onto it. Phase 1:
     #   allow  → legacy behavior / instant rollback
     #   warn   → attribute as today but log `reserved_agent_write` (observe)
-    #   reject → 409 with guidance; a write supplying a unique agent_id passes
+    #   reject → 409 with guidance; MCP may supply a unique agent_id, while REST
+    #     credentials verified as reserved main must be re-provisioned
     # Roll out warn → (measure) → reject. The bare-`main` delete gates on reject.
     reserved_agent_id_policy: Literal["allow", "warn", "reject"] = "warn"
-    # Phase 2 (spoof hardening), ships dark: bind a write's agent_id to the
-    # verified credential identity (auth.agent_id), ignoring a client-supplied
-    # body override. Enable ONLY after the reserved-`main` credentials are
-    # re-identified — otherwise it pins them back onto `main`.
-    bind_write_identity_to_auth: bool = False
+    # Phase 2 (spoof hardening): bind REST writes to the verified credential
+    # identity. Legacy credentials still stamped with reserved ``main`` follow
+    # ``reserved_agent_id_policy``: allow/warn keep accepting ANY non-placeholder
+    # body agent_id for migration, so spoof hardening is incomplete for that
+    # population until reject. ``false`` is an emergency rollback.
+    bind_write_identity_to_auth: bool = True
     # Outer cap on the inline embed+enrich gather in ParallelEmbedEnrich.
     # Was hardcoded at 20.0 — too tight under load once embedding moved
     # off the hot path (CAURA-594) and enrichment LLM became the sole

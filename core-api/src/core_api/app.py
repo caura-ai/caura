@@ -938,14 +938,15 @@ if app_settings.is_standalone:
 
     app.add_middleware(StandaloneTenantMiddleware)
 
+# PR #9: reject oversized ingest requests before FastAPI parses the body.
+# Registered before RequestTimeout so Starlette places it INSIDE the request
+# budget: a slow chunked upload cannot hold the body-counting loop forever.
+# Both sit inside SecurityHeaders/CORS so 413/504 responses carry those headers.
+app.add_middleware(IngestBodySizeMiddleware)
 app.add_middleware(
     RequestTimeoutMiddleware,
     timeout_seconds=app_settings.request_timeout_seconds,
 )
-# PR #9: reject oversized ingest requests at Content-Length, before
-# FastAPI parses the body. Sits inside SecurityHeaders/CORS so the 413
-# still carries those headers.
-app.add_middleware(IngestBodySizeMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,

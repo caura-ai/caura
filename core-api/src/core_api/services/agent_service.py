@@ -11,6 +11,7 @@ from core_api.agent_ids import AgentIdentity
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_TRUST_LEVEL
 from core_api.errors import (
+    AUTH_AGENT_IDENTITY_MISMATCH,
     AUTH_AGENT_NOT_REGISTERED,
     AUTH_AGENT_TRUST_TOO_LOW,
     AUTH_FLEET_SCOPE_FORBIDDEN,
@@ -235,6 +236,31 @@ async def broker_owned_agent_id(chosen: str, install_uuid: str | None, tenant_id
     return AgentIdentity(chosen)
 
 
+async def enforce_broker_agent_ownership(
+    tenant_id: str,
+    agent_id: str,
+    install_uuid: str | None,
+) -> None:
+    """Require an install credential to own an existing agent row.
+
+    Write attribution is intentionally lenient on first touch, but reads and
+    deletes of per-agent private state cannot claim an unowned name. A missing
+    install id, missing row, legacy unclaimed row, or different owner therefore
+    fails closed without disclosing which case applied.
+    """
+    owner = await lookup_agent(tenant_id, agent_id) if install_uuid else None
+    if owner and owner.get("owner_install_uuid") == install_uuid:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=coded_detail(
+            AUTH_AGENT_IDENTITY_MISMATCH,
+            "Install credential does not own the requested agent.",
+            field="agent_id",
+        ),
+    )
+
+
 async def resolve_write_agent(
     chosen_agent_id: str,
     tenant_id: str,
@@ -325,6 +351,41 @@ async def enforce_fleet_read(
 ) -> None:
     """Enforce read permissions for search/list (read-only — never creates agents)."""
     await enforce_fleet_read_many(tenant_id, agent_id, [fleet_id])
+
+
+async def enforce_registered_fleet_read(
+    tenant_id: str,
+    agent_id: AgentIdentity,
+    fleet_id: str,
+) -> None:
+    """Enforce the full trust ladder for a named fleet read.
+
+    Unlike :func:`enforce_fleet_read`, this fails closed for an unregistered
+    identity. That stricter contract is for private fleet state such as STM
+    bulletins, where an unknown caller cannot prove that any fleet is its own.
+    """
+    agent = await lookup_agent(tenant_id, agent_id)
+    if not agent:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED,
+                "Agent is not registered and cannot read fleet-private state.",
+            ),
+        )
+
+    own_fleet = agent.get("fleet_id")
+    trust = agent.get("trust_level", 0)
+    required = 1 if fleet_id == own_fleet else 2
+    if trust < required:
+        code = AUTH_AGENT_TRUST_TOO_LOW if required == 1 else AUTH_FLEET_SCOPE_FORBIDDEN
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                code,
+                f"fleet-scope policy: trust level {required} is required for this bulletin.",
+            ),
+        )
 
 
 async def enforce_fleet_read_many(

@@ -1,5 +1,4 @@
-"""Tests for `agent_ids.effective_write_agent_id` — the MCP write-path identity
-resolution (PR-2).
+"""Tests for shared `agent_ids.effective_write_agent_id` write-path resolution.
 
 Rule: the verified gateway id wins UNLESS it's a reserved placeholder, in which
 case a non-placeholder body id is honored (so a `home_agent_id="main"` cred can

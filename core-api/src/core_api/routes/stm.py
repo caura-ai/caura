@@ -18,6 +18,7 @@ from core_api.constants import (
     MemoryType,
 )
 from core_api.errors import (
+    AUTH_AGENT_CREDENTIAL_FORBIDDEN,
     AUTH_AGENT_TRUST_TOO_LOW,
     AUTH_TENANT_MISMATCH,
     AUTH_UNAUTHENTICATED,
@@ -26,7 +27,13 @@ from core_api.errors import (
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 from core_api.middleware.rate_limit import write_limit
 from core_api.schemas import STRICT_WRITE_BODY
-from core_api.services.agent_service import enforce_fleet_write, resolve_write_agent
+from core_api.services.agent_service import (
+    enforce_broker_agent_ownership,
+    enforce_delete,
+    enforce_fleet_write,
+    enforce_registered_fleet_read,
+    resolve_write_agent,
+)
 from core_api.services.usage_service import check_and_increment
 
 logger = logging.getLogger(__name__)
@@ -126,6 +133,25 @@ def _require_cleared(cleared: bool) -> None:
         raise HTTPException(
             status_code=503,
             detail=("Short-term memory is temporarily unavailable and nothing was cleared. Retry shortly."),
+        )
+
+
+async def _enforce_note_owner(auth: AuthContext, tenant_id: str, agent_id: str) -> None:
+    """Protect per-agent private notes on both the read and delete paths."""
+    auth.enforce_self_agent(agent_id)
+    if auth.is_install_credential:
+        await enforce_broker_agent_ownership(tenant_id, agent_id, auth.install_uuid)
+
+
+def _reject_install_bulletin_access(auth: AuthContext) -> None:
+    """An install credential has no verified agent/fleet trust identity."""
+    if auth.is_install_credential:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_CREDENTIAL_FORBIDDEN,
+                "Install credentials cannot access fleet bulletins without an agent-scoped credential.",
+            ),
         )
 
 
@@ -233,7 +259,7 @@ async def get_notes(
     # The DELETE twin directly below has enforced this since the 2026-06-11
     # audit, which left the pair lopsided: a peer's notes could not be cleared,
     # only read. Disclosure was the half still open.
-    auth.enforce_self_agent(agent_id)
+    await _enforce_note_owner(auth, tenant_id, agent_id)
     from core_api.services.stm_service import read_notes
 
     notes = await read_notes(tenant_id, agent_id, limit=limit)
@@ -257,7 +283,7 @@ async def clear_notes(
     tenant_id = _require_tenant(auth, tenant_id)
     # The query param must MATCH the authenticated agent identity — an agent
     # credential must not clear a peer agent's notes by naming it.
-    auth.enforce_self_agent(agent_id)
+    await _enforce_note_owner(auth, tenant_id, agent_id)
     from core_api.services.stm_service import clear_notes
 
     _require_cleared(await clear_notes(tenant_id, agent_id))
@@ -281,6 +307,11 @@ async def get_bulletin(
 ):
     _check_stm_enabled()
     tenant_id = _require_tenant(auth, tenant_id)
+    _reject_install_bulletin_access(auth)
+    # A bare tenant credential has tenant-admin authority by convention; only
+    # agent credentials enter the fleet trust ladder.
+    if auth.agent_id:
+        await enforce_registered_fleet_read(tenant_id, auth.agent_id, fleet_id)
     from core_api.services.stm_service import read_bulletin
 
     entries = await read_bulletin(tenant_id, fleet_id, limit=limit)
@@ -302,6 +333,11 @@ async def clear_bulletin(
     _check_stm_enabled()
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
+    _reject_install_bulletin_access(auth)
+    # Tenant-admin credentials retain tenant-wide clear access, matching the
+    # authorization convention used by the other private REST surfaces.
+    if auth.agent_id:
+        await enforce_delete(tenant_id, auth.agent_id)
     from core_api.services.stm_service import clear_bulletin
 
     _require_cleared(await clear_bulletin(tenant_id, fleet_id))

@@ -104,8 +104,10 @@ def effective_write_agent_id(verified_id: str | None, body_id: str | None) -> Ag
     Asymmetric on purpose: the *verified* check uses ``ALWAYS_RESERVED_AGENT_IDS``
     ({main}) so a real verified id (incl. "mcp-agent") can't be body-spoofed; the
     *body* check uses ``_PLACEHOLDER_BODY_AGENT_IDS`` ({main, mcp-agent}) so a
-    defaulted body can't become the identity. Strictly *tighter* than the REST
-    write path, which already trusts the body unconditionally.
+    defaulted body can't become the identity. MCP uses this directly; the
+    default-on REST binding shares it only for a reserved ``main`` while the
+    existing reserved-id policy is in allow/warn. That migration exception
+    accepts any non-placeholder body id and remains spoofable until reject.
     """
     if verified_id and verified_id not in ALWAYS_RESERVED_AGENT_IDS:
         return AgentIdentity(verified_id)
