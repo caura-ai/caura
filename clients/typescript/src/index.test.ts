@@ -50,16 +50,19 @@ test("every request names the SDK in User-Agent", async () => {
 });
 
 test("write posts to /memories and parses the response", async () => {
-  const client = makeClient((url, init) => {
-    assert.equal(new URL(url).pathname, "/api/v1/memories");
-    assert.equal((init.headers as Record<string, string>)["X-API-Key"], "mc_test");
-    assert.deepEqual(JSON.parse(init.body as string), {
-      tenant_id: "t1",
-      content: "hello",
-      agent_id: "a1",
-    });
-    return jsonResponse(201, { id: "m1", content: "hello", title: "Hi", agent_id: "a1" });
-  }, { agentId: "a1" });
+  const client = makeClient(
+    (url, init) => {
+      assert.equal(new URL(url).pathname, "/api/v1/memories");
+      assert.equal((init.headers as Record<string, string>)["X-API-Key"], "mc_test");
+      assert.deepEqual(JSON.parse(init.body as string), {
+        tenant_id: "t1",
+        content: "hello",
+        agent_id: "a1",
+      });
+      return jsonResponse(201, { id: "m1", content: "hello", title: "Hi", agent_id: "a1" });
+    },
+    { agentId: "a1" },
+  );
 
   const mem = await client.write("hello");
   assert.equal(mem.id, "m1");
@@ -68,10 +71,13 @@ test("write posts to /memories and parses the response", async () => {
 });
 
 test("write per-call agentId overrides the default", async () => {
-  const client = makeClient((_url, init) => {
-    assert.equal(JSON.parse(init.body as string).agent_id, "override");
-    return jsonResponse(201, { id: "m1", content: "x" });
-  }, { agentId: "default" });
+  const client = makeClient(
+    (_url, init) => {
+      assert.equal(JSON.parse(init.body as string).agent_id, "override");
+      return jsonResponse(201, { id: "m1", content: "x" });
+    },
+    { agentId: "default" },
+  );
   await client.write("x", { agentId: "override" });
 });
 
@@ -81,10 +87,18 @@ test("search posts to /search and returns a list", async () => {
     const body = JSON.parse(init.body as string);
     assert.equal(body.query, "q");
     assert.equal(body.top_k, 3);
-    return jsonResponse(200, { items: [{ id: "m1", content: "a" }, { id: "m2", content: "b" }] });
+    return jsonResponse(200, {
+      items: [
+        { id: "m1", content: "a" },
+        { id: "m2", content: "b" },
+      ],
+    });
   });
   const results = await client.search("q", { topK: 3 });
-  assert.deepEqual(results.map((m) => m.id), ["m1", "m2"]);
+  assert.deepEqual(
+    results.map((m) => m.id),
+    ["m1", "m2"],
+  );
 });
 
 test("search throws when 200 body lacks items", async () => {
@@ -134,9 +148,7 @@ test("recall returns the summary and supporting memories", async () => {
 });
 
 test("recall accepts the items alias alone", async () => {
-  const client = makeClient(() =>
-    jsonResponse(200, { summary: "S", items: [{ id: "m2", content: "b" }] }),
-  );
+  const client = makeClient(() => jsonResponse(200, { summary: "S", items: [{ id: "m2", content: "b" }] }));
   const result = await client.recall("q");
   assert.deepEqual(
     result.supportingMemories.map((m) => m.id),
@@ -243,14 +255,13 @@ test("getDocument allows overriding tenantId", async () => {
 
 test("getDocument maps 404 to NotFoundError", async () => {
   const client = makeClient(() => jsonResponse(404, { detail: "document not found" }));
-  await assert.rejects(
-    client.getDocument("missing-id", { collection: "interviews" }),
-    NotFoundError
-  );
+  await assert.rejects(client.getDocument("missing-id", { collection: "interviews" }), NotFoundError);
 });
 
 test("403 maps to AuthError and parses the error envelope", async () => {
-  const client = makeClient(() => jsonResponse(403, { error: { message: "cross-fleet", details: { x: 1 } } }));
+  const client = makeClient(() =>
+    jsonResponse(403, { error: { message: "cross-fleet", details: { x: 1 } } }),
+  );
   await assert.rejects(client.write("x"), (err: unknown) => {
     assert.ok(err instanceof AuthError);
     assert.equal((err as AuthError).statusCode, 403);
@@ -265,19 +276,31 @@ test("404 maps to NotFoundError", async () => {
 });
 
 test("429 maps to RateLimitError and parses retry-after", async () => {
-  const client = makeClient(async () => new Response(JSON.stringify({ detail: "slow down" }), {
-    status: 429, headers: { "content-type": "application/json", "retry-after": "2.5" },
-  }));
-  await assert.rejects(client.search("q"), (err: unknown) =>
-    err instanceof RateLimitError && err.retryAfter === 2.5);
+  const client = makeClient(
+    async () =>
+      new Response(JSON.stringify({ detail: "slow down" }), {
+        status: 429,
+        headers: { "content-type": "application/json", "retry-after": "2.5" },
+      }),
+  );
+  await assert.rejects(
+    client.search("q"),
+    (err: unknown) => err instanceof RateLimitError && err.retryAfter === 2.5,
+  );
 });
 
 test("429 without retry-after has null retryAfter", async () => {
-  const client = makeClient(async () => new Response(JSON.stringify({ detail: "slow down" }), {
-    status: 429, headers: { "content-type": "application/json" },
-  }));
-  await assert.rejects(client.search("q"), (err: unknown) =>
-    err instanceof RateLimitError && err.retryAfter === null);
+  const client = makeClient(
+    async () =>
+      new Response(JSON.stringify({ detail: "slow down" }), {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  await assert.rejects(
+    client.search("q"),
+    (err: unknown) => err instanceof RateLimitError && err.retryAfter === null,
+  );
 });
 
 test("500 maps to CauraApiError", async () => {
@@ -298,9 +321,10 @@ for (const operation of ["write", "search", "recall", "health", "getDocument"] a
       calls++;
       return Promise.reject(cause);
     });
-    const request = operation === "getDocument"
-      ? client.getDocument("doc-1", { collection: "interviews" })
-      : client[operation]("query");
+    const request =
+      operation === "getDocument"
+        ? client.getDocument("doc-1", { collection: "interviews" })
+        : client[operation]("query");
     await assert.rejects(request, (error: unknown) => {
       assert.ok(error instanceof CauraError);
       assert.ok(error instanceof TransportError);
@@ -314,12 +338,15 @@ for (const operation of ["write", "search", "recall", "health", "getDocument"] a
 
 test("the configured timeout wraps the abort reason", { timeout: 1000 }, async () => {
   let signal: AbortSignal | null | undefined;
-  const client = makeClient((_url, init) => {
-    signal = init.signal;
-    return new Promise<Response>((_resolve, reject) => {
-      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
-    });
-  }, { timeoutMs: 0 });
+  const client = makeClient(
+    (_url, init) => {
+      signal = init.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+      });
+    },
+    { timeoutMs: 0 },
+  );
   await assert.rejects(client.search("query"), (error: unknown) => {
     assert.ok(signal?.aborted);
     assert.ok(error instanceof CauraError);

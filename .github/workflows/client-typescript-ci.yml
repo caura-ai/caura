@@ -26,5 +26,7 @@ jobs:
           node-version: "20"
       - name: Install
         run: npm install
+      - name: Lint (prettier)
+        run: npm run lint
       - name: Build + test
         run: npm test
