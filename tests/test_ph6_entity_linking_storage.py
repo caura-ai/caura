@@ -477,6 +477,119 @@ async def test_discover_logs_its_summary_after_the_commit():
     )
 
 
+async def _capture_sql(engine, fn):
+    """Run ``fn`` while recording every statement the storage engine emits.
+
+    Takes the engine explicitly: ``conftest`` points the service's session
+    factory at the test engine rather than the one ``get_engine()`` builds, so
+    listening on the latter records nothing and the assertion passes vacuously.
+    """
+    from sqlalchemy import event
+
+    seen: list[str] = []
+
+    def _cap(conn, cursor, statement, params, context, executemany):
+        # ``set_config()`` takes its name and value as BIND PARAMETERS (the
+        # source says why: utility statements like SET LOCAL cannot be
+        # parameterised), so the GUC name never appears in the statement text.
+        # Record both or the assertion silently tests nothing.
+        seen.append(f"{statement} -- params={params!r}")
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _cap)
+    try:
+        await fn()
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _cap)
+    return seen
+
+
+async def _discover_once(sc, engine, tenant: str):
+    emb = fake_embedding("hilda")
+    await _seed_entity(
+        tenant_id=tenant,
+        canonical_name="Hilda",
+        entity_type="person",
+        name_embedding=emb,
+    )
+    await _seed_memory(tenant_id=tenant, content="Hilda arrives", embedding=emb)
+
+    async def _run():
+        await sc.discover_cross_links(
+            tenant_id=tenant,
+            fleet_id=None,
+            batch_size=200,
+            threshold=0.75,
+            text_verify=False,
+            target_memory_ids=None,
+        )
+
+    return await _capture_sql(engine, _run)
+
+
+async def test_discover_pins_iterative_scan_when_pgvector_supports_it(
+    sc, _engine, monkeypatch
+):
+    """caura#1616: this GUC is the only thing bounding the scan.
+
+    The threshold is a predicate the executor must satisfy before ``LIMIT 10``
+    is reached; for a tenant where nothing clears the floor it never is, so the
+    walk exhausts the index once per candidate memory — 143s for 100 candidates
+    against 125,252 entities. ``relaxed_order`` lets ``hnsw.max_scan_tuples``
+    bound that walk instead.
+
+    Asserted on the SQL actually sent to the database, not on source text: the
+    two previous attempts at this bug (#1635, #1640) both pinned query SHAPE
+    and both were measured worse than doing nothing."""
+    import core_storage_api.services.postgres_service as ps
+
+    monkeypatch.setattr(ps, "_pgvector_version", (0, 8, 1))  # AlloyDB reports 0.8.1
+    seen = await _discover_once(sc, _engine, _t())
+    assert any("hnsw.iterative_scan" in stmt for stmt in seen), (
+        f"expected set_config(hnsw.iterative_scan) to be emitted; got {seen!r}"
+    )
+
+
+async def test_discover_omits_iterative_scan_below_pgvector_08(
+    sc, _engine, monkeypatch
+):
+    """Below 0.8 the GUC does not exist and SET would fail, taking the whole
+    cross-link call down with it. The probe must keep such a database on
+    today's behaviour — slow for a tenant like the one in #1616, but working."""
+    import core_storage_api.services.postgres_service as ps
+
+    monkeypatch.setattr(ps, "_pgvector_version", (0, 7, 4))
+    seen = await _discover_once(sc, _engine, _t())
+    assert not any("hnsw.iterative_scan" in stmt for stmt in seen), (
+        "must not set a GUC that does not exist on this pgvector"
+    )
+
+
+async def test_discover_does_not_link_across_tenants(sc):
+    """Carried over from the closed #1640. Tenant scoping in this query has now
+    been rewritten three times; each rewrite is a chance to drop the predicate,
+    and dropping it links a memory to another tenant's entity."""
+    mine, theirs = _t(), _t()
+    emb = fake_embedding("gemma")
+    await _seed_entity(
+        tenant_id=theirs,
+        canonical_name="Gemma",
+        entity_type="person",
+        name_embedding=emb,
+    )
+    mem = await _seed_memory(tenant_id=mine, content="Gemma speaks", embedding=emb)
+
+    resp = await sc.discover_cross_links(
+        tenant_id=mine,
+        fleet_id=None,
+        batch_size=200,
+        threshold=0.75,
+        text_verify=False,
+        target_memory_ids=[mem],
+    )
+    assert resp["links_created"] == 0
+    assert await _link_entity_ids(mem) == set()
+
+
 # ===========================================================================
 # C. infer-relations — create + reinforce
 # ===========================================================================

@@ -484,9 +484,14 @@ def _get_probe_lock() -> asyncio.Lock:
 async def _ann_pool_available() -> bool:
     """True when the ANN candidate pool may run: pgvector >= 0.8 on this DB.
 
-    Called only when ``ann_pool_size`` > 0, so the default path never pays
-    the probe. The first caller runs one ``pg_extension`` lookup on a read
-    session and caches the parsed version; concurrent first callers coalesce
+    TWO callers now. ``memory_scored_search`` asks only when
+    ``ann_pool_size`` > 0, so its default path never pays the probe;
+    ``entity_discover_cross_links`` asks on every call, because there the
+    iterative scan is not an opt-in pool but the only thing bounding a walk
+    that an unsatisfiable threshold would otherwise run to exhaustion
+    (caura#1616). The cache below means that costs one lookup per process,
+    not one per call. The first caller runs one ``pg_extension`` lookup on a
+    read session and caches the parsed version; concurrent first callers coalesce
     on the probe lock instead of each issuing their own lookup. The fallback
     decision is logged once, at WARNING, because a tenant explicitly asked
     for the pool and is silently getting the full scan instead — on-call
@@ -8616,6 +8621,32 @@ class PostgresService:
                 ) e ON true
                 ORDER BY m.id, e.sim DESC
             """)
+
+            # caura#1616. Without this the scan cannot stop early: the
+            # threshold is a predicate the executor has to satisfy BEFORE
+            # ``LIMIT 10`` is reached, and for a tenant where nothing clears
+            # the floor it never is — so the walk exhausts the index, once per
+            # candidate memory. Measured at lateral=143s for 100 candidates on
+            # a tenant holding 125,252 entities, returning zero links. Tenant
+            # SIZE was never the variable; threshold satisfiability is.
+            #
+            # ``relaxed_order`` keeps the scan walking past ``ef_search`` until
+            # the LIMIT is satisfied, and pgvector's ``hnsw.max_scan_tuples``
+            # (default 20k) is what makes that BOUNDED rather than unbounded:
+            # a filter nothing satisfies degrades to an under-filled result
+            # instead of a full crawl. That is exactly this tenant's case, and
+            # it is why the bound belongs here rather than in a rewritten
+            # query — #1635 and #1640 both tried reshaping the SQL, and both
+            # were measured worse than doing nothing.
+            #
+            # Same probe, mechanism and idiom as ``memory_scored_search``:
+            # ``set_config(..., is_local => true)`` is SET LOCAL, scoped to the
+            # transaction ``get_session`` autobegan, so nothing leaks back to
+            # the pooled connection. Gated on the probe so a database below
+            # pgvector 0.8 keeps today's behaviour instead of failing on a GUC
+            # that does not exist there.
+            if await _ann_pool_available():
+                await session.execute(select(func.set_config("hnsw.iterative_scan", "relaxed_order", True)))
 
             with phases.phase("lateral"):
                 lateral_rows = (
