@@ -44,6 +44,30 @@ async def get_or_create_agent(
     """
     sc = get_storage_client()
     agent = await sc.get_agent(agent_id, tenant_id)
+    if agent is None:
+        # Confirm a MISS against the primary before creating. A miss is the
+        # only dangerous answer here: it sends this call down the create path,
+        # and ``agent_add``'s conflict branch overwrites ``trust_level`` when
+        # the supplied value differs — it protects ``install_id`` and
+        # ``owner_install_uuid`` from overwrite and deliberately does not
+        # protect trust. So a replica that has not caught up re-registers a
+        # live agent at ``initial_trust``:
+        #
+        #   - an agent that had earned trust above the default is silently
+        #     DEMOTED, losing capability it was granted
+        #   - an agent awaiting approval (trust 0) is silently PROMOTED to
+        #     DEFAULT_TRUST_LEVEL, which is the approval gate answering the
+        #     wrong way round
+        #
+        # and ``log_action(action="agent_registered")`` below writes an audit
+        # row for an agent that already existed.
+        #
+        # Only the miss pays for the primary. A hit is returned from the
+        # reader exactly as before, which matters: this runs on every MCP
+        # call and every memory write, so forcing the primary on the common
+        # path would move that whole population off the replica to fix a case
+        # that already ends in a write.
+        agent = await sc.get_agent(agent_id, tenant_id, read=False)
     if agent:
         # Backfill fleet_id if the agent was registered without one,
         # refresh display_name when it differs (hostname change), and
@@ -81,7 +105,12 @@ async def get_or_create_agent(
     inherited_trust: int | None = None
     inherited_search_profile: dict[str, Any] | None = None
     if not require_approval and install_id is not None and agent_id == f"main-{install_id}":
-        legacy = await sc.get_agent("main", tenant_id)
+        # ``read=False``: what this reads is copied straight into the row
+        # created below, so a stale or lagged answer is written down. Missing
+        # the legacy row loses the operator's calibration silently — the exact
+        # outcome this carryover exists to prevent. Create path only, so it
+        # costs a primary read on first contact and never again.
+        legacy = await sc.get_agent("main", tenant_id, read=False)
         if legacy and (fleet_id is None or legacy.get("fleet_id") == fleet_id):
             inherited_trust = legacy.get("trust_level")
             inherited_search_profile = legacy.get("search_profile")

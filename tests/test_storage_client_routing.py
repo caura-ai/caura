@@ -564,3 +564,73 @@ async def test_the_trust_level_refetch_asks_for_the_primary() -> None:
     assert sc.get_agent.await_args.kwargs.get("read") is False, (
         "the re-fetch after update_trust_level must come from the primary"
     )
+
+
+# ── get_or_create_agent: the miss is the dangerous answer ──────────────────
+
+
+def _goca_client(reader_returns, primary_returns=None):
+    """Storage client stub that answers reads by which pool they asked for."""
+    from unittest.mock import AsyncMock
+
+    sc = AsyncMock()
+    calls: list[bool] = []
+
+    async def _get_agent(agent_id, tenant_id, *, read=True):
+        calls.append(read)
+        return reader_returns if read else primary_returns
+
+    sc.get_agent = _get_agent
+    sc.create_or_update_agent = AsyncMock(return_value={"id": "new", "agent_id": "a1"})
+    return sc, calls
+
+
+async def test_a_reader_miss_is_confirmed_against_the_primary() -> None:
+    """A lagged miss must not become a re-registration.
+
+    ``agent_add``'s conflict branch overwrites ``trust_level`` — it protects
+    ``install_id`` and ``owner_install_uuid`` and deliberately does not protect
+    trust. So creating over a live agent silently demotes one that had earned
+    trust, or promotes one sitting at 0 awaiting approval.
+    """
+    from unittest.mock import patch as _patch
+
+    from core_api.services import agent_service
+
+    live = {"id": "x", "agent_id": "a1", "trust_level": 3, "fleet_id": None}
+    sc, calls = _goca_client(reader_returns=None, primary_returns=live)
+
+    with (
+        _patch.object(agent_service, "get_storage_client", return_value=sc),
+        _patch.object(agent_service, "log_action", new_callable=lambda: _AsyncNoop()),
+    ):
+        got = await agent_service.get_or_create_agent("t1", "a1")
+
+    assert calls == [True, False], "a miss must be re-checked against the primary"
+    assert got["trust_level"] == 3, "the live agent must be returned, not re-created"
+    sc.create_or_update_agent.assert_not_awaited()
+
+
+async def test_a_reader_hit_does_not_pay_for_the_primary() -> None:
+    """The trade that makes the fix above affordable.
+
+    This runs on every MCP call and every memory write. Confirming a HIT as
+    well would move that whole population off the replica to fix a case that
+    already ends in a write.
+    """
+    from unittest.mock import patch as _patch
+
+    from core_api.services import agent_service
+
+    live = {"id": "x", "agent_id": "a1", "trust_level": 3, "fleet_id": None}
+    sc, calls = _goca_client(reader_returns=live)
+
+    with _patch.object(agent_service, "get_storage_client", return_value=sc):
+        await agent_service.get_or_create_agent("t1", "a1")
+
+    assert calls == [True], f"hit path asked the primary too: {calls}"
+
+
+class _AsyncNoop:
+    async def __call__(self, *a, **k):
+        return None
