@@ -121,15 +121,45 @@ async def test_the_read_shape_carries_the_field_even_when_unset(client):
 # ── the credential wins ──────────────────────────────────────────────────
 
 
-def test_the_credential_takes_precedence_over_the_body():
-    """A caller must not be able to write a document under a name that is not
-    its own — the same rule `caller_agent_id` follows on a search, where an
-    agent credential may only name itself.
+def test_an_agent_credential_naming_a_peer_is_refused():
+    """A caller must not write a document under a name that is not its own.
 
-    Asserted on the resolution expression rather than over HTTP because the
-    OSS test path authenticates with an admin key, which carries no agent
-    identity: a route-level test here would exercise only the fallback and
-    would pass just as well if the precedence were reversed.
+    Refusing beats silently substituting the verified identity: a credential
+    that names a peer has made a claim, and quietly rewriting it means the
+    caller never learns its attribution was wrong. `enforce_self_agent` is the
+    gate the rest of this surface uses for that, and
+    `test_authz_gate_inventory` requires any route taking a caller-supplied
+    agent identity to call it (or to justify itself in SELF_GATE_ALLOWLIST) —
+    this route calls it.
+    """
+    from fastapi import HTTPException
+
+    from core_api.auth import AuthContext
+
+    auth = AuthContext(tenant_id="t1", agent_id="writer-1")
+
+    with pytest.raises(HTTPException) as exc:
+        auth.enforce_self_agent("writer-2")
+
+    assert exc.value.status_code == 403
+
+
+def test_a_tenant_scoped_key_may_still_name_an_agent():
+    """`enforce_self_agent` fires only for a credential that HAS an identity.
+    A tenant-scoped key writing on behalf of one of its agents is the ordinary
+    case, and it is the same latitude `POST /memories` gives."""
+    from core_api.auth import AuthContext
+
+    AuthContext(tenant_id="t1", agent_id=None).enforce_self_agent("writer-1")
+
+
+def test_the_route_gates_before_it_resolves():
+    """The gate has to run on the body value. Resolving first and gating the
+    result would compare the verified identity against itself and never fire.
+
+    Asserted on source because the OSS test path authenticates with an admin
+    key, which carries no agent identity — a route-level test here exercises
+    only the ungated branch and would pass with the order reversed.
     """
     import ast
     import inspect
@@ -137,7 +167,10 @@ def test_the_credential_takes_precedence_over_the_body():
     from core_api.routes import documents
 
     src = ast.unparse(ast.parse(inspect.getsource(documents.upsert_document)))
-    assert "author = auth.agent_id or body.agent_id" in src
+    assert "auth.enforce_self_agent(body.agent_id)" in src
+    assert src.index("enforce_self_agent") < src.index(
+        "author = auth.agent_id or body.agent_id"
+    )
 
 
 # ── the column ───────────────────────────────────────────────────────────

@@ -269,10 +269,16 @@ async def upsert_document(
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
     """Upsert a document. If collection+doc_id exists, data is replaced."""
-    # ax-0917-m-14 — the credential wins over the body, for the same reason
-    # ``caller_agent_id`` on a search does: a caller must not be able to write
-    # a document under a name that is not its own. A tenant-scoped key has no
-    # identity of its own to impose, so there the body is taken at its word.
+    # ax-0917-m-14 — a caller must not write a document under a name that is
+    # not its own. REFUSE rather than silently substitute: an agent credential
+    # that names a peer has made a claim, and quietly rewriting it means the
+    # caller never learns its attribution was wrong. ``enforce_self_agent``
+    # fires only for a credential that HAS an identity, so a tenant-scoped key
+    # may still name any of its agents — the same latitude ``POST /memories``
+    # gives — and omitting the field always passes.
+    auth.enforce_self_agent(body.agent_id)
+    # Equal whenever both are set, by the gate above. The ``or`` is what fills
+    # the field in for an agent credential that did not bother to name itself.
     author = auth.agent_id or body.agent_id
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()
