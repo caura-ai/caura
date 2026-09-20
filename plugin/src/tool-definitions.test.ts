@@ -11,7 +11,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { CAURA_TOOLS } from "./tools.js";
-import { createToolFromSpec } from "./tool-definitions.js";
+import {
+  createToolFromSpec,
+  MEMORY_TYPES,
+  WRITABLE_MEMORY_TYPES,
+} from "./tool-definitions.js";
 import { TOOL_SPECS, TOOL_SPECS_BY_NAME, getSpec } from "./tool-specs.js";
 import { buildToolsMd } from "./educate.js";
 import { cauraPromptSectionText } from "./prompt-section.js";
@@ -198,6 +202,30 @@ describe("createToolFromSpec factory", () => {
     assert.ok(write.properties.content);
     assert.ok(write.properties.items);
     assert.equal(write.properties.items.maxItems, 100);
+  });
+
+  test("write schemas exclude reserved and deprecated memory types", () => {
+    assert.deepEqual([...WRITABLE_MEMORY_TYPES], [
+      "fact", "episode", "decision", "preference", "task", "plan", "action",
+    ]);
+
+    const write = createToolFromSpec("caura_write").parameters as any;
+    const manage = createToolFromSpec("caura_manage").parameters as any;
+    assert.deepEqual(write.properties.memory_type.enum, [...WRITABLE_MEMORY_TYPES]);
+    assert.deepEqual(
+      write.properties.items.items.properties.memory_type.enum,
+      [...WRITABLE_MEMORY_TYPES],
+    );
+    assert.deepEqual(manage.properties.memory_type.enum, [...WRITABLE_MEMORY_TYPES]);
+
+    for (const name of ["caura_recall", "caura_list", "caura_stats"]) {
+      const schema = createToolFromSpec(name).parameters as any;
+      assert.deepEqual(
+        schema.properties.memory_type.enum,
+        [...MEMORY_TYPES],
+        `${name}: historical types must remain filterable`,
+      );
+    }
   });
 
   test("caura_list has no required params (trust gate handled server-side)", () => {

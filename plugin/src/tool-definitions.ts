@@ -93,6 +93,13 @@ interface EnrichOptions {
    * a silent behaviour change dressed up as a bug fix.
    */
   resolveIdentity?: boolean;
+
+  /**
+   * Do not turn the configured agent default into a recall identity. Search
+   * treats ``caller_agent_id`` as an authorization principal and may narrow a
+   * standard-trust caller to its home fleet, so recall must opt in explicitly.
+   */
+  skipAgentDefault?: boolean;
 }
 
 async function enrichBody(
@@ -108,7 +115,7 @@ async function enrichBody(
   // loud variant is for the per-turn paths, where a fall-through is a real bug.
   if (!body.agent_id) {
     if (opts.resolveIdentity) body.agent_id = resolveAgentIdQuiet(params);
-    else if (CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
+    else if (!opts.skipAgentDefault && CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
   }
   // The configured fleet below is a DEFAULT, for callers that did not say
   // which fleet they meant — so it must not override a caller that asked to
@@ -138,6 +145,13 @@ export const MEMORY_TYPES = [
   "intention", "plan", "commitment", "action", "outcome", "cancellation", "rule", "insight",
 ] as const;
 
+// Keep in sync with core-api/src/core_api/constants.py::MEMORY_TYPES_WRITE.
+// The full MEMORY_TYPES vocabulary remains valid for read filters because
+// historical rows can still carry reserved or deprecated types.
+export const WRITABLE_MEMORY_TYPES = [
+  "fact", "episode", "decision", "preference", "task", "plan", "action",
+] as const;
+
 export const STATUSES = [
   "active", "pending", "confirmed", "cancelled",
   "outdated", "conflicted", "archived", "deleted",
@@ -159,10 +173,16 @@ const DOC_OPS = [
 type ManageOp = (typeof MANAGE_OPS)[number];
 type DocOp = (typeof DOC_OPS)[number];
 
-const MEMORY_TYPE_SCHEMA = {
+const MEMORY_TYPE_FILTER_SCHEMA = {
   type: "string",
   enum: [...MEMORY_TYPES],
-  description: "Optional — auto-classified if omitted",
+  description: "Filter by any stored memory type, including historical types",
+};
+
+const WRITABLE_MEMORY_TYPE_SCHEMA = {
+  type: "string",
+  enum: [...WRITABLE_MEMORY_TYPES],
+  description: "Agent-writable type; auto-classified if omitted",
 };
 
 const STATUS_SCHEMA = {
@@ -181,7 +201,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       query: { type: "string", description: "Natural-language query (hybrid semantic+keyword)" },
       agent_id: { type: "string", description: "Caller agent ID for visibility scoping" },
       filter_agent_id: { type: "string", description: "Restrict to memories by this author" },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: MEMORY_TYPE_FILTER_SCHEMA,
       status: STATUS_SCHEMA,
       fleet_ids: { type: "array", items: { type: "string" }, description: "Restrict to fleets" },
       include_brief: { type: "boolean", description: "Append LLM-synthesized summary paragraph" },
@@ -202,7 +222,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
           type: "object", required: ["content"],
           properties: {
             content: { type: "string" },
-            memory_type: MEMORY_TYPE_SCHEMA,
+            memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
             weight: { type: "number" },
             source_uri: { type: "string" },
             run_id: { type: "string" },
@@ -213,7 +233,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       fleet_id: { type: "string", description: "Fleet scope" },
       visibility: { type: "string", enum: ["scope_agent", "scope_team", "scope_org"] },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
       weight: { type: "number", description: "Importance 0-1 (single-write only)" },
       source_uri: { type: "string", description: "Provenance URI (single-write only)" },
       run_id: { type: "string", description: "Run/session identifier (single-write only)" },
@@ -231,7 +251,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       memory_id: { type: "string", description: "UUID of memory to act on" },
       status: { type: "string", enum: [...STATUSES], description: "Required for op=transition" },
       content: { type: "string", description: "For op=update" },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
       weight: { type: "number", description: "For op=update (0-1)" },
       title: { type: "string", description: "For op=update" },
       metadata: { type: "object", description: "For op=update (replaces dict)" },
@@ -297,7 +317,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       scope: { type: "string", enum: ["agent", "fleet", "all"], description: "Optional. Omitted: filtered by agent_id if one is set, with no trust gate — not the same request as 'agent'. 'agent' = your memories only (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
       fleet_id: { type: "string", description: "Restrict to a fleet" },
       written_by: { type: "string", description: "Filter by author agent_id. With scope='agent' it must be omitted or match your own agent_id — a different author is rejected, not ignored." },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: MEMORY_TYPE_FILTER_SCHEMA,
       status: STATUS_SCHEMA,
       weight_min: { type: "number" },
       weight_max: { type: "number" },
@@ -375,7 +395,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       scope: { type: "string", enum: ["agent", "fleet", "all"], description: "Optional. Omitted: aggregated over agent_id if one is set, with no trust gate — not the same request as 'agent'. 'agent' = only memories visible to you (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
       agent_id: { type: "string", description: "Caller agent ID" },
       fleet_id: { type: "string", description: "Restrict aggregate to a fleet" },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: MEMORY_TYPE_FILTER_SCHEMA,
       status: STATUS_SCHEMA,
     },
   },
@@ -401,6 +421,14 @@ type ExecuteFn = (
 // Translate friendly MCP-tool param names to existing REST query/body fields.
 function searchBody(params: Record<string, unknown>): Record<string, unknown> {
   const body: Record<string, unknown> = { ...params };
+  if (body.caller_agent_id === undefined && body.agent_id !== undefined) {
+    body.caller_agent_id = body.agent_id;
+  }
+  delete body.agent_id;
+  if (body.fleet_ids === undefined && body.fleet_id !== undefined) {
+    body.fleet_ids = [body.fleet_id];
+  }
+  delete body.fleet_id;
   if (body.memory_type !== undefined) {
     body.memory_type_filter = body.memory_type;
     delete body.memory_type;
@@ -457,7 +485,12 @@ function unsupportedOp(tool: string, op: never, offered: readonly string[]): nev
 
 const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_recall: async (params, signal) => {
-    const body = await enrichBody(searchBody(params));
+    // Enrich first so the configured fleet default passes through the same
+    // adapter as explicit tool arguments. Do not add the configured agent
+    // default: SearchRequest treats caller_agent_id as an authorization
+    // principal and may narrow standard-trust reads to that agent's fleet.
+    // An explicitly supplied agent_id remains present and is translated.
+    const body = searchBody(await enrichBody(params, { skipAgentDefault: true }));
     const includeBrief = Boolean(params.include_brief);
     const results = await apiCall("POST", "/search", body, undefined, signal);
     if (!includeBrief) return { results };
