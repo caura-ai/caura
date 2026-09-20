@@ -69,6 +69,14 @@ def _bash_fallback_src_files(src: str) -> set[str]:
     return set(match.group(1).split())
 
 
+def _heartbeat_fallback_src_files(src: str) -> set[str]:
+    """Extract the TypeScript old-backend fallback without comment literals."""
+    match = re.search(r"const FALLBACK_SRC_FILES = \[(.*?)\];", src, re.DOTALL)
+    assert match, "Could not find heartbeat.ts FALLBACK_SRC_FILES"
+    uncommented = re.sub(r"//.*", "", match.group(1))
+    return set(re.findall(r'"([^"\n]+\.ts)"', uncommented))
+
+
 def test_no_shipped_module_imports_a_test_fixture():
     """The condition that makes excluding `*.fixture.ts` safe.
 
@@ -124,6 +132,17 @@ def test_python_and_bash_lists_agree():
         f"_plugin_files and install-script SRC_FILES fallback disagree — "
         f"only-in-python={sorted(python_files - fallback)}, "
         f"only-in-bash={sorted(fallback - python_files)}."
+    )
+
+
+def test_heartbeat_fallback_matches_served_plugin_sources():
+    """Old-backend deploys must fetch every module the current plugin ships."""
+    heartbeat = (PLUGIN_SRC / "heartbeat.ts").read_text(encoding="utf-8")
+    fallback = _heartbeat_fallback_src_files(heartbeat)
+    expected = set(plugin_mod._plugin_files)
+    assert fallback == expected, (
+        "heartbeat FALLBACK_SRC_FILES drift — "
+        f"missing={sorted(expected - fallback)}, extra={sorted(fallback - expected)}"
     )
 
 
