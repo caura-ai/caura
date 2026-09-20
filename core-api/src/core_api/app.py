@@ -885,7 +885,7 @@ async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPE
     "not that" and leaves the caller to guess again.
     """
     from core_api.errors import make_error_payload
-    from core_api.route_suggestions import suggest_routes
+    from core_api.route_suggestions import route_table, suggest_routes
 
     if exc.status_code != 404 or request.scope.get("route") is not None:
         # Anything the router raised that is not an unmatched path keeps the
@@ -894,7 +894,7 @@ async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPE
 
     path = request.scope.get("path", "")
     details: dict = {"path": path, "method": request.method}
-    suggestions = suggest_routes(path, app.routes)
+    suggestions = suggest_routes(path, route_table(app))
     if suggestions:
         details["did_you_mean"] = suggestions
 

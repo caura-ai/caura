@@ -11,6 +11,18 @@ The server knows every route it serves, so it can answer the question the
 caller was actually asking. This picks the registered paths closest to the one
 attempted and hands them back in the error envelope.
 
+The route table comes from ``app.openapi()``, NOT from walking ``app.routes``.
+That is not a style preference: since FastAPI 0.137, ``include_router(prefix=…)``
+mounts an opaque ``_IncludedRouter`` whose children are reachable only through a
+private attribute, so ``app.routes`` no longer carries the prefixed paths at all
+— it yields the wrappers. Walking it returns nothing useful, silently, which is
+the failure mode that passes review and fails in production (and did: it passed
+against a stale local fastapi 0.136 and produced zero suggestions in CI).
+``tests/_route_table.py`` documents the same obstacle for the same reason.
+The schema is public API, carries the full prefixed path and its methods, and
+omits ``include_in_schema=False`` routes — which is right here, since a hidden
+legacy alias is not something to point a confused caller at.
+
 Structural first, not fuzzy: routes are ranked by how many leading path
 segments they share with the attempt, so ``/api/v1/documents/skills/foo``
 surfaces the ``/api/v1/documents`` family and nothing from ``/api/v1/agents``.
@@ -54,28 +66,46 @@ def _shared_prefix_len(a: list[str], b: list[str]) -> int:
     return n
 
 
-def suggest_routes(path: str, routes) -> list[str]:
+def route_table(app) -> dict[str, str]:
+    """``{path: "GET,POST"}`` for every documented route on ``app``.
+
+    Built from the OpenAPI schema (see module docstring for why, not
+    ``app.routes``). ``app.openapi()`` caches into ``app.openapi_schema`` after
+    the first call, so the cost lands once — and on a 404, which is not a hot
+    path. Any failure yields an empty table: a broken schema must degrade the
+    suggestion, never turn a 404 into a 500.
+    """
+    try:
+        schema = app.openapi()
+    except Exception:  # a suggestion is never worth turning a 404 into a 500
+        return {}
+
+    table: dict[str, str] = {}
+    for route_path, operations in (schema.get("paths") or {}).items():
+        verbs = ",".join(
+            sorted(
+                verb.upper() for verb in operations if verb.upper() not in {"HEAD", "OPTIONS", "PARAMETERS"}
+            )
+        )
+        if verbs:
+            table[route_path] = verbs
+    return table
+
+
+def suggest_routes(path: str, routes: dict[str, str]) -> list[str]:
     """Return up to ``MAX_SUGGESTIONS`` registered routes nearest to ``path``.
 
-    ``routes`` is ``app.routes``. Each suggestion is rendered as
-    ``"GET,POST /api/v1/documents"`` so the caller learns the verb as well as
-    the path — a guess is as often the wrong method as the wrong path.
+    ``routes`` is a ``{path: "GET,POST"}`` mapping from :func:`route_table`.
+    Each suggestion is rendered as ``"GET,POST /api/v1/documents"`` so the
+    caller learns the verb as well as the path — a guess is as often the wrong
+    method as the wrong path.
     """
     want = _segments(path)
     if not want:
         return []
 
     scored: list[tuple[int, int, str, str]] = []
-    seen: set[str] = set()
-    for route in routes:
-        route_path = getattr(route, "path", None)
-        if not route_path or route_path in seen:
-            continue
-        methods = getattr(route, "methods", None)
-        if not methods:
-            continue
-        seen.add(route_path)
-
+    for route_path, verbs in routes.items():
         have = _segments(route_path)
         shared = _shared_prefix_len(want, have)
         if shared < MIN_SHARED_SEGMENTS:
@@ -83,9 +113,6 @@ def suggest_routes(path: str, routes) -> list[str]:
         # Prefer more shared segments, then the route closest in length to the
         # attempt — a caller who supplied two extra segments is likelier to
         # want the deeper route than the bare collection, and vice versa.
-        verbs = ",".join(sorted(m for m in methods if m not in {"HEAD", "OPTIONS"}))
-        if not verbs:
-            continue
         scored.append((-shared, abs(len(have) - len(want)), route_path, verbs))
 
     scored.sort()
@@ -115,7 +142,7 @@ def _same_resource(a: str, b: str) -> bool:
     return a == b or _singular(a) == _singular(b)
 
 
-def _near_miss_on_the_resource(want: list[str], routes) -> list[str]:
+def _near_miss_on_the_resource(want: list[str], routes: dict[str, str]) -> list[str]:
     """Routes whose resource segment is a near-miss of the one attempted.
 
     Runs only when the structural pass found nothing, so it can never dilute a
@@ -134,20 +161,14 @@ def _near_miss_on_the_resource(want: list[str], routes) -> list[str]:
     prefix, resource = want[: MIN_SHARED_SEGMENTS - 1], want[MIN_SHARED_SEGMENTS - 1]
 
     by_segment: dict[str, list[tuple[str, str]]] = {}
-    for route in routes:
-        route_path = getattr(route, "path", None)
-        methods = getattr(route, "methods", None)
-        if not route_path or not methods:
-            continue
+    for route_path, verbs in routes.items():
         have = _segments(route_path)
         if len(have) < MIN_SHARED_SEGMENTS or have[: MIN_SHARED_SEGMENTS - 1] != prefix:
             continue
         seg = have[MIN_SHARED_SEGMENTS - 1]
         if seg.startswith("{"):
             continue
-        verbs = ",".join(sorted(m for m in methods if m not in {"HEAD", "OPTIONS"}))
-        if verbs:
-            by_segment.setdefault(seg, []).append((route_path, verbs))
+        by_segment.setdefault(seg, []).append((route_path, verbs))
 
     # Plural agreement first, because that IS the common guess and it is exact:
     # ``keystone`` for ``keystones``, ``memory`` for ``memories``. No
