@@ -99,7 +99,7 @@ jobs:
         run: |
           uv venv .venv
           source .venv/bin/activate
-          uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev] -e core-worker/[dev]
+          uv pip install -e core-storage-api/[dev] -e core-api/[dev] -e core-operations/[dev] -e core-worker/[dev] -e clients/collaboration/core -e clients/collaboration/mcp
           echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
 
       # --- Broker↔cloud API-versioning gate (Gate C / Phase 1, deliverables A+B) ---
