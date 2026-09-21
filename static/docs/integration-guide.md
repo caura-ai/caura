@@ -94,8 +94,8 @@ table, and the "recall-before-you-start / write-when-something-matters
 agent reads on-demand. Install it after the MCP config above:
 
 ```bash
-# Installs SKILL.md into ~/.claude/skills/memclaw/ (Claude Code)
-# and/or ~/.agents/skills/memclaw/ (Codex).
+# Installs SKILL.md into ~/.claude/skills/memclaw/ (Claude Code). legacy-name-floor: installed default-skill path
+# And/or ~/.agents/skills/memclaw/ (Codex). legacy-name-floor: installed default-skill path
 curl -s "https://your-caura-instance.example.com/api/v1/install-skill" \
   -H "X-API-Key: mc_your_key" | bash
 ```
@@ -207,15 +207,15 @@ npm run build            # emits plugin/dist/
 
 ```bash
 # On the gateway machine
-mkdir -p ~/.openclaw/plugins/memclaw
+mkdir -p ~/.openclaw/plugins/memclaw # legacy-name-floor: frozen plugin install path
 # Copy the built plugin from your build machine (or rebuild here):
 scp -r plugin/dist plugin/package.json plugin/openclaw.plugin.json \
-    user@gateway:~/.openclaw/plugins/memclaw/
+    user@gateway:~/.openclaw/plugins/memclaw/ # legacy-name-floor: frozen plugin install path
 ```
 
 ### Environment variables
 
-Add to `~/.openclaw/plugins/memclaw/.env`:
+Add to `~/.openclaw/plugins/memclaw/.env`: <!-- legacy-name-floor: frozen plugin install path -->
 
 ```bash
 CAURA_API_URL=https://your-caura-instance.example.com   # your Caura API
@@ -260,7 +260,7 @@ The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` 
 > Alternatively, use the Plugin Manager's **Fix Configuration** button or the OpenClaw CLI:
 > ```bash
 > openclaw plugins disable memory-core
-> openclaw plugins enable memclaw
+> openclaw plugins enable memclaw # legacy-name-floor: CLI requires the frozen plugin id
 > ```
 
 **Optional — enable ContextEngine (Tier 2):** For full auto read/write loop, also set the contextEngine slot:
@@ -737,7 +737,7 @@ Content-hash rejects exact duplicates within a tenant+fleet scope (HTTP 409). Sa
 |---|---|
 | Plugin tools don't appear | Ensure all three `plugins` keys are set in `openclaw.json`: `allow`, `entries`, and `load.paths`. Restart OpenClaw |
 | Tools not in agent sessions | Auto-fixed on first plugin load (adds v1.0 names, removes stale pre-v1.0 names). If it persists after restart, run `openclaw gateway memclaw.allowlist.fix` or check that `CAURA_AUTO_FIX_CONFIG` is not set to `false` <!-- legacy-name-floor: memclaw.allowlist.fix is the live gateway RPC method name --> |
-| Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both |
+| Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both | <!-- legacy-name-floor: troubleshooting names the frozen live config key -->
 | All config issues | Use the "Fix Configuration" button in Fleet Browser Plugin Manager to auto-fix all settings |
 | `ECONNREFUSED` | Check `CAURA_API_URL`, ensure API is running |
 | 401 Unauthorized | Check `CAURA_API_KEY` env var on gateway |

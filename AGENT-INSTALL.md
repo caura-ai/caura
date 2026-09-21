@@ -161,7 +161,7 @@ curl -sf -H "X-API-Key: $CAURA_KEY" "$CAURA_URL/api/v1/install-plugin?fleet_id=$
 openclaw gateway restart    # or: systemctl --user restart openclaw-gateway
 ```
 
-This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP.
+This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP. <!-- legacy-name-floor: the installer still writes the frozen plugin directory -->
 
 **MCP vs Plugin — which to use:**
 

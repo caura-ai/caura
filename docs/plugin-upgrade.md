@@ -22,7 +22,7 @@ The server refuses to queue a deploy in these cases. Each falls through to the *
 |---|---|---|
 | Plugin version below `MIN_AUTO_DEPLOY_PLUGIN_VERSION` (pre-manifest-aware) | `skipping auto-upgrade for node=… on pre-manifest-aware version <v> (manual re-install required; floor=<F>)` | Run the manual re-install on each affected node |
 | Plugin version in `KNOWN_BROKEN_DEPLOY_VERSIONS` (e.g. 2.3.0) | `skipping auto-upgrade for node=… on broken-deploy version <v> (manual re-install required)` | Run the manual re-install on each affected node |
-| Tenant has `memclaw.auto_upgrade_enabled = false` | (silent skip; opt-out) | Either flip the setting or run the manual path |
+| Tenant has `memclaw.auto_upgrade_enabled = false` | (silent skip; opt-out) | Either flip the setting or run the manual path | <!-- legacy-name-floor: live persisted compatibility setting key -->
 | Node is in deploy cooldown | (silent skip; plugin reported `deploy_blocked_until`) | Wait, or run the manual path |
 | Plugin version unparseable or absent | (silent skip; fail-closed) | Investigate; node may need a fresh install |
 
@@ -57,7 +57,7 @@ The installer:
 When upgrading an existing install, read its current `.env` first and pass the values back so per-node identity (`tenant_id`, `node_name`, `fleet_id`, `api_key`) is preserved verbatim:
 
 ```bash
-ENV=$HOME/.openclaw/plugins/memclaw/.env
+ENV=$HOME/.openclaw/plugins/memclaw/.env # legacy-name-floor: live plugin install path used by this pasteable command
 
 # Read one setting, accepting either prefix: the installer writes CAURA_* into
 # new installs, older installs kept the pre-rename prefix, and a re-deploy
@@ -95,7 +95,7 @@ Use this form when re-installing across an existing fleet — it preserves node 
 After the installer exits, confirm the new version is on disk:
 
 ```bash
-grep PLUGIN_VERSION $HOME/.openclaw/plugins/memclaw/dist/version.js
+grep PLUGIN_VERSION $HOME/.openclaw/plugins/memclaw/dist/version.js # legacy-name-floor: live plugin install path used by this pasteable command
 # → export const PLUGIN_VERSION = "<new version>";
 ```
 
