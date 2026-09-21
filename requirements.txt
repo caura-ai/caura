@@ -48,7 +48,7 @@ redis[hiredis]>=8.1.0,<9
 slowapi>=0.1.10,<1.0
 
 # Error tracking (optional — set SENTRY_DSN to enable)
-sentry-sdk[fastapi]>=2.69.1,<3
+sentry-sdk[fastapi]>=2.69.2,<3
 
 # Structured logging with GCP Cloud Logging severity mapping (common/structlog_config.py)
 structlog>=26.1.0,<27
