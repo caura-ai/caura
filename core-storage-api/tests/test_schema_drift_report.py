@@ -11,6 +11,7 @@ from sqlalchemy import text
 from core_storage_api import app as app_module
 from core_storage_api.config import settings
 from core_storage_api.database.init import get_engine
+from core_storage_api.database.migration_postconditions import MigrationPostcondition
 
 _TEST_INDEX = "test_schema_drift_report_invalid_idx"
 
@@ -116,18 +117,90 @@ async def test_reader_role_does_not_probe() -> None:
     get_engine_mock.assert_not_called()
 
 
+async def test_registry_checks_share_one_connection_and_respect_severity(caplog) -> None:
+    warning = MigrationPostcondition(
+        "900", "warning_check", "SELECT false AS warning_check", "warning", "warning drift"
+    )
+    broken = MigrationPostcondition(
+        "901", "broken_check", "SELECT broken AS broken_check", "warning", "broken drift"
+    )
+    error = MigrationPostcondition(
+        "902", "error_check", "SELECT false AS error_check", "error", "error drift"
+    )
+
+    execute_result = Mock()
+    execute_result.scalars.return_value.all.return_value = []
+    connection = AsyncMock()
+    connection.execute.return_value = execute_result
+    connection.scalar.side_effect = [False, RuntimeError("predicate failed"), False]
+    connection.begin_nested = Mock(return_value=AsyncMock())
+    connection_manager = AsyncMock()
+    connection_manager.__aenter__.return_value = connection
+    engine = Mock()
+    engine.connect.return_value = connection_manager
+
+    caplog.clear()
+    with (
+        patch.object(settings, "core_storage_role", "writer"),
+        patch.object(app_module, "MIGRATION_POSTCONDITIONS", (warning, broken, error)),
+        patch.object(app_module, "get_engine", return_value=engine),
+        caplog.at_level(logging.WARNING, logger=app_module.__name__),
+    ):
+        await app_module.report_schema_drift()
+
+    engine.connect.assert_called_once_with()
+    assert [str(awaited.args[0]) for awaited in connection.scalar.await_args_list] == [
+        "SELECT false AS warning_check",
+        "SELECT broken AS broken_check",
+        "SELECT false AS error_check",
+    ]
+    records = {(record.levelno, record.getMessage()) for record in caplog.records}
+    assert any(level == logging.WARNING and "900/warning_check" in message for level, message in records)
+    assert any(level == logging.ERROR and "901/broken_check" in message for level, message in records)
+    assert any(level == logging.ERROR and "902/error_check" in message for level, message in records)
+
+
+async def test_failed_predicate_savepoint_does_not_suppress_later_checks(_ensure_schema, caplog) -> None:
+    broken = MigrationPostcondition(
+        "900", "broken_check", "SELECT this_is_not_valid_sql", "warning", "broken drift"
+    )
+    later = MigrationPostcondition("901", "later_check", "SELECT false", "error", "later drift")
+
+    caplog.clear()
+    with (
+        patch.object(app_module, "MIGRATION_POSTCONDITIONS", (broken, later)),
+        caplog.at_level(logging.WARNING, logger=app_module.__name__),
+    ):
+        await app_module.report_schema_drift()
+
+    records = {(record.levelno, record.getMessage()) for record in caplog.records}
+    assert any(level == logging.ERROR and "900/broken_check" in message for level, message in records)
+    assert any(
+        level == logging.ERROR and "Migration post-condition failed [901/later_check]" in message
+        for level, message in records
+    )
+
+
 async def test_startup_survives_probe_failure(caplog) -> None:
     events: list[str] = []
 
     async def record_init_database() -> None:
         events.append("init_database")
 
-    def fail_probe() -> None:
+    async def fail_probe(_predicate) -> None:
         events.append("schema_drift_probe")
         raise RuntimeError("catalog unavailable")
 
+    execute_result = Mock()
+    execute_result.scalars.return_value.all.return_value = []
+    connection = AsyncMock()
+    connection.execute.return_value = execute_result
+    connection.scalar.side_effect = fail_probe
+    connection.begin_nested = Mock(return_value=AsyncMock())
+    connection_manager = AsyncMock()
+    connection_manager.__aenter__.return_value = connection
     engine = Mock()
-    engine.connect.side_effect = fail_probe
+    engine.connect.return_value = connection_manager
     engine.dispose = AsyncMock()
 
     caplog.clear()
