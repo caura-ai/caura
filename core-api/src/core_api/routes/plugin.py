@@ -76,7 +76,7 @@ _plugin_files = [
 #   ``plugin/openclaw.plugin.json`` so the installer never falls behind.
 _plugin_root_files = {
     "tools.json",
-    "skills/memclaw/SKILL.md",
+    "skills/memclaw/SKILL.md",  # legacy-name-ok: existing installs fetch this frozen skill slug during the dual-path transition
     "skills/caura/SKILL.md",
     "openclaw.plugin.json",
 }
@@ -87,7 +87,11 @@ _plugin_root_files = {
 # MCP. Resolved from app.py's position: core-api/src/core_api/routes/ →
 # five ``.parent``s up land on the repo root.
 _skill_md_path = (
-    Path(__file__).resolve().parent.parent.parent.parent.parent / "static" / "skills" / "memclaw" / "SKILL.md"
+    Path(__file__).resolve().parent.parent.parent.parent.parent
+    / "static"
+    / "skills"
+    / "memclaw"  # legacy-name-ok: default installer serves the established skill path
+    / "SKILL.md"
 )
 
 
@@ -156,8 +160,8 @@ async def plugin_manifest():
     """Single source of truth for what a plugin should fetch on update.
 
     Returns the canonical version string, the list of source files
-    (``plugin/src/*.ts``) and root files (``tools.json``,
-    ``skills/memclaw/SKILL.md``, ``openclaw.plugin.json``) the plugin
+    (``plugin/src/*.ts``) and root files (the tool manifest, bundled skills,
+    and plugin manifest) the plugin
     must download to materialise a fresh install or upgrade, plus the
     combined content hash so callers can short-circuit when they're
     already current.
@@ -228,8 +232,8 @@ async def plugin_source_hash():
 
     Covers both ``_plugin_files`` (``plugin/src/*.ts``) and
     ``_plugin_root_files`` (``plugin/tools.json``, ``plugin/skills/...``)
-    so content changes in plugin-root artifacts (e.g. the shared
-    ``skills/memclaw/SKILL.md``) are reflected in the hash and picked up
+    so content changes in plugin-root artifacts (e.g. a shared skill file)
+    are reflected in the hash and picked up
     by clients polling for updates.
 
     Root files are iterated in sorted order to keep the hash stable
@@ -417,7 +421,7 @@ fi
 if [ -z "$SRC_FILES" ] || [ -z "$ROOT_FILES" ]; then
   echo "WARNING: Could not fetch/parse /api/v1/plugin-manifest (python3 missing or endpoint unreachable). Falling back to hardcoded file list."
   SRC_FILES="index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts context-engine.internal.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts keystones.ts openclaw-sdk-bridge.ts interview-buffer.ts task-trail.ts user-agent.ts"
-  ROOT_FILES="openclaw.plugin.json tools.json skills/memclaw/SKILL.md"
+  ROOT_FILES="openclaw.plugin.json tools.json skills/memclaw/SKILL.md"  # legacy-name-ok: fallback preserves the shipped dual-path skill manifest
 fi
 
 # SECURITY: validate every manifest-supplied filename BEFORE any disk
@@ -453,8 +457,8 @@ for srcfile in $SRC_FILES; do
     exit 1
   }}
 done
-# Root files (``openclaw.plugin.json``, ``tools.json``, nested skill paths
-# like ``skills/memclaw/SKILL.md``) — mkdir -p their parent so nested
+# Root files (``openclaw.plugin.json``, ``tools.json``, and nested skill paths)
+# need their parent created so nested
 # paths from the manifest don't trip over a missing directory.
 for rootfile in $ROOT_FILES; do
   _parent_dir=$(dirname "$PLUGIN_DIR/$rootfile")
@@ -520,7 +524,7 @@ if (config.plugins.entries['memory-core']) {{
 // registerMemoryRuntime delivery) AND the contextEngine slot (controls
 // ContextEngine.assemble() — the path that injects the <keystone_rules>
 // block into the system prompt on every turn). Without contextEngine set
-// to 'memclaw', OpenClaw falls back to the default "legacy" engine and
+// to the plugin id, OpenClaw falls back to the default "legacy" engine and
 // our assemble() never runs, so keystones never appear in the prompt
 // even though the tool surface is registered. Confirmed against
 // OpenClaw 2026.5.4 dist/registry-DFFgCbcm.js:241 resolveContextEngine.
@@ -738,15 +742,19 @@ def _derive_api_url_from_request(request: Request) -> str:
 
 
 def _generate_skill_install_script(
-    *, api_url: str, agent: str, api_key: str = "", skill: str = "memclaw"
+    *,
+    api_url: str,
+    agent: str,
+    api_key: str = "",
+    skill: str = "memclaw",  # legacy-name-ok: clients rely on the historical default skill slug
 ) -> str:
     """Bash installer for a direct-MCP skill (Claude Code / Codex).
 
     Fetches ``static/skills/<skill>/SKILL.md`` (served by the
     ``/skill/<skill>`` endpoint) and writes it to the user-scope skills
     dir(s) for the selected agent runtime(s). ``skill`` is one of
-    {@link _VALID_SKILLS} (validated by the caller); ``memclaw`` is the
-    default and renders the original installer byte-for-byte.
+    {@link _VALID_SKILLS} (validated by the caller); the default renders the
+    original installer byte-for-byte.
 
     ``api_key`` — when non-empty, embedded into the script and forwarded
     as ``-H "X-API-Key: ..."`` on the internal curl calls. Required for
@@ -771,7 +779,7 @@ def _generate_skill_install_script(
     # Otherwise the header becomes an empty string and curl rejects.
     key_header = ' -H "X-API-Key: $CAURA_API_KEY"' if api_key else ""
     # ``skill`` is allowlisted by the caller, so interpolating it into the
-    # path and URL is safe. For skill="memclaw" every line below is identical
+    # path and URL is safe. For the default skill every line below is identical
     # to the original installer.
     label = _SKILL_LABELS[skill]
     skill_url = f'"$CAURA_API_URL/api/v1/skill/{skill}"'
@@ -839,7 +847,7 @@ async def install_skill_script(
     request: Request,
     agent: str = Query(default="both", description="claude-code | codex | both"),
     skill: str = Query(
-        default="memclaw",
+        default="memclaw",  # legacy-name-ok: published query default retained for existing installer callers
         description="Which skill to install: memclaw (default) | caura | company-brain",  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
     ),
     api_url: str | None = Query(
@@ -854,7 +862,7 @@ async def install_skill_script(
     """Bash installer for the direct-MCP Caura skill.
 
     Serves a shell script that fetches the SKILL.md adapter for the requested
-    skill (default: memclaw) and writes it to the user-scope skills directory
+    default skill and writes it to the user-scope skills directory
     for the selected agent runtime(s). Designed for ``curl -s ... | bash`` use
     by teammates who have already connected via ``claude mcp add`` or the
     equivalent Codex MCP registration.
@@ -883,15 +891,17 @@ async def install_skill_script(
     return PlainTextResponse(script, media_type="text/plain")
 
 
-@router.get("/skill/memclaw", response_class=PlainTextResponse)
-async def skill_memclaw():
+@router.get(
+    "/skill/memclaw",  # legacy-name-ok: published compatibility route for existing installers
+    response_class=PlainTextResponse,
+)
+async def skill_memclaw():  # legacy-name-ok: keep the generated operation id aligned with the compatibility route
     """Serve the direct-MCP SKILL.md adapter.
 
     Public, auth-free — it's generic usage guidance for Claude Code / Codex
-    users with no tenant data in it. Content lives at
-    ``static/skills/memclaw/SKILL.md`` (not under ``plugin/`` — it's not an
-    OpenClaw artifact). The OpenClaw plugin's own shared skill lives at
-    ``plugin/skills/memclaw/SKILL.md`` and is served via ``/plugin-source``.
+    users with no tenant data in it. Content lives in the static skill tree
+    (not under ``plugin/`` — it's not an OpenClaw artifact). The OpenClaw
+    plugin's own shared skill is served separately via ``/plugin-source``.
     """
     if not _skill_md_path.is_file():
         return PlainTextResponse("skill not found", status_code=404)
@@ -903,8 +913,8 @@ async def skill_by_name(skill: str):
     """Serve a direct-MCP SKILL.md adapter by name (allowlisted).
 
     Pairs with ``/install-skill?skill=…``. Public, auth-free — generic usage
-    guidance with no tenant data. ``memclaw`` is also served by the explicit
-    ``/skill/memclaw`` route above (registered first, so it wins for that
+    guidance with no tenant data. The default skill is also served by the
+    explicit compatibility route above (registered first, so it wins for that
     name and keeps the default path unchanged); this handles the rest of the
     allowlist, including ``caura`` (served from ``static/skills/caura/``,
     independent of and identical in structure to the sibling copy served

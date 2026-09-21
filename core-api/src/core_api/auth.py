@@ -578,7 +578,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         return AuthContext(tenant_id=None, is_admin=True)
 
     # ── Path 2: CAURA_API_KEY gate (optional, for network-exposed OSS) ──
-    mclaw_key = settings.memclaw_api_key
+    mclaw_key = settings.memclaw_api_key  # legacy-name-ok: live compatibility field
     if mclaw_key:
         if key and hmac.compare_digest(key, mclaw_key):
             # Valid Caura key — resolve tenant from standalone or header

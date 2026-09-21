@@ -565,7 +565,7 @@ const cauraPlugin = {
         "You are running inside an OpenClaw memory-flush turn. Your only job is to " +
         "persist salient context to Caura via caura_write before this conversation " +
         "is compacted. Do not call any other tools. Do not produce a user-visible reply.",
-      relativePath: `memclaw/flush-${dateStamp}.md`,
+      relativePath: `memclaw/flush-${dateStamp}.md`, // legacy-name-ok: existing workspaces use this frozen plugin-owned flush namespace
     });
     try {
       if (typeof api.registerMemoryFlushPlan === "function") {
@@ -630,7 +630,7 @@ const cauraPlugin = {
             // different contract). Returning it here was inert but
             // misleading; removed so future readers don't think disabling
             // local-file persistence happens here.
-            return { backend: "memclaw" };
+            return { backend: "memclaw" }; // legacy-name-ok: OpenClaw resolves this backend by the frozen plugin id
           },
           async getMemorySearchManager(_params: Record<string, unknown>) {
             // Refuse to hand back a manager when we already know the backend
@@ -686,15 +686,15 @@ const cauraPlugin = {
               status() {
                 const hs = getReachability();
                 const base = {
-                  provider: "memclaw",
-                  backend: "memclaw-api" as const,
+                  provider: "memclaw", // legacy-name-ok: OpenClaw status contract uses the frozen provider id
+                  backend: "memclaw-api" as const, // legacy-name-ok: OpenClaw status contract uses the established backend id
                   apiUrl: CAURA_API_URL,
                 };
                 if (hs.state === "unreachable") {
                   return {
                     ...base,
                     status: "unreachable",
-                    fallback: { from: "memclaw-api", reason: hs.reason },
+                    fallback: { from: "memclaw-api", reason: hs.reason }, // legacy-name-ok: fallback.from must match the established backend id
                     lastProbeMs: hs.lastCheckMs,
                   };
                 }

@@ -545,7 +545,7 @@ def _semver_lt(a: str | None, b: str | None) -> bool:
 
 async def _auto_upgrade_enabled_for_tenant(tenant_id: str) -> bool:
     """Default true; per-tenant flip via
-    ``organization_settings.memclaw.auto_upgrade_enabled = false``.
+    the legacy plugin auto-upgrade setting set to ``false``.
     """
     try:
         raw = await get_raw_settings(tenant_id)

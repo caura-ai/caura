@@ -1067,7 +1067,7 @@ app.include_router(reports_router, prefix="/api/v1")
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
 # Rename compatibility (2026-08-14): the keystones REST surface
-# shipped as /api/v1/memclaw/keystones and customer scripts call it. The
+# shipped under the old brand prefix and customer scripts call it. The
 # canonical path is now the brand-neutral /api/v1/keystones (matching every
 # other route); the old prefix remains accepted, hidden from the schema.
 app.include_router(

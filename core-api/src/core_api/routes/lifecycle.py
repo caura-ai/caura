@@ -72,9 +72,10 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     # row rather than embedding inline, so the work paces through the normal
     # consumer path instead of competing with live writes at full rate.
     #
-    # PROVISION THE TOPIC BEFORE TRIGGERING THIS. ``memclaw.lifecycle.
-    # embed-backfill-requested`` is Terraform-provisioned, and
-    # ``PubSubEventBus.publish`` deliberately does not block on the publish
+    # PROVISION THE TOPIC BEFORE TRIGGERING THIS. The deployed topic is
+    # memclaw.lifecycle.embed-backfill-requested  # legacy-name-floor: live topic
+    # Terraform-provisioned. ``PubSubEventBus.publish`` deliberately does not
+    # block on the publish
     # future, so a "topic not found" surfaces only in the SDK's background
     # thread. Triggering either route before infra lands therefore returns 200
     # with an ``audit_id`` whose row sits at ``pending`` forever, with no error
