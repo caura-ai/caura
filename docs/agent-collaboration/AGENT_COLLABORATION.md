@@ -65,7 +65,7 @@ refresh the tool schema after upgrading the platform and MCP package.
    before claiming that stopping the runner stops all effects of its work.
 
 Native wake commands and host setup are documented in
-[Connecting a runtime](../README.md#connecting-a-runtime). Codex uses its native
+[Connecting a runtime](../../clients/collaboration/README.md). Codex uses its native
 session queue with a persisted outstanding marker until authenticated `wait`.
 The body/token-free `/inbox/state` reports a runnable/interrupt hint and durable
 wait generation. Each HTTP wait advances it once, not once per internal poll.

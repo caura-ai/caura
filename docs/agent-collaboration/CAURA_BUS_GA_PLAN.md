@@ -72,8 +72,8 @@ trail, not authorization to keep an injection fallback in the product.
    platform/runtime matrix, clean distributions, backup/restore and an opt-in
    beta. Publish measured latency and reliability targets, then decide GA.
 
-See [LOCAL_HANDOFF.md](LOCAL_HANDOFF.md) for the live local URL, exact verification
-results, files and commands. See [SPEC.md](../SPEC.md) for the implemented API and
+See [LOCAL_HANDOFF.md](../../clients/collaboration/README.md) for the live local URL, exact verification
+results, files and commands. See [SPEC.md](SPEC.md) for the implemented API and
 [AGENT_COLLABORATION.md](AGENT_COLLABORATION.md) for the product contract.
 
 ### Runtime acceptance gate (revised 2026-09-21)

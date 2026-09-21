@@ -27,8 +27,8 @@ identity and authorization. Keep keys out of TOML and source control.
 
 Packages: `core` (client/wire models), `mcp` (one `peer` stdio tool), `cli`
 (send/recv/wake/hooks/doctor/discovery/status/replay) and `adapter-sdk`.
-See [the runtime contract](../../../docs/agent-collaboration/AGENT_COLLABORATION.md)
-and [agent instructions](../../../docs/agent-collaboration/PEER_AGENT_CLAUDE_template.md).
+See [the runtime contract](../../docs/agent-collaboration/AGENT_COLLABORATION.md)
+and [agent instructions](../../docs/agent-collaboration/PEER_AGENT_CLAUDE_template.md).
 
 The stdio tool privately owns delivery leases and renewals. Native remote MCP,
 when enabled by the optional Enterprise entrypoint, supports non-lease operations
