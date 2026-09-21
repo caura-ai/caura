@@ -83,8 +83,25 @@ async def storage_call(operation):
         )
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
-        if status in {403, 404, 409, 422}:
-            raise HTTPException(status, exc.response.json().get("detail", "request rejected")) from exc
+        # Never forward storage exception text, paths or arbitrary payload fields.
+        if status == 409:
+            try:
+                payload = exc.response.json()
+            except ValueError:
+                payload = None  # A malformed error body still maps to a fixed conflict.
+            detail = payload.get("detail") if isinstance(payload, dict) else None
+            if isinstance(detail, dict) and detail.get("state") == "paused":
+                raise HTTPException(
+                    409, {"state": "paused", "detail": "Delivery paused; call wait for current context"}
+                ) from exc
+        public_errors = {
+            403: "Caura operation is forbidden",
+            404: "Caura resource was not found",
+            409: "Caura operation conflicts with the current state",
+            422: "Caura request is invalid",
+        }
+        if status in public_errors:
+            raise HTTPException(status, public_errors[status]) from exc
         raise HTTPException(503, "Caura storage is unavailable") from exc
     except httpx.TransportError as exc:
         raise HTTPException(503, "Caura storage is unavailable") from exc
