@@ -51,10 +51,11 @@ const mc = new Caura("standalone", { tenantId: "default", baseUrl: "http://local
 
 Failures throw `AuthError` (401/403), `NotFoundError` (404), or
 `CauraApiError` for HTTP errors. Network failures and timeouts while awaiting
-response headers throw `TransportError`, with the original fetch rejection in
-`cause`. All extend `CauraError`, so one catch can handle both HTTP and transport
-failures. Transport errors have no HTTP status code; requests are not retried.
-Every result also exposes the full API payload on `.raw`.
+response headers or consuming the response body throw `TransportError`, with
+the original rejection in `cause`. All extend `CauraError`, so one catch can
+handle both HTTP and transport failures. Transport errors have no HTTP status
+code; requests are not retried. Every result also exposes the full API payload
+on `.raw`.
 
 ### Fetching a document
 

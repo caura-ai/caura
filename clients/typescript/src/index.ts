@@ -237,21 +237,32 @@ export class Caura {
     const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let res: Response;
     try {
-      res = await this.fetchImpl(this.baseUrl + path, {
-        method,
-        headers: this.headers,
-        body: serializedBody,
-        signal: controller.signal,
-      });
-    } catch (cause) {
-      throw new TransportError(cause);
+      let res: Response;
+      try {
+        res = await this.fetchImpl(this.baseUrl + path, {
+          method,
+          headers: this.headers,
+          body: serializedBody,
+          signal: controller.signal,
+        });
+      } catch (cause) {
+        throw new TransportError(cause);
+      }
+      await raiseForStatus(res);
+      return await readResponseJson(res);
     } finally {
       clearTimeout(timer);
     }
-    await raiseForStatus(res);
-    return res.json();
+  }
+}
+
+async function readResponseJson(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch (cause) {
+    if (cause instanceof SyntaxError) throw cause;
+    throw new TransportError(cause);
   }
 }
 
@@ -259,8 +270,9 @@ async function raiseForStatus(res: Response): Promise<void> {
   if (res.ok) return;
   let payload: any = {};
   try {
-    payload = await res.json();
-  } catch {
+    payload = await readResponseJson(res);
+  } catch (cause) {
+    if (!(cause instanceof SyntaxError)) throw cause;
     payload = {};
   }
   let message = "";
