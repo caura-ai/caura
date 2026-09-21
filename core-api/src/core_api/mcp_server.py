@@ -191,6 +191,15 @@ _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # before. See that function and the setting's comment for why the capability is
 # available without being automatic.
 _org_read_only_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_org_read_only", default=False)
+# Set when the platform could not DETERMINE the read-only verdict, as opposed
+# to determining it is false. ``/_auth`` fails open on its own storage lookup,
+# which is correct for an auth path and wrong for a measurement one: the
+# observation that feeds the enforce_mcp_plan_limits decision cannot tell a
+# tenant who is under their limit from one nobody could look up. See
+# ``_check_plan_limit``.
+_org_read_only_unknown_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mcp_org_read_only_unknown", default=False
+)
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
@@ -552,9 +561,16 @@ class MCPAuthMiddleware:
             # would refuse a paying tenant; a stale False would be a billing
             # bypass. Both are silent, so neither is allowed to depend on a
             # header being present.
-            _org_read_only_var.set(
-                (headers.get(b"x-org-read-only", b"").decode().lower() == "true") if via_gateway else False
-            )
+            _read_only_header = headers.get(b"x-org-read-only", b"").decode().lower() if via_gateway else ""
+            _org_read_only_var.set(_read_only_header == "true")
+            # THREE-VALUED, not two. ``unknown`` is emitted by ``/_auth`` when
+            # its storage lookup failed, and it is deliberately NOT "true":
+            # auth must keep failing open, because refusing every write during a
+            # storage blip is far worse than letting a few over-plan ones
+            # through. What changes is that the blindness is now visible
+            # downstream instead of being indistinguishable from "under limit".
+            # Assigned on every request, like its neighbour above.
+            _org_read_only_unknown_var.set(_read_only_header == "unknown")
 
             # Last, because it needs the resolved tenant — and before the app,
             # because a suppressed org must not reach a tool at all.
@@ -613,6 +629,16 @@ def _is_org_read_only() -> bool:
     return _org_read_only_var.get(False)
 
 
+def _is_org_read_only_unknown() -> bool:
+    """True when the platform could not determine the verdict for this request.
+
+    Distinct from ``_is_org_read_only() is False``, which is a real verdict.
+    This one means nobody knows — see ``_check_plan_limit`` for why that has to
+    be counted separately rather than folded into the negative.
+    """
+    return _org_read_only_unknown_var.get(False)
+
+
 def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     """Refuse ``op`` when the org is over its plan limit — or just record it.
 
@@ -655,17 +681,28 @@ def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     ``platform-auth-api``'s ``/_auth``, which sets it on an expired license, a
     cached read-only verdict, or a live storage lookup.
 
-    READ SILENCE CAREFULLY — but one of the three causes is now ruled out. A
-    quiet log is NOT explained by the gateway skipping this route. What is left:
-    the tenant may never have been marked over plan, because the MCP batch path
-    records no usage to compute that from while ``meters_mcp_bulk_write()`` is
-    off, its default (caura-ai/caura#1220) — or there is genuinely nothing to
-    refuse. Rule the first out before reading a quiet log as a green light.
+    READ SILENCE CAREFULLY. Three of the four reasons a quiet log was not
+    evidence are now closed, and the fourth is the one that matters most.
 
-    Note that ``/_auth`` fails OPEN on its own storage lookup: an exception
-    there returns without the header, so a storage outage reads as "not
-    read-only" for the cache TTL. That is a fourth reason a log can be quiet
-    while a tenant is genuinely over plan, and it lives outside this repo.
+    * The gateway skipping this route: ruled out above.
+    * The batch path contributing nothing to the counters: closed in
+      caura-ai/caura#1638, which turned ``meters_mcp_bulk_write()`` on.
+    * ``/_auth`` failing open on its own storage lookup: it now reports
+      ``x-org-read-only: unknown`` instead of nothing, and this function emits
+      ``mcp_plan_limit_verdict_unknown`` for those requests. A blind sample is
+      no longer silence — count it, and treat an observation window with many
+      of them as not yet measured.
+    * NOTHING SETS THE FLAG FROM USAGE GROWTH, and this one is still open.
+      ``organizations.is_read_only`` in caura-enterprise is written to True by
+      exactly one thing, the Paddle ``subscription.canceled`` downgrade. No
+      sweep and no request-time check evaluates usage otherwise, and
+      ``check-read-only`` only ever lifts the flag. So a tenant over its plan on
+      a healthy subscription never gets stamped, and this log stays quiet no
+      matter how far over they go. Until that is fixed, a quiet log is evidence
+      about the STAMPING, not about the population — and flipping
+      ``enforce_mcp_plan_limits`` would enforce against a signal almost nobody
+      can currently receive. See the ``meter_mcp_bulk_writes`` comment in
+      ``config.py`` for the verification.
 
     Logged at WARNING rather than INFO because a firing line means real money:
     a write that the plan says should not have happened.
@@ -678,7 +715,18 @@ def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     rollout turns on. The ``enforced`` field is kept on both so a query written
     against either name still resolves it.
     """
-    if not _is_org_read_only() or not plan_limit_gated(op):
+    if not plan_limit_gated(op):
+        return None
+    if not _is_org_read_only():
+        if _is_org_read_only_unknown():
+            # NOT a refusal and not a would-refuse — nobody knows. Logged at
+            # INFO, unlike the two below: a blind sample costs no money, it
+            # only costs certainty, and at WARNING a storage blip would drown
+            # the signal it exists to protect.
+            logger.info(
+                "mcp_plan_limit_verdict_unknown",
+                extra={"tenant_id": tenant_id, "mcp_operation": op},
+            )
         return None
     enforcing = enforces_mcp_plan_limits()
     logger.warning(
@@ -1641,14 +1689,12 @@ async def caura_write(
             # same operation across two surfaces is the drift this whole area
             # keeps producing.
             #
-            # ``meters_mcp_bulk_write()`` is off by default. It is a billing
-            # switch, not a correctness one — see its docstring. While it is
-            # off, the caveat on ``_check_plan_limit`` still stands: the
-            # counters this would move are the ones over-plan mode is computed
-            # from, so a quiet observation log is not evidence that nothing
-            # would be refused — and now not evidence that nothing WILL be,
-            # since the gate above can refuse on a verdict this path never
-            # contributed to.
+            # ``meters_mcp_bulk_write()`` is ON since caura-ai/caura#1638. It
+            # is still a billing switch rather than a correctness one — see its
+            # docstring — and still reversible by env without a redeploy. What
+            # changed is that this path now contributes to the counters the gate
+            # above reads, so a quiet observation log is no longer explained by
+            # the batch path being invisible to it.
             #
             # Unreachable while the plan-limit gate refuses, which is the point:
             # a refused batch charges nothing.

@@ -472,20 +472,34 @@ class Settings(BaseSettings):
     meter_recall_as_recall: bool = False
     # Meter the MCP batch write (``caura_write(items=[...])``) against the
     # write counter, one unit per item, as REST's ``POST /memories/bulk``
-    # already does. Off by default for the same reason as the D13 flag above,
-    # and the reason is stronger here: that path charges NOTHING today, so
-    # flipping this does not correct a miscount — it starts billing writes
-    # that have been free. Tenants that batch over MCP will consume quota they
-    # did not before, and some will cross their plan limit for the first time.
+    # already does. ON since caura-ai/caura#1638 — before that this path
+    # charged NOTHING, so the same tenant writing the same N memories was
+    # billed differently depending on the transport it happened to use.
     #
-    # Crossing it bites on REST FIRST. Over-plan mode is computed from these
-    # counters and stamped as ``x-org-read-only``, which core-api turns into a
-    # 403 on ~22 REST write routes — while the MCP surface only OBSERVES it
-    # (see ``_check_plan_limit``). So enabling this can refuse a tenant's
-    # REST writes because of what it wrote over MCP. That is the intended end
-    # state, but it is not a deploy side effect. Off = the historical (unbilled)
-    # behavior. See caura-ai/caura#1220.
-    meter_mcp_bulk_writes: bool = False
+    # WHAT ENABLING IT COSTS A TENANT TODAY: quota, and nothing else. An
+    # earlier revision of this comment said "crossing it bites on REST FIRST",
+    # because over-plan mode is computed from these counters, stamped as
+    # ``x-org-read-only``, and turned into a 403 on ~22 REST write routes. Every
+    # link in that chain is real EXCEPT THE ONE THAT WOULD START IT.
+    #
+    # Metering only records: ``allowed`` has no reader in core-api (see
+    # ``usage_service._meter``), so the meter itself refuses nothing.
+    # Enforcement arrives via ``x-org-read-only``, whose org half is
+    # ``organizations.is_read_only`` in caura-enterprise. The only writer of
+    # that flag to True is the Paddle ``subscription.canceled`` downgrade
+    # (``platform-admin-api/routers/billing.py``). Usage does decide INSIDE
+    # that event — over the free tier, or unverifiable, sets it — but nothing
+    # evaluates usage OUTSIDE it: no periodic sweep, no request-time check, and
+    # the ``check-read-only`` endpoint returns early unless the org is ALREADY
+    # flagged and only ever writes ``False``. It exists to LIFT the lock.
+    #
+    # So a tenant that grows over its plan on a healthy subscription is never
+    # flagged, and turning this on cannot by itself refuse anybody. That is a
+    # hole in the enforcement chain, not a licence to treat these counters as
+    # decorative — the moment anything sets the flag from usage, this flag
+    # decides whether MCP-first tenants were ever measured. Reversible by env
+    # without a redeploy.
+    meter_mcp_bulk_writes: bool = True
     # Refuse MCP writes when the org is over its plan limit, as the ~22 REST
     # write routes already do. Off by default, and this is the sharpest of the
     # three flags above it: the other two change what is COUNTED, this one
@@ -500,12 +514,18 @@ class Settings(BaseSettings):
     # wrong. A code-only change would need a rollback to undo.
     #
     # Read ``_check_plan_limit``'s docstring before enabling. A quiet
-    # observation log is NOT evidence that nothing will be refused — the
-    # counters over-plan mode is computed from barely move for MCP-first
-    # tenants while ``meter_mcp_bulk_writes`` is off, which is the population
-    # this refusal is aimed at. The two flags interact: turning THIS on while
-    # that one is off enforces a limit against counters the MCP surface hardly
-    # contributes to. See caura-ai/caura#1205.
+    # observation log is STILL NOT evidence that nothing will be refused, but
+    # the reason changed with caura-ai/caura#1638 and the old one is gone:
+    # ``meter_mcp_bulk_writes`` above is now ON, so the batch path does move the
+    # counters over-plan mode is computed from, and MCP-first tenants are no
+    # longer invisible to them.
+    #
+    # WHAT REPLACES IT IS WORSE. Nothing stamps an org read-only from usage
+    # growth at all — see that flag's comment for the verification. So the
+    # observation log is quiet for reasons that have nothing to do with how many
+    # tenants are over plan, and enabling THIS would enforce against a signal
+    # almost nobody can currently receive. Settle what should set the flag
+    # before reading the log as a blast radius. See caura-ai/caura#1205.
     enforce_mcp_plan_limits: bool = False
     stm_backend: str = "memory"  # memory | redis
     stm_notes_ttl: int = 86400  # 24h

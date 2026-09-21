@@ -287,12 +287,13 @@ def enforces_mcp_plan_limits() -> bool:
     ``plan_limit_gated(op)`` is still consulted at the call site. This flag is
     the deploy-time gate; that table remains the policy record.
 
-    INTERACTS WITH ``meters_mcp_bulk_write``. Over-plan mode is computed from
-    counters the MCP batch path does not move while that flag is off, so
-    enabling this one alone enforces a limit against counters this surface
-    barely contributes to. Enforcement will still fire — the counters are
-    per-org and REST moves them — but a quiet ``mcp_plan_limit_would_refuse``
-    log beforehand is not evidence the blast radius is small.
+    INTERACTS WITH ``meters_mcp_bulk_write``, which is now ON, so the batch path
+    does move the counters over-plan mode is computed from. That removes one
+    reason a quiet ``mcp_plan_limit_would_refuse`` log was not evidence the
+    blast radius is small. It does not remove the decisive one: nothing stamps
+    an org read-only from usage growth in the first place, so the log is quiet
+    for reasons that have nothing to do with how many tenants are over plan.
+    Read ``_check_plan_limit``'s docstring before enabling this.
     """
     from core_api.config import settings
 
@@ -307,10 +308,16 @@ def meters_mcp_bulk_write() -> bool:
     unit per item. Same tenant, same N memories, different bill.
 
     Gated for the same reason as ``recall_operation`` above, and more sharply:
-    that one bills the wrong counter, this one bills nothing. Turning it on
-    starts charging for writes that have been free, so it is a billing decision
-    rather than a deploy side effect — see the setting's comment for why the
-    first refusal a tenant sees will come from REST.
+    that one bills the wrong counter, this one billed nothing. ON by default
+    since caura-ai/caura#1638 — the decision recorded there was to close the
+    measurement gap before deciding on ``enforce_mcp_plan_limits``, and this is
+    the half of it that lives in this repo.
+
+    Enabling it charges for writes that were free, so tenants that batch over
+    MCP consume quota they did not before. It refuses nobody: the meter only
+    records (``allowed`` has no reader here, see ``_meter``), and the flag that
+    enforcement travels on is not set by usage growth at all — the setting's
+    comment in ``config.py`` carries that verification.
 
     ``charges_write_quota("bulk_create")`` is still consulted at the call site.
     This flag is the deploy-time gate; that table remains the policy record, so
