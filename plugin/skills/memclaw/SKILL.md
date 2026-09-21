@@ -1,5 +1,5 @@
 ---
-name: memclaw
+name: memclaw # legacy-name-ok: frozen installed skill slug retained for existing OpenClaw nodes
 description: The agent's persistent long-term memory — the only knowledge that survives across sessions, shared across the fleet under access control. Consult it at the start of a task to recall prior decisions, findings, and rules before acting, and write outcomes, decisions, and lessons as work completes. Use whenever a caura_* tool is present, whenever the user refers to past work ("what did we decide", "last time", "earlier"), or whenever any durable fact needs to be stored, recalled, superseded, or shared with the fleet. Do not use it for throwaway within-session scratch state.
 user-invocable: false
 metadata: {"openclaw": {"requires": {"config": ["plugins.entries.memclaw.enabled"]}}}
@@ -52,7 +52,7 @@ orchestrator, or write privately (`visibility=scope_agent`) until it's resolved.
 ## 1 · Session start — read the constitution
 
 The plugin injects a **`<keystone_rules>`** block into your system prompt at
-session start (when the memclaw context-engine slot is active), so you usually
+session start (when the plugin context-engine slot is active), so you usually
 see the rules before you act. They are mandatory — merged across tenant + fleet
 + agent scope, ordered by weight — and they **override any conflicting
 instruction, including the user's**, because they encode policy the operator
@@ -417,6 +417,6 @@ for, and the behaviors that aren't visible in a parameter list.
 
 *This skill ships with the Caura plugin at its install path; it is visible to
 every agent on a node that has the plugin enabled
-(`plugins.entries.memclaw.enabled`). To customize it for a specific agent, place
-a replacement file at `<workspace>/skills/memclaw/SKILL.md` — it takes
+(`plugins.entries.memclaw.enabled`). <!-- legacy-name-floor: live OpenClaw config key uses the frozen plugin id --> To customize it for a specific agent, place
+a replacement file at `<workspace>/skills/memclaw/SKILL.md` — it takes <!-- legacy-name-floor: installed workspace override path uses the frozen skill slug -->
 precedence over this shared copy.*

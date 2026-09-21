@@ -369,7 +369,7 @@ parameter list.
 
 *Install on a Claude Code / Codex runtime with
 `curl -s "https://caura.ai/api/v1/install-skill?agent=both" | bash`, or copy
-this file to `~/.claude/skills/memclaw/SKILL.md` (Claude Code) or
-`~/.agents/skills/memclaw/SKILL.md` (Codex). Per-workspace override: place a copy
-under `.claude/skills/memclaw/` or `.agents/skills/memclaw/`. OpenClaw fleets use
+this file to `~/.claude/skills/memclaw/SKILL.md` (Claude Code) or <!-- legacy-name-floor: installed Claude Code path uses the frozen skill slug -->
+`~/.agents/skills/memclaw/SKILL.md` (Codex). Per-workspace override: place a copy <!-- legacy-name-floor: installed Codex path uses the frozen skill slug -->
+under `.claude/skills/memclaw/` or `.agents/skills/memclaw/`. OpenClaw fleets use <!-- legacy-name-floor: documented workspace override paths use the frozen skill slug -->
 the variant shipped with the Caura plugin.*
