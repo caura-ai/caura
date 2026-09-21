@@ -26,7 +26,7 @@ google-genai>=2.23.0
 requests>=2.34.2
 openai
 python-dateutil>=2.9.0.post0,<3
-httpx>=0.27,<1
+httpx>=0.28.1,<1
 mcp>=2.2.0,<3
 
 # Optional: only needed if EMBEDDING_PROVIDER=openai
