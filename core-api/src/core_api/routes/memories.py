@@ -185,6 +185,45 @@ def _resolve_rest_write_agent_id(auth: AuthContext, claimed_id: str) -> str:
     return canonical_service_agent_id(verified_id)
 
 
+def _credential_write_agent_id(auth: AuthContext) -> str | None:
+    """The write identity an omitted body ``agent_id`` falls back to, or None.
+
+    ax-0917-m-16. ``agent_id`` was mandatory in the body on every non-standalone
+    write — including for a credential whose agent identity the gateway had
+    already verified and injected as ``X-Agent-ID``. So an agent-scoped caller
+    had to repeat its own name in every request, and
+    ``_resolve_rest_write_agent_id`` then DISCARDED what it sent and wrote under
+    the verified id anyway: a required field whose value never reached a row.
+    The MCP plane never asked for it (``_refuse_default_agent_on_gateway``
+    returns early once ``X-Agent-ID`` resolved), so the two transports disagreed
+    about the same credential.
+
+    THIS WIDENS NOTHING, and that is the point rather than a hope. It returns
+    only the identity that already wins, under the same flag that makes it win,
+    so an omitted field resolves to exactly what repeating the credential's own
+    id resolves to. It is a default, not a trust decision: the body value stays
+    unable to override the credential, and a credential carrying no agent
+    identity still gets the 422 — defaulting THAT would collapse every anonymous
+    write onto one shared identity, which is the whole reason the 422 exists.
+
+    A reserved verified id (``main``) is deliberately excluded rather than
+    forgotten. The ``reserved_agent_id_policy`` migration relies on the BODY
+    naming a real identity for those credentials — that is the escape hatch
+    ``effective_write_agent_id`` keeps open while the policy is allow/warn — so
+    there is nothing here worth falling back to, and filling one in would
+    attribute the write to ``main``. They keep the 422 and its instruction to
+    name a real agent.
+    """
+    # Gated on the same flag as the binding it mirrors: with the emergency
+    # rollback thrown, this route resolves exactly as it did before.
+    if not app_settings.bind_write_identity_to_auth:
+        return None
+    verified_id = auth.agent_id
+    if not verified_id or verified_id in ALWAYS_RESERVED_AGENT_IDS:
+        return None
+    return canonical_service_agent_id(verified_id)
+
+
 def _observe_rest_reserved_write(auth: AuthContext, chosen_id: str) -> None:
     """Emit one warn event for a gated write that escaped reserved ``main``.
 
@@ -233,7 +272,8 @@ def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None =
 
 
 def _missing_agent_id_error() -> RequestValidationError:
-    """Build the 422 raised when a non-standalone write omits ``agent_id``.
+    """Build the 422 raised when a write omits ``agent_id`` and nothing can
+    supply one: not standalone, and a credential that authenticates no agent.
 
     Mirrors the shape FastAPI produces for a missing required field, so the
     app's validation-envelope handler renders it as a 422 INVALID_ARGUMENTS.
@@ -246,7 +286,16 @@ def _missing_agent_id_error() -> RequestValidationError:
             {
                 "type": "missing",
                 "loc": ("body", "agent_id"),
-                "msg": ("agent_id is required; only the standalone single-tenant deployment may omit it."),
+                # Names both ways out, because the caller that hits this has
+                # exactly one real question — "what do I send instead?" — and
+                # provisioning an agent-scoped credential is the answer that
+                # makes the field go away rather than one more value to repeat.
+                "msg": (
+                    "agent_id is required for a credential that authenticates no agent. "
+                    "Send it in the body, or use an agent-scoped credential "
+                    "(kind=agent_key), whose own identity is used when the field is "
+                    "omitted; the standalone single-tenant deployment may also omit it."
+                ),
                 "input": None,
             }
         ]
@@ -1231,11 +1280,14 @@ async def write_memory(
         auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     _reject_reserved_memory_type(body.memory_type)
-    # Resolve a missing agent_id. On the standalone single-tenant path there is
-    # one stable identity, so default to the reserved DEFAULT_AGENT_ID (mirrors
-    # the evolve/insights REST routes) — this is what makes the documented
-    # quickstart curl work without an agent_id. Everywhere else (tenant-scoped
-    # key / enterprise gateway) the caller MUST name a real agent, or every
+    # Resolve a missing agent_id. An agent-scoped credential supplies its own
+    # verified identity (ax-0917-m-16) — the value the binding below would
+    # impose anyway, so asking for it in the body bought nothing. On the
+    # standalone single-tenant path there is one stable identity, so default to
+    # the reserved DEFAULT_AGENT_ID (mirrors the evolve/insights REST routes) —
+    # this is what makes the documented quickstart curl work without an
+    # agent_id. Everywhere else (tenant-scoped key / enterprise gateway, both of
+    # which authenticate NO agent) the caller MUST name a real agent, or every
     # anonymous write would collapse onto one shared identity — the same footgun
     # mcp_server._refuse_default_agent_on_gateway guards against. Keep that as an
     # explicit 422 rather than a silent default.
@@ -1245,7 +1297,7 @@ async def write_memory(
     # ``body.agent_id`` in the inner function threw the guarantee away and
     # needed a ``type: ignore`` there. Passed down instead — see
     # ``_write_memory_inner``'s ``chosen_agent_id``.
-    chosen_agent_id = body.agent_id
+    chosen_agent_id = body.agent_id or _credential_write_agent_id(auth)
     if not chosen_agent_id:
         if app_settings.is_standalone:
             chosen_agent_id = DEFAULT_AGENT_ID
@@ -1452,17 +1504,19 @@ async def write_memories_bulk(
         # gate applies to that result — and to an explicitly-supplied
         # ``agent_id`` — there.
     # Resolve a missing agent_id (mirrors write_memory). Install-credential
-    # callers were already attributed above; everyone else either gets the
-    # reserved standalone identity or must name a real agent. Defaulting
-    # outside standalone would silently collapse anonymous writes onto one
-    # shared identity — see mcp_server._refuse_default_agent_on_gateway.
+    # callers were already attributed above; an agent-scoped credential supplies
+    # its own verified identity (ax-0917-m-16); everyone else either gets the
+    # reserved standalone identity or must name a real agent. Defaulting for a
+    # credential that authenticates no agent would silently collapse anonymous
+    # writes onto one shared identity — see
+    # mcp_server._refuse_default_agent_on_gateway.
     #
     # Bound to a local so the narrowing SURVIVES: ``model_copy`` rebinds
     # ``body`` and the field stays ``str | None`` on the model, so re-reading
     # ``body.agent_id`` in the inner function threw the guarantee away and
     # needed a ``type: ignore`` there. Passed down instead — see
     # ``_write_memories_bulk_inner``'s ``chosen_agent_id``.
-    chosen_agent_id = body.agent_id
+    chosen_agent_id = body.agent_id or _credential_write_agent_id(auth)
     if not chosen_agent_id:
         if app_settings.is_standalone:
             chosen_agent_id = DEFAULT_AGENT_ID

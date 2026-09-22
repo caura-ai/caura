@@ -152,12 +152,14 @@ class MemoryCreate(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
     fleet_id: str | None = None
-    # Optional like ``BulkMemoryCreate.agent_id``: omitting it is allowed only
-    # on the standalone single-tenant path, where ``write_memory`` fills the
-    # reserved ``"mcp-agent"`` identity. Tenant-scoped/gateway callers must
-    # still pass an explicit agent_id (enforced in the route) so writes are
-    # never silently attributed to one shared identity. min_length=1 rejects an
-    # empty string at the schema layer (None still means "unset").
+    # Optional like ``BulkMemoryCreate.agent_id``, and the route decides who may
+    # omit it: an AGENT-scoped credential supplies its own verified identity
+    # (ax-0917-m-16), and the standalone single-tenant path fills the reserved
+    # ``"mcp-agent"`` identity. A credential that authenticates no agent — a
+    # tenant key, the gateway's tenant path — must still pass an explicit
+    # agent_id (enforced in the route) so writes are never silently attributed
+    # to one shared identity. min_length=1 rejects an empty string at the schema
+    # layer (None still means "unset").
     agent_id: str | None = Field(default=None, min_length=1)
     memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
@@ -316,9 +318,10 @@ class BulkMemoryCreate(TenantScopedBody):
     # Optional on the wire so caura-daemon broker calls (cloud-data-plane.md
     # §2.4) can omit it — the route handler defaults to
     # ``broker:<install_uuid>`` when the caller authenticates with an
-    # install credential. Non-broker callers (dashboard / SDK) still
-    # must populate it; the route's relaxation branch keys off the
-    # credential kind, not the body.
+    # install credential, and an agent-scoped credential likewise supplies its
+    # own verified identity (ax-0917-m-16). A caller whose credential
+    # authenticates no agent (dashboard / SDK tenant keys) still must populate
+    # it; both relaxation branches key off the credential, not the body.
     agent_id: str | None = None
     items: list[BulkMemoryItem] = Field(min_length=1, max_length=BULK_MAX_ITEMS)
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
