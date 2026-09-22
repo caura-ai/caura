@@ -1066,6 +1066,39 @@ class ResolvedConfig:
             return CRYSTALLIZER_MIN_CLUSTER_SIZE
         return max(2, int(val))
 
+    @property
+    def atomic_fact_fanout_enabled(self) -> bool:
+        """Create a child memory per extracted atomic fact (default ON).
+
+        A70 shipped this on the strength of a measurement that said it almost
+        never fires, taken on conversational content. pm-0918-c-04 asked whether
+        it should be gated off for document-shaped writes, on the theory that
+        2,000-character chunks are the shape it fires on. Measured against the
+        local ``memclaw`` corpus (61,515 memories, 2,617 tenants) the theory does
+        not hold — the fan-out rate FALLS with length:
+
+            <500 chars      1.33%      2,000-2,999    0.57%
+            500-999         3.41%      >=3,000        0.34%
+            1,000-1,999     0.75%
+
+        So there is no length threshold that separates the case it was approved
+        on from the case that regressed, and a ceiling would cost the band where
+        it fires most while barely touching document chunks. A switch is the
+        honest control instead: a tenant seeing fan-out children crowd its
+        results turns them off for its own store without a deploy and without
+        imposing a guessed threshold on everyone else.
+
+        Default ON because that is today's behaviour, and because the write-side
+        volume is small — 703 of 60,029 parents fanned out (1.2%), producing
+        1,486 of 61,515 rows (2.4%). Turning it off by default would change what
+        every tenant's store contains to fix a problem measured on one.
+
+        Off is strictly cheaper: no child is embedded, so this reduces LLM and
+        embedding spend rather than adding any.
+        """
+        val = self._ts.get("enrichment", {}).get("atomic_fact_fanout_enabled")
+        return val if val is not None else True
+
     # Dedup
     @property
     def semantic_dedup_enabled(self) -> bool:

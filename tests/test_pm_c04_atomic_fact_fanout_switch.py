@@ -1,0 +1,161 @@
+"""pm-0918-c-04 — the atomic-fact fan-out is switchable per tenant.
+
+A70 shipped the fan-out on a measurement that said it almost never fires. That
+measurement was taken on conversational content, and the row asked whether the
+fan-out should be gated off for document-shaped writes — 2,000-character chunks
+being, the theory went, the shape it actually fires on.
+
+Measured against the local `memclaw` corpus (61,515 memories, 2,617 tenants),
+the theory does not hold. The fan-out rate FALLS with content length:
+
+    <500 chars      1.33%       2,000-2,999    0.57%
+    500-999         3.41%       >=3,000        0.34%
+    1,000-1,999     0.75%
+
+The band the row blames is the second-lowest. So there is no length threshold
+that separates the case A70 was approved on from the case that regressed, and a
+ceiling would cost the band where it fires most while barely touching document
+chunks. These tests pin the switch that replaced that idea, and — deliberately —
+the default that keeps every existing tenant unchanged.
+"""
+
+import inspect
+
+import pytest
+
+from core_api.services.organization_settings import ResolvedConfig
+
+pytestmark = pytest.mark.unit
+
+
+def _cfg(**enrichment):
+    return ResolvedConfig({"enrichment": enrichment} if enrichment else {})
+
+
+# ── the switch ───────────────────────────────────────────────────────────
+
+
+def test_the_fanout_is_on_by_default():
+    """Today's behaviour. The write-side volume is small — 703 of 60,029
+    parents fanned out — so switching it off by default would change what every
+    tenant's store contains to fix a problem measured on one."""
+    assert _cfg().atomic_fact_fanout_enabled is True
+
+
+def test_a_tenant_can_switch_it_off():
+    assert _cfg(atomic_fact_fanout_enabled=False).atomic_fact_fanout_enabled is False
+
+
+def test_an_explicit_true_is_honoured():
+    """A tenant that turns it back on must not be read as 'unset'."""
+    assert _cfg(atomic_fact_fanout_enabled=True).atomic_fact_fanout_enabled is True
+
+
+# ── the gate itself ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_tenant_creates_no_children():
+    """The whole point. A disabled tenant must reach neither the embedder nor
+    ``create_memory`` — the saving is the children not being embedded, so a
+    gate that ran the batch and discarded it would save nothing."""
+    from core_api.services.memory_service import fan_out_atomic_facts
+
+    class _Cfg:
+        atomic_fact_fanout_enabled = False
+
+    class _Storage:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"storage was called ({name}) with the fan-out disabled"
+            )
+
+    class _Fact:
+        content = "Rachel got engaged on May 15th"
+        suggested_type = "fact"
+        retrieval_hint = ""
+
+    counts = await fan_out_atomic_facts(
+        _Storage(),
+        atomic_facts=[_Fact()],
+        memory_id="00000000-0000-0000-0000-000000000001",
+        tenant_id="t1",
+        fleet_id=None,
+        agent_id="a1",
+        parent_metadata={},
+        parent_visibility="scope_team",
+        parent_weight=0.5,
+        parent_ts_start=None,
+        tenant_config=_Cfg(),
+    )
+
+    assert counts == {"created": 0, "deduped": 0, "unembedded": 0}
+
+
+@pytest.mark.asyncio
+async def test_the_disabled_result_lets_the_worker_clear_its_marker():
+    """Returning zeroed counts rather than raising is load-bearing.
+
+    ``consumer._fan_out_persisted_atomic_facts`` leaves the ``atomic_facts``
+    marker in place ONLY on an exception, so that a redelivery can retry. If the
+    gate raised, a tenant that deliberately switched the fan-out off would
+    re-enter this path on every redelivery, forever, and never clear the marker.
+    """
+    from core_api.services.memory_service import fan_out_atomic_facts
+
+    class _Cfg:
+        atomic_fact_fanout_enabled = False
+
+    class _Fact:
+        content = "x"
+        suggested_type = "fact"
+        retrieval_hint = ""
+
+    # Must return, not raise.
+    await fan_out_atomic_facts(
+        object(),
+        atomic_facts=[_Fact()],
+        memory_id="00000000-0000-0000-0000-000000000001",
+        tenant_id="t1",
+        fleet_id=None,
+        agent_id="a1",
+        parent_metadata={},
+        parent_visibility="scope_team",
+        parent_weight=0.5,
+        parent_ts_start=None,
+        tenant_config=_Cfg(),
+    )
+
+
+def test_a_config_without_the_knob_keeps_fanning_out():
+    """Older config objects and existing test doubles predate this knob. They
+    must resolve to today's behaviour rather than raising ``AttributeError``
+    inside a fire-and-forget enrichment task — the same reasoning
+    ``_run_crystallization`` documents for ``crystallizer_min_cluster_size``."""
+    from types import SimpleNamespace
+
+    from core_api.services.memory_service import fan_out_atomic_facts
+
+    src = inspect.getsource(fan_out_atomic_facts)
+    assert 'getattr(tenant_config, "atomic_fact_fanout_enabled", True)' in src
+
+    legacy = SimpleNamespace()  # no such attribute at all
+    assert getattr(legacy, "atomic_fact_fanout_enabled", True) is True
+
+
+def test_the_gate_sits_at_the_shared_chokepoint_not_a_call_site():
+    """Both the synchronous path and the worker path funnel through this one
+    function — that is why it exists rather than being inlined twice. A switch
+    honoured by only one of them would silently become a per-write-mode
+    difference, which is the exact class of bug A70 was fixing when it lifted
+    this function out of ``_enrich_memory_background``."""
+    from core_api import consumer
+    from core_api.services import memory_service
+
+    assert "atomic_fact_fanout_enabled" in inspect.getsource(
+        memory_service.fan_out_atomic_facts
+    )
+    # Neither caller re-implements the decision.
+    assert "atomic_fact_fanout_enabled" not in inspect.getsource(
+        consumer._fan_out_persisted_atomic_facts
+    )

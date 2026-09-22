@@ -3176,6 +3176,19 @@ async def fan_out_atomic_facts(
     """
     if not atomic_facts:
         return {"created": 0, "deduped": 0, "unembedded": 0}
+    # pm-0918-c-04. Gated HERE rather than at either call site: this function is
+    # shared precisely so the synchronous and worker paths cannot drift, and a
+    # switch honoured by only one of them would be a per-write-mode difference
+    # that nobody asked for. ``getattr`` because older config objects and test
+    # doubles predate the knob, matching how ``crystallizer_min_cluster_size``
+    # is read in ``_run_crystallization``.
+    #
+    # Returning zeroed counts rather than raising is what lets the worker path
+    # clear its ``atomic_facts`` marker: the consumer only leaves the marker in
+    # place on an exception, so raising here would re-enter this on every
+    # redelivery forever for a tenant that has deliberately switched it off.
+    if not getattr(tenant_config, "atomic_fact_fanout_enabled", True):
+        return {"created": 0, "deduped": 0, "unembedded": 0}
     meta = parent_metadata
     fanout_created = 0
     fanout_unembedded = 0
