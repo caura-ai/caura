@@ -339,6 +339,13 @@ DEFAULT_SETTINGS: dict = {
             "freshness_window_days": 14,
             "llm_tokens_per_run": 50_000,
             "max_writes_per_run": 20,
+            # Attempt ceiling: how many clusters one run may distill,
+            # written or not. 0 = derive from ``max_writes_per_run``
+            # (see ``ForgeConfig.effective_max_clusters_per_run``).
+            # This, not ``max_writes_per_run``, is what bounds a run's
+            # LLM spend — every attempted cluster pays for a distill
+            # call before we can know whether it will be written.
+            "max_clusters_per_run": 0,
         },
         # OpenClaw PROPOSAL.md bridge (Phase 5). Default OFF — turning
         # it on only matters once the OpenClaw workspace emitter ships.
@@ -685,6 +692,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.forge.freshness_window_days": int,
     "skills_factory.forge.llm_tokens_per_run": int,
     "skills_factory.forge.max_writes_per_run": int,
+    "skills_factory.forge.max_clusters_per_run": int,
     "skills_factory.openclaw_bridge.enabled": bool,
     # Interviewer Phase 1.
     "interviewer.enabled": bool,
@@ -738,6 +746,11 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
     # typo can't pin a DoS-shaped write through the validator.
     "skills_factory.body_max_bytes": (1, 10_000_000),
     "skills_factory.description_max_bytes": (1, 10_000),
+    # 0 is the "derive from max_writes_per_run" sentinel, so the floor is
+    # 0 rather than 1. Upper bound is a spend guard: every attempt buys a
+    # distill LLM call, and 1000 of them in one tick is already far past
+    # any sane window's cluster count.
+    "skills_factory.forge.max_clusters_per_run": (0, 1000),
 }
 
 

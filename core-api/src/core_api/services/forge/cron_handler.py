@@ -90,6 +90,7 @@ async def _resolve_forge_config(org_id: str) -> ForgeConfig:
         min_distinct_agents=int(forge.get("min_distinct_agents", _d.min_distinct_agents)),
         freshness_window_days=int(forge.get("freshness_window_days", _d.freshness_window_days)),
         max_writes_per_run=int(forge.get("max_writes_per_run", _d.max_writes_per_run)),
+        max_clusters_per_run=int(forge.get("max_clusters_per_run", _d.max_clusters_per_run)),
         body_max_bytes=int(sf.get("body_max_bytes", _d.body_max_bytes)),
         description_max_bytes=int(sf.get("description_max_bytes", _d.description_max_bytes)),
         cluster_entity_jaccard_threshold=float(
@@ -429,6 +430,14 @@ async def run_forge_cron_tick(
         # alerting on.
         "skipped_internal_error": forge_result.candidates_skipped_internal_error,
         "skipped_existing": forge_result.candidates_skipped_existing,
+        # Clusters this tick actually distilled. Below ``clusters_eligible``
+        # means the run stopped before the end of the order, and because that
+        # order is deterministic the unreached tail is the same tail next tick
+        # — the shape oss-0814 L-13 was about. The run logs a WARNING when it
+        # is the attempt ceiling (rather than a full write budget) that cut the
+        # run short; this key is what makes the same thing queryable from here.
+        "clusters_attempted": forge_result.clusters_attempted,
+        "clusters_eligible": forge_result.clusters_eligible,
         # 09/02 L-34. Without this, a promotion half that raises every tick
         # returns the same zeros as one with nothing to promote — the mining
         # counters above still look healthy, so the tick reads fine.

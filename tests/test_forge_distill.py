@@ -42,6 +42,7 @@ from core_api.services.forge.fingerprint import (
     FINGERPRINT_FORMULA_VERSION,
 )
 from core_api.services.forge.forge_service import (
+    DEFAULT_CLUSTER_ATTEMPT_MULTIPLIER,
     ForgeConfig,
     _cluster_by_entity_overlap,
     _gate_clusters,
@@ -1727,3 +1728,248 @@ class TestInternalErrorBucket:
         assert result.candidates_written == 1
         assert result.candidates_skipped_internal_error == 1
         assert not [r for r in caplog.records if "wrote NOTHING" in r.getMessage()]
+
+
+# ── Run budget: writes vs attempts (oss-0814 L-13) ────────────────
+
+
+def _separable_clusters(
+    n_clusters: int, traces_per_cluster: int = 4
+) -> list[SessionTraceRow]:
+    """``n_clusters`` clusters with disjoint entity sets, each big and
+    diverse enough to clear the gates, in a stable order.
+
+    Disjoint entities ⇒ zero Jaccard across clusters ⇒ the greedy
+    clusterer never merges two of them, and cluster ``k`` always lands
+    at index ``k``. That fixed order is the precondition for the bug
+    under test: whatever sits at the head of it sits there every run.
+    """
+    traces: list[SessionTraceRow] = []
+    for k in range(n_clusters):
+        ents = [f"k{k}-e1", f"k{k}-e2", f"k{k}-e3"]
+        traces += [
+            _trace(
+                run_id=f"k{k}-r{i}",
+                agent_id=f"k{k}-agent{i}",
+                entity_ids=ents,
+                memory_ids=[f"k{k}-m{i}"],
+            )
+            for i in range(traces_per_cluster)
+        ]
+    return traces
+
+
+def _cluster_index_from_prompt(prompt: str, n_clusters: int) -> int:
+    """Recover which cluster a distill prompt was built for.
+
+    Keyed on the cluster's entity ids (which ``build_distill_prompt``
+    renders) rather than on a call counter, so the mapping stays honest
+    even if the loop stops visiting clusters in call order.
+    """
+    for k in range(n_clusters):
+        if f"k{k}-e1" in prompt:
+            return k
+    raise AssertionError(f"distill prompt named no known cluster: {prompt[:200]!r}")
+
+
+def _slug_for(k: int) -> str:
+    return f"cluster-{k}"
+
+
+def _doomed_run_harness(n_clusters: int, doomed: set[int]):
+    """Wire an ``llm_fn`` + ``status_checker`` pair where the clusters in
+    ``doomed`` always skip and the rest always write.
+
+    ``status_checker`` returning ``active`` is the skip reason chosen on
+    purpose: unlike a poisoned fingerprint, it has NO cooloff. An
+    operator-approved skill at that slug exists forever, so the cluster
+    that maps to it is skipped on every run from now until the heat
+    death of the tenant. Returns ``(attempt_order, llm_fn, status_checker)``.
+    """
+    attempt_order: list[int] = []
+
+    async def llm_fn(prompt: str) -> str:
+        k = _cluster_index_from_prompt(prompt, n_clusters)
+        attempt_order.append(k)
+        return json.dumps(_golden_llm_response(slug=_slug_for(k)))
+
+    async def status_checker(_tenant: str, _collection: str, doc_id: str) -> str | None:
+        return "active" if doc_id in {f"forge/{_slug_for(k)}" for k in doomed} else None
+
+    return attempt_order, llm_fn, status_checker
+
+
+@pytest.mark.unit
+class TestRunBudgetCountsWritesNotAttempts:
+    """``max_writes_per_run`` must bound writes, not attempts.
+
+    The loop used to run over ``eligible[: cfg.max_writes_per_run]``, so
+    a cluster that was skipped — poisoned, Sentinel-blocked, unparseable,
+    already-``active``, mid-write I/O failure — spent a write slot having
+    written nothing. Cluster order is deterministic and most skip reasons
+    are permanent, so the same doomed clusters sat at the head of the
+    order, ate the whole budget, and everything behind them was never
+    reached on ANY run. Re-running rebuilt the same order and starved the
+    same tail.
+    """
+
+    def _patch_build(self, monkeypatch, traces: list[SessionTraceRow]):
+        async def fake_build(*_args, **_kwargs):
+            return traces
+
+        import core_api.services.forge.forge_service as svc
+
+        monkeypatch.setattr(svc, "build_session_traces", fake_build)
+
+    async def _run(
+        self, monkeypatch, *, n_clusters: int, doomed: set[int], cfg: ForgeConfig
+    ):
+        self._patch_build(monkeypatch, _separable_clusters(n_clusters))
+        attempt_order, llm_fn, status_checker = _doomed_run_harness(n_clusters, doomed)
+        captured, writer = _capture_writer()
+        result = await run_forge_distill(
+            run_label="test-run",
+            tenant_id="t1",
+            fleet_id=None,
+            window_start=datetime(2026, 5, 1, tzinfo=UTC),
+            window_end=datetime(2026, 5, 15, tzinfo=UTC),
+            llm_fn=llm_fn,
+            memory_fetcher=_memory_fetcher_always,
+            poison_checker=_poison_never,
+            candidate_writer=writer,
+            status_checker=status_checker,
+            config=cfg,
+        )
+        return result, captured, attempt_order
+
+    @pytest.mark.asyncio
+    async def test_clusters_behind_doomed_ones_are_still_reached(self, monkeypatch):
+        """THE starvation test. Five eligible clusters; the first three
+        are permanently un-writable; the write budget is three.
+
+        Before the fix the run attempted exactly clusters 0-2, wrote
+        nothing, and clusters 3 and 4 were never looked at — on this run
+        or any later one. After it, the three skips cost attempts only
+        and the tail behind them gets its turn.
+        """
+        result, captured, attempt_order = await self._run(
+            monkeypatch,
+            n_clusters=5,
+            doomed={0, 1, 2},
+            cfg=ForgeConfig(max_writes_per_run=3),
+        )
+
+        # The doomed clusters really are at the head of the order — the
+        # premise of the starvation, not incidental to it.
+        assert attempt_order[:3] == [0, 1, 2]
+        # …and the run got past them.
+        assert attempt_order == [0, 1, 2, 3, 4]
+        assert result.clusters_eligible == 5
+        assert result.clusters_attempted == 5
+        assert result.candidates_skipped_existing == 3
+        # The payload that was unreachable before: clusters 3 and 4.
+        assert result.candidate_doc_ids == ["forge/cluster-3", "forge/cluster-4"]
+        assert [d["data"]["slug"] for d in captured] == ["cluster-3", "cluster-4"]
+
+    @pytest.mark.asyncio
+    async def test_write_budget_still_caps_writes(self, monkeypatch):
+        """The other half of the contract: the budget is still a budget.
+
+        One doomed cluster ahead of four good ones, two writes allowed.
+        The skip costs an attempt, the next two clusters write, and the
+        loop stops there — clusters 3 and 4 are never distilled, so a
+        full budget does not keep buying LLM calls it cannot use.
+        """
+        result, captured, attempt_order = await self._run(
+            monkeypatch,
+            n_clusters=5,
+            doomed={0},
+            cfg=ForgeConfig(max_writes_per_run=2),
+        )
+
+        assert result.candidates_written == 2
+        assert result.candidate_doc_ids == ["forge/cluster-1", "forge/cluster-2"]
+        assert attempt_order == [0, 1, 2]
+        assert result.clusters_attempted == 3
+        assert len(captured) == 2
+
+    @pytest.mark.asyncio
+    async def test_attempt_ceiling_bounds_llm_spend_when_everything_skips(
+        self, monkeypatch, caplog
+    ):
+        """Un-capping the write budget must not un-cap the LLM bill.
+
+        Every cluster is doomed, so no write ever lands and the write
+        budget alone would let the run distill all twenty. The attempt
+        ceiling (derived: 2 writes x 3) stops it at six, and says so at
+        WARNING — because with deterministic ordering the fourteen it
+        never reached are the same fourteen it will not reach next run.
+        """
+        import logging
+
+        caplog.set_level(
+            logging.WARNING, logger="core_api.services.forge.forge_service"
+        )
+
+        result, captured, attempt_order = await self._run(
+            monkeypatch,
+            n_clusters=20,
+            doomed=set(range(20)),
+            cfg=ForgeConfig(max_writes_per_run=2),
+        )
+
+        assert result.clusters_eligible == 20
+        assert result.clusters_attempted == 6
+        assert attempt_order == [0, 1, 2, 3, 4, 5]
+        assert result.candidates_written == 0
+        assert captured == []
+        assert [
+            r for r in caplog.records if "attempt ceiling reached" in r.getMessage()
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_ceiling_warning_when_the_write_budget_is_what_stopped_us(
+        self, monkeypatch, caplog
+    ):
+        """A healthy run that simply filled its budget is not starvation
+        and must not warn — otherwise the warning is noise and gets
+        filtered, which is how the signal dies."""
+        import logging
+
+        caplog.set_level(
+            logging.WARNING, logger="core_api.services.forge.forge_service"
+        )
+
+        result, _captured, _order = await self._run(
+            monkeypatch,
+            n_clusters=5,
+            doomed=set(),
+            cfg=ForgeConfig(max_writes_per_run=2),
+        )
+
+        assert result.candidates_written == 2
+        assert not [
+            r for r in caplog.records if "attempt ceiling reached" in r.getMessage()
+        ]
+
+
+@pytest.mark.unit
+class TestEffectiveMaxClustersPerRun:
+    def test_derives_from_write_budget_when_unset(self):
+        cfg = ForgeConfig(max_writes_per_run=20)
+        assert cfg.max_clusters_per_run == 0
+        assert (
+            cfg.effective_max_clusters_per_run
+            == 20 * DEFAULT_CLUSTER_ATTEMPT_MULTIPLIER
+        )
+
+    def test_explicit_override_wins(self):
+        cfg = ForgeConfig(max_writes_per_run=20, max_clusters_per_run=25)
+        assert cfg.effective_max_clusters_per_run == 25
+
+    def test_override_below_write_budget_is_floored(self):
+        """An attempt ceiling under the write budget would make the write
+        budget unreachable — the exact conflation these two knobs exist
+        to undo. Floor it rather than honour the typo."""
+        cfg = ForgeConfig(max_writes_per_run=20, max_clusters_per_run=5)
+        assert cfg.effective_max_clusters_per_run == 20
