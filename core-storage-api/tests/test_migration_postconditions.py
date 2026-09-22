@@ -401,3 +401,19 @@ def test_migration_044_postcondition_preserves_the_repair_contract() -> None:
     assert "extension owner" in condition.message
     assert "ALTER FUNCTION cosine_distance(vector, vector) COST 100;" in condition.message
     assert "re-running the migration will never fix" in condition.message
+
+
+def test_migration_044_postcondition_does_not_assert_live_harm() -> None:
+    """044's message is read on every boot of deployments that can never apply it.
+
+    It once asserted the planner was "under-pricing <=> by ~100x", which reads as an
+    incident in exactly the deployments where the app user cannot own the pgvector
+    extension and the migration therefore cannot apply. Measured 2026-09-22 against a
+    2.1M-row production table still at procost 1, the filtered ANN arm was already
+    served by the HNSW index, so the mispricing was latent there. The message must
+    calibrate the claim and say how a reader checks it against their own deployment.
+    """
+    condition = next(item for item in MIGRATION_POSTCONDITIONS if item.revision == "044")
+    assert "under-pricing" not in condition.message
+    assert "latent rather than a live defect" in condition.message
+    assert "pg_stat_user_indexes" in condition.message

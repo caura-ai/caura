@@ -71,10 +71,7 @@ async def test_default_cosine_distance_cost_logs_warning(_ensure_schema, caplog)
             await app_module.report_schema_drift()
 
         warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
-        assert any(
-            "migration 044 did not apply" in message and "under-pricing <=> by ~100x" in message
-            for message in warnings
-        )
+        assert any("migration 044 did not apply" in message for message in warnings)
     finally:
         await _set_cosine_distance_cost(original_cost)
 
