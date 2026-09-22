@@ -18,6 +18,12 @@ original_lifespan = app.router.lifespan_context
 async def lifespan(app):
     async with original_lifespan(app):
         if store is not None:
+            from caura_bus_platform.wake import publish_wake
+
+            from common.events.factory import get_event_bus
+
+            store.publish_wake = publish_wake
+            await get_event_bus().start()
             await store.migrate()
         reconciler = asyncio.create_task(store.request_reconciler()) if store is not None else None
         try:
@@ -27,6 +33,7 @@ async def lifespan(app):
                 reconciler.cancel()
                 with suppress(asyncio.CancelledError):
                     await reconciler
+                await get_event_bus().stop()
 
 
 app.router.lifespan_context = lifespan

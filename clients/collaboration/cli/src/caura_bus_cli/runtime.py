@@ -23,6 +23,7 @@ WAKE_EVENTS = {
     "request.nudge",
     "request.cancelled",
     "message.available",
+    "delivery.available",
     "human.decided",
     "delivery.interrupt",
     "delivery.acked",
