@@ -5,8 +5,10 @@ A70 shipped partly on a measurement that the fan-out "almost never fires", taken
 on conversational content. reg-a75, the proof gate that would have covered the
 rest, was closed WITHOUT BEING RUN because its harness lived in a private repo
 nobody could reach. This script exists so that cannot happen to this number: it
-is a plain query over a live database, it needs nothing but psycopg, and it
-lives in the repo it makes claims about.
+is a plain query over a live database and it lives in the repo it makes claims
+about. It shells out to ``psql`` — and to ``docker`` in the default local-stack
+mode — so those are what it needs on PATH; no Python database driver is
+involved.
 
 Run it against any store. Read the findings document BEFORE trusting a number
 out of it — ``docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md`` explains

@@ -3194,6 +3194,15 @@ async def fan_out_atomic_facts(
     # the fan-out back on later will not replay them without re-enrichment. That
     # is right for "disable", and worth knowing if anyone reads it as "pause".
     if not getattr(tenant_config, "atomic_fact_fanout_enabled", True):
+        # Logged because the zeroed counts are AMBIGUOUS downstream: the
+        # consumer reports "created=0 deduped=0 unembedded=0" at INFO, which is
+        # byte-identical to a fan-out that ran and deduplicated everything. An
+        # operator asking the obvious question — "I switched it off, why am I
+        # still seeing children?" — gets no signal either way without this.
+        logger.info(
+            "atomic-fact fan-out skipped: disabled for this tenant",
+            extra={"tenant_id": tenant_id, "memory_id": str(memory_id), "facts": len(atomic_facts)},
+        )
         return {"created": 0, "deduped": 0, "unembedded": 0}
     meta = parent_metadata
     fanout_created = 0

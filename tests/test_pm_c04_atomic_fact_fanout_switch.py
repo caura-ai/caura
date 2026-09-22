@@ -211,20 +211,29 @@ async def test_a_config_without_the_knob_keeps_fanning_out():
 @pytest.mark.asyncio
 async def test_the_worker_path_honours_the_switch_too():
     """The gate lives in the shared function so BOTH callers get it. This
-    exercises the worker caller end to end rather than asserting that a string
-    appears in one function's source and not another's — an assertion that
-    passes just as well for a gate returning the wrong answer.
+    exercises the worker caller end to end.
 
-    `consumer._fan_out_persisted_atomic_facts` is the path A70 added, and the
-    one a bulk/deferred write takes.
+    It RECORDS whether storage was touched rather than raising from the double,
+    and that detail is the whole test. An earlier version raised
+    ``AssertionError`` from ``__getattr__`` — but
+    ``_fan_out_persisted_atomic_facts`` wraps the call in ``except Exception``
+    and swallows it by design ("never raises: a fan-out failure must not nack
+    the event"). So the raising version passed with the switch ON as well, i.e.
+    it could not fail. The property this module documents defeated the test
+    that was checking it.
     """
     from core_api import consumer
 
+    touched: list[str] = []
+
     class _Storage:
         def __getattr__(self, name):
-            raise AssertionError(
-                f"storage was called ({name}) with the fan-out disabled"
-            )
+            touched.append(name)
+
+            async def _noop(*a, **kw):
+                return None
+
+            return _noop
 
     class _Payload:
         memory_id = "00000000-0000-0000-0000-000000000001"
@@ -250,10 +259,17 @@ async def test_the_worker_path_honours_the_switch_too():
     orig = consumer.resolve_config
     consumer.resolve_config = _resolve
     try:
-        # Must not raise, and must not reach storage: a disabled tenant creates
-        # no children on the worker path either.
         await consumer._fan_out_persisted_atomic_facts(
             _Storage(), memory, _Payload(), _Outcome()
         )
     finally:
         consumer.resolve_config = orig
+
+    # No child was created. This is the observable that survives the consumer's
+    # except-and-continue: with the switch ON, ``create_memory`` appears here.
+    assert "create_memory" not in touched
+
+    # And the marker WAS cleared — the other half of why the gate returns
+    # zeroed counts instead of raising. An exception would have skipped this,
+    # leaving every redelivery to re-enter a fan-out that is switched off.
+    assert "update_memory" in touched

@@ -58,6 +58,26 @@ falling rate-with-length appears in the data whether or not the enricher
 behaves that way. The measurement cannot separate "the enricher fans out less
 on long content" from "long content was deferred and its facts thrown away".
 
+## Two code facts that bear on the row directly
+
+Both verified against `main`, and both narrow the question more than the corpus
+does.
+
+**`create_memories_bulk` never calls the fan-out.** There are exactly two call
+sites for `fan_out_atomic_facts` in the tree — `memory_service.py` (the
+synchronous enrichment path) and `consumer.py` (the worker path). The bulk
+create path is not one of them. So on a deployment running inline enrichment,
+**ingest and document writes have a 0% fan-out rate by construction**, whatever
+the enricher decides. Any measurement of "does it fire on document writes" has
+to establish which of those two paths the writes in question actually took.
+
+**`CHUNKING_THRESHOLD_CHARS = 2000`** (`core-api/src/core_api/constants.py`).
+Content above 2,000 characters triggers auto-chunking, so an ordinary single
+write never reaches the fan-out at that length — it arrives as chunks. The
+"≥2,000" band in the withdrawn table could therefore only ever have been bulk
+and ingest rows, never long single writes. That is a second, independent reason
+the band did not mean what it appeared to.
+
 ## What went wrong the first time
 
 The first version of this document reported a rate-by-length table over the
