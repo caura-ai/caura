@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 
-from core_api.agent_ids import DOC_INDEXER_AGENT_ID, LEGACY_DOC_INDEXER_AGENT_ID
+from core_api.agent_ids import DOC_INDEXER_AGENT_ID
 from core_api.constants import CHUNKING_THRESHOLD_CHARS
 from core_api.services import doc_memory
 from core_api.services.doc_indexing import DocMemorySpec
@@ -253,16 +253,6 @@ async def test_falls_back_to_service_identity_only_when_no_caller(patched, missi
     args = patched.get_or_create_agent.call_args.args
     assert args[0] == "t1"
     assert args[1] == DOC_INDEXER_AGENT_ID
-
-
-async def test_legacy_doc_indexer_input_writes_under_canonical_id(patched):
-    await doc_memory.sync_doc_memory(
-        _spec(), tenant_id="t1", fleet_id="f1", agent_id=LEGACY_DOC_INDEXER_AGENT_ID
-    )
-
-    (payload,) = patched.create_memory.call_args.args
-    assert payload.agent_id == DOC_INDEXER_AGENT_ID
-    assert patched.get_or_create_agent.call_args.args[1] == DOC_INDEXER_AGENT_ID
 
 
 # ── safe_sync_doc_memory never raises ─────────────────────────────────────────

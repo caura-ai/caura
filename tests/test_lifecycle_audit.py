@@ -19,7 +19,7 @@ from uuid import uuid4
 
 import pytest
 
-from core_api.agent_ids import INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID
+from core_api.agent_ids import INSIGHTER_AGENT_ID
 from core_api.services.lifecycle_audit import (
     _CRYSTALLIZE_MIN_ACTIVE_MEMORIES,
     _CoreApiLifecycleAdapter,
@@ -231,49 +231,6 @@ async def test_insights_does_not_reregister_existing_agent() -> None:
 
     assert produced == 1
     # Still attributed to the dedicated identity even though it was pre-existing.
-    assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTER_AGENT_ID
-
-
-@pytest.mark.asyncio
-async def test_insights_legacy_registration_is_reused_while_writes_use_new_id() -> None:
-    """A pre-migration tenant must not acquire a duplicate agent row."""
-    lookups: list[str] = []
-
-    class _InsightsStorage:
-        async def insights_activity_gate(self, *, tenant_id: str, fleet_id):
-            return {
-                "latest_non_insight": "2026-07-08T00:00:00+00:00",
-                "latest_insight": None,
-            }
-
-        async def get_agent(self, agent_id: str, tenant_id: str) -> dict | None:
-            lookups.append(agent_id)
-            if agent_id == LEGACY_INSIGHTER_AGENT_ID:
-                return {"agent_id": agent_id, "tenant_id": tenant_id}
-            return None
-
-        async def create_or_update_agent(
-            self, payload: dict
-        ) -> dict:  # pragma: no cover
-            raise AssertionError("must reuse the legacy registration")
-
-    class _On:
-        auto_insights_enabled = True
-
-    adapter = _CoreApiLifecycleAdapter(_InsightsStorage())
-    with (
-        patch(
-            "core_api.services.lifecycle_audit.resolve_config",
-            new=AsyncMock(return_value=_On()),
-        ),
-        patch(
-            "core_api.services.insights_service.generate_insights",
-            new=AsyncMock(return_value={"insight_memory_ids": ["a"]}),
-        ) as mock_gen,
-    ):
-        assert await adapter.insights(org_id="t1", fleet_id=None) == 1
-
-    assert lookups == [INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID]
     assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTER_AGENT_ID
 
 

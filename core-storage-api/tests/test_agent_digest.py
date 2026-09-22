@@ -10,7 +10,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from core_api.agent_ids import INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID
 from httpx import AsyncClient
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -112,26 +111,6 @@ async def test_agent_id_filter(client: AsyncClient):
     await _post(client, _row(tenant, "b", run_id=run))
     rows = await _latest(client, tenant, agent_id="a")
     assert len(rows) == 1 and rows[0]["agent_id"] == "a"
-
-
-async def test_agent_id_filter_accepts_alias_set(client: AsyncClient):
-    tenant = f"dig-{_uid()}"
-    run = str(uuid.uuid4())
-    await _post(client, _row(tenant, INSIGHTER_AGENT_ID, run_id=run))
-    await _post(client, _row(tenant, LEGACY_INSIGHTER_AGENT_ID, run_id=run))
-    await _post(client, _row(tenant, "other", run_id=run))
-
-    rows = await _latest(
-        client,
-        tenant,
-        agent_id=INSIGHTER_AGENT_ID,
-        agent_ids=[INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID],
-    )
-
-    assert {row["agent_id"] for row in rows} == {
-        INSIGHTER_AGENT_ID,
-        LEGACY_INSIGHTER_AGENT_ID,
-    }
 
 
 async def test_prune_deletes_rows_older_than_cutoff(client: AsyncClient):

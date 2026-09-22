@@ -13,7 +13,6 @@ from uuid import UUID
 from fastapi import HTTPException
 
 from common import duplicate_memory
-from core_api.agent_ids import service_agent_read_ids
 from core_api.constants import (
     EVOLVE_FAILURE_DELTA,
     EVOLVE_MAX_RELATED_IDS,
@@ -223,7 +222,6 @@ async def _filter_by_scope(
     allowed_strs = await sc.evolve_filter_by_scope(
         tenant_id=tenant_id,
         caller_agent_id=caller_agent_id,
-        caller_agent_ids=list(service_agent_read_ids(caller_agent_id)),
         fleet_id=fleet_id,
         scope=scope,
         ids=[str(u) for u in valid_uuids.values()],

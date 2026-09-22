@@ -35,7 +35,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from core_api.agent_ids import canonical_service_agent_id, service_agent_read_ids
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.errors import (
@@ -331,7 +331,6 @@ async def get_report(
     elif dest in _SELF_AUDIENCES and caller_agent_id:
         # Narrowest: only the caller's own contributions.
         breakdown_query["agent_id"] = caller_agent_id
-        breakdown_query["agent_ids"] = list(service_agent_read_ids(caller_agent_id))
         scope_label = "self"
         is_self_scope = True
     else:
@@ -342,11 +341,9 @@ async def get_report(
         scope_label = "group"
 
     breakdown = await sc.memory_stats_breakdown(breakdown_query)
-    by_agent: dict[str, int] = {}
-    for raw_agent_id, count in (breakdown.get("by_agent") or {}).items():
-        canonical_agent_id = canonical_service_agent_id(raw_agent_id)
-        if canonical_agent_id not in RESERVED_FIREHOSE_AGENTS:
-            by_agent[canonical_agent_id] = by_agent.get(canonical_agent_id, 0) + int(count)
+    by_agent = {
+        a: c for a, c in (breakdown.get("by_agent") or {}).items() if a not in RESERVED_FIREHOSE_AGENTS
+    }
     by_type = breakdown.get("by_type") or {}
     durable_total = int(breakdown.get("total", 0) or 0)
     by_tenant = breakdown.get("by_tenant") or {}  # populated only in org scope (>1 tenant)
@@ -396,11 +393,8 @@ async def get_report(
         # is not read on that path). That is a DIFFERENT knob from the visibility
         # identity above — a row can be visible without being authored by the
         # caller, which is the whole group view.
-        if is_self_scope and caller_agent_id:
+        if is_self_scope:
             list_query["written_by"] = caller_agent_id
-            aliases = list(service_agent_read_ids(caller_agent_id))
-            list_query["caller_agent_ids"] = aliases
-            list_query["written_by_ids"] = aliases
         if org_mode:
             list_query["readable_tenant_ids"] = readable
         elif dest == AUDIENCE_GROUP and caller_fleet:
@@ -443,14 +437,8 @@ async def get_report(
         p1_vals = await asyncio.gather(*(phase1[k] for k in p1_keys))
         p1 = dict(zip(p1_keys, p1_vals))
 
-        def _canonicalize_memory_agent(memory: dict) -> dict:
-            raw_agent_id = memory.get("agent_id")
-            if not raw_agent_id:
-                return memory
-            return {**memory, "agent_id": canonical_service_agent_id(raw_agent_id)}
-
-        durable = [_canonicalize_memory_agent(m) for m in (p1["recent"] or []) if _cohesive(m)]
-        top_durable = [_canonicalize_memory_agent(m) for m in (p1["recall"] or []) if _cohesive(m)]
+        durable = [m for m in (p1["recent"] or []) if _cohesive(m)]
+        top_durable = [m for m in (p1["recall"] or []) if _cohesive(m)]
 
         # Per-agent leaderboard, joined with belonging metadata. Group = the whole
         # fleet (list_agents); self = just the caller's own row (already fetched);
@@ -467,9 +455,7 @@ async def get_report(
             for row in agent_rows:
                 aid = row.get("agent_id")
                 if aid:
-                    canonical_id = canonical_service_agent_id(aid)
-                    if canonical_id not in belong_by_id or aid == canonical_id:
-                        belong_by_id[canonical_id] = row
+                    belong_by_id[aid] = row
         for aid, cnt in sorted(by_agent.items(), key=lambda kv: kv[1], reverse=True)[:_TOP_AGENTS_LIMIT]:
             row = belong_by_id.get(aid, {})
             per_agent.append(
@@ -563,14 +549,7 @@ async def get_report(
         # the write→durable→reused funnel invariant.
         scope_keys = {
             k: breakdown_query[k]
-            for k in (
-                "tenant_id",
-                "agent_id",
-                "agent_ids",
-                "fleet_id",
-                "readable_tenant_ids",
-                "include_scope_agent",
-            )
+            for k in ("tenant_id", "agent_id", "fleet_id", "readable_tenant_ids", "include_scope_agent")
             if k in breakdown_query
         }
         # ── Phase 2: quality metrics + the two supporting breakdown calls run
@@ -712,6 +691,8 @@ async def get_agent_activity_digest(
     ``meta.generated_at: null`` when no run exists yet, not a 404.
     """
     auth.enforce_cross_tenant_read()
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     if period not in _PERIOD_DAYS:
         raise HTTPException(status_code=422, detail=f"Invalid period '{period}'. Use 'day' or 'week'.")
     if scope not in ("own", "org"):
@@ -747,23 +728,12 @@ async def get_agent_activity_digest(
         *(sc.get_agent_activity_digest(t, period, agent_id=agent_id, as_of=as_of) for t in tenants),
         return_exceptions=True,
     )
-    digest_by_agent: dict[tuple[str, str], tuple[bool, dict]] = {}
+    digests: list[dict] = []
     for t, rows in zip(tenants, per_tenant):
         if isinstance(rows, BaseException):
             logger.warning("agent_activity_digest: storage call failed for tenant %s: %r", t, rows)
         else:
-            for row in rows or []:
-                raw_agent_id = row["agent_id"]
-                canonical_agent_id = canonical_service_agent_id(raw_agent_id)
-                key = (t, canonical_agent_id)
-                is_canonical = raw_agent_id == canonical_agent_id
-                current = digest_by_agent.get(key)
-                if current is None or (is_canonical and not current[0]):
-                    digest_by_agent[key] = (
-                        is_canonical,
-                        {**row, "agent_id": canonical_agent_id},
-                    )
-    digests = [row for _, row in digest_by_agent.values()]
+            digests.extend(rows or [])
 
     # Meta reflects the freshest run represented in the result set. Under
     # scope='org' the digests can span tenants whose scheduled passes ran over

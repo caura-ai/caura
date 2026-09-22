@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from common.embedding import get_embedding
 from core_api import openapi_responses as _oar
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
@@ -293,7 +294,8 @@ async def upsert_document(
     auth.enforce_self_agent(body.agent_id)
     # Equal whenever both are set, by the gate above. The ``or`` is what fills
     # the field in for an agent credential that did not bother to name itself.
-    author = auth.agent_id or body.agent_id
+    raw_author = auth.agent_id or body.agent_id
+    author = canonical_service_agent_id(raw_author) if raw_author is not None else None
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()
     auth.enforce_usage_limits()
@@ -341,7 +343,7 @@ async def upsert_document(
             # external source='forge' attempt.
             is_internal_forge = False
             sf_ctx = SkillWriteContext(
-                caller_agent_id=auth.agent_id,
+                caller_agent_id=author,
                 is_admin=auth.is_org_admin,
                 is_internal_forge=is_internal_forge,
                 description_max_bytes=int(sf_settings.get("description_max_bytes", 160)),

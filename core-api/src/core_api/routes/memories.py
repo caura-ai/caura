@@ -31,7 +31,6 @@ from core_api.agent_ids import (
     AgentIdentity,
     canonical_service_agent_id,
     effective_write_agent_id,
-    service_agent_read_ids,
 )
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
@@ -517,6 +516,10 @@ async def list_memories(
     # or by omitting it. The query param stays the AUTHOR filter (written_by).
     # A tenant/user credential (auth.agent_id None) keeps using the param, as the
     # dashboard intends.
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
+    if written_by is not None:
+        written_by = canonical_service_agent_id(written_by)
     caller_agent_id = auth.effective_agent_id(agent_id)
     # ``written_by`` is the author filter; ``agent_id`` keeps serving as that
     # filter when ``written_by`` is omitted, so existing callers are unaffected.
@@ -575,14 +578,8 @@ async def list_memories(
     list_payload: dict = {
         "tenant_id": tenant_id or "",
         "caller_agent_id": caller_agent_id,  # visibility scoping (authenticated identity)
-        "caller_agent_ids": (
-            list(service_agent_read_ids(caller_agent_id)) if caller_agent_id is not None else None
-        ),
         "fleet_id": fleet_id,
         "written_by": author_filter,  # author filter (written_by, else agent_id)
-        "written_by_ids": (
-            list(service_agent_read_ids(author_filter)) if author_filter is not None else None
-        ),
         "memory_type": memory_type,
         "exclude_memory_types": exclude_memory_types,
         "created_after": created_after.isoformat() if created_after else None,
@@ -699,6 +696,8 @@ async def memory_stats(
         agent_id,
         message=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
     )
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     # Was the bare ``auth.agent_id or agent_id``. That is exactly the
     # expression ``effective_agent_id`` exists to name (see its docstring:
     # the bare form is indistinguishable from an audit-attribution line of
@@ -862,6 +861,8 @@ async def delete_all_memories(
     # owner) keep full reach (dashboard reset, tagged cleanup) unchanged.
     if auth.tenant_id and auth.agent_id:
         await enforce_delete(tenant_id, auth.agent_id)
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     # OSS 09/02 L-24 — the same validation ``bulk_delete_by_ids`` applies below.
     # This one also feeds the ``is_tenant_wide`` test further down, so a
     # malformed value did not merely 500 later: a non-empty string counted as
@@ -1478,6 +1479,8 @@ async def write_memories_bulk(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    if body.agent_id:
+        body.agent_id = canonical_service_agent_id(body.agent_id)
     for _idx, _item in enumerate(body.items):
         _reject_reserved_memory_type(_item.memory_type, index=_idx)
 
@@ -2081,6 +2084,10 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     # identity directly, so leaving it unguarded reopens the same escalation
     # under a different field name.
     auth.enforce_self_agent(body.caller_agent_id, field="caller_agent_id")
+    if body.filter_agent_id is not None:
+        body.filter_agent_id = canonical_service_agent_id(body.filter_agent_id)
+    if body.caller_agent_id is not None:
+        body.caller_agent_id = canonical_service_agent_id(body.caller_agent_id)
     # Identity, in precedence order: an authenticated agent always wins, then an
     # explicit assertion, then the legacy derivation from the filter so existing
     # callers are untouched. The filter itself is passed separately at the
@@ -2089,7 +2096,7 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
     asserted = body.caller_agent_id or body.filter_agent_id
     # ``is not None`` keeps this an exact passthrough of the original
     # ``auth.agent_id or body.caller_agent_id or body.filter_agent_id``.
-    eff_agent_id = auth.agent_id or (AgentIdentity(asserted) if asserted is not None else None)
+    eff_agent_id = auth.effective_agent_id(asserted)
     # True when the identity was ASSERTED by a tenant-scoped caller rather than
     # authenticated. Gates the recall_count bump — see the note at the callsite.
     identity_asserted = bool(not auth.agent_id and body.caller_agent_id)
@@ -2477,6 +2484,8 @@ async def ingest_commit_endpoint(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    if body.agent_id:
+        body.agent_id = canonical_service_agent_id(body.agent_id)
     # Broker ownership boundary: degrade a foreign / reserved agent id to the
     # install's own broker:<install> fallback so a broker can't attribute an
     # ingested memory to an agent owned by another install (parity with the
@@ -2784,7 +2793,9 @@ async def redistribute_memories(
             ),
         )
 
-    # Verify target agent exists and is not restricted
+    # Verify target agent exists and is not restricted. Persist only the
+    # canonical identity even when an older client supplies a retired alias.
+    body.target_agent_id = canonical_service_agent_id(body.target_agent_id)
     target = await lookup_agent(tenant_id, body.target_agent_id)
     if target is None:
         raise HTTPException(
@@ -2927,7 +2938,7 @@ async def admin_list_memories(
     if fleet_id:
         payload["fleet_id"] = fleet_id
     if agent_id:
-        payload["agent_id"] = agent_id
+        payload["agent_id"] = canonical_service_agent_id(agent_id)
     if memory_type:
         payload["memory_type"] = memory_type
     if status:

@@ -20,7 +20,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core_api import openapi_responses as _oar
-from core_api.agent_ids import DEFAULT_AGENT_ID
+from core_api.agent_ids import DEFAULT_AGENT_ID, canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.errors import (
@@ -107,7 +107,7 @@ async def resolve_conflict(
     # system's only record of the detector being wrong, so a self-serving one
     # corrupts the exact ground truth this surface exists to collect. Trust >= 2
     # matches the keystone-author bar: a privileged action inside a tenant.
-    reviewer = auth.agent_id or DEFAULT_AGENT_ID
+    reviewer = canonical_service_agent_id(auth.agent_id or DEFAULT_AGENT_ID)
     _trust, not_found, terr = await _require_trust(body.tenant_id, reviewer, min_level=2)
     if not_found or terr:
         raise HTTPException(

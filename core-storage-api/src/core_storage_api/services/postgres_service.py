@@ -2674,9 +2674,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
-        caller_agent_ids: list[str] | None = None,
         filter_agent_id: str | None = None,
-        filter_agent_ids: list[str] | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
         valid_at: datetime | None = None,
@@ -2892,7 +2890,7 @@ class PostgresService:
                     Memory.visibility == "scope_team",
                     and_(
                         Memory.visibility == "scope_agent",
-                        Memory.agent_id.in_(caller_agent_ids or [caller_agent_id]),
+                        Memory.agent_id == caller_agent_id,
                     ),
                 )
             )
@@ -2900,7 +2898,7 @@ class PostgresService:
             row_filters.append(Memory.visibility != "scope_agent")
 
         if filter_agent_id:
-            row_filters.append(Memory.agent_id.in_(filter_agent_ids or [filter_agent_id]))
+            row_filters.append(Memory.agent_id == filter_agent_id)
         if memory_type_filter:
             row_filters.append(Memory.memory_type == memory_type_filter)
         if status_filter:
@@ -3634,9 +3632,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
-        caller_agent_ids: list[str] | None = None,
         filter_agent_id: str | None = None,
-        filter_agent_ids: list[str] | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
         valid_at: datetime | None = None,
@@ -3690,14 +3686,14 @@ class PostgresService:
                         Memory.visibility == "scope_team",
                         and_(
                             Memory.visibility == "scope_agent",
-                            Memory.agent_id.in_(caller_agent_ids or [caller_agent_id]),
+                            Memory.agent_id == caller_agent_id,
                         ),
                     )
                 )
             else:
                 stmt = stmt.where(Memory.visibility != "scope_agent")
             if filter_agent_id:
-                stmt = stmt.where(Memory.agent_id.in_(filter_agent_ids or [filter_agent_id]))
+                stmt = stmt.where(Memory.agent_id == filter_agent_id)
             if memory_type_filter:
                 stmt = stmt.where(Memory.memory_type == memory_type_filter)
             if status_filter:
@@ -3807,9 +3803,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
-        caller_agent_ids: list[str] | None = None,
         filter_agent_id: str | None = None,
-        filter_agent_ids: list[str] | None = None,
         memory_type_filter: str | None = None,
         valid_at: datetime | None = None,
         strict_fleet_scoping: bool = False,
@@ -3835,14 +3829,14 @@ class PostgresService:
                         Memory.visibility == "scope_team",
                         and_(
                             Memory.visibility == "scope_agent",
-                            Memory.agent_id.in_(caller_agent_ids or [caller_agent_id]),
+                            Memory.agent_id == caller_agent_id,
                         ),
                     )
                 )
             else:
                 stmt = stmt.where(Memory.visibility != "scope_agent")
             if filter_agent_id:
-                stmt = stmt.where(Memory.agent_id.in_(filter_agent_ids or [filter_agent_id]))
+                stmt = stmt.where(Memory.agent_id == filter_agent_id)
             if memory_type_filter:
                 stmt = stmt.where(Memory.memory_type == memory_type_filter)
             if valid_at:
@@ -6010,10 +6004,8 @@ class PostgresService:
         *,
         tenant_id: str,
         caller_agent_id: str | None = None,
-        caller_agent_ids: list[str] | None = None,
         fleet_id: str | None = None,
         written_by: str | None = None,
-        written_by_ids: list[str] | None = None,
         memory_type: str | None = None,
         exclude_memory_types: list[str] | None = None,
         status: str | None = None,
@@ -6056,14 +6048,13 @@ class PostgresService:
 
         # Visibility predicate (critical: prevents scope_agent leaks).
         if caller_agent_id:
-            visible_agent_ids = caller_agent_ids or [caller_agent_id]
             stmt = stmt.where(
                 or_(
                     Memory.visibility == "scope_org",
                     Memory.visibility == "scope_team",
                     and_(
                         Memory.visibility == "scope_agent",
-                        Memory.agent_id.in_(visible_agent_ids),
+                        Memory.agent_id == caller_agent_id,
                     ),
                 )
             )
@@ -6073,7 +6064,7 @@ class PostgresService:
         if fleet_id:
             stmt = stmt.where(Memory.fleet_id == fleet_id)
         if written_by:
-            stmt = stmt.where(Memory.agent_id.in_(written_by_ids or [written_by]))
+            stmt = stmt.where(Memory.agent_id == written_by)
         if memory_type:
             stmt = stmt.where(Memory.memory_type == memory_type)
         if exclude_memory_types:
@@ -6136,7 +6127,6 @@ class PostgresService:
         tenant_id: str | None,
         fleet_id: str | None = None,
         agent_id: str | None = None,
-        agent_ids: list[str] | None = None,
         memory_type: str | None = None,
         status: str | None = None,
         created_after: datetime | None = None,
@@ -6184,15 +6174,14 @@ class PostgresService:
         if fleet_id:
             scope_filters.append(Memory.fleet_id == fleet_id)
         if agent_id:
-            visible_agent_ids = agent_ids or [agent_id]
-            scope_filters.append(Memory.agent_id.in_(visible_agent_ids))
+            scope_filters.append(Memory.agent_id == agent_id)
             scope_filters.append(
                 or_(
                     Memory.visibility == "scope_org",
                     Memory.visibility == "scope_team",
                     and_(
                         Memory.visibility == "scope_agent",
-                        Memory.agent_id.in_(visible_agent_ids),
+                        Memory.agent_id == agent_id,
                     ),
                 )
             )
@@ -6417,7 +6406,6 @@ class PostgresService:
         tenant_id: str | None,
         fleet_id: str | None = None,
         agent_id: str | None = None,
-        agent_ids: list[str] | None = None,
         created_after: datetime | None = None,
         exclude_memory_types: list[str] | None = None,
         exclude_agent_ids: list[str] | None = None,
@@ -6447,13 +6435,12 @@ class PostgresService:
         if fleet_id:
             scope_filters.append(Memory.fleet_id == fleet_id)
         if agent_id:
-            visible_agent_ids = agent_ids or [agent_id]
-            scope_filters.append(Memory.agent_id.in_(visible_agent_ids))
+            scope_filters.append(Memory.agent_id == agent_id)
             scope_filters.append(
                 or_(
                     Memory.visibility == "scope_org",
                     Memory.visibility == "scope_team",
-                    and_(Memory.visibility == "scope_agent", Memory.agent_id.in_(visible_agent_ids)),
+                    and_(Memory.visibility == "scope_agent", Memory.agent_id == agent_id),
                 )
             )
         elif not include_scope_agent:
@@ -10289,13 +10276,7 @@ class PostgresService:
     _INSIGHTS_OPAQUE_CONTENT_PREFIX = '[{"type":"thinking","thinking":""%'
 
     @staticmethod
-    def _insights_scope_filters(
-        tenant_id: str,
-        fleet_id: str | None,
-        agent_id: str,
-        scope: str,
-        agent_ids: list[str] | None = None,
-    ) -> list:
+    def _insights_scope_filters(tenant_id: str, fleet_id: str | None, agent_id: str, scope: str) -> list:
         """Reconstruct ``insights_service._scope_filters`` ORM WHERE clauses,
         plus the opaque-payload noise guard (see
         ``_INSIGHTS_OPAQUE_CONTENT_PREFIX``) that applies to all 6 analytic
@@ -10307,7 +10288,7 @@ class PostgresService:
             Memory.content.notlike(PostgresService._INSIGHTS_OPAQUE_CONTENT_PREFIX),
         ]
         if scope == "agent":
-            base.append(Memory.agent_id.in_(agent_ids or [agent_id]))
+            base.append(Memory.agent_id == agent_id)
             if fleet_id:
                 base.append(Memory.fleet_id == fleet_id)
         elif scope == "fleet":
@@ -10416,14 +10397,7 @@ class PostgresService:
         return out
 
     async def insights_query_contradictions(
-        self,
-        *,
-        tenant_id: str,
-        fleet_id: str | None,
-        agent_id: str,
-        scope: str,
-        max_memories: int,
-        agent_ids: list[str] | None = None,
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
     ) -> list[dict]:
         """Memories that supersede others, are conflicted, or share entities
         with divergent values. Ports ``_query_contradictions`` verbatim (the
@@ -10431,7 +10405,7 @@ class PostgresService:
         by id, capped at ``max_memories`` (``INSIGHTS_MAX_MEMORIES`` forwarded
         from core-api — the tuning constant stays the single source of truth
         on the core-api side, mirroring Ph5a's ``threshold`` param)."""
-        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope, agent_ids)
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
         async with get_read_session() as session:
             stmt = (
                 select(Memory)
@@ -10516,7 +10490,6 @@ class PostgresService:
         scope: str,
         max_memories: int,
         window_start: datetime | None = None,
-        agent_ids: list[str] | None = None,
     ) -> list[dict]:
         """Low-weight memories that were recalled (agents acted on weak info).
         Ports ``_query_failures``, deduped to one exemplar per exact title
@@ -10535,7 +10508,7 @@ class PostgresService:
         low even when the pattern repeats constantly, so without it a
         40-instance pattern (newest rc=2) would be cut by LIMIT below a
         one-off rc=5 row."""
-        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope, agent_ids)
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
         filters = [
             *base,
             Memory.memory_type != "insight",
@@ -10577,7 +10550,6 @@ class PostgresService:
         fourteen_days_ago: datetime,
         max_memories: int,
         window_start: datetime | None = None,
-        agent_ids: list[str] | None = None,
     ) -> list[dict]:
         """Memories likely outdated based on age + recall activity. Ports
         ``_query_stale``, deduped to one exemplar per exact title (see
@@ -10592,7 +10564,7 @@ class PostgresService:
         band instead (the ancient tail is the archive-stale lifecycle job's
         business). Omitted (None) → the ORIGINAL pre-dedup query (identical
         results AND cost for older core-api callers)."""
-        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope, agent_ids)
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
         filters = [
             *base,
             Memory.memory_type != "insight",
@@ -10621,20 +10593,13 @@ class PostgresService:
             return self._insights_annotated_rows_to_dicts(result.all())
 
     async def insights_query_divergence(
-        self,
-        *,
-        tenant_id: str,
-        fleet_id: str | None,
-        agent_id: str,
-        scope: str,
-        max_memories: int,
-        agent_ids: list[str] | None = None,
+        self, *, tenant_id: str, fleet_id: str | None, agent_id: str, scope: str, max_memories: int
     ) -> list[dict]:
         """Memories where multiple agents reference the same entities
         differently. Ports ``_query_divergence`` verbatim: entity pre-query
         (GROUP BY subject_entity_id HAVING COUNT(DISTINCT agent_id) >= 2) then
         fetch; ``[]`` when no entity qualifies."""
-        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope, agent_ids)
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
         async with get_read_session() as session:
             entity_stmt = (
                 select(Memory.subject_entity_id)
@@ -10676,7 +10641,6 @@ class PostgresService:
         scope: str,
         max_memories: int,
         window_start: datetime | None = None,
-        agent_ids: list[str] | None = None,
     ) -> list[dict]:
         """Recent active memories for trend/pattern analysis. Ports
         ``_query_patterns``, deduped to one exemplar per exact title (see
@@ -10690,7 +10654,7 @@ class PostgresService:
         A trailing window is also what the mode means ("recent memories").
         Omitted (None) → the ORIGINAL pre-dedup query (identical results AND
         cost for older core-api callers; no full-corpus window scan)."""
-        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope, agent_ids)
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
         filters = [
             *base,
             Memory.memory_type != "insight",
@@ -10719,7 +10683,6 @@ class PostgresService:
         scope: str,
         sample_size: int,
         window_start: datetime | None = None,
-        agent_ids: list[str] | None = None,
     ) -> list[dict]:
         """Sample active memories WITH embeddings for client-side k-means.
         Ports ``_query_discover``'s row-fetch (the numpy clustering + cluster
@@ -10742,7 +10705,7 @@ class PostgresService:
           every night). Omitted (None) → the ORIGINAL pre-dedup newest-first
           query (identical results AND cost for older core-api callers; no
           full-corpus window scan)."""
-        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope, agent_ids)
+        base = self._insights_scope_filters(tenant_id, fleet_id, agent_id, scope)
         filters = [
             *base,
             Memory.status == "active",
@@ -10767,7 +10730,6 @@ class PostgresService:
         focus: str,
         scope: str,
         fleet_id: str | None = None,
-        agent_ids: list[str] | None = None,
     ) -> dict:
         """Atomically select + outdate prior live insights for this
         focus/scope/fleet. Ports ``_persist_findings`` prior-select + outdate
@@ -10799,7 +10761,7 @@ class PostgresService:
                     UPDATE memories
                     SET status = 'outdated'
                     WHERE tenant_id = :tenant_id
-                      AND agent_id = ANY(CAST(:agent_ids AS text[]))
+                      AND agent_id = :agent_id
                       AND memory_type = 'insight'
                       AND status IN ('active', 'pending')
                       AND deleted_at IS NULL
@@ -10814,7 +10776,7 @@ class PostgresService:
                 ),
                 {
                     "tenant_id": tenant_id,
-                    "agent_ids": agent_ids or [agent_id],
+                    "agent_id": agent_id,
                     "focus": focus,
                     "scope": scope,
                     "fleet_id": fleet_id,
@@ -10930,7 +10892,6 @@ class PostgresService:
         *,
         tenant_id: str,
         caller_agent_id: str,
-        caller_agent_ids: list[str] | None = None,
         fleet_id: str | None,
         scope: str,
         ids: list[str],
@@ -10958,7 +10919,7 @@ class PostgresService:
             .where(Memory.deleted_at.is_(None))
         )
         if scope == "agent":
-            stmt = stmt.where(Memory.agent_id.in_(caller_agent_ids or [caller_agent_id]))
+            stmt = stmt.where(Memory.agent_id == caller_agent_id)
         elif scope == "fleet":
             stmt = stmt.where(Memory.fleet_id == fleet_id)
         async with get_read_session() as session:
@@ -12812,7 +12773,6 @@ class PostgresService:
         period: str,
         *,
         agent_id: str | None = None,
-        agent_ids: list[str] | None = None,
         as_of: datetime | None = None,
     ) -> list[AgentActivityDigest]:
         """Return every agent row from the most recent run for a tenant/period.
@@ -12849,7 +12809,7 @@ class PostgresService:
                 AgentActivityDigest.tenant_id == tenant_id,
             )
             if agent_id is not None:
-                rows_stmt = rows_stmt.where(AgentActivityDigest.agent_id.in_(agent_ids or [agent_id]))
+                rows_stmt = rows_stmt.where(AgentActivityDigest.agent_id == agent_id)
             rows_stmt = rows_stmt.order_by(AgentActivityDigest.source_count.desc())
             result = await session.execute(rows_stmt)
             return list(result.scalars().all())

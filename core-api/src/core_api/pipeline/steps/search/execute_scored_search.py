@@ -213,10 +213,8 @@ class ExecuteScoredSearch:
                 search_data["strict_fleet_scoping"] = True
         if data.get("filter_agent_id"):
             search_data["filter_agent_id"] = data["filter_agent_id"]
-            search_data["filter_agent_ids"] = data.get("filter_agent_ids")
         if data.get("caller_agent_id"):
             search_data["caller_agent_id"] = data["caller_agent_id"]
-            search_data["caller_agent_ids"] = data.get("caller_agent_ids")
         if data.get("memory_type_filter"):
             search_data["memory_type_filter"] = data["memory_type_filter"]
         if data.get("status_filter"):

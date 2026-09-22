@@ -23,7 +23,7 @@ import httpx
 import pytest
 
 from core_api import mcp_server
-from core_api.agent_ids import INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID
+from core_api.agent_ids import INSIGHTER_AGENT_ID
 from tests._mcp_test_helpers import as_text, parse_envelope, stub_storage_client
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -65,15 +65,16 @@ async def test_list_scope_agent_allowed_at_trust_1(mcp_env, monkeypatch):
     assert payload["scope"] == "agent"
 
 
-async def test_list_service_identity_reads_both_persisted_ids(mcp_env, monkeypatch):
+async def test_list_normalizes_retired_client_input(mcp_env, monkeypatch):
     storage = stub_storage_client(monkeypatch, list_memories_by_filters=[])
 
-    await mcp_server.caura_list(agent_id=LEGACY_INSIGHTER_AGENT_ID)
+    await mcp_server.caura_list(
+        agent_id="memclaw-insighter",  # legacy-name-ok: supported client input alias
+    )
 
     payload = storage.list_memories_by_filters.await_args.args[0]
-    expected = [INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID]
-    assert payload["caller_agent_ids"] == expected
-    assert payload["written_by_ids"] == expected
+    assert payload["caller_agent_id"] == INSIGHTER_AGENT_ID
+    assert payload["written_by"] == INSIGHTER_AGENT_ID
 
 
 async def test_list_scope_fleet_own_allowed_at_trust_1(mcp_env, monkeypatch):

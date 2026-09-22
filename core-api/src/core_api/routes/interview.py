@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings as app_settings
 from core_api.constants import INTERVIEW_EVENT_MAX_CHARS, INTERVIEW_MAX_EVENTS_PER_SUBMIT
@@ -145,6 +146,7 @@ async def submit_interview(
     """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
+    body.agent_id = canonical_service_agent_id(body.agent_id)
 
     tenant_id = body.tenant_id or auth.tenant_id
     if not tenant_id:

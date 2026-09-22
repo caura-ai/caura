@@ -66,7 +66,6 @@ async def evolve_filter_by_scope(request: Request) -> dict:
         allowed = await _svc.evolve_filter_by_scope(
             tenant_id=tenant_id,
             caller_agent_id=caller_agent_id,
-            caller_agent_ids=body.get("caller_agent_ids"),
             fleet_id=fleet_id,
             scope=scope,
             ids=ids,

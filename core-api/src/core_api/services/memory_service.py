@@ -13,7 +13,6 @@ from fastapi import HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 
 from common import duplicate_memory
-from core_api.agent_ids import service_agent_read_ids
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
@@ -5163,13 +5162,7 @@ async def _search_memories_pipeline(
             "tenant_id": tenant_id,
             "fleet_ids": fleet_ids,
             "filter_agent_id": filter_agent_id,
-            "filter_agent_ids": (
-                list(service_agent_read_ids(filter_agent_id)) if filter_agent_id is not None else None
-            ),
             "caller_agent_id": caller_agent_id,
-            "caller_agent_ids": (
-                list(service_agent_read_ids(caller_agent_id)) if caller_agent_id is not None else None
-            ),
             "allow_recall_bump": allow_recall_bump,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
@@ -5356,13 +5349,7 @@ async def _search_memories_legacy(
         # strict mode depend on which search implementation served the request.
         "strict_fleet_scoping": bool(getattr(tenant_config, "strict_fleet_scoping", False)),
         "filter_agent_id": filter_agent_id,
-        "filter_agent_ids": (
-            list(service_agent_read_ids(filter_agent_id)) if filter_agent_id is not None else None
-        ),
         "caller_agent_id": caller_agent_id,
-        "caller_agent_ids": (
-            list(service_agent_read_ids(caller_agent_id)) if caller_agent_id is not None else None
-        ),
         "memory_type_filter": memory_type_filter,
         "status_filter": status_filter,
         "valid_at": valid_at.isoformat() if valid_at else None,

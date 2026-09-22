@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from core_storage_api.routers._validation import _require
 from core_storage_api.schemas import AGENT_DIGEST_FIELDS, REPORT_FIELDS, orm_to_dict
@@ -114,7 +114,6 @@ async def get_agent_activity_digest(
     tenant_id: str,
     period: str = "day",
     agent_id: str | None = None,
-    agent_ids: list[str] | None = Query(None),
     as_of: str | None = None,
 ) -> list[dict]:
     """Latest run's per-agent digest rows for a tenant/period.
@@ -136,13 +135,7 @@ async def get_agent_activity_digest(
         # timestamptz, so assume UTC to avoid a naive-vs-aware asyncpg error.
         if as_of_dt.tzinfo is None:
             as_of_dt = as_of_dt.replace(tzinfo=UTC)
-    rows = await _svc.agent_activity_digest_get_latest(
-        tenant_id,
-        period,
-        agent_id=agent_id,
-        agent_ids=agent_ids,
-        as_of=as_of_dt,
-    )
+    rows = await _svc.agent_activity_digest_get_latest(tenant_id, period, agent_id=agent_id, as_of=as_of_dt)
     return [orm_to_dict(r, AGENT_DIGEST_FIELDS) for r in rows]
 
 

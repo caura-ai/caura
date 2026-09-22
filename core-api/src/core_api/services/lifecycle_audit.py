@@ -20,11 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from core_api.agent_ids import (
-    INSIGHTER_AGENT_ID,
-    INSIGHTER_TRUST_LEVEL,
-    service_agent_read_ids,
-)
+from core_api.agent_ids import INSIGHTER_AGENT_ID, INSIGHTER_TRUST_LEVEL
 from core_api.clients.storage_client import CoreStorageClient
 from core_api.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
 from core_api.services.organization_settings import resolve_config
@@ -229,11 +225,7 @@ class _CoreApiLifecycleAdapter:
         # don't require the agent to be registered), and the next nightly run
         # retries registration.
         try:
-            existing = None
-            for read_id in service_agent_read_ids(INSIGHTER_AGENT_ID):
-                existing = await self._storage.get_agent(read_id, org_id)
-                if existing is not None:
-                    break
+            existing = await self._storage.get_agent(INSIGHTER_AGENT_ID, org_id)
             if existing is None:
                 await self._storage.create_or_update_agent(
                     {

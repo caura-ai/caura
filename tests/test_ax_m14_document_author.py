@@ -52,6 +52,23 @@ async def test_a_document_records_its_author(client):
 
 
 @pytest.mark.asyncio
+async def test_a_retired_service_author_is_stored_under_the_canonical_id(client):
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+
+    resp = await _write(
+        client,
+        headers,
+        tenant_id,
+        tag,
+        agent_id="memclaw-doc-indexer",  # legacy-name-ok: supported client input alias
+    )
+
+    assert resp.status_code in (200, 201), resp.text
+    assert resp.json()["agent_id"] == "caura-doc-indexer"
+
+
+@pytest.mark.asyncio
 async def test_the_author_survives_a_read(client):
     """The `owner`-inside-`data` workaround did not survive anything. This has
     to be readable back through the ordinary GET, not just echoed by the write
@@ -169,8 +186,9 @@ def test_the_route_gates_before_it_resolves():
     src = ast.unparse(ast.parse(inspect.getsource(documents.upsert_document)))
     assert "auth.enforce_self_agent(body.agent_id)" in src
     assert src.index("enforce_self_agent") < src.index(
-        "author = auth.agent_id or body.agent_id"
+        "raw_author = auth.agent_id or body.agent_id"
     )
+    assert "author = canonical_service_agent_id(raw_author)" in src
 
 
 # ── the column ───────────────────────────────────────────────────────────

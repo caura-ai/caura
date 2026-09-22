@@ -7,11 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from core_api.agent_ids import (
-    AgentIdentity,
-    canonical_service_agent_id,
-    service_agent_read_ids,
-)
+from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_TRUST_LEVEL
 from core_api.errors import (
@@ -49,15 +45,7 @@ async def get_or_create_agent(
     """
     sc = get_storage_client()
     agent_id = canonical_service_agent_id(agent_id)
-    read_ids = service_agent_read_ids(agent_id)
-
-    async def _lookup(*, read: bool = True) -> dict | None:
-        for read_id in read_ids:
-            if agent := await sc.get_agent(read_id, tenant_id, read=read):
-                return agent
-        return None
-
-    agent = await _lookup()
+    agent = await sc.get_agent(agent_id, tenant_id)
     if agent is None:
         # Confirm a MISS against the primary before creating. A miss is the
         # only dangerous answer here: it sends this call down the create path,
@@ -81,7 +69,7 @@ async def get_or_create_agent(
         # call and every memory write, so forcing the primary on the common
         # path would move that whole population off the replica to fix a case
         # that already ends in a write.
-        agent = await _lookup(read=False)
+        agent = await sc.get_agent(agent_id, tenant_id, read=False)
     if agent:
         # Backfill fleet_id if the agent was registered without one,
         # refresh display_name when it differs (hostname change), and
@@ -175,11 +163,7 @@ async def get_or_create_agent(
 
 async def lookup_agent(tenant_id: str, agent_id: str, *, read: bool = True) -> dict | None:
     sc = get_storage_client()
-    for read_id in service_agent_read_ids(agent_id):
-        agent = await sc.get_agent(read_id, tenant_id, read=read)
-        if agent is not None:
-            return agent
-    return None
+    return await sc.get_agent(canonical_service_agent_id(agent_id), tenant_id, read=read)
 
 
 _BROKER_LABEL_PREFIX = "broker:"
@@ -621,10 +605,7 @@ def memory_access_allowed_for_agent(
     boundary this helper guards).
     """
     if visibility == "scope_agent":
-        return bool(
-            owner_agent_id
-            and canonical_service_agent_id(owner_agent_id) == canonical_service_agent_id(caller_agent_id)
-        )
+        return bool(owner_agent_id and owner_agent_id == canonical_service_agent_id(caller_agent_id))
     if visibility == "scope_org":
         return True
     if not agent:
@@ -717,9 +698,7 @@ async def enforce_update(
                 AUTH_AGENT_TRUST_TOO_LOW, f"access policy: agent '{agent_id}' is restricted from updates."
             ),
         )
-    if trust < 3 and canonical_service_agent_id(agent_id) != canonical_service_agent_id(
-        memory_owner_agent_id
-    ):
+    if trust < 3 and canonical_service_agent_id(agent_id) != memory_owner_agent_id:
         raise HTTPException(
             status_code=403,
             detail=coded_detail(

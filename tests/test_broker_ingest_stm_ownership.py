@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import Response
 
+from core_api.agent_ids import DOC_INDEXER_AGENT_ID
 from core_api.auth import AuthContext
 from core_api.routes import memories, stm
 from core_api.schemas import IngestCommitRequest, IngestFact
@@ -77,6 +78,16 @@ async def test_ingest_commit_non_broker_not_degraded(monkeypatch):
         monkeypatch, agent_id="dash-agent", auth=_broker_auth(None, is_install=False)
     )
     assert agent_id == "dash-agent"
+    gate.assert_not_awaited()
+
+
+async def test_ingest_commit_normalizes_retired_input(monkeypatch):
+    agent_id, gate = await _drive_ingest(
+        monkeypatch,
+        agent_id="memclaw-doc-indexer",  # legacy-name-ok: supported client input alias
+        auth=_broker_auth(None, is_install=False),
+    )
+    assert agent_id == DOC_INDEXER_AGENT_ID
     gate.assert_not_awaited()
 
 

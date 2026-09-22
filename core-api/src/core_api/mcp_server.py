@@ -33,7 +33,6 @@ from core_api.agent_ids import (
     canonical_service_agent_id,
     effective_read_agent_id,
     effective_write_agent_id,
-    service_agent_read_ids,
 )
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
@@ -1280,6 +1279,8 @@ async def caura_recall(
     # rather than inline because this one reaches ``enforce_fleet_read_many``
     # below, so it must be an ``AgentIdentity`` and not a bare string.
     agent_id = effective_read_agent_id(_get_agent_id(), agent_id)
+    if filter_agent_id is not None:
+        filter_agent_id = canonical_service_agent_id(filter_agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # Clamped at BOTH ends. ``min`` alone let a negative top_k through to the
@@ -1851,7 +1852,7 @@ async def caura_manage(
     # unauthenticated caller would inherit that identity's scope. ``None`` ⇒
     # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
     caller_agent_id = _get_agent_id()
-    agent_id = caller_agent_id or agent_id
+    agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     if op in {"update", "transition", "delete", "bulk_delete"} and (
         refuse := _refuse_default_agent_on_gateway(agent_id)
     ):
@@ -2235,7 +2236,7 @@ async def caura_tune(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -2463,7 +2464,7 @@ async def caura_doc(
     # Raw authenticated identity for the delete trust gate (None ⇒ no agent
     # context). Must not fall back to the ``mcp-agent`` default.
     caller_agent_id = _get_agent_id()
-    agent_id = caller_agent_id or agent_id
+    agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     # A29 — refuse the default identity on every op. Was previously
     # write-only (A14); reads inherit the same contract because the
     # silent-empty-result UX is its own class of paper cut, and ``delete``
@@ -3219,7 +3220,9 @@ async def caura_list(
     capped_limit = max(1, min(int(limit), 50))
 
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
+    if written_by is not None:
+        written_by = canonical_service_agent_id(written_by)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3304,14 +3307,8 @@ async def caura_list(
             list_payload: dict[str, Any] = {
                 "tenant_id": tenant_id,
                 "caller_agent_id": agent_id,
-                "caller_agent_ids": list(service_agent_read_ids(agent_id)),
                 "fleet_id": fleet_id,
                 "written_by": effective_written_by,
-                "written_by_ids": (
-                    list(service_agent_read_ids(effective_written_by))
-                    if effective_written_by is not None
-                    else None
-                ),
                 "memory_type": memory_type,
                 "status": status,
                 "weight_min": weight_min,
@@ -3439,7 +3436,7 @@ async def caura_stats(
         )
 
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # Trust ladder resolves by TARGET (spec: L1 = read within own fleet, L2 =
@@ -3489,11 +3486,6 @@ async def caura_stats(
                     "tenant_id": tenant_id,
                     "fleet_id": fleet_id,
                     "agent_id": effective_agent_id,
-                    "agent_ids": (
-                        list(service_agent_read_ids(effective_agent_id))
-                        if effective_agent_id is not None
-                        else None
-                    ),
                     "memory_type": memory_type,
                     "status": status,
                     "include_deleted": effective_include_deleted,
@@ -3547,7 +3539,7 @@ async def caura_insights(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3733,7 +3725,7 @@ async def caura_evolve(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3939,7 +3931,7 @@ async def caura_keystones(
     if err := _check_auth():
         return err
     tenant_id = _get_tenant()
-    agent_id_effective = _get_agent_id() or agent_id
+    agent_id_effective = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id_effective):
         return _with_latency(refuse, t0)
 
@@ -4051,7 +4043,9 @@ async def caura_keystones_set(
         )
 
     tenant_id = _get_tenant()
-    caller_agent_id = _get_agent_id() or "mcp-agent"
+    caller_agent_id = canonical_service_agent_id(_get_agent_id() or "mcp-agent")
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     if refuse := _refuse_default_agent_on_gateway(caller_agent_id):
         return _with_latency(refuse, t0)
 

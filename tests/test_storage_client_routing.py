@@ -631,40 +631,6 @@ async def test_a_reader_hit_does_not_pay_for_the_primary() -> None:
     assert calls == [True], f"hit path asked the primary too: {calls}"
 
 
-async def test_service_agent_registration_reads_new_then_legacy_without_creating() -> (
-    None
-):
-    from unittest.mock import AsyncMock
-    from unittest.mock import patch as _patch
-
-    from core_api.agent_ids import INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID
-    from core_api.services import agent_service
-
-    sc = AsyncMock()
-
-    async def _get_agent(agent_id, tenant_id, *, read=True):
-        if agent_id == LEGACY_INSIGHTER_AGENT_ID:
-            return {
-                "id": "legacy",
-                "tenant_id": tenant_id,
-                "agent_id": agent_id,
-                "trust_level": 3,
-                "fleet_id": None,
-            }
-        return None
-
-    sc.get_agent = AsyncMock(side_effect=_get_agent)
-    with _patch.object(agent_service, "get_storage_client", return_value=sc):
-        got = await agent_service.get_or_create_agent("t1", INSIGHTER_AGENT_ID)
-
-    assert got["agent_id"] == LEGACY_INSIGHTER_AGENT_ID
-    assert [call.args[0] for call in sc.get_agent.await_args_list] == [
-        INSIGHTER_AGENT_ID,
-        LEGACY_INSIGHTER_AGENT_ID,
-    ]
-    sc.create_or_update_agent.assert_not_awaited()
-
-
 class _AsyncNoop:
     async def __call__(self, *a, **k):
         return None

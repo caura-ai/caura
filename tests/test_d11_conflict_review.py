@@ -71,7 +71,10 @@ def test_reviewer_identity_is_never_taken_from_the_body():
     src = inspect.getsource(__import__("core_api.routes.conflicts", fromlist=["x"]))
     # attribution is the gated identity, resolved before the trust check
     assert '"resolved_by": reviewer' in src
-    assert "reviewer = auth.agent_id or DEFAULT_AGENT_ID" in src
+    assert (
+        "reviewer = canonical_service_agent_id(auth.agent_id or DEFAULT_AGENT_ID)"
+        in src
+    )
 
 
 # ── storage-side guarantees ───────────────────────────────────────────────
