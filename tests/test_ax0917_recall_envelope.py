@@ -77,8 +77,9 @@ def _stored_metadata() -> dict:
 
 def _memory_out(
     content: str = "Ran prefers the CLI over the dashboard for fleet ops.",
+    metadata: dict | None = None,
 ) -> MemoryOut:
-    metadata = _stored_metadata()
+    metadata = _stored_metadata() if metadata is None else metadata
     return MemoryOut(
         id=uuid.uuid4(),
         tenant_id="tenant-A",
@@ -237,6 +238,73 @@ async def test_h04_recall_rows_carry_telemetry_exactly_once():
     assert row["system_metadata"]["embedding_pending"] is False
     # The caller's own bag is untouched.
     assert row["metadata"]["source"] == "openclaw-plugin"
+
+
+async def test_h04_platform_produced_caller_ownable_keys_are_not_duplicated():
+    """``summary``/``tags`` the PLATFORM produced are a mirror, not caller data.
+
+    FAILS PRE-FIX: ``CALLER_OWNABLE_KEYS`` were kept at top level
+    unconditionally, so a platform-produced ``summary`` still shipped twice —
+    ``metadata.summary`` plus the merged ``system_metadata`` view. Two copies
+    instead of three is still not the "one location" the projection promises.
+
+    ``set_system_value`` writes the top-level mirror for every platform value
+    except one whose key the caller owns, so a platform-produced value is
+    IDENTICAL in both places — which is exactly what makes it recognisable here.
+    """
+    platform_summary = "Prefers CLI tooling for fleet operations."
+    platform_tags = ["cli", "fleet"]
+    stored = {
+        "_system": {**_TELEMETRY, "summary": platform_summary, "tags": platform_tags},
+        **_TELEMETRY,
+        # The dual-write: no caller value, so the platform wrote top level too.
+        "summary": platform_summary,
+        "tags": platform_tags,
+        **_CALLER_META,
+    }
+
+    resp = await summarize_memories(
+        [_memory_out(metadata=stored)], "q", _minimal_config()
+    )
+    row = resp["memories"][0]
+
+    assert "summary" not in (row["metadata"] or {})
+    assert "tags" not in (row["metadata"] or {})
+    # Still in the response, at the one documented location.
+    assert row["system_metadata"]["summary"] == platform_summary
+    assert row["system_metadata"]["tags"] == platform_tags
+    # The caller's own bag is untouched, as always.
+    assert row["metadata"]["source"] == "openclaw-plugin"
+
+
+async def test_h04_caller_supplied_caller_ownable_keys_survive():
+    """The counter-case, and the reason the fix compares instead of deleting.
+
+    Without this, "drop summary unconditionally" would also pass the test above
+    while silently destroying caller data — the clobber C25 exists to prevent.
+    A caller-supplied value differs from the platform's namespace copy, and must
+    survive the projection at top level.
+    """
+    stored = {
+        "_system": {**_TELEMETRY, "summary": "Platform's generated summary."},
+        **_TELEMETRY,
+        # ``set_system_value`` skipped the top-level write because the caller
+        # owns this key, so what sits here is the caller's own value.
+        "summary": "The caller's own summary, which is theirs to keep.",
+        **_CALLER_META,
+    }
+
+    resp = await summarize_memories(
+        [_memory_out(metadata=stored)], "q", _minimal_config()
+    )
+    row = resp["memories"][0]
+
+    assert (
+        row["metadata"]["summary"]
+        == "The caller's own summary, which is theirs to keep."
+    )
+    # The platform's own version is still reachable, at its own location.
+    assert row["system_metadata"]["summary"] == "Platform's generated summary."
 
 
 async def test_h04_one_location_is_a_third_of_the_metadata_bytes():
