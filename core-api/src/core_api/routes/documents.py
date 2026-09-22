@@ -7,7 +7,7 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from common.embedding import get_embedding
 from core_api import openapi_responses as _oar
@@ -87,6 +87,45 @@ _SKILL_SLUG_RE = re.compile(r"^(?:forge/|agent/)?[a-z0-9][a-z0-9._-]{0,99}$")
 SKILLS_ROLLBACK_COLLECTION = "skills_rollback"
 
 
+# ax-0917-m-13 — field names that hold the PAYLOAD on the memories surface (or
+# are the obvious guess for one), none of which are fields on a document.
+#
+# The two stores took different words for the same idea and never said so: a
+# memory is written as ``{"content": ...}`` and a document as
+# ``{"collection", "doc_id", "data"}``, where ``data`` is a free-form JSON
+# object holding the whole payload. An agent that had already used
+# ``POST /memories`` sent ``{"title": ..., "content": ...}`` here and got the
+# generic unknown-field 422 plus "Field required" for three fields it had never
+# been told about — an error that says what is wrong with the body and nothing
+# about what a right one looks like.
+#
+# This list only changes the MESSAGE. Deliberately NAMED rather than a category
+# (same discipline as ``SERVER_OWNED_MEMORY_FIELDS``): an unrecognised key that
+# is not on it is still just a typo and keeps the ordinary unknown-field 422,
+# which is the correct answer for a typo.
+#
+# And deliberately not an alias into ``data``. Accepting ``content`` at the top
+# level would not rescue the body that motivated this — ``collection`` and
+# ``doc_id`` have no safe default (see ``_explain_document_shape``), so such a
+# request still fails and still needs to be told the shape. It would buy a
+# second spelling for the payload on a store whose own history says extra
+# spellings of a body field cannot be made correct (CAURA-717, see
+# ``core_api.services.doc_indexing``), plus a precedence rule for a caller that
+# sends both.
+_FIELDS_THAT_BELONG_IN_DATA = (
+    "content",
+    "text",
+    "body",
+    "title",
+    "summary",
+    "memory_type",
+    "metadata",
+)
+
+# Named once because the message below lists whichever of them are absent.
+_DOCUMENT_REQUIRED_FIELDS = ("collection", "doc_id", "data")
+
+
 # ── Schemas ──
 
 
@@ -112,9 +151,34 @@ class DocWriteRequest(TenantScopedBody):
             "each upsert, since an upsert replaces the document."
         ),
     )
-    collection: str = Field(min_length=1, max_length=200)
-    doc_id: str = Field(min_length=1, max_length=500)
-    data: dict
+    collection: str = Field(
+        min_length=1,
+        max_length=200,
+        description=(
+            "Namespace grouping related documents, e.g. 'runbooks'. Chosen by "
+            "the caller; created on first write. Part of the upsert key."
+        ),
+    )
+    doc_id: str = Field(
+        min_length=1,
+        max_length=500,
+        description=(
+            "Your own stable id for this document within the collection. "
+            "Together with 'collection' it is the upsert key: writing the same "
+            "pair again REPLACES the stored document rather than adding one, "
+            "which is what makes a retry safe. No server-generated default — "
+            "minting an id would turn every write into a new row."
+        ),
+    )
+    data: dict = Field(
+        description=(
+            "The document itself, as a free-form JSON object. This is where "
+            "the payload goes — there is no top-level 'content' or 'title' "
+            "field on a document. Replaced wholesale on each upsert. "
+            "data['summary'], when present, is the string that gets embedded "
+            "and is the only thing POST /documents/search can match on."
+        ),
+    )
     # C34 — opt out of the server-side catastrophic-shrink guard, which
     # refuses to replace a substantial document with a near-empty one. A
     # truncated payload from a failed read looks exactly like an intentional
@@ -124,6 +188,76 @@ class DocWriteRequest(TenantScopedBody):
     # Embed source is no longer caller-chosen. Server reads data["summary"]
     # (and, for collection="skills", falls back to data["description"] for
     # back-compat). See core_api.services.doc_indexing.
+
+    @model_validator(mode="before")
+    @classmethod
+    def _explain_document_shape(cls, data):
+        """ax-0917-m-13 — answer a memories-shaped body with the document shape.
+
+        Fires only when the body borrows a name from
+        ``_FIELDS_THAT_BELONG_IN_DATA``. Every other invalid body keeps the 422
+        it already had, per-field ``loc`` included.
+
+        WHY THE MESSAGE IS THE FIX, and not a default or an alias. The naive
+        body cannot be made to succeed, because the two fields it is missing
+        are the two that cannot be invented:
+
+        * ``doc_id`` — the write is an upsert idempotent on
+          ``(collection, doc_id)``. A server-minted id would silently convert
+          it into create-every-time: the same call issued twice would leave two
+          rows, a retry after a timeout would duplicate rather than converge,
+          and the C34 shrink guard in ``postgres_service.document_upsert``
+          (which compares a write against the row it is about to replace) would
+          have nothing to compare against. That is a change to what the
+          endpoint MEANS, sold as a convenience.
+        * ``collection`` — a default is a shared namespace, and the doc_id
+          inside it is the upsert key, so two callers who both accept the
+          default and pick the same obvious doc_id silently overwrite each
+          other's document.
+
+        So the request fails either way and the only open question is what it
+        is told. It is told the shape, with a body it can send — the same move
+        as the ``NO_SUCH_ROUTE`` 404, which answers a wrong path by naming the
+        real ones instead of just "not that".
+
+        ``mode="before"`` sees the raw payload, which is what this needs: by
+        the time ``extra="forbid"`` has run, the request is already several
+        errors that individually name fields and collectively explain nothing.
+        """
+        if not isinstance(data, dict):
+            return data
+        borrowed = [k for k in _FIELDS_THAT_BELONG_IN_DATA if k in data]
+        if not borrowed:
+            return data
+
+        names = ", ".join(f"'{k}'" for k in borrowed)
+        subject = f"{names} is not a field" if len(borrowed) == 1 else f"{names} are not fields"
+        pronoun = "It belongs" if len(borrowed) == 1 else "They belong"
+        missing = [f for f in _DOCUMENT_REQUIRED_FIELDS if f not in data]
+
+        message = (
+            f"{subject} on a document. {pronoun} inside 'data'. "
+            "A document is 'collection' + 'doc_id' + 'data': 'collection' groups related "
+            "documents, 'doc_id' is your own stable id for this one, and the two together "
+            "are the upsert key — writing the same pair again REPLACES the stored document. "
+            "'data' is a free-form JSON object holding the whole payload, which is why no "
+            "payload field is declared on this body."
+        )
+        if missing:
+            message += f" This body is also missing: {', '.join(missing)}."
+        message += (
+            " Minimal valid body: "
+            '{"collection": "notes", "doc_id": "my-note", "data": {"title": "...", '
+            '"content": "...", "summary": "one line describing this document"}}.'
+            " Only data['summary'] is embedded, so a document written without one is stored "
+            "and readable by id but is never returned by POST /documents/search."
+        )
+        if "content" in borrowed:
+            message += (
+                " If you meant to store a fact rather than a document, that is "
+                "POST /memories, which does take a top-level 'content'."
+            )
+        raise ValueError(message)
 
 
 class DocQueryRequest(TenantScopedBody):
