@@ -120,6 +120,7 @@ from core_api.services.usage_service import (
     check_and_increment,
     plan_limit_gated,
     recall_operation,
+    set_usage_headers,
 )
 
 logger = logging.getLogger(__name__)
@@ -1274,7 +1275,7 @@ async def write_memory(
         _body, _status = _replay
         # Replays bypass the per-tenant slot AND the
         # ``check_and_increment`` quota call below, so ``response.headers``
-        # is empty here — emit no rate-limit headers rather than
+        # is empty here — emit no quota headers rather than
         # passing empties. Acceptable trade-off: a replayed request
         # didn't consume quota, so there's no fresh ``remaining`` value
         # to publish.
@@ -1326,9 +1327,7 @@ async def _write_memory_inner(
         await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
         if charges_write_quota("create"):
             usage = await check_and_increment(body.tenant_id, "write")
-    if usage:
-        response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
-        response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
+    set_usage_headers(response, usage)
     _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
     result = await create_memory(body)
     # STM writes return STMWriteResponse (different shape from MemoryOut)
@@ -1741,13 +1740,20 @@ async def _write_memories_bulk_inner(
     # duplicates or errors. Those are a billing decision, and
     # ``meters_mcp_bulk_write``'s docstring is the precedent for treating one as
     # such rather than shipping it as a deploy side effect.
+    usage = None
     if auth.tenant_id:
         usage = await bulk_check_and_increment(body.tenant_id, len(body.items))
-        if usage:
-            response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
-            response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
 
     bulk_resp = _bulk_response(result)
+    # Onto ``bulk_resp``, NOT the injected ``response`` param. This route
+    # RETURNS a Response, and FastAPI only merges the param's headers into a
+    # response it built itself from a returned model — ``if isinstance(
+    # raw_response, Response): response = raw_response``, with no
+    # ``headers.raw.extend``. So the quota headers set on ``response`` here
+    # were dropped on the floor and no bulk caller has ever seen them. (The
+    # throttle headers survive because slowapi's decorator injects into
+    # whatever the handler RETURNS when that is a Response.)
+    set_usage_headers(bulk_resp, usage)
     if idem:
         # Replay the live status code, not a hardcoded 200 — a 207
         # batch with mixed errors must replay AS 207, not as a 200
@@ -2281,9 +2287,7 @@ async def _search_inner(
             if body.fleet_ids:
                 await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids)
         usage = await check_and_increment(body.tenant_id, "search")
-    if usage:
-        response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
-        response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
+    set_usage_headers(response, usage)
     from core_api.services.organization_settings import resolve_config
 
     t_start = time.perf_counter()

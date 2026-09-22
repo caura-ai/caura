@@ -745,6 +745,11 @@ Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLim
 otherwise, so a multi-instance deployment without Redis limits each instance separately. A Redis
 outage fails open: requests pass through un-throttled rather than erroring.
 
+`X-RateLimit-*` is the per-second throttle and nothing else. A deployment with a usage meter wired
+reports the separate per-period plan quota as `X-Usage-Limit` / `X-Usage-Remaining` on
+`POST /memories`, `POST /memories/bulk` and `POST /search`; OSS standalone has no quota, so those
+headers are absent there.
+
 Add limiting at your reverse proxy (nginx, Caddy, Cloudflare) as well if you need per-IP DDoS
 floors or limits the application layer can't see.
 

@@ -148,6 +148,8 @@ These limits apply to the managed platform at `caura.ai`. A self-hosted deployme
 
 Exceeded limits return HTTP 429 with a `Retry-After` header. Rate-limited routes also carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` on **successful** responses, so a client can back off before it is throttled rather than after.
 
+Those three headers describe the throttle only. The per-period plan quota is reported separately as `X-Usage-Limit` / `X-Usage-Remaining` on `POST /memories`, `POST /memories/bulk` and `POST /search`, and only where a usage meter is wired — a deployment without one (OSS standalone) omits them rather than reporting a placeholder.
+
 </details>
 
 ## Configuration

@@ -28,9 +28,11 @@ and ``enforce_usage_limits()`` turns into a 403 at ~22 write routes. So a hook
 returning ``allowed=False`` blocks nothing here, by design — the decision it
 would express is already travelling a different way.
 
-What the result IS used for: the ``X-RateLimit-Limit`` /
-``X-RateLimit-Remaining`` response headers on three routes. Everything else
-discards it.
+What the result IS used for: the ``X-Usage-Limit`` / ``X-Usage-Remaining``
+response headers on three routes, via ``set_usage_headers`` below. Everything
+else discards it. Those headers were called ``X-RateLimit-*`` until this
+module grew ``set_usage_headers``; see the note beside the constants for why
+that name could not stay.
 
 Implementation guidance for the platform side: enqueue and return ``None``.
 This runs on the write path, and this codebase has twice moved off per-request
@@ -43,9 +45,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, get_args
+from typing import TYPE_CHECKING, Literal, get_args
 
 from core_api.services.hooks import get_hooks
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
@@ -355,3 +360,54 @@ async def bulk_check_and_increment(
 ) -> UsageCheckResult:
     """Record a bulk write of ``count`` items as a single metered call."""
     return await _meter(tenant_id, "write", count)
+
+
+# ── Publishing the counters: headers of their own ───────────────────────────
+#
+# These are the PERIOD QUOTA — "you may write N this billing period, M left" —
+# and they are deliberately NOT called ``X-RateLimit-*``.
+#
+# That name belongs to something else on this API. slowapi owns
+# ``X-RateLimit-Limit`` / ``-Remaining`` / ``-Reset`` for the per-second
+# throttle (``middleware/rate_limit.py``, ``headers_enabled=True``), and that
+# meaning is the one README and ``docs/api-reference.md`` publish: a client
+# reads them to back off BEFORE it is throttled. The quota headers used to
+# reuse the same two names, so a metered route answered with both — slowapi
+# appends rather than sets, so the response carried ``X-RateLimit-Limit``
+# twice, e.g. ``None`` then ``10``. HTTP says a client may join repeated
+# headers with a comma, and httpx/requests/fetch all do, so the value a caller
+# actually read back was ``"None, 10"``: not an integer, so ``int(...)`` raises
+# and any back-off arithmetic built on it fails. The throttle signal was
+# unusable on exactly the routes most likely to be throttled — ``POST
+# /memories`` and ``POST /search``.
+#
+# Two different quantities cannot share one header name, so the one with no
+# published contract moved. ``X-RateLimit-*`` now means the throttle and only
+# the throttle.
+USAGE_LIMIT_HEADER = "X-Usage-Limit"
+USAGE_REMAINING_HEADER = "X-Usage-Remaining"
+
+
+def set_usage_headers(response: Response, usage: UsageCheckResult | None) -> None:
+    """Publish period-quota counters on ``response`` — when there are any.
+
+    Absent headers mean "no quota to report", which is the honest answer for
+    the OSS default (no meter wired, ``_allowed()`` → ``limit=None``) and for a
+    platform meter that recorded the usage without handing counters back.
+
+    The call sites previously wrote ``str(usage.get("limit", "unlimited"))``,
+    and that default is unreachable: ``UsageCheckResult.get`` is
+    ``getattr(self, key, default)``, so a field that EXISTS and is ``None``
+    returns ``None`` rather than falling back — ``dict.get`` semantics, applied
+    to a dataclass whose fields all exist. Every unmetered response therefore
+    advertised the literal string ``"None"`` as its limit. Omitting beats
+    emitting either ``"None"`` or ``"unlimited"``: both are non-numeric values
+    in a numeric header, so both break the same ``int(...)`` the caller has to
+    write.
+    """
+    if usage is None:
+        return
+    if usage.limit is not None:
+        response.headers[USAGE_LIMIT_HEADER] = str(usage.limit)
+    if usage.remaining is not None:
+        response.headers[USAGE_REMAINING_HEADER] = str(usage.remaining)
