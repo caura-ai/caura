@@ -143,6 +143,28 @@ def _is_valid_entity(name: str, blocklist: frozenset[str] | None = None) -> bool
     return True
 
 
+def _merge_alias_into(item: dict, *names: str) -> None:
+    """Fold ``names`` into an already-built upsert item's ``_aliases``.
+
+    L-32. The second surface form that lands on a row already claimed by this
+    batch contributes its alias to the FIRST item rather than becoming a second
+    item for the same ``entity_id``. Everything else about the row is
+    first-seen-wins — ``canonical_name``, ``entity_type``, ``name_embedding`` —
+    so the alias list is the only field that has to accumulate, and it is
+    exactly the field the lost update was destroying.
+
+    Order-preserving and idempotent: appended in the order the extraction named
+    them, and a name already present is not repeated. The ``_aliases`` value is
+    read defensively because it comes from a storage response.
+    """
+    attrs = item.setdefault("attributes", {})
+    aliases = list(attrs.get("_aliases") or [])
+    for name in names:
+        if name and name not in aliases:
+            aliases.append(name)
+    attrs["_aliases"] = aliases
+
+
 async def _discover_cross_links_for_memory(
     memory_id: UUID,
     tenant_id: str,
@@ -499,7 +521,13 @@ async def process_entity_extraction(
             # about the prior "longest-wins" regression that turned LLM
             # hallucinations into canonical rows — this preservation is
             # the audit P1 fix's correctness gate.
+            # L-32. ``upsert_names[j]`` is every surface form that item ``j``
+            # stands for — usually one, more when two of them resolved to the
+            # same existing row. See the coalescing branch below for why the
+            # items cannot simply be 1:1 with ``filtered`` any more.
             upsert_items: list[dict] = []
+            upsert_names: list[list[str]] = []
+            entity_id_to_item: dict[str, int] = {}
             for i, (name, entity_type, _role) in enumerate(filtered):
                 match = resolved[i] if i < len(resolved) else None
                 # CAURA graph-build fix (B): reject a similarity-merge when the two
@@ -508,7 +536,11 @@ async def process_entity_extraction(
                 if match and not _same_identifier_signature(name, match.get("canonical_name") or ""):
                     match = None
                 item: dict = {
-                    "input_idx": i,
+                    # Index into ``upsert_items``, NOT into ``filtered`` — the
+                    # two stop being the same list the moment anything
+                    # coalesces, and storage validates that these tile
+                    # ``[0, len(items))`` contiguously.
+                    "input_idx": len(upsert_items),
                     "tenant_id": tenant_id,
                     "fleet_id": fleet_id,
                     "entity_type": entity_type,
@@ -569,16 +601,52 @@ async def process_entity_extraction(
                         item["canonical_name"] = name
                         item["attributes"] = {}
                     else:
+                        # L-32: intra-batch alias lost-update.
+                        #
+                        # Two surface forms in ONE extraction can resolve to the
+                        # SAME existing row — "IBM" exact-matches it while
+                        # "I.B.M." reaches it by embedding similarity, and the
+                        # WT-2 dedupe above does not collapse them because their
+                        # ``canonical_match_key``s genuinely differ. Both then
+                        # built ``merged_attrs`` from the SAME resolve snapshot,
+                        # so neither payload contained the other's alias, and
+                        # storage applies ``attributes`` wholesale per item in
+                        # list order (``entity_bulk_upsert``: "caller
+                        # pre-computed the merged attributes — server side does
+                        # not re-merge"). Last item won; the first surface form's
+                        # alias was written and then overwritten in the same
+                        # batch. Deterministic, not racy — which is why it never
+                        # looked like a race and never got chased.
+                        #
+                        # Fixed by coalescing here rather than storage-side,
+                        # because the merge contract is the caller's: this is the
+                        # same "dedupe at the write site" the link batch below
+                        # already does for the same cause, and the same
+                        # first-seen-wins rule applies to everything except the
+                        # alias list, which accumulates.
+                        #
+                        # Only the UPDATE path can collide. Two creates cannot
+                        # name the same row: the natural key is
+                        # ``lower(canonical_name)``, and two names that differ
+                        # only in case share a ``canonical_match_key`` and were
+                        # already deduped.
+                        prior = entity_id_to_item.get(str(match_entity_id))
+                        if prior is not None:
+                            _merge_alias_into(upsert_items[prior], name, existing_name)
+                            upsert_names[prior].append(name)
+                            continue
                         item["action"] = "update"
                         item["entity_id"] = match_entity_id
                         item["canonical_name"] = existing_name  # first-seen wins
                         item["attributes"] = merged_attrs
+                        entity_id_to_item[str(match_entity_id)] = len(upsert_items)
                 else:
                     # No match — create.
                     item["action"] = "create"
                     item["canonical_name"] = name
                     item["attributes"] = {}
                 upsert_items.append(item)
+                upsert_names.append([name])
 
             # ---- Step 2c: bulk upsert ----
             #
@@ -617,14 +685,19 @@ async def process_entity_extraction(
                 if not r.get("entity_id"):
                     continue
                 idx = r["input_idx"]
-                if idx >= len(filtered):
+                if idx >= len(upsert_names):
                     logger.warning(
-                        "bulk_upsert_entities returned out-of-range input_idx %d (filtered len=%d); skipping",
+                        "bulk_upsert_entities returned out-of-range input_idx %d (items len=%d); skipping",
                         idx,
-                        len(filtered),
+                        len(upsert_names),
                     )
                     continue
-                name_to_id[filtered[idx][0]] = UUID(r["entity_id"])
+                # L-32: one item can stand for several surface forms. Every one
+                # of them has to reach ``name_to_id``, or the relation loop
+                # below cannot resolve an endpoint the extractor named by the
+                # coalesced form and silently drops that edge.
+                for nm in upsert_names[idx]:
+                    name_to_id[nm] = UUID(r["entity_id"])
                 if r.get("action") == "created":
                     created_entity_ids.append(str(r["entity_id"]))
 
