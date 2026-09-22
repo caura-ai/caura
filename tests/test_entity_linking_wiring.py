@@ -41,7 +41,8 @@ def _fake_config(**overrides):
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -57,7 +58,7 @@ async def test_extraction_triggers_cross_links_when_enabled(
     mock_extract,
     mock_sc_factory,
     mock_embed,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_log,
     mock_discover,
 ):
@@ -121,7 +122,8 @@ async def test_extraction_triggers_cross_links_when_enabled(
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -137,7 +139,7 @@ async def test_extraction_skips_cross_links_when_disabled(
     mock_extract,
     mock_sc_factory,
     mock_embed,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_log,
     mock_discover,
 ):
@@ -200,7 +202,8 @@ async def test_extraction_skips_cross_links_when_disabled(
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -216,7 +219,7 @@ async def test_extraction_cross_link_failure_is_nonfatal(
     mock_extract,
     mock_sc_factory,
     mock_embed,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_log,
     mock_discover,
 ):
@@ -513,7 +516,8 @@ async def test_a_row_still_live_after_the_writes_is_not_purged(
     new_callable=AsyncMock,
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
@@ -531,7 +535,7 @@ async def test_a_detected_drop_stops_the_writes_that_come_after_the_purge(
     mock_sc_factory,
     mock_embed,
     mock_log,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_discover,
 ):
     """Purging is only half of it — the function must also STOP.
@@ -569,7 +573,7 @@ async def test_a_detected_drop_stops_the_writes_that_come_after_the_purge(
 
     sc.purge_entity_artifacts.assert_awaited_once()
     # The rows the purge would NOT have covered, because they did not exist yet.
-    mock_upsert_relation.assert_not_awaited()
+    mock_bulk_relations.assert_not_awaited()
     mock_discover.assert_not_awaited()
 
 
@@ -578,7 +582,8 @@ async def test_a_detected_drop_stops_the_writes_that_come_after_the_purge(
     new_callable=AsyncMock,
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
@@ -596,7 +601,7 @@ async def test_a_live_row_still_gets_its_relations_written(
     mock_sc_factory,
     mock_embed,
     mock_log,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_discover,
 ):
     """The other half of the guard above: stopping must be conditional.
@@ -621,7 +626,7 @@ async def test_a_live_row_still_gets_its_relations_written(
         )
 
     sc.purge_entity_artifacts.assert_not_awaited()
-    mock_upsert_relation.assert_awaited()
+    mock_bulk_relations.assert_awaited()
     mock_discover.assert_awaited()
 
 
@@ -630,7 +635,8 @@ async def test_a_live_row_still_gets_its_relations_written(
     new_callable=AsyncMock,
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
@@ -648,7 +654,7 @@ async def test_a_drop_landing_after_the_relation_write_is_still_purged(
     mock_sc_factory,
     mock_embed,
     mock_log,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_discover,
 ):
     """The window the post-link check does NOT cover.
@@ -688,7 +694,7 @@ async def test_a_drop_landing_after_the_relation_write_is_still_purged(
         )
 
     # The relation WAS written — that is the premise of this race, not a failure.
-    mock_upsert_relation.assert_awaited()
+    mock_bulk_relations.assert_awaited()
     # And the rows it left behind were taken back.
     sc.purge_entity_artifacts.assert_awaited_once()
 
@@ -698,7 +704,8 @@ async def test_a_drop_landing_after_the_relation_write_is_still_purged(
     new_callable=AsyncMock,
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
@@ -716,7 +723,7 @@ async def test_a_transient_liveness_read_failure_does_not_discard_the_audit_work
     mock_sc_factory,
     mock_embed,
     mock_log,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_discover,
 ):
     """A read timeout says nothing about whether the memory was dropped.
@@ -758,7 +765,7 @@ async def test_a_transient_liveness_read_failure_does_not_discard_the_audit_work
     # Nothing was concluded, so nothing was destroyed.
     sc.purge_entity_artifacts.assert_not_awaited()
     assert mock_log.await_count == 1, "the audit entry was discarded on a non-answer"
-    mock_upsert_relation.assert_awaited()
+    mock_bulk_relations.assert_awaited()
     mock_discover.assert_awaited()
 
 
@@ -767,7 +774,8 @@ async def test_a_transient_liveness_read_failure_does_not_discard_the_audit_work
     new_callable=AsyncMock,
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
@@ -785,7 +793,7 @@ async def test_a_crash_after_the_writes_still_purges_a_dropped_row(
     mock_sc_factory,
     mock_embed,
     mock_log,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_discover,
 ):
     """The exit the final check does not cover: leaving by raising.
@@ -855,7 +863,8 @@ async def test_a_crash_after_the_writes_still_purges_a_dropped_row(
     new_callable=AsyncMock,
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
@@ -873,7 +882,7 @@ async def test_a_guarded_relation_failure_still_reaches_the_final_purge_check(
     mock_sc_factory,
     mock_embed,
     mock_log,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_discover,
 ):
     """The other half of the H-02 guarantee, after the relation guard.
@@ -895,7 +904,7 @@ async def test_a_guarded_relation_failure_still_reaches_the_final_purge_check(
         ]
     )
     mock_sc_factory.return_value = sc
-    mock_upsert_relation.side_effect = RuntimeError("storage 500 on one relation")
+    mock_bulk_relations.side_effect = RuntimeError("storage 500 on one relation")
 
     with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
@@ -1118,7 +1127,8 @@ async def test_cross_link_discovery_alone_still_owes_the_memory_a_liveness_check
     new_callable=AsyncMock,
 )
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
@@ -1136,7 +1146,7 @@ async def test_an_unreadable_purge_response_does_not_escape_the_except_handler(
     mock_sc_factory,
     mock_embed,
     mock_log,
-    mock_upsert_relation,
+    mock_bulk_relations,
     mock_discover,
 ):
     """The purge response shape is not guaranteed, and one call site is exposed.
@@ -1167,7 +1177,7 @@ async def test_an_unreadable_purge_response_does_not_escape_the_except_handler(
     )
     sc.purge_entity_artifacts = AsyncMock(return_value=["unexpected", "shape"])
     mock_sc_factory.return_value = sc
-    mock_upsert_relation.side_effect = RuntimeError("storage went away mid-write")
+    mock_bulk_relations.side_effect = RuntimeError("storage went away mid-write")
 
     # The assertion IS that this returns rather than raising.
     with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):

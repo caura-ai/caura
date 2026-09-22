@@ -175,15 +175,43 @@ def _write_markers(fn: ast.AST) -> set[str]:
     return marks
 
 
+def _delegated_markers(fn: ast.AST, writers: set[str]) -> set[str]:
+    """Writes this method performs through a helper in the same module.
+
+    The fifth thing the classifier was blind to. It reads a method's OWN body,
+    so a method that opens the session and hands it to a sibling holding the
+    ``pg_insert`` shows no marker at all and lands in the "pure read" bucket —
+    the same silent misclassification ``agent_update_fleet`` is pinned for,
+    arriving by delegation rather than by an invisible statement. Converting
+    such a method to the read replica would drop its writes without a word.
+
+    Only ``self.``/``cls.`` calls to functions that this module itself
+    classifies as writers count, so it cannot be fooled by a name.
+    """
+    marks: set[str] = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        target = node.func.value
+        if isinstance(target, ast.Name) and target.id in {"self", "cls"} and node.func.attr in writers:
+            marks.add(f"delegated:{node.func.attr}")
+    return marks
+
+
 def _writer_session_methods() -> dict[str, set[str]]:
     _, tree, lines = _source()
+    functions = [node for node in ast.walk(tree) if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))]
+    # Every writer in the module, INCLUDING the ones that take a session rather
+    # than opening one — those are exactly the helpers the delegation check
+    # needs to recognise, and they never appear in the result below.
+    direct = {node.name: _write_markers(node) for node in functions}
+    writers = {name for name, marks in direct.items() if marks}
+
     out: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
-            continue
+    for node in functions:
         if node.name == "get_session" or "get_session()" not in _segment(lines, node):
             continue
-        out[node.name] = _write_markers(node)
+        out[node.name] = direct[node.name] | _delegated_markers(node, writers)
     return out
 
 
@@ -255,11 +283,19 @@ def test_the_writer_session_population_is_pinned() -> None:
     ``document_get_by_doc_id`` holds the writer for the same reason, and the two
     document lookups must not disagree about staleness — that would make the
     ``id`` path unreliable while the ``doc_id`` path was not.
+
+    137 -> 138 on 2026-09-22 (OSS-0814-L-37): ``relation_bulk_add`` is new — the
+    batch behind ``POST /entities/relations/bulk``. It is plainly a writer and
+    is NOT in the ``pure`` subset, which is only true because the classifier
+    grew ``_delegated_markers`` in the same change: the method opens the session
+    and hands it to ``_relation_upsert_and_fetch``, which holds the
+    ``pg_insert``. Without that rule it would have been counted as a pure read
+    and offered up as a conversion candidate.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 137, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 138, f"{len(methods)} methods open a writer session"
     assert len(pure) == 64, f"{len(pure)} of them show no write marker"
 
 

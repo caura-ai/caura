@@ -394,6 +394,69 @@ async def create_relation(request: Request) -> dict:
     return orm_to_dict(relation, RELATION_FIELDS)
 
 
+@router.post("/relations/bulk")
+async def bulk_create_relations(request: Request) -> list[dict]:
+    """Upsert many relations in one round-trip.
+
+    Body: ``{"tenant_id", "items": [{"input_idx", "fleet_id"?,
+    "from_entity_id", "relation_type", "to_entity_id", "weight"?,
+    "evidence_memory_id"?}, ...]}``. Response is aligned to input order with
+    ``{"input_idx", "relation": {...} | null, "error"?: "fk_violation"}``.
+
+    Per-item results rather than a single verdict, because the caller's failure
+    isolation is load-bearing: core-api's extraction worker guards every
+    relation individually so one bad upsert cannot take out the stages that
+    follow it (#1495). This endpoint collapses N round-trips into one WITHOUT
+    collapsing N outcomes into one.
+
+    Cap: 500 items per request.
+
+    ``tenant_id`` is required and binds every item, on both endpoints — the
+    same one-tenant-per-request rule ``/entities/links/bulk`` uses.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    items = body.get("items", [])
+    if not isinstance(items, list):
+        raise HTTPException(status_code=422, detail="'items' must be a list")
+    if len(items) > 500:
+        raise HTTPException(
+            status_code=422,
+            detail=f"bulk-relations capped at 500 items (got {len(items)})",
+        )
+    # Required per-item fields up-front, so a missing key surfaces as a 422
+    # rather than an uncaught KeyError → 500 inside the service.
+    _REQUIRED_RELATION = {"from_entity_id", "to_entity_id", "relation_type"}
+    for item in items:
+        missing = _REQUIRED_RELATION - item.keys()
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=(f"item at input_idx {item.get('input_idx')!r} missing fields: {sorted(missing)}"),
+            )
+    # UUID shape at the boundary — the service's ``UUID(...)`` would otherwise
+    # raise from inside and surface as a 500.
+    for item in items:
+        for field in ("from_entity_id", "to_entity_id"):
+            try:
+                UUID(str(item[field]))
+            except (ValueError, AttributeError, TypeError):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"invalid {field} UUID at input_idx {item.get('input_idx')!r}",
+                )
+        if item.get("evidence_memory_id") is not None:
+            try:
+                UUID(str(item["evidence_memory_id"]))
+            except (ValueError, AttributeError, TypeError):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"invalid evidence_memory_id UUID at input_idx {item.get('input_idx')!r}",
+                )
+    _validate_input_idxs(items)
+    return await _svc.relation_bulk_add(tenant_id, items)
+
+
 # ------------------------------------------------------------------
 # Memory-entity links
 # ------------------------------------------------------------------

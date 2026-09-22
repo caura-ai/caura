@@ -453,3 +453,65 @@ async def upsert_relation(data: RelationUpsert) -> RelationUpsertOut:
         weight=relation.get("weight"),
         evidence_memory_id=relation.get("evidence_memory_id"),
     )
+
+
+async def bulk_upsert_relations(data: list[RelationUpsert]) -> list[bool]:
+    """Upsert many relations in ONE storage round-trip.
+
+    Returns a list aligned to ``data``: ``True`` where the relation landed,
+    ``False`` where storage refused that item (``error="fk_violation"`` — an
+    endpoint that does not exist, or is not in this tenant).
+
+    Per-item outcomes, not a single verdict, so the caller keeps the failure
+    isolation the serial loop gave it: ``entity_extraction_worker`` guards every
+    relation individually because one failed upsert used to take out the A65
+    predicate write-back and the ``Trigger.ENTITY`` fire for that memory
+    (#1495). Batching the ROUND-TRIP is the win; batching the OUTCOME would
+    hand that regression back.
+
+    Every item must carry the same ``tenant_id``: storage binds one tenant per
+    request so a batch cannot span namespaces. ``ValueError`` if they disagree,
+    rather than silently writing them all under the first one's tenant.
+    """
+    if not data:
+        return []
+
+    tenants = {d.tenant_id for d in data}
+    if len(tenants) != 1:
+        raise ValueError(f"bulk_upsert_relations requires one tenant per call, got {sorted(tenants)}")
+    tenant_id = next(iter(tenants))
+
+    results = await get_storage_client().bulk_create_relations(
+        tenant_id=tenant_id,
+        items=[
+            {
+                "input_idx": i,
+                "fleet_id": d.fleet_id,
+                "from_entity_id": str(d.from_entity_id),
+                "relation_type": d.relation_type,
+                "to_entity_id": str(d.to_entity_id),
+                "weight": d.weight,
+                "evidence_memory_id": str(d.evidence_memory_id) if d.evidence_memory_id else None,
+            }
+            for i, d in enumerate(data)
+        ],
+    )
+
+    # Indexed by ``input_idx`` rather than zip'd positionally. A short or
+    # reordered response is a storage-side partial failure, and reading it
+    # positionally would silently attribute one relation's outcome to another —
+    # the same defensive shape ``entity_extraction_worker`` already applies to
+    # ``bulk_upsert_entities``. A missing slot reads as "did not land", which is
+    # the direction that under-reports rather than inventing a success.
+    landed = [False] * len(data)
+    for r in results:
+        idx = r.get("input_idx")
+        if not isinstance(idx, int) or not 0 <= idx < len(data):
+            logger.warning(
+                "bulk_create_relations returned out-of-range input_idx %r (sent %d); skipping",
+                idx,
+                len(data),
+            )
+            continue
+        landed[idx] = r.get("error") is None and r.get("relation") is not None
+    return landed

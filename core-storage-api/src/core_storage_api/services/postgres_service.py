@@ -99,7 +99,7 @@ from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
 from common.organization_settings_merge import deep_merge, diff_settings
 from core_storage_api.observability import PhaseTimer, db_measure
-from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
+from core_storage_api.schemas import MEMORY_LIST_FIELDS, RELATION_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
     assert_pii_safe,
@@ -7225,44 +7225,160 @@ class PostgresService:
                     data["tenant_id"],
                 )
                 raise ValueError(_RELATION_REJECTED)
-            insert_stmt = pg_insert(Relation).values(**data)
-            upsert_stmt = insert_stmt.on_conflict_do_update(
-                constraint="uq_relations_natural_key",
-                set_={
-                    "weight": insert_stmt.excluded.weight,
-                    # COALESCE so a caller that omits ``evidence_memory_id``
-                    # (or passes ``None``) does NOT wipe an existing evidence
-                    # link — common in the entity-extraction path where a
-                    # follow-up memory mentioning the same entities arrives
-                    # without a fresh evidence pointer. Latest non-NULL wins.
-                    "evidence_memory_id": func.coalesce(
-                        insert_stmt.excluded.evidence_memory_id,
-                        Relation.evidence_memory_id,
-                    ),
-                },
-            )
-            await session.execute(upsert_stmt)
+            return await self._relation_upsert_and_fetch(session, data)
 
-            # Re-fetch through the session so the caller gets a fully
-            # ORM-tracked ``Relation`` (matching the legacy ``session.add``
-            # path's contract). ``RETURNING`` on a ``pg_insert + on_conflict``
-            # statement yields a ``Row`` rather than a tracked instance,
-            # which downstream serialisers (``orm_to_dict``) expect to be
-            # an ORM object — re-querying keeps the contract.
-            #
-            # The four-column unique constraint guarantees at most one row per
-            # natural key regardless of ``fleet_id``, so filtering on fleet_id
-            # would crash with ``NoResultFound`` whenever the stored row's
-            # fleet_id differs from the incoming call's (the upsert SET clause
-            # intentionally does not touch fleet_id — first-writer wins on it).
-            select_stmt = select(Relation).where(
-                Relation.tenant_id == data["tenant_id"],
-                Relation.from_entity_id == data["from_entity_id"],
-                Relation.relation_type == data["relation_type"],
-                Relation.to_entity_id == data["to_entity_id"],
+    @staticmethod
+    async def _relation_upsert_and_fetch(session: AsyncSession, data: dict) -> Relation:
+        """The upsert half of :meth:`relation_add`, with the ownership test
+        already done by the caller.
+
+        Split out so the singular route and ``relation_bulk_add`` share ONE
+        statement. They differ only in where the ownership check happens — once
+        per call for the former, once per batch for the latter — and a second
+        inline copy of the ON CONFLICT clause is how the two drift apart on
+        exactly the semantics the docstring above spells out (weight refreshed,
+        evidence COALESCEd, fleet_id untouched).
+        """
+        insert_stmt = pg_insert(Relation).values(**data)
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            constraint="uq_relations_natural_key",
+            set_={
+                "weight": insert_stmt.excluded.weight,
+                # COALESCE so a caller that omits ``evidence_memory_id``
+                # (or passes ``None``) does NOT wipe an existing evidence
+                # link — common in the entity-extraction path where a
+                # follow-up memory mentioning the same entities arrives
+                # without a fresh evidence pointer. Latest non-NULL wins.
+                "evidence_memory_id": func.coalesce(
+                    insert_stmt.excluded.evidence_memory_id,
+                    Relation.evidence_memory_id,
+                ),
+            },
+        )
+        await session.execute(upsert_stmt)
+
+        # Re-fetch through the session so the caller gets a fully
+        # ORM-tracked ``Relation`` (matching the legacy ``session.add``
+        # path's contract). ``RETURNING`` on a ``pg_insert + on_conflict``
+        # statement yields a ``Row`` rather than a tracked instance,
+        # which downstream serialisers (``orm_to_dict``) expect to be
+        # an ORM object — re-querying keeps the contract.
+        #
+        # The four-column unique constraint guarantees at most one row per
+        # natural key regardless of ``fleet_id``, so filtering on fleet_id
+        # would crash with ``NoResultFound`` whenever the stored row's
+        # fleet_id differs from the incoming call's (the upsert SET clause
+        # intentionally does not touch fleet_id — first-writer wins on it).
+        select_stmt = select(Relation).where(
+            Relation.tenant_id == data["tenant_id"],
+            Relation.from_entity_id == data["from_entity_id"],
+            Relation.relation_type == data["relation_type"],
+            Relation.to_entity_id == data["to_entity_id"],
+        )
+        result = await session.execute(select_stmt)
+        return result.scalar_one()
+
+    async def relation_bulk_add(self, tenant_id: str, items: list[dict]) -> list[dict]:
+        """Upsert many relations in ONE round-trip, per-item isolated.
+
+        Each input item: ``{"input_idx", "fleet_id"?, "from_entity_id",
+        "relation_type", "to_entity_id", "weight"?, "evidence_memory_id"?}``.
+        Returns a list aligned to input order, each element either
+        ``{"input_idx", "relation": {...}}`` or ``{"input_idx", "relation":
+        None, "error": "fk_violation"}``.
+
+        Per-item sessions, deliberately — the same choice, for the same reason,
+        as :meth:`entity_bulk_upsert_links`. One bad endpoint in item N must
+        cost item N and nothing else; a shared transaction would roll back items
+        0..N-1 with it. That is not a detail here: core-api's extraction worker
+        guards every relation individually precisely because one failing upsert
+        used to take out the A65 predicate write-back and the ``Trigger.ENTITY``
+        fire for that memory (#1495). A batch endpoint that failed as a unit
+        would hand that regression straight back. What moves into one HTTP call
+        is the round-trip, not the blast radius.
+
+        ``tenant_id`` binds the request and every item, on both endpoints —
+        one tenant per request rather than one per item, so a single batch
+        cannot span namespaces (#1124). An item whose endpoint is not in
+        ``tenant_id`` is reported exactly like one whose endpoint does not
+        exist: ``error="fk_violation"``, same as the singular route's uniform
+        409, because a distinguishable answer turns the route into a bulk
+        existence oracle for the entity id space.
+
+        Cap enforced at the router level.
+        """
+        if not items:
+            return []
+
+        pair_ids: list[tuple[UUID, UUID]] = [
+            (
+                fid if isinstance(fid, UUID) else UUID(str(fid)),
+                tid if isinstance(tid, UUID) else UUID(str(tid)),
             )
-            result = await session.execute(select_stmt)
-            return result.scalar_one()
+            for fid, tid in ((it["from_entity_id"], it["to_entity_id"]) for it in items)
+        ]
+
+        # Ownership resolved ONCE for the whole batch — one query instead of one
+        # per item, and a batch naming the same entity a dozen times (the common
+        # shape: every relation of one memory starts at its subject) pays for it
+        # once. Its own session, and safe to be: ``Entity.tenant_id`` is not
+        # caller-writable (``_ENTITY_UPDATABLE_FIELDS`` omits it), so a row
+        # cannot change hands between this read and the writes below. Sharing
+        # one session with the inserts would undo their isolation.
+        endpoint_ids = {eid for pair in pair_ids for eid in pair}
+        async with get_session() as session:
+            owned = await self._owned_entities(session, tenant_id, endpoint_ids)
+
+        results: list[dict] = []
+        for it, (from_id, to_id) in zip(items, pair_ids, strict=True):
+            if from_id not in owned or to_id not in owned:
+                # The distinct log line is what keeps the real cause available
+                # to an operator while the wire answer stays uniform — the same
+                # split ``relation_add`` makes.
+                logger.info(
+                    "Relation rejected for %s → %s: an endpoint is not in tenant %s",
+                    from_id,
+                    to_id,
+                    tenant_id,
+                )
+                results.append({"input_idx": it["input_idx"], "relation": None, "error": "fk_violation"})
+                continue
+            data = {
+                "tenant_id": tenant_id,
+                "fleet_id": it.get("fleet_id"),
+                "from_entity_id": from_id,
+                "relation_type": it["relation_type"],
+                "to_entity_id": to_id,
+            }
+            if it.get("weight") is not None:
+                data["weight"] = it["weight"]
+            if it.get("evidence_memory_id") is not None:
+                data["evidence_memory_id"] = it["evidence_memory_id"]
+            try:
+                async with get_session() as session:
+                    relation = await self._relation_upsert_and_fetch(session, data)
+                # ``error: None`` spelled out rather than omitted, so every row
+                # of this response carries the same three keys and a caller
+                # reading ``row["error"]`` cannot KeyError on the happy path.
+                results.append(
+                    {
+                        "input_idx": it["input_idx"],
+                        "relation": orm_to_dict(relation, RELATION_FIELDS),
+                        "error": None,
+                    }
+                )
+            except IntegrityError:
+                # An endpoint deleted between the ownership read above and this
+                # insert. Reported per row so the rest of the batch still lands,
+                # and with the same opaque ``fk_violation`` the not-owned branch
+                # uses.
+                logger.warning(
+                    "Relation bulk-upsert FK violation: from_entity_id=%s to_entity_id=%s",
+                    from_id,
+                    to_id,
+                )
+                results.append({"input_idx": it["input_idx"], "relation": None, "error": "fk_violation"})
+        return results
 
     async def relation_get_outgoing(
         self,

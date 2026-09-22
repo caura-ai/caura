@@ -1093,3 +1093,89 @@ async def test_bulk_upsert_links_non_uuid_entity_id_returns_422(sc):
         )
     assert exc.value.response.status_code == 422
     assert "entity_id" in exc.value.response.text
+
+
+# ---------------------------------------------------------------------------
+# POST /entities/relations/bulk (L-37)
+# ---------------------------------------------------------------------------
+#
+# Only the REFUSAL path is exercised here, and that is a property of this
+# suite's database rather than a gap in the route. ``uq_relations_natural_key``
+# lives in migration 001 and is not declared on the ``Relation`` model, so the
+# ``caura_test`` schema — built by ``Base.metadata.create_all`` — does not have
+# it, and the ON CONFLICT clause the upsert targets by NAME cannot resolve.
+# (``Entity`` carries exactly this declaration, for exactly this reason; see the
+# comment on ``uq_entities_tenant_type_name_fleet``. Relations were missed.)
+#
+# The landing path is covered against the migration-owned ``caura_storage``
+# schema in ``core-storage-api/tests/test_relation_bulk_upsert.py``. What these
+# add on top of it is the one hop that suite cannot reach: core-api's storage
+# CLIENT — that ``bulk_create_relations`` posts the path and body the router
+# actually accepts, and reads back the shape it actually returns.
+
+
+async def test_bulk_create_relations_reports_a_bad_endpoint_per_item(sc):
+    """Per-item isolation is the half that makes the batch safe to adopt.
+
+    core-api guards every relation individually because one failed upsert used
+    to take out the A65 predicate write-back and the ``Trigger.ENTITY`` fire for
+    that memory (#1495). A batch that answered with one verdict for all of them
+    would hand that regression back.
+    """
+    tid = _t()
+    a = await _create_entity(sc, tid, "iso-a")
+    ghost = str(uuid4())
+
+    results = await sc.bulk_create_relations(
+        tid,
+        items=[
+            {
+                "input_idx": 0,
+                "fleet_id": None,
+                "from_entity_id": a["id"],
+                "relation_type": "dead_target",
+                "to_entity_id": ghost,
+            },
+            {
+                "input_idx": 1,
+                "fleet_id": None,
+                "from_entity_id": ghost,
+                "relation_type": "dead_source",
+                "to_entity_id": a["id"],
+            },
+        ],
+    )
+
+    assert [r["input_idx"] for r in results] == [0, 1]
+    assert [r["error"] for r in results] == ["fk_violation", "fk_violation"]
+    assert all(r["relation"] is None for r in results)
+
+
+async def test_bulk_create_relations_refuses_an_endpoint_in_another_tenant(sc):
+    """M-64 through the client. ``Relation.tenant_id`` describes the EDGE, and
+    the FKs only require its endpoints to exist in SOME tenant — so a batch
+    route that skipped the ownership test would be a second door to the
+    disclosure the singular route closed."""
+    attacker, victim = _t(), _t()
+    mine = await _create_entity(sc, attacker, "mine")
+    theirs = await _create_entity(sc, victim, "theirs")
+
+    results = await sc.bulk_create_relations(
+        attacker,
+        items=[
+            {
+                "input_idx": 0,
+                "fleet_id": None,
+                "from_entity_id": mine["id"],
+                "relation_type": "knows",
+                "to_entity_id": theirs["id"],
+            }
+        ],
+    )
+
+    assert results[0]["error"] == "fk_violation"
+    assert results[0]["relation"] is None
+
+
+async def test_bulk_create_relations_sends_nothing_for_an_empty_batch(sc):
+    assert await sc.bulk_create_relations(_t(), items=[]) == []

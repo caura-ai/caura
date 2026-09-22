@@ -21,7 +21,7 @@ from core_api.constants import (
 from core_api.schemas import RelationUpsert
 from core_api.services.audit_service import log_action
 from core_api.services.entity_extraction import extract_entities_from_content
-from core_api.services.entity_service import upsert_relation
+from core_api.services.entity_service import bulk_upsert_relations
 from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
@@ -824,26 +824,38 @@ async def process_entity_extraction(
         key_to_id: dict[str, UUID] = {canonical_match_key(n): i for n, i in name_to_id.items()}
         rel_count = 0
         rel_failed = 0
+        # L-37. ONE round-trip for the whole batch, not one per relation.
+        #
+        # Everything else this worker does to persist a memory's graph was
+        # already collapsed into batches — ``bulk_resolve_entities``,
+        # ``bulk_upsert_entities``, ``bulk_upsert_entity_links`` — and then
+        # relations fell back to a sequential ``await`` per edge. A memory with
+        # a dozen relations paid twelve serial HTTP round-trips after the rest
+        # of its extraction had been reduced to three.
+        #
+        # What did NOT change is the failure isolation, because that is
+        # load-bearing rather than incidental. Everything after this block is
+        # what feeds the deterministic contradiction path — the A65 predicate
+        # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY thing
+        # that runs A40's RDF pass — so before #1495 a single transient storage
+        # error on one relation out of dozens left that memory with a NULL
+        # predicate forever and no Path C detection at all, and said
+        # "non-fatal" while doing it. Nothing retries.
+        #
+        # ``/entities/relations/bulk`` therefore reports PER ITEM: storage runs
+        # each upsert in its own session and answers ``error="fk_violation"``
+        # for the ones it refused, so a bad endpoint still costs exactly one
+        # edge. The outer guard here covers the other half — a call that fails
+        # as a whole (a storage 500, a timeout) must still fall through to the
+        # write-back and the trigger, which is the guarantee #1495 established.
+        rel_specs: list[tuple[Any, RelationUpsert]] = []
         for rel in graph.relations:
             from_id = name_to_id.get(rel.from_entity) or key_to_id.get(canonical_match_key(rel.from_entity))
             to_id = name_to_id.get(rel.to_entity) or key_to_id.get(canonical_match_key(rel.to_entity))
             if from_id and to_id:
-                # Guarded PER RELATION, matching ``subject_writeback`` /
-                # ``predicate_writeback`` below. Unguarded, ONE failing upsert
-                # threw out of this whole function into the outer "(non-fatal)"
-                # handler — and everything after this loop is what actually
-                # feeds the deterministic contradiction path: the A65 predicate
-                # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY
-                # thing that runs A40's RDF pass. So a single transient storage
-                # error on one relation out of dozens left that memory with a
-                # NULL predicate forever and no Path C detection at all, and
-                # said "non-fatal" while doing it. Nothing retries.
-                #
-                # Observed, not hypothesised: a storage 500 on
-                # ``POST /entities/relations`` produced exactly this — every
-                # later stage skipped, one warning line, predicate never set.
-                try:
-                    await upsert_relation(
+                rel_specs.append(
+                    (
+                        rel,
                         RelationUpsert(
                             tenant_id=tenant_id,
                             fleet_id=fleet_id,
@@ -853,17 +865,54 @@ async def process_entity_extraction(
                             evidence_memory_id=memory_id,
                         ),
                     )
-                    rel_count += 1
-                except Exception:
-                    rel_failed += 1
+                )
+        if rel_specs:
+            try:
+                landed = await bulk_upsert_relations([spec for _rel, spec in rel_specs])
+            except Exception:
+                # The whole call failed, so no relation landed. Counted, logged,
+                # and fallen through — NOT re-raised, because raising here is
+                # exactly the cascade #1495 removed.
+                rel_failed = len(rel_specs)
+                logger.warning(
+                    "relation_upsert failed for memory %s (%d relation(s), whole batch) (non-fatal)",
+                    memory_id,
+                    rel_failed,
+                    exc_info=True,
+                )
+            else:
+                if len(landed) != len(rel_specs):
+                    # ``bulk_upsert_relations`` aligns its answer to its input by
+                    # construction, so this is an internal inconsistency rather
+                    # than a storage partial failure. Warned and absorbed, not
+                    # raised: a raise here lands in the outer handler and skips
+                    # the predicate write-back and the ``Trigger.ENTITY`` fire —
+                    # the cascade #1495 closed, re-opened by a bookkeeping bug.
+                    # Missing slots read as "did not land", which under-reports
+                    # rather than inventing a success.
                     logger.warning(
-                        "relation_upsert failed for memory %s (%s -[%s]-> %s) (non-fatal)",
+                        "relation_upsert returned %d outcome(s) for %d relation(s) on memory %s; "
+                        "the remainder are counted as failed",
+                        len(landed),
+                        len(rel_specs),
                         memory_id,
-                        rel.from_entity,
-                        rel.relation_type,
-                        rel.to_entity,
-                        exc_info=True,
                     )
+                for i, (rel, _spec) in enumerate(rel_specs):
+                    ok = landed[i] if i < len(landed) else False
+                    if ok:
+                        rel_count += 1
+                    else:
+                        rel_failed += 1
+                        # Per edge, as before: a batch that half-landed has to
+                        # name WHICH half, or the count below is the only
+                        # evidence and nothing says what to go and look at.
+                        logger.warning(
+                            "relation_upsert failed for memory %s (%s -[%s]-> %s) (non-fatal)",
+                            memory_id,
+                            rel.from_entity,
+                            rel.relation_type,
+                            rel.to_entity,
+                        )
         if rel_failed:
             # Surfaced as its own line so a partial graph is visible as a
             # COUNT rather than N scattered warnings — a spike here means the

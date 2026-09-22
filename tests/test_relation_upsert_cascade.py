@@ -1,12 +1,12 @@
 """One failing relation upsert used to silently disable two later features.
 
-``process_entity_extraction`` upserts each extracted relation in a loop. The
-loop had no per-relation guard, so a single failure threw out of the whole
-function into the outer handler, which logs::
+``process_entity_extraction`` upserts the relations it extracted. There was no
+guard around that, so a single failure threw out of the whole function into the
+outer handler, which logs::
 
     Entity extraction failed for memory <id> (non-fatal)
 
-"Non-fatal" is true of the request and false of everything after the loop:
+"Non-fatal" is true of the request and false of everything after the upserts:
 
 * the **A65 predicate write-back** never runs, so the row keeps a NULL
   ``predicate`` — permanently, because nothing re-extracts it; and
@@ -18,8 +18,13 @@ quietly removed that row from the deterministic contradiction path for good and
 reported success. This was observed on a real stack, not imagined: a storage 500
 on ``POST /entities/relations`` reproduced it exactly.
 
-Each upsert is now guarded individually — the pattern ``subject_writeback`` and
-``predicate_writeback`` in the same function already use.
+L-37 moved the upsert from one sequential HTTP per relation to one batched call,
+and the guarantee moved with it rather than being traded away for the
+round-trips. It now has two halves, and the tests below cover both:
+
+* a refused RELATION comes back as that item's own outcome in the response —
+  storage runs each one in its own session — so it costs one edge; and
+* a failed CALL is caught here, so it costs the relations and nothing below.
 """
 
 import inspect
@@ -46,18 +51,24 @@ def _code_only(src: str) -> str:
 
 
 def _relation_loop_source() -> str:
-    """The upsert loop plus everything the old cascade skipped."""
+    """The relation-upsert block plus everything the old cascade skipped."""
     src = _code_only(inspect.getsource(w.process_entity_extraction))
     start = src.index("for rel in graph.relations:")
     return src[start:]
 
 
-def test_each_relation_upsert_is_guarded():
-    """The fix itself. An unguarded ``await upsert_relation(`` inside the loop
-    is what let one failure abort the rest of extraction."""
+def test_the_batched_relation_upsert_is_guarded():
+    """The fix itself, re-expressed for L-37's batch.
+
+    The upsert moved from one ``await`` per relation to one ``await`` for the
+    batch, and the guard moved with it. Unguarded, a call that fails as a WHOLE
+    — a storage 500, a timeout — throws out of this function into the outer
+    "(non-fatal)" handler and takes every stage below with it, which is exactly
+    the cascade this file exists to keep closed.
+    """
     loop = _relation_loop_source()
     body = loop[: loop.index("predicate_writeback")]
-    assert "try:" in body, "relation upsert must be guarded per relation"
+    assert "try:" in body, "the relation upsert must be guarded"
     assert "except Exception:" in body
 
 
@@ -82,31 +93,57 @@ def test_partial_failure_is_counted_not_just_logged_per_item():
 
 
 def test_successful_relations_still_counted_when_a_sibling_fails():
-    """``rel_count`` must increment only on success, so the completion log does
-    not report relations that were never written."""
+    """``rel_count`` must increment only on the items that landed.
+
+    Under L-37 the per-item verdict arrives in the response rather than as an
+    exception, so this is the assertion that the worker reads it instead of
+    counting the batch as one number: the increment is conditional on that
+    per-item flag, and the failure branch is its ``else``.
+    """
     loop = _relation_loop_source()
     body = loop[: loop.index("predicate_writeback")]
-    # the increment sits inside the try, after the await
-    assert body.index("await upsert_relation(") < body.index("rel_count += 1")
-    assert body.index("rel_count += 1") < body.index("except Exception:")
+    assert "for i, (rel, _spec) in enumerate(rel_specs):" in body
+    assert body.index("if ok:") < body.index("rel_count += 1")
+    assert body.index("rel_count += 1") < body.index("rel_failed += 1")
 
 
-def test_the_guard_is_inside_the_loop_not_around_it():
+def test_the_guard_wraps_the_call_not_the_whole_stage():
     """Non-vacuity matters here. The function already has an outer
     ``try/except`` and the predicate write-back has its own, so a test that
-    merely looks for "an except somewhere after the loop" passes with this fix
+    merely looks for "an except somewhere after the block" passes with this fix
     REVERTED and asserts nothing.
 
-    The load-bearing property: a ``try:`` opens BEFORE the awaited upsert and
-    inside the loop body, so one failure costs one relation instead of the
-    remaining relations plus every stage after the loop. Path C's survival is
-    covered behaviourally below, which is the assertion that actually fails
+    The load-bearing property: a ``try:`` opens BEFORE the awaited upsert, so a
+    whole-batch failure costs the relations and nothing else. Path C's survival
+    is covered behaviourally below, which is the assertion that actually fails
     without the guard.
     """
     loop = _relation_loop_source()
     body = loop[: loop.index("predicate_writeback")]
     assert "try:" in body
-    assert body.index("try:") < body.index("await upsert_relation(")
+    assert body.index("try:") < body.index("await bulk_upsert_relations(")
+
+
+def test_relations_cost_one_round_trip_not_one_each():
+    """L-37. The worker batches its entity resolve, its entity upsert and its
+    link upsert, and then used to spend one sequential HTTP POST per relation —
+    so a memory with a dozen edges paid a dozen serial round-trips after the
+    rest of its extraction had been reduced to three calls.
+
+    Structural half of the claim; the call-count assertion that actually fails
+    on the pre-fix code lives in ``test_l37_bulk_relations.py``. What is pinned
+    here is that the ``await`` sits OUTSIDE the per-relation loop — a batch
+    call issued once per relation would be no better than what it replaced.
+    """
+    loop = _relation_loop_source()
+    body = loop[: loop.index("predicate_writeback")]
+    build_loop = body[
+        body.index("for rel in graph.relations:") : body.index("if rel_specs:")
+    ]
+    assert "await" not in build_loop, (
+        "the per-relation loop must only BUILD the batch; awaiting inside it "
+        "puts the round-trips straight back"
+    )
 
 
 # ── behavioural: the cascade itself ───────────────────────────────────────
@@ -162,7 +199,8 @@ def _sc():
 @pytest.mark.asyncio
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -176,10 +214,14 @@ def _sc():
 async def test_one_failing_relation_does_not_abort_the_others(
     mock_resolve, mock_extract, mock_sc_factory, _embed, mock_rel, _log
 ):
-    """The first relation blows up; the second must still be attempted.
+    """One relation is refused; the other must still be sent and still land.
 
     Before the guard, the throw left the loop on iteration one and every
-    remaining relation was silently dropped along with it.
+    remaining relation was silently dropped along with it. Under L-37 the same
+    property has a different shape: both relations travel in ONE call, and a
+    refusal comes back as that item's own ``False`` rather than as an
+    exception — so the second relation must still appear in the batch that was
+    sent.
     """
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph(
@@ -190,7 +232,8 @@ async def test_one_failing_relation_does_not_abort_the_others(
         ],
     )
     mock_sc_factory.return_value = _sc()
-    mock_rel.side_effect = [RuntimeError("storage 500"), None]
+    # Item 0 refused by storage, item 1 landed.
+    mock_rel.return_value = [False, True]
 
     with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
@@ -202,13 +245,18 @@ async def test_one_failing_relation_does_not_abort_the_others(
             memory_type="episodic",
         )
 
-    assert mock_rel.call_count == 2, "second relation must still be attempted"
+    assert mock_rel.call_count == 1, "both relations travel in one round-trip"
+    sent = mock_rel.call_args.args[0]
+    assert [s.relation_type for s in sent] == ["lives_in", "works_at"], (
+        "the relation after the refused one must still be in the batch"
+    )
 
 
 @pytest.mark.asyncio
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock

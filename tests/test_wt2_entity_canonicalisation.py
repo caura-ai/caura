@@ -106,7 +106,7 @@ _WORKER = "core_api.services.entity_extraction_worker"
 
 @pytest.mark.unit
 @patch(f"{_WORKER}.log_action", new_callable=AsyncMock)
-@patch(f"{_WORKER}.upsert_relation", new_callable=AsyncMock)
+@patch(f"{_WORKER}.bulk_upsert_relations", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_embedding", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_storage_client")
 @patch(f"{_WORKER}.extract_entities_from_content", new_callable=AsyncMock)
@@ -149,7 +149,7 @@ async def test_extractor_repeating_one_entity_writes_one_link(
 
 @pytest.mark.unit
 @patch(f"{_WORKER}.log_action", new_callable=AsyncMock)
-@patch(f"{_WORKER}.upsert_relation", new_callable=AsyncMock)
+@patch(f"{_WORKER}.bulk_upsert_relations", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_embedding", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_storage_client")
 @patch(f"{_WORKER}.extract_entities_from_content", new_callable=AsyncMock)
@@ -196,7 +196,7 @@ async def test_qualifier_variants_in_one_extraction_collapse_to_one_entity(
 
 @pytest.mark.unit
 @patch(f"{_WORKER}.log_action", new_callable=AsyncMock)
-@patch(f"{_WORKER}.upsert_relation", new_callable=AsyncMock)
+@patch(f"{_WORKER}.bulk_upsert_relations", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_embedding", new_callable=AsyncMock)
 @patch(f"{_WORKER}.get_storage_client")
 @patch(f"{_WORKER}.extract_entities_from_content", new_callable=AsyncMock)

@@ -1764,6 +1764,26 @@ class CoreStorageClient:
     async def create_relation(self, data: dict) -> dict:
         return await self._post("/entities/relations", data)  # type: ignore[return-value]
 
+    async def bulk_create_relations(self, tenant_id: str, items: list[dict]) -> list[dict]:
+        """Upsert many relations in one round-trip.
+
+        Per-item: ``{"input_idx", "fleet_id"?, "from_entity_id",
+        "relation_type", "to_entity_id", "weight"?, "evidence_memory_id"?}``.
+        Response aligned to input with ``{"input_idx", "relation": {...} |
+        None, "error"?: "fk_violation"}``.
+
+        One HTTP call, N outcomes. The per-item ``error`` is what lets the
+        extraction worker keep the per-relation failure isolation it has today
+        (#1495) while paying one round-trip instead of one per relation.
+
+        ``tenant_id`` binds every item on both endpoints. An item naming an
+        entity outside it comes back as ``error="fk_violation"`` — the same
+        answer as an endpoint that does not exist, deliberately.
+        """
+        return await self._post(  # type: ignore[return-value]
+            "/entities/relations/bulk", {"tenant_id": tenant_id, "items": items}
+        )
+
     async def create_entity_link(self, tenant_id: str, data: dict) -> dict:
         # The link is addressed by two bare UUIDs, so the tenant has to travel
         # with them: storage scopes both ends to it. The explicit arg wins over

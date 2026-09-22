@@ -102,7 +102,8 @@ def _build_sc_mock(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -156,7 +157,8 @@ async def test_bulk_path_collapses_to_3_storage_https_for_n_entities(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -204,7 +206,8 @@ async def test_embeddings_fire_concurrently_via_gather(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -243,7 +246,8 @@ async def test_zero_entities_skips_bulk_https_entirely(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -291,7 +295,8 @@ async def test_blocklisted_entities_filtered_before_bulk_path(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -359,7 +364,8 @@ async def test_duplicate_canonical_names_collapse_to_first(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -424,7 +430,8 @@ async def test_first_seen_wins_canonical_when_longer_name_arrives(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -481,7 +488,8 @@ async def test_existing_aliases_preserved_and_extended(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -531,7 +539,8 @@ async def test_no_match_takes_create_path(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -586,7 +595,8 @@ async def test_embedding_failure_yields_null_in_resolve_payload(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
@@ -644,7 +654,8 @@ async def test_link_role_binding_preserved_per_entity(
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
 @patch(
-    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+    "core_api.services.entity_extraction_worker.bulk_upsert_relations",
+    new_callable=AsyncMock,
 )
 @patch(
     "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
