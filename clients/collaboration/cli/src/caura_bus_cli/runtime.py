@@ -15,7 +15,10 @@ import httpx
 from caura_bus_core import Bus, PlatformError
 from caura_bus_core.collaboration import Presence
 
-WAKE_TEXT = "Caura: new delivery. Call peer wait and handle it."
+WAKE_TEXT = (
+    "Caura: check inbox. Call peer wait, handle each delivery, and repeat until delivery is null. "
+    "Read notices too. Stop if paused."
+)
 OVERDUE_TEXT = "Caura: a request you sent is overdue. Call peer wait."
 WAKE_EVENTS = {
     "request.overdue",
@@ -73,15 +76,28 @@ class WakeState:
     async def notify(self, snapshot, emit):
         with lock(self.path.with_suffix(".lock")):
             saved = self.load()
-            generation = snapshot["wait_generation"]
-            notice_cursor = snapshot.get("notice_cursor", 0)
-            if not (snapshot["pending"] or snapshot.get("notices_pending")) or (
-                saved.get("outstanding") == generation and saved.get("notice_cursor", 0) == notice_cursor
-            ):
+            # Repeated waits on a lease and additional notices belong to the
+            # same burst. Only a drained inbox rearms its ordinary wake hint.
+            # Keep the old-server path for rolling upgrades.
+            durable = "drain_generation" in snapshot
+            generation = snapshot.get("drain_generation", snapshot["wait_generation"])
+            marker = "drain_generation" if durable else "outstanding"
+            recovery = snapshot.get("recovery_key")
+            if not (snapshot["pending"] or snapshot.get("notices_pending")):
+                return False
+            if durable and marker not in saved and saved.get("outstanding") == snapshot["wait_generation"]:
+                # An older waker may already have queued a prompt. Adopt it,
+                # rather than queueing another merely because we upgraded.
+                saved = {marker: generation, "recovery_key": recovery}
+                self.save(saved)
+                return False
+            same_burst = saved.get(marker) == generation
+            recovering = recovery is not None and recovery != saved.get("recovery_key")
+            if same_burst and not recovering:
                 return False
             # Persist before handing control to a runtime. A crash/ambiguous
             # queue failure must not enqueue duplicate prompts on restart.
-            self.save({"outstanding": generation, "notice_cursor": notice_cursor})
+            self.save({marker: generation, "recovery_key": recovery or saved.get("recovery_key")})
             if snapshot.get("wake_reason") == "request_overdue":
                 await emit(OVERDUE_TEXT)
             else:

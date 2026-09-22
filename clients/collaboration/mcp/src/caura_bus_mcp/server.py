@@ -185,7 +185,8 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
       explicit Caura memory write; no bodies, keys or memory writes. Sent fanout needs delivery_id.
     human: delivery_id*, reason*. Pauses your delivery; stop work until a human decision.
     wait: timeout=50 (0-50 seconds, below host timeout). Returns delivery (possibly null) and durable notices. Read notices even when delivery is null.
-      One delivery at a time; paused work cannot run. Honor resume_context on human resumption.
+      On a wake hint, handle deliveries and repeat wait until delivery is null; drain notices too.
+      One delivery at a time; stop if paused. Honor resume_context on human resumption.
     ack: delivery_id*. Explicit completion, idempotent even after restart.
     reply: delivery_id*, body*, idempotency_key*, reply_to, ack=true. Atomic reply+ack;
       ack=false for multi-step work. send with the claimed reply_to uses the same semantics.
