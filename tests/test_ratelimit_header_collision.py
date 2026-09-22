@@ -164,3 +164,29 @@ async def test_bulk_write_quota_headers_reach_the_client(client, wired_meter):
 
     assert _occurrences(resp, "x-usage-limit") == ["100"]
     assert _occurrences(resp, "x-usage-remaining") == ["93"]
+
+
+async def test_every_security_header_is_sent_exactly_once(client, enabled_limiter):
+    """The other half of the report — "several security and rate-limit headers
+    duplicated" — checked rather than assumed.
+
+    This one PASSES pre-fix, and is kept as a pin rather than as evidence of a
+    bug: ``SecurityHeadersMiddleware`` strips its own keys from the downstream
+    message before re-adding them, so it cannot double up the way slowapi's
+    ``append`` did. Losing that strip is the regression this catches.
+    """
+    from core_api.app import _SECURITY_HEADERS
+
+    resp = await _write(client, {"x-api-key": f"mc_l22_sec_{uuid.uuid4().hex[:8]}"})
+    assert resp.status_code == 201, resp.text
+
+    duplicated = {
+        name: _occurrences(resp, name)
+        for name in _SECURITY_HEADERS
+        if len(_occurrences(resp, name)) != 1
+    }
+    assert duplicated == {}, f"security headers not sent exactly once: {duplicated}"
+
+    # Same for the two throttle headers slowapi sets rather than appends.
+    for name in ("x-ratelimit-reset", "retry-after"):
+        assert len(_occurrences(resp, name)) == 1, _occurrences(resp, name)
