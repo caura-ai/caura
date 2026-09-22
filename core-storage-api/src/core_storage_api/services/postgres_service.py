@@ -564,8 +564,9 @@ def _saturate_rank(scaled_rank: Any) -> Any:
     matches (scoring 2 renders vs 1, ordered and limited): **32-39% faster**
     across queries matching 1,875-11,505 rows — 92.0ms -> 56.4ms at 11,505,
     medians of 7 runs. Read that as the gain on the FTS scoring component
-    alone; the full search also pays six pgvector distance computations per
-    row, so end-to-end it is smaller.
+    alone; the full search also paid the pgvector distance more than once per
+    row (two evaluations per scanned row at the default function cost; see the
+    two-layer note in ``memory_scored_search``), so end-to-end it is smaller.
 
     NOT bit-identical, and the difference is real but negligible: the two forms
     disagree by at most one ULP (measured max ``|a - b|`` = 5.55e-17 over every
@@ -2776,10 +2777,19 @@ class PostgresService:
         # computed in the branch layer above it from those columns. This is the
         # inner-projection work ``_saturate_rank``'s note promised: before it,
         # SQLAlchemy inlined the ``vec_sim`` CASE at every site that named it
-        # and the compiled statement paid SIX cosine distance computations per
-        # candidate row (427ms -> 90ms for this change alone on a 50k-row,
-        # 1024-dim rig; the ratchet in test_fts_score_single_render pins the
-        # counts in both directions).
+        # and the compiled statement carried SIX cosine renders (three per
+        # UNION branch). Renders are not evaluations: the planner postpones
+        # expensive non-sort-key columns above the Sort/Limit, so the scan
+        # evaluated the distance TWICE per candidate row at the default
+        # ``cosine_distance`` cost (once at COST 100, migration 044).
+        # Re-measured 2026-09-17 on a standalone rig (pgvector 0.8.1, PG 16.12,
+        # 50k rows x 1024-dim, M4 Pro): this change alone takes the serial
+        # scored select from ~196 ms to ~157 ms, and the materialised CTE does
+        # not parallelise, so two-worker wall-clock went 123 -> 156 ms. The
+        # order-of-magnitude win is the ANN candidate pool below (~5 ms), not
+        # this dedup. An earlier "427ms -> 90ms" figure for this change did not
+        # reproduce. The ratchet in test_fts_score_single_render pins the
+        # render counts in both directions.
         #
         # CAURA-594: pgvector's `<=>` is strict — NULL in → NULL out. A
         # bare `1 - cosine_distance` would therefore propagate NULL up
@@ -3150,7 +3160,8 @@ class PostgresService:
         # test_scored_search_materialized_plan pins the PLAN — EXPLAIN must
         # show the CTE as its own node on the single-branch statement, so a
         # future PostgreSQL/SQLAlchemy behaviour change surfaces in CI rather
-        # than as a silent ~6x hot-path regression.
+        # than as a silent hot-path regression (six renders in the text, two
+        # distance evaluations per scanned row at the default function cost).
         ing = ingredients_stmt.cte("ingredients").prefix_with("MATERIALIZED")
 
         # -- Layer 1: derived factors over ingredient columns --
