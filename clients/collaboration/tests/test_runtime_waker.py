@@ -29,11 +29,12 @@ async def test_real_fake_queue_captures_fixed_argv_no_credential_and_coalesces(t
     monkeypatch.setenv("CAURA_API_KEY", "must-not-reach-runtime")
     state = runtime.WakeState(tmp_path / "state.json")
     queue = runtime.CodexQueue("a session; $(no shell)", str(fake))
-    snapshot = {"pending": True, "wait_generation": 4}
+    snapshot = {"pending": True, "wait_generation": 4, "drain_generation": 0}
     assert await state.notify(snapshot, queue)
     assert not await state.notify(snapshot, queue)
     assert not await runtime.WakeState(state.path).notify(snapshot, queue)
-    assert await state.notify({**snapshot, "wait_generation": 5}, queue)
+    assert not await state.notify({**snapshot, "wait_generation": 5}, queue)
+    assert await state.notify({**snapshot, "wait_generation": 6, "drain_generation": 5}, queue)
     records = [json.loads(line) for line in capture.read_text().splitlines()]
     assert (
         records
@@ -51,7 +52,7 @@ async def test_ambiguous_runtime_failure_does_not_queue_again(tmp_path):
         calls += 1
         raise TimeoutError()
 
-    snapshot = {"pending": True, "wait_generation": 0}
+    snapshot = {"pending": True, "wait_generation": 0, "drain_generation": 0}
     with pytest.raises(TimeoutError):
         await state.notify(snapshot, failed)
     assert not await state.notify(snapshot, failed)
@@ -114,7 +115,9 @@ def test_hooks_merge_idempotently_preserve_settings_and_use_project_scope(tmp_pa
 class FakeBus:
     def __init__(self, cfg):
         self.config = cfg
-        self.snapshots = [{"pending": False, "active": False, "wait_generation": 0, "cursor": 2}]
+        self.snapshots = [
+            {"pending": False, "active": False, "wait_generation": 0, "drain_generation": 0, "cursor": 2}
+        ]
         self.profiles = []
         self.closed = False
 
@@ -133,7 +136,9 @@ class FakeBus:
 
 async def test_stop_listener_arrival_and_hook_coalescing(tmp_path, monkeypatch, capsys):
     bus = FakeBus(config())
-    bus.snapshots.append({"pending": True, "active": False, "wait_generation": 0, "cursor": 3})
+    bus.snapshots.append(
+        {"pending": True, "active": False, "wait_generation": 0, "drain_generation": 0, "cursor": 3}
+    )
     monkeypatch.setattr(runtime, "Bus", lambda _: bus)
     state = runtime.WakeState(tmp_path / "state.json")
     result = await runtime.receive(config(), state, "Stop", wait=2)
@@ -143,6 +148,8 @@ async def test_stop_listener_arrival_and_hook_coalescing(tmp_path, monkeypatch, 
     assert bus.closed
     assert await runtime.receive(config(), state, "Stop", wait=2) == ""
     bus.snapshots[0]["wait_generation"] += 1
+    assert await runtime.receive(config(), state, "UserPromptSubmit") == ""
+    bus.snapshots[0]["drain_generation"] += 1
     submitted = json.loads(await runtime.receive(config(), state, "UserPromptSubmit"))
     assert submitted["hookSpecificOutput"]["additionalContext"] == runtime.WAKE_TEXT
 
@@ -291,7 +298,7 @@ async def test_listener_shortens_window_when_request_is_answered(tmp_path, monke
     assert sleeps == pytest.approx([0.08, 0.02], abs=0.005)
 
 
-async def test_sender_notice_wakes_with_exact_text_without_delivery_and_new_notice_is_not_coalesced(tmp_path):
+async def test_sender_notices_share_a_hint_until_inbox_is_drained(tmp_path):
     state = runtime.WakeState(tmp_path / "notices.json")
     emitted = []
 
@@ -302,13 +309,15 @@ async def test_sender_notice_wakes_with_exact_text_without_delivery_and_new_noti
         "pending": False,
         "notices_pending": True,
         "wait_generation": 3,
+        "drain_generation": 2,
         "notice_cursor": 8,
         "wake_reason": "request_overdue",
     }
     assert await state.notify(snapshot, emit)
     assert emitted == ["Caura: a request you sent is overdue. Call peer wait."]
     assert not await state.notify(snapshot, emit)
-    assert await state.notify({**snapshot, "notice_cursor": 9}, emit)
+    assert not await state.notify({**snapshot, "notice_cursor": 9}, emit)
+    assert await state.notify({**snapshot, "notice_cursor": 10, "drain_generation": 4}, emit)
     assert len(emitted) == 2
 
 
@@ -330,3 +339,64 @@ async def test_notice_only_hook_prompts_peer_wait(tmp_path, monkeypatch, hook):
     result = await runtime.receive(config(), runtime.WakeState(tmp_path / "notice.json"), hook)
     assert runtime.OVERDUE_TEXT in result
     assert bus.closed
+
+
+async def test_delivery_burst_across_turns_and_restarts_queues_only_one_hint(tmp_path):
+    path = tmp_path / "burst.json"
+    queued = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    # A queued native prompt may not reach the model until many waits, replies,
+    # and notice arrivals have happened in the current turn.
+    snapshot = {"pending": True, "active": False, "wait_generation": 0, "drain_generation": 0}
+    assert await runtime.WakeState(path).notify(snapshot, emit)
+    for generation in range(1, 21):
+        snapshot.update(wait_generation=generation, notice_cursor=generation)
+        assert not await runtime.WakeState(path).notify({**snapshot, "active": True}, emit)
+        assert not await runtime.WakeState(path).notify(snapshot, emit)
+    # Inbox becoming temporarily empty is not proof the native hint was read.
+    assert not await runtime.WakeState(path).notify({**snapshot, "pending": False}, emit)
+    assert not await runtime.WakeState(path).notify(snapshot, emit)
+    assert len(queued) == 1  # At most this one prompt can cause an empty wait.
+    # The model drains the inbox; later work must still wake it, even if the
+    # waker never observed the intervening empty snapshot.
+    snapshot.update(wait_generation=22, drain_generation=21)
+    assert await runtime.WakeState(path).notify(snapshot, emit)
+    assert not await runtime.WakeState(path).notify(snapshot, emit)
+    assert len(queued) == 2
+
+
+@pytest.mark.parametrize("key", ["resume:case-1", "retry:delivery-1:1", "retry:delivery-1:2"])
+async def test_recovery_rearms_without_an_empty_wait(tmp_path, key):
+    state = runtime.WakeState(tmp_path / "recovery.json")
+    queued = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    snapshot = {"pending": True, "wait_generation": 0, "drain_generation": 0}
+    assert await state.notify(snapshot, emit)
+    assert await state.notify({**snapshot, "recovery_key": key}, emit)
+    assert not await runtime.WakeState(state.path).notify({**snapshot, "recovery_key": key}, emit)
+    # Ordinary messages queued behind the recovery share the same drain.
+    assert not await state.notify({**snapshot, "wait_generation": 10}, emit)
+    assert len(queued) == 2
+
+
+async def test_upgrade_adopts_unread_hint_but_does_not_strand_consumed_legacy_state(tmp_path):
+    state = runtime.WakeState(tmp_path / "upgrade.json")
+    state.save({"outstanding": 4, "notice_cursor": 7})
+    queued = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    snapshot = {"pending": True, "wait_generation": 4, "drain_generation": 0}
+    assert not await state.notify(snapshot, emit)
+    assert not await runtime.WakeState(state.path).notify({**snapshot, "wait_generation": 5}, emit)
+    assert await state.notify({**snapshot, "wait_generation": 6, "drain_generation": 6}, emit)
+    state.save({"outstanding": 4, "notice_cursor": 7})
+    assert await state.notify({**snapshot, "wait_generation": 5}, emit)
+    assert len(queued) == 2
