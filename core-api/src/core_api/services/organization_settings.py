@@ -1078,31 +1078,32 @@ class ResolvedConfig:
     def atomic_fact_fanout_enabled(self) -> bool:
         """Create a child memory per extracted atomic fact (default ON).
 
-        A70 shipped this on the strength of a measurement that said it almost
-        never fires, taken on conversational content. pm-0918-c-04 asked whether
-        it should be gated off for document-shaped writes, on the theory that
-        2,000-character chunks are the shape it fires on. Measured against the
-        local development corpus (61,515 memories, 2,617 tenants) the theory does
-        not hold — the fan-out rate FALLS with length:
+        A70 shipped this on the strength of a measurement that it almost never
+        fires, taken on conversational content. pm-0918-c-04 asked whether it
+        should be gated off for document-shaped writes, on the theory that
+        2,000-character chunks are the shape it fires on.
 
-            <500 chars      1.33%      2,000-2,999    0.57%
-            500-999         3.41%      >=3,000        0.34%
-            1,000-1,999     0.75%
+        That question is still OPEN. The attempt to settle it against the local
+        corpus failed for reasons worth knowing before anyone tries again: every
+        fan-out child in that database came from benchmark conversation data,
+        the non-benchmark slice produced none at all, and the corpus predates
+        A70 — so it contains no worker-path fan-out, and pre-A70 deferred writes
+        discarded their facts, which reads as "did not fan out". See
+        docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md.
 
-        So there is no length threshold that separates the case it was approved
-        on from the case that regressed, and a ceiling would cost the band where
-        it fires most while barely touching document chunks. A switch is the
-        honest control instead: a tenant seeing fan-out children crowd its
-        results turns them off for its own store without a deploy and without
-        imposing a guessed threshold on everyone else.
+        So this is a switch and not a threshold, because there is no evidence
+        for where a threshold would go — not because the evidence rules one out.
 
-        Default ON because that is today's behaviour, and because the write-side
-        volume is small — 703 of 60,029 parents fanned out (1.2%), producing
-        1,486 of 61,515 rows (2.4%). Turning it off by default would change what
-        every tenant's store contains to fix a problem measured on one.
+        A switch is worth having regardless of how that question lands: a tenant
+        whose results are crowded by fan-out children turns them off for its own
+        store, immediately, without a deploy and without inheriting a number
+        somebody guessed. Default ON is today's behaviour; changing every
+        tenant's store to address one store's regression would be the wrong
+        default whichever way the measurement eventually goes.
 
-        Off is strictly cheaper: no child is embedded, so this reduces LLM and
-        embedding spend rather than adding any.
+        Off is cheaper but not free of consequence: it skips the children's
+        embeddings and writes, NOT the enrichment call that extracted the facts
+        — that has already happened by the time this is read.
         """
         val = self._ts.get("enrichment", {}).get("atomic_fact_fanout_enabled")
         return val if val is not None else True

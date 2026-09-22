@@ -3183,10 +3183,16 @@ async def fan_out_atomic_facts(
     # doubles predate the knob, matching how ``crystallizer_min_cluster_size``
     # is read in ``_run_crystallization``.
     #
-    # Returning zeroed counts rather than raising is what lets the worker path
-    # clear its ``atomic_facts`` marker: the consumer only leaves the marker in
-    # place on an exception, so raising here would re-enter this on every
-    # redelivery forever for a tenant that has deliberately switched it off.
+    # Returns zeroed counts rather than raising so the worker path reaches its
+    # ``atomic_facts`` marker cleanup: the consumer preserves the marker on an
+    # exception (for a later retry) and clears it otherwise. Raising would not
+    # loop forever — the consumer catches and returns without nacking — but it
+    # would leave the marker set on every disabled-tenant write, so each
+    # redelivery re-enters a fan-out that is switched off.
+    #
+    # The trade this makes: clearing the marker CONSUMES those facts. Switching
+    # the fan-out back on later will not replay them without re-enrichment. That
+    # is right for "disable", and worth knowing if anyone reads it as "pause".
     if not getattr(tenant_config, "atomic_fact_fanout_enabled", True):
         return {"created": 0, "deduped": 0, "unembedded": 0}
     meta = parent_metadata

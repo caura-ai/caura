@@ -1,99 +1,124 @@
 # pm-0918-c-04 — does the atomic-fact fan-out fire on document-shaped writes?
 
-**Answer: no, and the rate falls as content gets longer.** The hypothesis in the
-tracker row — that 2,000-character document chunks are the shape the fan-out
-fires on — is not supported by the corpus. A content-length gate, the row's
-leading proposal, would be the wrong fix.
+**This corpus cannot answer that question, and an earlier version of this
+document claimed it could.** The correction is the finding. Read the "What went
+wrong the first time" section before using any number here.
 
-## Why this measurement exists
+## The question
 
-A70 shipped the fan-out on 2026-09-09 (#1424, #1428, #1430) partly on the
-strength of a measurement that it almost never fires: seeding three STALE T2
-haystacks produced zero fanned rows, because the enrichment prompt
+A70 shipped the fan-out on 2026-09-09 (#1424, #1428, #1430) partly on a
+measurement that it almost never fires: seeding three STALE T2 haystacks
+produced zero fanned rows, because the enrichment prompt
 (`common/enrichment/_prompts.py`, field 9) says `atomic_facts` is "OPTIONAL —
 null in almost all cases" and "DO NOT fan out single-topic content".
 
-**That measurement was taken on conversational content.** The proof gate that
-would have covered the rest — reg-a75, the 100-session replay — was closed
-without being run, because its harness lived in an unreachable private repo. So
-three flags shipped with no evidence, and the first evidence was an external
-benchmark regression.
+That measurement was taken on conversational content. The row asks whether
+2,000-character document chunks — multi-topic by construction — are the shape
+it does fire on, which nobody tested. reg-a75, the proof gate that would have
+covered it, was closed **without being run** because its harness lived in an
+unreachable private repo.
 
-This is that measurement, run on data rather than closed again.
+## What the corpus actually contains
 
-## Method
+Local development database, 61,515 memories, 2,617 tenants, newest row
+**2026-09-08**.
 
-Local `memclaw` database: **61,515 memories across 2,617 tenants**. <!-- legacy-name-floor: names the database these numbers came from; the measurement is not checkable without it --> Fan-out
-children are identified by `metadata->>'source' = 'atomic_fact_fanout'` and
-carry `metadata->>'parent_memory_id'`.
+| slice | parents | fanned out | parents ≥2,000 chars | fanned at ≥2,000 |
+|---|---:|---:|---:|---:|
+| **Non-benchmark (real content)** | 20,756 | **0** | 83 | **0** |
+| Benchmark (LongMemEval) | 39,026 | 703 | 13,396 | 70 |
 
-> The tracker row names `split_of` as the marker. That is stale — nothing in the
-> current code writes it, so a query using it returns zero and reads as "never
-> fires". Worth knowing, because that is the same shape as the original
-> null result.
+Every fan-out child in this database — all 1,486 of them, from 703 parents —
+came from **benchmark conversation data written in `write_mode=fast`**. Split by
+mode and provenance, no other combination produced a single child:
 
-Parents are joined back from their children, bucketed by `length(content)`.
+| write_mode | benchmark? | parents | fanned | rate |
+|---|---|---:|---:|---:|
+| fast | yes | 28,581 | 703 | 2.46% |
+| (unset) | no | 18,816 | 0 | 0% |
+| strong | yes | 10,445 | 0 | 0% |
+| fast | no | 1,684 | 0 | 0% |
+| strong | no | 256 | 0 | 0% |
 
-## Result
+## Three reasons this cannot settle the row
 
-| content length | parents | fanned out | **rate** | children made | children per fanned parent |
-|---|---:|---:|---:|---:|---:|
-| <500 | 39,828 | 528 | **1.33%** | 1,014 | 1.92 |
-| 500–999 | 2,051 | 70 | **3.41%** | 173 | 2.47 |
-| 1,000–1,999 | 4,671 | 35 | 0.75% | 74 | 2.11 |
-| **2,000–2,999** | 10,554 | 60 | **0.57%** | 207 | 3.45 |
-| ≥3,000 | 2,925 | 10 | **0.34%** | 18 | 1.80 |
+**1. The real-content slice has no fan-out at all, and almost no long content.**
+20,756 non-benchmark parents produced zero children, and only 83 of them reach
+2,000 characters. There is no document-shaped population here to measure.
 
-The band the row blames is the **second-lowest**, at less than half the rate of
-short conversational content and a sixth of the 500–999 peak. The corpus is not
-short of document-shaped content either — 13,479 parents sit at ≥2,000
-characters, and 70 of them fanned out.
+**2. The corpus predates the mechanism the row is about.** The newest row is
+2026-09-08; A70 shipped 2026-09-09. Before A70 the *synchronous* path fanned out
+and the worker path did not — it computed `atomic_facts` and discarded them. So
+a deferred write whose enricher *did* decide to fan out appears in this data as
+"did not fan out". `write_mode=fast` defers, and fast is the default.
 
-Overall: **703 of 60,029 parents fanned out (1.2%)**, producing **1,486 of
-61,515 rows (2.4%)**.
+**3. That bias is not random — it tracks the variable under test.** If longer
+content is written more often in bulk (deferred, facts discarded pre-A70), a
+falling rate-with-length appears in the data whether or not the enricher
+behaves that way. The measurement cannot separate "the enricher fans out less
+on long content" from "long content was deferred and its facts thrown away".
 
-## What this means
+## What went wrong the first time
 
-**1. There is no length threshold worth having.** Any ceiling low enough to
-exclude document chunks also cuts the 500–999 band, where the fan-out fires
-three times more often and is presumably doing the job it was built for.
+The first version of this document reported a rate-by-length table over the
+whole corpus and concluded the row's premise was disproven — the fan-out rate
+*falls* with length, so no length gate is worth having.
 
-**2. The 28% figure is about retrieval, not writing.** Children are 2.4% of
-rows but were measured at ~28% of returned rows on the PersonaMem store. Those
-two numbers are consistent only if children out-rank their parents — which is
-exactly what they are built to do: short, self-contained, single-claim, one
-embedding per claim. **The lever is therefore the read path, which is
-pm-0918-c-03 (`include_derived`), not the write path.** This row should not be
-closed by making writes rarer.
+That table was real arithmetic over the wrong population. Its ≥2,000-character
+band was **99.4% synthetic benchmark conversation** (13,396 of 13,479 rows). It
+was measuring the length distribution of LongMemEval, not a property of the
+fan-out. It also contained a plainly false sentence — that any ceiling low
+enough to exclude document chunks must also cut the 500–999 band, when a
+2,000-character ceiling preserves that band entirely.
 
-**3. One in-code justification rests on the rarity claim and survives.**
-`fan_out_atomic_facts` deliberately bypasses the per-tenant storage bulkhead
-(CAURA-602), justified in a comment by "the fan-out is rare enough". At 1.2% of
-parents that holds. It is worth re-checking if the rate ever moves.
+The irony is the point, and it is why this section exists rather than a quiet
+edit: **this row exists because A70 shipped on a measurement taken on an
+unrepresentative population, and the first attempt to correct it did the same
+thing.** The lesson is not "measure more" but "state the population, and check
+whether the thing you are measuring could have happened in it".
 
-## What shipped instead
+## Where that leaves the question
 
-A per-tenant switch, `enrichment.atomic_fact_fanout_enabled`, default **ON**
-(today's behaviour), read at the one chokepoint both the synchronous and worker
-paths share.
+**Untested, not disproven.** Whether the fan-out fires on 2,000-character
+document chunks is open. Answering it needs a corpus written after 2026-09-09
+through the path that actually serves document writes, with `write_mode` and
+provenance recorded — or a direct experiment: enrich a sample of real document
+chunks and count how often the enricher returns `atomic_facts`, which measures
+the decision rather than inferring it from surviving children.
 
-A switch rather than a threshold because the measurement does not support a
-threshold, and default-ON because turning it off for everyone would change what
-every tenant's store contains in order to fix a problem measured on one store.
-A tenant seeing fan-out children crowd its results turns them off for itself,
-without a deploy and without inheriting a guessed number.
+Also worth knowing: children can be deduplicated on creation, so a parent whose
+facts all collided with live rows leaves no linked children and reads as "did
+not fan out" here. Any future measurement should count the enricher's decision,
+not the rows that survived it.
 
-Switching it off is strictly cheaper — no child is embedded — so it reduces LLM
-and embedding spend rather than adding any.
+## What shipped anyway, and why it does not depend on the above
 
-## Limits of this measurement
+A per-tenant switch, `enrichment.atomic_fact_fanout_enabled`, default **ON**,
+read at the one chokepoint the synchronous and worker paths share.
 
-The fan-out decision is made by the enrichment LLM, so the rate depends on the
-model and prompt in force. This corpus reflects the configuration that wrote it;
-a store enriched by a different model could fan out at a different rate. What
-the corpus does establish is that **length is not the discriminator**, which is
-the specific claim the row rested on.
+It is justified without the measurement: a tenant whose results are crowded by
+fan-out children can turn them off for its own store, immediately, without a
+deploy and without imposing a threshold on anyone else. That is exactly what
+PersonaMem needs and what nothing in the codebase offered. Default ON because
+that is today's behaviour, and changing every tenant's store to address one
+store's regression would be the wrong default whichever way this measurement
+eventually lands.
 
-The PersonaMem `ambs` store itself was not available here. Its 28% remains the
-only direct measurement of the regressed case, and it measures returned rows,
-not writes.
+A threshold was **not** shipped, and the reason is now "there is no evidence for
+where to put one", not "the evidence says no threshold helps".
+
+## The 28% figure
+
+The CEO measured ~28% of returned rows on the PersonaMem store as fan-out
+children. That is a **retrieval** proportion; the numbers here are **write**
+proportions on a different corpus, and the two cannot be compared — PersonaMem's
+own child-to-row ratio was never measured. A plausible reading is that short,
+self-contained, single-claim children out-rank their parents, which would make
+pm-0918-c-03 (`include_derived`) the lever. That remains a hypothesis this
+document does not test.
+
+## Re-running
+
+`benchmark/pm_c04_fanout_rate.py` breaks the result out by `write_mode` and by
+benchmark provenance, because a single aggregate number over this corpus is
+misleading — that is how the first version went wrong.

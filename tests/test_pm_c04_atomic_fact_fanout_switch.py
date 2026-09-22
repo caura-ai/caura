@@ -1,22 +1,22 @@
 """pm-0918-c-04 — the atomic-fact fan-out is switchable per tenant.
 
-A70 shipped the fan-out on a measurement that said it almost never fires. That
-measurement was taken on conversational content, and the row asked whether the
-fan-out should be gated off for document-shaped writes — 2,000-character chunks
-being, the theory went, the shape it actually fires on.
+A70 shipped the fan-out on a measurement that said it almost never fires, taken
+on conversational content. The row asked whether it should be gated off for
+document-shaped writes, on the theory that 2,000-character chunks are the shape
+it fires on.
 
-Measured against the local development corpus (61,515 memories, 2,617 tenants),
-the theory does not hold. The fan-out rate FALLS with content length:
+**That question is still open.** The attempt to settle it against the local
+corpus failed: every fan-out child in that database came from benchmark
+conversation data, the non-benchmark slice produced none at all, and the corpus
+predates A70 — so it holds no worker-path fan-out, and pre-A70 deferred writes
+discarded their facts, which reads identically to "did not fan out". See
+`docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md`, including what the
+first version of that document got wrong.
 
-    <500 chars      1.33%       2,000-2,999    0.57%
-    500-999         3.41%       >=3,000        0.34%
-    1,000-1,999     0.75%
-
-The band the row blames is the second-lowest. So there is no length threshold
-that separates the case A70 was approved on from the case that regressed, and a
-ceiling would cost the band where it fires most while barely touching document
-chunks. These tests pin the switch that replaced that idea, and — deliberately —
-the default that keeps every existing tenant unchanged.
+So what ships is a switch, not a threshold — there is no evidence for where a
+threshold would go, which is different from evidence that none helps. The
+switch stands on its own: a tenant whose results are crowded by fan-out children
+can turn them off for its own store without a deploy.
 """
 
 import inspect
@@ -123,10 +123,12 @@ async def test_a_disabled_tenant_creates_no_children():
 async def test_the_disabled_result_lets_the_worker_clear_its_marker():
     """Returning zeroed counts rather than raising is load-bearing.
 
-    ``consumer._fan_out_persisted_atomic_facts`` leaves the ``atomic_facts``
-    marker in place ONLY on an exception, so that a redelivery can retry. If the
-    gate raised, a tenant that deliberately switched the fan-out off would
-    re-enter this path on every redelivery, forever, and never clear the marker.
+    ``consumer._fan_out_persisted_atomic_facts`` preserves the ``atomic_facts``
+    marker on an exception (so a redelivery can retry) and clears it otherwise.
+    Raising here would not loop forever — the consumer catches and returns
+    without nacking — but it would leave the marker set on every write by a
+    tenant that deliberately switched the fan-out off, so each redelivery
+    re-enters a fan-out that is disabled.
     """
     from core_api.services.memory_service import fan_out_atomic_facts
 
