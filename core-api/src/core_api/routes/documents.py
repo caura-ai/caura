@@ -268,7 +268,21 @@ async def upsert_document(
     auth: AuthContext = Depends(get_auth_context),
     idempotency_key: str | None = Header(None, alias=IDEMPOTENCY_HEADER),
 ):
-    """Upsert a document. If collection+doc_id exists, data is replaced."""
+    """Upsert a document. If collection+doc_id exists, data is replaced.
+
+    ax-0917-m-15 — this write ALSO mints a memory carrying the document's
+    data, so the body becomes reachable by ``caura_recall`` / ``POST
+    /memories/search``. The two stores are not cross-searched and only
+    ``data["summary"]`` is embedded on the document row, so without the mint
+    a document's body is reachable by meaning nowhere.
+
+    Independent of ``indexed``: a document with no ``summary`` is invisible to
+    ``POST /documents/search`` and still mints. The mint is skipped for
+    ``collection="skills"`` (staged → active approval lifecycle), for
+    ``_``-prefixed system collections, for a ``data`` that renders empty, and
+    for one over the memory size limit. ``DELETE /documents/{doc_id}``
+    un-mints it. Never fails the write.
+    """
     # ax-0917-m-14 — a caller must not write a document under a name that is
     # not its own. REFUSE rather than silently substitute: an agent credential
     # that names a peer has made a claim, and quietly rewriting it means the
@@ -722,7 +736,10 @@ async def delete_document(
     collection: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Delete a document by collection + doc_id."""
+    """Delete a document by collection + doc_id.
+
+    Also un-mints the memory the write minted — see ``POST /documents``.
+    """
     auth.enforce_tenant(tenant_id)
     auth.enforce_read_only()
     # Bulk/destructive parity with memory deletes: an agent credential needs

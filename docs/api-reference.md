@@ -79,10 +79,10 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/documents` | POST | Store or update a structured JSON document |
+| `/documents` | POST | Store or update a structured JSON document. Also mints a memory carrying the document's `data`, so the body is reachable by recall — the doc row embeds only `data["summary"]`. Independent of the summary: a doc without one is invisible to `/documents/search` and still mints. Not minted for `collection="skills"`, `_`-prefixed collections, an empty `data`, or a payload over the memory size limit |
 | `/documents/{id}` | GET | Retrieve document by ID |
 | `/documents/query` | POST | Query by field equality filters |
-| `/documents/{id}` | DELETE | Delete a document |
+| `/documents/{id}` | DELETE | Delete a document, and un-mint the memory its write minted |
 
 **Fleet**
 
