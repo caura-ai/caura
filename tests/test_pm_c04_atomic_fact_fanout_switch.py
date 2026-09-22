@@ -51,6 +51,33 @@ def test_an_explicit_true_is_honoured():
     assert _cfg(atomic_fact_fanout_enabled=True).atomic_fact_fanout_enabled is True
 
 
+def test_the_switch_can_actually_be_written():
+    """The switch has to survive a settings WRITE, not just a resolver read.
+
+    Caught by review, and it made the whole feature inert: `_check_keys`
+    validates a settings payload against `DEFAULT_SETTINGS`, so a knob that
+    exists only as a `ResolvedConfig` property is READ-ONLY — the resolver
+    happily returns its default while every attempt to set it raises
+    `Unknown settings key(s)`.
+
+    Every other test in this file builds `ResolvedConfig` directly, which
+    bypasses that validation entirely and passes against a switch nobody can
+    switch. This one goes through the door a tenant goes through.
+    """
+    from core_api.services.organization_settings import DEFAULT_SETTINGS, _check_keys
+
+    _check_keys({"enrichment": {"atomic_fact_fanout_enabled": False}}, DEFAULT_SETTINGS)
+
+
+def test_the_switch_is_type_checked_on_write():
+    """Registered in `_LEAF_TYPES` like every other boolean knob, so a string
+    "false" — which is truthy, and would silently leave the fan-out ON — is
+    refused at the boundary rather than resolved."""
+    from core_api.services.organization_settings import _LEAF_TYPES
+
+    assert _LEAF_TYPES["enrichment.atomic_fact_fanout_enabled"] is bool
+
+
 # ── the gate itself ──────────────────────────────────────────────────────
 
 

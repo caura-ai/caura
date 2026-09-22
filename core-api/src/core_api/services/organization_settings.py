@@ -56,6 +56,13 @@ DEFAULT_SETTINGS: dict = {
         "provider": None,
         "model": None,
         "enabled": None,
+        # pm-0918-c-04. MUST be listed here, not only as a ResolvedConfig
+        # property: ``_check_keys`` validates a settings write against this
+        # schema, so a knob absent from it is READ-ONLY — the resolver returns
+        # its default and every attempt to set it raises "Unknown settings
+        # key(s)". A switch nobody can switch is worse than no switch, because
+        # it reads as shipped.
+        "atomic_fact_fanout_enabled": None,
     },
     "recall": {
         "provider": None,
@@ -632,6 +639,7 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
 # Expected Python types for leaf values that need validation beyond key presence.
 # Dotted paths match the nested structure in DEFAULT_SETTINGS.
 _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
+    "enrichment.atomic_fact_fanout_enabled": bool,
     "security_audit.schedule_enabled": bool,
     "security_audit.schedule_cron": str,
     "security_audit.alerts_enabled": bool,
