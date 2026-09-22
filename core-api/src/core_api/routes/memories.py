@@ -2030,6 +2030,32 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[Agen
 
 # ax-0917-h-05 — a stable slug, same contract as SUCCESSOR_ENRICHMENT_INCOMPLETE.
 UNRECOGNIZED_PARAMETERS = "unrecognized_parameters"
+SUPERSEDED_PARAMETER_ALIAS = "superseded_parameter_alias"
+
+
+def _declared_alias_spellings(model: type[SearchRequest]) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Map every declared spelling of an aliased field to that field.
+
+    ``{alias -> (field_name, all spellings in priority order)}``. Built by
+    introspection rather than a hand-kept list, so a field that gains an alias
+    later cannot quietly start being reported as junk.
+    """
+    spellings: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for name, field in model.model_fields.items():
+        alias = field.validation_alias
+        choices = getattr(alias, "choices", None)
+        if not choices:
+            continue
+        # ``AliasChoices.choices`` may hold alias PATHS (lists) for nested
+        # lookups; only flat string spellings can collide with an extra key.
+        flat = tuple(c for c in choices if isinstance(c, str))
+        for c in flat:
+            spellings[c] = (name, flat)
+    return spellings
+
+
+# Computed once: the model is static, and this runs on every search request.
+_SEARCH_ALIAS_SPELLINGS = _declared_alias_spellings(SearchRequest)
 _MAX_REPORTED_UNKNOWN = 20
 
 
@@ -2050,32 +2076,98 @@ def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
     ``warnings`` entry for the caller, which is the only one an autonomous agent
     can act on — it does not read our logs.
 
-    Declared aliases are not extras, so the ``limit`` -> ``top_k`` absorption
-    above never lands here; only genuinely unread keys do.
+    Two kinds of key end up in ``model_extra``, and they need different answers.
+    A declared alias sent ALONE is absorbed and never reaches here — but a caller
+    who sends both spellings (``top_k`` and ``limit``, or ``status_filter`` and
+    ``status``) leaves the losing one behind, and it is a name this endpoint
+    knows. Reporting that as "not read by this endpoint" is false: it was read
+    and then superseded, and for ``status`` / ``memory_type`` it would send an
+    integrator looking for a typo that is not there. So the two are split, and
+    the alias case is named for what it is.
 
     Capped at ``_MAX_REPORTED_UNKNOWN`` names. A caller that sends two hundred
     junk keys should not get a warning bigger than the result set it asked
     for — in a change whose whole point is payload size, an unbounded echo of
     caller input would be its own bug.
     """
-    unknown = sorted((body.model_extra or {}).keys())[:_MAX_REPORTED_UNKNOWN]
-    if not unknown:
+    extras = body.model_extra or {}
+    if not extras:
         return []
-    logger.warning(
-        "request carried parameters this route does not read",
-        extra={"path": route, "tenant_id": body.tenant_id, "unknown_parameters": unknown},
-    )
-    return [
-        {
-            "code": UNRECOGNIZED_PARAMETERS,
-            "message": (
-                "These request parameters are not read by this endpoint and had no effect: "
-                + ", ".join(unknown)
-                + ". Result-count is controlled by 'top_k'."
-            ),
-            "details": {"unknown_parameters": unknown},
-        }
-    ]
+
+    # An extra key is not automatically an unknown one. ``extra="allow"`` keeps
+    # whatever pydantic did not bind, and when a caller sends BOTH spellings of
+    # an aliased field the losing spelling lands here even though it is a name
+    # this endpoint knows — it was read, then superseded. Calling that "not read
+    # by this endpoint" is simply false, and for ``status`` / ``memory_type`` it
+    # would send an integrator hunting a typo that does not exist.
+    superseded: list[tuple[str, str]] = []
+    unknown: list[str] = []
+    for key in sorted(extras):
+        entry = _SEARCH_ALIAS_SPELLINGS.get(key)
+        if entry is None:
+            unknown.append(key)
+            continue
+        field_name, choices = entry
+        # The winner is the highest-priority spelling the caller did NOT lose —
+        # i.e. the first choice that is not sitting in extras. Falling back to
+        # the field name keeps the message truthful if that ever comes up empty.
+        winner = next((c for c in choices if c not in extras), field_name)
+        superseded.append((key, winner))
+
+    warnings: list[dict] = []
+
+    if superseded:
+        capped = superseded[:_MAX_REPORTED_UNKNOWN]
+        logger.warning(
+            "request sent two spellings of the same parameter",
+            extra={
+                "path": route,
+                "tenant_id": body.tenant_id,
+                "superseded_parameters": [k for k, _ in capped],
+            },
+        )
+        warnings.append(
+            {
+                "code": SUPERSEDED_PARAMETER_ALIAS,
+                "message": (
+                    "These request parameters are accepted aliases, but another "
+                    "spelling of the same field was also sent and won: "
+                    + ", ".join(f"'{k}' superseded by '{w}'" for k, w in capped)
+                    + "."
+                ),
+                "details": {"superseded_parameters": dict(capped)},
+            }
+        )
+
+    if unknown:
+        capped_unknown = unknown[:_MAX_REPORTED_UNKNOWN]
+        logger.warning(
+            "request carried parameters this route does not read",
+            extra={
+                "path": route,
+                "tenant_id": body.tenant_id,
+                "unknown_parameters": capped_unknown,
+            },
+        )
+        # No result-count sentence here. ``limit`` is a DECLARED alias of
+        # ``top_k``: sent alone it is absorbed and never reaches this branch,
+        # sent alongside ``top_k`` it is reported as superseded above. So the
+        # count hint could only ever be attached to keys it has nothing to do
+        # with — it was accurate when ``limit`` was genuinely unread, and the
+        # alias is what made it unreachable.
+        warnings.append(
+            {
+                "code": UNRECOGNIZED_PARAMETERS,
+                "message": (
+                    "These request parameters are not read by this endpoint and had no effect: "
+                    + ", ".join(capped_unknown)
+                    + "."
+                ),
+                "details": {"unknown_parameters": capped_unknown},
+            }
+        )
+
+    return warnings
 
 
 @router.post("/search", response_model=SearchResponse)

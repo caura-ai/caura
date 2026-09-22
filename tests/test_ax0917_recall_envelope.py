@@ -359,6 +359,76 @@ def test_h05_unknown_params_are_captured_not_discarded():
     assert body.model_extra == {"bogus_param_xyz": 2}
 
 
+def test_h05_superseded_alias_is_not_reported_as_unknown():
+    """FAILS PRE-FIX: every extra key was called "not read by this endpoint".
+
+    Sending both spellings of an aliased field leaves the loser in
+    ``model_extra`` — but it is a name this endpoint knows, so reporting it as
+    unread is false. For ``status`` / ``memory_type`` it would send an
+    integrator hunting a typo that does not exist.
+    """
+    from core_api.routes.memories import (
+        SUPERSEDED_PARAMETER_ALIAS,
+        UNRECOGNIZED_PARAMETERS,
+        _unknown_param_warnings,
+    )
+
+    body = SearchRequest(
+        tenant_id="t",
+        query="q",
+        top_k=2,
+        limit=9,
+        status_filter="active",
+        status="archived",
+        bogus_xyz=1,
+    )
+    warnings = {w["code"]: w for w in _unknown_param_warnings(body, route="/search")}
+
+    superseded = warnings[SUPERSEDED_PARAMETER_ALIAS]
+    assert superseded["details"]["superseded_parameters"] == {
+        "limit": "top_k",
+        "status": "status_filter",
+    }
+    # Named for what happened: read, then beaten by the other spelling.
+    assert "superseded by 'top_k'" in superseded["message"]
+
+    # ...and the genuinely unknown key is still reported, on its own, without
+    # the aliases being swept in with it.
+    unknown = warnings[UNRECOGNIZED_PARAMETERS]
+    assert unknown["details"]["unknown_parameters"] == ["bogus_xyz"]
+    assert "status" not in unknown["message"]
+    assert "limit" not in unknown["message"]
+
+
+def test_h05_unknown_key_warning_carries_no_result_count_claim():
+    """The count sentence was unconditional, so it landed on keys with nothing
+    to do with counting. ``limit`` is a declared alias now — absorbed when sent
+    alone, reported as superseded when sent with ``top_k`` — so it can never
+    reach this branch, and the hint could only ever be wrong here."""
+    from core_api.routes.memories import (
+        UNRECOGNIZED_PARAMETERS,
+        _unknown_param_warnings,
+    )
+
+    body = SearchRequest(tenant_id="t", query="q", bogus_xyz=1)
+    (warning,) = _unknown_param_warnings(body, route="/search")
+
+    assert warning["code"] == UNRECOGNIZED_PARAMETERS
+    assert "top_k" not in warning["message"]
+    assert "Result-count" not in warning["message"]
+
+
+def test_h05_alias_sent_alone_still_warns_about_nothing():
+    """The guard on the fix: a plain ``limit: 2`` is the happy path h-05 exists
+    to make work, and it must stay silent — absorbed into ``top_k``, nothing in
+    ``model_extra``, no warning invented for a caller who did it right."""
+    from core_api.routes.memories import _unknown_param_warnings
+
+    body = SearchRequest(tenant_id="t", query="q", limit=2)
+    assert body.top_k == 2
+    assert _unknown_param_warnings(body, route="/search") == []
+
+
 async def test_h05_recall_warns_about_parameters_it_does_not_read(client, monkeypatch):
     """The response-level channel, which is the only one an autonomous agent
     can act on — it does not read our logs.
@@ -377,7 +447,14 @@ async def test_h05_recall_warns_about_parameters_it_does_not_read(client, monkey
     warnings = resp.json()["warnings"]
     assert warnings[0]["code"] == "unrecognized_parameters"
     assert warnings[0]["details"]["unknown_parameters"] == ["bogus_param_xyz"]
-    assert "top_k" in warnings[0]["message"]
+    # This asserted "top_k" until review: the message carried an unconditional
+    # "Result-count is controlled by 'top_k'." tail, which is a claim about a
+    # key that has nothing to do with counting. ``limit`` is a declared alias
+    # now — absorbed alone, reported as superseded alongside ``top_k`` — so it
+    # can never reach this branch and the hint could only ever be misplaced
+    # here. Pinned positively in
+    # ``test_h05_unknown_key_warning_carries_no_result_count_claim``.
+    assert "top_k" not in warnings[0]["message"]
 
 
 async def test_h05_a_clean_recall_carries_no_warnings_key(client, monkeypatch):
