@@ -19,8 +19,6 @@ switch stands on its own: a tenant whose results are crowded by fan-out children
 can turn them off for its own store without a deploy.
 """
 
-import inspect
-
 import pytest
 
 from core_api.services.organization_settings import ResolvedConfig
@@ -51,31 +49,38 @@ def test_an_explicit_true_is_honoured():
     assert _cfg(atomic_fact_fanout_enabled=True).atomic_fact_fanout_enabled is True
 
 
-def test_the_switch_can_actually_be_written():
+def test_the_switch_survives_the_settings_write_path():
     """The switch has to survive a settings WRITE, not just a resolver read.
 
     Caught by review, and it made the whole feature inert: `_check_keys`
-    validates a settings payload against `DEFAULT_SETTINGS`, so a knob that
-    exists only as a `ResolvedConfig` property is READ-ONLY — the resolver
-    happily returns its default while every attempt to set it raises
-    `Unknown settings key(s)`.
+    validates a payload against `DEFAULT_SETTINGS`, so a knob that exists only
+    as a `ResolvedConfig` property is READ-ONLY — the resolver serves its
+    default while `PUT /settings` 422s.
 
     Every other test in this file builds `ResolvedConfig` directly, which
-    bypasses that validation entirely and passes against a switch nobody can
-    switch. This one goes through the door a tenant goes through.
+    bypasses that validation and passes against a switch nobody can switch.
+    Shape copied from `test_entity_retrieval_flag.test_settings_key_accepted_and_type_checked`,
+    which is the established way to pin a new knob.
     """
-    from core_api.services.organization_settings import DEFAULT_SETTINGS, _check_keys
+    from core_api.services.organization_settings import (
+        DEFAULT_SETTINGS,
+        _check_keys,
+        _validate_leaf_types,
+    )
 
-    _check_keys({"enrichment": {"atomic_fact_fanout_enabled": False}}, DEFAULT_SETTINGS)
+    payload = {"enrichment": {"atomic_fact_fanout_enabled": False}}
+    _check_keys(payload, DEFAULT_SETTINGS)
+    _validate_leaf_types(payload)
 
+    # A string "false" is TRUTHY. Without the type check it would resolve to
+    # "on" while the dashboard rendered the tenant's "off" back to them.
+    with pytest.raises(ValueError, match="atomic_fact_fanout_enabled"):
+        _validate_leaf_types({"enrichment": {"atomic_fact_fanout_enabled": "false"}})
 
-def test_the_switch_is_type_checked_on_write():
-    """Registered in `_LEAF_TYPES` like every other boolean knob, so a string
-    "false" — which is truthy, and would silently leave the fan-out ON — is
-    refused at the boundary rather than resolved."""
-    from core_api.services.organization_settings import _LEAF_TYPES
-
-    assert _LEAF_TYPES["enrichment.atomic_fact_fanout_enabled"] is bool
+    with pytest.raises(ValueError, match="Unknown settings key"):
+        _check_keys(
+            {"enrichment": {"atomic_fact_fanout_enable": False}}, DEFAULT_SETTINGS
+        )
 
 
 # ── the gate itself ──────────────────────────────────────────────────────
@@ -156,35 +161,99 @@ async def test_the_disabled_result_lets_the_worker_clear_its_marker():
     )
 
 
-def test_a_config_without_the_knob_keeps_fanning_out():
-    """Older config objects and existing test doubles predate this knob. They
+@pytest.mark.asyncio
+async def test_a_config_without_the_knob_keeps_fanning_out():
+    """Older config objects and existing test doubles predate this knob, and
     must resolve to today's behaviour rather than raising ``AttributeError``
-    inside a fire-and-forget enrichment task — the same reasoning
-    ``_run_crystallization`` documents for ``crystallizer_min_cluster_size``."""
+    inside a fire-and-forget enrichment task.
+
+    Asserted by CALLING the function with such an object, not by reading the
+    source for a ``getattr`` — a source assertion passes just as well for a
+    gate that reads the attribute and then does the wrong thing with it.
+    """
     from types import SimpleNamespace
 
     from core_api.services.memory_service import fan_out_atomic_facts
 
-    src = inspect.getsource(fan_out_atomic_facts)
-    assert 'getattr(tenant_config, "atomic_fact_fanout_enabled", True)' in src
+    reached = {"storage": False}
 
-    legacy = SimpleNamespace()  # no such attribute at all
-    assert getattr(legacy, "atomic_fact_fanout_enabled", True) is True
+    class _Storage:
+        def __getattr__(self, name):
+            reached["storage"] = True
+            raise _Stop
+
+    class _Stop(Exception):
+        pass
+
+    class _Fact:
+        content = "x"
+        suggested_type = "fact"
+        retrieval_hint = ""
+
+    with pytest.raises(_Stop):
+        await fan_out_atomic_facts(
+            _Storage(),
+            atomic_facts=[_Fact()],
+            memory_id="00000000-0000-0000-0000-000000000001",
+            tenant_id="t1",
+            fleet_id=None,
+            agent_id="a1",
+            parent_metadata={},
+            parent_visibility="scope_team",
+            parent_weight=0.5,
+            parent_ts_start=None,
+            tenant_config=SimpleNamespace(),  # no such attribute at all
+        )
+    # It got PAST the gate and reached storage — i.e. it defaulted to ON.
+    assert reached["storage"] is True
 
 
-def test_the_gate_sits_at_the_shared_chokepoint_not_a_call_site():
-    """Both the synchronous path and the worker path funnel through this one
-    function — that is why it exists rather than being inlined twice. A switch
-    honoured by only one of them would silently become a per-write-mode
-    difference, which is the exact class of bug A70 was fixing when it lifted
-    this function out of ``_enrich_memory_background``."""
+@pytest.mark.asyncio
+async def test_the_worker_path_honours_the_switch_too():
+    """The gate lives in the shared function so BOTH callers get it. This
+    exercises the worker caller end to end rather than asserting that a string
+    appears in one function's source and not another's — an assertion that
+    passes just as well for a gate returning the wrong answer.
+
+    `consumer._fan_out_persisted_atomic_facts` is the path A70 added, and the
+    one a bulk/deferred write takes.
+    """
     from core_api import consumer
-    from core_api.services import memory_service
 
-    assert "atomic_fact_fanout_enabled" in inspect.getsource(
-        memory_service.fan_out_atomic_facts
-    )
-    # Neither caller re-implements the decision.
-    assert "atomic_fact_fanout_enabled" not in inspect.getsource(
-        consumer._fan_out_persisted_atomic_facts
-    )
+    class _Storage:
+        def __getattr__(self, name):
+            raise AssertionError(
+                f"storage was called ({name}) with the fan-out disabled"
+            )
+
+    class _Payload:
+        memory_id = "00000000-0000-0000-0000-000000000001"
+        tenant_id = "t1"
+
+    class _Outcome:
+        visibility = "scope_team"
+
+    memory = {
+        "metadata_": {"atomic_facts": [{"content": "x", "suggested_type": "fact"}]},
+        "fleet_id": None,
+        "agent_id": "a1",
+        "weight": 0.5,
+        "ts_valid_start": None,
+    }
+
+    class _Cfg:
+        atomic_fact_fanout_enabled = False
+
+    async def _resolve(_tenant):
+        return _Cfg()
+
+    orig = consumer.resolve_config
+    consumer.resolve_config = _resolve
+    try:
+        # Must not raise, and must not reach storage: a disabled tenant creates
+        # no children on the worker path either.
+        await consumer._fan_out_persisted_atomic_facts(
+            _Storage(), memory, _Payload(), _Outcome()
+        )
+    finally:
+        consumer.resolve_config = orig
