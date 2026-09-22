@@ -13,8 +13,8 @@ single-agent benchmarks can't measure.
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
-| Token savings vs full context | **96.6%** | **79.2%** | — |
+| Accuracy (LLM-judge) | **77.9%** | **92.2%** | — |
+| Token savings vs full context | withdrawn (see note) | **79.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** (warm) |
 
 LoCoMo and LongMemEval both measure one agent, one user, one long
@@ -30,8 +30,13 @@ against the 108k-token median haystack). Its harness, saved contexts and
 per-question verdicts are public at
 [caura-ai/caura-longmemeval](https://github.com/caura-ai/caura-longmemeval), and
 the write-up is at [caura.ai/blog/caura-longmemeval](https://caura.ai/blog/caura-longmemeval).
-The LoCoMo column is still the 2026-04-19 run. The canonical, current version
-lives in the blog write-up linked below.
+The LoCoMo column is the September 2026 run: all 1,540 scored questions
+(categories 1–4), three-vote LLM judge (Gemini 3.8 Flash), 77–79% across
+repeat runs, official token F1 0.575. Its April token-savings figure (96.6%)
+is withdrawn: the September configuration (k=30, 4k-character chunks)
+retrieves most of each conversation, so no savings figure is claimed until it
+is re-derived. The canonical, current version lives in the blog write-up
+linked below.
 
 ## What we measure, and how
 
