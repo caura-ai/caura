@@ -9,6 +9,7 @@ from core_api.constants import (
     BULK_MAX_ITEMS,
     DEFAULT_MEMORY_TYPE,
     DEFAULT_SEARCH_TOP_K,
+    EXPIRES_AT_DESCRIPTION,
     MAX_CONTENT_LENGTH,
     MAX_QUERY_LENGTH,
     MAX_SEARCH_TOP_K,
@@ -165,7 +166,7 @@ class MemoryCreate(TenantScopedBody):
     run_id: str | None = None
     metadata: dict | None = None
     entity_links: list[EntityLinkIn] = []
-    expires_at: datetime | None = None
+    expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     # RDF triple
     subject_entity_id: UUID | None = None
     predicate: str | None = None
@@ -271,7 +272,7 @@ class BulkMemoryItem(BaseModel):
     run_id: str | None = None
     metadata: dict | None = None
     entity_links: list[EntityLinkIn] = []
-    expires_at: datetime | None = None
+    expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     subject_entity_id: UUID | None = None
     predicate: str | None = None
     object_value: str | None = None
@@ -413,7 +414,7 @@ class MemoryUpdate(BaseModel):
     object_value: str | None = None
     ts_valid_start: datetime | None = None
     ts_valid_end: datetime | None = None
-    expires_at: datetime | None = None
+    expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     entity_links: list[EntityLinkIn] | None = Field(
         default=None,
         description=(

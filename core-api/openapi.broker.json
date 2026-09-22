@@ -157,6 +157,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional retention hint. Once this time passes, the row is archived on the next lifecycle tick and stops being returned by reads. Not a hard cutoff: the row remains readable until that tick runs. Distinct from ts_valid_end, which closes a temporal-validity interval rather than expressing retention.",
             "title": "Expires At"
           },
           "memory_type": {
@@ -1233,6 +1234,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional retention hint. Once this time passes, the row is archived on the next lifecycle tick and stops being returned by reads. Not a hard cutoff: the row remains readable until that tick runs. Distinct from ts_valid_end, which closes a temporal-validity interval rather than expressing retention.",
             "title": "Expires At"
           },
           "memory_type": {

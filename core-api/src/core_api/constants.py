@@ -140,6 +140,18 @@ MEMORY_TYPES_FILTER_DESCRIPTION = (
     "Filter results to a single memory type. Valid values: " + ", ".join(MEMORY_TYPES) + "."
 )
 
+# Shown on every WRITE field that accepts it. States the guarantee exactly,
+# because the guarantee is weaker than the field name suggests: the lifecycle
+# sweep archives the row, so it stays readable until the next tick. A caller
+# needing it to disappear AT the timestamp is asking for a read-time filter,
+# which this is not (caura#1637).
+EXPIRES_AT_DESCRIPTION = (
+    "Optional retention hint. Once this time passes, the row is archived on the "
+    "next lifecycle tick and stops being returned by reads. Not a hard cutoff: "
+    "the row remains readable until that tick runs. Distinct from ts_valid_end, "
+    "which closes a temporal-validity interval rather than expressing retention."
+)
+
 # ── Memory status lifecycle ──
 MEMORY_STATUSES_PATTERN = (
     r"^(active|pending|confirmed|cancelled"

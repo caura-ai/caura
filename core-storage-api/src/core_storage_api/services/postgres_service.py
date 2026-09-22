@@ -4072,6 +4072,23 @@ class PostgresService:
         fleet_id: str | None = None,
         batch_size: int = 500,
     ) -> int:
+        """Archive rows whose validity has run out, on the next lifecycle tick.
+
+        TWO columns end a row's life and they are not the same thing.
+        ``ts_valid_end`` closes a temporal-validity interval — the fact stopped
+        being true. ``expires_at`` is a caller-supplied retention hint — keep
+        this until then. Both land a row in ``outdated``.
+
+        ``expires_at`` was accepted, stored and returned for the whole life of
+        the product and enforced by nothing: this sweep existed and filtered
+        the OTHER column, which is why the gap read as "never enforced" rather
+        than "enforced late" (caura#1637).
+
+        This is archival on the next tick, NOT a hard retention control. A row
+        stays visible for up to one tick past its ``expires_at``, and callers
+        needing a tighter guarantee are asking for a read-time filter, which
+        this deliberately is not.
+        """
         async with get_session() as session:
             params: dict = {"tenant_id": tenant_id, "batch_size": batch_size}
             fleet_clause = ""
@@ -4086,7 +4103,7 @@ class PostgresService:
                     SELECT id FROM memories
                     WHERE tenant_id = :tenant_id
                       {fleet_clause}
-                      AND ts_valid_end < NOW()
+                      AND (ts_valid_end < NOW() OR expires_at < NOW())
                       AND status = 'active'
                       AND deleted_at IS NULL
                     LIMIT :batch_size
