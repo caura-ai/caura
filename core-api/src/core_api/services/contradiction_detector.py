@@ -3100,7 +3100,25 @@ async def detect_contradictions_by_entities_async(
                 except Exception as e:
                     for i in base_idx:
                         results[i] = e
-        found = False
+        # 09/22 L-12 — chain-edge guard, tracked SEPARATELY from the
+        # status-reversion guard below, exactly as both Path A loops in
+        # ``_detect()`` do. A single flag covering both branches (the
+        # previous ``found``) meant the first confirmed conflict in a run
+        # suppressed every later edge write while the ``"conflicted"``
+        # status write at the top of the loop still landed — leaving a row
+        # conflicted with nothing pointing at it, which is the orphaning
+        # Path A's ``if not supersedes_id`` split exists to prevent (see
+        # ``test_mixed_conflicts_complete_three_way_chain``). Both
+        # mixed-direction orderings produced it: flipped-then-canonical
+        # orphaned the older candidate, canonical-then-flipped orphaned
+        # ``new_memory`` itself.
+        #
+        # Seeded from the row's current edge, as the semantic loop is: a
+        # verdict this run's retraction phase did NOT clear is still owned
+        # by whoever wrote it, and ``memory_update_status`` has no
+        # ``supersedes_id IS NULL`` guard, so an unseeded write would
+        # silently re-point the row and orphan its previous target.
+        chain_supersedes_id = new_memory.get("supersedes_id")
         # CAURA-125 — state-corruption guard; mirrors the RDF and
         # semantic paths in ``_detect()``.
         new_memory_is_outdated = False
@@ -3135,10 +3153,11 @@ async def detect_contradictions_by_entities_async(
             )
             if verdict:
                 # CAURA-125 — symmetric attribution; see RDF path for
-                # the rationale. First match sets supersedes_id on the
-                # newer row (most relevant — candidates are ordered by
-                # shared-entity-count DESC); subsequent matches only
-                # update the older row's status.
+                # the rationale. ``new_memory`` carries at most one
+                # outgoing edge (first canonical match wins — candidates
+                # are ordered by shared-entity-count DESC); every flipped
+                # match wires its own edge back at ``new_memory``, since
+                # many newer rows may supersede one older row.
                 older = _pick_older(candidate, new_memory)
                 older_is_new = str(older.get("id")) == str(memory_id)
                 newer = new_memory if not older_is_new else candidate
@@ -3146,8 +3165,9 @@ async def detect_contradictions_by_entities_async(
                 newer_id = newer.get("id")
 
                 _merge_status_update(updates, {"memory_id": str(older_id), "status": "conflicted"})
-                if not found:
-                    if newer is new_memory:
+                if newer is new_memory:
+                    if not chain_supersedes_id:
+                        chain_supersedes_id = older_id
                         # See RDF path above for the rationale of
                         # separating the status-reversion guard from
                         # the chain edge. Entity-based path uses
@@ -3164,27 +3184,26 @@ async def detect_contradictions_by_entities_async(
                                 "supersedes_id": str(older_id),
                             },
                         )
+                else:
+                    new_memory_is_outdated = True
+                    # Application-level guard; see RDF flipped
+                    # branch in _detect() for rationale.
+                    if newer.get("supersedes_id"):
+                        logger.warning(
+                            "Flipped contradiction skipped supersedes_id overwrite "
+                            "for candidate %s (already supersedes %s)",
+                            newer_id,
+                            newer.get("supersedes_id"),
+                        )
                     else:
-                        new_memory_is_outdated = True
-                        # Application-level guard; see RDF flipped
-                        # branch in _detect() for rationale.
-                        if newer.get("supersedes_id"):
-                            logger.warning(
-                                "Flipped contradiction skipped supersedes_id overwrite "
-                                "for candidate %s (already supersedes %s)",
-                                newer_id,
-                                newer.get("supersedes_id"),
-                            )
-                        else:
-                            _merge_status_update(
-                                updates,
-                                {
-                                    "memory_id": str(newer_id),
-                                    "status": newer.get("status", "active"),
-                                    "supersedes_id": str(older_id),
-                                },
-                            )
-                found = True
+                        _merge_status_update(
+                            updates,
+                            {
+                                "memory_id": str(newer_id),
+                                "status": newer.get("status", "active"),
+                                "supersedes_id": str(older_id),
+                            },
+                        )
                 n_conflicts += 1
                 logger.info(
                     "Entity-based contradiction: %s conflicted by %s direction=%s",
