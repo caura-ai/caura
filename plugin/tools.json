@@ -981,21 +981,21 @@
       },
       {
         "default": null,
-        "description": "Source URI (single only).",
+        "description": "Single only.",
         "name": "source_uri",
         "required": false,
         "type": "str | None"
       },
       {
         "default": null,
-        "description": "Run id (single only).",
+        "description": "Single only.",
         "name": "run_id",
         "required": false,
         "type": "str | None"
       },
       {
         "default": null,
-        "description": "Metadata (single only).",
+        "description": "Metadata (single only). Your summary/tags survive enrichment.",
         "name": "metadata",
         "required": false,
         "type": "dict | None"

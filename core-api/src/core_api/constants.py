@@ -152,6 +152,29 @@ EXPIRES_AT_DESCRIPTION = (
     "which closes a temporal-validity interval rather than expressing retention."
 )
 
+# oss-0814-l-08. The C25 caller/platform metadata boundary, stated on the surface
+# a caller actually reads.
+#
+# The rule itself is old — "LLM fills gaps; agent-provided values always win" has
+# sat in ``MergeEnrichmentFields`` since the first public release, and C25 made
+# the metadata half of it true. But it was only ever written in source comments:
+# this field carried no description at all, and ``caura_write``'s said "Metadata
+# (single only)." An agent deciding whether it is safe to send its own ``summary``
+# had nothing to read, and the safe assumption from the outside — that a field
+# the platform also writes will be overwritten — is the wrong one.
+#
+# Named keys rather than "some keys": ``summary`` and ``tags`` are the entire
+# ``CALLER_OWNABLE_KEYS`` set, and a caller cannot act on a rule whose scope is
+# left vague.
+CALLER_METADATA_DESCRIPTION = (
+    "Free-form metadata stored with the memory. Keys you send are yours: "
+    "enrichment never overwrites a `summary` or `tags` you supply here, on this "
+    "write or on any later one — the platform's own versions go to "
+    "`system_metadata` instead. Platform-reserved keys (timings, governance "
+    "verdicts, provenance) are stripped from this dict; send them and they are "
+    "dropped, not stored."
+)
+
 # ── Memory status lifecycle ──
 MEMORY_STATUSES_PATTERN = (
     r"^(active|pending|confirmed|cancelled"

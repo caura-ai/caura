@@ -1481,9 +1481,24 @@ async def caura_write(
     visibility: Annotated[str | None, Field(description="scope_team|scope_org|scope_agent.")] = None,
     memory_type: Annotated[str | None, Field(description="Type (single only).")] = None,
     weight: Annotated[float | None, Field(description="0-1 (single only).")] = None,
-    source_uri: Annotated[str | None, Field(description="Source URI (single only).")] = None,
-    run_id: Annotated[str | None, Field(description="Run id (single only).")] = None,
-    metadata: Annotated[dict | None, Field(description="Metadata (single only).")] = None,
+    # oss-0814-l-08 paid for the ``metadata`` clause below out of these two,
+    # which only restated their own parameter names ("Source URI", "Run id") —
+    # the fixtures README's stated preference over raising ``CEILING_TOKENS``.
+    # Net -3 tokens against the pre-change surface (5317 -> 5314).
+    source_uri: Annotated[str | None, Field(description="Single only.")] = None,
+    run_id: Annotated[str | None, Field(description="Single only.")] = None,
+    metadata: Annotated[
+        dict | None,
+        # oss-0814-l-08: say that these keys are the caller's. "LLM fills gaps;
+        # agent-provided values always win" has been true of metadata since C25
+        # and was stated only in source comments, so an agent reading the tool
+        # surface had nothing to go on — and the safe assumption from outside,
+        # that a field the platform also writes will be overwritten, is the
+        # wrong one. Six tokens, because the whole surface is on the context
+        # budget of every agent turn; ``MemoryCreate.metadata`` carries the full
+        # statement for anyone reading the REST schema.
+        Field(description="Metadata (single only). Your summary/tags survive enrichment."),
+    ] = None,
     status: Annotated[str | None, Field(description="Status (single only).")] = None,
     write_mode: Annotated[
         str | None,

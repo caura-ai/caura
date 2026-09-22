@@ -7,6 +7,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model, m
 from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
     BULK_MAX_ITEMS,
+    CALLER_METADATA_DESCRIPTION,
     DEFAULT_MEMORY_TYPE,
     DEFAULT_SEARCH_TOP_K,
     EXPIRES_AT_DESCRIPTION,
@@ -166,7 +167,7 @@ class MemoryCreate(TenantScopedBody):
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     source_uri: str | None = None
     run_id: str | None = None
-    metadata: dict | None = None
+    metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     entity_links: list[EntityLinkIn] = []
     expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     # RDF triple
@@ -400,7 +401,7 @@ class MemoryUpdate(BaseModel):
     title: str | None = None
     status: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
-    metadata: dict | None = None
+    metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     metadata_mode: str | None = Field(
         default=None,
         pattern="^(merge|replace)$",
