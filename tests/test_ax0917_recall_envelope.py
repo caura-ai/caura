@@ -35,6 +35,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import AliasChoices, Field
 
 from core_api.schemas import MemoryOut, RecallRequest, SearchRequest
 from core_api.services.recall_service import summarize_memories
@@ -389,6 +390,11 @@ def test_h05_superseded_alias_is_not_reported_as_unknown():
         "limit": "top_k",
         "status": "status_filter",
     }
+    # Two spellings each, so the winner is knowable and is named exactly.
+    assert superseded["details"]["superseded_by"] == {
+        "limit": "top_k",
+        "status": "status_filter",
+    }
     # Named for what happened: read, then beaten by the other spelling.
     assert "superseded by 'top_k'" in superseded["message"]
 
@@ -398,6 +404,67 @@ def test_h05_superseded_alias_is_not_reported_as_unknown():
     assert unknown["details"]["unknown_parameters"] == ["bogus_xyz"]
     assert "status" not in unknown["message"]
     assert "limit" not in unknown["message"]
+
+
+def test_h05_winner_detection_is_exact_or_silent_for_three_aliases():
+    """FAILS PRE-FIX: the winner was picked by elimination against ``extras``.
+
+    ``AliasChoices`` takes the FIRST spelling present in the input, so a
+    spelling that was never sent is absent from ``extras`` for exactly the same
+    reason a consumed one is — and the old
+    ``next(c for c in choices if c not in extras)`` could not tell those apart.
+    Given ``("a", "b", "c")`` and a caller who sent only ``b`` and ``c``,
+    pydantic uses ``b`` while the old logic answered ``a``: a spelling the
+    caller never sent, reported confidently.
+
+    The rule now is exact or silent. It names a winner only when ONE candidate
+    remains above the highest-priority loser, which is always true for two
+    spellings and sometimes true for more.
+    """
+    from core_api.routes.memories import _superseded_winner
+
+    # Two spellings, both sent — one candidate above the loser, so exact.
+    assert _superseded_winner(("top_k", "limit"), {"limit": 9}) == "top_k"
+
+    # Three spellings, 2nd and 3rd sent. ``b`` won; ``a`` and ``b`` are
+    # indistinguishable from extras alone, so no spelling is claimed. The
+    # assertion that matters is that it is NOT the wrong answer the old
+    # elimination gave.
+    assert _superseded_winner(("a", "b", "c"), {"c": 1}) is None
+
+    # Three spellings, all sent — only ``a`` sits above the first loser, so it
+    # is knowable and named.
+    assert _superseded_winner(("a", "b", "c"), {"b": 1, "c": 1}) == "a"
+
+    # Nothing lost at all is not a supersession.
+    assert _superseded_winner(("a", "b"), {}) is None
+
+
+def test_h05_ambiguous_winner_names_the_field_not_a_guessed_spelling():
+    """When the spelling is unknowable the caller is still told the field was
+    superseded — it is simply not told a spelling it may never have sent."""
+    from core_api.routes.memories import (
+        SUPERSEDED_PARAMETER_ALIAS,
+        _unknown_param_warnings,
+    )
+
+    class _ThreeAliasBody(SearchRequest):
+        widget: str | None = Field(
+            default=None, validation_alias=AliasChoices("widget", "gadget", "doohickey")
+        )
+
+    body = _ThreeAliasBody(tenant_id="t", query="q", gadget="g", doohickey="d")
+    assert body.widget == "g"  # pydantic took the higher-priority spelling
+    (warning,) = _unknown_param_warnings(body, route="/search")
+
+    assert warning["code"] == SUPERSEDED_PARAMETER_ALIAS
+    # The FIELD is named, because that much is known...
+    assert warning["details"]["superseded_parameters"] == {"doohickey": "widget"}
+    # ...but no winning spelling is claimed, and the sentence says so rather
+    # than reading as though "widget" were sent — it was not.
+    assert "doohickey" not in warning["details"]["superseded_by"]
+    assert "another spelling of 'widget'" in warning["message"]
+    assert "superseded by 'widget'" not in warning["message"]
 
 
 def test_h05_unknown_key_warning_carries_no_result_count_claim():

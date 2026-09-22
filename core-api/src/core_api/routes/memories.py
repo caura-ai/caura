@@ -2054,8 +2054,53 @@ def _declared_alias_spellings(model: type[SearchRequest]) -> dict[str, tuple[str
     return spellings
 
 
-# Computed once: the model is static, and this runs on every search request.
-_SEARCH_ALIAS_SPELLINGS = _declared_alias_spellings(SearchRequest)
+# Computed once per model: the classes are static, and this runs on every
+# search request. Keyed by class because ``RecallRequest`` subclasses
+# ``SearchRequest`` and may declare aliases of its own.
+_ALIAS_SPELLINGS_CACHE: dict[type, dict[str, tuple[str, tuple[str, ...]]]] = {}
+
+
+def _alias_spellings_for(model: type[SearchRequest]) -> dict[str, tuple[str, tuple[str, ...]]]:
+    cached = _ALIAS_SPELLINGS_CACHE.get(model)
+    if cached is None:
+        cached = _declared_alias_spellings(model)
+        _ALIAS_SPELLINGS_CACHE[model] = cached
+    return cached
+
+
+def _superseded_winner(choices: tuple[str, ...], extras: dict) -> str | None:
+    """Which spelling pydantic actually used — or None when that is unknowable.
+
+    ``AliasChoices`` resolution takes the FIRST choice present in the input, so
+    every other spelling the caller sent lands in ``model_extra``. Two facts
+    follow, and together they bound what can be inferred from ``extras`` alone:
+
+    * the winner outranks every loser, so it sits strictly above the
+      highest-priority spelling found in ``extras``;
+    * exactly one spelling above that point was sent — the winner — but
+      ``extras`` cannot say WHICH, because a spelling that was never sent is
+      absent from ``extras`` for the same reason a consumed one is.
+
+    So the answer is exact only when one candidate remains above the first
+    loser. With two spellings that is always the case. With three or more it
+    may not be: given ``("a", "b", "c")`` and a caller who sent only ``b`` and
+    ``c``, pydantic used ``b`` while ``a`` and ``b`` are indistinguishable from
+    here — and the earlier ``next(c for c in choices if c not in extras)``
+    answered ``a``, confidently and wrongly.
+
+    Returning None there is the honest answer; the caller is told the field was
+    superseded without being told a spelling it may never have sent. Naming it
+    exactly for N >= 3 needs the raw request keys (a ``mode="wrap"`` validator
+    recording them), which is not worth putting on this path for a case no
+    field currently has.
+    """
+    lost = [i for i, c in enumerate(choices) if c in extras]
+    if not lost:
+        return None
+    candidates = choices[: min(lost)]
+    return candidates[0] if len(candidates) == 1 else None
+
+
 _MAX_REPORTED_UNKNOWN = 20
 
 
@@ -2100,19 +2145,19 @@ def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
     # this endpoint knows — it was read, then superseded. Calling that "not read
     # by this endpoint" is simply false, and for ``status`` / ``memory_type`` it
     # would send an integrator hunting a typo that does not exist.
-    superseded: list[tuple[str, str]] = []
+    alias_spellings = _alias_spellings_for(type(body))
+    superseded: list[tuple[str, str, str | None]] = []
     unknown: list[str] = []
     for key in sorted(extras):
-        entry = _SEARCH_ALIAS_SPELLINGS.get(key)
+        entry = alias_spellings.get(key)
         if entry is None:
             unknown.append(key)
             continue
         field_name, choices = entry
-        # The winner is the highest-priority spelling the caller did NOT lose —
-        # i.e. the first choice that is not sitting in extras. Falling back to
-        # the field name keeps the message truthful if that ever comes up empty.
-        winner = next((c for c in choices if c not in extras), field_name)
-        superseded.append((key, winner))
+        # ``None`` when the winning spelling cannot be known from extras alone.
+        # The two cases get different sentences: naming a field where a reader
+        # expects a spelling would be its own small lie.
+        superseded.append((key, field_name, _superseded_winner(choices, extras)))
 
     warnings: list[dict] = []
 
@@ -2123,7 +2168,7 @@ def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
             extra={
                 "path": route,
                 "tenant_id": body.tenant_id,
-                "superseded_parameters": [k for k, _ in capped],
+                "superseded_parameters": [k for k, _, _ in capped],
             },
         )
         warnings.append(
@@ -2132,10 +2177,20 @@ def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
                 "message": (
                     "These request parameters are accepted aliases, but another "
                     "spelling of the same field was also sent and won: "
-                    + ", ".join(f"'{k}' superseded by '{w}'" for k, w in capped)
+                    + ", ".join(
+                        f"'{k}' superseded by '{w}'"
+                        if w
+                        else f"'{k}' superseded by another spelling of '{f}'"
+                        for k, f, w in capped
+                    )
                     + "."
                 ),
-                "details": {"superseded_parameters": dict(capped)},
+                "details": {
+                    "superseded_parameters": {k: f for k, f, _ in capped},
+                    # The spelling that won, where it is knowable. Absent for an
+                    # alias whose winner cannot be identified from the request.
+                    "superseded_by": {k: w for k, _, w in capped if w},
+                },
             }
         )
 

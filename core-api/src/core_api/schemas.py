@@ -1005,8 +1005,12 @@ class SearchRequest(TenantScopedBody):
             "outdated/conflicted row also carries its newest correction, "
             "injected beyond this budget and marked injected: true (with "
             "score: null), so a response holds at most 2*top_k items. "
-            "Also accepted as 'limit'; when both are sent, top_k wins and the "
-            "response warns that 'limit' was not read."
+            "Also accepted as 'limit': sent on its own it is absorbed silently "
+            "and no warning is raised. Sent together with 'top_k', top_k wins "
+            "and the response carries a 'superseded_parameter_alias' warning "
+            "naming 'limit' as superseded by 'top_k' — not an "
+            "'unrecognized_parameters' one, because the endpoint does read "
+            "'limit'; it was simply outranked."
         ),
     )
     # D12 — per-request cosine floor. Overrides the resolved profile/tenant
