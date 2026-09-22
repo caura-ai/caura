@@ -6,8 +6,8 @@ Operator-grade companion to the public benchmarks write-up. The blog answers *"i
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
-| Token savings vs full context | **96.6%** | **79.2%** | — |
+| Accuracy (LLM-judge) | **77.9%** | **92.2%** | — |
+| Token savings vs full context | withdrawn (see note) | **79.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** (warm) |
 
 LoCoMo and LongMemEval are the two most-cited public agent-memory benchmarks. Both measure one agent, one user, one long conversation — the single-chatbot shape. Accuracy across the leading systems (Caura, Mem0, Zep) clusters in a narrow band.
@@ -15,17 +15,19 @@ LoCoMo and LongMemEval are the two most-cited public agent-memory benchmarks. Bo
 **Source:** LongMemEval, [Caura scores 92.2% on LongMemEval](https://caura.ai/blog/caura-longmemeval)
 (2026-09-15; harness and per-question verdicts at
 [caura-ai/caura-longmemeval](https://github.com/caura-ai/caura-longmemeval)).
-LoCoMo and search latency, [Fast, Token-Efficient, and Built for
-Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19).
+LoCoMo (September 2026: all 1,540 scored questions, categories 1–4, three-vote
+LLM judge, 77–79% across repeat runs; the April token-savings figure is
+withdrawn pending re-derivation) and search latency (2026-04-19), [Fast,
+Token-Efficient, and Built for Fleets](https://caura.ai/blog/caura-benchmarks).
 
-**Last updated:** 2026-04-19. These numbers move when we re-run; check the blog for the current canonical version.
+**Last updated:** 2026-09-22. These numbers move when we re-run; check the blog for the current canonical version.
 
 ## What we optimize for
 
 Accuracy sits inside the leading cluster. That's not the axis we push hardest along.
 
 - **Latency** — a few hundred ms of search disappears behind one LLM call when you run one agent. The same overhead, multiplied across thousands of agents making millions of recall calls a day, decides whether a deployment is viable.
-- **Token efficiency** — recall returns the relevant slice, not the full transcript. Token savings vs sending the full context to the LLM: 96–98% on the two benchmarks. That ratio is the bill at fleet scale.
+- **Token efficiency** — recall returns the relevant slice, not the full transcript. Token savings vs sending the full context to the LLM: 79% on LongMemEval (the LoCoMo figure is withdrawn pending re-derivation). That ratio is the bill at fleet scale.
 - **Governance correctness** — write a memory at the wrong scope and you've leaked data across teams. The retrieval surface enforces scope filtering by default; the audit log records every cross-scope read.
 
 ## What we measure
