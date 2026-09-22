@@ -23,7 +23,7 @@ This is that measurement, run on data rather than closed again.
 
 ## Method
 
-Local `memclaw` database: **61,515 memories across 2,617 tenants**. Fan-out
+Local `memclaw` database: **61,515 memories across 2,617 tenants**. <!-- legacy-name-floor: names the database these numbers came from; the measurement is not checkable without it --> Fan-out
 children are identified by `metadata->>'source' = 'atomic_fact_fanout'` and
 carry `metadata->>'parent_memory_id'`.
 

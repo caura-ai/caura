@@ -1074,7 +1074,7 @@ class ResolvedConfig:
         never fires, taken on conversational content. pm-0918-c-04 asked whether
         it should be gated off for document-shaped writes, on the theory that
         2,000-character chunks are the shape it fires on. Measured against the
-        local ``memclaw`` corpus (61,515 memories, 2,617 tenants) the theory does
+        local development corpus (61,515 memories, 2,617 tenants) the theory does
         not hold — the fan-out rate FALLS with length:
 
             <500 chars      1.33%      2,000-2,999    0.57%

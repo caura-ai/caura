@@ -5,7 +5,7 @@ measurement was taken on conversational content, and the row asked whether the
 fan-out should be gated off for document-shaped writes — 2,000-character chunks
 being, the theory went, the shape it actually fires on.
 
-Measured against the local `memclaw` corpus (61,515 memories, 2,617 tenants),
+Measured against the local development corpus (61,515 memories, 2,617 tenants),
 the theory does not hold. The fan-out rate FALLS with content length:
 
     <500 chars      1.33%       2,000-2,999    0.57%

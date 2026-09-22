@@ -11,7 +11,7 @@ lives in the repo it makes claims about.
 Run it against any store to re-check the claim in
 ``docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md``:
 
-    python3 benchmark/pm_c04_fanout_rate.py "postgresql://caura@localhost:5432/memclaw"
+    python3 benchmark/pm_c04_fanout_rate.py "postgresql://user@host:5432/<database>"
 
 or, against the local docker stack:
 
@@ -67,12 +67,12 @@ def main() -> int:
         cmd = [
             "docker",
             "exec",
-            "caura-memclaw-enterprise-postgres-1",
+            "caura-memclaw-enterprise-postgres-1",  # legacy-name-floor: the running container bears this name
             "psql",
             "-U",
             "caura",
             "-d",
-            "memclaw",
+            "memclaw",  # legacy-name-floor: the database bears this name
             "-c",
             QUERY,
         ]
