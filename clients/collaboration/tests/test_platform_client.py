@@ -201,3 +201,25 @@ async def test_auth_rejection_not_retried_and_redirect_not_followed():
 def test_invalid_send_shapes_rejected(payload):
     with pytest.raises(ValidationError):
         SendMessage.model_validate(payload)
+
+
+async def test_wait_result_returns_notice_only_response_immediately():
+    calls = []
+
+    async def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            200, json={"delivery": None, "notices": [{"type": "request_overdue", "cause": "silent"}]}
+        )
+
+    bus = Bus(
+        AgentConfig(api_url="https://caura.test", agent={"agent_id": "a", "tenant_id": "t"}),
+        api_key="test",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await bus.wait_result("stable", 50)
+        assert result["delivery"] is None and result["notices"][0]["cause"] == "silent"
+        assert len(calls) == 1
+    finally:
+        await bus.close()

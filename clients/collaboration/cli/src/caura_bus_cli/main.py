@@ -151,13 +151,23 @@ def send(
     kind: str = "info",
     thread: str | None = None,
     reply_to: str | None = None,
+    expect_reply_within_seconds: int | None = typer.Option(None, min=60, max=604800),
+    capability: str | None = None,
     config: Path | None = typer.Option(None),
 ):
     """Send a message; keep the idempotency key to safely retry an uncertain send."""
 
     async def run(bus):
         receipt = await bus.send(
-            SendMessage(to=to, body=body, kind=kind, thread_id=thread, reply_to=reply_to),
+            SendMessage(
+                to=to,
+                body=body,
+                kind=kind,
+                thread_id=thread,
+                reply_to=reply_to,
+                expect_reply_within_seconds=expect_reply_within_seconds,
+                capability=capability,
+            ),
             idempotency_key=idempotency_key,
         )
         return receipt.model_dump()
@@ -219,6 +229,16 @@ def agents_list(fleet: str | None = None, config: Path | None = typer.Option(Non
 @threads_app.command("list")
 def threads_list(config: Path | None = typer.Option(None)):
     execute(config, lambda bus: bus.threads())
+
+
+@app.command()
+def requests(
+    state: str | None = None, limit: int = typer.Option(20, min=1, max=100), config: Path | None = None
+):
+    """List sent requests and retire their active notices."""
+    if state not in {None, "awaiting", "overdue", "unanswered"}:
+        raise typer.BadParameter("state must be awaiting, overdue or unanswered")
+    execute(config, lambda bus: bus.requests(state=state, limit=limit))
 
 
 if __name__ == "__main__":

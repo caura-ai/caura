@@ -16,7 +16,12 @@ from caura_bus_core import Bus, PlatformError
 from caura_bus_core.collaboration import Presence
 
 WAKE_TEXT = "Caura: new delivery. Call peer wait and handle it."
+OVERDUE_TEXT = "Caura: a request you sent is overdue. Call peer wait."
 WAKE_EVENTS = {
+    "request.overdue",
+    "request.unanswered",
+    "request.nudge",
+    "request.cancelled",
     "message.available",
     "human.decided",
     "delivery.interrupt",
@@ -68,12 +73,18 @@ class WakeState:
         with lock(self.path.with_suffix(".lock")):
             saved = self.load()
             generation = snapshot["wait_generation"]
-            if not snapshot["pending"] or saved.get("outstanding") == generation:
+            notice_cursor = snapshot.get("notice_cursor", 0)
+            if not (snapshot["pending"] or snapshot.get("notices_pending")) or (
+                saved.get("outstanding") == generation and saved.get("notice_cursor", 0) == notice_cursor
+            ):
                 return False
             # Persist before handing control to a runtime. A crash/ambiguous
             # queue failure must not enqueue duplicate prompts on restart.
-            self.save({"outstanding": generation})
-            await emit()
+            self.save({"outstanding": generation, "notice_cursor": notice_cursor})
+            if snapshot.get("wake_reason") == "request_overdue":
+                await emit(OVERDUE_TEXT)
+            else:
+                await emit()
             return True
 
 
@@ -82,7 +93,7 @@ class CodexQueue:
         self.thread = thread
         self.executable = executable
 
-    async def __call__(self):
+    async def __call__(self, message=WAKE_TEXT):
         env = {k: v for k, v in os.environ.items() if k not in {"CAURA_API_KEY", "CAURA_BUS_AGENT_CONFIG"}}
         process = await asyncio.create_subprocess_exec(
             self.executable,
@@ -90,7 +101,7 @@ class CodexQueue:
             "--thread",
             self.thread,
             "--message",
-            WAKE_TEXT,
+            message,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
@@ -212,15 +223,15 @@ async def supervise(config, runtime, state, emit=None):
 async def receive(config, state, hook=None, wait=0, idle_listen_seconds=5):
     output = []
 
-    async def emit():
+    async def emit(message=WAKE_TEXT):
         if hook == "Stop":
-            output.append(json.dumps({"decision": "block", "reason": WAKE_TEXT}))
+            output.append(json.dumps({"decision": "block", "reason": message}))
         elif hook == "UserPromptSubmit":
             output.append(
-                json.dumps({"hookSpecificOutput": {"hookEventName": hook, "additionalContext": WAKE_TEXT}})
+                json.dumps({"hookSpecificOutput": {"hookEventName": hook, "additionalContext": message}})
             )
         else:
-            output.append(WAKE_TEXT)
+            output.append(message)
 
     started = time.monotonic()
     deadline = started + wait

@@ -289,3 +289,44 @@ async def test_listener_shortens_window_when_request_is_answered(tmp_path, monke
         config(), runtime.WakeState(tmp_path / "state"), "Stop", wait=0.08, idle_listen_seconds=0.02
     )
     assert sleeps == pytest.approx([0.08, 0.02], abs=0.005)
+
+
+async def test_sender_notice_wakes_with_exact_text_without_delivery_and_new_notice_is_not_coalesced(tmp_path):
+    state = runtime.WakeState(tmp_path / "notices.json")
+    emitted = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        emitted.append(message)
+
+    snapshot = {
+        "pending": False,
+        "notices_pending": True,
+        "wait_generation": 3,
+        "notice_cursor": 8,
+        "wake_reason": "request_overdue",
+    }
+    assert await state.notify(snapshot, emit)
+    assert emitted == ["Caura: a request you sent is overdue. Call peer wait."]
+    assert not await state.notify(snapshot, emit)
+    assert await state.notify({**snapshot, "notice_cursor": 9}, emit)
+    assert len(emitted) == 2
+
+
+@pytest.mark.parametrize("hook", [None, "Stop", "UserPromptSubmit"])
+async def test_notice_only_hook_prompts_peer_wait(tmp_path, monkeypatch, hook):
+    bus = FakeBus(config())
+    bus.snapshots = [
+        {
+            "pending": True,
+            "active": False,
+            "notices_pending": True,
+            "notice_cursor": 1,
+            "wake_reason": "request_overdue",
+            "wait_generation": 0,
+            "cursor": 1,
+        }
+    ]
+    monkeypatch.setattr(runtime, "Bus", lambda cfg: bus)
+    result = await runtime.receive(config(), runtime.WakeState(tmp_path / "notice.json"), hook)
+    assert runtime.OVERDUE_TEXT in result
+    assert bus.closed

@@ -126,6 +126,11 @@ async def test_storage_mount_runs_migrations_inside_existing_lifespan(
         async def migrate(self):
             events.append("bus migrations")
 
+        async def request_reconciler(self):
+            import asyncio
+
+            await asyncio.Event().wait()
+
     module(monkeypatch, "caura_bus_platform")
     module(
         monkeypatch,

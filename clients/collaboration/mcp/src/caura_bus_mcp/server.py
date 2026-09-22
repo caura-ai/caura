@@ -47,6 +47,7 @@ Opcode = Literal[
     "agents",
     "threads",
     "status",
+    "requests",
     "human",
     "wait",
     "ack",
@@ -79,6 +80,8 @@ class Send(Arguments):
     thread_id: str | None = Field(default=None, max_length=80)
     reply_to: str | None = Field(default=None, max_length=80)
     ack: bool | None = None
+    expect_reply_within_seconds: int | None = Field(default=None, ge=60, le=604800)
+    capability: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class Wait(Arguments):
@@ -121,6 +124,11 @@ class Agents(Arguments):
     fleet_id: str | None = None
 
 
+class Requests(Arguments):
+    state: Literal["awaiting", "overdue", "unanswered"] | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+
+
 class Status(Arguments):
     message_id: str = Field(min_length=1, max_length=80)
 
@@ -137,6 +145,7 @@ OPERATIONS: dict[str, type[Arguments]] = {
     "agents": Agents,
     "threads": Arguments,
     "status": Status,
+    "requests": Requests,
     "human": Human,
     "wait": Wait,
     "ack": Ack,
@@ -164,16 +173,18 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     discover: capability, available_only=true, fleet_id. Returns agents with live skills/status.
     agents: fleet_id. Returns registered peers.
     send: to* (ID list), body*, idempotency_key*, kind=info (info/request/response/ack),
-      thread_id, reply_to. Returns message_id/thread_id; accepted does not mean completed.
+      thread_id, reply_to, expect_reply_within_seconds=60..604800, capability (request only).
+      Returns message_id/thread_id; accepted does not mean completed.
       Retry the same payload with the same key. Reply: kind=response, reply_to=request ID,
       to=[original sender]; Caura preserves the thread. to=["*"] expands allowed peers.
     recent: thread_id, agent_id, limit=20 (1-100), before=next_cursor. Returns visible messages.
     threads: no args. Returns your conversations.
-    status: message_id*. Returns delivery state; ACK does not prove task completion.
+    status: message_id*. Includes per-recipient reply state, due time and cause.
+    requests: state=awaiting|overdue|unanswered, limit=20. Lists sent requests and retires listed notices.
     memory_context: exactly one of delivery_id or message_id. Read-only provenance for an
       explicit Caura memory write; no bodies, keys or memory writes. Sent fanout needs delivery_id.
     human: delivery_id*, reason*. Pauses your delivery; stop work until a human decision.
-    wait: timeout=50 (0-50 seconds, below host timeout). Returns outstanding delivery or null.
+    wait: timeout=50 (0-50 seconds, below host timeout). Returns delivery (possibly null) and durable notices. Read notices even when delivery is null.
       One delivery at a time; paused work cannot run. Honor resume_context on human resumption.
     ack: delivery_id*. Explicit completion, idempotent even after restart.
     reply: delivery_id*, body*, idempotency_key*, reply_to, ack=true. Atomic reply+ack;
@@ -192,7 +203,7 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
 
 
 REMOTE_OPERATIONS = frozenset(
-    {"discover", "send", "recent", "agents", "threads", "status", "human", "memory_context"}
+    {"discover", "send", "recent", "agents", "threads", "status", "requests", "human", "memory_context"}
 )
 
 
@@ -212,6 +223,7 @@ async def dispatch(
             return await app.delivery.wait(params.timeout)
         case Reply():
             result = await app.bus.reply(**params.model_dump(), token=app.delivery.token(params.delivery_id))
+            app.delivery.reply_keys.add((params.delivery_id, params.idempotency_key))
             if params.ack:
                 app.delivery.completed(params.delivery_id)
             return result
@@ -251,7 +263,10 @@ async def dispatch(
             return {"agents": await app.bus.discover(**params.model_dump())}
         case Send():
             reply_context = app.delivery.reply_deliveries.get(params.reply_to)
-            if reply_context:
+            if reply_context and (
+                (app.delivery.current and app.delivery.current.delivery_id == reply_context[0])
+                or (reply_context[0], params.idempotency_key) in app.delivery.reply_keys
+            ):
                 delivery_id, sender, thread = reply_context
                 if params.to != [sender] or params.thread_id not in {None, thread}:
                     raise ValueError("reply recipient and thread must match the claimed message")
@@ -263,6 +278,7 @@ async def dispatch(
                     reply_to=params.reply_to,
                     ack=params.ack is not False,
                 )
+                app.delivery.reply_keys.add((delivery_id, params.idempotency_key))
                 if params.ack is not False:
                     app.delivery.completed(delivery_id)
                 return result
@@ -289,6 +305,8 @@ async def dispatch(
         case Agents():
             agents = await app.bus.agents(params.fleet_id)
             return {"agents": [a for a in agents if a["agent_id"] != app.config.agent.agent_id]}
+        case Requests():
+            return await app.bus.requests(**params.model_dump())
         case Status():
             return await app.bus.status(params.message_id)
         case Human():

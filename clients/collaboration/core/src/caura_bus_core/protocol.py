@@ -29,6 +29,9 @@ class SendMessage(StrictModel):
     thread_id: str | None = Field(default=None, max_length=80)
     reply_to: str | None = Field(default=None, max_length=80)
 
+    expect_reply_within_seconds: int | None = Field(default=None, ge=60, le=604800)
+    capability: str | None = Field(default=None, min_length=1, max_length=80)
+
     @field_validator("to")
     @classmethod
     def recipients(cls, value: list[str]) -> list[str]:
@@ -40,6 +43,10 @@ class SendMessage(StrictModel):
 
     @model_validator(mode="after")
     def response_has_parent(self):
+        if self.kind != "request" and (
+            self.expect_reply_within_seconds is not None or self.capability is not None
+        ):
+            raise ValueError("reply timeout and capability require kind=request")
         if self.kind == "response" and not self.reply_to:
             raise ValueError("responses require reply_to")
         return self

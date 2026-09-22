@@ -112,6 +112,10 @@ class Bus:
         return Claim.model_validate(data["delivery"]) if data["delivery"] else None
 
     async def wait(self, session_id: str, timeout: float = 50) -> Claim | None:
+        result = await self.wait_result(session_id, timeout)
+        return Claim.model_validate(result["delivery"]) if result["delivery"] else None
+
+    async def wait_result(self, session_id: str, timeout: float = 50) -> dict:
         # Short HTTP polls fit the Caura gateway's 25-second upstream timeout and
         # revalidate credentials; the model still sees one bounded MCP wait.
         deadline = monotonic() + timeout
@@ -130,8 +134,8 @@ class Bus:
                     )
                 responded = True
                 failures = 0
-                if data["delivery"]:
-                    return Claim.model_validate(data["delivery"])
+                if data["delivery"] or data.get("notices"):
+                    return data
             except PlatformError as exc:
                 if exc.status < 500:
                     raise
@@ -141,7 +145,7 @@ class Bus:
             remaining = deadline - monotonic()
             if remaining <= 0 or not timeout:
                 if responded:
-                    return None
+                    return {"delivery": None, "notices": []}
                 raise PlatformError(503, "Caura remained unavailable during wait; retry wait")
             if failures:
                 await asyncio.sleep(min(remaining, 0.25 * 2 ** min(failures - 1, 4)))
@@ -208,6 +212,13 @@ class Bus:
 
     async def threads(self):
         return await self.request("GET", "threads")
+
+    async def requests(self, *, state=None, limit=20):
+        return await self.request(
+            "GET",
+            "requests",
+            params={k: v for k, v in {"state": state, "limit": limit}.items() if v is not None},
+        )
 
     async def status(self, message_id: str):
         return await self.request("GET", f"messages/{message_id}")

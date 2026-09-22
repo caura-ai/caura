@@ -38,7 +38,8 @@ class Checkpoint(StrictModel):
 
 class HumanDecision(StrictModel):
     version: int = Field(ge=1)
-    action: Literal["approve", "reject", "redirect"]
+    action: Literal["approve", "reject", "redirect", "nudge", "reassign", "cancel"]
+    target_agent_id: str | None = Field(default=None, min_length=1, max_length=256)
     instructions: str = Field(default="", max_length=4000)
     allow_unconfirmed: bool = False
 
@@ -49,6 +50,9 @@ class Interrupt(StrictModel):
 
 
 class CollaborationPolicy(StrictModel):
+    request_reply_timeout_seconds: int = Field(default=900, ge=60, le=604800)
+    unanswered_after_seconds: int = Field(default=86400, ge=60, le=604800)
+    overdue_action: Literal["notify_sender", "nudge", "escalate"] = "notify_sender"
     processing_timeout_seconds: int = Field(default=600, ge=30, le=86400)
     max_extensions: int = Field(default=6, ge=0, le=100)
     minimum_confidence: float = Field(default=0.75, ge=0, le=1)

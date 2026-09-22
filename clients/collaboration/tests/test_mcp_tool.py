@@ -62,6 +62,7 @@ async def test_only_one_tool_is_advertised():
         "agents",
         "threads",
         "status",
+        "requests",
         "human",
         "wait",
         "ack",

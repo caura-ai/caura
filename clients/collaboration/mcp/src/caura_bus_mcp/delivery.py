@@ -19,6 +19,7 @@ class DeliverySession:
         self.current: Claim | None = None
         self.lock = asyncio.Lock()
         self.renewal: asyncio.Task | None = None
+        self.reply_keys: set[tuple[str, str]] = set()
         self.reply_deliveries: dict[str, tuple[str, str, str]] = {}
 
     @staticmethod
@@ -34,7 +35,8 @@ class DeliverySession:
 
     async def wait(self, timeout=50):
         async with self.lock:
-            claim = await self.bus.wait(self.session_id, timeout)
+            result = await self.bus.wait_result(self.session_id, timeout)
+            claim = Claim.model_validate(result["delivery"]) if result["delivery"] else None
             self.current = claim
             if claim:
                 self.reply_deliveries[claim.envelope.id] = (
@@ -46,7 +48,7 @@ class DeliverySession:
                     await self._observe_pause(claim)
                 elif claim.state == "leased" and (not self.renewal or self.renewal.done()):
                     self.renewal = asyncio.create_task(self._renew())
-            return {"delivery": self.public(claim)}
+            return {"delivery": self.public(claim), "notices": result.get("notices", [])}
 
     async def _observe_pause(self, claim):
         token = claim.lease_token
