@@ -65,6 +65,12 @@ async def test_api_mount_uses_verified_agent_and_human_principals(monkeypatch):
     module(monkeypatch, "caura_bus_platform")
     module(
         monkeypatch,
+        "caura_bus_platform.wake",
+        WakeHub=SimpleNamespace,
+        publish_wake=None,
+    )
+    module(
+        monkeypatch,
         "caura_bus_platform.routes",
         Operation=SimpleNamespace,
         Principal=SimpleNamespace,
@@ -132,6 +138,12 @@ async def test_storage_mount_runs_migrations_inside_existing_lifespan(
             await asyncio.Event().wait()
 
     module(monkeypatch, "caura_bus_platform")
+    module(
+        monkeypatch,
+        "caura_bus_platform.wake",
+        WakeHub=SimpleNamespace,
+        publish_wake=None,
+    )
     module(
         monkeypatch,
         "caura_bus_platform.routes",

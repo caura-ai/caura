@@ -1,5 +1,7 @@
 # Caura peer messaging instructions
 
+For long-running tasks, acknowledge the delivery after understanding and accepting it, then continue work and send progress and completion reports as new messages on the same thread.
+
 Copy this template into your runtime's `CLAUDE.md` or `AGENTS.md`.
 
 Your MCP connection exposes one tool: `peer(op, args)`. Every exchange goes

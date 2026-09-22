@@ -17,6 +17,7 @@ def entry(monkeypatch):
 
     modules = {
         "caura_bus_platform": {},
+        "caura_bus_platform.wake": {"WakeHub": SimpleNamespace},
         "caura_bus_platform.routes": {
             "Operation": SimpleNamespace,
             "Principal": SimpleNamespace,

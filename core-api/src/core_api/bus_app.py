@@ -1,11 +1,14 @@
 """Mount inside the real Caura core-api, retaining its auth and middleware."""
 
 import hmac
+import os
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 import httpx
 from caura_bus_platform.collaboration_routes import HumanPrincipal, human_router
 from caura_bus_platform.routes import Operation, Principal, public_router
+from caura_bus_platform.wake import WakeHub
 from fastapi import Depends, HTTPException, Request
 
 from core_api.app import app
@@ -107,8 +110,30 @@ async def storage_call(operation):
         raise HTTPException(503, "Caura storage is unavailable") from exc
 
 
-app.include_router(public_router(bus_principal, storage_call))
-app.include_router(human_router(human_principal, storage_call, Operation))
+wake_hub = WakeHub()
+original_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def lifespan(app):
+    from common.events.factory import get_event_bus
+
+    wake_hub.register(get_event_bus())
+    async with original_lifespan(app):
+        yield
+
+
+@app.middleware("http")
+async def collaboration_replica(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/v1/bus/"):
+        response.headers["X-Caura-Collaboration-Replica"] = os.getenv("COLLABORATION_REPLICA_ID", "core-api")
+    return response
+
+
+app.router.lifespan_context = lifespan
+app.include_router(public_router(bus_principal, storage_call, wake_hub))
+app.include_router(human_router(human_principal, storage_call, Operation, wake_hub))
 # Upstream builds its schema during import to check route invariants.
 app.openapi_schema = None
 
