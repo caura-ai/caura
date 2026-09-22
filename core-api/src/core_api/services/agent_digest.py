@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from common.llm import call_with_fallback
+from core_api.agent_ids import canonical_service_agent_id, service_agent_read_ids
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.organization_settings import get_settings_for_display
 from core_api.services.report_corpus import (
@@ -243,7 +244,14 @@ async def generate_for_org(
     provider = config.get("provider") or "openai"
     max_cost = float(config.get("max_cost_per_run_usd") or 0)
 
-    agents = await sc.list_agents(org_id)
+    raw_agents = await sc.list_agents(org_id)
+    agents_by_id: dict[str, dict] = {}
+    for raw_agent in raw_agents:
+        canonical_id = canonical_service_agent_id(raw_agent["agent_id"])
+        agent = {**raw_agent, "agent_id": canonical_id}
+        if canonical_id not in agents_by_id or raw_agent["agent_id"] == canonical_id:
+            agents_by_id[canonical_id] = agent
+    agents = list(agents_by_id.values())
     known_ids = frozenset(a["agent_id"] for a in agents if a.get("agent_id"))
 
     # Fetch each agent's window memories (cheap; bounded concurrency). We already
@@ -258,6 +266,7 @@ async def generate_for_org(
                 {
                     "tenant_id": org_id,
                     "written_by": agent["agent_id"],
+                    "written_by_ids": list(service_agent_read_ids(agent["agent_id"])),
                     "created_after": window_start.isoformat(),
                     "created_before": window_end.isoformat(),
                     "sort": "created_at",
@@ -265,7 +274,7 @@ async def generate_for_org(
                     "limit": _FETCH_LIMIT,
                 }
             )
-            rows = rows or []
+            rows = [{**row, "agent_id": canonical_service_agent_id(row["agent_id"])} for row in (rows or [])]
             durable = [m for m in rows if is_cohesive(m)]
             events = [m for m in rows if passes_noise_filter(m) and not is_cohesive(m)]
             return agent, durable, events

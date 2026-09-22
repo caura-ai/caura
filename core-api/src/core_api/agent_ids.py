@@ -42,7 +42,10 @@ DEFAULT_AGENT_ID = "mcp-agent"
 # collapsing onto the anonymous default (which is unregistered, so its writes
 # never surface in Prism or the per-agent report). Registered per-tenant with
 # ``belonging_type='service'`` the first time the job runs for that tenant.
-INSIGHTER_AGENT_ID = "memclaw-insighter"  # legacy-name-floor: floor
+INSIGHTER_AGENT_ID = "caura-insighter"
+# Permanent client-input alias. Existing rows keep this value until the data
+# migration lands; reads therefore expand the canonical id to both spellings.
+LEGACY_INSIGHTER_AGENT_ID = "memclaw-insighter"  # legacy-name-floor: floor
 
 # Trust tier the insighter self-registers at: service level, granting cross-fleet
 # read (>=2, needed for scope='all') and write (>=3, it persists scope_org
@@ -61,7 +64,28 @@ INSIGHTER_TRUST_LEVEL = 3
 # cosmetic here: ``caura_insights`` defaults to ``scope="agent"``, which filters
 # ``Memory.agent_id == agent_id``, so rows attributed to this service identity are
 # invisible to every real agent's default insights run.
-DOC_INDEXER_AGENT_ID = "memclaw-doc-indexer"  # legacy-name-floor: floor
+DOC_INDEXER_AGENT_ID = "caura-doc-indexer"
+# Same compatibility contract as ``LEGACY_INSIGHTER_AGENT_ID``.
+LEGACY_DOC_INDEXER_AGENT_ID = "memclaw-doc-indexer"  # legacy-name-floor: floor
+
+_SERVICE_AGENT_CANONICAL_IDS = {
+    LEGACY_INSIGHTER_AGENT_ID: INSIGHTER_AGENT_ID,
+    LEGACY_DOC_INDEXER_AGENT_ID: DOC_INDEXER_AGENT_ID,
+}
+_SERVICE_AGENT_LEGACY_IDS = {canonical: legacy for legacy, canonical in _SERVICE_AGENT_CANONICAL_IDS.items()}
+
+
+def canonical_service_agent_id(agent_id: str) -> str:
+    """Map a retired service id supplied by a client to its write identity."""
+    return _SERVICE_AGENT_CANONICAL_IDS.get(agent_id, agent_id)
+
+
+def service_agent_read_ids(agent_id: str) -> tuple[str, ...]:
+    """Return canonical-first ids that represent one logical service agent."""
+    canonical = canonical_service_agent_id(agent_id)
+    legacy = _SERVICE_AGENT_LEGACY_IDS.get(canonical)
+    return (canonical, legacy) if legacy is not None else (canonical,)
+
 
 # Bare ``"main"`` is the OpenClaw plugin's *unset* default agent_id: when an
 # operator never sets ``CAURA_AGENT_ID`` every install collapses onto this one
@@ -110,9 +134,9 @@ def effective_write_agent_id(verified_id: str | None, body_id: str | None) -> Ag
     accepts any non-placeholder body id and remains spoofable until reject.
     """
     if verified_id and verified_id not in ALWAYS_RESERVED_AGENT_IDS:
-        return AgentIdentity(verified_id)
+        return AgentIdentity(canonical_service_agent_id(verified_id))
     if body_id and body_id not in _PLACEHOLDER_BODY_AGENT_IDS:
-        return AgentIdentity(body_id)
+        return AgentIdentity(canonical_service_agent_id(body_id))
     # Reserved/placeholder fallthrough: still the resolved identity, and the
     # write-path guard (policy=reject) is what refuses it downstream.
     reserved = verified_id or body_id
@@ -131,10 +155,9 @@ def effective_read_agent_id(verified_id: str | None, asserted_id: str) -> AgentI
     fallback. Total, because every MCP read tool defaults ``agent_id`` to
     ``DEFAULT_AGENT_ID`` rather than accepting None.
 
-    Exists so the read path has ONE place that turns two strings into an
-    ``AgentIdentity``. It was written as ``_get_agent_id() or agent_id`` inline
-    at eight MCP call sites; the one that reaches ``enforce_fleet_read_many``
-    now routes through here instead. The remaining seven feed no authorization
-    sink and are deliberately left alone rather than swept.
+    This is also the compatibility boundary for retired service ids: callers
+    may keep supplying an old id while every downstream read operates on the
+    canonical logical identity and expands database filters through
+    :func:`service_agent_read_ids`.
     """
-    return AgentIdentity(verified_id or asserted_id)
+    return AgentIdentity(canonical_service_agent_id(verified_id or asserted_id))

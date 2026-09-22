@@ -20,7 +20,7 @@ import logging
 
 from fastapi import HTTPException
 
-from core_api.agent_ids import DEFAULT_AGENT_ID, AgentIdentity
+from core_api.agent_ids import DEFAULT_AGENT_ID, AgentIdentity, canonical_service_agent_id
 from core_api.auth import AuthContext
 from core_api.config import settings as app_settings
 from core_api.errors import (
@@ -74,7 +74,9 @@ async def resolve_caller_and_gate(
     # The single construction point for this resolver: all three returns
     # below hand back this value (or a broker-degraded one, itself already an
     # AgentIdentity), so the identity is minted once, here.
-    caller_agent_id = AgentIdentity(auth.agent_id or body_agent_id or DEFAULT_AGENT_ID)
+    caller_agent_id = AgentIdentity(
+        canonical_service_agent_id(auth.agent_id or body_agent_id or DEFAULT_AGENT_ID)
+    )
 
     if auth.is_admin:
         return caller_agent_id

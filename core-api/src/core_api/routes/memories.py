@@ -29,7 +29,9 @@ from core_api.agent_ids import (
     ALWAYS_RESERVED_AGENT_IDS,
     DEFAULT_AGENT_ID,
     AgentIdentity,
+    canonical_service_agent_id,
     effective_write_agent_id,
+    service_agent_read_ids,
 )
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
@@ -168,7 +170,7 @@ def _resolve_rest_write_agent_id(auth: AuthContext, claimed_id: str) -> str:
     risk, then fails closed when the reserved-id policy reaches reject.
     """
     if not app_settings.bind_write_identity_to_auth or not auth.agent_id:
-        return claimed_id
+        return canonical_service_agent_id(claimed_id)
     verified_id = auth.agent_id
     if verified_id in ALWAYS_RESERVED_AGENT_IDS:
         # Reject is deterministic and must precede idempotency, but a rejected
@@ -179,7 +181,7 @@ def _resolve_rest_write_agent_id(auth: AuthContext, claimed_id: str) -> str:
                 detail=_REST_RESERVED_CREDENTIAL_MESSAGE.format(agent_id=verified_id),
             )
         return effective_write_agent_id(verified_id, claimed_id) or claimed_id
-    return verified_id
+    return canonical_service_agent_id(verified_id)
 
 
 def _observe_rest_reserved_write(auth: AuthContext, chosen_id: str) -> None:
@@ -523,8 +525,14 @@ async def list_memories(
     list_payload: dict = {
         "tenant_id": tenant_id or "",
         "caller_agent_id": caller_agent_id,  # visibility scoping (authenticated identity)
+        "caller_agent_ids": (
+            list(service_agent_read_ids(caller_agent_id)) if caller_agent_id is not None else None
+        ),
         "fleet_id": fleet_id,
         "written_by": author_filter,  # author filter (written_by, else agent_id)
+        "written_by_ids": (
+            list(service_agent_read_ids(author_filter)) if author_filter is not None else None
+        ),
         "memory_type": memory_type,
         "exclude_memory_types": exclude_memory_types,
         "created_after": created_after.isoformat() if created_after else None,

@@ -19,11 +19,11 @@ from uuid import uuid4
 
 import pytest
 
+from core_api.agent_ids import INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID
 from core_api.services.lifecycle_audit import (
     _CRYSTALLIZE_MIN_ACTIVE_MEMORIES,
     _CoreApiLifecycleAdapter,
 )
-from tests._legacy_contracts import INSIGHTS_AGENT_ID
 
 _UNSET = object()  # "count_active was never called" sentinel
 
@@ -180,13 +180,13 @@ async def test_insights_attributes_and_registers_dedicated_agent() -> None:
     assert produced == 2
     # Attributed to the dedicated identity, tenant-wide (no fleet → scope='all').
     mock_gen.assert_awaited_once()
-    assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTS_AGENT_ID
+    assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTER_AGENT_ID
     assert mock_gen.await_args.kwargs["scope"] == "all"
     # Self-registered exactly once as a service agent with cross-fleet trust.
     assert len(registered) == 1
     reg = registered[0]
     assert reg["tenant_id"] == "t1"
-    assert reg["agent_id"] == INSIGHTS_AGENT_ID
+    assert reg["agent_id"] == INSIGHTER_AGENT_ID
     assert reg["belonging_type"] == "service"
     assert reg["trust_level"] == 3
 
@@ -231,7 +231,50 @@ async def test_insights_does_not_reregister_existing_agent() -> None:
 
     assert produced == 1
     # Still attributed to the dedicated identity even though it was pre-existing.
-    assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTS_AGENT_ID
+    assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTER_AGENT_ID
+
+
+@pytest.mark.asyncio
+async def test_insights_legacy_registration_is_reused_while_writes_use_new_id() -> None:
+    """A pre-migration tenant must not acquire a duplicate agent row."""
+    lookups: list[str] = []
+
+    class _InsightsStorage:
+        async def insights_activity_gate(self, *, tenant_id: str, fleet_id):
+            return {
+                "latest_non_insight": "2026-07-08T00:00:00+00:00",
+                "latest_insight": None,
+            }
+
+        async def get_agent(self, agent_id: str, tenant_id: str) -> dict | None:
+            lookups.append(agent_id)
+            if agent_id == LEGACY_INSIGHTER_AGENT_ID:
+                return {"agent_id": agent_id, "tenant_id": tenant_id}
+            return None
+
+        async def create_or_update_agent(
+            self, payload: dict
+        ) -> dict:  # pragma: no cover
+            raise AssertionError("must reuse the legacy registration")
+
+    class _On:
+        auto_insights_enabled = True
+
+    adapter = _CoreApiLifecycleAdapter(_InsightsStorage())
+    with (
+        patch(
+            "core_api.services.lifecycle_audit.resolve_config",
+            new=AsyncMock(return_value=_On()),
+        ),
+        patch(
+            "core_api.services.insights_service.generate_insights",
+            new=AsyncMock(return_value={"insight_memory_ids": ["a"]}),
+        ) as mock_gen,
+    ):
+        assert await adapter.insights(org_id="t1", fleet_id=None) == 1
+
+    assert lookups == [INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID]
+    assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTER_AGENT_ID
 
 
 @pytest.mark.asyncio
@@ -273,7 +316,7 @@ async def test_insights_registration_failure_does_not_abort_run() -> None:
 
     # Run completed despite the registration failure, still under the dedicated id.
     assert produced == 3
-    assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTS_AGENT_ID
+    assert mock_gen.await_args.kwargs["agent_id"] == INSIGHTER_AGENT_ID
 
 
 @pytest.mark.asyncio

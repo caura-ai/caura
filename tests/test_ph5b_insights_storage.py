@@ -30,6 +30,7 @@ import pytest
 from sqlalchemy import text
 
 from common.constants import VECTOR_DIM
+from core_api.agent_ids import INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID
 from core_api.constants import INSIGHTS_DISCOVER_SAMPLE_SIZE, INSIGHTS_MAX_MEMORIES
 from core_storage_api.services.postgres_service import get_session
 
@@ -197,6 +198,25 @@ async def test_patterns_scope_agent_filters_by_agent(sc):
         max_memories=INSIGHTS_MAX_MEMORIES,
     )
     assert {r["content"] for r in rows_all} == {"mine", "theirs"}
+
+
+async def test_patterns_service_agent_reads_new_and_legacy_ids(sc):
+    tenant = _t()
+    await _seed_memory(tenant_id=tenant, agent_id=INSIGHTER_AGENT_ID, content="new")
+    await _seed_memory(
+        tenant_id=tenant, agent_id=LEGACY_INSIGHTER_AGENT_ID, content="legacy"
+    )
+    await _seed_memory(tenant_id=tenant, agent_id="other", content="other")
+
+    rows = await sc.insights_query_patterns(
+        tenant_id=tenant,
+        fleet_id=None,
+        agent_id=INSIGHTER_AGENT_ID,
+        scope="agent",
+        max_memories=INSIGHTS_MAX_MEMORIES,
+    )
+
+    assert {row["content"] for row in rows} == {"new", "legacy"}
 
 
 async def test_patterns_scope_fleet_filters_by_fleet(sc):
@@ -441,6 +461,36 @@ async def test_supersede_priors_selects_by_jsonb_metadata(sc):
     assert result["outdated_count"] == 1
     assert await _status(match) == "outdated"
     assert await _status(other_focus) == "active"
+
+
+async def test_supersede_priors_service_agent_updates_new_and_legacy_ids(sc):
+    tenant = _t()
+    metadata = {"insight_focus": "patterns", "insight_scope": "agent"}
+    new = await _seed_memory(
+        tenant_id=tenant,
+        agent_id=INSIGHTER_AGENT_ID,
+        memory_type="insight",
+        content="new prior",
+        metadata=metadata,
+    )
+    legacy = await _seed_memory(
+        tenant_id=tenant,
+        agent_id=LEGACY_INSIGHTER_AGENT_ID,
+        memory_type="insight",
+        content="legacy prior",
+        metadata=metadata,
+    )
+
+    result = await sc.insights_supersede_priors(
+        tenant_id=tenant,
+        agent_id=INSIGHTER_AGENT_ID,
+        focus="patterns",
+        scope="agent",
+        fleet_id=None,
+    )
+
+    assert set(result["prior_ids"]) == {new, legacy}
+    assert result["outdated_count"] == 2
 
 
 async def test_supersede_priors_covers_pending_but_not_confirmed(sc):

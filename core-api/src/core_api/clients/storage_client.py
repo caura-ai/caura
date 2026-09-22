@@ -15,6 +15,7 @@ from common import permanent_failure
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.http_retry import CONNECT_PHASE_MAX_ATTEMPTS, with_connect_phase_retry, with_retry
 from common.storage_auth import is_storage_shared_secret_rejection
+from core_api.agent_ids import service_agent_read_ids
 from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
@@ -2377,6 +2378,7 @@ class CoreStorageClient:
                 "tenant_id": tenant_id,
                 "fleet_id": fleet_id,
                 "agent_id": agent_id,
+                "agent_ids": list(service_agent_read_ids(agent_id)),
                 "scope": scope,
                 "max_memories": max_memories,
             },
@@ -2402,6 +2404,7 @@ class CoreStorageClient:
                 "tenant_id": tenant_id,
                 "fleet_id": fleet_id,
                 "agent_id": agent_id,
+                "agent_ids": list(service_agent_read_ids(agent_id)),
                 "scope": scope,
                 "max_memories": max_memories,
                 "window_start": window_start.isoformat() if window_start else None,
@@ -2431,6 +2434,7 @@ class CoreStorageClient:
                 "tenant_id": tenant_id,
                 "fleet_id": fleet_id,
                 "agent_id": agent_id,
+                "agent_ids": list(service_agent_read_ids(agent_id)),
                 "scope": scope,
                 "thirty_days_ago": thirty_days_ago.isoformat(),
                 "fourteen_days_ago": fourteen_days_ago.isoformat(),
@@ -2449,6 +2453,7 @@ class CoreStorageClient:
                 "tenant_id": tenant_id,
                 "fleet_id": fleet_id,
                 "agent_id": agent_id,
+                "agent_ids": list(service_agent_read_ids(agent_id)),
                 "scope": scope,
                 "max_memories": max_memories,
             },
@@ -2474,6 +2479,7 @@ class CoreStorageClient:
                 "tenant_id": tenant_id,
                 "fleet_id": fleet_id,
                 "agent_id": agent_id,
+                "agent_ids": list(service_agent_read_ids(agent_id)),
                 "scope": scope,
                 "max_memories": max_memories,
                 "window_start": window_start.isoformat() if window_start else None,
@@ -2501,6 +2507,7 @@ class CoreStorageClient:
                 "tenant_id": tenant_id,
                 "fleet_id": fleet_id,
                 "agent_id": agent_id,
+                "agent_ids": list(service_agent_read_ids(agent_id)),
                 "scope": scope,
                 "sample_size": sample_size,
                 "window_start": window_start.isoformat() if window_start else None,
@@ -2517,6 +2524,7 @@ class CoreStorageClient:
             {
                 "tenant_id": tenant_id,
                 "agent_id": agent_id,
+                "agent_ids": list(service_agent_read_ids(agent_id)),
                 "focus": focus,
                 "scope": scope,
                 "fleet_id": fleet_id,
@@ -2564,6 +2572,7 @@ class CoreStorageClient:
         *,
         tenant_id: str,
         caller_agent_id: str,
+        caller_agent_ids: list[str] | None = None,
         fleet_id: str | None,
         scope: str,
         ids: list[str],
@@ -2574,6 +2583,7 @@ class CoreStorageClient:
             {
                 "tenant_id": tenant_id,
                 "caller_agent_id": caller_agent_id,
+                "caller_agent_ids": caller_agent_ids,
                 "fleet_id": fleet_id,
                 "scope": scope,
                 "ids": ids,
@@ -3289,6 +3299,7 @@ class CoreStorageClient:
         params: dict[str, Any] = {"tenant_id": tenant_id, "period": period}
         if agent_id is not None:
             params["agent_id"] = agent_id
+            params["agent_ids"] = list(service_agent_read_ids(agent_id))
         if as_of is not None:
             params["as_of"] = as_of
         return await self._get_list("/reports/agent-activity", **params)

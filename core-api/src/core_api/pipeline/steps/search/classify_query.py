@@ -71,7 +71,9 @@ class ClassifyQuery:
         fleet_ids: list[str] | None = ctx.data.get("fleet_ids")
         fleet_ids = fleet_ids or None  # normalise [] → None for consistent fleet filtering
         caller_agent_id: str | None = ctx.data.get("caller_agent_id")
+        caller_agent_ids: list[str] | None = ctx.data.get("caller_agent_ids")
         filter_agent_id: str | None = ctx.data.get("filter_agent_id")
+        filter_agent_ids: list[str] | None = ctx.data.get("filter_agent_ids")
         memory_type_filter: str | None = ctx.data.get("memory_type_filter")
         status_filter: str | None = ctx.data.get("status_filter")
         valid_at = ctx.data.get("valid_at")
@@ -206,7 +208,9 @@ class ClassifyQuery:
                         query=query,
                         fleet_ids=fleet_ids,
                         caller_agent_id=caller_agent_id,
+                        caller_agent_ids=caller_agent_ids,
                         filter_agent_id=filter_agent_id,
+                        filter_agent_ids=filter_agent_ids,
                         memory_type_filter=memory_type_filter,
                         status_filter=status_filter,
                         valid_at=valid_at,
@@ -491,7 +495,9 @@ class ClassifyQuery:
         query: str = "",
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_agent_ids: list[str] | None = None,
         filter_agent_id: str | None = None,
+        filter_agent_ids: list[str] | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
         valid_at: datetime | None = None,
@@ -602,7 +608,9 @@ class ClassifyQuery:
             "memory_ids": list(memory_boost.keys()),
             "fleet_ids": fleet_ids,
             "caller_agent_id": caller_agent_id,
+            "caller_agent_ids": caller_agent_ids,
             "filter_agent_id": filter_agent_id,
+            "filter_agent_ids": filter_agent_ids,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
             # C27 — the ENTITY_LOOKUP short-circuit bypasses scored search

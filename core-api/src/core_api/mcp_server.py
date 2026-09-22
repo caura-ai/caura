@@ -30,8 +30,10 @@ from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.agent_ids import (
     DEFAULT_AGENT_ID,
     AgentIdentity,
+    canonical_service_agent_id,
     effective_read_agent_id,
     effective_write_agent_id,
+    service_agent_read_ids,
 )
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
@@ -66,6 +68,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     get_or_create_agent,
+    lookup_agent,
     resolve_write_agent,
 )
 
@@ -513,7 +516,9 @@ class MCPAuthMiddleware:
             # and the delete trust gate. Use the value the resolution above
             # decided; only Path 4 sets it True.
             agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
-            _agent_id_var.set(AgentIdentity(agent_header) if agent_header else None)
+            _agent_id_var.set(
+                AgentIdentity(canonical_service_agent_id(agent_header)) if agent_header else None
+            )
 
             readable_header = headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
             if readable_header:
@@ -1305,13 +1310,12 @@ async def caura_recall(
         # ``_mcp_session`` / RLS GUCs — tenant isolation is carried explicitly:
         # the agent lookup + write quota pin to the HOME tenant, while the READ
         # (search + audit) widens via ``readable_tenant_ids`` exactly as before.
-        sc = get_storage_client()
         # D13 — same fix as REST /recall: bill the recall counter (flag-gated).
         await check_and_increment(tenant_id, recall_operation())
         config = await resolve_config(tenant_id)
         # Agent profile + fleet-scope signals are HOME-tenant only — never
         # widened by the readable set.
-        _ag = await sc.get_agent(agent_id, tenant_id)
+        _ag = await lookup_agent(tenant_id, agent_id)
         agent_profile = None
         if _ag:
             agent_profile = _ag.get("search_profile")
@@ -3300,8 +3304,14 @@ async def caura_list(
             list_payload: dict[str, Any] = {
                 "tenant_id": tenant_id,
                 "caller_agent_id": agent_id,
+                "caller_agent_ids": list(service_agent_read_ids(agent_id)),
                 "fleet_id": fleet_id,
                 "written_by": effective_written_by,
+                "written_by_ids": (
+                    list(service_agent_read_ids(effective_written_by))
+                    if effective_written_by is not None
+                    else None
+                ),
                 "memory_type": memory_type,
                 "status": status,
                 "weight_min": weight_min,
@@ -3479,6 +3489,11 @@ async def caura_stats(
                     "tenant_id": tenant_id,
                     "fleet_id": fleet_id,
                     "agent_id": effective_agent_id,
+                    "agent_ids": (
+                        list(service_agent_read_ids(effective_agent_id))
+                        if effective_agent_id is not None
+                        else None
+                    ),
                     "memory_type": memory_type,
                     "status": status,
                     "include_deleted": effective_include_deleted,

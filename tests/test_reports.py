@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 
+from core_api.agent_ids import INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID
 from core_api.app import app
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
@@ -201,6 +202,101 @@ async def test_report_owner_1to1_is_self(client):
     assert body["spotlight"] is None or body["spotlight"]["agent_id"] == a1, body[
         "spotlight"
     ]
+
+
+async def test_report_self_scope_combines_service_agent_aliases(client):
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-alias-{tag}")
+    fleet = f"rep-fleet-{tag}"
+    await _register(tenant_id, fleet, LEGACY_INSIGHTER_AGENT_ID)
+    sc = get_storage_client()
+    for agent_id, content in (
+        (LEGACY_INSIGHTER_AGENT_ID, f"legacy decision {tag}"),
+        (INSIGHTER_AGENT_ID, f"new decision {tag}"),
+    ):
+        await sc.create_memory(
+            {
+                "tenant_id": tenant_id,
+                "agent_id": agent_id,
+                "fleet_id": fleet,
+                "memory_type": "decision",
+                "status": "active",
+                "visibility": "scope_agent",
+                "content": content,
+            }
+        )
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "owner_1to1",
+            "agent_id": LEGACY_INSIGHTER_AGENT_ID,
+        },
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["summary"]["durable_memories_written"] == 2
+    assert len(body["per_agent"]) == 1
+    assert body["per_agent"][0]["agent_id"] == INSIGHTER_AGENT_ID
+    assert body["per_agent"][0]["durable_writes"] == 2
+    assert {item["agent_id"] for item in body["value_highlights"]} == {
+        INSIGHTER_AGENT_ID
+    }
+
+
+async def test_report_alias_leaderboard_prefers_canonical_agent_row(client):
+    tag = _uid()
+    tenant_id, headers = get_test_auth(f"rep-alias-row-{tag}")
+    fleet = f"rep-fleet-{tag}"
+    sc = get_storage_client()
+    # list_agents returns newest first, so create the legacy row second. The
+    # merge must still replace it with the canonical row deterministically.
+    for agent_id, display_name in (
+        (INSIGHTER_AGENT_ID, "Canonical Insighter"),
+        (LEGACY_INSIGHTER_AGENT_ID, "Legacy Insighter"),
+    ):
+        await sc.create_or_update_agent(
+            {
+                "tenant_id": tenant_id,
+                "agent_id": agent_id,
+                "fleet_id": fleet,
+                "trust_level": 1,
+                "display_name": display_name,
+            }
+        )
+        await sc.create_memory(
+            {
+                "tenant_id": tenant_id,
+                "agent_id": agent_id,
+                "fleet_id": fleet,
+                "memory_type": "decision",
+                "status": "active",
+                "visibility": "scope_team",
+                "content": f"{display_name} decision {tag}",
+            }
+        )
+
+    resp = await client.get(
+        "/api/v1/reports",
+        params={
+            "tenant_id": tenant_id,
+            "period": "week",
+            "destination": "internal_group",
+            "agent_id": LEGACY_INSIGHTER_AGENT_ID,
+        },
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    logical_agent = next(
+        row for row in resp.json()["per_agent"] if row["agent_id"] == INSIGHTER_AGENT_ID
+    )
+    assert logical_agent["durable_writes"] == 2
+    assert logical_agent["display_name"] == "Canonical Insighter"
 
 
 async def test_report_external_is_fail_closed(client):

@@ -8,7 +8,14 @@ overridden by the body (no spoofing of a properly-provisioned cred).
 
 import pytest
 
-from core_api.agent_ids import effective_write_agent_id
+from core_api.agent_ids import (
+    DOC_INDEXER_AGENT_ID,
+    INSIGHTER_AGENT_ID,
+    LEGACY_DOC_INDEXER_AGENT_ID,
+    LEGACY_INSIGHTER_AGENT_ID,
+    effective_write_agent_id,
+    service_agent_read_ids,
+)
 
 
 @pytest.mark.parametrize(
@@ -37,7 +44,22 @@ from core_api.agent_ids import effective_write_agent_id
             "mcp-agent",
         ),  # preserved for _refuse_default_agent_on_gateway
         (None, None, None),
+        (LEGACY_INSIGHTER_AGENT_ID, None, INSIGHTER_AGENT_ID),
+        (None, LEGACY_DOC_INDEXER_AGENT_ID, DOC_INDEXER_AGENT_ID),
     ],
 )
 def test_effective_write_agent_id(verified, body, expected):
     assert effective_write_agent_id(verified, body) == expected
+
+
+@pytest.mark.parametrize(
+    "supplied,expected",
+    [
+        (INSIGHTER_AGENT_ID, (INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID)),
+        (LEGACY_INSIGHTER_AGENT_ID, (INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID)),
+        (DOC_INDEXER_AGENT_ID, (DOC_INDEXER_AGENT_ID, LEGACY_DOC_INDEXER_AGENT_ID)),
+        ("customer-agent", ("customer-agent",)),
+    ],
+)
+def test_service_agent_read_ids_are_canonical_first(supplied, expected):
+    assert service_agent_read_ids(supplied) == expected

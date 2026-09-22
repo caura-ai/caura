@@ -23,6 +23,7 @@ import pytest
 from fastapi import HTTPException
 
 from core_api import mcp_server
+from core_api.agent_ids import INSIGHTER_AGENT_ID, LEGACY_INSIGHTER_AGENT_ID
 from tests._mcp_test_helpers import as_text, parse_envelope, stub_storage_client
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -62,6 +63,30 @@ async def test_recall_happy_path(mcp_env, monkeypatch):
     assert len(payload["results"]) == 2
     assert "brief" not in payload
     search_mock.assert_called_once()
+
+
+async def test_recall_uses_legacy_registration_during_migration(mcp_env, monkeypatch):
+    search_mock = mcp_env["service"]("search_memories")
+    search_mock.return_value = []
+    monkeypatch.setattr(mcp_server, "resolve_config", _fake_resolve_config)
+    storage = stub_storage_client(monkeypatch, get_agent=None)
+    storage.get_agent.side_effect = lambda agent_id, tenant_id, read=True: (
+        {
+            "agent_id": LEGACY_INSIGHTER_AGENT_ID,
+            "fleet_id": "home",
+            "trust_level": 1,
+            "search_profile": {"top_k": 7},
+        }
+        if agent_id == LEGACY_INSIGHTER_AGENT_ID
+        else None
+    )
+
+    await mcp_server.caura_recall(query="status", agent_id=LEGACY_INSIGHTER_AGENT_ID)
+
+    kwargs = search_mock.await_args.kwargs
+    assert kwargs["caller_agent_id"] == INSIGHTER_AGENT_ID
+    assert kwargs["fleet_ids"] == ["home"]
+    assert kwargs["search_profile"] == {"top_k": 7}
 
 
 async def test_recall_with_include_brief(mcp_env, monkeypatch):
