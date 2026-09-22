@@ -58,7 +58,7 @@ async def human_principal(request: Request, auth: Annotated[AuthContext, Depends
 # Reconstruct only this fixed operator vocabulary; storage text stays private.
 DECISION_CONFLICTS = {
     "REQUEST_NOT_DECIDABLE": "This decision is no longer current. Refresh before trying again.",
-    "TARGET_UNAVAILABLE": "Choose an online agent with the required capability.",
+    "TARGET_UNAVAILABLE": "Choose an online agent in this tenant.",
     "TARGET_ALREADY_ASSIGNED": "This agent already has this request. Choose another agent.",
     "STOP_NOT_CONFIRMED": "Stop is not confirmed. Wait for confirmation or acknowledge unconfirmed recovery.",
 }
