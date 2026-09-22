@@ -9,8 +9,8 @@ swap.
 The 8 checks (one ``ScanFinding`` per hit; severity drives caller
 behavior — see :class:`ScanFinding`):
 
-  1. **prompt-injection** markers in content / description / summary /
-     evidence (``critical``) — quarantine.
+  1. **prompt-injection** markers in name / content / description /
+     summary / goal / tags[] / evidence (``critical``) — quarantine.
   2. **shell-injection** patterns inside ``support_files`` entry
      bodies, under EVERY ``role`` (``critical``) — quarantine.
   3. **URL exfiltration** patterns in script-roled bodies only
@@ -18,8 +18,9 @@ behavior — see :class:`ScanFinding`):
   4. **path violations** on ``support_files`` (absolute, traversal,
      hidden, bare-dot, executable, non-ASCII) — ``fatal=True``;
      refuse the write.
-  5. **PII** (SSN / credit card / phone / email) in content / evidence
-     (``warn``; redact-on-display flag set by the inbox renderer).
+  5. **PII** (SSN / credit card / phone / email) in the same fields as
+     check #1 (``warn``; redact-on-display flag set by the inbox
+     renderer).
   6. **memory-id stuffing** — more than 20 unique cited memory ids in
      ``data.cites`` (the field Forge writes) or ``data.evidence.memory_ids``
      (the dict shape an external writer may use); ``warn``, capped at 20 on
@@ -229,8 +230,15 @@ _PROMPT_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-def _scan_prompt_injection(text: str | None, field_name: str) -> Iterable[ScanFinding]:
-    if not text:
+def _scan_prompt_injection(text: object, field_name: str) -> Iterable[ScanFinding]:
+    # Non-``str`` in, nothing out. The guard used to be a bare ``if not
+    # text``, which a non-empty non-string (a ``list``, say) passes —
+    # sending it straight into ``re.search``, which raises ``TypeError``
+    # and takes down a scanner this module promises will never be the
+    # thing that fails a write. Reachable for every field: Forge and the
+    # pre-apply rescan both hand Sentinel data that never went through
+    # the SF-002 validator.
+    if not isinstance(text, str) or not text:
         return
     for pat in _PROMPT_INJECTION_PATTERNS:
         m = pat.search(text)
@@ -501,8 +509,9 @@ _PII_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def _scan_pii(text: str | None, field_name: str) -> Iterable[ScanFinding]:
-    if not text:
+def _scan_pii(text: object, field_name: str) -> Iterable[ScanFinding]:
+    # Same non-``str`` guard as ``_scan_prompt_injection`` — see there.
+    if not isinstance(text, str) or not text:
         return
     for kind, pat in _PII_PATTERNS:
         m = pat.search(text)
@@ -642,9 +651,35 @@ async def scan_skill_doc(
     findings: list[ScanFinding] = []
 
     # Checks #1 + #5 over the natural-language fields.
-    for field_name in ("content", "description", "summary", "goal"):
+    #
+    # 09/02 L-02: ``name`` was missing from this tuple. It is not a
+    # cosmetic omission — the plugin's skill reconciler synthesises the
+    # YAML frontmatter of ``<slug>/SKILL.md`` from ``data.name`` and
+    # ``data.description`` whenever the body has none of its own, so an
+    # injection marker in a skill's display NAME is written to the file
+    # the agent harness loads, having passed a scan that looked at its
+    # neighbour ``description`` and not at it. Forge takes ``name``
+    # straight from the LLM distill response with an ``isinstance(str)``
+    # check and nothing else.
+    for field_name in ("name", "content", "description", "summary", "goal"):
         findings.extend(_scan_prompt_injection(data.get(field_name), field_name))
         findings.extend(_scan_pii(data.get(field_name), field_name))
+
+    # ``tags`` is the other field the L-02 row named, and it cannot just
+    # join the tuple above: it is a ``list[str]``, not a string, so it
+    # needs per-element scanning to get a usable locator (a bare
+    # ``data.tags`` would send an operator hunting through the list).
+    # The non-``str`` guard now lives in the two scanners — a list
+    # reaching ``re.search`` raised ``TypeError`` — but elements are
+    # still filtered here so a mixed list scans the strings in it
+    # instead of being skipped wholesale.
+    tags = data.get("tags")
+    if isinstance(tags, list):
+        for i, tag in enumerate(tags):
+            if not isinstance(tag, str):
+                continue
+            findings.extend(_scan_prompt_injection(tag, f"tags[{i}]"))
+            findings.extend(_scan_pii(tag, f"tags[{i}]"))
 
     evidence = data.get("evidence")
     if isinstance(evidence, str):
