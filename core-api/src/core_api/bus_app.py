@@ -55,6 +55,15 @@ async def human_principal(request: Request, auth: Annotated[AuthContext, Depends
     )
 
 
+# Reconstruct only this fixed operator vocabulary; storage text stays private.
+DECISION_CONFLICTS = {
+    "REQUEST_NOT_DECIDABLE": "This decision is no longer current. Refresh before trying again.",
+    "TARGET_UNAVAILABLE": "Choose an online agent with the required capability.",
+    "TARGET_ALREADY_ASSIGNED": "This agent already has this request. Choose another agent.",
+    "STOP_NOT_CONFIRMED": "Stop is not confirmed. Wait for confirmation or acknowledge unconfirmed recovery.",
+}
+
+
 async def storage_call(operation):
     try:
         return await get_storage_client()._post(
@@ -93,6 +102,9 @@ async def storage_call(operation):
             except ValueError:
                 payload = None  # A malformed error body still maps to a fixed conflict.
             detail = payload.get("detail") if isinstance(payload, dict) else None
+            code = detail.get("code") if isinstance(detail, dict) else None
+            if operation.operation == "human_decide" and isinstance(code, str) and code in DECISION_CONFLICTS:
+                raise HTTPException(409, {"code": code, "message": DECISION_CONFLICTS[code]}) from exc
             if isinstance(detail, dict) and detail.get("state") == "paused":
                 raise HTTPException(
                     409, {"state": "paused", "detail": "Delivery paused; call wait for current context"}
