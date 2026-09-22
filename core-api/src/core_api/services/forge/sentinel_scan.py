@@ -11,12 +11,13 @@ behavior — see :class:`ScanFinding`):
 
   1. **prompt-injection** markers in content / description / summary /
      evidence (``critical``) — quarantine.
-  2. **shell-injection** patterns inside ``support_files`` entries
-     whose ``role`` looks like a script (``critical``) — quarantine.
-  3. **URL exfiltration** patterns in the same script bodies
+  2. **shell-injection** patterns inside ``support_files`` entry
+     bodies, under EVERY ``role`` (``critical``) — quarantine.
+  3. **URL exfiltration** patterns in script-roled bodies only
      (``warn``) — surfaces on the inbox card; doc may still proceed.
   4. **path violations** on ``support_files`` (absolute, traversal,
-     hidden, executable, non-UTF8) — ``fatal=True``; refuse the write.
+     hidden, bare-dot, executable, non-ASCII) — ``fatal=True``;
+     refuse the write.
   5. **PII** (SSN / credit card / phone / email) in content / evidence
      (``warn``; redact-on-display flag set by the inbox renderer).
   6. **memory-id stuffing** — more than 20 unique cited memory ids in
@@ -27,6 +28,36 @@ behavior — see :class:`ScanFinding`):
      ``body_max_bytes`` — ``fatal=True``.
   8. **description size** — UTF-8 byte length of ``data.description``
      exceeds ``description_max_bytes`` — ``fatal=True``.
+
+``support_files`` (checks #2, #3, #4) has no production WRITER yet
+─────────────────────────────────────────────────────────────────
+09/02 L-01. Nothing in the shipped product populates the key.
+``forge_service._distill_cluster`` — the only production writer of a
+skill doc — builds ``data`` without it, and the only harness-install
+path that exists (the plugin's skill reconciler) materialises
+``<slug>/SKILL.md`` from ``data.content`` alone and never asks for
+side-car files. The identically-named ``support_files`` documented in
+``routes/documents.py`` belongs to the ``skills_rollback`` collection,
+carries a different shape
+(``{path, existed, previous_content_hash, previous_content}``), and is
+never handed to this scanner.
+
+So these three checks are FORWARD-LOOKING, not dead, and the
+distinction is the whole point. Contrast check #6 (09/02 L-35), which
+was repointed because a real, populated field — ``data.cites`` — was
+going unscanned while the check watched a shape no writer produced.
+There is no such alternate field here: no side-car content reaches
+disk by any route, so nothing is slipping past an unfired check.
+
+They are also reachable TODAY. ``POST /documents`` with
+``collection='skills'`` type-checks a fixed set of keys and passes
+every other key in ``data`` through untouched, so an external writer
+using the shape above is scanned exactly as written — see
+``tests/test_l01_sentinel_support_files_forward_looking.py``, which
+pins that. What is absent is a consumer, not a caller. Deleting the
+checks would drop BOTH of this module's ``fatal=True`` content guards
+while the write surface still accepts the field, and they would have
+to be written again for the Phase-3 install path.
 
 Performance budget (plan §9): p95 < 500ms on a 40KB body — regex +
 path checks + classifiers, **NO LLM, NO network**. Cacheable by
@@ -215,11 +246,15 @@ def _scan_prompt_injection(text: str | None, field_name: str) -> Iterable[ScanFi
             return
 
 
-# ── Check #2 — shell-injection in script bodies ────────────────────
+# ── Check #2 — shell-injection in support_file bodies ──────────────
 #
-# Only fires on support_files whose ``role`` looks script-y (the
-# harness install ships scripts/* under that path). Skips
-# non-executable artefacts like README/templates/references.
+# Runs on EVERY support_file body regardless of ``role`` — see the
+# orchestrator, which deliberately dropped the role gate because a
+# fork-bomb shipped under role='templates' would otherwise have gone
+# unscanned. This comment used to claim the opposite ("only fires on
+# support_files whose role looks script-y"); ``_SCRIPT_ROLES`` is what
+# check #3 (URL exfiltration) and check #4 (executable-extension
+# placement) gate on, and it does not narrow this check.
 _SCRIPT_ROLES: frozenset[str] = frozenset({"scripts", "script", "exec", "command"})
 
 _SHELL_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (

@@ -1383,6 +1383,36 @@ class TestForgeStatusCheckerGuard:
         assert doc["content_hash"] == expected
 
     @pytest.mark.asyncio
+    async def test_candidate_doc_carries_no_support_files(self, monkeypatch):
+        """09/02 L-01 — the premise behind keeping Sentinel checks #2/#3/#4 as
+        forward-looking guards rather than repointing them: the only
+        production writer of a skill doc emits no ``support_files`` at all, and
+        no other key on the candidate carries side-car file content. So unlike
+        check #6 (09/02 L-35), there is no populated field those checks should
+        have been watching instead — nothing is slipping past them.
+
+        Asserted through the real distill path, not by reading the source: a
+        future change that starts shipping side-car files fails here, which is
+        the signal to wire the checks into the install path."""
+        self._patch_build(monkeypatch, _passing_traces(4))
+        captured, writer = _capture_writer()
+        await run_forge_distill(
+            candidate_writer=writer,
+            **self._kw(),
+        )
+        doc = captured[0]["data"]
+        assert "support_files" not in doc
+        # Nor under any other name — no value on the candidate is a list of
+        # file-shaped dicts.
+        file_shaped = [
+            k
+            for k, v in doc.items()
+            if isinstance(v, list)
+            and any(isinstance(item, dict) and "path" in item for item in v)
+        ]
+        assert file_shaped == []
+
+    @pytest.mark.asyncio
     async def test_candidate_doc_carries_scan_result(self, monkeypatch):
         """Sentinel pre-scan result must be on every Forge candidate —
         the Inbox card renders ``data.scan.findings`` in Phase 2 and
