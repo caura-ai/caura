@@ -7,10 +7,29 @@ from caura_bus_platform.routes import storage_router
 from caura_bus_platform.settings import settings as collaboration_settings
 from caura_bus_platform.store import Store
 from caura_bus_platform.timing import TimingMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from core_storage_api.app import app
 from core_storage_api.config import db_connect_args, settings
+
+
+@app.exception_handler(PoolTimeout)
+async def collaboration_pool_timeout(request, exc):
+    if not request.url.path.startswith("/api/v1/storage/bus/"):
+        raise exc
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "1"},
+        content={
+            "detail": "Collaboration storage capacity is exhausted",
+            "error": {
+                "code": "COLLABORATION_UNAVAILABLE",
+                "message": "Collaboration storage capacity is exhausted",
+            },
+        },
+    )
 
 
 def collaboration_engine():
