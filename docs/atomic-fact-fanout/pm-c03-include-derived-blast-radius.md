@@ -88,7 +88,7 @@ link). Neither is a fan-out child and neither should be excluded.
 | database | live rows | scanned | newest row | fan-out children | auto-chunk children |
 |---|---:|---:|---|---:|---:|
 | `caura` | 41,533 | 41,400 | 2026-09-22 | **0** | **0** |
-| `memclaw` | 57,354 | 57,107 | 2026-09-08 | 1,486 (2.60% of scanned) | 0 |
+| `memclaw` | 57,354 | 57,107 | 2026-09-08 | 1,486 (2.60% of scanned) | 0 | <!-- legacy-name-floor: names the local database these figures were measured from -->
 | `caura_storage` | 2,456 | 126 | 2026-09-22 | 0 | 16 (test fixtures) |
 
 "Scanned" is rows whose `metadata` is a JSON object; the rest are `NULL` or
@@ -100,7 +100,7 @@ database's size would be wrong.
 **`caura` — the only corpus written after A70 shipped (2026-09-09) — contains
 zero derived rows of either kind.** It cannot answer this question at all.
 
-`memclaw` has the only fan-out population, and it is not representative:
+`memclaw` has the only fan-out population, and it is not representative: <!-- legacy-name-floor: names the local database holding that population -->
 
 - all 1,486 children come from **703 parents, every one of them
   `benchmark=true` and `write_mode=fast`** — LongMemEval conversation data;
@@ -307,7 +307,7 @@ in one command.
 
 ```bash
 python3 benchmark/pm_c03_derived_row_population.py                     # local docker stack, `caura`
-python3 benchmark/pm_c03_derived_row_population.py --db memclaw        # the corpus with the only fan-out
+python3 benchmark/pm_c03_derived_row_population.py --db memclaw        # legacy-name-floor: pasteable command; the database bears this name
 python3 benchmark/pm_c03_derived_row_population.py "postgresql://…"    # any store
 ```
 

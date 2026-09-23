@@ -14,7 +14,7 @@ pm-0918-c-04 already made once.
 
     python3 benchmark/pm_c03_derived_row_population.py "postgresql://user@host:5432/<database>"
     python3 benchmark/pm_c03_derived_row_population.py              # local docker stack, `caura` database
-    python3 benchmark/pm_c03_derived_row_population.py --db memclaw # local docker stack, another database
+    python3 benchmark/pm_c03_derived_row_population.py --db memclaw  # legacy-name-floor: the other local database literally bears this name
 
 WHAT COUNTS AS DERIVED, and why the predicate is a conjunction
 --------------------------------------------------------------
