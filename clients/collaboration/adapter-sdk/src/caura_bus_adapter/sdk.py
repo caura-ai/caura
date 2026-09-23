@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 import uuid
 from collections.abc import Awaitable, Coroutine
 from contextlib import asynccontextmanager
@@ -189,6 +190,57 @@ async def connected_bus(config):
         await bus.close()
 
 
+class PresencePublisher:
+    """Debounce advisory state while keeping one independent liveness loop."""
+
+    def __init__(self, bus, profile):
+        self.bus, self.profile = bus, profile
+        self.desired = profile.status
+        self.changed_at = time.monotonic()
+        self.changed = asyncio.Event()
+        self.last_write = float("-inf")
+
+    def set_status(self, status):
+        if status != self.desired:
+            self.desired = status
+            self.changed_at = time.monotonic()
+            self.changed.set()
+
+    async def publish(self):
+        # Includes the final offline announcement. SDK retries of this same
+        # advertisement remain bounded by Bus.request's transport policy.
+        await asyncio.sleep(max(0, self.last_write + 1 - time.monotonic()))
+        self.last_write = time.monotonic()
+        await self.bus.advertise(self.profile.model_copy(deep=True))
+
+    async def run(self):
+        heartbeat_at = 0.0
+        backoff = Backoff()
+        while True:
+            self.changed.clear()
+            now = time.monotonic()
+            transition_at = self.changed_at + 2 if self.desired != self.profile.status else float("inf")
+            due = max(self.last_write + 1, min(heartbeat_at, transition_at))
+            if now < due:
+                try:
+                    await asyncio.wait_for(self.changed.wait(), due - now)
+                except TimeoutError:
+                    pass
+                continue
+            if now >= transition_at:
+                self.profile.status = self.desired
+            try:
+                await self.publish()
+            except (httpx.TransportError, PlatformError) as exc:
+                if isinstance(exc, PlatformError) and not transient_status(exc.status):
+                    raise
+                log.warning("Presence update unavailable; retrying without bypassing Caura")
+                await backoff.sleep()
+                continue
+            backoff.reset()
+            heartbeat_at = time.monotonic() + 15
+
+
 async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
     """Advertise presence, wake on live events, and execute one leased item at a time."""
     profile = Presence(
@@ -202,19 +254,7 @@ async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
         wake = asyncio.Event()
         wake.set()
 
-        async def presence():
-            backoff = Backoff()
-            while True:
-                try:
-                    await bus.advertise(profile)
-                except (httpx.TransportError, PlatformError) as exc:
-                    if isinstance(exc, PlatformError) and not transient_status(exc.status):
-                        raise
-                    log.warning("Presence update unavailable; retrying without bypassing Caura")
-                    await backoff.sleep()
-                    continue
-                backoff.reset()
-                await asyncio.sleep(15)
+        publisher = PresencePublisher(bus, profile)
 
         async def notifications():
             async for event in bus.events():
@@ -228,13 +268,11 @@ async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
                     await adapter.wait_until_idle()
                     claim = await bus.claim()
                     if claim:
-                        profile.status = "busy"
+                        publisher.set_status("busy")
                         try:
-                            await bus.advertise(profile)
                             await process_delivery(bus, adapter, claim)
                         finally:
-                            profile.status = "ready"
-                            await bus.advertise(profile)
+                            publisher.set_status("ready")
                     else:
                         # Reconciliation also finds expired leases if an event was lost.
                         try:
@@ -257,13 +295,13 @@ async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
 
         try:
             async with asyncio.TaskGroup() as tasks:
-                tasks.create_task(presence())
+                tasks.create_task(publisher.run())
                 tasks.create_task(notifications())
                 tasks.create_task(consume())
         finally:
             profile.status = "offline"
             try:
-                await bus.advertise(profile)
+                await publisher.publish()
             except (httpx.TransportError, PlatformError):
                 log.warning("Could not announce shutdown; presence will expire automatically")
 
