@@ -82,7 +82,7 @@ was written and became searchable.
 
 ## 2. The trigger fires, and not by a constant
 
-Run `benchmark/c01_title_fts_rank_movement.py`; it opens with a probe that
+Run `scripts/c01_title_fts_rank_movement.py`; it opens with a probe that
 borrows the real trigger function onto a temp table inside a rolled-back
 transaction. Two rows, `content` never touched, `ts_rank_cd` against two queries:
 
@@ -97,7 +97,7 @@ non-uniformity the row's argument needs, and it is real.
 
 ## 3. What it does to real rows
 
-`benchmark/c01_title_fts_rank_movement.py` scores every row of a tenant twice,
+`scripts/c01_title_fts_rank_movement.py` scores every row of a tenant twice,
 building both vectors itself rather than reading the stored one:
 
 ```
@@ -306,7 +306,7 @@ this document.**
 ## Reproducing
 
 ```
-python benchmark/c01_title_fts_rank_movement.py \
+python scripts/c01_title_fts_rank_movement.py \
     --dsn postgresql://memclaw:changeme@localhost:5432/memclaw \ <!-- legacy-name-floor: pasteable command; the local database and role bear this name and dev-9ff0ca lives in it -->
     --tenant dev-9ff0ca --terms 2 --queries 40 --seed c01
 ```

@@ -153,7 +153,7 @@ async def _sample_queries(
         SELECT {col} AS text FROM memories
         WHERE deleted_at IS NULL AND tenant_id = $1 AND {col} IS NOT NULL
         ORDER BY md5(id::text || $2) LIMIT $3
-        """,
+        """,  # noqa: S608 -- {col} is a 2-value whitelist; user input is $1/$2/$3
         tenant,
         seed,
         n * 3,
@@ -184,7 +184,7 @@ async def measure(conn: asyncpg.Connection, tenant: str, query: str) -> QueryRes
                sv_after @@ q.tq AS m_after
         FROM pop, q
         WHERE sv_before @@ q.tq OR sv_after @@ q.tq
-        """,
+        """,  # noqa: S608 -- SV_BEFORE/SV_AFTER are module constants; query text is $2
         tenant,
         query,
     )
@@ -331,7 +331,7 @@ async def corpus_health(conn: asyncpg.Connection, tenant: str | None) -> None:
                count(title) AS titled,
                count(*) FILTER (WHERE search_vector IS DISTINCT FROM {SV_AFTER}) AS stale_vector
         FROM memories {where}
-        """,
+        """,  # noqa: S608 -- SV_AFTER is a module constant; tenant is $1
         *args,
     )
     print(f"\n### corpus ({tenant or 'ALL TENANTS'})")
@@ -361,7 +361,7 @@ async def corpus_health(conn: asyncpg.Connection, tenant: str | None) -> None:
                count(*) FILTER (WHERE c.title_at_create IS NULL AND m.title IS NOT NULL) AS landed_later
         FROM c JOIN memories m ON m.id = c.resource_id
         {"AND m.tenant_id = $1" if tenant else ""}
-        """,
+        """,  # noqa: S608 -- SV_AFTER is a module constant; tenant is $1
         *args,
     )
     print(
@@ -400,7 +400,7 @@ async def probe(conn: asyncpg.Connection) -> None:
 
         async def snap(label: str) -> None:
             rows = await conn.fetch(
-                f"SELECT id, {RANK}(search_vector, plainto_tsquery('english', $1)) r1,"
+                f"SELECT id, {RANK}(search_vector, plainto_tsquery('english', $1)) r1,"  # noqa: S608 -- RANK is a module constant; both queries are bound $1/$2
                 f"       {RANK}(search_vector, plainto_tsquery('english', $2)) r2"
                 " FROM c01_probe ORDER BY id",
                 q1,
@@ -469,9 +469,8 @@ async def main() -> None:
                 conn, args.tenant, source, args.queries, args.seed, args.terms
             )
             results = [await measure(conn, args.tenant, q) for q in qs]
-            assert all(r.n_lost == 0 for r in results), (
-                "a title removed a match — impossible, check SQL"
-            )
+            if not all(r.n_lost == 0 for r in results):
+                raise RuntimeError("a title removed a match — impossible, check SQL")
             report(f"{source}-derived queries (tenant {args.tenant})", results)
             digest = hashlib.sha256("|".join(qs).encode()).hexdigest()[:12]
             print(f"  query-set digest: {digest}  (seed={args.seed}, n={len(qs)})")
