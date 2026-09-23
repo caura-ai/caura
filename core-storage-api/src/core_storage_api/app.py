@@ -106,6 +106,35 @@ async def report_schema_drift() -> None:
                     )
                     continue
                 if effect_is_present is not True:
+                    # A soft-failing migration promises "apply this if allowed
+                    # to", so an unmet post-condition on a deployment that was
+                    # never allowed is the documented outcome, not a defect.
+                    # Report it once at INFO rather than warning on every boot
+                    # forever: an unactionable warning that cannot be cleared is
+                    # how the genuine case gets lost. A probe that itself fails
+                    # says nothing either way, so the condition stays a warning.
+                    expected_here = False
+                    if postcondition.expected_when is not None:
+                        try:
+                            async with connection.begin_nested():
+                                expected_here = (
+                                    await connection.scalar(text(postcondition.expected_when))
+                                ) is True
+                        except Exception:
+                            logger.exception(
+                                "Post-condition expectation probe failed [%s/%s]; "
+                                "treating the condition as unexpected",
+                                postcondition.revision,
+                                postcondition.name,
+                            )
+                    if expected_here:
+                        logger.info(
+                            "Migration post-condition not met but expected here [%s/%s]; "
+                            "this deployment could not have applied it",
+                            postcondition.revision,
+                            postcondition.name,
+                        )
+                        continue
                     logger.log(
                         logging.ERROR if postcondition.severity == "error" else logging.WARNING,
                         "Migration post-condition failed [%s/%s]: %s",
