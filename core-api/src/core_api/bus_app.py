@@ -1,20 +1,23 @@
-"""Mount inside the real Caura core-api, retaining its auth and middleware."""
+"""Dedicated collaboration workload using the existing core image and identity boundary."""
 
+import asyncio
 import hmac
-import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import httpx
 from caura_bus_platform.collaboration_routes import HumanPrincipal, human_router
 from caura_bus_platform.routes import Operation, Principal, public_router
+from caura_bus_platform.runtime import AdmissionMiddleware, Runtime, shutdown_signals, stop_task
+from caura_bus_platform.settings import settings as collaboration_settings
 from caura_bus_platform.wake import WakeHub
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 
-from core_api.app import app
+from core_api.app import app as memory_app
 from core_api.auth import AuthContext, get_auth_context
-from core_api.clients.storage_client import get_storage_client
+from core_api.bus_storage import close_storage_client, get_storage_client
 from core_api.config import settings
+from core_api.middleware.request_timeout import RequestTimeoutMiddleware
 
 
 async def bus_principal(request: Request, auth: Annotated[AuthContext, Depends(get_auth_context)]):
@@ -123,32 +126,47 @@ async def storage_call(operation):
 
 
 wake_hub = WakeHub()
-original_lifespan = app.router.lifespan_context
+runtime = Runtime(wake_hub, get_storage_client)
 
 
 @asynccontextmanager
 async def lifespan(app):
     from common.events.factory import get_event_bus
 
-    wake_hub.register(get_event_bus())
-    async with original_lifespan(app):
-        yield
+    get_storage_client()
+    runtime.bus = get_event_bus()
+    wake_hub.draining = False
+    wake_hub.register(runtime.bus)
+    await runtime.bus.start()
+    metrics_task = asyncio.create_task(runtime.refresh_metrics())
+    try:
+        with shutdown_signals(wake_hub):
+            yield
+    finally:
+        wake_hub.drain()
+        await stop_task(metrics_task)
+        try:
+            await runtime.bus.stop()
+        finally:
+            await close_storage_client()
 
 
-@app.middleware("http")
-async def collaboration_replica(request, call_next):
-    response = await call_next(request)
-    if request.url.path.startswith("/api/v1/bus/"):
-        response.headers["X-Caura-Collaboration-Replica"] = os.getenv("COLLABORATION_REPLICA_ID", "core-api")
-    return response
+# Reuse the canonical error envelope and security headers without starting
+# memory providers, memory background work, or mounting its API routes.
+app = FastAPI(
+    title="Caura collaboration",
+    lifespan=lifespan,
+    middleware=[
+        m
+        for m in memory_app.user_middleware
+        if getattr(m.cls, "__name__", None) in {"SecurityHeadersMiddleware", "CORSMiddleware"}
+    ],
+)
+app.exception_handlers.update(memory_app.exception_handlers)
+app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=collaboration_settings.request_timeout_seconds)
+app.add_middleware(AdmissionMiddleware, runtime=runtime)
 
 
-app.router.lifespan_context = lifespan
+runtime.install(app)
 app.include_router(public_router(bus_principal, storage_call, wake_hub))
 app.include_router(human_router(human_principal, storage_call, Operation, wake_hub))
-# Upstream builds its schema during import to check route invariants.
-app.openapi_schema = None
-
-from core_api.bus_mcp import register_peer
-
-register_peer(app)

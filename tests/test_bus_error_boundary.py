@@ -18,6 +18,23 @@ def entry(monkeypatch):
     modules = {
         "caura_bus_platform": {},
         "caura_bus_platform.wake": {"WakeHub": SimpleNamespace},
+        "caura_bus_platform.runtime": {
+            "AdmissionMiddleware": SimpleNamespace,
+            "Runtime": lambda *_args: SimpleNamespace(install=lambda app: None),
+            "shutdown_signals": lambda *_args: None,
+            "stop_task": lambda *_args: None,
+        },
+        "caura_bus_platform.settings": {
+            "settings": SimpleNamespace(request_timeout_seconds=25)
+        },
+        "core_api.bus_storage": {
+            "get_storage_client": lambda: None,
+            "close_storage_client": lambda: None,
+        },
+        "core_api.middleware": {},
+        "core_api.middleware.request_timeout": {
+            "RequestTimeoutMiddleware": SimpleNamespace
+        },
         "caura_bus_platform.routes": {
             "Operation": SimpleNamespace,
             "Principal": SimpleNamespace,

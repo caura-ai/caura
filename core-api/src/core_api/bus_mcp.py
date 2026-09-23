@@ -17,7 +17,7 @@ class RequestTransport(httpx.AsyncBaseTransport):
     """
 
     def __init__(self, app, headers):
-        self.inner = httpx.ASGITransport(app=app)
+        self.inner = httpx.ASGITransport(app=app) if app is not None else httpx.AsyncHTTPTransport()
         self.headers = {
             key: value
             for key, value in headers.items()
@@ -33,7 +33,7 @@ class RequestTransport(httpx.AsyncBaseTransport):
         await self.inner.aclose()
 
 
-def register_peer(app, server=None):
+def register_peer(app=None, server=None, *, api_url="https://caura.internal"):
     # Import only from the optional entrypoint, preserving the default registry.
     from core_api import mcp_server
 
@@ -55,7 +55,9 @@ def register_peer(app, server=None):
         if request is None or not agent or not mcp_server._via_gateway_var.get(False):
             raise ToolError("Caura gateway agent authentication is required")
         config = AgentConfig(
-            api_url="https://caura.internal",
+            api_url=api_url,
+            # This URL is trusted deployment configuration on the internal network.
+            allow_insecure_http=api_url.startswith("http://"),
             agent=AgentInfo(agent_id=str(agent), tenant_id=mcp_server._get_tenant()),
             peers=["*"],
         )

@@ -4,13 +4,28 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 
 from caura_bus_platform.routes import storage_router
+from caura_bus_platform.settings import settings as collaboration_settings
 from caura_bus_platform.store import Store
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from core_storage_api.app import app
-from core_storage_api.config import settings
-from core_storage_api.database.init import get_engine
+from core_storage_api.config import db_connect_args, settings
 
-store = None if settings.core_storage_role == "reader" else Store(get_engine())
+
+def collaboration_engine():
+    url = settings.database_url.get_secret_value()
+    return create_async_engine(
+        url,
+        connect_args=db_connect_args(url),
+        pool_size=collaboration_settings.db_pool_size,
+        max_overflow=collaboration_settings.db_max_overflow,
+        pool_timeout=collaboration_settings.db_pool_timeout,
+        pool_recycle=settings.db_pool_recycle,
+        pool_pre_ping=True,
+    )
+
+
+store = None if settings.core_storage_role == "reader" else Store(collaboration_engine())
 original_lifespan = app.router.lifespan_context
 
 
@@ -33,7 +48,10 @@ async def lifespan(app):
                 reconciler.cancel()
                 with suppress(asyncio.CancelledError):
                     await reconciler
-                await get_event_bus().stop()
+                try:
+                    await get_event_bus().stop()
+                finally:
+                    await store.engine.dispose()
 
 
 app.router.lifespan_context = lifespan
