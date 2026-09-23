@@ -13,7 +13,7 @@ from .agent import AgentConfig
 from .collaboration import Checkpoint, Presence
 from .config import require_api_key
 from .protocol import Claim, Receipt, SendMessage
-from .retry import Backoff, transient_status
+from .retry import Backoff, retry_after_seconds, transient_status
 
 
 class HumanRequired(RuntimeError):
@@ -82,6 +82,7 @@ class Bus:
         kwargs["headers"] = headers
         # Only operations with durable idempotency retry ambiguous responses.
         for attempt in range(3):
+            hinted = None
             try:
                 response = await self._http.request(method, path, **kwargs)
             except httpx.TransportError:
@@ -96,7 +97,13 @@ class Bus:
                     except ValueError:
                         detail = "gateway rejected request"
                     raise PlatformError(response.status_code, detail)
-            await asyncio.sleep(0.25 * (2**attempt) + secrets.randbelow(100) / 1000)
+                # A shed or overloaded service says when to come back; honour it
+                # (capped) instead of returning on the fixed backoff alone.
+                hinted = retry_after_seconds(response)
+            delay = 0.25 * (2**attempt)
+            if hinted is not None:
+                delay = max(delay, hinted)
+            await asyncio.sleep(delay + secrets.randbelow(100) / 1000)
         raise AssertionError("unreachable")
 
     async def send(self, message: SendMessage, *, idempotency_key: str) -> Receipt:
