@@ -10,6 +10,7 @@ from caura_bus_platform.timing import TimingMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
 
 from core_storage_api.app import app
 from core_storage_api.config import db_connect_args, settings
@@ -32,20 +33,31 @@ async def collaboration_pool_timeout(request, exc):
     )
 
 
-def collaboration_engine():
+def collaboration_engine(*, leader=False):
     url = settings.database_url.get_secret_value()
+    pool = (
+        {"poolclass": NullPool}
+        if leader
+        else {
+            "pool_size": collaboration_settings.db_pool_size,
+            "max_overflow": collaboration_settings.db_max_overflow,
+            "pool_timeout": collaboration_settings.db_pool_timeout,
+        }
+    )
     return create_async_engine(
         url,
         connect_args=db_connect_args(url),
-        pool_size=collaboration_settings.db_pool_size,
-        max_overflow=collaboration_settings.db_max_overflow,
-        pool_timeout=collaboration_settings.db_pool_timeout,
+        **pool,
         pool_recycle=settings.db_pool_recycle,
         pool_pre_ping=True,
     )
 
 
-store = None if settings.core_storage_role == "reader" else Store(collaboration_engine())
+store = (
+    None
+    if settings.core_storage_role == "reader"
+    else Store(collaboration_engine(), leader_engine=collaboration_engine(leader=True))
+)
 original_lifespan = app.router.lifespan_context
 
 
@@ -72,6 +84,7 @@ async def lifespan(app):
                     await get_event_bus().stop()
                 finally:
                     await store.engine.dispose()
+                    await store.leader_engine.dispose()
 
 
 app.router.lifespan_context = lifespan
