@@ -1036,6 +1036,34 @@ class SearchRequest(TenantScopedBody):
     # (full candidate set, score factors, exclusion reasons, applied knobs).
     # Results are unchanged and no recall_count is bumped on a diagnostic call.
     diagnostic: bool = False
+    # pm-0918-c-03. Inherited by ``RecallRequest`` below, deliberately: /recall
+    # summarises these rows into a brief, so a short fragment restating its
+    # parent costs brief tokens on exactly the surface where they are scarcest.
+    include_derived: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to return atomic-fact fan-out children — short single-claim "
+            "rows the platform derives from a memory you wrote, which stay "
+            "retrievable alongside it. Omit to inherit the tenant's "
+            "search.include_derived setting, which in turn falls back to the "
+            "global default (currently true). Precedence: this field beats the "
+            "tenant setting beats the global default. Excluded rows are dropped "
+            "BEFORE the top_k trim, so top_k still returns top_k rows. Does not "
+            "affect auto-chunk children, which are the only sub-document vectors "
+            "a long document has."
+        ),
+    )
+    # ``bool | None``, not ``bool = True``. The tri-state is load-bearing: the
+    # tenant setting can turn derived rows off store-wide, and a caller that
+    # wants them back needs to be able to say ``true`` in a way that is
+    # distinguishable from not asking. A plain ``bool`` default would make every
+    # request an explicit vote and the tenant setting would never be consulted.
+    #
+    # NOTE for a caller on an older server: this model is ``extra="allow"``, so a
+    # server that predates this field does not reject the key — it lands in
+    # ``model_extra`` and comes back in ``SearchResponse.warnings`` as a name the
+    # endpoint does not read (ax-0917-h-05). A server older than THAT discards it
+    # silently. Check the warnings rather than assuming the filter applied.
 
 
 class RecallRequest(SearchRequest):

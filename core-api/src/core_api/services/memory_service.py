@@ -101,7 +101,12 @@ from core_api.schemas import (
     MemoryUpdate,
     ScoreParts,
 )
-from core_api.search_trim import passes_relevance_filter, trim_reserving_fts_matches
+from core_api.search_trim import (
+    is_derived_fanout_row,
+    passes_relevance_filter,
+    resolve_include_derived,
+    trim_reserving_fts_matches,
+)
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.governance_gate import (
@@ -5110,6 +5115,7 @@ async def search_memories(
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
     allow_recall_bump: bool = True,
+    include_derived: bool | None = None,
 ) -> list[MemoryOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
@@ -5141,6 +5147,7 @@ async def search_memories(
             source=source,
             min_similarity=min_similarity,
             recall_ctx=recall_ctx,
+            include_derived=include_derived,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -5167,6 +5174,7 @@ async def search_memories(
         search_profile=search_profile,
         min_similarity=min_similarity,
         allow_recall_bump=allow_recall_bump,
+        include_derived=include_derived,
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
@@ -5198,6 +5206,7 @@ async def _search_memories_pipeline(
     source: str = "search",
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
+    include_derived: bool | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -5234,6 +5243,12 @@ async def _search_memories_pipeline(
             "min_similarity_override": min_similarity,
             "readable_tenant_ids": readable_tenant_ids,
             "source": source,
+            # pm-0918-c-03 — resolved ONCE here, not read off ``tenant_config``
+            # inside PostFilterResults, for the same reason
+            # ``strict_fleet_scoping`` above is: a step that forgot to consult
+            # the request layer would silently fall back to the tenant default,
+            # and the request flag is the layer a caller can actually see.
+            "include_derived": resolve_include_derived(include_derived, tenant_config),
         },
         tenant_config=tenant_config,
     )
@@ -5315,6 +5330,7 @@ async def _search_memories_legacy(
     search_profile: dict | None = None,
     min_similarity: float | None = None,
     allow_recall_bump: bool = True,
+    include_derived: bool | None = None,
 ) -> list[MemoryOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
@@ -5440,6 +5456,16 @@ async def _search_memories_legacy(
             allow_fts_global_floor_bypass=allow_fts_bypass,
         )
     ]
+    # pm-0918-c-03 — BEFORE the trim, deliberately, exactly as the pipeline step
+    # does it. Storage returned ``_top_k * SEARCH_OVERFETCH_FACTOR`` candidates,
+    # so dropping derived rows here still fills ``_top_k``; dropping them after
+    # the trim (or client-side) is what makes a caller asking for 50 get 36 and
+    # have to over-fetch and guess. Wired here as well as in the pipeline so the
+    # ``_USE_PIPELINE_SEARCH = False`` hotfix lever does not silently revert the
+    # filter — this file already carries two features that shipped pipeline-only
+    # for exactly that reason.
+    if not resolve_include_derived(include_derived, tenant_config):
+        rows = [r for r in rows if not is_derived_fanout_row(r.get("metadata_"))]
     rows = trim_reserving_fts_matches(
         rows,
         _top_k,

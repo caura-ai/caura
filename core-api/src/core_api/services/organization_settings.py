@@ -147,6 +147,28 @@ DEFAULT_SETTINGS: dict = {
         # ``entity_linking.auto_entity_linking_enabled``) and relation inference
         # keep populating the graph, so flipping this back on needs no backfill.
         "entity_retrieval": None,
+        # pm-0918-c-03 — whether ``/search`` returns atomic-fact fan-out children
+        # (A70) alongside the rows the caller wrote. ``None`` resolves to the
+        # global default, which is TRUE: today's behaviour, unchanged for a
+        # tenant that never touches this.
+        #
+        # LISTED HERE, not only as a ``ResolvedConfig`` property, and the sibling
+        # row is why: ``_check_keys`` validates a settings write against this
+        # schema, so a knob missing from it is READ-ONLY — ``PUT /settings``
+        # answers 422 "Unknown settings key(s)" while the resolver cheerfully
+        # serves the default. pm-0918-c-04 shipped exactly that and it read as
+        # working. ``test_the_tenant_default_survives_a_real_settings_put``
+        # exercises the HTTP route rather than building a ``ResolvedConfig``,
+        # because constructing the config object directly is what hid it.
+        #
+        # A tenant crowded by fan-out children sets this to ``false`` and gets
+        # the behaviour of option (c) — exclude by default — for its own store,
+        # without a deploy and without imposing it on every other tenant. That is
+        # the same argument that justified A70's per-tenant write-side switch,
+        # ``enrichment.atomic_fact_fanout_enabled``, and the two are independent:
+        # this one hides existing children from reads, that one stops new ones
+        # being written.
+        "include_derived": None,
         # Tenant-wide default search profile (A47). Any search_profile knob set
         # here (min_similarity, top_k, freshness_floor, ...) becomes the fallback
         # for EVERY agent in the tenant, filling the gap between a per-agent tuned
@@ -661,6 +683,10 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "search.recall_for_asserted_identity": bool,
     "search.graph_retrieval": bool,
     "search.entity_retrieval": bool,
+    # bool, NOT just "present": a string "false" is TRUTHY, so without this a
+    # tenant that set it off would resolve to ON while the dashboard rendered
+    # their "off" back to them. Same trap as the c-04 switch above.
+    "search.include_derived": bool,
     "crystallizer.auto_crystallize": bool,
     "crystallizer.dedup_threshold": float,
     "crystallizer.min_cluster_size": int,
@@ -1030,6 +1056,26 @@ class ResolvedConfig:
         """
         val = self._ts.get("search", {}).get("entity_retrieval")
         return val if val is not None else global_settings.entity_retrieval_enabled
+
+    @property
+    def search_include_derived(self) -> bool | None:
+        """Whether ``/search`` returns atomic-fact fan-out children (pm-0918-c-03).
+
+        Returns ``None`` — NOT a resolved boolean — when the tenant has not set
+        it, and that is the whole point of the signature. This property is the
+        MIDDLE layer of a three-layer resolution (request flag > tenant setting >
+        ``INCLUDE_DERIVED_DEFAULT``), so it has to be able to say "not set" and
+        let ``resolve_include_derived`` fall through. Collapsing it to ``return
+        val if val is not None else True`` — the shape every neighbour here
+        uses — would make an unset tenant indistinguishable from one that
+        explicitly asked for derived rows, and the global default would then be
+        unreachable and untestable.
+
+        It is also why this is one of the few properties on this class that is
+        not typed ``bool``. Read it through ``resolve_include_derived``; reading
+        it directly and treating a falsy ``None`` as "off" inverts the default.
+        """
+        return self._ts.get("search", {}).get("include_derived")
 
     @property
     def default_search_profile(self) -> dict:

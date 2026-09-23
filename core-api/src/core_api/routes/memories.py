@@ -2419,6 +2419,13 @@ async def _search_inner(
             warnings_ctx=search_warnings,
             min_similarity=body.min_similarity,
             recall_ctx=recall_ctx,
+            # pm-0918-c-03 — the REQUEST layer, passed through as the tri-state
+            # it is. ``None`` here means the caller did not ask, and
+            # ``resolve_include_derived`` then consults the tenant's
+            # ``search.include_derived`` before the global default. Coercing it
+            # to a bool at this boundary would make every request an explicit
+            # vote and the tenant setting could never take effect.
+            include_derived=body.include_derived,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -2746,6 +2753,11 @@ async def recall_endpoint(
         diagnostic=body.diagnostic,
         diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
         min_similarity=body.min_similarity,
+        # pm-0918-c-03 — /recall inherits the field from ``SearchRequest`` and
+        # has to pass it on. Honouring it on /search alone is the divergence
+        # ``caller_agent_id`` already paid for once: the same body returned
+        # different rows on the two routes with no error.
+        include_derived=body.include_derived,
     )
 
     # Release the pooled DB connection before the LLM round-trip.

@@ -831,6 +831,20 @@ FTS_BOOST_SPECIFICITY_RATIO = 0.4  # strict >; at N=2 this means >=1 specific to
 SIMILARITY_BLEND = 0.85  # base_score = SIMILARITY_BLEND * similarity + (1 - SIMILARITY_BLEND) * weight (raised from 0.75 — LoCoMo sweep showed +13pp recall)
 SEARCH_OVERFETCH_FACTOR = 2  # fetch top_k * N candidates from storage, trim to top_k after min_similarity filter — gives post-filter headroom
 FTS_RESERVED_RESULTS = 1  # result slots held for full-text matches; includes #687's transient rows whose embedding is still pending
+
+# pm-0918-c-03 — whether ``/search`` returns atomic-fact fan-out children
+# alongside the rows a caller wrote. TRUE is today's behaviour and is the GLOBAL
+# floor of a three-layer resolution: request flag beats ``search.include_derived``
+# beats this. See ``core_api.search_trim.resolve_include_derived``.
+#
+# Deliberately a named constant rather than a literal in the resolver, so the
+# test that pins it (``test_pm_c03_include_derived.py``) asserts against
+# something a refactor has to delete rather than something it can quietly edit.
+# The row that produced it recommended revisiting this default at the next
+# minor, on a second store's evidence; changing it here is a BREAKING change to
+# a frozen-contract endpoint that no CI gate catches — see
+# docs/atomic-fact-fanout/pm-c03-include-derived-blast-radius.md §4.
+INCLUDE_DERIVED_DEFAULT = True
 # ``SQL_SCORING_PARAM_KEYS`` — the set both search-path builders project through
 # before sending ``search_params`` — is re-exported from ``common.constants``
 # above, because storage reads the same set and the drift that matters is
