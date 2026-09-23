@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Security
 
 from core_api.app import app as memory_app
 from core_api.auth import AuthContext, api_key_header, get_auth_context
-from core_api.bus_storage import close_storage_client, get_storage_client
+from core_api.bus_storage import close_storage_client, get_presence_storage_client, get_storage_client
 from core_api.config import settings
 from core_api.middleware.request_timeout import RequestTimeoutMiddleware
 
@@ -80,7 +80,8 @@ async def storage_call(operation):
 
 async def _storage_call(operation):
     try:
-        return await get_storage_client()._post(
+        client = get_presence_storage_client() if operation.operation == "presence" else get_storage_client()
+        return await client._post(
             "/bus/execute",
             operation.model_dump(),
             idempotent=operation.operation
@@ -137,7 +138,7 @@ async def _storage_call(operation):
 
 
 wake_hub = WakeHub()
-runtime = Runtime(wake_hub, get_storage_client)
+runtime = Runtime(wake_hub, get_storage_client, get_presence_storage_client)
 
 
 @asynccontextmanager

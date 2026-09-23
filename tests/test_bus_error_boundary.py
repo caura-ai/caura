@@ -10,7 +10,6 @@ import httpx
 import pytest
 from fastapi import APIRouter, FastAPI, HTTPException
 
-
 pytestmark = pytest.mark.unit
 
 
@@ -37,6 +36,7 @@ def entry(monkeypatch):
         },
         "core_api.bus_storage": {
             "get_storage_client": lambda: None,
+            "get_presence_storage_client": lambda: None,
             "close_storage_client": lambda: None,
         },
         "core_api.middleware": {},
@@ -204,3 +204,26 @@ async def test_conflict_code_allowlist_is_limited_to_human_decisions(
         )
     assert caught.value.status_code == 409
     assert caught.value.detail == "Caura operation conflicts with the current state"
+
+
+async def test_presence_routes_to_its_reserved_client(entry, monkeypatch):
+    async def presence_post(path, payload, **kwargs):
+        assert path == "/bus/execute" and payload == {"operation": "presence"}
+        return {"ttl_seconds": 45}
+
+    monkeypatch.setattr(
+        entry,
+        "get_storage_client",
+        lambda: pytest.fail("message pool used for presence"),
+    )
+    monkeypatch.setattr(
+        entry,
+        "get_presence_storage_client",
+        lambda: SimpleNamespace(_post=presence_post),
+    )
+    result = await entry.storage_call(
+        SimpleNamespace(
+            operation="presence", model_dump=lambda: {"operation": "presence"}
+        )
+    )
+    assert result == {"ttl_seconds": 45}

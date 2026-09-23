@@ -33,14 +33,16 @@ async def collaboration_pool_timeout(request, exc):
     )
 
 
-def collaboration_engine(*, leader=False):
+def collaboration_engine(*, leader=False, presence=False):
     url = settings.database_url.get_secret_value()
     pool = (
         {"poolclass": NullPool}
         if leader
         else {
-            "pool_size": collaboration_settings.db_pool_size,
-            "max_overflow": collaboration_settings.db_max_overflow,
+            "pool_size": collaboration_settings.presence_db_pool_size
+            if presence
+            else collaboration_settings.db_pool_size,
+            "max_overflow": 0 if presence else collaboration_settings.db_max_overflow,
             "pool_timeout": collaboration_settings.db_pool_timeout,
         }
     )
@@ -56,7 +58,11 @@ def collaboration_engine(*, leader=False):
 store = (
     None
     if settings.core_storage_role == "reader"
-    else Store(collaboration_engine(), leader_engine=collaboration_engine(leader=True))
+    else Store(
+        collaboration_engine(),
+        leader_engine=collaboration_engine(leader=True),
+        presence_engine=collaboration_engine(presence=True),
+    )
 )
 original_lifespan = app.router.lifespan_context
 
@@ -85,6 +91,7 @@ async def lifespan(app):
                 finally:
                     await store.engine.dispose()
                     await store.leader_engine.dispose()
+                    await store.presence_engine.dispose()
 
 
 app.router.lifespan_context = lifespan
