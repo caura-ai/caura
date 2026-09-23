@@ -1998,7 +1998,7 @@
             }
           },
           {
-            "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter.",
+            "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter. Unrelated to the `visibility` parameter despite the shared word: this selects how wide to look at read time, `visibility=scope_*` filters on the tier a writer stamped on the row. Keystone routes spell their own scope with a different enum again ('tenant' where this says 'all').",
             "in": "query",
             "name": "scope",
             "required": false,
@@ -2012,7 +2012,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter.",
+              "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter. Unrelated to the `visibility` parameter despite the shared word: this selects how wide to look at read time, `visibility=scope_*` filters on the tier a writer stamped on the row. Keystone routes spell their own scope with a different enum again ('tenant' where this says 'all').",
               "title": "Scope"
             }
           },
@@ -2120,6 +2120,7 @@
             }
           },
           {
+            "description": "Filter on the write-time visibility tier stamped on the row (`scope_agent`, `scope_team`, `scope_org`). Not the `scope` parameter above, which chooses read breadth — the two words look alike and control different things.",
             "in": "query",
             "name": "visibility",
             "required": false,
@@ -2132,6 +2133,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Filter on the write-time visibility tier stamped on the row (`scope_agent`, `scope_team`, `scope_org`). Not the `scope` parameter above, which chooses read breadth — the two words look alike and control different things.",
               "title": "Visibility"
             }
           },

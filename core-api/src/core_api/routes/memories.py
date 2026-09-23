@@ -436,7 +436,11 @@ async def list_memories(
             "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own "
             "memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet "
             "trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). "
-            "Omit for the historical behaviour, where `agent_id` is the author filter."
+            "Omit for the historical behaviour, where `agent_id` is the author filter. "
+            "Unrelated to the `visibility` parameter despite the shared word: this "
+            "selects how wide to look at read time, `visibility=scope_*` filters on "
+            "the tier a writer stamped on the row. Keystone routes spell their own "
+            "scope with a different enum again ('tenant' where this says 'all')."
         ),
     ),
     written_by: str | None = Query(
@@ -451,7 +455,15 @@ async def list_memories(
     created_after: datetime | None = Query(default=None),
     created_before: datetime | None = Query(default=None),
     status: str | None = Query(default=None),
-    visibility: str | None = Query(default=None),
+    visibility: str | None = Query(
+        default=None,
+        description=(
+            "Filter on the write-time visibility tier stamped on the row "
+            "(`scope_agent`, `scope_team`, `scope_org`). Not the `scope` "
+            "parameter above, which chooses read breadth — the two words look "
+            "alike and control different things."
+        ),
+    ),
     run_id: str | None = Query(default=None),
     weight_min: float | None = Query(default=None, ge=0, le=1),
     weight_max: float | None = Query(default=None, ge=0, le=1),
@@ -658,7 +670,8 @@ async def memory_stats(
             "Opt-in aggregate scope, mirroring the MCP/plugin contract. 'agent' = your "
             "own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet "
             "trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). "
-            "Omit for the historical behaviour."
+            "Omit for the historical behaviour. Unrelated to `visibility=scope_*`, "
+            "which is the tier a writer stamped on the row rather than a read breadth."
         ),
     ),
     memory_type: str | None = Query(default=None),
