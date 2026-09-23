@@ -307,7 +307,7 @@ this document.**
 
 ```
 python benchmark/c01_title_fts_rank_movement.py \
-    --dsn postgresql://memclaw:changeme@localhost:5432/memclaw \
+    --dsn postgresql://memclaw:changeme@localhost:5432/memclaw \ <!-- legacy-name-floor: pasteable command; the local database and role bear this name and dev-9ff0ca lives in it -->
     --tenant dev-9ff0ca --terms 2 --queries 40 --seed c01
 ```
 

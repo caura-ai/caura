@@ -432,11 +432,16 @@ async def probe(conn: asyncpg.Connection) -> None:
         await tx.rollback()
 
 
+# The local dev database and role literally bear this name, and the tenant
+# carrying the titled corpus (dev-9ff0ca) lives in it -- pointing this at
+# "caura" would make the default not work. Naming an existing on-disk
+# artifact, not minting a new one.
+_DEFAULT_DSN = "postgresql://memclaw:changeme@localhost:5432/memclaw"  # legacy-name-floor: live local database name
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "--dsn", default="postgresql://memclaw:changeme@localhost:5432/memclaw"
-    )
+    ap.add_argument("--dsn", default=_DEFAULT_DSN)
     ap.add_argument(
         "--tenant",
         default="dev-9ff0ca",
