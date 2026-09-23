@@ -1653,7 +1653,7 @@
                 "type": "null"
               }
             ],
-            "description": "Whether to return atomic-fact fan-out children — short single-claim rows the platform derives from a memory you wrote, which stay retrievable alongside it. Omit to inherit the tenant's search.include_derived setting, which in turn falls back to the global default (currently true). Precedence: this field beats the tenant setting beats the global default. Excluded rows are dropped BEFORE the top_k trim, so top_k still returns top_k rows. Does not affect auto-chunk children, which are the only sub-document vectors a long document has.",
+            "description": "Whether to return atomic-fact fan-out children — short single-claim rows the platform derives from a memory you wrote, which stay retrievable alongside it. Omit to inherit the tenant's search.include_derived setting, which in turn falls back to the global default (currently true). Precedence: this field beats the tenant setting beats the global default. Excluded rows are dropped BEFORE the top_k trim, so top_k still returns top_k rows. Does not affect auto-chunk children, which are the only sub-document vectors a long document has. REST only: the MCP tools do not expose this per request — an MCP caller sets the tenant's search.include_derived instead, and an unknown argument sent to an MCP tool is dropped silently rather than reported (oss-0923-h-01).",
             "title": "Include Derived"
           },
           "memory_type_filter": {

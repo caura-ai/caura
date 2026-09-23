@@ -1050,7 +1050,10 @@ class SearchRequest(TenantScopedBody):
             "tenant setting beats the global default. Excluded rows are dropped "
             "BEFORE the top_k trim, so top_k still returns top_k rows. Does not "
             "affect auto-chunk children, which are the only sub-document vectors "
-            "a long document has."
+            "a long document has. REST only: the MCP tools do not expose this "
+            "per request — an MCP caller sets the tenant's search.include_derived "
+            "instead, and an unknown argument sent to an MCP tool is dropped "
+            "silently rather than reported (oss-0923-h-01)."
         ),
     )
     # ``bool | None``, not ``bool = True``. The tri-state is load-bearing: the

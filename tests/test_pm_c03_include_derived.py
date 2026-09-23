@@ -152,6 +152,18 @@ async def test_the_tenant_default_survives_a_real_settings_put(client):
     read as shipped. Every test that file had built ``ResolvedConfig`` directly,
     which bypasses the validation entirely — which is exactly why this one goes
     through the route.
+
+    Verified by REINTRODUCING the defect rather than by asserting against it:
+    removing the ``DEFAULT_SETTINGS`` entry while leaving the resolver property
+    in place makes this fail with c-04's exact error, ``Unknown settings key(s):
+    ['search.include_derived']``.
+
+    ORDER IS LOAD-BEARING, and the near-miss is why it is written down. The
+    first draft of this test asserted the unset read shape BEFORE the PUT, and
+    under the reintroduced defect it failed on a ``KeyError`` from the GET —
+    a true report, of a different thing, one step removed from the defect being
+    guarded. A test for an unsettable knob has to fail ON THE WRITE. The unset
+    read shape is worth pinning too and has its own test below.
     """
     tenant_id, headers = get_test_auth(tenant_id=f"test-tenant-{_uid()}")
 
