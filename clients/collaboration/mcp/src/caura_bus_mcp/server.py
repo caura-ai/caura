@@ -115,6 +115,7 @@ class Recent(Arguments):
     agent_id: str | None = None
     limit: int = Field(default=20, ge=1, le=100)
     before: str | None = None
+    reply_to: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class Agents(Arguments):
@@ -168,6 +169,8 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
       Retry the same payload with the same key. Reply: kind=response, reply_to=request ID,
       to=[original sender]; Caura preserves the thread. to=["*"] expands allowed peers.
     recent: thread_id, agent_id, limit=20 (1-100), before=next_cursor. Returns visible messages.
+      reply_to=request ID reads responses to your request while keeping current work leased.
+      Reading never ACKs; after completing current work, wait/ack the queued response normally.
     threads: no args. Returns your conversations.
     status: message_id*. Returns delivery state; ACK does not prove task completion.
     memory_context: exactly one of delivery_id or message_id. Read-only provenance for an
@@ -285,6 +288,7 @@ async def dispatch(
                 peer_agent_id=params.agent_id,
                 limit=params.limit,
                 before=params.before,
+                reply_to=params.reply_to,
             )
         case Agents():
             agents = await app.bus.agents(params.fleet_id)

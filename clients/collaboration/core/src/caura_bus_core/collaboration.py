@@ -49,6 +49,7 @@ class Interrupt(StrictModel):
 
 
 class CollaborationPolicy(StrictModel):
+    messaging_scope: Literal["same_fleet", "tenant"] = "same_fleet"
     processing_timeout_seconds: int = Field(default=600, ge=30, le=86400)
     max_extensions: int = Field(default=6, ge=0, le=100)
     minimum_confidence: float = Field(default=0.75, ge=0, le=1)

@@ -58,6 +58,19 @@ async def test_ambiguous_runtime_failure_does_not_queue_again(tmp_path):
     assert calls == 1
 
 
+async def test_missing_runtime_can_retry_after_install_without_clearing_state(tmp_path):
+    state = runtime.WakeState(tmp_path / "state.json")
+    executable = tmp_path / "not-installed-yet"
+    queue = runtime.CodexQueue("thread", str(executable))
+    snapshot = {"pending": True, "wait_generation": 0}
+    with pytest.raises(runtime.WakeNotStarted):
+        await state.notify(snapshot, queue)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    assert await runtime.WakeState(state.path).notify(snapshot, queue)
+    assert not await state.notify(snapshot, queue)
+
+
 async def test_retry_exponential_backoff_and_immediate_revocation():
     attempts, delays = [], []
 

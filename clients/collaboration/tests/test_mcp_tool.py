@@ -196,3 +196,12 @@ async def test_human_reply_keeps_parent_and_is_sent_to_platform_for_authorizatio
     )
     payload = json.loads(requests[0].content)
     assert payload["reply_to"] == "parent" and payload["to"] == ["human:owner"]
+
+
+async def test_recent_forwards_response_filter_without_claiming(tool):
+    call, requests, _ = tool
+    result = await call({"op": "recent", "args": {"reply_to": "request-123"}})
+    assert result["messages"] == []
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.params["reply_to"] == "request-123"
