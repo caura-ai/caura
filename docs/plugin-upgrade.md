@@ -35,13 +35,12 @@ The server's `/api/v1/install-plugin` endpoint returns a complete bash installer
 ### Minimal — fresh install or operator-driven re-install with explicit creds
 
 ```bash
-curl -ks -X POST "$CAURA_API_URL/api/v1/install-plugin" \
+curl -s -X POST "$CAURA_API_URL/api/v1/install-plugin" \
   -H "Content-Type: application/json" \
   -d '{
     "api_url":   "https://your-caura-server",
     "api_key":   "mc_…",
     "fleet_id":  "your-fleet",
-    "tenant_id": "your-tenant",
     "node_name": "this-node"
   }' | bash
 ```
@@ -54,7 +53,7 @@ The installer:
 
 ### Identity-preserving — re-install over an existing node
 
-When upgrading an existing install, read its current `.env` first and pass the values back so per-node identity (`tenant_id`, `node_name`, `fleet_id`, `api_key`) is preserved verbatim:
+When upgrading an existing install, read its current `.env` first and pass the values back so per-node identity (`node_name`, `fleet_id`, `api_key`) is preserved verbatim. The tenant is not passed: the server resolves it, and refuses a body that names one.
 
 ```bash
 ENV=$HOME/.openclaw/plugins/memclaw/.env # legacy-name-floor: live plugin install path used by this pasteable command
@@ -74,21 +73,31 @@ read_env() {
 URL=$(read_env API_URL)
 KEY=$(read_env API_KEY)
 FLEET=$(read_env FLEET_ID)
-TENANT=$(read_env TENANT_ID)
 NODE=$(read_env NODE_NAME)
 
-curl -ks -X POST "$URL/api/v1/install-plugin" \
+curl -s -X POST "$URL/api/v1/install-plugin" \
   -H "Content-Type: application/json" \
   -d "$(jq -nc \
         --arg u "$URL" \
         --arg k "$KEY" \
         --arg f "$FLEET" \
-        --arg t "$TENANT" \
         --arg n "$NODE" \
-        '{api_url:$u, api_key:$k, fleet_id:$f, tenant_id:$t, node_name:$n}')" | bash
+        '{api_url:$u, api_key:$k, fleet_id:$f, node_name:$n}')" | bash
 ```
 
 Use this form when re-installing across an existing fleet — it preserves node identity end-to-end, so audit logs, fleet stats, and any per-node trust elevation stay intact.
+
+### Servers with a self-signed certificate
+
+The installer checks the server's TLS certificate, like any HTTPS client, and stops with a clear error if this node doesn't trust it. For an on-prem server with a self-signed certificate, ask for trust on first use explicitly. Add `?tls_bootstrap=tofu` to the URL, and `-k` to the outer `curl`, which meets the same certificate:
+
+```bash
+curl -ks -X POST "$CAURA_API_URL/api/v1/install-plugin?tls_bootstrap=tofu" \
+  -H "Content-Type: application/json" \
+  -d '{"api_url": "https://your-caura-server", "api_key": "mc_…", "fleet_id": "your-fleet"}' | bash
+```
+
+The script then skips verification for its own downloads and saves the server's certificate for the plugin's runtime (`NODE_EXTRA_CA_CERTS`). Use it only on a network you trust: anyone able to intercept that one install could substitute their own certificate. Never use it against a server with a publicly trusted certificate, such as caura.ai — there it gains nothing and exposes the API key.
 
 ### Verify
 
