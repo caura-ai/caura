@@ -150,3 +150,17 @@ async def test_interrupt_between_consume_and_ack_still_confirms_stopped(claim):
     bus = RacingBus()
     await process_delivery(bus, Runtime(), claim)
     assert bus.actions == ["ack", "paused"]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_client_error_during_consume_is_fatal(claim, status):
+    bus = Bus()
+
+    class Adapter:
+        async def consume(self, env):
+            raise PlatformError(status, "credential or request rejected")
+
+    with pytest.raises(ExceptionGroup) as error:
+        await process_delivery(bus, Adapter(), claim)
+    assert error.value.subgroup(lambda exc: isinstance(exc, PlatformError) and exc.status == status)
+    assert not bus.actions

@@ -9,6 +9,7 @@ import os
 import signal
 import uuid
 from collections.abc import Awaitable, Coroutine
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -22,6 +23,7 @@ from caura_bus_core import (
 )
 from caura_bus_core.bus import HumanRequired, PlatformError
 from caura_bus_core.collaboration import Checkpoint, Presence
+from caura_bus_core.retry import Backoff, transient_status
 
 log = logging.getLogger("caura-bus-adapter")
 
@@ -123,6 +125,15 @@ async def process_delivery(bus, adapter, claim, *, lease_seconds=30):
         except* HumanRequired:
             failed = True
             log.info("Caura paused delivery %s for human input", claim.delivery_id)
+        except* PlatformError as errors:
+            if errors.subgroup(
+                lambda exc: (
+                    isinstance(exc, PlatformError) and exc.status != 409 and not transient_status(exc.status)
+                )
+            ):
+                raise
+            failed = True
+            log.warning("Delivery interrupted by an unavailable API or lost lease")
         except* Exception:
             failed = True
             log.exception("delivery failed id=%s attempt=%s", claim.delivery_id, claim.attempt)
@@ -158,6 +169,26 @@ async def process_delivery(bus, adapter, claim, *, lease_seconds=30):
         _active_delivery.reset(context_token)
 
 
+@asynccontextmanager
+async def connected_bus(config):
+    """An upstream restart during startup must not strand the adapter either."""
+    bus = Bus(config)
+    backoff = Backoff()
+    try:
+        while True:
+            try:
+                await bus.connect()
+                break
+            except (httpx.TransportError, PlatformError) as exc:
+                if isinstance(exc, PlatformError) and not transient_status(exc.status):
+                    raise
+                log.warning("Caura connection unavailable; retrying")
+                await backoff.sleep()
+        yield bus
+    finally:
+        await bus.close()
+
+
 async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
     """Advertise presence, wake on live events, and execute one leased item at a time."""
     profile = Presence(
@@ -167,18 +198,22 @@ async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
         capabilities=getattr(adapter, "capabilities", []),
         supports_interrupt=getattr(adapter, "supports_interrupt", False),
     )
-    async with Bus(config) as bus:
+    async with connected_bus(config) as bus:
         wake = asyncio.Event()
         wake.set()
 
         async def presence():
+            backoff = Backoff()
             while True:
                 try:
                     await bus.advertise(profile)
                 except (httpx.TransportError, PlatformError) as exc:
-                    if isinstance(exc, PlatformError) and exc.status not in {429, 502, 503, 504}:
+                    if isinstance(exc, PlatformError) and not transient_status(exc.status):
                         raise
                     log.warning("Presence update unavailable; retrying without bypassing Caura")
+                    await backoff.sleep()
+                    continue
+                backoff.reset()
                 await asyncio.sleep(15)
 
         async def notifications():
@@ -187,15 +222,15 @@ async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
                     wake.set()
 
         async def consume():
-            failures = 0
+            backoff = Backoff()
             while True:
                 try:
                     await adapter.wait_until_idle()
                     claim = await bus.claim()
                     if claim:
                         profile.status = "busy"
-                        await bus.advertise(profile)
                         try:
+                            await bus.advertise(profile)
                             await process_delivery(bus, adapter, claim)
                         finally:
                             profile.status = "ready"
@@ -207,19 +242,18 @@ async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
                         except TimeoutError:
                             log.debug("Inbox event wait timed out; polling durable state")
                         wake.clear()
-                    failures = 0
+                    backoff.reset()
                 except (httpx.TransportError, PlatformError) as exc:
-                    if isinstance(exc, PlatformError) and exc.status not in {
-                        409,
-                        429,
-                        502,
-                        503,
-                        504,
-                    }:
+                    # A lost delivery lease is reconciled by the next claim;
+                    # authentication and other client errors remain fatal.
+                    if (
+                        isinstance(exc, PlatformError)
+                        and exc.status != 409
+                        and not transient_status(exc.status)
+                    ):
                         raise
-                    failures += 1
-                    log.warning("Caura unavailable or lease lost; retrying (%s)", failures)
-                    await asyncio.sleep(min(2 ** min(failures, 5), 30))
+                    log.warning("Caura unavailable or lease lost; retrying")
+                    await backoff.sleep()
 
         try:
             async with asyncio.TaskGroup() as tasks:
