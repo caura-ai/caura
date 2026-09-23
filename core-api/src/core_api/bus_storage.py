@@ -9,6 +9,12 @@ from core_api.clients.storage_client import CoreStorageClient
 
 
 class CollaborationStorageClient(CoreStorageClient):
+    async def _execute(self, do_request, *, retry, label):
+        # Collaboration has end-to-end deadlines and caller idempotency. Keep
+        # one cancellable RPC per attempt: inherited retries/shielding/recycling
+        # can otherwise outlive an admission slot and amplify overload.
+        return await do_request()
+
     @staticmethod
     def _make_pool(pool_size=None):
         pool_size = settings.http_pool_size if pool_size is None else pool_size

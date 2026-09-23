@@ -1,14 +1,22 @@
 """Dedicated collaboration workload using the existing core image and identity boundary."""
 
 import asyncio
+import hashlib
 import hmac
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import httpx
 from caura_bus_platform.collaboration_routes import HumanPrincipal, human_router
+from caura_bus_platform.liveness import SuppressionCache
 from caura_bus_platform.routes import Operation, Principal, public_router
-from caura_bus_platform.runtime import AdmissionMiddleware, Runtime, shutdown_signals, stop_task
+from caura_bus_platform.runtime import (
+    AdmissionMiddleware,
+    Runtime,
+    send_deadline,
+    shutdown_signals,
+    stop_task,
+)
 from caura_bus_platform.settings import settings as collaboration_settings
 from caura_bus_platform.timing import TimingMiddleware, span
 from caura_bus_platform.wake import WakeHub
@@ -19,10 +27,27 @@ from core_api.auth import AuthContext, api_key_header, get_auth_context
 from core_api.bus_storage import close_storage_client, get_presence_storage_client, get_storage_client
 from core_api.config import settings
 from core_api.middleware.request_timeout import RequestTimeoutMiddleware
+from core_api.suppression import use_suppression_lookup
+
+
+async def _suppression_lookup(tenant):
+    return await get_presence_storage_client().is_tenant_suppressed(tenant)
+
+
+suppression_cache = SuppressionCache(_suppression_lookup)
 
 
 async def measured_auth_context(request: Request, key: str | None = Security(api_key_header)):
-    with span("credential_auth"):
+    # Keep raw credentials out of caches, logs and metrics. Human sessions use
+    # their trusted gateway user identity; the auth dependency still validates it.
+    credential = hashlib.sha256((key or request.headers.get("x-user-id", "")).encode()).digest()
+    liveness = request.method == "PUT" and request.url.path == "/api/v1/bus/presence"
+
+    async def lookup(tenant):
+        with span("suppression_wait"):
+            return await suppression_cache.check(tenant, credential, liveness=liveness)
+
+    with span("credential_auth"), use_suppression_lookup(lookup):
         return await get_auth_context(request, key)
 
 
@@ -74,6 +99,8 @@ DECISION_CONFLICTS = {
 
 
 async def storage_call(operation):
+    if operation.operation in {"send", "human_send", "reply"}:
+        operation = operation.model_copy(update={"deadline_at": send_deadline.get()})
     with span("storage_rpc"):
         return await _storage_call(operation)
 
@@ -111,6 +138,13 @@ async def _storage_call(operation):
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
         # Never forward storage exception text, paths or arbitrary payload fields.
+        if status == 503 and exc.response.headers.get("x-caura-send-result") == "deadline":
+            runtime.cancelled_sends += 1
+            raise HTTPException(
+                503,
+                "Collaboration send deadline exceeded",
+                headers={"Retry-After": "1", "X-Caura-Send-Result": "deadline"},
+            ) from exc
         if status == 409:
             try:
                 payload = exc.response.json()
@@ -132,9 +166,9 @@ async def _storage_call(operation):
         }
         if status in public_errors:
             raise HTTPException(status, public_errors[status]) from exc
-        raise HTTPException(503, "Caura storage is unavailable") from exc
+        raise HTTPException(503, "Caura storage is unavailable", headers={"Retry-After": "1"}) from exc
     except httpx.TransportError as exc:
-        raise HTTPException(503, "Caura storage is unavailable") from exc
+        raise HTTPException(503, "Caura storage is unavailable", headers={"Retry-After": "1"}) from exc
 
 
 wake_hub = WakeHub()
@@ -160,6 +194,7 @@ async def lifespan(app):
         try:
             await runtime.bus.stop()
         finally:
+            await suppression_cache.close()
             await close_storage_client()
 
 

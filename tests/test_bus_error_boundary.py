@@ -3,6 +3,7 @@
 import importlib.util
 import sys
 from contextlib import nullcontext
+from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -11,22 +12,30 @@ import pytest
 from fastapi import APIRouter, FastAPI, HTTPException
 
 pytestmark = pytest.mark.unit
+SUPPRESSION_PATH = Path(__file__).resolve().parents[1] / "core-api/src/core_api/suppression.py"
 
 
 @pytest.fixture
 def entry(monkeypatch):
+    from caura_bus_platform.liveness import SuppressionCache
+
     class AuthContext:
         pass
 
     modules = {
         "caura_bus_platform": {},
         "caura_bus_platform.wake": {"WakeHub": SimpleNamespace},
+        "caura_bus_platform.liveness": {"SuppressionCache": SuppressionCache},
+        "core_api.suppression": {
+            "use_suppression_lookup": lambda lookup: nullcontext()
+        },
         "caura_bus_platform.timing": {
             "TimingMiddleware": lambda app, **kwargs: app,
             "span": lambda name: nullcontext(),
         },
         "caura_bus_platform.runtime": {
             "AdmissionMiddleware": SimpleNamespace,
+            "send_deadline": ContextVar("test_send_deadline", default=None),
             "Runtime": lambda *_args: SimpleNamespace(install=lambda app: None),
             "shutdown_signals": lambda *_args: None,
             "stop_task": lambda *_args: None,
@@ -227,3 +236,101 @@ async def test_presence_routes_to_its_reserved_client(entry, monkeypatch):
         )
     )
     assert result == {"ttl_seconds": 45}
+
+
+async def test_cold_suppression_and_presence_use_reserved_pool_under_real_tcp_saturation(
+    entry, monkeypatch
+):
+    import asyncio
+
+    from starlette.requests import Request
+
+    # Load the real suppression boundary with the fixture's storage getter.
+    spec = importlib.util.spec_from_file_location("scoped_suppression_test", SUPPRESSION_PATH)
+    suppression = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(suppression)
+    monkeypatch.setattr(
+        entry, "use_suppression_lookup", suppression.use_suppression_lookup
+    )
+    blocked, release = asyncio.Event(), asyncio.Event()
+    paths = []
+
+    async def serve(reader, writer):
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            path = request.split(b" ")[1]
+            paths.append(path)
+            if path == b"/held":
+                blocked.set()
+                await release.wait()
+            payload = b'{"ok":true}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n"
+                + payload
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    async with (
+        server,
+        httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=1), trust_env=False
+        ) as message,
+        httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=1), trust_env=False
+        ) as reserved,
+    ):
+        url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+
+        async def lookup(tenant):
+            response = await reserved.get(url + "/suppression")
+            response.raise_for_status()
+            return False
+
+        async def presence(*args, **kwargs):
+            response = await reserved.get(url + "/presence")
+            response.raise_for_status()
+            return response.json()
+
+        monkeypatch.setattr(
+            entry,
+            "get_presence_storage_client",
+            lambda: SimpleNamespace(is_tenant_suppressed=lookup, _post=presence),
+        )
+
+        async def auth(request, key):
+            assert not await suppression.is_tenant_suppressed("tenant")
+            return "authenticated"
+
+        monkeypatch.setattr(entry, "get_auth_context", auth)
+        held = asyncio.create_task(message.get(url + "/held"))
+        await blocked.wait()
+        try:
+            async with asyncio.timeout(1):
+                request = Request(
+                    {
+                        "type": "http",
+                        "method": "PUT",
+                        "path": "/api/v1/bus/presence",
+                        "headers": [],
+                    }
+                )
+                assert (
+                    await entry.measured_auth_context(request, "private-test-key")
+                    == "authenticated"
+                )
+                assert await entry.storage_call(
+                    SimpleNamespace(operation="presence", model_dump=lambda: {})
+                ) == {"ok": True}
+            assert not held.done() and paths == [
+                b"/held",
+                b"/suppression",
+                b"/presence",
+            ]
+        finally:
+            release.set()
+            await held
+            await entry.suppression_cache.close()

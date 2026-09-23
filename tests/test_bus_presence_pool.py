@@ -14,7 +14,8 @@ MODULE_PATH = (
 )
 
 
-async def test_presence_http_pool_remains_available_and_both_clients_close(monkeypatch):
+@pytest.fixture
+def pool_module(monkeypatch):
     class BaseClient:
         def __init__(self, **kwargs):
             self._http = self._make_pool()
@@ -41,6 +42,11 @@ async def test_presence_http_pool_remains_available_and_both_clients_close(monke
     spec = importlib.util.spec_from_file_location("presence_pool_test", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module, client_module
+
+
+async def test_presence_http_pool_remains_available_and_both_clients_close(pool_module):
+    module, client_module = pool_module
     message, presence = (
         module.get_storage_client(),
         module.get_presence_storage_client(),
@@ -81,3 +87,61 @@ async def test_presence_http_pool_remains_available_and_both_clients_close(monke
         await module.close_storage_client()
     assert message._http.is_closed and presence._http.is_closed
     assert module._client is module._presence_client is client_module._client is None
+
+
+async def test_collaboration_rpc_cancellation_leaves_no_http_orphans_or_pool_leaks(
+    pool_module,
+):
+    module, _ = pool_module
+    client = module.get_storage_client()
+    closed = asyncio.Queue()
+    active = 0
+
+    async def serve(reader, writer):
+        nonlocal active
+        active += 1
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+            if request.startswith(b"GET /blocked "):
+                await reader.read()
+            else:
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                )
+                await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            active -= 1
+            closed.put_nowait(True)
+
+    async def forbidden_retry(*args, **kwargs):
+        raise AssertionError(
+            "Collaboration must not create an inherited retry/shield task"
+        )
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    try:
+        async with server:
+            url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            for _ in range(20):
+                with pytest.raises(TimeoutError):
+                    async with asyncio.timeout(0.02):
+                        await client._execute(
+                            lambda: client._http.get(url + "/blocked"),
+                            retry=forbidden_retry,
+                            label="cancel-test",
+                        )
+                await asyncio.wait_for(closed.get(), 0.5)
+                assert active == 0
+                assert not client._http._transport._pool._requests
+            response = await client._execute(
+                lambda: client._http.get(url + "/healthy"),
+                retry=forbidden_retry,
+                label="after-cancel",
+            )
+            assert response.status_code == 200
+            await asyncio.wait_for(closed.get(), 0.5)
+            assert active == 0 and not client._http._transport._pool._requests
+    finally:
+        await module.close_storage_client()
