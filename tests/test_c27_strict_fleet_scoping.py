@@ -83,14 +83,18 @@ def test_entities_have_no_visibility_column_and_say_so():
 # ── the A54 lesson: one predicate, one place ──────────────────────────────
 
 
-def test_every_fleet_scoped_read_goes_through_the_helper():
+def test_no_query_builds_the_fleet_predicate_by_hand():
     """Fails on a COPY of the predicate, not on the leak it later causes.
 
-    Counts hand-rolled ``fleet_id.is_(None)`` disjuncts in the storage service.
     The legitimate uses are single-fleet equality lookups (``fleet_id == x OR
     fleet_id IS NULL`` for a write path), not the multi-fleet READ predicate
     this switch governs — so what is asserted is that no read builds an
     ``in_(fleet_ids)``/``is_(None)`` pair outside the helper.
+
+    This one catches a predicate written out longhand. Its sibling below,
+    ``test_every_fleet_scoped_read_routes_through_the_helper_with_its_own_arguments``,
+    catches the other direction: a read that uses the helper but with the wrong
+    arguments for its family. Neither subsumes the other.
     """
     from core_storage_api.services import postgres_service as ps
 
@@ -103,8 +107,140 @@ def test_every_fleet_scoped_read_goes_through_the_helper():
         "the one inside _fleet_scope_clause); an inline copy sits outside the "
         "strict switch and is silently permissive — this is exactly how A54 leaked"
     )
-    # definition + the four fleet-scoped reads
-    assert src.count("_fleet_scope_clause(") == 5
+
+
+# Every read that scopes by fleet, and the arguments each one must pass.
+#
+# TWO FAMILIES, and the difference between them is the whole point:
+#
+# * SCOPE reads take a caller's authorization scope — a plural ``fleet_ids``
+#   resolved upstream — and apply D4 as written: null-fleet rows are
+#   tenant-shared, ``scope_org`` survives, and ``strict`` comes from the tenant
+#   switch.
+# * FILTER reads take ONE caller-supplied ``fleet_id`` that core-api sometimes
+#   overloads as a security PIN (``resolve_read_fleet_gate`` case (a) pins it
+#   for a trust < 2 caller asking ``scope='fleet'``). Storage cannot tell a
+#   filter from a pin by the value alone, so these stay strict and org-blind —
+#   which is exactly the predicate they used before C27 centralised them.
+#
+# Relaxing a FILTER read toward the SCOPE defaults is a privilege escalation,
+# not a tidy-up: ``visibility = 'scope_org'`` carries no fleet term, so a
+# pinned trust-1 caller would see every other fleet's org-wide rows. It is also
+# invisible to the contract gate — semantic change, no schema movement, so the
+# broker baseline does not regenerate and oasdiff reports nothing (ax-0917-m-19).
+# ``strict=strict_fleet_scoping`` — the tenant switch, an expression rather than
+# a constant, so the AST reader reports this sentinel instead of a value.
+FROM_TENANT_SWITCH = object()
+
+FLEET_SCOPED_READS: dict[str, dict[str, object]] = {
+    # SCOPE reads — D4 applies and ``strict`` is the tenant's choice.
+    "memory_scored_search": {"strict": FROM_TENANT_SWITCH},
+    "memory_load_by_ids": {"strict": FROM_TENANT_SWITCH},
+    "memory_find_successors": {"strict": FROM_TENANT_SWITCH},
+    # A scope read that is nonetheless org-blind, for a STRUCTURAL reason and
+    # not a pin: it scopes ``Entity``, which has no ``visibility`` column, so
+    # there is no org tier to preserve. Worth stating, because the argument list
+    # otherwise looks like the pinned family below and invites the wrong
+    # conclusion about why.
+    "entity_fts_search": {
+        "strict": FROM_TENANT_SWITCH,
+        "include_org_visibility": False,
+    },
+    # FILTER reads — pinned, and the values are the assertion.
+    "memory_list_by_filters": {"strict": True, "include_org_visibility": False},
+    "memory_stats_breakdown": {"strict": True, "include_org_visibility": False},
+    "memory_quality_metrics": {"strict": True, "include_org_visibility": False},
+}
+
+PINNED_FILTER_READS = {
+    "memory_list_by_filters",
+    "memory_stats_breakdown",
+    "memory_quality_metrics",
+}
+
+
+def _helper_calls_by_function():
+    """``{function name: [ {kwarg: literal-or-None}, ... ]}`` for every
+    ``_fleet_scope_clause`` call in the storage service, read from the AST.
+
+    Deliberately NOT a ``src.count(...)``. The previous version of this guard
+    asserted the call sites numbered five, which pinned the incompleteness
+    rather than catching it: it passed while two fleet-scoped reads hand-rolled
+    the predicate, and it would have gone green again for the wrong reason the
+    moment anyone raised the count. What matters is WHICH reads route through
+    the helper and WITH WHAT — so that is what is read.
+    """
+    import ast
+
+    from core_storage_api.services import postgres_service as ps
+
+    tree = ast.parse(inspect.getsource(ps))
+    found: dict[str, list[dict[str, object]]] = {}
+
+    def visit(node, fn_name):
+        for child in ast.iter_child_nodes(node):
+            name = fn_name
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = child.name
+            if (
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Name)
+                and child.func.id == "_fleet_scope_clause"
+                and fn_name is not None
+            ):
+                kwargs: dict[str, object] = {}
+                for kw in child.keywords:
+                    try:
+                        kwargs[kw.arg] = ast.literal_eval(kw.value)
+                    except ValueError:
+                        kwargs[kw.arg] = FROM_TENANT_SWITCH
+                found.setdefault(fn_name, []).append(kwargs)
+            visit(child, name)
+
+    visit(tree, None)
+    return found
+
+
+def test_every_fleet_scoped_read_routes_through_the_helper_with_its_own_arguments():
+    """Enumerates the reads instead of counting them, and pins their arguments.
+
+    Catches three different regressions: a new fleet-scoped read that hand-rolls
+    the predicate (absent from the AST), a declared read that stops using the
+    helper, and — the one that matters most — a pinned filter read quietly
+    relaxed toward the permissive defaults.
+    """
+    calls = _helper_calls_by_function()
+    # The helper's own definition is not a call site.
+    declared = set(FLEET_SCOPED_READS)
+
+    assert set(calls) == declared, (
+        f"fleet-scoped reads changed: unexpected {sorted(set(calls) - declared)}, "
+        f"missing {sorted(declared - set(calls))}. Add the read here WITH the "
+        "arguments it must pass — a read absent from this map is a read nobody "
+        "has decided the scoping rule for."
+    )
+
+    for fn, expected_kwargs in FLEET_SCOPED_READS.items():
+        for kwargs in calls[fn]:
+            assert kwargs == expected_kwargs, (
+                f"{fn} calls the helper with {kwargs}, expected {expected_kwargs}. "
+                "If that is deliberate, change the entry here and say why — the "
+                "arguments ARE the scoping rule, so a silent change to them is a "
+                "silent change to who can read what."
+            )
+
+    for fn in PINNED_FILTER_READS:
+        for kwargs in calls[fn]:
+            assert (
+                kwargs.get("strict") is True
+                and kwargs.get("include_org_visibility") is False
+            ), (
+                f"{fn} is a PINNED read: core-api uses its fleet_id as a security "
+                "confinement for trust < 2 callers, so it must stay "
+                "strict=True, include_org_visibility=False. Relaxing it lets a "
+                "pinned caller read other fleets' scope_org rows, and no contract "
+                "gate will tell you (ax-0917-m-19)."
+            )
 
 
 @pytest.mark.parametrize(

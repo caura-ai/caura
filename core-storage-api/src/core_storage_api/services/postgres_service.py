@@ -6128,7 +6128,34 @@ class PostgresService:
             stmt = stmt.where(Memory.visibility != "scope_agent")
 
         if fleet_id:
-            stmt = stmt.where(Memory.fleet_id == fleet_id)
+            # Same predicate as the bare ``Memory.fleet_id == fleet_id`` this
+            # replaces (``fleet_id IN (:f)``), routed through the helper so D4
+            # lives in one place and "strict" cannot mean different things in
+            # different queries -- the copy-drift A54 was filed for.
+            #
+            # THE ARGUMENTS ARE LOAD-BEARING. Do not "simplify" them toward the
+            # defaults the multi-fleet reads use. ``resolve_read_fleet_gate`` case
+            # (a) PINS ``fleet_id`` here for a trust < 2 caller asking
+            # ``scope='fleet'`` -- a security decision, stated as one in its own
+            # docstring -- and this predicate is that confinement. Dropping
+            # ``strict`` would re-admit null-fleet rows; dropping
+            # ``include_org_visibility=False`` is worse, because
+            # ``visibility = 'scope_org'`` carries NO fleet term at all, so a
+            # caller pinned precisely to stop it fanning out would see every
+            # scope_org row in every other fleet of the tenant. Either turns the
+            # trust ladder into a no-op, silently, on an endpoint in the frozen
+            # broker subset that oasdiff cannot flag (semantic change, no schema
+            # movement).
+            #
+            # The distinction to hold onto: the plural ``fleet_ids`` reads take an
+            # AUTHORIZATION SCOPE and correctly apply D4; this singular
+            # ``fleet_id`` is a caller-supplied FILTER that core-api sometimes
+            # overloads as a pin, and storage cannot tell the two apart from the
+            # value alone. Closing that gap properly means passing provenance, not
+            # widening the predicate (ax-0917-m-19).
+            stmt = stmt.where(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if written_by:
             stmt = stmt.where(Memory.agent_id == written_by)
         if memory_type:
@@ -6238,7 +6265,13 @@ class PostgresService:
             # that omits tenant scope gets empty stats, never cross-tenant rows.
             scope_filters.append(Memory.tenant_id == tenant_id)
         if fleet_id:
-            scope_filters.append(Memory.fleet_id == fleet_id)
+            # Strict and org-blind on purpose, exactly as in
+            # ``memory_list_by_filters`` -- see the comment there before changing
+            # these arguments; this predicate is a security confinement, not a
+            # convenience filter (ax-0917-m-19).
+            scope_filters.append(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
             scope_filters.append(
@@ -6499,7 +6532,13 @@ class PostgresService:
         else:
             scope_filters.append(Memory.tenant_id == tenant_id)
         if fleet_id:
-            scope_filters.append(Memory.fleet_id == fleet_id)
+            # Strict and org-blind on purpose, exactly as in
+            # ``memory_list_by_filters`` -- see the comment there before changing
+            # these arguments; this predicate is a security confinement, not a
+            # convenience filter (ax-0917-m-19).
+            scope_filters.append(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
             scope_filters.append(
