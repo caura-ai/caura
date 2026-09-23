@@ -10,6 +10,23 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.18.1](https://github.com/caura-ai/caura/compare/backend-v3.18.0...backend-v3.18.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **contradiction:** stop Path C orphaning a conflicted row (09/22 L-12) ([#1690](https://github.com/caura-ai/caura/issues/1690)) ([469f597](https://github.com/caura-ai/caura/commit/469f597371cbf330b11c7d759f917bae380890c3))
+* **documents:** answer a memories-shaped write body with the document shape (09/17 m-13) ([#1688](https://github.com/caura-ai/caura/issues/1688)) ([9f3aecc](https://github.com/caura-ai/caura/commit/9f3aecc733128fc0989814d71348dea953ad5dda))
+* **forge:** stop skipped clusters from spending the run's write budget ([#1687](https://github.com/caura-ai/caura/issues/1687)) ([5132e20](https://github.com/caura-ai/caura/commit/5132e20e3bc2a568e152537c62acf39c2fd304bf))
+* **memory:** make caller ownership of summary/tags durable on the row (09/02 L-08) ([#1693](https://github.com/caura-ai/caura/issues/1693)) ([6cce76a](https://github.com/caura-ai/caura/commit/6cce76aad6fc7df4d0c89a1e9e4b0aa85c87e845))
+* **sentinel:** scan name + tags, and settle the support_files checks (09/02 L-01, L-02) ([#1689](https://github.com/caura-ai/caura/issues/1689)) ([7527a71](https://github.com/caura-ai/caura/commit/7527a7121141ae2cf0c227bd9d0e821176f423ca))
+* **storage:** say when an unapplied migration is the expected outcome ([#1700](https://github.com/caura-ai/caura/issues/1700)) ([d83a0a3](https://github.com/caura-ai/caura/commit/d83a0a37636a20ccf42d4e6fd476a2773e58e50a))
+
+
+### Dependencies
+
+* bump the uv-majors group across 2 directories with 1 update ([#1590](https://github.com/caura-ai/caura/issues/1590)) ([5c86e9d](https://github.com/caura-ai/caura/commit/5c86e9d7a046cc1f8cf331e0dbfcbe46180b2916))
+
 ## [3.18.0](https://github.com/caura-ai/caura/compare/backend-v3.17.2...backend-v3.18.0) (2026-09-23)
 
 

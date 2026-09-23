@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.23.2](https://github.com/caura-ai/caura/compare/plugin-v2.23.1...plugin-v2.23.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **memory:** make caller ownership of summary/tags durable on the row (09/02 L-08) ([#1693](https://github.com/caura-ai/caura/issues/1693)) ([6cce76a](https://github.com/caura-ai/caura/commit/6cce76aad6fc7df4d0c89a1e9e4b0aa85c87e845))
+
 ## [2.23.1](https://github.com/caura-ai/caura/compare/plugin-v2.23.0...plugin-v2.23.1) (2026-09-23)
 
 
