@@ -4,6 +4,7 @@ import json
 import sys
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from mcp.server import MCPServer
@@ -13,8 +14,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from core_api.bus_mcp import register_peer
 
 
-@pytest.fixture
-async def remote(monkeypatch):
+@pytest.fixture(params=["inprocess", "network"])
+async def remote(monkeypatch, request):
     native = SimpleNamespace(
         _get_agent_id=lambda: "agent-a",
         _get_tenant=lambda: "tenant-a",
@@ -39,7 +40,11 @@ async def remote(monkeypatch):
         return []
 
     server = MCPServer("optional-peer-test")
-    register_peer(api, server)
+    if request.param == "network":
+        monkeypatch.setattr(httpx, "AsyncHTTPTransport", lambda: httpx.ASGITransport(app=api))
+        register_peer(None, server, api_url="http://collaboration-api:8000")
+    else:
+        register_peer(api, server)
 
     async def call(op, headers=None, args=None):
         ctx = Context(
