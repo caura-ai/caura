@@ -2,12 +2,16 @@
 
 import importlib.util
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import APIRouter, FastAPI, HTTPException
+
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
@@ -18,6 +22,10 @@ def entry(monkeypatch):
     modules = {
         "caura_bus_platform": {},
         "caura_bus_platform.wake": {"WakeHub": SimpleNamespace},
+        "caura_bus_platform.timing": {
+            "TimingMiddleware": lambda app, **kwargs: app,
+            "span": lambda name: nullcontext(),
+        },
         "caura_bus_platform.runtime": {
             "AdmissionMiddleware": SimpleNamespace,
             "Runtime": lambda *_args: SimpleNamespace(install=lambda app: None),
@@ -46,7 +54,11 @@ def entry(monkeypatch):
         },
         "core_api": {},
         "core_api.app": {"app": FastAPI()},
-        "core_api.auth": {"AuthContext": AuthContext, "get_auth_context": lambda: None},
+        "core_api.auth": {
+            "AuthContext": AuthContext,
+            "get_auth_context": lambda: None,
+            "api_key_header": None,
+        },
         "core_api.clients": {},
         "core_api.clients.storage_client": {"get_storage_client": lambda: None},
         "core_api.config": {"settings": SimpleNamespace(gateway_shared_secret="test")},

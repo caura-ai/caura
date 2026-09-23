@@ -2,6 +2,7 @@
 
 import httpx
 from caura_bus_platform.settings import settings
+from caura_bus_platform.timing import http_timing_hooks
 
 from core_api.clients import storage_client
 from core_api.clients.storage_client import CoreStorageClient
@@ -18,6 +19,7 @@ class CollaborationStorageClient(CoreStorageClient):
                 keepalive_expiry=60,
             ),
             trust_env=False,
+            event_hooks=http_timing_hooks(),
         )
 
 

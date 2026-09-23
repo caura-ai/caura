@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager, suppress
 from caura_bus_platform.routes import storage_router
 from caura_bus_platform.settings import settings as collaboration_settings
 from caura_bus_platform.store import Store
+from caura_bus_platform.timing import TimingMiddleware
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from core_storage_api.app import app
@@ -57,4 +58,5 @@ async def lifespan(app):
 app.router.lifespan_context = lifespan
 if store is not None:
     app.include_router(storage_router(store))
+    app.add_middleware(TimingMiddleware, service="collaboration-storage")
 app.openapi_schema = None

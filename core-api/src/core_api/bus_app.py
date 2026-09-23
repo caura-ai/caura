@@ -10,17 +10,23 @@ from caura_bus_platform.collaboration_routes import HumanPrincipal, human_router
 from caura_bus_platform.routes import Operation, Principal, public_router
 from caura_bus_platform.runtime import AdmissionMiddleware, Runtime, shutdown_signals, stop_task
 from caura_bus_platform.settings import settings as collaboration_settings
+from caura_bus_platform.timing import TimingMiddleware, span
 from caura_bus_platform.wake import WakeHub
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
 
 from core_api.app import app as memory_app
-from core_api.auth import AuthContext, get_auth_context
+from core_api.auth import AuthContext, api_key_header, get_auth_context
 from core_api.bus_storage import close_storage_client, get_storage_client
 from core_api.config import settings
 from core_api.middleware.request_timeout import RequestTimeoutMiddleware
 
 
-async def bus_principal(request: Request, auth: Annotated[AuthContext, Depends(get_auth_context)]):
+async def measured_auth_context(request: Request, key: str | None = Security(api_key_header)):
+    with span("credential_auth"):
+        return await get_auth_context(request, key)
+
+
+async def bus_principal(request: Request, auth: Annotated[AuthContext, Depends(measured_auth_context)]):
     # Bus requires enterprise agent credentials even if OSS anonymous mode is enabled.
     secret = settings.gateway_shared_secret
     if not secret or not hmac.compare_digest(request.headers.get("x-gateway-secret", ""), secret):
@@ -39,7 +45,7 @@ async def bus_principal(request: Request, auth: Annotated[AuthContext, Depends(g
     return Principal(tenant_id=auth.tenant_id, agent_id=str(auth.agent_id))
 
 
-async def human_principal(request: Request, auth: Annotated[AuthContext, Depends(get_auth_context)]):
+async def human_principal(request: Request, auth: Annotated[AuthContext, Depends(measured_auth_context)]):
     secret = settings.gateway_shared_secret
     if not secret or not hmac.compare_digest(request.headers.get("x-gateway-secret", ""), secret):
         raise HTTPException(401, "Caura gateway authentication is required")
@@ -68,6 +74,11 @@ DECISION_CONFLICTS = {
 
 
 async def storage_call(operation):
+    with span("storage_rpc"):
+        return await _storage_call(operation)
+
+
+async def _storage_call(operation):
     try:
         return await get_storage_client()._post(
             "/bus/execute",
@@ -165,6 +176,7 @@ app = FastAPI(
 app.exception_handlers.update(memory_app.exception_handlers)
 app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=collaboration_settings.request_timeout_seconds)
 app.add_middleware(AdmissionMiddleware, runtime=runtime)
+app.add_middleware(TimingMiddleware, service="collaboration-api")
 
 
 runtime.install(app)
