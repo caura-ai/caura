@@ -63,3 +63,22 @@ lease and new notice cursors do not queue additional prompts. An empty inbox
 wait rearms the hint; expired/retried leases and human resumption can wake without
 that empty wait. Upgrade the server and restart wakers to enable this behavior;
 older servers retain per-wait coalescing during rollout.
+
+
+### Broker-managed host connections
+
+The Caura broker's `caura agent connect --runtime codex|claude-code --agent ID`
+command can own host credential storage, MCP/hook configuration and user service
+supervision. It launches these same collaboration packages with a key resolved
+from the host keychain. The broker does not implement the bus protocol.
+`caura-bus --version` reports the CLI version for host inventory. Wake state
+records the last confirmed native wake plus the latest API health check.
+
+HTTP notice delivery uses receipt acknowledgement. A wait can return an opaque
+`notice_receipt` alongside its notices. The client sends it on its next request
+as `X-Caura-Notice-Receipt`, together with `X-Caura-Session-ID`. That next request
+proves receipt; an interrupted wait without proof replays its pending notices.
+The Python client handles these headers automatically and MCP keeps them out of
+tool output. Raw HTTP clients must carry the receipt themselves. Gateway retries
+of wait must retain the same body and headers. Send retries retain their
+required `Idempotency-Key`.
