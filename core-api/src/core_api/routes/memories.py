@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from common import permanent_failure
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
+from core_api import request_phase
 from core_api.agent_ids import (
     ALWAYS_RESERVED_AGENT_IDS,
     DEFAULT_AGENT_ID,
@@ -2423,20 +2424,33 @@ async def _search_inner(
         # Auth / tenant errors raised downstream are expected outcomes,
         # not DB/network failures — don't flag them as ``error=True``.
         raise
-    except Exception:
+    except BaseException:
+        # ``BaseException``, not ``Exception``: the request budget kills this
+        # handler with ``CancelledError``, which is neither — so a search the
+        # server gave up on logged ``error=false`` with ``row_count=0`` and
+        # a duration exactly equal to the budget. In this route's own
+        # telemetry a timed-out search was indistinguishable from a search
+        # that legitimately matched nothing, which put every 45s timeout into
+        # the empty-result rate and none into the error rate.
         success = False
         raise
     finally:
         if logger.isEnabledFor(logging.INFO):
+            cancelled = request_phase.past_deadline()
             logger.info(
                 "search request completed",
                 extra={
                     "path": "memory-search",
                     "tenant_id": body.tenant_id,
                     "top_k": body.top_k,
+                    # Meaningless on a cancelled request — the pipeline never
+                    # filled it — and reported anyway so the pair
+                    # (row_count=0, cancelled=true) reads as one fact rather
+                    # than as an empty result set.
                     "row_count": len(results),
                     "total_ms": (time.perf_counter() - t_start) * 1000,
                     "error": not success,
+                    "cancelled": cancelled,
                 },
             )
     recall_tracked = bool(recall_ctx.get("recall_tracked"))

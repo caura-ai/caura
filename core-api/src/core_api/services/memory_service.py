@@ -16,6 +16,7 @@ from common import duplicate_memory
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
+from core_api.request_phase import phase
 from core_api.services.agent_identity import ReservedAgentIdError, enforce_reserved_write_id
 from core_api.tasks import track_task
 
@@ -4732,7 +4733,14 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
         # propagates through the ``except`` below (future + joiners) and
         # the ``finally`` still pops the in-flight entry.
         async with per_tenant_slot("embed", tenant_id):
-            embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
+            # h-02's shape — both semantic endpoints down while CRUD stayed
+            # healthy — points at exactly this hop, because it is the one
+            # /search and /recall share and CRUD never touches. Naming it
+            # separately from ``slot_acquire.embed`` is the whole point: a
+            # stalled provider and a queue behind other tenants' embeds are
+            # different incidents with different owners.
+            with phase("embed.query"):
+                embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
         if embedding is None:
             # Two different things arrive as ``None`` and they are not the
             # same incident. A blank query cannot be embedded by anyone, and
