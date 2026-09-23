@@ -1,8 +1,8 @@
 """Deterministic demo responder: requests get one idempotent, correlated reply."""
 
-from caura_bus_core import Bus, Envelope, SendMessage, load_config
+from caura_bus_core import Envelope, SendMessage, load_config
 
-from .sdk import NoIdleGate, adapter_main, checkpoint, configure_logging, run_adapter
+from .sdk import NoIdleGate, adapter_main, checkpoint, configure_logging, connected_bus, run_adapter
 
 
 class Responder(NoIdleGate):
@@ -52,7 +52,7 @@ class Responder(NoIdleGate):
 
 async def run():
     config = load_config()
-    async with Bus(config) as bus:
+    async with connected_bus(config) as bus:
         await run_adapter(config, Responder(bus))
 
 

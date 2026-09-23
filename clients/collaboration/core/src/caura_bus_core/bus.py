@@ -13,6 +13,7 @@ from .agent import AgentConfig
 from .collaboration import Checkpoint, Presence
 from .config import require_api_key
 from .protocol import Claim, Receipt, SendMessage
+from .retry import Backoff, transient_status
 
 
 class HumanRequired(RuntimeError):
@@ -89,7 +90,7 @@ class Bus:
             else:
                 if response.is_success:
                     return response.json()
-                if response.status_code not in {429, 502, 503, 504} or not retry_safe or attempt == 2:
+                if not transient_status(response.status_code) or not retry_safe or attempt == 2:
                     try:
                         detail = response.json().get("detail", "request rejected")
                     except ValueError:
@@ -264,7 +265,7 @@ class Bus:
     async def events(self, after=0):
         """Resume a live stream by durable cursor; reconnect revalidates credentials."""
         cursor = after
-        failures = 0
+        backoff = Backoff(maximum=15)
         while True:
             try:
                 async with self._http.stream(
@@ -274,19 +275,17 @@ class Bus:
                     headers={"Accept": "text/event-stream"},
                 ) as response:
                     if response.status_code != 200:
-                        if response.status_code in {401, 403}:
-                            raise PlatformError(response.status_code, "live event access denied")
-                        if response.status_code < 500 and response.status_code != 429:
+                        if not transient_status(response.status_code):
                             raise PlatformError(response.status_code, "live event access failed")
-                        failures += 1
-                        await asyncio.sleep(min(2 ** min(failures, 4), 15))
-                        continue
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            event = json.loads(line[6:])
-                            cursor = event["seq"]
-                            yield event
-                failures = 0
+                    else:
+                        async for line in response.aiter_lines():
+                            if line.startswith("data: "):
+                                event = json.loads(line[6:])
+                                cursor = event["seq"]
+                                backoff.reset()
+                                yield event
             except httpx.TransportError:
-                failures += 1
-                await asyncio.sleep(min(2 ** min(failures, 4), 15))
+                pass
+            # This also bounds reconnects when an upstream closes an empty
+            # stream successfully, without supplying an event or heartbeat.
+            await backoff.sleep()
