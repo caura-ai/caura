@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -73,6 +74,10 @@ class WakeState:
             os.fsync(stream.fileno())
         temporary.replace(self.path)
 
+    def health(self, status):
+        with lock(self.path.with_suffix(".lock")):
+            self.save({**self.load(), "health": status, "health_at": datetime.now(UTC).isoformat()})
+
     async def notify(self, snapshot, emit):
         with lock(self.path.with_suffix(".lock")):
             saved = self.load()
@@ -88,7 +93,7 @@ class WakeState:
             if durable and marker not in saved and saved.get("outstanding") == snapshot["wait_generation"]:
                 # An older waker may already have queued a prompt. Adopt it,
                 # rather than queueing another merely because we upgraded.
-                saved = {marker: generation, "recovery_key": recovery}
+                saved = {**saved, marker: generation, "recovery_key": recovery}
                 self.save(saved)
                 return False
             same_burst = saved.get(marker) == generation
@@ -97,11 +102,15 @@ class WakeState:
                 return False
             # Persist before handing control to a runtime. A crash/ambiguous
             # queue failure must not enqueue duplicate prompts on restart.
-            self.save({marker: generation, "recovery_key": recovery or saved.get("recovery_key")})
+            current = {**saved, marker: generation, "recovery_key": recovery or saved.get("recovery_key")}
+            self.save(current)
             if snapshot.get("wake_reason") == "request_overdue":
                 await emit(OVERDUE_TEXT)
             else:
                 await emit()
+            # Inventory records only confirmed queue delivery or emitted hook
+            # output; an ambiguous runtime failure never becomes a successful wake.
+            self.save({**current, "last_wake_at": datetime.now(UTC).isoformat()})
             return True
 
 
@@ -176,20 +185,31 @@ async def run_waker(config, runtime, state, emit=None):
             if event["event_type"] in WAKE_EVENTS:
                 changed.set()
 
+    async def checked(operation):
+        try:
+            return await operation()
+        except (PlatformError, httpx.TransportError):
+            state.health("error")
+            raise
+
     async def reconcile():
-        snapshot = await retry(bus.inbox_state)
+        snapshot = await retry(lambda: checked(bus.inbox_state))
         await retry(
-            lambda: bus.advertise(
-                profile.model_copy(update={"status": "busy" if snapshot["active"] else "ready"})
+            lambda: checked(
+                lambda: bus.advertise(
+                    profile.model_copy(update={"status": "busy" if snapshot["active"] else "ready"})
+                )
             )
         )
         if emit is not None:
             await state.notify(snapshot, emit)
+        state.health("healthy")
         return snapshot
 
     events_task = None
     try:
-        await retry(bus.connect)
+        state.health("starting")
+        await retry(lambda: checked(bus.connect))
         snapshot = await reconcile()
         events_task = asyncio.create_task(consume(snapshot["cursor"]))
         while True:
@@ -211,6 +231,7 @@ async def run_waker(config, runtime, state, emit=None):
             await reconcile()
     except PlatformError as exc:
         revoked = exc.status in {401, 403}
+        state.health("error")
         raise
     finally:
         if events_task is not None:
@@ -269,6 +290,7 @@ async def receive(config, state, hook=None, wait=0, idle_listen_seconds=5):
                 try:
                     await bus.connect()
                     snapshot = await bus.inbox_state()
+                    state.health("healthy")
                     if wait:
                         window = (
                             wait if snapshot.get("awaiting_reply", False) else min(wait, idle_listen_seconds)
@@ -300,6 +322,7 @@ async def receive(config, state, hook=None, wait=0, idle_listen_seconds=5):
                     failures = 0
                     await asyncio.sleep(min(1, remaining))
                 except (PlatformError, httpx.TransportError) as exc:
+                    state.health("error")
                     if not transient(exc) or not wait:
                         raise
                     await asyncio.sleep(min(0.5 * 2 ** min(failures, 5), 15))

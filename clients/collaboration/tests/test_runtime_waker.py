@@ -1,6 +1,7 @@
 import asyncio
 import json
 import shlex
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -31,6 +32,7 @@ async def test_real_fake_queue_captures_fixed_argv_no_credential_and_coalesces(t
     queue = runtime.CodexQueue("a session; $(no shell)", str(fake))
     snapshot = {"pending": True, "wait_generation": 4, "drain_generation": 0}
     assert await state.notify(snapshot, queue)
+    assert datetime.fromisoformat(state.load()["last_wake_at"]).tzinfo is not None
     assert not await state.notify(snapshot, queue)
     assert not await runtime.WakeState(state.path).notify(snapshot, queue)
     assert not await state.notify({**snapshot, "wait_generation": 5}, queue)
@@ -57,6 +59,7 @@ async def test_ambiguous_runtime_failure_does_not_queue_again(tmp_path):
         await state.notify(snapshot, failed)
     assert not await state.notify(snapshot, failed)
     assert calls == 1
+    assert "last_wake_at" not in state.load()
 
 
 async def test_retry_exponential_backoff_and_immediate_revocation():
@@ -400,3 +403,9 @@ async def test_upgrade_adopts_unread_hint_but_does_not_strand_consumed_legacy_st
     state.save({"outstanding": 4, "notice_cursor": 7})
     assert await state.notify({**snapshot, "wait_generation": 5}, emit)
     assert len(queued) == 2
+
+
+def test_cli_reports_its_version_without_starting_a_runtime():
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout.startswith("caura-bus ")

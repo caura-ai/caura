@@ -39,6 +39,8 @@ class Bus:
         if config.api_url.startswith("http:") and not config.allow_insecure_http:
             raise ValueError("HTTPS is required; allow_insecure_http is only for isolated local demos")
         self.config = config
+        self._notice_session: str | None = None
+        self._notice_receipt: str | None = None
         self._http = httpx.AsyncClient(
             base_url=config.api_url + "/api/v1/bus/",
             headers={"X-API-Key": api_key or require_api_key()},
@@ -70,6 +72,13 @@ class Bus:
         await self._http.aclose()
 
     async def request(self, method: str, path: str, *, retry_safe: bool = False, **kwargs):
+        # Snapshot proof of the previous response; retries retain exactly the
+        # same acknowledgement even if another concurrent call receives notices.
+        headers = dict(kwargs.pop("headers", {}))
+        if self._notice_session and self._notice_receipt:
+            headers["X-Caura-Session-ID"] = self._notice_session
+            headers["X-Caura-Notice-Receipt"] = self._notice_receipt
+        kwargs["headers"] = headers
         # Only operations with durable idempotency retry ambiguous responses.
         for attempt in range(3):
             try:
@@ -134,6 +143,9 @@ class Bus:
                     )
                 responded = True
                 failures = 0
+                if data.get("notice_receipt"):
+                    self._notice_session = session_id
+                    self._notice_receipt = data["notice_receipt"]
                 if data["delivery"] or data.get("notices"):
                     return data
             except PlatformError as exc:

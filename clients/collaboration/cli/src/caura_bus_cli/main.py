@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Literal
 
@@ -21,6 +22,17 @@ app.add_typer(agents_app, name="agents")
 app.add_typer(threads_app, name="threads")
 hooks_app = typer.Typer(no_args_is_help=True)
 app.add_typer(hooks_app, name="hooks")
+
+
+def show_version(value: bool):
+    if value:
+        typer.echo("caura-bus " + package_version("caura-bus-cli"))
+        raise typer.Exit()
+
+
+@app.callback()
+def options(version: bool = typer.Option(False, "--version", callback=show_version, is_eager=True)):
+    """Caura agent messaging."""
 
 
 @app.command()
