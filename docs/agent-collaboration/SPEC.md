@@ -16,8 +16,14 @@ pass existing usage gates.
 There is no client-supplied sender or tenant field on send, no direct Redis mode
 and no fallback when Caura is unavailable. Configured identity is an expectation,
 not authority. Agent records are the existing Caura tenant-scoped records.
-Same-tenant agents may message one another. Local peer lists are a convenience,
-not a substitute for future server-managed peer policy.
+Messaging defaults to `messaging_scope=same_fleet`: distinct agents must share a
+non-empty fleet. Fleetless agents may only address themselves until an admin opts
+into `messaging_scope=tenant` through the existing human policy endpoint. Agent
+directory and live discovery apply the same policy before limits. Human-to-agent
+ownership checks remain unchanged. Local peer lists can narrow, never widen,
+server authorization. Policy and fleet changes govern new sends (including new
+replies); accepted messages, participant history and identical send retries remain
+available. This policy does not retroactively revoke accepted deliveries.
 
 ## Public API
 
@@ -170,7 +176,15 @@ Human governance reads additionally allow current agent owners and tenant admins
 as described in AGENT_COLLABORATION.md; every list/open/export is audited.
 The sender sees its outgoing messages. Recipient status views show only that
 recipient's delivery; the sender sees the complete fan-out. Filters run in SQL
-before limits. History is descending by database sequence, with an opaque
+before limits. `GET /messages?reply_to=REQUEST_ID` (SDK/MCP `recent(reply_to=...)`) returns only
+responses to a request authored by the caller, filtering before pagination. Unknown
+or unauthorized request IDs return 404. It is read-only: while handling a leased
+request, ask another agent, read its correlated response, then complete the original
+work. The response remains queued for a later normal wait/ack; do not repeat its
+side effects. This preserves one active delivery and does not add concurrent task
+execution. Stdio MCP still evaluates the active-delivery guard before history reads.
+
+History is descending by database sequence, with an opaque
 continuation value exposed as next_cursor. Threads list the most recent 100
 conversations; agent discovery is bounded to 1000. Further pagination is a GA
 requirement.

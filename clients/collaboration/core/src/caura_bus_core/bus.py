@@ -195,12 +195,14 @@ class Bus:
         peer_agent_id: str | None = None,
         limit: int = 20,
         before: str | None = None,
+        reply_to: str | None = None,
     ):
         params = {
             "limit": limit,
             "thread_id": thread_id,
             "peer_agent_id": peer_agent_id,
             "before": before,
+            "reply_to": reply_to,
         }
         return await self.request(
             "GET", "messages", params={k: v for k, v in params.items() if v is not None}
