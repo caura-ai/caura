@@ -246,3 +246,17 @@ The preview uses paired `caura` and `caura-enterprise` checkouts. Enterprise's
 `platform-collaboration-api/sources.json` is the single OSS revision pin. Public
 source checkout needs no private repository secret. Docker accepts the OSS tree
 as a named build context. There are no patch overlays or synchronization jobs.
+
+## Consolidated messaging boundary
+
+Keep the durable PostgreSQL ledger, private stdio lease tokens and one outstanding
+delivery. Same-fleet messaging is the default; admins may explicitly enable
+tenant-wide messaging through `messaging_scope=tenant`. Existing accepted work
+and history survive policy changes. See SPEC.md for correlated response reads
+that permit a nested consultation without releasing the original lease.
+
+A waker retries after an OS error proves the runtime process never started.
+Once a process has started, timeout, cancellation or a nonzero exit can be
+ambiguous: retain the wake marker and inspect the runtime before clearing it.
+These guarantees prevent a missing executable from permanently suppressing work
+without claiming exactly-once runtime execution.
