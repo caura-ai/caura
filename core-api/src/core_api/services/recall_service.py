@@ -55,7 +55,11 @@ Answer (step by step):"""
 # the second closes the over-abstention the v1 wording caused on
 # knowledge-update questions (answerable questions turned into "not enough
 # information"). Change only with a fresh control pair on the 67-q regression
-# sample (see benchmark/a57-recall-experiments-findings.md).
+# sample. The procedure and the A64 numbers are in
+# ``<multi-repo-workspace-root>/benchmark/a57-recall-experiments-findings.md``
+# -- WORKSPACE ROOT, one level above this repo, not in this repo on any ref.
+# See ``.claude/skills/regression-bench`` for how to run the pair: it needs
+# only the LOCAL docker stack and ``dev-admin-key``, no hosted credentials.
 PREMISE_GUARD_BLOCK = """\
 Before answering, check whether the question rests on an assumption about the \
 user's current situation that the memories contradict or no longer support \

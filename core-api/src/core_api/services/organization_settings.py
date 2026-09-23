@@ -73,7 +73,9 @@ DEFAULT_SETTINGS: dict = {
         # instead of going along with it. Off (None/False) keeps the recall
         # prompt byte-identical to pre-A64. Evidence: STALE T2 31%->71%
         # overall with the guard; true-premise control +1.9pp overall
-        # (benchmark/a57-recall-experiments-findings.md).
+        # (findings: ``<multi-repo-workspace-root>/benchmark/
+        # a57-recall-experiments-findings.md`` -- WORKSPACE ROOT, one level
+        # above this repo; not in this repo on any ref).
         "premise_guard": None,
     },
     "embedding": {
