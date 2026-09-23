@@ -1,7 +1,6 @@
 """Dedicated collaboration workload using the existing core image and identity boundary."""
 
 import asyncio
-import hashlib
 import hmac
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -38,14 +37,12 @@ suppression_cache = SuppressionCache(_suppression_lookup)
 
 
 async def measured_auth_context(request: Request, key: str | None = Security(api_key_header)):
-    # Keep raw credentials out of caches, logs and metrics. Human sessions use
-    # their trusted gateway user identity; the auth dependency still validates it.
-    credential = hashlib.sha256((key or request.headers.get("x-user-id", "")).encode()).digest()
+    # Suppression is a tenant-wide property shared by all validated principals.
     liveness = request.method == "PUT" and request.url.path == "/api/v1/bus/presence"
 
     async def lookup(tenant):
         with span("suppression_wait"):
-            return await suppression_cache.check(tenant, credential, liveness=liveness)
+            return await suppression_cache.check(tenant, liveness=liveness)
 
     with span("credential_auth"), use_suppression_lookup(lookup):
         return await get_auth_context(request, key)
