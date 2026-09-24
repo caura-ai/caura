@@ -33,6 +33,13 @@ const AGENT_AUTH_ENABLED = Boolean(CAURA_API_KEY);
 
 const keyCache = new Map<string, string>();
 
+// Set once the server answers the provision route with 404: the route is not
+// mounted there (OSS core-api does not implement it, caura#845), so every later
+// attempt would 404 too. Callers already fall back to the tenant key; this only
+// stops the repeat request and warning on every cold resolution. Resets on
+// restart, so a server that gains the route is picked up then.
+let provisioningUnavailable = false;
+
 // --- Secrets file I/O ---
 
 interface SecretsFile {
@@ -68,6 +75,7 @@ function writeSecretsFile(secrets: SecretsFile): void {
 async function provisionAgentKey(
   agentId: string,
 ): Promise<{ raw_key: string; key_prefix: string } | null> {
+  if (provisioningUnavailable) return null;
   try {
     const url = new URL(`${CAURA_API_PREFIX}/admin/agent-keys/provision`, CAURA_API_URL);
     const res = await fetch(url.toString(), {
@@ -79,6 +87,13 @@ async function provisionAgentKey(
       body: JSON.stringify({ agent_id: agentId }),
       signal: AbortSignal.timeout(10_000),
     });
+    if (res.status === 404) {
+      provisioningUnavailable = true;
+      console.info(
+        "[caura] Server does not support agent key provisioning (404); using the tenant key for all agents",
+      );
+      return null;
+    }
     if (!res.ok) {
       console.warn(
         `[caura] Agent key provisioning failed for '${agentId}': ${res.status}`,
