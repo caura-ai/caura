@@ -76,9 +76,12 @@ describe("resolveTenantId — network failure handling", () => {
     assert.equal(
       headers["User-Agent"],
       USER_AGENT,
-      "the /auth/verify request must identify the plugin (Caura Heartbeat v1 §7)",
+      "the /whoami request must identify the plugin (Caura Heartbeat v1 §7)",
     );
-    assert.equal(headers["Content-Type"], "application/json", "existing headers stay intact");
+    assert.equal(headers["X-API-Key"], process.env.CAURA_API_KEY);
+    assert.equal(calls[0].url, "http://localhost:8000/api/v1/whoami");
+    assert.equal(calls[0].init?.method, "GET");
+    assert.equal(calls[0].init?.body, undefined);
     assert.ok(elapsed < 500, `should short-circuit fast, took ${elapsed}ms`);
     assert.equal(
       warnLines.length,
@@ -91,7 +94,7 @@ describe("resolveTenantId — network failure handling", () => {
   });
 
   test("passes an AbortSignal to fetch on every attempt (bounds per-attempt latency — CAURA-000)", async () => {
-    // Pins the contract that the ``/auth/verify`` fetch in
+    // Pins the contract that the ``/whoami`` fetch in
     // ``resolveTenantId`` MUST be invoked with an AbortSignal — without
     // it, a backend that accepts the TCP connection but never replies
     // hangs ``ensureTenantId`` forever, which in turn stalls every
@@ -153,6 +156,20 @@ describe("resolveTenantId — network failure handling", () => {
     } finally {
       globalThis.setTimeout = originalSetTimeout;
     }
+  });
+
+  test("returns the tenant resolved by whoami", async () => {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify({ tenant_id: "tenant-from-key" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    assert.equal(await resolveTenantId(), "tenant-from-key");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "http://localhost:8000/api/v1/whoami");
   });
 });
 

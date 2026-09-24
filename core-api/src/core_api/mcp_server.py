@@ -30,6 +30,7 @@ from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api.agent_ids import (
     DEFAULT_AGENT_ID,
     AgentIdentity,
+    canonical_service_agent_id,
     effective_read_agent_id,
     effective_write_agent_id,
 )
@@ -66,6 +67,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     get_or_create_agent,
+    lookup_agent,
     resolve_write_agent,
 )
 
@@ -191,6 +193,15 @@ _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # before. See that function and the setting's comment for why the capability is
 # available without being automatic.
 _org_read_only_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_org_read_only", default=False)
+# Set when the platform could not DETERMINE the read-only verdict, as opposed
+# to determining it is false. ``/_auth`` fails open on its own storage lookup,
+# which is correct for an auth path and wrong for a measurement one: the
+# observation that feeds the enforce_mcp_plan_limits decision cannot tell a
+# tenant who is under their limit from one nobody could look up. See
+# ``_check_plan_limit``.
+_org_read_only_unknown_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mcp_org_read_only_unknown", default=False
+)
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
@@ -504,7 +515,9 @@ class MCPAuthMiddleware:
             # and the delete trust gate. Use the value the resolution above
             # decided; only Path 4 sets it True.
             agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
-            _agent_id_var.set(AgentIdentity(agent_header) if agent_header else None)
+            _agent_id_var.set(
+                AgentIdentity(canonical_service_agent_id(agent_header)) if agent_header else None
+            )
 
             readable_header = headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
             if readable_header:
@@ -552,9 +565,16 @@ class MCPAuthMiddleware:
             # would refuse a paying tenant; a stale False would be a billing
             # bypass. Both are silent, so neither is allowed to depend on a
             # header being present.
-            _org_read_only_var.set(
-                (headers.get(b"x-org-read-only", b"").decode().lower() == "true") if via_gateway else False
-            )
+            _read_only_header = headers.get(b"x-org-read-only", b"").decode().lower() if via_gateway else ""
+            _org_read_only_var.set(_read_only_header == "true")
+            # THREE-VALUED, not two. ``unknown`` is emitted by ``/_auth`` when
+            # its storage lookup failed, and it is deliberately NOT "true":
+            # auth must keep failing open, because refusing every write during a
+            # storage blip is far worse than letting a few over-plan ones
+            # through. What changes is that the blindness is now visible
+            # downstream instead of being indistinguishable from "under limit".
+            # Assigned on every request, like its neighbour above.
+            _org_read_only_unknown_var.set(_read_only_header == "unknown")
 
             # Last, because it needs the resolved tenant — and before the app,
             # because a suppressed org must not reach a tool at all.
@@ -613,6 +633,16 @@ def _is_org_read_only() -> bool:
     return _org_read_only_var.get(False)
 
 
+def _is_org_read_only_unknown() -> bool:
+    """True when the platform could not determine the verdict for this request.
+
+    Distinct from ``_is_org_read_only() is False``, which is a real verdict.
+    This one means nobody knows — see ``_check_plan_limit`` for why that has to
+    be counted separately rather than folded into the negative.
+    """
+    return _org_read_only_unknown_var.get(False)
+
+
 def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     """Refuse ``op`` when the org is over its plan limit — or just record it.
 
@@ -655,17 +685,28 @@ def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     ``platform-auth-api``'s ``/_auth``, which sets it on an expired license, a
     cached read-only verdict, or a live storage lookup.
 
-    READ SILENCE CAREFULLY — but one of the three causes is now ruled out. A
-    quiet log is NOT explained by the gateway skipping this route. What is left:
-    the tenant may never have been marked over plan, because the MCP batch path
-    records no usage to compute that from while ``meters_mcp_bulk_write()`` is
-    off, its default (caura-ai/caura#1220) — or there is genuinely nothing to
-    refuse. Rule the first out before reading a quiet log as a green light.
+    READ SILENCE CAREFULLY. Three of the four reasons a quiet log was not
+    evidence are now closed, and the fourth is the one that matters most.
 
-    Note that ``/_auth`` fails OPEN on its own storage lookup: an exception
-    there returns without the header, so a storage outage reads as "not
-    read-only" for the cache TTL. That is a fourth reason a log can be quiet
-    while a tenant is genuinely over plan, and it lives outside this repo.
+    * The gateway skipping this route: ruled out above.
+    * The batch path contributing nothing to the counters: closed in
+      caura-ai/caura#1638, which turned ``meters_mcp_bulk_write()`` on.
+    * ``/_auth`` failing open on its own storage lookup: it now reports
+      ``x-org-read-only: unknown`` instead of nothing, and this function emits
+      ``mcp_plan_limit_verdict_unknown`` for those requests. A blind sample is
+      no longer silence — count it, and treat an observation window with many
+      of them as not yet measured.
+    * NOTHING SETS THE FLAG FROM USAGE GROWTH, and this one is still open.
+      ``organizations.is_read_only`` in caura-enterprise is written to True by
+      exactly one thing, the Paddle ``subscription.canceled`` downgrade. No
+      sweep and no request-time check evaluates usage otherwise, and
+      ``check-read-only`` only ever lifts the flag. So a tenant over its plan on
+      a healthy subscription never gets stamped, and this log stays quiet no
+      matter how far over they go. Until that is fixed, a quiet log is evidence
+      about the STAMPING, not about the population — and flipping
+      ``enforce_mcp_plan_limits`` would enforce against a signal almost nobody
+      can currently receive. See the ``meter_mcp_bulk_writes`` comment in
+      ``config.py`` for the verification.
 
     Logged at WARNING rather than INFO because a firing line means real money:
     a write that the plan says should not have happened.
@@ -678,7 +719,18 @@ def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     rollout turns on. The ``enforced`` field is kept on both so a query written
     against either name still resolves it.
     """
-    if not _is_org_read_only() or not plan_limit_gated(op):
+    if not plan_limit_gated(op):
+        return None
+    if not _is_org_read_only():
+        if _is_org_read_only_unknown():
+            # NOT a refusal and not a would-refuse — nobody knows. Logged at
+            # INFO, unlike the two below: a blind sample costs no money, it
+            # only costs certainty, and at WARNING a storage blip would drown
+            # the signal it exists to protect.
+            logger.info(
+                "mcp_plan_limit_verdict_unknown",
+                extra={"tenant_id": tenant_id, "mcp_operation": op},
+            )
         return None
     enforcing = enforces_mcp_plan_limits()
     logger.warning(
@@ -1227,6 +1279,8 @@ async def caura_recall(
     # rather than inline because this one reaches ``enforce_fleet_read_many``
     # below, so it must be an ``AgentIdentity`` and not a bare string.
     agent_id = effective_read_agent_id(_get_agent_id(), agent_id)
+    if filter_agent_id is not None:
+        filter_agent_id = canonical_service_agent_id(filter_agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # Clamped at BOTH ends. ``min`` alone let a negative top_k through to the
@@ -1257,13 +1311,12 @@ async def caura_recall(
         # ``_mcp_session`` / RLS GUCs — tenant isolation is carried explicitly:
         # the agent lookup + write quota pin to the HOME tenant, while the READ
         # (search + audit) widens via ``readable_tenant_ids`` exactly as before.
-        sc = get_storage_client()
         # D13 — same fix as REST /recall: bill the recall counter (flag-gated).
         await check_and_increment(tenant_id, recall_operation())
         config = await resolve_config(tenant_id)
         # Agent profile + fleet-scope signals are HOME-tenant only — never
         # widened by the readable set.
-        _ag = await sc.get_agent(agent_id, tenant_id)
+        _ag = await lookup_agent(tenant_id, agent_id)
         agent_profile = None
         if _ag:
             agent_profile = _ag.get("search_profile")
@@ -1391,6 +1444,20 @@ async def caura_recall(
                 query,
                 config,
                 top_k=capped_top_k,
+                # ax-0917-h-03 — no ``items`` inside the brief. This payload
+                # ALREADY carries the identical rows twice, under ``results``
+                # and its permanent ``items`` alias above; the brief used to add
+                # two more, so one ``include_brief=true`` call shipped the same
+                # result set FOUR times into an agent's context window. The
+                # brief keeps ``memories``, which is /recall's canonical key and
+                # the one both first-party SDKs read.
+                #
+                # Safe to change here in a way the REST default is not:
+                # ``docs/public-api-stability.md`` pins MCP tool names,
+                # parameter names and op-dispatch values — not the shape of a
+                # tool's JSON body — while it explicitly makes REST response
+                # shapes part of the contract.
+                items_alias=False,
             )
         return _with_latency(_dumps(payload), t0)
     except HTTPException as e:
@@ -1414,9 +1481,24 @@ async def caura_write(
     visibility: Annotated[str | None, Field(description="scope_team|scope_org|scope_agent.")] = None,
     memory_type: Annotated[str | None, Field(description="Type (single only).")] = None,
     weight: Annotated[float | None, Field(description="0-1 (single only).")] = None,
-    source_uri: Annotated[str | None, Field(description="Source URI (single only).")] = None,
-    run_id: Annotated[str | None, Field(description="Run id (single only).")] = None,
-    metadata: Annotated[dict | None, Field(description="Metadata (single only).")] = None,
+    # oss-0814-l-08 paid for the ``metadata`` clause below out of these two,
+    # which only restated their own parameter names ("Source URI", "Run id") —
+    # the fixtures README's stated preference over raising ``CEILING_TOKENS``.
+    # Net -3 tokens against the pre-change surface (5317 -> 5314).
+    source_uri: Annotated[str | None, Field(description="Single only.")] = None,
+    run_id: Annotated[str | None, Field(description="Single only.")] = None,
+    metadata: Annotated[
+        dict | None,
+        # oss-0814-l-08: say that these keys are the caller's. "LLM fills gaps;
+        # agent-provided values always win" has been true of metadata since C25
+        # and was stated only in source comments, so an agent reading the tool
+        # surface had nothing to go on — and the safe assumption from outside,
+        # that a field the platform also writes will be overwritten, is the
+        # wrong one. Six tokens, because the whole surface is on the context
+        # budget of every agent turn; ``MemoryCreate.metadata`` carries the full
+        # statement for anyone reading the REST schema.
+        Field(description="Metadata (single only). Your summary/tags survive enrichment."),
+    ] = None,
     status: Annotated[str | None, Field(description="Status (single only).")] = None,
     write_mode: Annotated[
         str | None,
@@ -1641,14 +1723,12 @@ async def caura_write(
             # same operation across two surfaces is the drift this whole area
             # keeps producing.
             #
-            # ``meters_mcp_bulk_write()`` is off by default. It is a billing
-            # switch, not a correctness one — see its docstring. While it is
-            # off, the caveat on ``_check_plan_limit`` still stands: the
-            # counters this would move are the ones over-plan mode is computed
-            # from, so a quiet observation log is not evidence that nothing
-            # would be refused — and now not evidence that nothing WILL be,
-            # since the gate above can refuse on a verdict this path never
-            # contributed to.
+            # ``meters_mcp_bulk_write()`` is ON since caura-ai/caura#1638. It
+            # is still a billing switch rather than a correctness one — see its
+            # docstring — and still reversible by env without a redeploy. What
+            # changed is that this path now contributes to the counters the gate
+            # above reads, so a quiet observation log is no longer explained by
+            # the batch path being invisible to it.
             #
             # Unreachable while the plan-limit gate refuses, which is the point:
             # a refused batch charges nothing.
@@ -1787,7 +1867,7 @@ async def caura_manage(
     # unauthenticated caller would inherit that identity's scope. ``None`` ⇒
     # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
     caller_agent_id = _get_agent_id()
-    agent_id = caller_agent_id or agent_id
+    agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     if op in {"update", "transition", "delete", "bulk_delete"} and (
         refuse := _refuse_default_agent_on_gateway(agent_id)
     ):
@@ -2171,7 +2251,7 @@ async def caura_tune(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -2399,7 +2479,7 @@ async def caura_doc(
     # Raw authenticated identity for the delete trust gate (None ⇒ no agent
     # context). Must not fall back to the ``mcp-agent`` default.
     caller_agent_id = _get_agent_id()
-    agent_id = caller_agent_id or agent_id
+    agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     # A29 — refuse the default identity on every op. Was previously
     # write-only (A14); reads inherit the same contract because the
     # silent-empty-result UX is its own class of paper cut, and ``delete``
@@ -3155,7 +3235,9 @@ async def caura_list(
     capped_limit = max(1, min(int(limit), 50))
 
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
+    if written_by is not None:
+        written_by = canonical_service_agent_id(written_by)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3369,7 +3451,7 @@ async def caura_stats(
         )
 
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # Trust ladder resolves by TARGET (spec: L1 = read within own fleet, L2 =
@@ -3472,7 +3554,7 @@ async def caura_insights(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3658,7 +3740,7 @@ async def caura_evolve(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3864,7 +3946,7 @@ async def caura_keystones(
     if err := _check_auth():
         return err
     tenant_id = _get_tenant()
-    agent_id_effective = _get_agent_id() or agent_id
+    agent_id_effective = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id_effective):
         return _with_latency(refuse, t0)
 
@@ -3976,7 +4058,9 @@ async def caura_keystones_set(
         )
 
     tenant_id = _get_tenant()
-    caller_agent_id = _get_agent_id() or "mcp-agent"
+    caller_agent_id = canonical_service_agent_id(_get_agent_id() or "mcp-agent")
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     if refuse := _refuse_default_agent_on_gateway(caller_agent_id):
         return _with_latency(refuse, t0)
 

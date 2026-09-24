@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from core_api.agent_ids import AgentIdentity
+from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_TRUST_LEVEL
 from core_api.errors import (
@@ -44,6 +44,7 @@ async def get_or_create_agent(
     install identity is stable for the row's lifetime.
     """
     sc = get_storage_client()
+    agent_id = canonical_service_agent_id(agent_id)
     agent = await sc.get_agent(agent_id, tenant_id)
     if agent is None:
         # Confirm a MISS against the primary before creating. A miss is the
@@ -85,7 +86,9 @@ async def get_or_create_agent(
         if backfill:
             agent.update(backfill)
             agent["updated_at"] = datetime.now(UTC)
-            await sc.create_or_update_agent({"tenant_id": tenant_id, "agent_id": agent_id, **backfill})
+            await sc.create_or_update_agent(
+                {"tenant_id": tenant_id, "agent_id": agent["agent_id"], **backfill}
+            )
         return agent
 
     # Legacy-main carryover: pre-Task6 plugins all defaulted to
@@ -158,9 +161,9 @@ async def get_or_create_agent(
     return agent
 
 
-async def lookup_agent(tenant_id: str, agent_id: str) -> dict | None:
+async def lookup_agent(tenant_id: str, agent_id: str, *, read: bool = True) -> dict | None:
     sc = get_storage_client()
-    return await sc.get_agent(agent_id, tenant_id)
+    return await sc.get_agent(canonical_service_agent_id(agent_id), tenant_id, read=read)
 
 
 _BROKER_LABEL_PREFIX = "broker:"
@@ -292,6 +295,7 @@ async def resolve_write_agent(
     on ``is_install_credential`` (a stray ``install_uuid`` without the credential
     kind is ignored).
     """
+    chosen_agent_id = canonical_service_agent_id(chosen_agent_id)
     if is_install_credential:
         chosen_agent_id = await broker_owned_agent_id(chosen_agent_id, install_uuid, tenant_id)
     agent = await get_or_create_agent(
@@ -485,7 +489,7 @@ async def resolve_read_fleet_gate(
     if scope == "all":
         return 2, fleet_id
     # scope == "fleet": decide by target fleet vs the caller's home fleet.
-    agent = await get_storage_client().get_agent(agent_id, tenant_id)
+    agent = await lookup_agent(tenant_id, agent_id)
     home_fleet = (agent or {}).get("fleet_id")
     # trust_level pre-read from the agent storage row (agents.trust_level is the
     # single source of truth; update_trust_level writes it directly). Used to:
@@ -601,7 +605,7 @@ def memory_access_allowed_for_agent(
     boundary this helper guards).
     """
     if visibility == "scope_agent":
-        return owner_agent_id == caller_agent_id
+        return bool(owner_agent_id and owner_agent_id == canonical_service_agent_id(caller_agent_id))
     if visibility == "scope_org":
         return True
     if not agent:
@@ -694,7 +698,7 @@ async def enforce_update(
                 AUTH_AGENT_TRUST_TOO_LOW, f"access policy: agent '{agent_id}' is restricted from updates."
             ),
         )
-    if trust < 3 and agent_id != memory_owner_agent_id:
+    if trust < 3 and canonical_service_agent_id(agent_id) != memory_owner_agent_id:
         raise HTTPException(
             status_code=403,
             detail=coded_detail(
@@ -742,12 +746,13 @@ async def update_trust_level(
     data: dict[str, Any] = {"tenant_id": tenant_id, "trust_level": trust_level}
     if fleet_id is not None:
         data["fleet_id"] = fleet_id
-    await sc.update_trust_level(agent_id, data)
+    stored_agent_id = agent["agent_id"]
+    await sc.update_trust_level(stored_agent_id, data)
     # Re-fetch to get the updated agent dict. ``read=False`` because this is a
     # read-after-write: from a replica it can return the PREVIOUS trust level,
     # and this function's own docstring calls that column the single source of
     # truth that every gate reads live. Returning the old value here would
     # report a promotion or demotion that had already been applied as not
     # having happened.
-    updated = await sc.get_agent(agent_id, tenant_id, read=False)
+    updated = await sc.get_agent(stored_agent_id, tenant_id, read=False)
     return updated or agent

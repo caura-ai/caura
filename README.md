@@ -547,16 +547,16 @@ bash /tmp/install-caura-skill.sh
 
 | Query param | Effect |
 |---|---|
-| (none) | Install the **memclaw** skill for both Claude Code and Codex (default) |
+| (none) | Install the default Caura tool-reference skill for both Claude Code and Codex |
 | `?agent=claude-code` | Only Claude Code → `~/.claude/skills/<skill>/SKILL.md` |
 | `?agent=codex` | Only Codex → `~/.agents/skills/<skill>/SKILL.md` |
-| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of memclaw (see below; combine with `?agent=`) |
+| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of the default skill (see below; combine with `?agent=`) |
 
 #### Verify
 
 ```bash
-ls -la ~/.claude/skills/memclaw/SKILL.md       # Claude Code
-ls -la ~/.agents/skills/memclaw/SKILL.md       # Codex
+ls -la ~/.claude/skills/memclaw/SKILL.md       # Claude Code; legacy-name-floor: installed default-skill path
+ls -la ~/.agents/skills/memclaw/SKILL.md       # Codex; legacy-name-floor: installed default-skill path
 ```
 
 Restart your agent after installing — skills are loaded at startup.
@@ -567,10 +567,10 @@ installs; skip this step.
 
 #### Optional: the Company Brain skill
 
-`memclaw` teaches the agent the tools. **`company-brain`** is a thin,
+The default skill teaches the agent the tools. **`company-brain`** is a thin,
 concept-first *posture* skill that layers on top: it frames the agent as one
 mind in a shared **Company Brain** and defers all tool mechanics back to the
-`memclaw` skill. Install it alongside `memclaw` when you want that framing:
+tool-reference skill. Install the two together when you want that framing:
 
 ```bash
 curl -s "https://caura.ai/api/v1/install-skill?skill=company-brain" | bash
@@ -579,7 +579,7 @@ curl -s "https://caura.ai/api/v1/install-skill?skill=company-brain" | bash
 It installs to `~/.claude/skills/company-brain/SKILL.md` (Claude Code) and/or
 `~/.agents/skills/company-brain/SKILL.md` (Codex), and obeys the same
 `?agent=` filter. The default install (no `?skill=`) is unchanged — it
-installs `memclaw` only.
+installs the default tool-reference skill only.
 
 ---
 
@@ -592,8 +592,8 @@ The recommended way to run Caura is via Docker Compose (see [Quick Start](#quick
 Each release publishes multi-arch (linux/amd64, linux/arm64) images to [GitHub Container Registry](https://github.com/orgs/caura-ai/packages):
 
 ```
-ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0
-ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0
+ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0 # legacy-name-floor: published GHCR repository name
+ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0 # legacy-name-floor: published GHCR repository name
 ```
 
 Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:latest` for the latest stable release. Pull them in your own compose file or Kubernetes manifests instead of building from source.
@@ -744,6 +744,11 @@ Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLim
 `REDIS_URL` is set — which is what makes the limit hold across replicas — and in process memory
 otherwise, so a multi-instance deployment without Redis limits each instance separately. A Redis
 outage fails open: requests pass through un-throttled rather than erroring.
+
+`X-RateLimit-*` is the per-second throttle and nothing else. A deployment with a usage meter wired
+reports the separate per-period plan quota as `X-Usage-Limit` / `X-Usage-Remaining` on
+`POST /memories`, `POST /memories/bulk` and `POST /search`; OSS standalone has no quota, so those
+headers are absent there.
 
 Add limiting at your reverse proxy (nginx, Caddy, Cloudflare) as well if you need per-IP DDoS
 floors or limits the application layer can't see.

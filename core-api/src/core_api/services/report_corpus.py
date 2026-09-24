@@ -21,7 +21,7 @@ PERIOD_DAYS: dict[str, int] = {"day": 1, "week": 7}
 NON_DURABLE_TYPES = ("episode",)
 # Reserved / automated write-path identities that are never a real agent: the
 # legacy unattributed ``main`` firehose, and ``__health_check__`` (a monitoring
-# probe that writes ~200 ``memclaw-smoke-*`` facts/day). These must appear in a
+# probe that writes roughly 200 smoke-test facts per day). These must appear in a
 # report neither as a ROW nor as a rollup PARENT (see :func:`resolve_parent`) —
 # otherwise a real agent's work gets mislabeled under a reserved id. Note
 # ``routes/reports.py`` also passes this tuple to storage as a server-side

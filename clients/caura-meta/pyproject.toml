@@ -53,3 +53,6 @@ Benchmark = "https://github.com/caura-ai/caura-longmemeval"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+caura = ["py.typed"]

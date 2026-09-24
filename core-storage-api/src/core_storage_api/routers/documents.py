@@ -23,6 +23,8 @@ async def upsert_document(request: Request) -> dict:
             doc_id=body["doc_id"],
             data=body["data"],
             fleet_id=body.get("fleet_id"),
+            # ax-0917-m-14 — who wrote this version.
+            agent_id=body.get("agent_id"),
             # C34 — explicit opt-out of the catastrophic-shrink guard.
             force=bool(body.get("force")),
         )
@@ -47,6 +49,8 @@ async def upsert_document_xmax(request: Request) -> dict:
             doc_id=body["doc_id"],
             data=body["data"],
             fleet_id=body.get("fleet_id"),
+            # ax-0917-m-14 — who wrote this version.
+            agent_id=body.get("agent_id"),
             # C34 — explicit opt-out of the catastrophic-shrink guard.
             force=bool(body.get("force")),
             embedding=body.get("embedding"),

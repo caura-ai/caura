@@ -16,6 +16,7 @@ from common import duplicate_memory
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
+from core_api.request_phase import phase
 from core_api.services.agent_identity import ReservedAgentIdError, enforce_reserved_write_id
 from core_api.tasks import track_task
 
@@ -100,7 +101,12 @@ from core_api.schemas import (
     MemoryUpdate,
     ScoreParts,
 )
-from core_api.search_trim import passes_relevance_filter, trim_reserving_fts_matches
+from core_api.search_trim import (
+    is_derived_fanout_row,
+    passes_relevance_filter,
+    resolve_include_derived,
+    trim_reserving_fts_matches,
+)
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.governance_gate import (
@@ -115,7 +121,9 @@ from core_api.services.hooks import get_hooks
 from core_api.services.organization_settings import validate_search_profile
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
+    caller_owned_keys,
     extract_system_metadata,
+    mark_caller_owned,
     sanitize_caller_metadata,
     set_system_value,
 )
@@ -2020,6 +2028,11 @@ async def create_memories_bulk(
         # before this point, so any ``summary`` / ``tags`` here are
         # authentically the caller's.
         caller_keys = frozenset(metadata.keys())
+        # oss-0814-l-08 — the durable half, same as ``MergeEnrichmentFields``.
+        # Bulk items bypass the pipeline, so leaving this to the single-write
+        # step would mean a batch of one carried no marker and the same payload
+        # lost its summary to a later enrichment purely for having been batched.
+        mark_caller_owned(metadata, caller_keys)
 
         if enrichment:
             if memory_type is None:
@@ -3175,6 +3188,34 @@ async def fan_out_atomic_facts(
     """
     if not atomic_facts:
         return {"created": 0, "deduped": 0, "unembedded": 0}
+    # pm-0918-c-04. Gated HERE rather than at either call site: this function is
+    # shared precisely so the synchronous and worker paths cannot drift, and a
+    # switch honoured by only one of them would be a per-write-mode difference
+    # that nobody asked for. ``getattr`` because older config objects and test
+    # doubles predate the knob, matching how ``crystallizer_min_cluster_size``
+    # is read in ``_run_crystallization``.
+    #
+    # Returns zeroed counts rather than raising so the worker path reaches its
+    # ``atomic_facts`` marker cleanup: the consumer preserves the marker on an
+    # exception (for a later retry) and clears it otherwise. Raising would not
+    # loop forever — the consumer catches and returns without nacking — but it
+    # would leave the marker set on every disabled-tenant write, so each
+    # redelivery re-enters a fan-out that is switched off.
+    #
+    # The trade this makes: clearing the marker CONSUMES those facts. Switching
+    # the fan-out back on later will not replay them without re-enrichment. That
+    # is right for "disable", and worth knowing if anyone reads it as "pause".
+    if not getattr(tenant_config, "atomic_fact_fanout_enabled", True):
+        # Logged because the zeroed counts are AMBIGUOUS downstream: the
+        # consumer reports "created=0 deduped=0 unembedded=0" at INFO, which is
+        # byte-identical to a fan-out that ran and deduplicated everything. An
+        # operator asking the obvious question — "I switched it off, why am I
+        # still seeing children?" — gets no signal either way without this.
+        logger.info(
+            "atomic-fact fan-out skipped: disabled for this tenant",
+            extra={"tenant_id": tenant_id, "memory_id": str(memory_id), "facts": len(atomic_facts)},
+        )
+        return {"created": 0, "deduped": 0, "unembedded": 0}
     meta = parent_metadata
     fanout_created = 0
     fanout_unembedded = 0
@@ -3555,7 +3596,16 @@ async def _enrich_memory_background(
         # the LLM's summary straight over the caller's, seconds after the write
         # that set it — the same clobber C25 closed for the synchronous path,
         # left open on the one that runs on every inline deployment.
-        caller_keys = frozenset(caller_owned_metadata_keys or ())
+        #
+        # oss-0814-l-08 — UNION with what the ROW records, because the forwarded
+        # set answers only for the write it was taken from. A caller who PATCHes
+        # ``metadata["summary"]`` after that write is not in it, and this task is
+        # typically still in flight when they do (fast mode defers enrichment and
+        # is the default), so the annotation was overwritten seconds after they
+        # made it. The row's marker is the surface-independent answer; the
+        # forwarded set stays because a row is not re-read between the snapshot
+        # and here, and dropping it would trust a marker this very write wrote.
+        caller_keys = frozenset(caller_owned_metadata_keys or ()) | caller_owned_keys(meta)
         if enrichment.summary:
             set_system_value(meta, "summary", enrichment.summary, caller_keys=caller_keys)
         if enrichment.tags:
@@ -4109,6 +4159,16 @@ async def update_memory(
         # corrupting the audit-log ``old`` field.
         raw_meta = mem.get("metadata_")
         old_meta = raw_meta if raw_meta is not None else mem.get("metadata")
+        # oss-0814-l-08 — PATCH is the third surface on which a caller supplies
+        # metadata, and the only one C25's write-time snapshot cannot see: that
+        # set was taken from the CREATE payload and is already on its way to (or
+        # inside) an enricher by the time this runs. So record the claim on the
+        # ROW, which every later writer can read. ``existing`` carries the prior
+        # marker forward because the storage layer replaces the ``_system``
+        # sub-object's keys wholesale — a caller who claimed ``summary`` last
+        # week and ``tags`` today must end up owning both.
+        claimed = frozenset(data.metadata or ())
+        prior_owned = caller_owned_keys(old_meta)
         if effective_mode == "replace":
             changes["metadata"] = {
                 "old": old_meta,
@@ -4116,6 +4176,12 @@ async def update_memory(
                 "mode": "replace",
             }
             patch["metadata_"] = data.metadata
+            # Replace mode discards the column, marker included, so prior claims
+            # are NOT carried over: the caller asked for this dict and nothing
+            # else. That is also the documented way to hand a key back to the
+            # platform — omit it from a replace and the next enrichment fills it.
+            if patch["metadata_"] is not None:
+                mark_caller_owned(patch["metadata_"], claimed)
         elif data.metadata is None:
             # Surface the breaking change explicitly: pre-PR
             # ``{"metadata": null}`` cleared the column. The
@@ -4139,6 +4205,13 @@ async def update_memory(
                 "mode": "merge",
             }
             patch["metadata_patch"] = data.metadata
+            # Marker goes in the SAME patch, which is also what tells the
+            # storage layer this is a CALLER write and must not be held back by
+            # the row's existing claims (see ``update_memory`` there). Audited
+            # ``changes`` is captured above, on the caller's own dict, so the
+            # bookkeeping key does not show up in the audit log as an edit the
+            # caller made.
+            mark_caller_owned(patch["metadata_patch"], claimed, existing=prior_owned)
         # else (empty dict in merge mode) → storage no-op, no audit
         # entry, no patch field.
 
@@ -4665,7 +4738,14 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
         # propagates through the ``except`` below (future + joiners) and
         # the ``finally`` still pops the in-flight entry.
         async with per_tenant_slot("embed", tenant_id):
-            embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
+            # h-02's shape — both semantic endpoints down while CRUD stayed
+            # healthy — points at exactly this hop, because it is the one
+            # /search and /recall share and CRUD never touches. Naming it
+            # separately from ``slot_acquire.embed`` is the whole point: a
+            # stalled provider and a queue behind other tenants' embeds are
+            # different incidents with different owners.
+            with phase("embed.query"):
+                embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
         if embedding is None:
             # Two different things arrive as ``None`` and they are not the
             # same incident. A blank query cannot be embedded by anyone, and
@@ -5035,6 +5115,7 @@ async def search_memories(
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
     allow_recall_bump: bool = True,
+    include_derived: bool | None = None,
 ) -> list[MemoryOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
@@ -5066,6 +5147,7 @@ async def search_memories(
             source=source,
             min_similarity=min_similarity,
             recall_ctx=recall_ctx,
+            include_derived=include_derived,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -5092,6 +5174,7 @@ async def search_memories(
         search_profile=search_profile,
         min_similarity=min_similarity,
         allow_recall_bump=allow_recall_bump,
+        include_derived=include_derived,
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
@@ -5123,6 +5206,7 @@ async def _search_memories_pipeline(
     source: str = "search",
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
+    include_derived: bool | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -5159,6 +5243,12 @@ async def _search_memories_pipeline(
             "min_similarity_override": min_similarity,
             "readable_tenant_ids": readable_tenant_ids,
             "source": source,
+            # pm-0918-c-03 — resolved ONCE here, not read off ``tenant_config``
+            # inside PostFilterResults, for the same reason
+            # ``strict_fleet_scoping`` above is: a step that forgot to consult
+            # the request layer would silently fall back to the tenant default,
+            # and the request flag is the layer a caller can actually see.
+            "include_derived": resolve_include_derived(include_derived, tenant_config),
         },
         tenant_config=tenant_config,
     )
@@ -5240,6 +5330,7 @@ async def _search_memories_legacy(
     search_profile: dict | None = None,
     min_similarity: float | None = None,
     allow_recall_bump: bool = True,
+    include_derived: bool | None = None,
 ) -> list[MemoryOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
@@ -5365,6 +5456,16 @@ async def _search_memories_legacy(
             allow_fts_global_floor_bypass=allow_fts_bypass,
         )
     ]
+    # pm-0918-c-03 — BEFORE the trim, deliberately, exactly as the pipeline step
+    # does it. Storage returned ``_top_k * SEARCH_OVERFETCH_FACTOR`` candidates,
+    # so dropping derived rows here still fills ``_top_k``; dropping them after
+    # the trim (or client-side) is what makes a caller asking for 50 get 36 and
+    # have to over-fetch and guess. Wired here as well as in the pipeline so the
+    # ``_USE_PIPELINE_SEARCH = False`` hotfix lever does not silently revert the
+    # filter — this file already carries two features that shipped pipeline-only
+    # for exactly that reason.
+    if not resolve_include_derived(include_derived, tenant_config):
+        rows = [r for r in rows if not is_derived_fanout_row(r.get("metadata_"))]
     rows = trim_reserving_fts_matches(
         rows,
         _top_k,

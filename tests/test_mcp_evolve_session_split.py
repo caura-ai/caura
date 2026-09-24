@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core_api import mcp_server
+from core_api.agent_ids import DOC_INDEXER_AGENT_ID
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -46,7 +47,7 @@ _APPLY_OUTCOME_RESULT = {
 
 
 async def _run_evolve_capturing_apply_kwargs(
-    monkeypatch, *, related_ids, filter_result
+    monkeypatch, *, related_ids, filter_result, agent_id="a1"
 ):
     """Drive caura_evolve with mocked collaborators, returning the kwargs
     the handler passed to ``_apply_outcome_to_db``."""
@@ -86,7 +87,7 @@ async def _run_evolve_capturing_apply_kwargs(
         outcome_type="failure",
         related_ids=related_ids,
         scope="agent",
-        agent_id="a1",
+        agent_id=agent_id,
     )
     return captured
 
@@ -114,6 +115,19 @@ async def test_evolve_passes_all_required_apply_outcome_kwargs(mcp_env, monkeypa
     # (incl. weight_adjustment_skipped_reason) is absent from the call.
     real_sig.bind(**captured)
     assert "weight_adjustment_skipped_reason" in captured
+
+
+async def test_evolve_normalizes_retired_identity_before_persistence(
+    mcp_env, monkeypatch
+):
+    captured = await _run_evolve_capturing_apply_kwargs(
+        monkeypatch,
+        related_ids=[],
+        filter_result=([], 0),
+        agent_id="memclaw-doc-indexer",  # legacy-name-ok: supported client input alias
+    )
+
+    assert captured["agent_id"] == DOC_INDEXER_AGENT_ID
 
 
 async def test_evolve_weight_skip_reason_no_related_ids(mcp_env, monkeypatch):

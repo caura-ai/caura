@@ -51,7 +51,7 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 
 ### Plugin environment variables
 
-Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these variables are the public contract; the plugin's TypeScript module structure is internal.
+Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these variables are the public contract; the plugin's TypeScript module structure is internal. <!-- legacy-name-floor: documents the frozen published plugin id -->
 
 | Var | Purpose |
 |---|---|

@@ -4,7 +4,8 @@
 CAURA-686 toolkit. The endpoint is on the writer's private VPC IP, so
 this script assumes a local proxy is forwarding it — typically::
 
-    gcloud run services proxy staging-memclaw-core-storage-writer \\
+    SERVICE=staging-memclaw-core-storage-writer  # legacy-name-floor: deployed Cloud Run service name used by this pasteable command
+    gcloud run services proxy "$SERVICE" \\
         --port 8080 --region us-central1
 
 Then::

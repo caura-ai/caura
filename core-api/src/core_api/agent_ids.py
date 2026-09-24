@@ -8,6 +8,12 @@ otherwise couple the route module to the whole MCP tool surface.
 
 from typing import NewType
 
+from core_api import service_agent_ids as _service_agent_ids
+
+DOC_INDEXER_AGENT_ID = _service_agent_ids.DOC_INDEXER_AGENT_ID
+INSIGHTER_AGENT_ID = _service_agent_ids.INSIGHTER_AGENT_ID
+canonical_service_agent_id = _service_agent_ids.canonical_service_agent_id
+
 # A caller identity that has been through authentication or resolution — not
 # merely a string that happens to hold an agent id. The distinction is
 # load-bearing rather than cosmetic: ``memory_access_allowed_for_agent`` decides
@@ -34,34 +40,11 @@ AgentIdentity = NewType("AgentIdentity", str)
 # anonymous writes are never silently attributed to one shared identity.
 DEFAULT_AGENT_ID = "mcp-agent"
 
-# Dedicated system identity for the automated nightly insights run
-# (``lifecycle_audit._CoreApiLifecycleAdapter.insights`` → ``generate_insights``).
-# Distinct from ``DEFAULT_AGENT_ID`` above: that is the generic "caller specified
-# nothing" fallback, whereas the scheduled insights pass has no human/agent
-# caller and must write under a stable, registerable identity rather than
-# collapsing onto the anonymous default (which is unregistered, so its writes
-# never surface in Prism or the per-agent report). Registered per-tenant with
-# ``belonging_type='service'`` the first time the job runs for that tenant.
-INSIGHTER_AGENT_ID = "memclaw-insighter"  # legacy-name-floor: floor
-
 # Trust tier the insighter self-registers at: service level, granting cross-fleet
 # read (>=2, needed for scope='all') and write (>=3, it persists scope_org
 # insights). The automated path calls the service directly and bypasses the
 # route trust gate, so this is future-proofing for any gated re-route.
 INSIGHTER_TRUST_LEVEL = 3
-
-# Fallback identity for the memory minted from a document write, used ONLY when
-# the caller carries no agent identity at all (the REST ``POST /documents`` path
-# without a gateway-stamped ``X-Agent-ID``; the MCP path always has one). Same
-# reasoning as ``INSIGHTER_AGENT_ID``: a stable registerable service identity
-# rather than the anonymous default, and self-registered per tenant on first use
-# via ``get_or_create_agent``.
-#
-# Prefer the real doc writer's agent_id whenever there is one. Attribution is not
-# cosmetic here: ``caura_insights`` defaults to ``scope="agent"``, which filters
-# ``Memory.agent_id == agent_id``, so rows attributed to this service identity are
-# invisible to every real agent's default insights run.
-DOC_INDEXER_AGENT_ID = "memclaw-doc-indexer"  # legacy-name-floor: floor
 
 # Bare ``"main"`` is the OpenClaw plugin's *unset* default agent_id: when an
 # operator never sets ``CAURA_AGENT_ID`` every install collapses onto this one
@@ -110,9 +93,9 @@ def effective_write_agent_id(verified_id: str | None, body_id: str | None) -> Ag
     accepts any non-placeholder body id and remains spoofable until reject.
     """
     if verified_id and verified_id not in ALWAYS_RESERVED_AGENT_IDS:
-        return AgentIdentity(verified_id)
+        return AgentIdentity(canonical_service_agent_id(verified_id))
     if body_id and body_id not in _PLACEHOLDER_BODY_AGENT_IDS:
-        return AgentIdentity(body_id)
+        return AgentIdentity(canonical_service_agent_id(body_id))
     # Reserved/placeholder fallthrough: still the resolved identity, and the
     # write-path guard (policy=reject) is what refuses it downstream.
     reserved = verified_id or body_id
@@ -131,10 +114,8 @@ def effective_read_agent_id(verified_id: str | None, asserted_id: str) -> AgentI
     fallback. Total, because every MCP read tool defaults ``agent_id`` to
     ``DEFAULT_AGENT_ID`` rather than accepting None.
 
-    Exists so the read path has ONE place that turns two strings into an
-    ``AgentIdentity``. It was written as ``_get_agent_id() or agent_id`` inline
-    at eight MCP call sites; the one that reaches ``enforce_fleet_read_many``
-    now routes through here instead. The remaining seven feed no authorization
-    sink and are deliberately left alone rather than swept.
+    This is also the compatibility boundary for retired client inputs: callers
+    may keep supplying an old spelling while every downstream read operates on
+    the canonical identity. Persisted rows no longer need alias expansion.
     """
-    return AgentIdentity(verified_id or asserted_id)
+    return AgentIdentity(canonical_service_agent_id(verified_id or asserted_id))

@@ -16,7 +16,7 @@ import {
   unlinkSync,
   mkdirSync,
 } from "fs";
-import { join } from "path";
+import { dirname, join } from "path";
 import { createHash } from "crypto";
 import { execSync } from "child_process";
 import { hostname, platform, release, networkInterfaces } from "os";
@@ -53,7 +53,7 @@ import {
   isCauraFullyConfigured,
 } from "./config.js";
 import { getReachability, markReachable, markUnreachable } from "./health.js";
-import { deployPlugin } from "./deploy.js";
+import { deployPlugin, runPluginBuild } from "./deploy.js";
 import {
   educateAgents,
   writeEducationFiles,
@@ -82,6 +82,22 @@ function interviewerEnabled(): boolean {
 let heartbeatCount = 0;
 let bakCleanupDone = false;
 let postRestartCheckDone = false;
+
+type DeployFile = { name: string; isRoot: boolean };
+
+function verifyFetchedManifestContent(
+  fetched: ReadonlyMap<string, string>,
+  files: readonly DeployFile[],
+  expectedHash: string,
+): boolean {
+  const hash = createHash("sha256");
+  for (const { name, isRoot } of files) {
+    const content = fetched.get((isRoot ? "" : "src/") + name);
+    if (content === undefined) return false;
+    hash.update(content, "utf8");
+  }
+  return hash.digest("hex") === expectedHash.toLowerCase();
+}
 
 // --- Deploy cooldown / post-restart verification (CAURA-444) ---
 //
@@ -187,6 +203,7 @@ export const __DEPLOY_INTERNALS__ = {
     if (process.env.NODE_ENV !== "test") return;
     _interviewerEnabledOverride = v;
   },
+  verifyFetchedManifestContent,
   // Pass a function to install a spy; pass ``null`` to restore the
   // production scheduler (use in ``afterEach`` so subsequent tests in
   // the same process don't inherit the spy state — without this, a
@@ -741,6 +758,12 @@ async function processCommand(cmd: {
           // ``env.ts``, ``agent-auth.ts`` and this file. Same TS2307
           // failure class as the two entries above if it is missing.
           "user-agent.ts",
+          // These are also statically imported shipped modules. Keep the
+          // offline/old-backend fallback complete; the server-side lockstep
+          // test compares this array with ``_plugin_files``.
+          "context-engine.internal.ts",
+          "openclaw-sdk-bridge.ts",
+          "task-trail.ts",
         ];
         const FALLBACK_ROOT_FILES = [
           "openclaw.plugin.json", "tools.json", "skills/memclaw/SKILL.md", // legacy-name-floor: shipped skill path
@@ -750,6 +773,7 @@ async function processCommand(cmd: {
         let srcFiles: string[] = FALLBACK_SRC_FILES;
         let rootFiles: string[] = FALLBACK_ROOT_FILES;
         let manifestVersion: string | undefined;
+        let manifestContentHash: string | undefined;
         try {
           const mUrl = new URL(
             `${CAURA_API_PREFIX}/plugin-manifest`,
@@ -775,6 +799,7 @@ async function processCommand(cmd: {
               version?: string;
               src_files?: string[];
               root_files?: string[];
+              content_hash?: string;
             };
             if (Array.isArray(m.src_files) && m.src_files.length > 0) {
               srcFiles = m.src_files;
@@ -784,6 +809,14 @@ async function processCommand(cmd: {
             }
             if (typeof m.version === "string" && m.version) {
               manifestVersion = m.version;
+            }
+            if (
+              typeof m.content_hash === "string" &&
+              /^[a-f0-9]{64}$/i.test(m.content_hash)
+            ) {
+              manifestContentHash = m.content_hash.toLowerCase();
+            } else {
+              console.warn("[caura] plugin manifest omitted a valid SHA-256 content_hash");
             }
             // SECURITY: ``manifestVersion`` is later interpolated into a
             // TypeScript source file (``version.ts``) and a JSON-like
@@ -813,6 +846,18 @@ async function processCommand(cmd: {
           console.warn(
             `[caura] /plugin-manifest fetch failed (back-compat fallback): ${(e as Error).message}`,
           );
+        }
+
+        // Signed-command mode requires the backend's manifest snapshot hash so
+        // files fetched afterward cannot silently drift from that snapshot.
+        // Unsigned legacy installs keep their older-backend fallback.
+        if (CAURA_REQUIRE_SIGNED_COMMANDS && !manifestContentHash) {
+          status = "failed";
+          result = {
+            error: "Signed deploy requires a valid plugin manifest content_hash",
+          };
+          srcFiles = [];
+          rootFiles = [];
         }
 
         // Effective version for cooldown bookkeeping. Prefer the live
@@ -901,7 +946,7 @@ async function processCommand(cmd: {
           const fetched = new Map<string, string>();
           let fetchOk = true;
           const skipped404: string[] = [];
-          const allFiles: Array<{ name: string; isRoot: boolean }> = [
+          const allFiles: DeployFile[] = [
             ...srcFiles.map((f) => ({ name: f, isRoot: false })),
             ...rootFiles.map((f) => ({ name: f, isRoot: true })),
           ];
@@ -952,12 +997,22 @@ async function processCommand(cmd: {
                 `keeping local copies: ${skipped404.join(", ")}`,
             );
           }
+          if (
+            fetchOk &&
+            manifestContentHash &&
+            !verifyFetchedManifestContent(fetched, allFiles, manifestContentHash)
+          ) {
+            fetchOk = false;
+            console.warn(
+              "[caura] fetched plugin content did not match manifest content_hash",
+            );
+          }
           if (fetchOk) {
             try {
               // Write all fetched files to disk (creating subdirs as needed)
               for (const [relPath, text] of fetched) {
                 const target = join(pluginDir, relPath);
-                const dir = target.substring(0, target.lastIndexOf("/"));
+                const dir = dirname(target);
                 if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
                 writeFileSync(target, text, "utf-8");
               }
@@ -1005,11 +1060,7 @@ async function processCommand(cmd: {
               // so the prebuild step is redundant AND fatal here. Going
               // straight through tsc keeps the build hermetic.
               console.log(`[caura] deploy: invoking npx tsc (timeout=${BUILD_TIMEOUT_MS}ms)`);
-              const buildOutput = execSync("npx tsc 2>&1", {
-                cwd: pluginDir,
-                encoding: "utf-8",
-                timeout: BUILD_TIMEOUT_MS,
-              });
+              const buildOutput = runPluginBuild(pluginDir);
               console.log(`[caura] deploy: build succeeded, restart will be scheduled after result POST`);
               result = {
                 ok: true,

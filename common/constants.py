@@ -223,6 +223,40 @@ SINGLE_VALUE_PREDICATES: frozenset[str] = frozenset(
         "maintainer_of",
         "supervised_by",
         "supervisor",
+        # -- Provenance & containment (A77) --
+        # Four relation types the extractor emits constantly and this set never
+        # named. On the non-benchmark slice of a 768-tenant corpus (64,212
+        # extracted relations) they account for ~1,939 rows — 3.0% of everything
+        # extracted, and roughly DOUBLE this set's coverage of live relations
+        # from 4.4% to ~7.4%. Counts at the time of measurement: belongs_to 750,
+        # created_by 685, written_by 296, part_of 208.
+        #
+        # They qualify on the same test the rest of this section passes, not on
+        # volume: each makes the OBJECT an attribute OF the subject, and a
+        # subject can hold only one of them at a time. One author, one owner,
+        # one parent. That is what makes a second value a replacement rather
+        # than an addition, and it is why a disagreement here is a real signal
+        # instead of noise.
+        #
+        # Direction is load-bearing, exactly as for ``owned_by`` / ``managed_by``
+        # above. ``created_by`` and ``written_by`` join; their inverses
+        # (``creates``, ``writes``) do not, because one author writes many
+        # documents. ``part_of`` ends in ``_of`` but is NOT an inverse in the
+        # A36 sense — "X is part of Y" already makes the parent an attribute of
+        # X, unlike ``manager_of``, which points away from its subject.
+        #
+        # THE LINE, and why it is drawn here. The far larger relation types by
+        # volume in the same corpus are genuinely multi-valued and must NOT be
+        # added without repeating this measurement: uses 7,962, includes 6,113,
+        # offers 1,891, has 1,350, depends_on 1,001, provides 837, features 663,
+        # requires 612. A service uses many libraries; a product includes many
+        # features. Admitting one of those would manufacture a contradiction
+        # between two facts that were never in competition, retire the loser on
+        # the near-duplicate path, and penalise it on the ranking path.
+        "belongs_to",
+        "part_of",
+        "created_by",
+        "written_by",
         # -- Metrics, scores & measurements --
         "score",
         "scored",

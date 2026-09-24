@@ -30,7 +30,10 @@ configure_logging(
     log_file=settings.log_file or None,
 )
 
+from sqlalchemy import text
+
 from core_storage_api.database.init import get_engine, init_database
+from core_storage_api.database.migration_postconditions import MIGRATION_POSTCONDITIONS
 from core_storage_api.middleware import (
     RejectWritesOnReaderMiddleware,
     RequireStorageSharedSecretMiddleware,
@@ -63,6 +66,85 @@ from core_storage_api.routers import (
 
 logger = logging.getLogger(__name__)
 
+_INVALID_INDEXES = text(
+    """
+    SELECT c.relname
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE NOT i.indisvalid
+      AND n.nspname NOT IN ('pg_catalog', 'pg_toast')
+    ORDER BY c.relname
+    """
+)
+
+
+async def report_schema_drift() -> None:
+    """Report known migration soft-failures without blocking startup."""
+    if settings.core_storage_role == "reader":
+        return
+
+    try:
+        async with get_engine().connect() as connection:
+            invalid_indexes = (await connection.execute(_INVALID_INDEXES)).scalars().all()
+            if invalid_indexes:
+                logger.error(
+                    "Invalid PostgreSQL indexes detected: %s. Repair with DROP INDEX CONCURRENTLY, "
+                    "then CREATE INDEX CONCURRENTLY, from a session that will not be killed mid-build.",
+                    ", ".join(invalid_indexes),
+                )
+
+            for postcondition in MIGRATION_POSTCONDITIONS:
+                try:
+                    async with connection.begin_nested():
+                        effect_is_present = await connection.scalar(text(postcondition.predicate))
+                except Exception:
+                    logger.exception(
+                        "Schema drift post-condition probe failed [%s/%s]; startup will continue",
+                        postcondition.revision,
+                        postcondition.name,
+                    )
+                    continue
+                if effect_is_present is not True:
+                    # A soft-failing migration promises "apply this if allowed
+                    # to", so an unmet post-condition on a deployment that was
+                    # never allowed is the documented outcome, not a defect.
+                    # Report it once at INFO rather than warning on every boot
+                    # forever: an unactionable warning that cannot be cleared is
+                    # how the genuine case gets lost. A probe that itself fails
+                    # says nothing either way, so the condition stays a warning.
+                    expected_here = False
+                    if postcondition.expected_when is not None:
+                        try:
+                            async with connection.begin_nested():
+                                expected_here = (
+                                    await connection.scalar(text(postcondition.expected_when))
+                                ) is True
+                        except Exception:
+                            logger.exception(
+                                "Post-condition expectation probe failed [%s/%s]; "
+                                "treating the condition as unexpected",
+                                postcondition.revision,
+                                postcondition.name,
+                            )
+                    if expected_here:
+                        logger.info(
+                            "Migration post-condition not met but expected here [%s/%s]; "
+                            "this deployment could not have applied it",
+                            postcondition.revision,
+                            postcondition.name,
+                        )
+                        continue
+                    logger.log(
+                        logging.ERROR if postcondition.severity == "error" else logging.WARNING,
+                        "Migration post-condition failed [%s/%s]: %s",
+                        postcondition.revision,
+                        postcondition.name,
+                        postcondition.message,
+                    )
+    except Exception:
+        logger.exception("Schema drift report failed; startup will continue")
+
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -77,6 +159,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "and storage data requests will reject authentication"
         )
     await init_database()
+    await report_schema_drift()
     yield
     logger.info("Shutting down core-storage-api")
     # Don't spin up a writer engine just to tear it down — reader-role

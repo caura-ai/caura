@@ -1,7 +1,7 @@
 import uuid
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Float, ForeignKey, Index, Text, func, text
+from sqlalchemy import Float, ForeignKey, Index, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -70,6 +70,35 @@ class Relation(Base):
     )
 
     __table_args__ = (
+        # The natural key ``relation_add`` upserts on. Created in migration 001
+        # (``op.create_unique_constraint``) and, like
+        # ``uq_entities_tenant_type_name_fleet`` above, declared nowhere else —
+        # so a schema built from this metadata rather than the migration chain
+        # (``tests/conftest.py`` uses ``Base.metadata.create_all``) had no such
+        # constraint, and the upsert's ``ON CONFLICT ON CONSTRAINT
+        # uq_relations_natural_key`` — which names it — could not resolve there
+        # at all. Not a silent divergence like the entities one: Postgres
+        # rejects the statement outright, which is why every relation-upsert
+        # test had to live in ``core-storage-api/tests/`` against the
+        # migration-owned schema.
+        #
+        # A ``UniqueConstraint`` and not an ``Index(unique=True)``: ``ON
+        # CONFLICT ON CONSTRAINT`` resolves names in ``pg_constraint``, and a
+        # bare unique index is not there. ``Entity`` can use an index because
+        # its key is over expressions (``lower()``/``COALESCE()``), which a
+        # constraint cannot express; these four columns are plain.
+        #
+        # ``fleet_id`` is deliberately absent — the key is tenant-wide, which is
+        # what lets a fleet-scoped ``infer_relations`` run reinforce an edge a
+        # full run created, and what makes ``relation_add``'s fleet_id
+        # first-writer-wins.
+        UniqueConstraint(
+            "tenant_id",
+            "from_entity_id",
+            "relation_type",
+            "to_entity_id",
+            name="uq_relations_natural_key",
+        ),
         Index("ix_relations_from", "from_entity_id"),
         Index("ix_relations_to", "to_entity_id"),
         # For DELETEs on ``memories``, not reads here — the referencing side of

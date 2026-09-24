@@ -140,6 +140,41 @@ MEMORY_TYPES_FILTER_DESCRIPTION = (
     "Filter results to a single memory type. Valid values: " + ", ".join(MEMORY_TYPES) + "."
 )
 
+# Shown on every WRITE field that accepts it. States the guarantee exactly,
+# because the guarantee is weaker than the field name suggests: the lifecycle
+# sweep archives the row, so it stays readable until the next tick. A caller
+# needing it to disappear AT the timestamp is asking for a read-time filter,
+# which this is not (caura#1637).
+EXPIRES_AT_DESCRIPTION = (
+    "Optional retention hint. Once this time passes, the row is archived on the "
+    "next lifecycle tick and stops being returned by reads. Not a hard cutoff: "
+    "the row remains readable until that tick runs. Distinct from ts_valid_end, "
+    "which closes a temporal-validity interval rather than expressing retention."
+)
+
+# oss-0814-l-08. The C25 caller/platform metadata boundary, stated on the surface
+# a caller actually reads.
+#
+# The rule itself is old — "LLM fills gaps; agent-provided values always win" has
+# sat in ``MergeEnrichmentFields`` since the first public release, and C25 made
+# the metadata half of it true. But it was only ever written in source comments:
+# this field carried no description at all, and ``caura_write``'s said "Metadata
+# (single only)." An agent deciding whether it is safe to send its own ``summary``
+# had nothing to read, and the safe assumption from the outside — that a field
+# the platform also writes will be overwritten — is the wrong one.
+#
+# Named keys rather than "some keys": ``summary`` and ``tags`` are the entire
+# ``CALLER_OWNABLE_KEYS`` set, and a caller cannot act on a rule whose scope is
+# left vague.
+CALLER_METADATA_DESCRIPTION = (
+    "Free-form metadata stored with the memory. Keys you send are yours: "
+    "enrichment never overwrites a `summary` or `tags` you supply here, on this "
+    "write or on any later one — the platform's own versions go to "
+    "`system_metadata` instead. Platform-reserved keys (timings, governance "
+    "verdicts, provenance) are stripped from this dict; send them and they are "
+    "dropped, not stored."
+)
+
 # ── Memory status lifecycle ──
 MEMORY_STATUSES_PATTERN = (
     r"^(active|pending|confirmed|cancelled"
@@ -796,6 +831,20 @@ FTS_BOOST_SPECIFICITY_RATIO = 0.4  # strict >; at N=2 this means >=1 specific to
 SIMILARITY_BLEND = 0.85  # base_score = SIMILARITY_BLEND * similarity + (1 - SIMILARITY_BLEND) * weight (raised from 0.75 — LoCoMo sweep showed +13pp recall)
 SEARCH_OVERFETCH_FACTOR = 2  # fetch top_k * N candidates from storage, trim to top_k after min_similarity filter — gives post-filter headroom
 FTS_RESERVED_RESULTS = 1  # result slots held for full-text matches; includes #687's transient rows whose embedding is still pending
+
+# pm-0918-c-03 — whether ``/search`` returns atomic-fact fan-out children
+# alongside the rows a caller wrote. TRUE is today's behaviour and is the GLOBAL
+# floor of a three-layer resolution: request flag beats ``search.include_derived``
+# beats this. See ``core_api.search_trim.resolve_include_derived``.
+#
+# Deliberately a named constant rather than a literal in the resolver, so the
+# test that pins it (``test_pm_c03_include_derived.py``) asserts against
+# something a refactor has to delete rather than something it can quietly edit.
+# The row that produced it recommended revisiting this default at the next
+# minor, on a second store's evidence; changing it here is a BREAKING change to
+# a frozen-contract endpoint that no CI gate catches — see
+# docs/atomic-fact-fanout/pm-c03-include-derived-blast-radius.md §4.
+INCLUDE_DERIVED_DEFAULT = True
 # ``SQL_SCORING_PARAM_KEYS`` — the set both search-path builders project through
 # before sending ``search_params`` — is re-exported from ``common.constants``
 # above, because storage reads the same set and the drift that matters is

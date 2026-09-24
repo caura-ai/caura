@@ -22,10 +22,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 from ..client import Caura
 from ..exceptions import AuthError
+from . import installer
 from .discovery import (
     DEFAULT_CURSOR_PROJECTS_ROOT,
     DEFAULT_PROJECTS_ROOT,
@@ -36,7 +36,6 @@ from .discovery import (
     project_allowed,
     transcript_from_path,
 )
-from . import installer
 from .machine import machine_id_short
 from .parser import count_lines
 from .runner import RunConfig, node_id_for, read_watermark, run_all
@@ -177,7 +176,7 @@ def _resolve_allowlist(args: argparse.Namespace) -> list[str]:
     return [g.strip() for g in env.split(",") if g.strip()]
 
 
-def _require_config(args: argparse.Namespace) -> Optional[str]:
+def _require_config(args: argparse.Namespace) -> str | None:
     if not args.api_key:
         return "CAURA_API_KEY (or --api-key) is required"
     if not args.tenant_id:
@@ -199,7 +198,7 @@ def _deny_guidance(args: argparse.Namespace) -> str:
     return "\n".join(lines)
 
 
-def _acquire_lock() -> Optional[object]:
+def _acquire_lock() -> object | None:
     """Best-effort cross-invocation guard (cron + hook overlap).
 
     The REAL safety is the server's deterministic attempt-id dedup; this
@@ -219,7 +218,7 @@ def _acquire_lock() -> Optional[object]:
     lock_path = Path(tempfile.gettempdir()) / f"memclaw-interviewer-{getpass.getuser()}.lock"  # legacy-name-deferred: current writer needs a canonical lock migration before removal (docs/plans/rebrand-alias-migration-notes.md)
     handle = None
     try:
-        handle = open(lock_path, "w")
+        handle = open(lock_path, "w")  # noqa: SIM115 - caller owns the lock lifetime.
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return handle
     except OSError as exc:
@@ -516,7 +515,7 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     # argparse's choices= only validates values passed on the command line,

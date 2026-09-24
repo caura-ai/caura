@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import uuid
 from typing import NamedTuple
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -198,17 +199,34 @@ async def test_redistribute_rejects_asserted_admin_identity(client, as_auth, sc)
     assert "does not match the authenticated agent identity" in resp.text
 
 
-async def test_redistribute_allows_matching_admin_identity(client, as_auth, sc):
+async def test_redistribute_normalizes_a_retired_target_identity(
+    client, as_auth, sc, monkeypatch
+):
+    from core_api.routes import memories as memories_route
+
     tenant = f"tenant-{_uid()}"
     await _seed_agent(sc, tenant, "admin-agent", 3)
-    await _seed_agent(sc, tenant, "target-agent", 1)
+    await _seed_agent(sc, tenant, "caura-doc-indexer", 1)
+    storage = AsyncMock()
+    storage.redistribute_memories.return_value = {
+        "from_agents": [],
+        "moved": 0,
+        "promoted": 0,
+        "skipped": 0,
+        "not_found": [],
+    }
+    monkeypatch.setattr(memories_route, "get_storage_client", lambda: storage)
 
     as_auth(tenant, agent_id="admin-agent")
     resp = await client.post(
         f"/api/v1/memories/redistribute?tenant_id={tenant}&agent_id=admin-agent",
-        json={"memory_ids": [str(uuid.uuid4())], "target_agent_id": "target-agent"},
+        json={
+            "memory_ids": [str(uuid.uuid4())],
+            "target_agent_id": "memclaw-doc-indexer",  # legacy-name-ok: supported input alias
+        },
     )
     assert resp.status_code == 200, resp.text
+    assert storage.redistribute_memories.await_args.args[2] == "caura-doc-indexer"
 
 
 async def test_redistribute_user_credential_unchanged(client, as_auth, sc):

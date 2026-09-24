@@ -6,7 +6,7 @@
  */
 
 import { createHmac, timingSafeEqual } from "crypto";
-import { resolve } from "path";
+import { isAbsolute, relative, resolve, sep } from "path";
 import { realpathSync, existsSync } from "fs";
 
 // --- UUID validation ---
@@ -46,14 +46,34 @@ export function warnIfInsecureUrl(apiUrl: string, apiKey: string): void {
 
 // --- Path containment ---
 
+interface PathContainmentOps {
+  relative(from: string, to: string): string;
+  isAbsolute(path: string): boolean;
+  sep: string;
+}
+
+const HOST_PATH_OPS: PathContainmentOps = { relative, isAbsolute, sep };
+
+/** @internal Exported to inject platform-specific path operations in tests. */
+export function isContainedResolvedPath(
+  child: string,
+  parent: string,
+  pathOps: PathContainmentOps = HOST_PATH_OPS,
+): boolean {
+  const relativePath = pathOps.relative(parent, child);
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${pathOps.sep}`) &&
+      !pathOps.isAbsolute(relativePath))
+  );
+}
+
 export function isContainedPath(child: string, parent: string): boolean {
   try {
     const resolvedChild = existsSync(child) ? realpathSync(child) : resolve(child);
     const resolvedParent = existsSync(parent) ? realpathSync(parent) : resolve(parent);
-    return (
-      resolvedChild === resolvedParent ||
-      resolvedChild.startsWith(resolvedParent + "/")
-    );
+    return isContainedResolvedPath(resolvedChild, resolvedParent);
   } catch {
     return false;
   }

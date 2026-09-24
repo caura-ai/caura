@@ -23,6 +23,18 @@ function jsonResponse(status: number, data: unknown): Response {
   });
 }
 
+function stalledJsonResponse(signal: AbortSignal, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(),
+    json: () =>
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+  } as unknown as Response;
+}
+
 function makeClient(handler: Handler, options: Record<string, unknown> = {}): Caura {
   return new Caura("mc_test", {
     tenantId: "t1",
@@ -355,6 +367,28 @@ test("the configured timeout wraps the abort reason", { timeout: 1000 }, async (
     return true;
   });
 });
+
+for (const [status, phase] of [
+  [200, "successful response bodies"],
+  [500, "error response bodies"],
+] as const) {
+  test(`the configured timeout also covers ${phase}`, { timeout: 1000 }, async () => {
+    let signal: AbortSignal | null | undefined;
+    const client = makeClient(
+      (_url, init) => {
+        signal = init.signal;
+        return stalledJsonResponse(signal!, status);
+      },
+      { timeoutMs: 0 },
+    );
+    await assert.rejects(client.search("query"), (error: unknown) => {
+      assert.ok(signal?.aborted);
+      assert.ok(error instanceof TransportError);
+      assert.equal(error.cause, signal.reason);
+      return true;
+    });
+  });
+}
 
 test("transport mapping does not wrap serialization errors", async () => {
   const client = makeClient(() => assert.fail("serialization must fail before fetch"));

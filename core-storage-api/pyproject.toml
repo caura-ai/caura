@@ -1,6 +1,6 @@
 [project]
 name = "core-storage-api"
-version = "3.17.2"
+version = "3.18.1"
 description = "Caura Core Storage API — PostgreSQL CRUD service"
 license = "Apache-2.0"
 requires-python = ">=3.12"
@@ -22,6 +22,7 @@ dependencies = [
     "pydantic-settings>=2.15.0,<3",
     "alembic>=1.19.0,<2",
     "httpx>=0.27,<1",
+    "httpx2>=2,<3",
     "structlog>=25.4,<27",
     # OpenAI SDK. NOT used by the live core-storage-api request path
     # (which talks DB only) — added so the standalone backfill CLI at
@@ -31,7 +32,7 @@ dependencies = [
     # its docstring: "Run inside the docker-compose stack so envs are
     # wired up correctly"). Pin matches ``core-worker``'s pin so the
     # OpenAI SDK version is consistent across services.
-    "openai>=2.53.0,<3",
+    "openai>=3,<4",
 ]
 
 [project.optional-dependencies]

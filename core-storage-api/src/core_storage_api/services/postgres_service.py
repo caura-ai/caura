@@ -564,8 +564,9 @@ def _saturate_rank(scaled_rank: Any) -> Any:
     matches (scoring 2 renders vs 1, ordered and limited): **32-39% faster**
     across queries matching 1,875-11,505 rows — 92.0ms -> 56.4ms at 11,505,
     medians of 7 runs. Read that as the gain on the FTS scoring component
-    alone; the full search also pays six pgvector distance computations per
-    row, so end-to-end it is smaller.
+    alone; the full search also paid the pgvector distance more than once per
+    row (two evaluations per scanned row at the default function cost; see the
+    two-layer note in ``memory_scored_search``), so end-to-end it is smaller.
 
     NOT bit-identical, and the difference is real but negligible: the two forms
     disagree by at most one ULP (measured max ``|a - b|`` = 5.55e-17 over every
@@ -609,6 +610,63 @@ _MEMORY_IMMUTABLE_FIELDS = frozenset({"id", "tenant_id", "fleet_id", "search_vec
 # production write. Entity's is four columns and two callers, so it can be
 # enumerated exactly. Both arrive at the same guarantee.
 _MEMORY_UPDATABLE_FIELDS = _MEMORY_VALID_FIELDS - _MEMORY_IMMUTABLE_FIELDS
+
+# oss-0814-l-08 — the C25 caller/platform metadata boundary, enforced where the
+# ROW is. Mirrors ``core_api.services.system_metadata``; duplicated because this
+# service does not import core-api, exactly as core-worker duplicates it. The
+# root ``tests/`` package can import all three and asserts the copies agree.
+_SYSTEM_NAMESPACE = "_system"
+_CALLER_OWNED_KEY = "caller_owned"
+_CALLER_OWNABLE_KEYS: frozenset[str] = frozenset({"summary", "tags"})
+
+
+def _withhold_caller_owned_keys(metadata_patch: dict | None, stored: dict | None) -> dict | None:
+    """Drop top-level ``summary``/``tags`` a PLATFORM patch must not mirror.
+
+    C25 lets the platform write these two keys into ``_system`` always, and
+    mirror them to the legacy top-level position only when the caller has not
+    claimed them. Who has claimed what was decided in core-api from a snapshot
+    taken at write time — which answers for that write and no other. A caller
+    who claims ``summary`` through ``PATCH /memories/{id}`` afterwards is
+    invisible to an enrichment already in flight, and core-worker cannot ask:
+    it PATCHes this service directly and never reads the row.
+
+    This service does read the row, under the lock the merge runs beneath, so it
+    is the one place that can answer for every writer regardless of surface or
+    deployment mode. A patch reaching here in the deferred deployment is the
+    last chance to get it right.
+
+    A patch that CARRIES the marker is a caller write (core-api attaches it to
+    the caller's own metadata patch and to nothing else) and is applied
+    untouched — otherwise a caller's first claim on a key would block their
+    second, and ``summary`` would become permanently unwritable by anyone.
+
+    Only the top-level mirror is withheld. The patch's ``_system`` half is left
+    alone: the platform's value must still be recorded, because the whole point
+    of the boundary is that the loser is preserved rather than discarded.
+
+    Returns the patch unchanged (same object) whenever nothing is withheld, so
+    the common path allocates nothing.
+    """
+    if not metadata_patch or not stored:
+        return metadata_patch
+    contested = _CALLER_OWNABLE_KEYS & metadata_patch.keys()
+    if not contested:
+        return metadata_patch
+    patch_system = metadata_patch.get(_SYSTEM_NAMESPACE)
+    if isinstance(patch_system, dict) and _CALLER_OWNED_KEY in patch_system:
+        return metadata_patch  # caller's own write — see above
+    stored_system = stored.get(_SYSTEM_NAMESPACE)
+    if not isinstance(stored_system, dict):
+        return metadata_patch
+    owned = stored_system.get(_CALLER_OWNED_KEY)
+    if not isinstance(owned, list):
+        return metadata_patch
+    withheld = contested & {k for k in owned if isinstance(k, str)}
+    if not withheld:
+        return metadata_patch
+    return {k: v for k, v in metadata_patch.items() if k not in withheld}
+
 
 # Columns ``entity_update`` may write. Deliberately a subset, not
 # ``Entity.__table__.columns`` the way ``_MEMORY_VALID_FIELDS`` above is: the
@@ -1799,9 +1857,16 @@ class PostgresService:
             # (None tuple) and "row exists, deleted_at IS NULL" (live)
             # are distinguishable — ``scalar_one_or_none`` on
             # ``deleted_at`` alone would collapse both into None.
+            #
+            # ``metadata_`` joins the projection for oss-0814-l-08 (see
+            # ``_withhold_caller_owned_keys``). Free: the row is being read and
+            # locked either way, and doing it HERE rather than in a second
+            # statement is what makes the read-then-merge atomic — the decision
+            # about which keys a platform patch may mirror is taken under the
+            # same ``FOR UPDATE`` that the merge itself runs beneath.
             row = (
                 await session.execute(
-                    select(Memory.id, Memory.deleted_at)
+                    select(Memory.id, Memory.deleted_at, Memory.metadata_)
                     .where(Memory.id == memory_id, Memory.tenant_id == tenant_id)
                     .with_for_update()
                 )
@@ -1810,6 +1875,8 @@ class PostgresService:
                 return False  # row truly absent — caller → 404
             if row.deleted_at is not None:
                 return False  # soft-deleted — caller → 404, no UPDATE runs
+
+            metadata_patch = _withhold_caller_owned_keys(metadata_patch, row.metadata_)
 
             # No-op patches on a live row are valid: existence check
             # already passed, so report success without burning UPDATEs.
@@ -2774,10 +2841,19 @@ class PostgresService:
         # computed in the branch layer above it from those columns. This is the
         # inner-projection work ``_saturate_rank``'s note promised: before it,
         # SQLAlchemy inlined the ``vec_sim`` CASE at every site that named it
-        # and the compiled statement paid SIX cosine distance computations per
-        # candidate row (427ms -> 90ms for this change alone on a 50k-row,
-        # 1024-dim rig; the ratchet in test_fts_score_single_render pins the
-        # counts in both directions).
+        # and the compiled statement carried SIX cosine renders (three per
+        # UNION branch). Renders are not evaluations: the planner postpones
+        # expensive non-sort-key columns above the Sort/Limit, so the scan
+        # evaluated the distance TWICE per candidate row at the default
+        # ``cosine_distance`` cost (once at COST 100, migration 044).
+        # Re-measured 2026-09-17 on a standalone rig (pgvector 0.8.1, PG 16.12,
+        # 50k rows x 1024-dim, M4 Pro): this change alone takes the serial
+        # scored select from ~196 ms to ~157 ms, and the materialised CTE does
+        # not parallelise, so two-worker wall-clock went 123 -> 156 ms. The
+        # order-of-magnitude win is the ANN candidate pool below (~5 ms), not
+        # this dedup. An earlier "427ms -> 90ms" figure for this change did not
+        # reproduce. The ratchet in test_fts_score_single_render pins the
+        # render counts in both directions.
         #
         # CAURA-594: pgvector's `<=>` is strict — NULL in → NULL out. A
         # bare `1 - cosine_distance` would therefore propagate NULL up
@@ -3148,7 +3224,8 @@ class PostgresService:
         # test_scored_search_materialized_plan pins the PLAN — EXPLAIN must
         # show the CTE as its own node on the single-branch statement, so a
         # future PostgreSQL/SQLAlchemy behaviour change surfaces in CI rather
-        # than as a silent ~6x hot-path regression.
+        # than as a silent hot-path regression (six renders in the text, two
+        # distance evaluations per scanned row at the default function cost).
         ing = ingredients_stmt.cte("ingredients").prefix_with("MATERIALIZED")
 
         # -- Layer 1: derived factors over ingredient columns --
@@ -4066,6 +4143,23 @@ class PostgresService:
         fleet_id: str | None = None,
         batch_size: int = 500,
     ) -> int:
+        """Archive rows whose validity has run out, on the next lifecycle tick.
+
+        TWO columns end a row's life and they are not the same thing.
+        ``ts_valid_end`` closes a temporal-validity interval — the fact stopped
+        being true. ``expires_at`` is a caller-supplied retention hint — keep
+        this until then. Both land a row in ``outdated``.
+
+        ``expires_at`` was accepted, stored and returned for the whole life of
+        the product and enforced by nothing: this sweep existed and filtered
+        the OTHER column, which is why the gap read as "never enforced" rather
+        than "enforced late" (caura#1637).
+
+        This is archival on the next tick, NOT a hard retention control. A row
+        stays visible for up to one tick past its ``expires_at``, and callers
+        needing a tighter guarantee are asking for a read-time filter, which
+        this deliberately is not.
+        """
         async with get_session() as session:
             params: dict = {"tenant_id": tenant_id, "batch_size": batch_size}
             fleet_clause = ""
@@ -4080,7 +4174,7 @@ class PostgresService:
                     SELECT id FROM memories
                     WHERE tenant_id = :tenant_id
                       {fleet_clause}
-                      AND ts_valid_end < NOW()
+                      AND (ts_valid_end < NOW() OR expires_at < NOW())
                       AND status = 'active'
                       AND deleted_at IS NULL
                     LIMIT :batch_size
@@ -6034,7 +6128,34 @@ class PostgresService:
             stmt = stmt.where(Memory.visibility != "scope_agent")
 
         if fleet_id:
-            stmt = stmt.where(Memory.fleet_id == fleet_id)
+            # Same predicate as the bare ``Memory.fleet_id == fleet_id`` this
+            # replaces (``fleet_id IN (:f)``), routed through the helper so D4
+            # lives in one place and "strict" cannot mean different things in
+            # different queries -- the copy-drift A54 was filed for.
+            #
+            # THE ARGUMENTS ARE LOAD-BEARING. Do not "simplify" them toward the
+            # defaults the multi-fleet reads use. ``resolve_read_fleet_gate`` case
+            # (a) PINS ``fleet_id`` here for a trust < 2 caller asking
+            # ``scope='fleet'`` -- a security decision, stated as one in its own
+            # docstring -- and this predicate is that confinement. Dropping
+            # ``strict`` would re-admit null-fleet rows; dropping
+            # ``include_org_visibility=False`` is worse, because
+            # ``visibility = 'scope_org'`` carries NO fleet term at all, so a
+            # caller pinned precisely to stop it fanning out would see every
+            # scope_org row in every other fleet of the tenant. Either turns the
+            # trust ladder into a no-op, silently, on an endpoint in the frozen
+            # broker subset that oasdiff cannot flag (semantic change, no schema
+            # movement).
+            #
+            # The distinction to hold onto: the plural ``fleet_ids`` reads take an
+            # AUTHORIZATION SCOPE and correctly apply D4; this singular
+            # ``fleet_id`` is a caller-supplied FILTER that core-api sometimes
+            # overloads as a pin, and storage cannot tell the two apart from the
+            # value alone. Closing that gap properly means passing provenance, not
+            # widening the predicate (ax-0917-m-19).
+            stmt = stmt.where(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if written_by:
             stmt = stmt.where(Memory.agent_id == written_by)
         if memory_type:
@@ -6144,7 +6265,13 @@ class PostgresService:
             # that omits tenant scope gets empty stats, never cross-tenant rows.
             scope_filters.append(Memory.tenant_id == tenant_id)
         if fleet_id:
-            scope_filters.append(Memory.fleet_id == fleet_id)
+            # Strict and org-blind on purpose, exactly as in
+            # ``memory_list_by_filters`` -- see the comment there before changing
+            # these arguments; this predicate is a security confinement, not a
+            # convenience filter (ax-0917-m-19).
+            scope_filters.append(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
             scope_filters.append(
@@ -6405,7 +6532,13 @@ class PostgresService:
         else:
             scope_filters.append(Memory.tenant_id == tenant_id)
         if fleet_id:
-            scope_filters.append(Memory.fleet_id == fleet_id)
+            # Strict and org-blind on purpose, exactly as in
+            # ``memory_list_by_filters`` -- see the comment there before changing
+            # these arguments; this predicate is a security confinement, not a
+            # convenience filter (ax-0917-m-19).
+            scope_filters.append(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
             scope_filters.append(
@@ -9184,6 +9317,7 @@ class PostgresService:
         doc_id: str,
         data: dict,
         fleet_id: str | None = None,
+        agent_id: str | None = None,
         system: bool = False,
         force: bool = False,
     ) -> Document:
@@ -9216,12 +9350,18 @@ class PostgresService:
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    agent_id=agent_id,
                 )
                 .on_conflict_do_update(
                     constraint="uq_documents_tenant_collection_doc",
                     set_={
                         "data": data,
                         "fleet_id": fleet_id,
+                        # ax-0917-m-14 — the upsert replaces the document, so
+                        # the author recorded is whoever wrote THIS version.
+                        # Keeping the original author would attribute someone
+                        # else's edit to the first writer.
+                        "agent_id": agent_id,
                         "updated_at": datetime.now(UTC),
                     },
                 )
@@ -9275,6 +9415,7 @@ class PostgresService:
         doc_id: str,
         data: dict,
         fleet_id: str | None = None,
+        agent_id: str | None = None,
         embedding: list[float] | None = None,
         system: bool = False,
         force: bool = False,
@@ -9308,6 +9449,7 @@ class PostgresService:
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    agent_id=agent_id,
                     embedding=embedding,
                 )
                 .on_conflict_do_update(
@@ -9315,6 +9457,7 @@ class PostgresService:
                     set_={
                         "data": data,
                         "fleet_id": fleet_id,
+                        "agent_id": agent_id,
                         "embedding": embedding,
                         "updated_at": text("now()"),
                     },

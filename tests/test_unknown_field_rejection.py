@@ -155,7 +155,20 @@ async def test_bulk_envelope_rejects_unknown_field(client):
 
 
 async def test_document_upsert_rejects_unknown_field(client):
-    """POST /documents — ``agent_id`` was the plugin's own junk field."""
+    """POST /documents.
+
+    The junk field used to be ``agent_id`` — the plugin's own, on the reading
+    that the documents routes take identity from auth. Half of that was true:
+    identity did come from auth, and then went nowhere, because the table had
+    no column to put it in. So the plugin was refused a field it was sending
+    for a real reason, and documents carried no author at all (ax-0917-m-14).
+    ``agent_id`` is a declared field now.
+
+    ``owner`` takes its place, and not arbitrarily: it is what the probe that
+    found m-14 resorted to putting inside ``data`` when the body would not
+    take an author. It is still not a field, and a caller reaching for it
+    should be told so rather than have it vanish.
+    """
     tenant_id, headers = get_test_auth()
     tag = _uid()
     resp = await client.post(
@@ -165,11 +178,11 @@ async def test_document_upsert_rejects_unknown_field(client):
             "collection": f"notes-{tag}",
             "doc_id": f"doc-{tag}",
             "data": {"title": "Hello"},
-            "agent_id": "the-documents-routes-take-identity-from-auth",
+            "owner": "not-a-field-use-agent_id",
         },
         headers=headers,
     )
-    _assert_names_field(resp, "agent_id")
+    _assert_names_field(resp, "owner")
 
 
 async def test_entity_upsert_rejects_unknown_field(client):

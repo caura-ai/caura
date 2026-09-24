@@ -125,6 +125,24 @@ AUTH_SKILLS_FACTORY_DISABLED = "SKILLS_FACTORY_DISABLED"
 AUTH_SKILLS_INBOX_FORBIDDEN = "SKILLS_INBOX_FORBIDDEN"
 
 
+# ── Code for the request-budget deadline (ax-0917-h-01/h-02) ──────────────
+#
+# ``code_for_status`` maps 504 to ``UPSTREAM_TIMEOUT``, which is a claim about
+# a backend. The one 504 this service emits itself is the opposite: the
+# RequestTimeoutMiddleware budget expired and WE cancelled the handler, with no
+# upstream having reported anything. Telling a caller "upstream timed out" when
+# nothing upstream said so sends them to the wrong system.
+#
+# That distinction is the whole reason this code exists. The 45s 504s on
+# ``/recall`` and ``/search`` (2026-09-17, three attempts, CRUD healthy
+# throughout) arrived as ``{"detail":"request timeout"}`` — no code, no budget,
+# no way to tell "we gave up at 45s" from "a backend returned 504 to us", and
+# the probe had nothing to report but the wall-clock number. Same failure the
+# auth codes above were minted for: one status carrying several reasons leaves
+# the caller guessing.
+REQUEST_BUDGET_EXCEEDED = "REQUEST_BUDGET_EXCEEDED"
+
+
 def coded_detail(code: str, message: str, **details: object) -> dict:
     """An ``HTTPException`` detail that keeps its own error code.
 

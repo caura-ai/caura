@@ -5,7 +5,7 @@ from fastapi import HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
 from core_api import errors
-from core_api.agent_ids import AgentIdentity
+from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
@@ -305,7 +305,11 @@ class AuthContext:
         the verified identity win instead of refusing. It is not a missing
         caller of this gate; the routes behind it want an override.
         """
-        if self.agent_id and requested_agent_id is not None and requested_agent_id != self.agent_id:
+        if (
+            self.agent_id
+            and requested_agent_id is not None
+            and canonical_service_agent_id(requested_agent_id) != canonical_service_agent_id(self.agent_id)
+        ):
             raise HTTPException(
                 status_code=403,
                 detail=coded_detail(
@@ -352,7 +356,7 @@ class AuthContext:
         # PRESERVED here (pinned by test_auth_context.py), because
         # ``enforce_self_agent`` treats it as an assertion and refuses it.
         # Collapsing it to None would read as "no assertion" instead.
-        return AgentIdentity(resolved) if resolved is not None else None
+        return AgentIdentity(canonical_service_agent_id(resolved)) if resolved is not None else None
 
     def enforce_tenant(self, requested_tenant: str | None) -> None:
         """Raise if the caller may not write to ``requested_tenant``.
@@ -578,7 +582,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         return AuthContext(tenant_id=None, is_admin=True)
 
     # ── Path 2: CAURA_API_KEY gate (optional, for network-exposed OSS) ──
-    mclaw_key = settings.memclaw_api_key
+    mclaw_key = settings.memclaw_api_key  # legacy-name-ok: live compatibility field
     if mclaw_key:
         if key and hmac.compare_digest(key, mclaw_key):
             # Valid Caura key — resolve tenant from standalone or header

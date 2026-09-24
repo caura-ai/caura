@@ -16,10 +16,41 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { win32 } from "node:path";
 
-import { verifyCommandSignature } from "./validation.js";
+import {
+  isContainedResolvedPath,
+  verifyCommandSignature,
+} from "./validation.js";
 
 const KEY = "test-hmac-secret";
+
+describe("isContainedPath", () => {
+  test("recognizes Windows descendants without accepting siblings or other drives", () => {
+    const parent = "C:\\Users\\agent\\workspace";
+
+    assert.equal(
+      isContainedResolvedPath(
+        "C:\\Users\\agent\\workspace\\project",
+        parent,
+        win32,
+      ),
+      true,
+    );
+    assert.equal(
+      isContainedResolvedPath(
+        "C:\\Users\\agent\\workspace-copy",
+        parent,
+        win32,
+      ),
+      false,
+    );
+    assert.equal(
+      isContainedResolvedPath("D:\\project", parent, win32),
+      false,
+    );
+  });
+});
 
 function signedCommand(overrides: Partial<{ id: string; command: string; payload: Record<string, unknown>; timestamp: string }> = {}) {
   const cmd = {

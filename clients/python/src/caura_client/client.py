@@ -250,7 +250,7 @@ class Caura:
     def close(self) -> None:
         self._http.close()
 
-    def __enter__(self) -> Caura:
+    def __enter__(self) -> Caura:  # noqa: PYI034 - Self is unavailable on supported Python 3.9.
         return self
 
     def __exit__(self, *exc: object) -> None:

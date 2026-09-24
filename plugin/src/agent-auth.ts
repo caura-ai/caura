@@ -12,7 +12,8 @@
  *   2. Falls back to secrets file on disk
  *   3. If missing, provisions via POST /api/v1/admin/agent-keys/provision
  *   4. Stores the raw key and returns it
- *   5. On 401, evicts and re-provisions (see handleAgentAuthError)
+ *   5. On 401, transport evicts the key and retries that request once with
+ *      the tenant key; a later agent request may provision a replacement
  */
 
 import { readFileSync, writeFileSync, existsSync, chmodSync } from "fs";
@@ -136,8 +137,12 @@ export async function resolveAgentKey(
     prefix: result.key_prefix,
     provisioned_at: new Date().toISOString(),
   };
-  writeSecretsFile(secrets);
   keyCache.set(agentId, result.raw_key);
+  try {
+    writeSecretsFile(secrets);
+  } catch (e: unknown) {
+    logError(`Could not persist agent key for '${agentId}'; using the in-memory key`, e);
+  }
 
   return result.raw_key;
 }
