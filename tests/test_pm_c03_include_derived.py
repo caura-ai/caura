@@ -3,7 +3,13 @@
 A70's fan-out writes a short single-claim child per extracted fact. They stay
 retrievable alongside the parent they came from, so a caller asking for 50
 memories can get 36 memories and 14 fragments — measured at ~28% of returned
-rows on the store that prompted this, worth 79.8% vs 82.2% on that harness.
+rows on the store that prompted this.
+
+That store's own measurements are under review (``pm-0918-c-01``), so the
+within-run 79.8% vs 82.2% delta recorded alongside it is deliberately NOT
+repeated here as a value for this feature: it was measured client-side before
+the server-side refill below existed, which makes it a floor rather than an
+estimate. The behaviour these tests pin does not depend on it.
 
 Filtering them CLIENT-side does not work, and the reason is the whole design:
 dropping rows after the response distorts ``top_k``. Ask for 50, drop 14, get
