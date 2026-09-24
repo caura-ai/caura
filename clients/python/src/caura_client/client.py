@@ -7,6 +7,7 @@ A thin wrapper over the Caura REST API. Point it at a managed
 from __future__ import annotations
 
 import sys
+import time
 import urllib.parse
 from typing import Any
 
@@ -18,9 +19,9 @@ from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
 
-USER_AGENT = (
-    f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
-)
+_RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
+
+USER_AGENT = f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
 """Sent on every request so a server can tell SDK families apart.
 
 It names the package, its version and the Python major.minor, nothing more;
@@ -40,6 +41,13 @@ class Caura:
         mc.write("Q3 revenue target is $4M, set on 2026-04-15.")
         for m in mc.search("Q3 revenue target"):
             print(m.title, m.content)
+
+    Pass ``retries`` to retry transient failures (transport errors and
+    429/502/503/504) on read calls (``search``, ``recall``, ``health``,
+    ``get_document``) with exponential backoff, honoring ``Retry-After``
+    when present. Off by default (``retries=0``). ``write`` and
+    ``submit_interview`` are never retried, to avoid duplicating a write
+    whose result is unknown.
     """
 
     def __init__(
@@ -50,14 +58,22 @@ class Caura:
         base_url: str = DEFAULT_BASE_URL,
         agent_id: str | None = None,
         timeout: float = 30.0,
+        retries: int = 0,
+        retry_backoff: float = 0.5,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         if not api_key:
             raise ValueError("api_key is required")
         if not tenant_id:
             raise ValueError("tenant_id is required")
+        if retries < 0:
+            raise ValueError("retries must be >= 0")
+        if retry_backoff < 0:
+            raise ValueError("retry_backoff must be >= 0")
         self.tenant_id = tenant_id
         self.agent_id = agent_id
+        self._retries = retries
+        self._retry_backoff = retry_backoff
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
             headers={
@@ -110,7 +126,7 @@ class Caura:
         if filter_agent_id:
             body["filter_agent_id"] = filter_agent_id
         body.update(extra)
-        data = self._post("/api/v1/search", body)
+        data = self._post("/api/v1/search", body, retryable=True)
         if not isinstance(data, dict):
             raise CauraAPIError(200, "search response must be a JSON object")
         if "items" not in data:
@@ -124,14 +140,14 @@ class Caura:
         """Search + LLM summary. Returns a ``RecallResult`` context brief (POST /api/v1/recall)."""
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "query": query, "top_k": top_k}
         body.update(extra)
-        data = self._post("/api/v1/recall", body)
+        data = self._post("/api/v1/recall", body, retryable=True)
         if not isinstance(data, dict):
             raise CauraAPIError(200, "recall response must be a JSON object")
         return RecallResult.from_dict(data)
 
     def health(self) -> dict[str, Any]:
         """Liveness probe (GET /api/v1/health)."""
-        response = self._request("GET", "/api/v1/health")
+        response = self._request("GET", "/api/v1/health", retryable=True)
         self._raise_for_status(response)
         return response.json()
 
@@ -155,6 +171,7 @@ class Caura:
             "GET",
             f"/api/v1/documents/{encoded}",
             params={"tenant_id": tenant_id or self.tenant_id, "collection": collection},
+            retryable=True,
         )
         self._raise_for_status(response)
         return response.json()
@@ -200,16 +217,40 @@ class Caura:
         return result
 
     # ------------------------------------------------------------- internals
-    def _post(self, path: str, body: dict[str, Any]) -> Any:
-        response = self._request("POST", path, json=body)
+    def _post(self, path: str, body: dict[str, Any], *, retryable: bool = False) -> Any:
+        response = self._request("POST", path, json=body, retryable=retryable)
         self._raise_for_status(response)
         return response.json()
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def _request(self, method: str, path: str, *, retryable: bool = False, **kwargs: Any) -> httpx.Response:
+        attempts = self._retries + 1 if retryable else 1
+        attempt = 0
+        while True:
+            try:
+                response = self._http.request(method, path, **kwargs)
+            except httpx.TransportError as exc:
+                if attempt + 1 >= attempts:
+                    raise TransportError(f"Request failed: {exc}") from exc
+                delay = self._retry_delay(attempt, None)
+            else:
+                if attempt + 1 >= attempts or response.status_code not in _RETRYABLE_STATUS_CODES:
+                    return response
+                delay = self._retry_delay(attempt, self._parse_retry_after(response))
+            time.sleep(delay)
+            attempt += 1
+
+    def _retry_delay(self, attempt: int, retry_after: float | None) -> float:
+        """Seconds to wait before the next attempt: ``Retry-After`` if present, else exponential."""
+        if retry_after is not None:
+            return retry_after
+        return self._retry_backoff * (2**attempt)
+
+    @staticmethod
+    def _parse_retry_after(response: httpx.Response) -> float | None:
         try:
-            return self._http.request(method, path, **kwargs)
-        except httpx.TransportError as exc:
-            raise TransportError(f"Request failed: {exc}") from exc
+            return float(response.headers["Retry-After"])
+        except (KeyError, ValueError):
+            return None
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
