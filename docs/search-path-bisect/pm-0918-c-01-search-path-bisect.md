@@ -250,7 +250,7 @@ precondition, not an assumption, and it is checkable in one line
 
 This also resolves what looks at first like a contradiction in
 `docs/atomic-fact-fanout/pm-c03-include-derived-blast-radius.md`, which reports 1,486
-fan-out children on the local `memclaw` database with `created_at` of **2026-09-06**,
+fan-out children on the local `memclaw` database with `created_at` of **2026-09-06**, <!-- legacy-name-floor: names the local development database, which literally bears this name; the claim cannot be checked without it -->
 three days before A70 — from parents marked `write_mode=fast`. That is not a
 counter-example: a local stack runs inline, `write_mode` does not select the
 enrichment path, and the inline path always fanned out. The two observations are
