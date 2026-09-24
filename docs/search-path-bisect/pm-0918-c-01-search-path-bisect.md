@@ -235,6 +235,27 @@ Why this is the top candidate:
    into a top-50 competition. 71% context overlap is the shape of a candidate set that
    gained a large cohort of new rows, not of a scoring formula that shifted.
 
+**The precondition this rests on, stated explicitly.** Which enrichment path a write
+takes is decided by `settings.inline_enrichment`, i.e. `deployment_mode == "inline"`
+— **not** by `write_mode`. In inline mode (the OSS default, a single-process stack)
+enrichment runs in-process via `_enrich_memory_background`, which has called
+`fan_out_atomic_facts` all along; A70 changed nothing there. In deferred mode (what
+`core-api/tasks.py` calls "the SaaS shape") the write publishes an enrich request and
+the worker handles it — and that is the path that discarded the facts until 9 Sep.
+
+So this finding applies **only if the deployment serving the `amb` store runs in
+deferred mode.** It almost certainly does — it has a `core-worker` — but it is a
+precondition, not an assumption, and it is checkable in one line
+(`DEPLOYMENT_MODE` / `deployment_mode` in that environment's core-api config).
+
+This also resolves what looks at first like a contradiction in
+`docs/atomic-fact-fanout/pm-c03-include-derived-blast-radius.md`, which reports 1,486
+fan-out children on the local `memclaw` database with `created_at` of **2026-09-06**,
+three days before A70 — from parents marked `write_mode=fast`. That is not a
+counter-example: a local stack runs inline, `write_mode` does not select the
+enrichment path, and the inline path always fanned out. The two observations are
+consistent.
+
 Direction is genuinely open. Children are shorter and more atomic — which is either
 better recall (a precise fact now has its own row and its own embedding) or worse
 (the answer's context fills with fragments instead of the chunk that held the answer).
@@ -426,3 +447,53 @@ That has been false since `2a88514d` (9 Sep) wired the consumer up. The string w
 deliberately greppable so the exposure stayed countable for the A75 proof gate; it now
 miscounts in the opposite direction and would mislead anyone grepping for fan-out
 behaviour during exactly this investigation. Not fixed here — flagging it.
+
+---
+
+## Appendix — reconciling with pm-0918-c-03's +2.4pp
+
+c-03 reports that excluding derived rows moved a PersonaMem run **79.8% → 82.2%
+(+2.4pp)**, on a run it names `caura-bulk-2k-top50-sess2`. The tempting chain is:
+85.4 was a near-unpolluted store, the later runs measure a ~28%-derived store, and
+filtering recovers +2.4 of the 3.2pp gap. Three things have to be said before anyone
+writes that down.
+
+**1. There are two different 82.2s and they are probably not the same measurement.**
+The row records the 18 Sep re-run at **82.2% unfiltered**. c-03 records **82.2%
+filtered, from a 79.8% baseline**, on `sess2`. If both are right, `sess2`'s unfiltered
+score (79.8) is not the 18 Sep run's unfiltered score (82.2), and the two results
+cannot be chained — chaining them would predict 84.6, which nobody measured. Resolve
+which run 79.8 belongs to before quoting a combined number.
+
+**2. Filtering at query time is not the same as a store that never had children, and
+every difference runs the same way — filtering under-recovers.**
+
+- *Refill.* c-03 makes the point that a **server-side** exclusion placed before
+  `PostFilterResults`' trim fills `top_k` exactly (storage overfetches
+  `top_k * SEARCH_OVERFETCH_FACTOR`, factor 2). But that exclusion shipped as
+  `1c98ce18` on 23 Sep; the +2.4pp was measured client-side, which is the shape the
+  18 Sep correspondence complains about — "asking for 50 and getting
+  50-minus-whatever-you-dropped". ~24 rows removed from 85 and not backfilled is a
+  smaller context than a store that never had them. **+2.4pp is a floor.**
+- *Recall-boost hysteresis.* `TrackRecalls` bumps `recall_count` on every returned
+  row, children included, and `recall_boost` feeds back into the score. Children
+  returned since 9 Sep have accrued it; the parents they displaced have not.
+  Query-time filtering does not undo an accrued counter. Small after A26 dampened it
+  (cap 1.1, 14-day window) but signed toward the children — and it is exactly the
+  loop A41 was built to break.
+- *D16.* The record run also enjoyed unbudgeted successor injection until 9 Sep 17:53.
+  No amount of derived-row filtering recovers that component.
+
+**3. One asymmetry that does *not* exist, which is why reconciliation is plausible at
+all.** PostgreSQL's `ts_rank_cd` scores a row from its own `tsvector` and the query;
+it carries no collection-wide IDF term. Cosine similarity is likewise per-row. So
+inserting ~1,000 children did **not** change any parent's score. The pollution is
+purely slot competition — and slot competition is the one kind of damage that a
+filter with proper refill can undo exactly.
+
+**Conclusion.** The numbers do not reconcile as arithmetic, and they were never going
+to: 79.8 → 82.2 is a within-run delta on one run, 85.4 is a different run against a
+different store state. The residual 3.2pp is better described as *not measured by that
+experiment* than as *unexplained*. All three asymmetries above predict the filtered
+run should land below the never-polluted run, which is the direction observed — so the
+corpus-change reading is **consistent with** c-03, not **confirmed by** it.
