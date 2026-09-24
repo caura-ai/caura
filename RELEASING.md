@@ -36,6 +36,8 @@ bump unless the plugin source itself changes.
 - `core-api/pyproject.toml` (`$.project.version`)
 - `core-worker/pyproject.toml` (`$.project.version`)
 - `core-storage-api/pyproject.toml` (`$.project.version`)
+- `core-operations/pyproject.toml` (`$.project.version`)
+- each service's `uv.lock` entry for its own package
 
 **Plugin (`plugin/`):**
 - `plugin/package.json` (`$.version`) — handled by `release-type: node`
