@@ -452,6 +452,12 @@ behaviour during exactly this investigation. Not fixed here — flagging it.
 
 ## Appendix — reconciling with pm-0918-c-03's +2.4pp
 
+> **Caution for whoever reads this next.** The reconciliation below was nearly
+> written as a finding on the strength of two figures matching. They are different
+> measurements that happen to share a value. On this row specifically, treat a
+> coincidence of numbers as a prompt to check provenance, not as evidence — it is
+> the third time a matching figure has almost become a conclusion here.
+
 c-03 reports that excluding derived rows moved a PersonaMem run **79.8% → 82.2%
 (+2.4pp)**, on a run it names `caura-bulk-2k-top50-sess2`. The tempting chain is:
 85.4 was a near-unpolluted store, the later runs measure a ~28%-derived store, and
