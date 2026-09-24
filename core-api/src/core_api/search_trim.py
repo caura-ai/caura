@@ -25,8 +25,41 @@ def passes_relevance_filter(
 
     Storage admits an unembedded row only through full-text search and represents
     its missing cosine as ``0.0``. ``has_embedding`` distinguishes that sentinel
-    from a real orthogonal vector. An embedded full-text match may bypass only
-    the untuned global fallback; request, agent, and tenant floors remain strict.
+    from a real orthogonal vector.
+
+    THE TWO EXCEPTIONS ARE NOT SYMMETRIC, and the difference has now been read as
+    a bug twice (oss-0923-h-01), so it is spelled out:
+
+    * an EMBEDDED full-text match may bypass only the untuned global fallback —
+      request, agent, and tenant floors stay strict, which is what
+      ``allow_fts_global_floor_bypass`` is gated on;
+    * an UNEMBEDDED row bypasses every floor, including one a caller set
+      explicitly on the request. Nothing any layer configures will hold it back.
+
+    That second clause is load-bearing rather than permissive. The floor compares
+    ``min_similarity`` against ``vec_sim``, and for these rows ``vec_sim`` is
+    storage's 0.0 sentinel, not a measurement — so a strict branch would drop
+    EVERY unembedded row at any positive floor, reverting CAURA-594, CAURA-679
+    and #687 together. Judging them on ``similarity`` (which CAURA-679 sets to
+    ``fts_score`` alone for these rows) is not the alternative it looks like
+    either: a saturated ``ts_rank_cd`` and a cosine are different scales, and a
+    floor tuned for one is meaningless against the other.
+
+    WHAT BOUNDS THE CLAUSE LIVES IN THE OTHER SERVICE. ``search_memories_scored``
+    filters rows on ``or_(Memory.embedding.is_not(None), _fts_guard)`` — the
+    CAURA-594 admission guard — over the ingredients CTE and every ANN pool arm,
+    so an unembedded row that does not match the query lexically never reaches
+    this function. Relax that guard and this clause becomes the unbounded hole it
+    is mistaken for, with nothing downstream able to judge the rows it admits;
+    ``tests/test_oss_0923_unembedded_relevance_floor.py`` fails if it goes.
+
+    One correction to the framing the guard's own comments use: they describe a
+    transient "backfill window". Measured on the development corpus it is not
+    transient — 2,139 live unembedded rows across 135 tenants, none younger than
+    seven days and the oldest eight months, with several tenants unembedded in
+    full. CAURA-679 is the only comment that admits this ("any case where the
+    embed worker fails permanently"). Rows reaching this branch should be assumed
+    permanent, not in flight.
     """
     return (
         has_embedding is False

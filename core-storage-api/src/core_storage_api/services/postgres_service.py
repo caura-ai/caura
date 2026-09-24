@@ -2940,6 +2940,15 @@ class PostgresService:
             # find_near_duplicate_pairs, compute_health_stats) keep their
             # NULL guards — vector-pure operations where a NULL operand has
             # no comparable semantics.
+            #
+            # THIS PREDICATE IS LOAD-BEARING FOR THE OTHER SERVICE, which is not
+            # visible from here: core-api's ``passes_relevance_filter`` returns
+            # True unconditionally for a NULL-embedding row, because the floor it
+            # applies compares against ``vec_sim`` and these rows only carry the
+            # 0.0 sentinel above. The guard below is therefore the ONLY relevance
+            # test such a row ever faces end to end — drop it and nothing
+            # downstream can judge what it admits. See that function's docstring
+            # and tests/test_oss_0923_unembedded_relevance_floor.py.
             or_(
                 Memory.embedding.is_not(None),
                 _fts_guard,
