@@ -45,6 +45,7 @@ from core_api.errors import (
     AUTH_AGENT_TRUST_TOO_LOW,
     AUTH_FLEET_SCOPE_FORBIDDEN,
     AUTH_TARGET_AGENT_RESTRICTED,
+    REQUEST_BUDGET_EXCEEDED,
     coded_detail,
 )
 from core_api.middleware.idempotency import (
@@ -1659,11 +1660,24 @@ async def _write_memories_bulk_inner(
     # used to be ``usage = await bulk_check_and_increment(...)`` on this line,
     # before the try, and no failure path gave it back.
     _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
+    # ax-0917-h-01/h-02 follow-up. This route opts OUT of
+    # ``RequestTimeoutMiddleware`` (see ``_TIMEOUT_OPT_OUT_PATHS``) and
+    # enforces the budget below instead — which also opted it out of the
+    # phase attribution the middleware arms, leaving this 504 saying exactly
+    # what the middleware's used to say before #1707: the deadline passed,
+    # and nothing about which layer passed it. The recorder is armed here so
+    # the answer is the same one ``/search`` now gives. Bulk is the route
+    # most able to need it: 90s of budget across embed, enrich, an unbounded
+    # ``per_tenant_storage_slot`` acquire and the storage roundtrip, on the
+    # path a customer's bulk ingest runs.
+    bulk_budget = app_settings.bulk_request_timeout_seconds
+    timeout_started_at = time.monotonic()
     try:
-        result = await asyncio.wait_for(
-            create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),
-            timeout=app_settings.bulk_request_timeout_seconds,
-        )
+        with request_phase.own_deadline(bulk_budget) as phases:
+            result = await asyncio.wait_for(
+                create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),
+                timeout=bulk_budget,
+            )
     except (TimeoutError, httpx.TimeoutException):
         # ``asyncio.wait_for`` documents raising ``asyncio.TimeoutError``,
         # which Python 3.11 aliased to the builtin ``TimeoutError``.
@@ -1688,11 +1702,24 @@ async def _write_memories_bulk_inner(
         # entry is self-explanatory; the actual elapsed time on the
         # request line distinguishes which timer fired (storage cap at
         # ~25s elapsed vs umbrella at ~90s elapsed).
+        attribution = phases.snapshot()
+        elapsed = round(time.monotonic() - timeout_started_at, 3)
         logger.warning(
             "bulk write timed out (storage cap %ss / request cap %ss); client should retry with same %s",
             app_settings.storage_bulk_timeout_seconds,
-            app_settings.bulk_request_timeout_seconds,
+            bulk_budget,
             BULK_ATTEMPT_ID_HEADER,
+            # Flat and top-level, matching the middleware's budget log, so
+            # "which layer is eating bulk budgets, how often" is one
+            # group-by rather than a grep of two differently-shaped lines.
+            extra={
+                "budget_seconds": bulk_budget,
+                "elapsed_seconds": elapsed,
+                "path": "/api/v1/memories/bulk",
+                "phase": attribution["phase"],
+                "phases_cancelled": attribution["phases_cancelled"],
+                "phases_completed": attribution["phases_completed"],
+            },
         )
         # No per-item state to surface — the storage call may have
         # committed some rows, none, or be still in flight. Do NOT
@@ -1700,12 +1727,29 @@ async def _write_memories_bulk_inner(
         # incomplete answer; the per-item attempt-id is the recovery
         # contract and a retry will resolve every committed row to
         # ``duplicate_attempt`` with its canonical id.
+        #
+        # ``coded_detail`` rather than a bare string for the same reason the
+        # middleware does not reuse ``code_for_status(504)``: that maps to
+        # ``UPSTREAM_TIMEOUT``, a claim that a backend reported a failure.
+        # Nothing did — WE cancelled the handler at our own budget, and a
+        # caller sent after the wrong system by the code is the failure
+        # ``REQUEST_BUDGET_EXCEEDED`` was minted for. Top-level ``detail``
+        # stays the same plain sentence, including the header name the
+        # retry contract turns on.
         raise HTTPException(
             status_code=504,
-            detail=(
-                "bulk write timed out before completing; retry with "
-                f"the same {BULK_ATTEMPT_ID_HEADER} to recover any "
-                "committed items."
+            detail=coded_detail(
+                REQUEST_BUDGET_EXCEEDED,
+                (
+                    "bulk write timed out before completing"
+                    + (f" while running {attribution['phase']}" if attribution["phase"] else "")
+                    + f"; retry with the same {BULK_ATTEMPT_ID_HEADER} to recover any "
+                    "committed items."
+                ),
+                budget_seconds=bulk_budget,
+                elapsed_seconds=elapsed,
+                path="/api/v1/memories/bulk",
+                **attribution,
             ),
         )
     except PermanentStorageWriteError as exc:

@@ -1770,20 +1770,27 @@ async def create_memories_bulk(
             # slow provider surfaces here as a bare cancellation that names
             # nothing — and at the strong-embed budget of 8s it always would,
             # since one provider request may run 25s.
-            async with asyncio.timeout(embed_timeout):
-                valid_embeddings = await get_embeddings_batch(
-                    [items[i].content for i in embed_indices],
-                    tenant_config,
-                    budget_s=embed_timeout,
-                    # Reached only when inline_embedding is on or the item is
-                    # write_mode="strong". The caller synchronously awaits this
-                    # batch in BOTH cases, which is what makes background=False
-                    # correct. The consequence of failure differs, though: under
-                    # inline_embedding the handler below fails the request
-                    # outright, while a deferred deployment with a strong item
-                    # logs and falls through to the backfill path.
-                    background=False,
-                )
+            # ``phase`` as well as the two deadlines: this route enforces its
+            # own budget (it opts out of RequestTimeoutMiddleware), and until
+            # this hop announced itself a bulk 504 that burned its 90s here
+            # named nothing at all — the same undiagnosable failure #1707 fixed
+            # on /search. "embed" not "embed.query": this is the batch write
+            # hop, not the shared single-vector query hop.
+            with phase("embed.bulk"):
+                async with asyncio.timeout(embed_timeout):
+                    valid_embeddings = await get_embeddings_batch(
+                        [items[i].content for i in embed_indices],
+                        tenant_config,
+                        budget_s=embed_timeout,
+                        # Reached only when inline_embedding is on or the item is
+                        # write_mode="strong". The caller synchronously awaits this
+                        # batch in BOTH cases, which is what makes background=False
+                        # correct. The consequence of failure differs, though: under
+                        # inline_embedding the handler below fails the request
+                        # outright, while a deferred deployment with a strong item
+                        # logs and falls through to the backfill path.
+                        background=False,
+                    )
         except Exception as exc:
             # Inline deployments: this is the only place a row gets its vector, so
             # a failure fails the request rather than persisting vectorless rows.
@@ -1830,8 +1837,14 @@ async def create_memories_bulk(
                     logger.warning("Enrichment failed for bulk item %d", idx)
 
         try:
-            async with asyncio.timeout(BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS):
-                await asyncio.gather(*[_enrich(i) for i in valid_indices])
+            # The other half of the bulk budget that had no name. Enrichment
+            # runs SEQUENTIALLY after embed on this path, so a 504 whose
+            # completed phases hold ``embed.bulk`` and whose cancelled stack
+            # holds ``enrich.bulk`` localises the burn to the LLM fan-out
+            # rather than the provider embed that preceded it.
+            with phase("enrich.bulk"):
+                async with asyncio.timeout(BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS):
+                    await asyncio.gather(*[_enrich(i) for i in valid_indices])
         except TimeoutError:
             logger.warning(
                 "Bulk enrichment exceeded %ss budget; proceeding with partial results",
