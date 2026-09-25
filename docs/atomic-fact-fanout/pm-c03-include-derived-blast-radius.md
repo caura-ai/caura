@@ -138,8 +138,27 @@ it only returns a shorter, cleaner list.
 server-side filter worth building: the CEO's measurement reports ~24 derived of
 **85 requested** rows, on a run named `caura-bulk-2k-top50-sess2`. Getting 85
 rows back means the candidate pool was not exhausted — there *were* more rows to
-promote. So filtering there genuinely promotes real memories, and the 79.8% →
-82.2% (+2.4pp) result is a ranking gain, not just a tidier payload.
+promote. So filtering there genuinely promotes real memories rather than just
+tidying the payload.
+
+**The +2.4pp figure that motivated this needs three qualifications, and none of
+them was stated when this document first landed.** It is a *within-run* delta
+(79.8% → 82.2%) on one named session, `caura-bulk-2k-top50-sess2`, on
+PersonaMem's store. (1) It was measured **client-side**, before the server-side
+exclusion that refills `top_k` existed — so roughly 24 rows were deleted from 85
+and not backfilled, against a thinner context than a store that never had them.
+**+2.4pp is therefore a floor, not an unbiased estimate of what the shipped
+server-side filter is worth.** (2) `TrackRecalls` bumps `recall_count` on every
+returned row, children included, and it feeds the score; query-time filtering
+cannot undo a counter children already accrued. (3) That store's measurements
+are themselves under review — its headline figure has not reproduced across two
+later runs (`pm-0918-c-01`, `pm-0918-c-05`), so any number taken from it
+inherits that doubt.
+
+It should not be quoted as the value of this feature, and it is not the
+justification for it. The mechanism is: derived rows compete for `top_k` slots
+they were never meant to occupy, and filtering before the trim returns those
+slots to real memories. That argument stands without any percentage.
 
 **What this corpus therefore cannot tell you:** how much of a *typical* store is
 derived, or how much of a typical top-50 they occupy. Nothing here should be
@@ -257,8 +276,10 @@ reaching for, today, with no API change.
 The reasoning is that this is the choice that makes the decision reversible
 rather than the choice that settles it:
 
-- It gives the CEO exactly what was asked for, immediately, and the +2.4pp on
-  the PersonaMem store without waiting for a contract event.
+- It gives the CEO exactly what was asked for, immediately, and whatever the
+  filter is worth on the PersonaMem store without waiting for a contract event.
+  (That store's +2.4pp is a within-run floor, not an estimate — see the three
+  qualifications above.)
 - `search.*` is an existing per-tenant boolean namespace
   (`organization_settings.py:657-661`: `strict_fleet_scoping`, `recall_boost`,
   `graph_retrieval`, `entity_retrieval`). `search.include_derived` is one entry
