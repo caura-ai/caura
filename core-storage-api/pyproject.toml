@@ -10,7 +10,13 @@ dependencies = [
     # exact version; this range only bounds future re-locks.
     "fastapi>=0.141.1,<1",
     "uvicorn[standard]>=0.51.0,<1",
-    "sqlalchemy[asyncio]>=2.0.51,<3",
+    # Capped below 2.1, which types Select and Row differently: select(Memory)
+    # is Select[Memory] there, not Select[tuple[Memory]], so this package's
+    # annotations fail mypy against it. The committed uv.lock pins 2.0.x, which
+    # is what the image ships; CI and the CONTRIBUTING setup install without the
+    # lock, so uncapped they would type-check a 2.1 that nothing ships. Moving to
+    # 2.1 is its own change: re-lock with core-api and update the annotations.
+    "sqlalchemy[asyncio]>=2.0.51,<2.1",
     # SQLAlchemy[asyncio] pulls in greenlet. greenlet 3.5.0 shipped wheels for
     # macOS/Windows ARM only (no Linux x86_64) which broke the Linux runner, but
     # 3.5.1 restored the Linux x86_64 wheels — so the old <3.5.0 cap is lifted to
