@@ -10,6 +10,23 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.20.0](https://github.com/caura-ai/caura/compare/backend-v3.19.2...backend-v3.20.0) (2026-09-26)
+
+
+### Features
+
+* **llm:** add Atlas Cloud provider ([#1510](https://github.com/caura-ai/caura/issues/1510)) ([0ee34f4](https://github.com/caura-ai/caura/commit/0ee34f4cbf8d590ca8f8b209493e950c6402817c))
+
+
+### Bug Fixes
+
+* **api:** align ConflictOut OpenAPI response with runtime schema fields ([#1536](https://github.com/caura-ai/caura/issues/1536)) ([1f929dc](https://github.com/caura-ai/caura/commit/1f929dcef4d8d909600b1d336088172ccc42d1db))
+* **client-python:** ship the Apache-2.0 LICENSE in the published package ([#1031](https://github.com/caura-ai/caura/issues/1031)) ([820d60b](https://github.com/caura-ai/caura/commit/820d60b315ec89c623f315392046a88e3852dd82))
+* **client-ts:** ship the Apache-2.0 LICENSE in the npm package ([#1032](https://github.com/caura-ai/caura/issues/1032)) ([26231d4](https://github.com/caura-ai/caura/commit/26231d4c477d826161b8b3acc3868ea22a3adaa7))
+* **contradiction:** give the forward chain-edge writes the CAS their comments claimed ([#1727](https://github.com/caura-ai/caura/issues/1727)) ([4599871](https://github.com/caura-ai/caura/commit/45998718d1dce12b8b27925080857a926cdbada1))
+* **plugin:** stop re-requesting agent keys after the provision route 404s ([#1718](https://github.com/caura-ai/caura/issues/1718)) ([b5fe391](https://github.com/caura-ai/caura/commit/b5fe3911047379cd812373a4e7e47a41e6d8f909))
+* **worker:** stop warning that the async path does not fan out — it has since A70 (oss-0924-m-03) ([#1724](https://github.com/caura-ai/caura/issues/1724)) ([cb84511](https://github.com/caura-ai/caura/commit/cb84511e8ffbe42bfb6e37fa2915a907bf6a3822))
+
 ## [3.19.2](https://github.com/caura-ai/caura/compare/backend-v3.19.1...backend-v3.19.2) (2026-09-25)
 
 
