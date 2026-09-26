@@ -167,14 +167,27 @@ async def _enforce_author_trust(
 def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple[str, bool]:
     """Return ``(caller_agent_id, verified)`` for the request.
 
-    ``verified=True`` means the gateway cryptographically established
-    the caller's agent identity (an agent-scoped credential whose
-    ``kind=agent_key`` populated ``auth.agent_id``). ``verified=False``
-    means the identity
-    is asserted via the ``X-Agent-ID`` header alone — which is what
-    happens when a non-agent-scoped (admin / tenant) key is in use.
+    ``verified=True`` is INTENDED to mean the gateway cryptographically
+    established the caller's agent identity (an agent-scoped credential whose
+    ``kind=agent_key`` populated ``auth.agent_id``), and ``verified=False``
+    that the identity is asserted via the ``X-Agent-ID`` header alone — which
+    is what happens when a non-agent-scoped (admin / tenant) key is in use.
     Unverified identities are still accepted but with stricter trust
     gating downstream — see ``_effective_min_for_caller``.
+
+    WHAT IT ACTUALLY MEASURES, and the gap is load-bearing: this reads the
+    PRESENCE of ``auth.agent_id``, not its provenance, and ``auth.py`` builds
+    that attribute from the raw ``X-Agent-ID`` header on more than one path.
+    On the shared-``CAURA_API_KEY`` path (``auth.py`` Path 2, :584) the header
+    is honoured with no gateway-secret check, so ``auth.agent_id`` IS the
+    unverified header and this helper reports ``verified=True`` for it — the
+    floor bump below is skipped for a credential the admin key would have been
+    refused on. Measured both ways in
+    ``core-api/scripts/repro_path2_keystone_verified.py``; the decision on
+    whether to close it is open in
+    ``docs/plans/rest-mcp-agent-identity-asymmetry.md`` (row ``oss-0922-m-03``).
+    Paths 1 and 3 discard the header, and Path 4 gates it on
+    ``X-Gateway-Secret``, so the promise above holds everywhere but Path 2.
 
     Mismatch rejection: when both signals are present and disagree,
     the caller is treated as a spoofing attempt and rejected outright
