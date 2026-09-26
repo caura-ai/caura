@@ -1,0 +1,25 @@
+name: Collaboration clients
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4
+        with:
+          version: "0.9.26"
+          python-version: "3.13"
+      - name: Frozen client install and tests
+        working-directory: clients/collaboration
+        run: |
+          uv lock --check
+          uv sync --frozen --all-packages
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+          uv run --no-sync pytest --cov=caura_bus_core --cov=caura_bus_mcp --cov=caura_bus_cli --cov=caura_bus_adapter --cov-fail-under=70
+          uv build --all-packages
