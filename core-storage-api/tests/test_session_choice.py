@@ -259,7 +259,7 @@ def test_the_writer_session_population_is_pinned() -> None:
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 137, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 138, f"{len(methods)} methods open a writer session"
     assert len(pure) == 64, f"{len(pure)} of them show no write marker"
 
 
