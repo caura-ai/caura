@@ -22,17 +22,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from core_api import request_phase
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings as app_settings
 from core_api.constants import INTERVIEW_EVENT_MAX_CHARS, INTERVIEW_MAX_EVENTS_PER_SUBMIT
 from core_api.errors import (
     AUTH_FEATURE_DISABLED,
+    REQUEST_BUDGET_EXCEEDED,
     coded_detail,
 )
 from core_api.schemas import STRICT_WRITE_BODY
@@ -145,6 +149,7 @@ async def submit_interview(
     """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
+    body.agent_id = canonical_service_agent_id(body.agent_id)
 
     tenant_id = body.tenant_id or auth.tenant_id
     if not tenant_id:
@@ -223,24 +228,59 @@ async def submit_interview(
     # watermark advances only after the bulk write commits, the plugin
     # never prunes on error, and the deterministic attempt id dedups any
     # rows that did land before the deadline.
+    #
+    # ax-0917-h-01/h-02 follow-up: opting out of the blanket middleware also
+    # opted this route out of the phase attribution that middleware arms, so
+    # its 504 said the deadline passed and nothing about which of the two very
+    # different halves passed it — the map-phase LLM chain or the bulk write
+    # it feeds. ``own_deadline`` arms the same recorder against this route's
+    # own budget.
+    interview_budget = app_settings.interview_request_timeout_seconds
+    started_at = time.monotonic()
     try:
-        result = await asyncio.wait_for(
-            run_interview(
-                tenant_id=tenant_id,
-                fleet_id=body.fleet_id,
-                agent_id=body.agent_id,
-                node_id=body.node_id,
-                command_id=body.command_id,
-                cursor_from=body.cursor_from,
-                cursor_to=body.cursor_to,
-                events=[ev.model_dump(mode="json") for ev in body.events],
-            ),
-            timeout=app_settings.interview_request_timeout_seconds,
-        )
+        with request_phase.own_deadline(interview_budget) as phases:
+            result = await asyncio.wait_for(
+                run_interview(
+                    tenant_id=tenant_id,
+                    fleet_id=body.fleet_id,
+                    agent_id=body.agent_id,
+                    node_id=body.node_id,
+                    command_id=body.command_id,
+                    cursor_from=body.cursor_from,
+                    cursor_to=body.cursor_to,
+                    events=[ev.model_dump(mode="json") for ev in body.events],
+                ),
+                timeout=interview_budget,
+            )
     except TimeoutError:
+        attribution = phases.snapshot()
+        elapsed = round(time.monotonic() - started_at, 3)
+        logger.warning(
+            "interview exceeded its request budget",
+            extra={
+                "budget_seconds": interview_budget,
+                "elapsed_seconds": elapsed,
+                "path": "/api/v1/interview/submit",
+                "phase": attribution["phase"],
+                "phases_cancelled": attribution["phases_cancelled"],
+                "phases_completed": attribution["phases_completed"],
+            },
+        )
+        # ``REQUEST_BUDGET_EXCEEDED`` rather than the status-derived
+        # ``UPSTREAM_TIMEOUT``: this deadline is ours and no upstream reported
+        # anything, the same distinction the middleware's 504 draws.
         raise HTTPException(
             status_code=504,
-            detail="interview exceeded its request budget; window not consumed",
+            detail=coded_detail(
+                REQUEST_BUDGET_EXCEEDED,
+                "interview exceeded its request budget"
+                + (f" while running {attribution['phase']}" if attribution["phase"] else "")
+                + "; window not consumed",
+                budget_seconds=interview_budget,
+                elapsed_seconds=elapsed,
+                path="/api/v1/interview/submit",
+                **attribution,
+            ),
         )
 
     if result["status"] == "failed":

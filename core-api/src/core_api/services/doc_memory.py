@@ -80,7 +80,7 @@ import logging
 
 from fastapi import HTTPException
 
-from core_api.agent_ids import DOC_INDEXER_AGENT_ID
+from core_api.agent_ids import DOC_INDEXER_AGENT_ID, canonical_service_agent_id
 from core_api.constants import CHUNKING_THRESHOLD_CHARS
 from core_api.services.doc_indexing import DocMemorySpec, doc_provenance
 
@@ -114,7 +114,7 @@ async def resolve_doc_memory_agent(
     """
     from core_api.services.agent_service import get_or_create_agent
 
-    agent_id = caller_agent_id or DOC_INDEXER_AGENT_ID
+    agent_id = canonical_service_agent_id(caller_agent_id or DOC_INDEXER_AGENT_ID)
     await get_or_create_agent(
         tenant_id,
         agent_id,

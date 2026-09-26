@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
@@ -860,6 +861,52 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 
     body = {"detail": legacy_detail, **make_error_payload(code, message, details)}
     return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Give the router's own 404 the envelope every other error already has.
+
+    The handler above covers ``fastapi.HTTPException`` — everything a route
+    raises. It does not cover the 404 Starlette's router raises for a path that
+    matched no route at all, which is a different class and so arrived at the
+    caller as a bare ``{"detail": "Not Found"}``: no code, and a shape nothing
+    else on this surface uses. A client branching on ``error.code`` got nothing
+    from the one response it is most likely to meet while finding its way
+    around (ax-0917-m-13 hit it guessing ``/documents/{collection}/{doc_id}``).
+
+    A 404 here also means something specific — "no such route", not "no such
+    row" — so it carries ``NO_SUCH_ROUTE`` rather than ``NOT_FOUND``. A caller
+    that cannot tell those apart retries against a path that will never exist,
+    or concludes its data is gone when only its URL was wrong.
+
+    And since the server knows every route it serves, the response names the
+    nearest ones. The guess is the question; an unadorned 404 answers only
+    "not that" and leaves the caller to guess again.
+    """
+    from core_api.errors import make_error_payload
+    from core_api.route_suggestions import route_table, suggest_routes
+
+    if exc.status_code != 404 or request.scope.get("route") is not None:
+        # Anything the router raised that is not an unmatched path keeps the
+        # generic mapping; only the unmatched case has a route to suggest.
+        return await http_exception_handler(request, exc)  # type: ignore[arg-type]
+
+    path = request.scope.get("path", "")
+    details: dict = {"path": path, "method": request.method}
+    suggestions = suggest_routes(path, route_table(app))
+    if suggestions:
+        details["did_you_mean"] = suggestions
+
+    message = f"No route matches {request.method} {path}."
+    if suggestions:
+        message += " Closest registered routes are in details.did_you_mean."
+
+    body = {
+        "detail": exc.detail,  # back-compat: the old bare shape is preserved
+        **make_error_payload("NO_SUCH_ROUTE", message, details),
+    }
+    return JSONResponse(body, status_code=404, headers=getattr(exc, "headers", None))
 
 
 @app.exception_handler(RequestValidationError)

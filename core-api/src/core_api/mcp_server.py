@@ -27,9 +27,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from common import duplicate_memory
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from core_api import request_phase
 from core_api.agent_ids import (
     DEFAULT_AGENT_ID,
     AgentIdentity,
+    canonical_service_agent_id,
     effective_read_agent_id,
     effective_write_agent_id,
 )
@@ -66,6 +68,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     get_or_create_agent,
+    lookup_agent,
     resolve_write_agent,
 )
 
@@ -513,7 +516,9 @@ class MCPAuthMiddleware:
             # and the delete trust gate. Use the value the resolution above
             # decided; only Path 4 sets it True.
             agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
-            _agent_id_var.set(AgentIdentity(agent_header) if agent_header else None)
+            _agent_id_var.set(
+                AgentIdentity(canonical_service_agent_id(agent_header)) if agent_header else None
+            )
 
             readable_header = headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
             if readable_header:
@@ -962,22 +967,76 @@ class _InstrumentedMCPServer(MCPServer):
             name = "caura_" + name.removeprefix("memclaw_")  # legacy-name-floor: floor
         t0 = time.perf_counter()
         status = "ok"
-        try:
-            return await super().call_tool(name, arguments, context)
-        except Exception:
-            status = "error"
-            raise
-        finally:
-            op = arguments.get("op") if isinstance(arguments, dict) else None
-            capability = name.removeprefix("caura_") if isinstance(name, str) else str(name)
-            record_usage(
-                capability=capability,
-                op=op if isinstance(op, str) else None,
-                transport="mcp",
-                tenant_id=_get_tenant(),
-                status=status,
-                duration_ms=(time.perf_counter() - t0) * 1000.0,
-            )
+        # ax-0917-h-01/h-02 follow-up. This mount is skipped by
+        # ``RequestTimeoutMiddleware`` (``is_mcp_path``), so until now nothing
+        # armed the phase recorder on the surface agents actually use — and
+        # ``phase()`` is a no-op with no recorder bound, which means every hop
+        # the REST path names was anonymous here. ``call_tool`` is the single
+        # dispatch point for ``tools/call`` and already owns a try/finally, so
+        # it is where the recorder goes.
+        #
+        # Armed with NO budget, deliberately: this transport has no deadline
+        # of its own (see ``_mcp_no_deadline_note`` below), so there is no
+        # clock to sort phases against and nothing here cancels anything. What
+        # the recorder buys is the failure path — a storage read that finally
+        # gives up at the httpx pool timeout, or a client that disconnects and
+        # cancels the call — which used to arrive as an exception with no
+        # indication of which hop it came from.
+        with request_phase.own_deadline(None) as phases:
+            try:
+                return await super().call_tool(name, arguments, context)
+            except BaseException as exc:
+                # ``BaseException``: a client disconnect cancels this call, and
+                # "the agent's MCP call hung until it gave up" is precisely the
+                # h-01 shape on this transport. ``CancelledError`` is not an
+                # ``Exception``, so the narrower clause below would miss it.
+                status = "error"
+                attribution = phases.snapshot()
+                logger.warning(
+                    "MCP tool call failed",
+                    extra={
+                        "tool": name if isinstance(name, str) else str(name),
+                        "error_type": type(exc).__name__,
+                        "elapsed_seconds": round(time.perf_counter() - t0, 3),
+                        "phase": attribution["phase"],
+                        "phases_cancelled": attribution["phases_cancelled"],
+                        "phases_completed": attribution["phases_completed"],
+                    },
+                )
+                raise
+            finally:
+                op = arguments.get("op") if isinstance(arguments, dict) else None
+                capability = name.removeprefix("caura_") if isinstance(name, str) else str(name)
+                record_usage(
+                    capability=capability,
+                    op=op if isinstance(op, str) else None,
+                    transport="mcp",
+                    tenant_id=_get_tenant(),
+                    status=status,
+                    duration_ms=(time.perf_counter() - t0) * 1000.0,
+                )
+
+
+# ── Why this transport has no deadline to attribute ──
+#
+# Recorded because its absence is load-bearing in ``call_tool`` above, and is
+# a finding in its own right.
+#
+# ``RequestTimeoutMiddleware`` skips ``/mcp`` on purpose — the mount serves
+# long-lived streaming responses and a blanket cancel would cut them. The
+# consequence is that a ``tools/call`` has NO server-side budget: the only
+# things that can end a stalled one are the storage client's own httpx
+# timeouts and the client hanging up.
+#
+# That matters most at ``per_tenant_storage_slot``, whose docstring justifies
+# an UNBOUNDED acquire queue with "the outer request budget already caps total
+# wall time". On REST that is true (45s, or the bulk route's 90s). On this
+# transport there is no outer request budget, so the stated cap does not
+# exist and the acquire can wait with nothing to stop it — ``caura_recall``
+# reaches that exact semaphore through ``search_memories``. Bounding it is a
+# load-shedding decision, not an attribution one, so it is deliberately NOT
+# made here; the recorder above at least makes the wait nameable when the hop
+# does eventually fail.
 
 
 mcp = _InstrumentedMCPServer(
@@ -1275,6 +1334,8 @@ async def caura_recall(
     # rather than inline because this one reaches ``enforce_fleet_read_many``
     # below, so it must be an ``AgentIdentity`` and not a bare string.
     agent_id = effective_read_agent_id(_get_agent_id(), agent_id)
+    if filter_agent_id is not None:
+        filter_agent_id = canonical_service_agent_id(filter_agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # Clamped at BOTH ends. ``min`` alone let a negative top_k through to the
@@ -1305,13 +1366,12 @@ async def caura_recall(
         # ``_mcp_session`` / RLS GUCs — tenant isolation is carried explicitly:
         # the agent lookup + write quota pin to the HOME tenant, while the READ
         # (search + audit) widens via ``readable_tenant_ids`` exactly as before.
-        sc = get_storage_client()
         # D13 — same fix as REST /recall: bill the recall counter (flag-gated).
         await check_and_increment(tenant_id, recall_operation())
         config = await resolve_config(tenant_id)
         # Agent profile + fleet-scope signals are HOME-tenant only — never
         # widened by the readable set.
-        _ag = await sc.get_agent(agent_id, tenant_id)
+        _ag = await lookup_agent(tenant_id, agent_id)
         agent_profile = None
         if _ag:
             agent_profile = _ag.get("search_profile")
@@ -1439,6 +1499,20 @@ async def caura_recall(
                 query,
                 config,
                 top_k=capped_top_k,
+                # ax-0917-h-03 — no ``items`` inside the brief. This payload
+                # ALREADY carries the identical rows twice, under ``results``
+                # and its permanent ``items`` alias above; the brief used to add
+                # two more, so one ``include_brief=true`` call shipped the same
+                # result set FOUR times into an agent's context window. The
+                # brief keeps ``memories``, which is /recall's canonical key and
+                # the one both first-party SDKs read.
+                #
+                # Safe to change here in a way the REST default is not:
+                # ``docs/public-api-stability.md`` pins MCP tool names,
+                # parameter names and op-dispatch values — not the shape of a
+                # tool's JSON body — while it explicitly makes REST response
+                # shapes part of the contract.
+                items_alias=False,
             )
         return _with_latency(_dumps(payload), t0)
     except HTTPException as e:
@@ -1462,9 +1536,24 @@ async def caura_write(
     visibility: Annotated[str | None, Field(description="scope_team|scope_org|scope_agent.")] = None,
     memory_type: Annotated[str | None, Field(description="Type (single only).")] = None,
     weight: Annotated[float | None, Field(description="0-1 (single only).")] = None,
-    source_uri: Annotated[str | None, Field(description="Source URI (single only).")] = None,
-    run_id: Annotated[str | None, Field(description="Run id (single only).")] = None,
-    metadata: Annotated[dict | None, Field(description="Metadata (single only).")] = None,
+    # oss-0814-l-08 paid for the ``metadata`` clause below out of these two,
+    # which only restated their own parameter names ("Source URI", "Run id") —
+    # the fixtures README's stated preference over raising ``CEILING_TOKENS``.
+    # Net -3 tokens against the pre-change surface (5317 -> 5314).
+    source_uri: Annotated[str | None, Field(description="Single only.")] = None,
+    run_id: Annotated[str | None, Field(description="Single only.")] = None,
+    metadata: Annotated[
+        dict | None,
+        # oss-0814-l-08: say that these keys are the caller's. "LLM fills gaps;
+        # agent-provided values always win" has been true of metadata since C25
+        # and was stated only in source comments, so an agent reading the tool
+        # surface had nothing to go on — and the safe assumption from outside,
+        # that a field the platform also writes will be overwritten, is the
+        # wrong one. Six tokens, because the whole surface is on the context
+        # budget of every agent turn; ``MemoryCreate.metadata`` carries the full
+        # statement for anyone reading the REST schema.
+        Field(description="Metadata (single only). Your summary/tags survive enrichment."),
+    ] = None,
     status: Annotated[str | None, Field(description="Status (single only).")] = None,
     write_mode: Annotated[
         str | None,
@@ -1833,7 +1922,7 @@ async def caura_manage(
     # unauthenticated caller would inherit that identity's scope. ``None`` ⇒
     # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
     caller_agent_id = _get_agent_id()
-    agent_id = caller_agent_id or agent_id
+    agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     if op in {"update", "transition", "delete", "bulk_delete"} and (
         refuse := _refuse_default_agent_on_gateway(agent_id)
     ):
@@ -2217,7 +2306,7 @@ async def caura_tune(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -2445,7 +2534,7 @@ async def caura_doc(
     # Raw authenticated identity for the delete trust gate (None ⇒ no agent
     # context). Must not fall back to the ``mcp-agent`` default.
     caller_agent_id = _get_agent_id()
-    agent_id = caller_agent_id or agent_id
+    agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     # A29 — refuse the default identity on every op. Was previously
     # write-only (A14); reads inherit the same contract because the
     # silent-empty-result UX is its own class of paper cut, and ``delete``
@@ -3201,7 +3290,9 @@ async def caura_list(
     capped_limit = max(1, min(int(limit), 50))
 
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
+    if written_by is not None:
+        written_by = canonical_service_agent_id(written_by)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3415,7 +3506,7 @@ async def caura_stats(
         )
 
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # Trust ladder resolves by TARGET (spec: L1 = read within own fleet, L2 =
@@ -3518,7 +3609,7 @@ async def caura_insights(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3704,7 +3795,7 @@ async def caura_evolve(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3910,7 +4001,7 @@ async def caura_keystones(
     if err := _check_auth():
         return err
     tenant_id = _get_tenant()
-    agent_id_effective = _get_agent_id() or agent_id
+    agent_id_effective = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id_effective):
         return _with_latency(refuse, t0)
 
@@ -4022,7 +4113,9 @@ async def caura_keystones_set(
         )
 
     tenant_id = _get_tenant()
-    caller_agent_id = _get_agent_id() or "mcp-agent"
+    caller_agent_id = canonical_service_agent_id(_get_agent_id() or "mcp-agent")
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     if refuse := _refuse_default_agent_on_gateway(caller_agent_id):
         return _with_latency(refuse, t0)
 

@@ -65,6 +65,17 @@ logger = logging.getLogger(__name__)
 # ── Tunables (mirrors org_settings.skills_factory.forge.*) ────────
 
 
+#: How many clusters a run may attempt per write it is allowed to make, when
+#: ``ForgeConfig.max_clusters_per_run`` is left at its "derive" default.
+#:
+#: 3 buys a run two failed clusters for every one that lands — enough headroom
+#: that a handful of permanently-doomed clusters at the head of the order stop
+#: hiding everything behind them (oss-0814 L-13), while still bounding the run's
+#: LLM spend at a small multiple of the write budget rather than at "however
+#: many clusters the window happened to produce".
+DEFAULT_CLUSTER_ATTEMPT_MULTIPLIER = 3
+
+
 @dataclass(frozen=True)
 class ForgeConfig:
     """Resolves from ``org_settings.skills_factory.forge.*`` at call
@@ -77,7 +88,19 @@ class ForgeConfig:
     min_cluster_size: int = 3
     min_distinct_agents: int = 3
     freshness_window_days: int = 14
+    # Ceiling on candidates this run may WRITE. Only a successful
+    # ``candidate_writer`` call spends it — see the loop in
+    # :func:`run_forge_distill` and ``max_clusters_per_run`` below.
     max_writes_per_run: int = 20
+    # Ceiling on clusters this run may ATTEMPT. Each attempt costs one
+    # distill LLM call whether or not it ends in a write, so this — not
+    # ``max_writes_per_run`` — is the knob that bounds a run's spend.
+    #
+    # ``0`` means "derive": ``max_writes_per_run *
+    # DEFAULT_CLUSTER_ATTEMPT_MULTIPLIER``. Derived rather than a flat
+    # literal so a tenant that raises its write budget gets headroom
+    # to match instead of silently re-capping itself at the old value.
+    max_clusters_per_run: int = 0
     # Entity-Jaccard threshold for cluster membership. 0.4 means a
     # trace joins a cluster if it shares ≥40% of its entities with
     # the cluster's entity union.
@@ -91,6 +114,20 @@ class ForgeConfig:
     # falling back to Sentinel's module defaults.
     body_max_bytes: int = 40_000
     description_max_bytes: int = 160
+
+    @property
+    def effective_max_clusters_per_run(self) -> int:
+        """Resolved attempt ceiling: the explicit override when set,
+        else ``max_writes_per_run`` scaled by
+        :data:`DEFAULT_CLUSTER_ATTEMPT_MULTIPLIER`.
+
+        Floored at ``max_writes_per_run``: an override BELOW the write
+        budget would make the write budget unreachable, which is the
+        conflation this pair of knobs exists to undo.
+        """
+        if self.max_clusters_per_run > 0:
+            return max(self.max_clusters_per_run, self.max_writes_per_run)
+        return self.max_writes_per_run * DEFAULT_CLUSTER_ATTEMPT_MULTIPLIER
 
 
 # ── Injected callables ────────────────────────────────────────────
@@ -185,6 +222,17 @@ class ForgeRunResult:
     candidates_skipped_existing: int
     started_at: datetime
     run_label: str
+    # Clusters this run actually entered the distill loop for — i.e. the
+    # number of distill LLM calls it paid for. Bounded by
+    # ``ForgeConfig.effective_max_clusters_per_run``. Compare against
+    # ``clusters_eligible``: a run where ``clusters_attempted <
+    # clusters_eligible`` left clusters unreached, and (because cluster
+    # order is deterministic) will leave the SAME ones unreached next
+    # run unless the ones ahead of them start succeeding.
+    #
+    # Defaulted, unlike the skip counters: this is a diagnostic, and an
+    # un-passed 0 reads as "no information", not as a false all-clear.
+    clusters_attempted: int = 0
     candidate_doc_ids: list[str] = field(default_factory=list)
 
 
@@ -210,6 +258,13 @@ async def run_forge_distill(
     Idempotent against ``skills`` by virtue of fingerprint-keyed
     skipping — a re-run with the same lake state writes the same
     candidate ids back.
+
+    Two budgets bound the run, and they are not the same number.
+    ``cfg.max_writes_per_run`` is spent only by a candidate that is
+    actually WRITTEN; ``cfg.max_clusters_per_run`` (derived from it when
+    unset) bounds how many clusters may be ATTEMPTED, which is what
+    bounds the run's LLM spend. A skipped cluster costs an attempt and
+    no write.
 
     ``run_label`` is the audit handle for this tick — surfaced as
     ``origin.run_id`` on every candidate doc Forge produces. The
@@ -278,8 +333,42 @@ async def run_forge_distill(
     skipped_internal_error = 0
     skipped_existing = 0
 
-    # 5. Distill each eligible cluster.
-    for cluster_traces in eligible[: cfg.max_writes_per_run]:
+    # 5. Distill each eligible cluster, under TWO separate budgets.
+    #
+    # ``max_writes_per_run`` bounds work DONE: only a successful
+    # ``candidate_writer`` call spends it. ``max_clusters_per_run``
+    # bounds work ATTEMPTED: every cluster we enter pays for one distill
+    # LLM call before we can know whether it will be written, so that is
+    # the knob that bounds the run's spend.
+    #
+    # These used to be one number. The loop ran over
+    # ``eligible[: cfg.max_writes_per_run]``, so every SKIP — poisoned,
+    # Sentinel-blocked, unparseable, already-``active``, mid-write I/O
+    # failure — consumed a write slot while writing nothing. Cluster
+    # order is deterministic (``_cluster_by_entity_overlap`` iterates
+    # traces in the builder's (run_id, agent_id) order and
+    # ``_gate_clusters`` preserves it), and most skip reasons are
+    # deterministic too: an ``active`` doc at the candidate's slug never
+    # stops existing, a Sentinel path violation in a cluster's content
+    # re-fires every run, a cluster whose distill reliably returns
+    # ``kind='update'`` fails identically forever. So the same doomed
+    # clusters sat at the head of the order, spent the whole budget, and
+    # the clusters behind them were never reached — not "later", ever.
+    # Re-running could not help: the next run rebuilt the same order and
+    # starved the same tail. Only the poisoned bucket was bounded, by
+    # ``forge_rejected_fingerprints``' cooloff (default 30d), and that
+    # bounds one of six reasons.
+    #
+    # The write check is at the TOP of the loop, not after the write, so
+    # a full budget stops us BEFORE buying an LLM call we cannot use.
+    max_attempts = cfg.effective_max_clusters_per_run
+    clusters_attempted = 0
+    for cluster_traces in eligible:
+        if len(written_ids) >= cfg.max_writes_per_run:
+            break
+        if clusters_attempted >= max_attempts:
+            break
+        clusters_attempted += 1
         try:
             candidate_doc = await _distill_cluster(
                 cluster_traces,
@@ -387,6 +476,34 @@ async def run_forge_distill(
         # (tenant_id, collection, doc_id) primary-key shape.
         written_ids.append(candidate_doc["doc_id"])
 
+    # Attempt ceiling hit with clusters still unreached AND write budget
+    # still unspent — i.e. the run stopped because attempts ran out, not
+    # because it had written its fill. With deterministic ordering the
+    # unreached tail is the same tail next run, so this is the operator's
+    # one warning that the attempt ceiling has become a starvation line:
+    # raise ``max_clusters_per_run``, or fix whatever is failing ahead of
+    # it (the skip counters below say which).
+    if (
+        clusters_attempted >= max_attempts
+        and len(eligible) > clusters_attempted
+        and len(written_ids) < cfg.max_writes_per_run
+    ):
+        logger.warning(
+            "forge: attempt ceiling reached — attempted %d of %d eligible cluster(s) "
+            "and wrote %d of %d allowed. %d cluster(s) were never looked at, and "
+            "cluster order is deterministic, so the SAME ones will be skipped next "
+            "run. Raise skills_factory.forge.max_clusters_per_run or clear the "
+            "failures ahead of them (tenant=%s fleet=%s run=%s).",
+            clusters_attempted,
+            len(eligible),
+            len(written_ids),
+            cfg.max_writes_per_run,
+            len(eligible) - clusters_attempted,
+            tenant_id,
+            fleet_id,
+            run_label,
+        )
+
     # The signal H-08 never produced. Per-cluster tracebacks existed even then —
     # the bug was that nothing summarised them, so a tick that mined nothing at
     # all still returned a result the audit row rendered as success. A run that
@@ -407,7 +524,7 @@ async def run_forge_distill(
             "cluster paid for its LLM call before failing. Read the tracebacks above; the "
             "counter is candidates_skipped_internal_error (tenant=%s fleet=%s run=%s).",
             skipped_internal_error,
-            len(eligible[: cfg.max_writes_per_run]),
+            clusters_attempted,
             tenant_id,
             fleet_id,
             run_label,
@@ -422,6 +539,7 @@ async def run_forge_distill(
         labeled_traces=len(labeled),
         clusters_total=len(clusters),
         clusters_eligible=len(eligible),
+        clusters_attempted=clusters_attempted,
         candidates_written=len(written_ids),
         candidates_skipped_poisoned=skipped_poisoned,
         candidates_skipped_sentinel=skipped_sentinel,
@@ -435,7 +553,7 @@ async def run_forge_distill(
     )
     logger.info(
         "forge_run: run_label=%s tenant=%s fleet=%s traces=%d labeled=%d "
-        "clusters=%d eligible=%d written=%d poisoned=%d sentinel=%d "
+        "clusters=%d eligible=%d attempted=%d written=%d poisoned=%d sentinel=%d "
         "distill_errors=%d io_errors=%d internal_errors=%d existing=%d",
         result.run_label,
         result.tenant_id,
@@ -444,6 +562,7 @@ async def run_forge_distill(
         result.labeled_traces,
         result.clusters_total,
         result.clusters_eligible,
+        result.clusters_attempted,
         result.candidates_written,
         result.candidates_skipped_poisoned,
         result.candidates_skipped_sentinel,

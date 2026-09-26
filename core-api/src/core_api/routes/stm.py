@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
 from core_api.constants import (
@@ -260,6 +261,7 @@ async def get_notes(
     # audit, which left the pair lopsided: a peer's notes could not be cleared,
     # only read. Disclosure was the half still open.
     await _enforce_note_owner(auth, tenant_id, agent_id)
+    agent_id = canonical_service_agent_id(agent_id)
     from core_api.services.stm_service import read_notes
 
     notes = await read_notes(tenant_id, agent_id, limit=limit)
@@ -284,6 +286,7 @@ async def clear_notes(
     # The query param must MATCH the authenticated agent identity — an agent
     # credential must not clear a peer agent's notes by naming it.
     await _enforce_note_owner(auth, tenant_id, agent_id)
+    agent_id = canonical_service_agent_id(agent_id)
     from core_api.services.stm_service import clear_notes
 
     _require_cleared(await clear_notes(tenant_id, agent_id))

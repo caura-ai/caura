@@ -19,6 +19,7 @@ from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
 from core_api.constants import STORAGE_CONNECT_TIMEOUT_SECONDS, STORAGE_READ_TIMEOUT_SECONDS
+from core_api.request_phase import phase
 
 logger = logging.getLogger(__name__)
 
@@ -426,11 +427,17 @@ class CoreStorageClient:
             return self._cancel_safe(do_request())
 
         observed_gen = self._pool_generation
-        try:
-            return await retry(_shielded, label=label)
-        except httpx.PoolTimeout:
-            await self._recycle_pools(observed_gen=observed_gen, label=label)
-            return await retry(_shielded, label=label)
+        # ``label`` is already ``"<VERB> <route template>"`` — bounded, no path
+        # params — so it is safe as a phase name and reads as the hop it is.
+        # Wrapping the whole retry policy, not one attempt: a request that
+        # burns the budget across three retries spent that time HERE, and
+        # per-attempt phases would report the last one's few hundred ms.
+        with phase(f"storage.{label}"):
+            try:
+                return await retry(_shielded, label=label)
+            except httpx.PoolTimeout:
+                await self._recycle_pools(observed_gen=observed_gen, label=label)
+                return await retry(_shielded, label=label)
 
     # -- internal helpers ------------------------------------------------
 

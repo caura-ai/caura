@@ -56,6 +56,13 @@ DEFAULT_SETTINGS: dict = {
         "provider": None,
         "model": None,
         "enabled": None,
+        # pm-0918-c-04. MUST be listed here, not only as a ResolvedConfig
+        # property: ``_check_keys`` validates a settings write against this
+        # schema, so a knob absent from it is READ-ONLY — the resolver returns
+        # its default and every attempt to set it raises "Unknown settings
+        # key(s)". A switch nobody can switch is worse than no switch, because
+        # it reads as shipped.
+        "atomic_fact_fanout_enabled": None,
     },
     "recall": {
         "provider": None,
@@ -66,7 +73,9 @@ DEFAULT_SETTINGS: dict = {
         # instead of going along with it. Off (None/False) keeps the recall
         # prompt byte-identical to pre-A64. Evidence: STALE T2 31%->71%
         # overall with the guard; true-premise control +1.9pp overall
-        # (benchmark/a57-recall-experiments-findings.md).
+        # (findings: ``<multi-repo-workspace-root>/benchmark/
+        # a57-recall-experiments-findings.md`` -- WORKSPACE ROOT, one level
+        # above this repo; not in this repo on any ref).
         "premise_guard": None,
     },
     "embedding": {
@@ -138,6 +147,28 @@ DEFAULT_SETTINGS: dict = {
         # ``entity_linking.auto_entity_linking_enabled``) and relation inference
         # keep populating the graph, so flipping this back on needs no backfill.
         "entity_retrieval": None,
+        # pm-0918-c-03 — whether ``/search`` returns atomic-fact fan-out children
+        # (A70) alongside the rows the caller wrote. ``None`` resolves to the
+        # global default, which is TRUE: today's behaviour, unchanged for a
+        # tenant that never touches this.
+        #
+        # LISTED HERE, not only as a ``ResolvedConfig`` property, and the sibling
+        # row is why: ``_check_keys`` validates a settings write against this
+        # schema, so a knob missing from it is READ-ONLY — ``PUT /settings``
+        # answers 422 "Unknown settings key(s)" while the resolver cheerfully
+        # serves the default. pm-0918-c-04 shipped exactly that and it read as
+        # working. ``test_the_tenant_default_survives_a_real_settings_put``
+        # exercises the HTTP route rather than building a ``ResolvedConfig``,
+        # because constructing the config object directly is what hid it.
+        #
+        # A tenant crowded by fan-out children sets this to ``false`` and gets
+        # the behaviour of option (c) — exclude by default — for its own store,
+        # without a deploy and without imposing it on every other tenant. That is
+        # the same argument that justified A70's per-tenant write-side switch,
+        # ``enrichment.atomic_fact_fanout_enabled``, and the two are independent:
+        # this one hides existing children from reads, that one stops new ones
+        # being written.
+        "include_derived": None,
         # Tenant-wide default search profile (A47). Any search_profile knob set
         # here (min_similarity, top_k, freshness_floor, ...) becomes the fallback
         # for EVERY agent in the tenant, filling the gap between a per-agent tuned
@@ -332,6 +363,13 @@ DEFAULT_SETTINGS: dict = {
             "freshness_window_days": 14,
             "llm_tokens_per_run": 50_000,
             "max_writes_per_run": 20,
+            # Attempt ceiling: how many clusters one run may distill,
+            # written or not. 0 = derive from ``max_writes_per_run``
+            # (see ``ForgeConfig.effective_max_clusters_per_run``).
+            # This, not ``max_writes_per_run``, is what bounds a run's
+            # LLM spend — every attempted cluster pays for a distill
+            # call before we can know whether it will be written.
+            "max_clusters_per_run": 0,
         },
         # OpenClaw PROPOSAL.md bridge (Phase 5). Default OFF — turning
         # it on only matters once the OpenClaw workspace emitter ships.
@@ -632,6 +670,7 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
 # Expected Python types for leaf values that need validation beyond key presence.
 # Dotted paths match the nested structure in DEFAULT_SETTINGS.
 _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
+    "enrichment.atomic_fact_fanout_enabled": bool,
     "security_audit.schedule_enabled": bool,
     "security_audit.schedule_cron": str,
     "security_audit.alerts_enabled": bool,
@@ -644,6 +683,10 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "search.recall_for_asserted_identity": bool,
     "search.graph_retrieval": bool,
     "search.entity_retrieval": bool,
+    # bool, NOT just "present": a string "false" is TRUTHY, so without this a
+    # tenant that set it off would resolve to ON while the dashboard rendered
+    # their "off" back to them. Same trap as the c-04 switch above.
+    "search.include_derived": bool,
     "crystallizer.auto_crystallize": bool,
     "crystallizer.dedup_threshold": float,
     "crystallizer.min_cluster_size": int,
@@ -677,6 +720,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.forge.freshness_window_days": int,
     "skills_factory.forge.llm_tokens_per_run": int,
     "skills_factory.forge.max_writes_per_run": int,
+    "skills_factory.forge.max_clusters_per_run": int,
     "skills_factory.openclaw_bridge.enabled": bool,
     # Interviewer Phase 1.
     "interviewer.enabled": bool,
@@ -730,6 +774,11 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
     # typo can't pin a DoS-shaped write through the validator.
     "skills_factory.body_max_bytes": (1, 10_000_000),
     "skills_factory.description_max_bytes": (1, 10_000),
+    # 0 is the "derive from max_writes_per_run" sentinel, so the floor is
+    # 0 rather than 1. Upper bound is a spend guard: every attempt buys a
+    # distill LLM call, and 1000 of them in one tick is already far past
+    # any sane window's cluster count.
+    "skills_factory.forge.max_clusters_per_run": (0, 1000),
 }
 
 
@@ -941,6 +990,7 @@ class ResolvedConfig:
             (ProviderName.ANTHROPIC.value, self.anthropic_api_key),
             (ProviderName.GEMINI.value, self.gemini_api_key),
             (ProviderName.OPENROUTER.value, self.openrouter_api_key),
+            (ProviderName.ATLASCLOUD.value, self.atlascloud_api_key),
         ]
         for prov, key in candidates:
             if prov != primary and key:
@@ -959,6 +1009,10 @@ class ResolvedConfig:
     @property
     def openrouter_api_key(self) -> str | None:
         return self._ts.get("api_keys", {}).get("openrouter_api_key") or global_settings.openrouter_api_key
+
+    @property
+    def atlascloud_api_key(self) -> str | None:
+        return self._ts.get("api_keys", {}).get("atlascloud_api_key") or global_settings.atlascloud_api_key
 
     @property
     def gemini_api_key(self) -> str | None:
@@ -1007,6 +1061,26 @@ class ResolvedConfig:
         """
         val = self._ts.get("search", {}).get("entity_retrieval")
         return val if val is not None else global_settings.entity_retrieval_enabled
+
+    @property
+    def search_include_derived(self) -> bool | None:
+        """Whether ``/search`` returns atomic-fact fan-out children (pm-0918-c-03).
+
+        Returns ``None`` — NOT a resolved boolean — when the tenant has not set
+        it, and that is the whole point of the signature. This property is the
+        MIDDLE layer of a three-layer resolution (request flag > tenant setting >
+        ``INCLUDE_DERIVED_DEFAULT``), so it has to be able to say "not set" and
+        let ``resolve_include_derived`` fall through. Collapsing it to ``return
+        val if val is not None else True`` — the shape every neighbour here
+        uses — would make an unset tenant indistinguishable from one that
+        explicitly asked for derived rows, and the global default would then be
+        unreachable and untestable.
+
+        It is also why this is one of the few properties on this class that is
+        not typed ``bool``. Read it through ``resolve_include_derived``; reading
+        it directly and treating a falsy ``None`` as "off" inverts the default.
+        """
+        return self._ts.get("search", {}).get("include_derived")
 
     @property
     def default_search_profile(self) -> dict:
@@ -1065,6 +1139,40 @@ class ResolvedConfig:
         if val is None:
             return CRYSTALLIZER_MIN_CLUSTER_SIZE
         return max(2, int(val))
+
+    @property
+    def atomic_fact_fanout_enabled(self) -> bool:
+        """Create a child memory per extracted atomic fact (default ON).
+
+        A70 shipped this on the strength of a measurement that it almost never
+        fires, taken on conversational content. pm-0918-c-04 asked whether it
+        should be gated off for document-shaped writes, on the theory that
+        2,000-character chunks are the shape it fires on.
+
+        That question is still OPEN. The attempt to settle it against the local
+        corpus failed for reasons worth knowing before anyone tries again: every
+        fan-out child in that database came from benchmark conversation data,
+        the non-benchmark slice produced none at all, and the corpus predates
+        A70 — so it contains no worker-path fan-out, and pre-A70 deferred writes
+        discarded their facts, which reads as "did not fan out". See
+        docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md.
+
+        So this is a switch and not a threshold, because there is no evidence
+        for where a threshold would go — not because the evidence rules one out.
+
+        A switch is worth having regardless of how that question lands: a tenant
+        whose results are crowded by fan-out children turns them off for its own
+        store, immediately, without a deploy and without inheriting a number
+        somebody guessed. Default ON is today's behaviour; changing every
+        tenant's store to address one store's regression would be the wrong
+        default whichever way the measurement eventually goes.
+
+        Off is cheaper but not free of consequence: it skips the children's
+        embeddings and writes, NOT the enrichment call that extracted the facts
+        — that has already happened by the time this is read.
+        """
+        val = self._ts.get("enrichment", {}).get("atomic_fact_fanout_enabled")
+        return val if val is not None else True
 
     # Dedup
     @property

@@ -1,6 +1,6 @@
 [
   {
-    "description": "Structured-document CRUD in named collections. write upserts by collection+doc_id \u2014 include data['summary'] (1-3 dense sentences, intent-focused) to make the doc semantically searchable; omit it to store without indexing. query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over data['summary'] vectors \u2014 pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use caura_write.",
+    "description": "Structured-document CRUD in named collections. write upserts by collection+doc_id \u2014 include data['summary'] (1-3 dense sentences, intent-focused) to make the doc semantically searchable; omit it to store without indexing. Every write also mints a memory carrying the doc's data \u2014 so the body is caura_recall-able with or without a summary \u2014 and delete un-mints it; skills and _-prefixed collections are exempt. query filters by where dict; list_collections enumerates every collection this tenant has (with counts); search runs semantic retrieval over data['summary'] vectors \u2014 pass collection to scope to one (narrow strategy), or omit collection to span every collection in the tenant (broad strategy). Use for structured records (customers, config). For memories use caura_write.",
     "error_codes": [
       "FORBIDDEN",
       "INTERNAL_ERROR",
@@ -13,7 +13,7 @@
     "name": "caura_doc",
     "ops": [
       {
-        "description": "Upsert a document by collection+doc_id. Set data['summary'] to a short (1-3 sentence) intent-focused description to make the doc semantically searchable \u2014 that string (and only that string) is what gets embedded. The full body lives wherever the caller puts it (e.g. data['content']) and is returned in read/search results but is NOT indexed. Good: 'Postgres tuning runbook: vacuum, autovacuum, work_mem.' Bad: '<the first 200 chars of the body>' (truncation is not summarization). Omit summary to store the doc without indexing.",
+        "description": "Upsert a document by collection+doc_id. Set data['summary'] to a short (1-3 sentence) intent-focused description to make the doc semantically searchable \u2014 that string (and only that string) is what gets embedded. The full body lives wherever the caller puts it (e.g. data['content']) and is returned in read/search results but is NOT indexed. Good: 'Postgres tuning runbook: vacuum, autovacuum, work_mem.' Bad: '<the first 200 chars of the body>' (truncation is not summarization). Omit summary to store the doc without indexing. Side effect: the write also mints a memory carrying this document's data, so the body is reachable by caura_recall \u2014 the doc row embeds only data['summary'], so without it the body would be findable by meaning nowhere. This does not depend on summary: a doc with none is invisible to op=search and still mints. Not minted for collection='skills', _-prefixed collections, an empty data, or a payload over the memory size limit.",
         "name": "write",
         "required_params": [
           "collection",
@@ -40,7 +40,7 @@
         "trust_required": 0
       },
       {
-        "description": "Remove a document by collection+doc_id.",
+        "description": "Remove a document by collection+doc_id. Also un-mints its minted memory.",
         "name": "delete",
         "required_params": [
           "collection",
@@ -981,21 +981,21 @@
       },
       {
         "default": null,
-        "description": "Source URI (single only).",
+        "description": "Single only.",
         "name": "source_uri",
         "required": false,
         "type": "str | None"
       },
       {
         "default": null,
-        "description": "Run id (single only).",
+        "description": "Single only.",
         "name": "run_id",
         "required": false,
         "type": "str | None"
       },
       {
         "default": null,
-        "description": "Metadata (single only).",
+        "description": "Metadata (single only). Your summary/tags survive enrichment.",
         "name": "metadata",
         "required": false,
         "type": "dict | None"

@@ -4,7 +4,7 @@ from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.schemas import AgentOut, AgentTrustUpdate, SearchProfileUpdate
-from core_api.services.agent_service import update_trust_level
+from core_api.services.agent_service import lookup_agent, update_trust_level
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import validate_search_profile
 
@@ -32,8 +32,7 @@ async def get_agent(
 ):
     """Get a single agent's details and trust level."""
     auth.enforce_tenant(tenant_id)
-    sc = get_storage_client()
-    agent = await sc.get_agent(agent_id, tenant_id)
+    agent = await lookup_agent(tenant_id, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     return AgentOut.model_validate(agent)
@@ -92,13 +91,14 @@ async def update_agent_fleet(
         raise HTTPException(status_code=400, detail="fleet_id is required")
 
     sc = get_storage_client()
-    agent = await sc.get_agent(agent_id, tenant_id)
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
     old_fleet = agent.get("fleet_id")
-    await sc.update_agent_fleet(agent_id, {"tenant_id": tenant_id, "fleet_id": fleet_id})
-    return {"agent_id": agent_id, "old_fleet_id": old_fleet, "new_fleet_id": fleet_id}
+    stored_agent_id = agent["agent_id"]
+    await sc.update_agent_fleet(stored_agent_id, {"tenant_id": tenant_id, "fleet_id": fleet_id})
+    return {"agent_id": stored_agent_id, "old_fleet_id": old_fleet, "new_fleet_id": fleet_id}
 
 
 @router.get("/agents/{agent_id}/tune", response_model=AgentOut)
@@ -109,8 +109,7 @@ async def get_agent_tune(
 ):
     """Get an agent's current search profile (retrieval tuning parameters)."""
     auth.enforce_tenant(tenant_id)
-    sc = get_storage_client()
-    agent = await sc.get_agent(agent_id, tenant_id)
+    agent = await lookup_agent(tenant_id, agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     return AgentOut.model_validate(agent)
@@ -151,12 +150,13 @@ async def patch_agent_tune(
     # not mention are written back from a stale snapshot, quietly reverting a
     # tune that had already landed. A read that feeds a write belongs on the
     # primary for the same reason the re-fetches below do.
-    agent = await sc.get_agent(agent_id, tenant_id, read=False)
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
 
     if reset:
-        cleared = await sc.reset_search_profile(agent_id, tenant_id)
+        stored_agent_id = agent["agent_id"]
+        cleared = await sc.reset_search_profile(stored_agent_id, tenant_id)
         if not cleared:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         # Storage answers the reset with ``{"ok": true}``, not the agent row, so
@@ -169,7 +169,7 @@ async def patch_agent_tune(
         # can still see the pre-reset profile, which is exactly the value this
         # branch says it must never hand back — or miss the row entirely and
         # turn a successful reset into a 404.
-        refreshed = await sc.get_agent(agent_id, tenant_id, read=False)
+        refreshed = await sc.get_agent(stored_agent_id, tenant_id, read=False)
         if not refreshed:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
         return AgentOut.model_validate(refreshed)
@@ -185,7 +185,7 @@ async def patch_agent_tune(
         # because this is a read-after-write: from a replica it can return the
         # profile as it was before the update on the line above, so the PATCH
         # would answer with the value it just replaced.
-        refreshed = await sc.get_agent(agent_id, tenant_id, read=False)
+        refreshed = await sc.get_agent(agent["agent_id"], tenant_id, read=False)
         if refreshed:
             return AgentOut.model_validate(refreshed)
     return AgentOut.model_validate(agent)
@@ -205,13 +205,13 @@ async def delete_agent(
     # evade controls.
     auth.enforce_not_agent_credential("delete agents")
     sc = get_storage_client()
-    agent = await sc.get_agent(agent_id, tenant_id)
+    agent = await lookup_agent(tenant_id, agent_id, read=False)
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
     await log_action(
         tenant_id=tenant_id,
         action="delete",
         resource_type="agent",
-        detail={"agent_id": agent_id, "fleet_id": agent.get("fleet_id")},
+        detail={"agent_id": agent["agent_id"], "fleet_id": agent.get("fleet_id")},
     )
-    await sc.delete_agent(agent_id, tenant_id)
+    await sc.delete_agent(agent["agent_id"], tenant_id)

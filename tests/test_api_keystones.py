@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from core_api.agent_ids import INSIGHTER_AGENT_ID
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 from tests.conftest import get_test_auth
 from tests.conftest import uid as _uid
@@ -234,6 +235,45 @@ async def test_set_then_list_round_trip(client):
     )
     rules = get_resp.json()
     assert any(r["doc_id"] == doc_id for r in rules), rules
+
+
+async def test_retired_service_input_targets_canonical_agent_rule(client):
+    tenant_id, headers = get_test_auth(_ks_tenant())
+    tag = _uid()
+    fleet_id = f"fleet-{tag}"
+    retired = "memclaw-insighter"  # legacy-name-ok: supported client input alias
+    await _seed_trusted_agent(
+        client,
+        tenant_id,
+        headers,
+        INSIGHTER_AGENT_ID,
+        fleet_id,
+    )
+
+    set_resp = await _set_keystone(
+        client,
+        _author_headers(headers, retired),
+        tenant_id,
+        doc_id=f"ks-{tag}",
+        scope="agent",
+        fleet_id=fleet_id,
+        agent_id=retired,
+    )
+
+    assert set_resp.status_code == 200, set_resp.text
+    assert set_resp.json()["data"]["agent_id"] == INSIGHTER_AGENT_ID
+
+    listed = await client.get(
+        "/api/v1/keystones",
+        params={
+            "tenant_id": tenant_id,
+            "fleet_id": fleet_id,
+            "agent_id": retired,
+        },
+        headers=headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert any(row["doc_id"] == f"ks-{tag}" for row in listed.json())
 
 
 # ---------------------------------------------------------------------------

@@ -401,3 +401,38 @@ def test_migration_044_postcondition_preserves_the_repair_contract() -> None:
     assert "extension owner" in condition.message
     assert "ALTER FUNCTION cosine_distance(vector, vector) COST 100;" in condition.message
     assert "re-running the migration will never fix" in condition.message
+
+
+def test_migration_044_postcondition_does_not_assert_live_harm() -> None:
+    """044's message is read on every boot of deployments that can never apply it.
+
+    It once asserted the planner was "under-pricing <=> by ~100x", which reads as an
+    incident in exactly the deployments where the app user cannot own the pgvector
+    extension and the migration therefore cannot apply. Measured 2026-09-22 against a
+    2.1M-row production table still at procost 1, the filtered ANN arm was already
+    served by the HNSW index, so the mispricing was latent there. The message must
+    calibrate the claim and say how a reader checks it against their own deployment.
+    """
+    condition = next(item for item in MIGRATION_POSTCONDITIONS if item.revision == "044")
+    assert "under-pricing" not in condition.message
+    assert "latent rather than a live defect" in condition.message
+    assert "pg_stat_user_indexes" in condition.message
+
+
+def test_migration_044_expectation_asks_whether_this_role_could_alter() -> None:
+    """The skip 044 tolerates is an ownership failure, so that is what to test for.
+
+    Altering a function requires owning it or membership in the owning role;
+    ``pg_has_role`` answers both, and answers true for a superuser, who could
+    also apply it. Matching on the role rather than on, say, a hardcoded list
+    of managed providers keeps the check true of any deployment.
+    """
+    condition = next(item for item in MIGRATION_POSTCONDITIONS if item.revision == "044")
+    assert condition.expected_when is not None
+    assert "pg_has_role(current_user, proowner, 'USAGE')" in condition.expected_when
+    assert "to_regprocedure('cosine_distance(vector, vector)')" in condition.expected_when
+    # It must say the condition is EXPECTED when the role cannot alter, not when it can.
+    assert condition.expected_when.startswith("SELECT NOT ")
+    # And it must survive the function being absent — 044's other tolerated
+    # failure — rather than returning no row, which reads as "not expected".
+    assert "COALESCE(" in condition.expected_when

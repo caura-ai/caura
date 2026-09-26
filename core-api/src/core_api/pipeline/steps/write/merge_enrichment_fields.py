@@ -8,7 +8,7 @@ from common.enrichment.constants import CLASSIFIER_DEPRECATED_MEMORY_TYPES
 from core_api.constants import DEFAULT_MEMORY_TYPE, DEFAULT_MEMORY_WEIGHT
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
-from core_api.services.system_metadata import set_system_value
+from core_api.services.system_metadata import mark_caller_owned, set_system_value
 
 
 class MergeEnrichmentFields:
@@ -36,6 +36,13 @@ class MergeEnrichmentFields:
         # the legacy top-level key for one release unless caller-owned.
         metadata = data.metadata or {}
         caller_keys = frozenset(metadata.keys())
+        # oss-0814-l-08 — and record the same answer ON THE ROW. ``caller_keys``
+        # above dies with this request; the row outlives it, and the writers that
+        # arrive later (a deferred enrichment landing seconds after a PATCH) have
+        # no other way to ask. Written before the merge below for the reason
+        # ``caller_keys`` is captured before it: afterwards the dict may hold a
+        # PLATFORM summary, and the marker would claim it for the caller.
+        mark_caller_owned(metadata, caller_keys)
         ts_valid_start = data.ts_valid_start
         ts_valid_end = data.ts_valid_end
 

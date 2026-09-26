@@ -53,6 +53,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Resp
 from pydantic import Field
 
 from core_api import openapi_responses as _oar
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.config import settings as app_settings
@@ -209,9 +210,9 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
         ),
     )
     if verified_id:
-        return verified_id, True
+        return canonical_service_agent_id(verified_id), True
     if x_agent_id:
-        return x_agent_id, False
+        return canonical_service_agent_id(x_agent_id), False
     return "rest-admin", False
 
 
@@ -295,6 +296,8 @@ async def list_keystones(
     tenant for scope clarity.
     """
     auth.enforce_readable_tenant(tenant_id)
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     sc = get_storage_client()
     # Drop ``agent_id`` when there's no ``fleet_id`` — agent-scope rows
     # are keyed on the (fleet_id, agent_id) pair, so an agent-only filter
@@ -343,6 +346,8 @@ async def upsert_keystone(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     caller_agent_id, caller_verified = _resolve_caller_identity(auth, x_agent_id)
+    if body.agent_id is not None:
+        body.agent_id = canonical_service_agent_id(body.agent_id)
     standalone_admin = _is_standalone_admin(auth, x_agent_id)
 
     # Early registration check — anti-probing parity with delete. Without

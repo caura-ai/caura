@@ -41,6 +41,7 @@ from core_api.constants import (
     MAX_CONTENT_LENGTH,
     NODE_OFFLINE_SECONDS,
 )
+from core_api.request_phase import phase
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, BulkMemoryResponse
 from core_api.services.memory_service import create_memories_bulk
 from core_api.services.organization_settings import get_settings_for_display, resolve_config
@@ -277,14 +278,21 @@ async def _interview_chunk(prompt: str, config, events: list[dict]) -> dict:
     async def _do_interview(llm) -> dict:
         return await llm.complete_json(prompt, temperature=INTERVIEW_TEMPERATURE)
 
-    return await call_with_fallback(
-        primary_provider_name=config.enrichment_provider,
-        call_fn=_do_interview,
-        fake_fn=lambda: _fake_report(events),
-        tenant_config=config,
-        service_label="interview",
-        model_override=config.enrichment_model,
-    )
+    # Named for the 504: ``/interview/submit`` enforces its own 90s budget and
+    # spends it on this chain of map-phase LLM calls and then on the bulk
+    # write. Without a name here a 504 could not say which, and the two have
+    # different owners. Not indexed by chunk — the name is a log-line
+    # dimension, and ``phases_completed`` already carries one entry per chunk
+    # that finished, which is the "stalled on chunk 7 of 12" answer.
+    with phase("interview.chunk"):
+        return await call_with_fallback(
+            primary_provider_name=config.enrichment_provider,
+            call_fn=_do_interview,
+            fake_fn=lambda: _fake_report(events),
+            tenant_config=config,
+            service_label="interview",
+            model_override=config.enrichment_model,
+        )
 
 
 # ── Reduce ──

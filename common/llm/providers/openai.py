@@ -19,7 +19,7 @@ import json
 import logging
 import time
 
-import httpx
+import httpx2 as httpx
 import openai
 
 from common.llm.call_context import llm_call_label

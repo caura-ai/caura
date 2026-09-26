@@ -35,6 +35,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.errors import (
@@ -941,7 +942,7 @@ async def reject(
             tenant_id=tenant_id,
             fleet_id=doc.get("fleet_id"),
             cluster_fingerprint=fingerprint,
-            rejected_by_agent=auth.agent_id or "unknown",
+            rejected_by_agent=(canonical_service_agent_id(auth.agent_id) if auth.agent_id else "unknown"),
             reason=body.reason,
             cooloff_days=cooloff,
         )
@@ -1219,7 +1220,7 @@ async def edit(
     # validator's admin-only branches (e.g. setting ``source='forge'`` for
     # re-installs) stay consistent with what the surrounding endpoint allows.
     ctx = SkillWriteContext(
-        caller_agent_id=auth.agent_id,
+        caller_agent_id=(canonical_service_agent_id(auth.agent_id) if auth.agent_id else None),
         is_admin=auth.is_org_admin,
         is_internal_forge=False,
         description_max_bytes=desc_max,

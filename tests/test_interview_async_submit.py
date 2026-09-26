@@ -149,6 +149,32 @@ async def test_async_submit_accepts_with_watermark_and_masked_job(
     await _drain_inflight()
 
 
+async def test_async_submit_persists_canonical_service_agent_id(
+    client,
+    canned_llm,
+    async_submit,
+):
+    tenant_id, headers = get_test_auth(new_tenant_id())
+    await _enable_interviewer(client, tenant_id, headers)
+    node_id = f"node-{uid()}"
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_payload(
+            tenant_id,
+            node_id,
+            "memclaw-insighter",  # legacy-name-ok: supported client input alias
+        ),
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    doc = await _job_doc(tenant_id, interview_job_doc_id(node_id, 0, 10))
+    assert doc is not None
+    assert doc["data"]["agent_id"] == "caura-insighter"
+    await _drain_inflight()
+
+
 # ── (b) processor writes memories and marks the job done ──
 
 

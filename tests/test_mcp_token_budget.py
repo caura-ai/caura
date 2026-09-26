@@ -96,7 +96,27 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # ``injected:true``. The old text promised a maximum ("Max results") that
 # successor injection has violated since A34 — a caller reading it could not
 # explain a 10-item answer to a top_k=5 call. Ceiling NOT raised; 33 remain.
-CEILING_TOKENS = 5320
+#
+# 2026-09-22, first: the ledger above ends at 5287 and the fixture measured
+# 5317 before this change, so 30 tokens were spent across three PRs that each
+# skipped an entry. Measured from their fixtures: #682 (MCP SDK v2) +12, #1471
+# (freshness_reference) +13, #1572 (route parameters) +5. Recorded rather than
+# absorbed, because the 2026-09-08 entry already warned that the running total
+# had drifted once and asked the next reader to measure the fixture instead —
+# which is the only reason this was noticed. The headroom the D16 entry called
+# 33 was in fact 3.
+#
+# 2026-09-22 (ax-0917-m-15): 5368 cl100k (+51) after ``caura_doc`` disclosed
+# that a write also mints a memory carrying the doc's data and a delete
+# un-mints it. Not bloat and not optional: ``mcp_register`` publishes
+# ``spec.description`` and nothing else, so an MCP caller reads this string or
+# reads nothing, and the string it read before pointed the other way ("For
+# memories use caura_write"). An agent probe wrote a document and then met its
+# own document's content in ``caura_recall`` output it never asked to populate.
+# The clause also states what the op description cannot fit: the mint does NOT
+# depend on ``data['summary']`` — that field gates doc *indexing* — so a caller
+# cannot opt out by omitting it. Ceiling 5320 -> 5390, leaving 22.
+CEILING_TOKENS = 5390
 
 
 def _count(path: Path) -> int:

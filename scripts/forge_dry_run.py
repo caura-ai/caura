@@ -80,7 +80,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-writes-per-run",
         type=int,
         default=20,
-        help="Cap candidates written per run (default: 20).",
+        help="Cap candidates WRITTEN per run (default: 20). Skipped clusters do not spend it.",
+    )
+    p.add_argument(
+        "--max-clusters-per-run",
+        type=int,
+        default=0,
+        help=(
+            "Cap clusters ATTEMPTED per run — one distill LLM call each, written "
+            "or not. 0 (default) derives it from --max-writes-per-run."
+        ),
     )
     p.add_argument(
         "--json",
@@ -337,6 +346,7 @@ async def _run(args: argparse.Namespace) -> int:
         min_cluster_size=args.min_cluster_size,
         min_distinct_agents=args.min_distinct_agents,
         max_writes_per_run=args.max_writes_per_run,
+        max_clusters_per_run=args.max_clusters_per_run,
     )
 
     # No positional argument: ``run_forge_distill`` is keyword-only and
@@ -369,6 +379,7 @@ async def _run(args: argparse.Namespace) -> int:
             "labeled_traces": result.labeled_traces,
             "clusters_total": result.clusters_total,
             "clusters_eligible": result.clusters_eligible,
+            "clusters_attempted": result.clusters_attempted,
             "candidates_written": result.candidates_written,
             "candidates_skipped_poisoned": result.candidates_skipped_poisoned,
             "candidates_skipped_sentinel": result.candidates_skipped_sentinel,
@@ -389,7 +400,8 @@ async def _run(args: argparse.Namespace) -> int:
             f"  traces:      total={result.total_traces} labeled={result.labeled_traces}"
         )
         print(
-            f"  clusters:    total={result.clusters_total} eligible={result.clusters_eligible}"
+            f"  clusters:    total={result.clusters_total} "
+            f"eligible={result.clusters_eligible} attempted={result.clusters_attempted}"
         )
         print(
             f"  candidates:  written={result.candidates_written} "
