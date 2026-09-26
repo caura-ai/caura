@@ -806,13 +806,27 @@ async def batch_update_status(request: Request) -> dict:
         precedence over ``supersedes_id`` if both are present
       - ``expected_supersedes_id`` (optional, UUID): CAS gate — skip the
         row unless its current ``supersedes_id`` matches this value
+      - ``expect_supersedes_null`` (optional, bool): apply ``supersedes_id``
+        under a compare-and-set against NULL, so the first writer to land
+        owns the chain edge. This is what ``PATCH /memories/{id}/status``
+        has always done on its set path; 09/22 M-01 found that this route
+        did not, while six comments in the contradiction detector cited the
+        missing guard as their reason for omitting others. Opt-in so the
+        prior unconditional behaviour is unchanged for callers that want it.
 
     Backward-compatible with the prior 2-field shape — rows containing
     only ``memory_id`` + ``status`` behave exactly as before.
 
-    Returns ``{"ok": True, "skipped": [memory_id, ...]}`` listing rows
-    that failed the CAS gate (or pointed at a deleted / nonexistent id).
-    Callers that don't use the CAS field can safely ignore ``skipped``.
+    Returns ``{"ok": True, "skipped": [...], "edge_skipped": [...]}``.
+
+    ``skipped`` lists rows whose STATUS write did not land — the
+    ``expected_supersedes_id`` gate failed, or the row is deleted /
+    nonexistent / foreign-tenant. ``edge_skipped`` lists rows whose status
+    DID land but whose ``expect_supersedes_null`` CAS lost to a concurrent
+    writer, so the row kept the pointer it already had. The two are
+    disjoint, and a row in ``edge_skipped`` is not an error: it means
+    someone else owns that edge. Callers using neither CAS field can ignore
+    both lists.
     """
     body: dict = await request.json()
 
@@ -833,7 +847,7 @@ async def batch_update_status(request: Request) -> dict:
     # what got written. The validation pass is O(N) memory + zero DB
     # work, so the cost is negligible compared to the partial-commit
     # surprise it prevents.
-    parsed: list[tuple[UUID, str, UUID | None, bool, UUID | None]] = []
+    parsed: list[tuple[UUID, str, UUID | None, bool, UUID | None, bool]] = []
     for item in body.get("updates", []):
         try:
             sup_id = item.get("supersedes_id")
@@ -845,6 +859,7 @@ async def batch_update_status(request: Request) -> dict:
                     UUID(sup_id) if sup_id else None,
                     bool(item.get("unset_supersedes", False)),
                     UUID(exp_sup_id) if exp_sup_id else None,
+                    bool(item.get("expect_supersedes_null", False)),
                 )
             )
         except (ValueError, KeyError) as exc:
@@ -864,18 +879,30 @@ async def batch_update_status(request: Request) -> dict:
             )
 
     skipped: list[str] = []
-    for mid, new_status, sup_uuid, unset_sup, exp_sup_uuid in parsed:
+    edge_skipped: list[str] = []
+    for mid, new_status, sup_uuid, unset_sup, exp_sup_uuid, expect_null in parsed:
+        # Under ``expect_supersedes_null`` the pointer is written by the CAS
+        # method instead of being folded into the status UPDATE, so the two
+        # outcomes stay separable: the caller asked for a status flip AND an
+        # edge, and losing a race for the edge is not a reason to drop the
+        # flip. Same split, and same reason, as the single-row route.
+        cas_edge = sup_uuid if (expect_null and not unset_sup) else None
         ok = await _svc.memory_update_status(
             mid,
             new_status,
             tenant_id=tenant_id,
-            supersedes_id=sup_uuid,
+            supersedes_id=None if cas_edge else sup_uuid,
             unset_supersedes=unset_sup,
             expected_supersedes_id=exp_sup_uuid,
         )
         if not ok:
             skipped.append(str(mid))
-    return {"ok": True, "skipped": skipped}
+            continue
+        if cas_edge is not None and not await _svc.memory_set_supersedes_if_null(
+            mid, cas_edge, tenant_id=tenant_id
+        ):
+            edge_skipped.append(str(mid))
+    return {"ok": True, "skipped": skipped, "edge_skipped": edge_skipped}
 
 
 # ------------------------------------------------------------------
@@ -2150,26 +2177,14 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         # core_api.services.contradiction_detector to defend the
         # CAURA-000 ``NEW.supersedes_id = OLD.id`` rule against re-fired
         # detection on already-resolved memories.
-        from sqlalchemy import update as sql_update
-
-        from common.models import Memory
-        from core_storage_api.services.postgres_service import get_session
-
-        async with get_session() as session:
-            await session.execute(
-                sql_update(Memory)
-                .where(
-                    Memory.id == memory_id,
-                    Memory.tenant_id == tenant_id,
-                    # Unreachable today — ``memory_update_status`` above now
-                    # 404s on a deleted row before we get here — but this
-                    # statement should not depend on the liveness of a check
-                    # someone could reorder or make conditional later.
-                    Memory.deleted_at.is_(None),
-                    Memory.supersedes_id.is_(None),
-                )
-                .values(supersedes_id=UUID(supersedes_id))
-            )
+        #
+        # 09/22 M-01 — this used to be an inline UPDATE here, which is why
+        # ``POST /memories/batch-update-status`` never had it: the clause was
+        # a property of THIS ROUTE, not of the write. Now both routes call the
+        # same named service method, so neither can quietly lose the guard.
+        # The pointer write stays separate from the status flip above: losing
+        # the CAS must cost the edge only, never the status.
+        await _svc.memory_set_supersedes_if_null(memory_id, UUID(supersedes_id), tenant_id=tenant_id)
     return {"ok": True}
 
 
