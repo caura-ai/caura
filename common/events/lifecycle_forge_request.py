@@ -39,10 +39,18 @@ class LifecycleForgeDistillRequest(LifecycleRequestBase):
     # Field names mirror those configured knobs and
     # ``ForgeConfig.max_writes_per_run`` exactly so producers + the
     # consumer + the settings layer all spell the same thing.
+    #
+    # There is deliberately no token / cost override here. A
+    # ``llm_tokens_per_run`` field sat in this list and was read by
+    # nothing — not by this event's consumer and not by the settings
+    # layer it mirrored — so it advertised a spend ceiling Forge has
+    # never had (oss-0922-l-05). A run's LLM spend is bounded by how
+    # many clusters it may ATTEMPT
+    # (``skills_factory.forge.max_clusters_per_run``), because each
+    # attempt buys exactly one distill call.
     freshness_window_days: int | None = None
     min_cluster_size: int | None = None
     min_distinct_agents: int | None = None
-    llm_tokens_per_run: int | None = None
     max_writes_per_run: int | None = None
     # ``dry_run=True`` ⇒ produce candidates with ``status=candidate``
     # only; do not run the staged-promotion auto-gates. Used by the
