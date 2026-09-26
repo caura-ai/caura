@@ -331,15 +331,15 @@ Benchmarked against the two most-cited public agent-memory benchmarks. Full resu
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
-| Token savings vs full context | **96.6%** | **79.2%** | — |
-| Latency | — | — | **23 ms p50 · 27 ms p95** |
+| Accuracy (LLM-judge) | **77.9%** | **92.2%** | — |
+| Token savings vs full context | withdrawn (see note) | **79.2%** | — |
+| Latency | — | — | **23 ms p50 · 27 ms p95** (warm cache, single tenant) |
 
 Accuracy sits inside the leading cluster across the field (Mem0, Zep, Caura — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.
 
 > Single-agent benchmarks can't measure cross-agent recall, outcome propagation between agents, fleet-scoped visibility, or governance-aware retrieval. Those are the questions that decide whether a memory system is *deployable* inside a company. See [`docs/performance.md`](docs/performance.md#what-these-benchmarks-cant-measure).
 
-Source: [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/caura-benchmarks) (2026-04-19).
+Source: [Fast, Token-Efficient, and Built for Fleets](https://caura.ai/blog/caura-benchmarks) (LoCoMo updated September 2026; search latency 2026-04-19). LoCoMo: September 2026 run, all 1,540 scored questions (categories 1–4), three-vote LLM judge (Gemini 3.8 Flash), 77–79% across repeat runs, official token F1 0.575. The April LoCoMo token-savings figure (96.6%) is withdrawn: the September configuration (k=30, 4k-character chunks) retrieves most of each conversation, so no savings figure is claimed until it is re-derived.
 
 ---
 
