@@ -698,29 +698,36 @@ async def handle_enrich_request(event: Event) -> None:
         request.caller_owned_metadata_keys,
     )
 
-    # The sync/async gap, now HALF closed. ``memory_service.py`` fans
-    # ``atomic_facts`` out into child memories on the synchronous path; this
-    # worker does not, so fast-mode multi-claim content still yields fewer
-    # memories than the same content written in strong mode.
+    # The sync/async fan-out gap is CLOSED, and this is the handoff point.
+    # ``atomic_facts`` rides into the row's metadata in the patch above; the
+    # worker does not create the children itself, because its storage client
+    # has no create-memory call and a second copy of ``fan_out_atomic_facts``
+    # is exactly what A70 set out to avoid. It publishes
+    # ``Topics.Memory.ENRICHED`` below instead, and core-api's
+    # ``handle_memory_enriched`` runs ``_fan_out_persisted_atomic_facts``,
+    # which calls the same ``fan_out_atomic_facts`` the synchronous path uses
+    # and then clears the marker. Deferred multi-claim content DOES yield child
+    # memories (A70 step 2b, #1430, 2026-09-09).
     #
-    # What changed: the facts are no longer DISCARDED. They ride into the row's
-    # metadata above, so the gap is now recoverable from stored data instead of
-    # requiring the LLM to be re-run. Fan-out stays in core-api, which already
-    # consumes ``Topics.Memory.ENRICHED`` and already owns the dedup /
-    # visibility / weight rules a child must inherit.
+    # A WARNING here asserted the opposite — that fan-out was "not yet
+    # implemented on the async path" and secondary facts "will NOT appear as
+    # child memories" — for the fifteen days after #1430 landed. Its stated
+    # justification was that the string stayed greppable so "that count is what
+    # the A75 proof gate needs to size this". reg-a75 was closed on 2026-09-10
+    # WITHOUT BEING RUN, its harness having lived in a private repo nobody could
+    # reach, so no gate has consumed the count since before the claim went
+    # stale; nothing else in the tree greps the string. Retired rather than
+    # re-worded: there is no residual gap here to warn about.
     #
-    # Still WARNING, not ERROR: the gap is real but expected, and paging on
-    # every multi-fact write would bury on-call without an actionable fix. The
-    # string stays greppable so the exposure remains countable — that count is
-    # what the A75 proof gate needs to size this.
-    if result.atomic_facts:
-        logger.warning(
-            "enrich-request for memory %s produced %d atomic_facts; persisted to "
-            "metadata but child-memory fan-out is not yet implemented on the async "
-            "path — secondary facts will NOT appear as child memories YET",
-            request.memory_id,
-            len(result.atomic_facts),
-        )
+    # What IS still worth having is the size of the deferred fan-out
+    # population, which pm-0918-c-04 could not measure because its corpus
+    # predates A70 — see docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md.
+    # That survives as a field on the "enrich-request processed" INFO line
+    # below, not as a record of its own. Every way this handoff can still fail
+    # to produce children already logs at its own site, and more precisely than
+    # a count here could: the publish failure below, and on the core-api side a
+    # fan-out exception (marker deliberately left for retry), a governance drop,
+    # or the per-tenant ``atomic_fact_fanout_enabled`` switch.
 
     # Per-tenant slot scoped to the PATCH only; matches the embed
     # consumer above. The LLM enrichment call upstream is the
@@ -763,6 +770,10 @@ async def handle_enrich_request(event: Event) -> None:
             "provider": request.enrichment_provider or "platform",
             "memory_type": result.memory_type,
             "llm_ms": result.llm_ms,
+            # Always emitted, including the 0 case, so the denominator is
+            # available too: "how many deferred writes produced facts at all"
+            # needs the writes that produced none.
+            "atomic_facts": len(result.atomic_facts or []),
         },
     )
 
