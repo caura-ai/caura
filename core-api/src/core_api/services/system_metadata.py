@@ -15,9 +15,12 @@ every writer goes through:
   ``metadata["_system"]`` namespace — EXCEPT when the caller owns the key
   (``summary`` / ``tags``): then the caller's value stays at top level and
   the platform's copy lives only under ``_system``.
-- Caller input is sanitised at write time: the forgeable telemetry keys and
-  the ``_system`` namespace itself are stripped — a caller cannot inject
-  fake platform telemetry.
+- Caller input is sanitised at write time: every key in
+  ``PLATFORM_ONLY_KEYS`` and the ``_system`` namespace itself are stripped —
+  a caller cannot inject fake platform values. That set covers more than
+  telemetry: governance verdicts, dedup outcomes and row lineage are all
+  forgeable in exactly the same way, and were accepted from callers until
+  the registry was widened to name them.
 - Read-side, ``MemoryOut.system_metadata`` is derived from ``_system`` plus
   the legacy top-level keys, so historical rows (written before this module
   existed) expose the same view without a migration.
@@ -33,20 +36,55 @@ SYSTEM_NAMESPACE = "_system"
 # ``summary`` and ``tags`` are deliberately NOT here — callers legitimately
 # own those; the platform's versions go to the ``_system`` namespace when the
 # caller has set their own.
+#
+# Grouped by the step that writes them, so a key can be traced to its writer
+# without grepping. The registry is the ONLY thing standing between a caller
+# and a forged platform value: a platform key absent from this set is written
+# by the platform and accepted from callers, which is the whole defect this
+# grouping is meant to make visible.
+#
+# ``source`` is deliberately absent. The platform writes it ("auto_chunk",
+# "atomic_fact_fanout") but so does ingest, in caller-adjacent item metadata —
+# reserving it would strip that stamp the way M-48 nearly stripped
+# ``memory_type_agent_set``. It is a shared key, not a platform-only one.
 PLATFORM_ONLY_KEYS: frozenset[str] = frozenset(
     {
+        # Write-path timing. Forgeable into fake latency/telemetry.
         "llm_ms",
         "write_latency_ms",
         "semantic_dedup_ms",
+        "near_dup_check_ms",  # DetectNearDuplicate
+        "dedup_judge_ms",  # CheckSemanticDuplicate
+        "triple_emission_ms",  # EmitMemoryTriple
+        # Governance verdicts. Forging these rewrites a compliance decision.
         "business_relevance",
         "contains_pii",
         "pii_types",
+        "pii_flagged_by",
+        "governance_llm_uncertain",  # GovernanceDecision
+        "nonbusiness_kept_private",  # GovernanceDecision
+        # Dedup / near-duplicate outcomes. ``near_duplicate_of`` is read back by
+        # callers to decide whether to merge or undo, so a forged one redirects
+        # a real decision.
+        "dedup_skipped_reason",
+        "dedup_candidate_similarity",
+        "dedup_judge_confidence",
+        "dedup_subject_preflight",
+        "near_dup_skipped_reason",
+        "near_duplicate_of",
+        "near_duplicate_similarity",
+        # Write mode and the pending flags consumers poll on.
         "write_mode",
         "enrichment_pending",
         "embedding_pending",
+        # Provenance and lineage. Forging these fabricates where a row came from.
         "memory_type_agent_set",
         "weight_source",
-        "pii_flagged_by",
+        "parent_memory_id",  # auto-chunk + atomic-fact children
+        "auto_chunked",
+        "child_count",
+        # Enrichment output.
+        "retrieval_hint",
     }
 )
 
@@ -55,6 +93,25 @@ CALLER_OWNABLE_KEYS: frozenset[str] = frozenset({"summary", "tags"})
 
 # Everything the platform writes — the read-side extraction set.
 PLATFORM_KEYS: frozenset[str] = PLATFORM_ONLY_KEYS | CALLER_OWNABLE_KEYS
+
+# oss-0814-l-08. The key INSIDE ``_system`` that records which
+# ``CALLER_OWNABLE_KEYS`` the caller has claimed on this row.
+#
+# C25 answered "is this ``summary`` the caller's?" with a snapshot taken at
+# write time and carried to whichever enricher runs later — in the process
+# arguments for the inline task, on the wire for the deferred worker. That
+# works for the write it was taken from and for nothing else, because it is
+# IN-FLIGHT state: ``PATCH /memories/{id}`` is the third surface on which a
+# caller supplies metadata, it happens after the snapshot was taken, and an
+# enrichment still in flight (fast mode is the default) then mirrors its own
+# summary over the one the caller just set.
+#
+# Recording it on the ROW makes the question answerable by anyone holding the
+# row, at any later time, without having been told. Inside ``_system`` because
+# it is platform-written bookkeeping, not caller data: ``sanitize_caller_metadata``
+# already strips the whole namespace from caller input, so this needs no
+# ``PLATFORM_ONLY_KEYS`` entry of its own and cannot be forged.
+CALLER_OWNED_KEY = "caller_owned"
 
 
 def sanitize_caller_metadata(metadata: dict | None) -> dict:
@@ -84,6 +141,132 @@ def set_system_value(
     metadata.setdefault(SYSTEM_NAMESPACE, {})[key] = value
     if not (key in CALLER_OWNABLE_KEYS and key in caller_keys):
         metadata[key] = value
+
+
+def caller_owned_keys(metadata: dict | None) -> frozenset[str]:
+    """Which ``CALLER_OWNABLE_KEYS`` this ROW records the caller as owning.
+
+    The durable counterpart of the in-flight snapshot (see ``CALLER_OWNED_KEY``).
+    Intersected against ``CALLER_OWNABLE_KEYS`` rather than trusted as stored:
+    the namespace is unforgeable through the public API today, but a value read
+    back out of a JSONB column and fed straight into ``set_system_value`` would
+    let any future write path that CAN reach ``_system`` suppress the legacy
+    mirror for an arbitrary platform key — and some platform keys are read from
+    the top level only (``governance_remediation`` does ``md.get("contains_pii")``),
+    so that suppression silently disables a governance verdict. The worker's
+    ``_record_metadata`` intersects for exactly this reason; so does this.
+
+    Tolerant of shape: a row written before this key existed has no marker, and
+    a non-list value is treated as no marker rather than raising, because this
+    runs on the enrichment path where a crash loses the whole enrichment.
+    """
+    if not metadata:
+        return frozenset()
+    nested = metadata.get(SYSTEM_NAMESPACE)
+    if not isinstance(nested, dict):
+        return frozenset()
+    owned = nested.get(CALLER_OWNED_KEY)
+    if not isinstance(owned, list):
+        return frozenset()
+    return frozenset(k for k in owned if isinstance(k, str)) & CALLER_OWNABLE_KEYS
+
+
+def mark_caller_owned(
+    metadata: dict,
+    caller_keys: frozenset[str] | set[str],
+    *,
+    existing: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """Record on the row which caller-ownable keys the caller has claimed.
+
+    ``caller_keys`` is the key set of the metadata the caller just supplied;
+    only its ``CALLER_OWNABLE_KEYS`` members are recorded, for the same reason
+    ``_caller_owned_enrichment_metadata_keys`` narrows — nothing consults this
+    for any other key, and an arbitrary caller's key NAMES are worth not
+    persisting.
+
+    ``existing`` is what the row already recorded, for the UPDATE surface: a
+    caller who PATCHes ``summary`` and later PATCHes ``tags`` owns both, and
+    the storage layer's ``_system`` merge replaces this list wholesale rather
+    than appending to it. Claims accumulate and are never retracted here —
+    "the caller has supplied this key at least once" is the question every
+    reader is asking, and a caller who wants the platform's value back can
+    clear the key with ``metadata_mode="replace"``.
+
+    Writes nothing when the result is empty, so a row whose caller claimed
+    nothing carries no marker at all rather than an empty list — the same
+    None-vs-empty distinction the sibling snapshot helper makes.
+    """
+    owned = (CALLER_OWNABLE_KEYS & set(caller_keys)) | (CALLER_OWNABLE_KEYS & set(existing))
+    if not owned:
+        return
+    metadata.setdefault(SYSTEM_NAMESPACE, {})[CALLER_OWNED_KEY] = sorted(owned)
+
+
+def strip_platform_metadata(metadata: dict | None) -> dict | None:
+    """Caller-owned view of ``metadata``: the dual-write copies removed.
+
+    ax-0917-h-04. ``set_system_value`` writes every platform value TWICE (the
+    legacy top-level key plus ``_system``), and the read side derives a THIRD
+    copy into ``MemoryOut.system_metadata`` — so a recall row shipped the same
+    ``llm_ms`` / ``write_latency_ms`` / ``semantic_dedup_ms`` / ``weight_source``
+    block three times, ~1.9 KB per row against 65-82 B of actual content.
+
+    This picks ONE location for agent-facing reads. ``system_metadata`` is the
+    one that survives: it is the documented C25 read surface, it is the merged
+    view (nested wins over legacy) so it is correct for historical rows too, and
+    ``MemoryOut.metadata``'s own docstring already says reading platform keys
+    from ``metadata`` is deprecated. NOTHING is deleted — the JSONB column is
+    untouched, ``system_metadata`` carries the same values in the same response,
+    and the detail read (``GET /memories/{id}``) still returns raw ``metadata``.
+
+    ``summary`` and ``tags`` are ``CALLER_OWNABLE_KEYS``, and the read side CAN
+    tell the two apart — which is why they are no longer kept unconditionally.
+    ``set_system_value`` writes the top-level mirror for every platform value
+    EXCEPT one whose key the caller owns, so the two cases separate cleanly at
+    read time:
+
+    * caller supplied it  -> the platform skipped the top-level write, so
+      ``metadata[key]`` is the caller's value and ``_system[key]`` is the
+      platform's. They DIFFER, and the caller's copy is kept.
+    * platform produced it -> both writes happened, so ``metadata[key]`` and
+      ``_system[key]`` are IDENTICAL. That is a mirror, not caller data, and it
+      is dropped like any other platform key.
+
+    Keeping them unconditionally made the docstring's "one location" claim false
+    for these two keys: a platform-produced ``summary`` was still shipped twice
+    (top level + the merged ``system_metadata`` view), just 2x instead of 3x.
+
+    Equality is the proxy, and it has one accepted false positive: a caller who
+    writes a value byte-identical to the platform's loses the top-level copy.
+    That is not data loss on the wire — ``system_metadata`` carries the same
+    value in the same response — and it is strictly better than shipping every
+    platform-produced summary twice to protect a coincidence.
+
+    A key with NO ``_system`` counterpart is always kept. Historical (pre-C25)
+    rows have no namespace to compare against, so a mirror cannot be proven, and
+    an unprovable case must not be dropped — that is the clobber C25 exists to
+    prevent.
+
+    Only None-ness is preserved; a row left with nothing caller-owned returns
+    ``{}``, never None. That is the same falsy-``{}`` trap ``_dict_to_memory_out``
+    guards: ``null`` and ``{}`` are different answers on the wire, and a row that
+    HAS a metadata column should not report it absent just because every key in
+    it was platform-written.
+    """
+    if metadata is None:
+        return None
+    nested = metadata.get(SYSTEM_NAMESPACE) or {}
+    kept: dict = {}
+    for key, value in metadata.items():
+        if key in PLATFORM_ONLY_KEYS or key == SYSTEM_NAMESPACE:
+            continue
+        # Caller-ownable, and identical to the namespace copy => the platform
+        # wrote both, so this is the mirror rather than the caller's own value.
+        if key in CALLER_OWNABLE_KEYS and key in nested and nested[key] == value:
+            continue
+        kept[key] = value
+    return kept
 
 
 def extract_system_metadata(metadata: dict | None) -> dict | None:

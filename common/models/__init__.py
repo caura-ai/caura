@@ -15,6 +15,11 @@ from common.models.lifecycle_audit import LifecycleAudit
 from common.models.memory import Memory
 from common.models.memory_conflict import MemoryConflict
 from common.models.memory_derivation import MemoryDerivation
+from common.models.organization_settings import (
+    OrganizationSettings,
+    OrganizationSettingsAudit,
+)
+from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.skill_factory import ForgeRejectedFingerprint, SessionTrace
 from common.models.tenant_usage_counter import TenantUsageCounter
 
@@ -39,6 +44,10 @@ __all__ = [
     "MemoryConflict",
     "MemoryDerivation",
     "MemoryEntityLink",
+    "OrganizationSettings",
+    "OrganizationSettingsAudit",
+    "RecallCandidate",
+    "RecallEvent",
     "Relation",
     "SessionTrace",
     "TenantUsageCounter",

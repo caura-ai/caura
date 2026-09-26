@@ -11,10 +11,59 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, existsSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { createHash } from "crypto";
 
 import { __DEPLOY_INTERNALS__ } from "./heartbeat.js";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { runPluginBuild } from "./deploy.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 import { PLUGIN_VERSION } from "./version.js";
+import { USER_AGENT } from "./user-agent.js";
+
+describe("deploy build and content boundaries", () => {
+  test("flat-install deploys compile without the monorepo prebuild hook", () => {
+    let seenCommand = "";
+    let seenCwd = "";
+    assert.equal(
+      runPluginBuild("/flat/plugin", (command, options) => {
+        seenCommand = command;
+        seenCwd = options.cwd;
+        return "compiled";
+      }),
+      "compiled",
+    );
+    assert.equal(seenCommand, "npx tsc 2>&1");
+    assert.equal(seenCwd, "/flat/plugin");
+    assert.doesNotMatch(seenCommand, /npm run build/);
+  });
+
+  test("manifest hash covers every fetched file in manifest order", () => {
+    const files = [
+      { name: "a.ts", isRoot: false },
+      { name: "nested/config.json", isRoot: true },
+    ];
+    const fetched = new Map([
+      ["src/a.ts", "export const a = 1;\n"],
+      ["nested/config.json", "{\"ok\":true}\n"],
+    ]);
+    const expected = createHash("sha256")
+      .update("export const a = 1;\n{\"ok\":true}\n", "utf8")
+      .digest("hex");
+
+    assert.equal(
+      __DEPLOY_INTERNALS__.verifyFetchedManifestContent(fetched, files, expected),
+      true,
+    );
+    assert.equal(
+      __DEPLOY_INTERNALS__.verifyFetchedManifestContent(fetched, files, "0".repeat(64)),
+      false,
+    );
+    fetched.delete("nested/config.json");
+    assert.equal(
+      __DEPLOY_INTERNALS__.verifyFetchedManifestContent(fetched, files, expected),
+      false,
+    );
+  });
+});
 
 describe("deploy cooldown lifecycle", () => {
   let tmpHome: string;
@@ -245,10 +294,12 @@ describe("processCommand — restart-after-POST ordering (CAURA-000)", () => {
   test("a non-restart command (ping) does NOT schedule a restart", async () => {
     // Pin that the shouldRestart flag is properly gated — only flipped
     // inside the deploy/restart branches, not by ping/unknown commands.
-    globalThis.fetch = (async (input: string | URL | Request) => {
+    const resultHeaders: Array<Record<string, string>> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/fleet/commands/") && url.endsWith("/result")) {
         order.push("post-resolved");
+        resultHeaders.push((init?.headers ?? {}) as Record<string, string>);
       }
       return new Response("{}", {
         status: 200,
@@ -270,6 +321,12 @@ describe("processCommand — restart-after-POST ordering (CAURA-000)", () => {
       ["post-resolved"],
       "ping must not schedule a restart — only deploy / restart / update_plugin do",
     );
+    // The heartbeat's command-result POST goes through the shared
+    // transport, so it must carry the plugin's User-Agent like every
+    // other request to the Caura server (Caura Heartbeat v1 §7).
+    assert.equal(resultHeaders.length, 1);
+    assert.equal(resultHeaders[0]["User-Agent"], USER_AGENT);
+    assert.equal(resultHeaders[0]["Content-Type"], "application/json", "existing headers stay intact");
   });
 
   test("an unknown command does NOT schedule a restart (fails closed)", async () => {

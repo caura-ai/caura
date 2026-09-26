@@ -25,7 +25,14 @@ from fastapi.responses import JSONResponse
 from common import permanent_failure
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
-from core_api.agent_ids import DEFAULT_AGENT_ID
+from core_api import request_phase
+from core_api.agent_ids import (
+    ALWAYS_RESERVED_AGENT_IDS,
+    DEFAULT_AGENT_ID,
+    AgentIdentity,
+    canonical_service_agent_id,
+    effective_write_agent_id,
+)
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
 from core_api.config import settings as app_settings
@@ -34,7 +41,13 @@ from core_api.constants import (
     MAX_LIST_LIMIT,
     MEMORY_STATUSES_PATTERN,
 )
-from core_api.errors import coded_detail
+from core_api.errors import (
+    AUTH_AGENT_TRUST_TOO_LOW,
+    AUTH_FLEET_SCOPE_FORBIDDEN,
+    AUTH_TARGET_AGENT_RESTRICTED,
+    REQUEST_BUDGET_EXCEEDED,
+    coded_detail,
+)
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
     IdempotencyGuard,
@@ -43,7 +56,7 @@ from core_api.middleware.idempotency import (
 )
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 from core_api.middleware.rate_limit import search_limit, write_bulk_limit, write_limit
-from core_api.pagination import decode_cursor, encode_cursor
+from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
@@ -55,6 +68,7 @@ from core_api.schemas import (
     MemoryOut,
     MemoryUpdate,
     PaginatedMemoryResponse,
+    RecallRequest,
     RedistributeRequest,
     RedistributeResponse,
     SearchDiagnostic,
@@ -64,6 +78,7 @@ from core_api.schemas import (
     STMWriteResponse,
     UsageSummary,
 )
+from core_api.services.agent_identity import reserved_write_refusal
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_label,
@@ -106,11 +121,123 @@ from core_api.services.usage_service import (
     check_and_increment,
     plan_limit_gated,
     recall_operation,
+    set_usage_headers,
 )
 
 logger = logging.getLogger(__name__)
 
+
+def _require_uuid_list(values: object, field: str) -> list:
+    """Return ``values`` once it is a list of parseable UUIDs, else 422 (OSS 09/02 L-24).
+
+    Owns the shape check as well as the element check so a caller cannot honour
+    one and forget the other — that split is what let ``{"ids": "abc"}`` through
+    as a 3-item iterable of characters. Validates at the boundary rather than at
+    the storage call, so a caller's typo is their 422 instead of our 500, and
+    names the offending value because these lists run to hundreds of ids and
+    "one of them is bad" is not an actionable error message.
+
+    Only ``ValueError`` is caught: ``str(value)`` always yields a ``str`` for any
+    JSON-representable input, and ``UUID(<str>)`` raises nothing else.
+    """
+    if not isinstance(values, list):
+        raise HTTPException(status_code=422, detail=f"'{field}' must be a list")
+    for value in values:
+        try:
+            UUID(str(value))
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"'{field}' must contain only UUID strings (got {value!r})",
+            ) from None
+    return values
+
+
 router = APIRouter(tags=["Memory"])
+
+_REST_RESERVED_CREDENTIAL_MESSAGE = (
+    'Verified agent identity "{agent_id}" is reserved and cannot authenticate '
+    "a REST write. Re-provision the credential with a unique home agent identity "
+    '(for example, "main-<install_id>") and retry; a body agent_id cannot override '
+    "an authenticated credential."
+)
+
+
+def _resolve_rest_write_agent_id(auth: AuthContext, claimed_id: str) -> str:
+    """Apply REST binding with the staged reserved-``main`` migration.
+
+    The feature flag remains a deliberate emergency rollback. A reserved
+    verified identity follows the existing allow → warn → reject rollout: the
+    caller-named escape hatch survives during observation, including its spoof
+    risk, then fails closed when the reserved-id policy reaches reject.
+    """
+    if not app_settings.bind_write_identity_to_auth or not auth.agent_id:
+        return canonical_service_agent_id(claimed_id)
+    verified_id = auth.agent_id
+    if verified_id in ALWAYS_RESERVED_AGENT_IDS:
+        # Reject is deterministic and must precede idempotency, but a rejected
+        # attempt is not a write and must not increment the rollout counter.
+        if app_settings.reserved_agent_id_policy == "reject":
+            raise HTTPException(
+                status_code=409,
+                detail=_REST_RESERVED_CREDENTIAL_MESSAGE.format(agent_id=verified_id),
+            )
+        return effective_write_agent_id(verified_id, claimed_id) or claimed_id
+    return canonical_service_agent_id(verified_id)
+
+
+def _credential_write_agent_id(auth: AuthContext) -> str | None:
+    """The write identity an omitted body ``agent_id`` falls back to, or None.
+
+    ax-0917-m-16. ``agent_id`` was mandatory in the body on every non-standalone
+    write — including for a credential whose agent identity the gateway had
+    already verified and injected as ``X-Agent-ID``. So an agent-scoped caller
+    had to repeat its own name in every request, and
+    ``_resolve_rest_write_agent_id`` then DISCARDED what it sent and wrote under
+    the verified id anyway: a required field whose value never reached a row.
+    The MCP plane never asked for it (``_refuse_default_agent_on_gateway``
+    returns early once ``X-Agent-ID`` resolved), so the two transports disagreed
+    about the same credential.
+
+    THIS WIDENS NOTHING, and that is the point rather than a hope. It returns
+    only the identity that already wins, under the same flag that makes it win,
+    so an omitted field resolves to exactly what repeating the credential's own
+    id resolves to. It is a default, not a trust decision: the body value stays
+    unable to override the credential, and a credential carrying no agent
+    identity still gets the 422 — defaulting THAT would collapse every anonymous
+    write onto one shared identity, which is the whole reason the 422 exists.
+
+    A reserved verified id (``main``) is deliberately excluded rather than
+    forgotten. The ``reserved_agent_id_policy`` migration relies on the BODY
+    naming a real identity for those credentials — that is the escape hatch
+    ``effective_write_agent_id`` keeps open while the policy is allow/warn — so
+    there is nothing here worth falling back to, and filling one in would
+    attribute the write to ``main``. They keep the 422 and its instruction to
+    name a real agent.
+    """
+    # Gated on the same flag as the binding it mirrors: with the emergency
+    # rollback thrown, this route resolves exactly as it did before.
+    if not app_settings.bind_write_identity_to_auth:
+        return None
+    verified_id = auth.agent_id
+    if not verified_id or verified_id in ALWAYS_RESERVED_AGENT_IDS:
+        return None
+    return canonical_service_agent_id(verified_id)
+
+
+def _observe_rest_reserved_write(auth: AuthContext, chosen_id: str) -> None:
+    """Emit one warn event for a gated write that escaped reserved ``main``.
+
+    A reserved final identity is observed by the shared service-layer guard;
+    a unique fallback bypasses that guard, so observe it here instead, alongside
+    the service call and after the same ownership/fleet gates.
+    """
+    if (
+        app_settings.reserved_agent_id_policy == "warn"
+        and auth.agent_id in ALWAYS_RESERVED_AGENT_IDS
+        and chosen_id not in ALWAYS_RESERVED_AGENT_IDS
+    ):
+        reserved_write_refusal(auth.agent_id)
 
 
 def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None = None) -> None:
@@ -146,7 +273,8 @@ def _reject_reserved_memory_type(memory_type: str | None, *, index: int | None =
 
 
 def _missing_agent_id_error() -> RequestValidationError:
-    """Build the 422 raised when a non-standalone write omits ``agent_id``.
+    """Build the 422 raised when a write omits ``agent_id`` and nothing can
+    supply one: not standalone, and a credential that authenticates no agent.
 
     Mirrors the shape FastAPI produces for a missing required field, so the
     app's validation-envelope handler renders it as a 422 INVALID_ARGUMENTS.
@@ -159,7 +287,16 @@ def _missing_agent_id_error() -> RequestValidationError:
             {
                 "type": "missing",
                 "loc": ("body", "agent_id"),
-                "msg": ("agent_id is required; only the standalone single-tenant deployment may omit it."),
+                # Names both ways out, because the caller that hits this has
+                # exactly one real question — "what do I send instead?" — and
+                # provisioning an agent-scoped credential is the answer that
+                # makes the field go away rather than one more value to repeat.
+                "msg": (
+                    "agent_id is required for a credential that authenticates no agent. "
+                    "Send it in the body, or use an agent-scoped credential "
+                    "(kind=agent_key), whose own identity is used when the field is "
+                    "omitted; the standalone single-tenant deployment may also omit it."
+                ),
                 "input": None,
             }
         ]
@@ -196,6 +333,31 @@ async def list_fleets(
     # actually return. The storage endpoint applies this exclusion server-side
     # when ``exclude_scope_agent=True``.
     return await get_storage_client().memory_fleet_distribution(tenant_id, exclude_scope_agent=True)
+
+
+async def _gate_fleet_read(
+    auth: AuthContext,
+    tenant_id: str | None,
+    caller_agent_id: AgentIdentity | None,
+    fleet_id: str | None,
+) -> None:
+    """Apply the fleet-read trust gate, under the condition it needs to be
+    meaningful — in one place, because three read routes had to agree on it.
+
+    The four-term condition is not a style choice. The gate resolves a trust
+    ladder for a *verifiable* caller, so it needs an authenticated tenant, a
+    resolved tenant to check against, an agent identity to resolve, and a fleet
+    to resolve it for. A tenant/user credential has no agent identity and is
+    tenant-wide by design; there is nothing for the ladder to rank.
+
+    ``_resolve_scoped_read`` below states this same condition in prose as the
+    thing its callers are expected to match. This makes the prose executable:
+    the list, stats and count routes now match it by calling one function
+    rather than by three copies staying in step. Count is the route that proves
+    the point — it is the neighbour that never got the gate at all.
+    """
+    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
+        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
 
 
 async def _resolve_scoped_read(
@@ -257,7 +419,10 @@ async def _resolve_scoped_read(
         # unregistered agent_id is cosmetic here because nothing is persisted.
         _, _, terr = await require_trust(tenant_id, caller_agent_id, min_level=min_level)
         if terr:
-            raise HTTPException(status_code=403, detail=parse_trust_error(terr))
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr)),
+            )
     return author_filter, fleet_id
 
 
@@ -273,7 +438,11 @@ async def list_memories(
             "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own "
             "memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet "
             "trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). "
-            "Omit for the historical behaviour, where `agent_id` is the author filter."
+            "Omit for the historical behaviour, where `agent_id` is the author filter. "
+            "Unrelated to the `visibility` parameter despite the shared word: this "
+            "selects how wide to look at read time, `visibility=scope_*` filters on "
+            "the tier a writer stamped on the row. Keystone routes spell their own "
+            "scope with a different enum again ('tenant' where this says 'all')."
         ),
     ),
     written_by: str | None = Query(
@@ -288,7 +457,15 @@ async def list_memories(
     created_after: datetime | None = Query(default=None),
     created_before: datetime | None = Query(default=None),
     status: str | None = Query(default=None),
-    visibility: str | None = Query(default=None),
+    visibility: str | None = Query(
+        default=None,
+        description=(
+            "Filter on the write-time visibility tier stamped on the row "
+            "(`scope_agent`, `scope_team`, `scope_org`). Not the `scope` "
+            "parameter above, which chooses read breadth — the two words look "
+            "alike and control different things."
+        ),
+    ),
     run_id: str | None = Query(default=None),
     weight_min: float | None = Query(default=None, ge=0, le=1),
     weight_max: float | None = Query(default=None, ge=0, le=1),
@@ -353,7 +530,11 @@ async def list_memories(
     # or by omitting it. The query param stays the AUTHOR filter (written_by).
     # A tenant/user credential (auth.agent_id None) keeps using the param, as the
     # dashboard intends.
-    caller_agent_id = auth.agent_id or agent_id
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
+    if written_by is not None:
+        written_by = canonical_service_agent_id(written_by)
+    caller_agent_id = auth.effective_agent_id(agent_id)
     # ``written_by`` is the author filter; ``agent_id`` keeps serving as that
     # filter when ``written_by`` is omitted, so existing callers are unaffected.
     author_filter = written_by if written_by is not None else agent_id
@@ -373,8 +554,7 @@ async def list_memories(
     # Not redundant with the ladder above: scope='agent' resolves to L1 WITHOUT
     # inspecting the fleet it was handed, so this is the only thing standing
     # between a constrained caller and `scope=agent&fleet_id=<someone else's>`.
-    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
-        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
 
     # An inverted range matches nothing. Say so rather than serving an empty
     # page the caller reads as "no such memories".
@@ -385,7 +565,7 @@ async def list_memories(
         )
 
     # Cursor-based pagination (only applies to created_at descending sort)
-    if cursor and (sort != "created_at" or order != "desc"):
+    if cursor and not cursor_sortable(sort, order):
         raise HTTPException(
             status_code=400,
             detail="Cursor pagination is only supported with sort=created_at and order=desc",
@@ -429,6 +609,12 @@ async def list_memories(
         "offset": offset,
         "cursor_ts": c_ts.isoformat() if c_ts else None,
         "cursor_id": str(c_id) if c_id else None,
+        # OSS 09/02 M-27 — declared on this route since it was written and
+        # never put in the payload, so ``?visibility=scope_org`` returned the
+        # unfiltered page. Narrowing only: storage ANDs it onto a query the
+        # visibility-scoping predicate has already bounded, so it cannot reach
+        # a row the caller could not already see.
+        "visibility": visibility,
         # scope='agent' never widens across tenants — it means "my own memories",
         # which live in the home tenant. Mirrors the MCP handler, which passes
         # ``readable_tenant_ids`` only when scope != 'agent'.
@@ -444,7 +630,12 @@ async def list_memories(
     items = [_memory_to_out(m) for m in rows[:limit]]
 
     next_cursor = None
-    if has_more and items:
+    # OSS 09/02 L-23 — only mint a cursor this endpoint would accept back.
+    # The gate above 400s a cursor unless ``sort=created_at`` and
+    # ``order=desc``, but the mint was unconditional, so any other sort handed
+    # the caller a token and then refused it on the very next request. Following
+    # the documented pagination contract was the way to hit it.
+    if has_more and items and cursor_sortable(sort, order):
         last = rows[limit - 1]
         next_cursor = encode_cursor(datetime.fromisoformat(last["created_at"]), UUID(last["id"]))
 
@@ -481,7 +672,8 @@ async def memory_stats(
             "Opt-in aggregate scope, mirroring the MCP/plugin contract. 'agent' = your "
             "own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet "
             "trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). "
-            "Omit for the historical behaviour."
+            "Omit for the historical behaviour. Unrelated to `visibility=scope_*`, "
+            "which is the tier a writer stamped on the row rather than a read breadth."
         ),
     ),
     memory_type: str | None = Query(default=None),
@@ -512,13 +704,21 @@ async def memory_stats(
     # Stats cannot borrow that fix as-is: with one knob doing both jobs, forcing
     # it to the caller would silently narrow the historical "no agent_id →
     # team/org-wide" aggregate. Rejecting the conflict closes the leak and
-    # leaves every legitimate call (omitted, or naming yourself) untouched.
-    if auth.agent_id and agent_id and agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
-        )
-    caller_agent_id = auth.agent_id or agent_id
+    # leaves every legitimate call untouched: omit it for the wider aggregate,
+    # or name yourself. An explicit ``?agent_id=`` is an assertion, not an
+    # omission, and is refused with the rest — see ``enforce_self_agent``.
+    auth.enforce_self_agent(
+        agent_id,
+        message=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
+    )
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
+    # Was the bare ``auth.agent_id or agent_id``. That is exactly the
+    # expression ``effective_agent_id`` exists to name (see its docstring:
+    # the bare form is indistinguishable from an audit-attribution line of
+    # the same shape), and this is the authorization identity — it gates
+    # ``enforce_fleet_read`` below. Same value, via the audited helper.
+    caller_agent_id = auth.effective_agent_id(agent_id)
     effective_agent_id = agent_id
     if scope is not None:
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
@@ -535,11 +735,9 @@ async def memory_stats(
             written_by=None,
         )
         effective_agent_id = caller_agent_id if scope == "agent" else None
-    # A fleet-scoped aggregate is a fleet-scoped read: gate it exactly as
-    # GET /memories does. Previously absent here, which let a trust-1 agent
-    # read another fleet's breakdown that the list route would have refused.
-    if auth.tenant_id and tenant_id and caller_agent_id and fleet_id:
-        await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
+    # Previously absent here, which let a trust-1 agent read another fleet's
+    # breakdown that the list route would have refused.
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
 
     # Type/agent/status breakdown (GROUPING SETS) via core-storage-api. Aggregates
     # across the readable set when the caller has cross-tenant read AND didn't pin
@@ -596,7 +794,27 @@ async def memory_count(
         tenant_id = auth.tenant_id
     if not tenant_id:
         raise HTTPException(status_code=400, detail="tenant_id is required")
-    count = await get_storage_client().count_active(tenant_id, fleet_id, status=status)
+    # This route sat beside stats and list without the gate, so a trust-1 agent
+    # could count another fleet's rows the list route would have refused to show
+    # it — the same hole that was closed on stats and missed here.
+    caller_agent_id = auth.effective_agent_id(None)
+    await _gate_fleet_read(auth, tenant_id, caller_agent_id, fleet_id)
+    # Visibility, scoped exactly as ``GET /memories`` scopes the rows this
+    # number summarises: ``scope_agent`` rows count only for their own author.
+    # Counting them all handed back, as a number, what the list route withholds
+    # — peers' private row counts. Excluding them all was the equal and
+    # opposite error: an agent credential's own count would then come in UNDER
+    # the list it can see.
+    #
+    # This route takes no ``agent_id`` param, so there is nothing to forge: the
+    # identity is the authenticated one or nothing.
+    count = await get_storage_client().count_active(
+        tenant_id,
+        fleet_id,
+        status=status,
+        exclude_scope_agent=True,
+        caller_agent_id=caller_agent_id,
+    )
     return {"count": count}
 
 
@@ -658,7 +876,13 @@ async def delete_all_memories(
     # owner) keep full reach (dashboard reset, tagged cleanup) unchanged.
     if auth.tenant_id and auth.agent_id:
         await enforce_delete(tenant_id, auth.agent_id)
-    exclude_ids = (body or {}).get("exclude_ids", [])
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
+    # OSS 09/02 L-24 — the same validation ``bulk_delete_by_ids`` applies below.
+    # This one also feeds the ``is_tenant_wide`` test further down, so a
+    # malformed value did not merely 500 later: a non-empty string counted as
+    # "narrowed", quietly disarming the unbounded-delete guard.
+    exclude_ids = _require_uuid_list((body or {}).get("exclude_ids", []), "exclude_ids")
     metadata_filter = (body or {}).get("metadata_filter") or {}
     # SAFE-03 / C28. "Unbounded" means every narrowing input is absent, so the
     # filter set degenerates to the tenant alone. Listed explicitly rather than
@@ -764,6 +988,12 @@ async def bulk_delete_by_ids(
     # closes the cross-fleet/agent delete (the ids are otherwise unscoped).
     if auth.tenant_id and auth.agent_id:
         await enforce_delete(tenant_id, auth.agent_id)
+    # OSS 09/02 L-24 — shape and elements, not just size. ``len()`` answers for
+    # a str as readily as for a list, so ``{"ids": "abc"}`` passed the size gate
+    # and reached storage as a 3-item iterable of characters; a non-UUID element
+    # got as far as ``UUID(...)`` storage-side. Both surfaced to the caller as a
+    # gateway 500 for what is plainly their own malformed input.
+    ids = _require_uuid_list(ids, "ids")
     if not ids or len(ids) > 1000:
         raise HTTPException(status_code=400, detail="ids must be 1-1000 items")
 
@@ -1039,7 +1269,20 @@ async def get_contradictions(
     }
 
 
-@router.post("/memories", response_model=MemoryOut, status_code=201)
+# Two shapes, and the document now says so. The STM branch returns
+# ``STMWriteResponse`` through a raw ``JSONResponse``, which bypasses
+# ``response_model`` — so the SERVER was always right here and only the
+# published contract was wrong: it advertised one 201 shape for an endpoint
+# with two, which a generated client discovers by failing to parse a
+# SUCCESSFUL write.
+#
+# Written as a union on ``response_model`` rather than an extra ``responses``
+# entry. Both produce an anyOf, but adding it alongside ``response_model``
+# leaves FastAPI emitting a ``$ref`` WITH an ``anyOf`` sibling, which
+# generators are free to read either way — replacing one ambiguity with
+# another is not a fix. The LTM path still validates: a ``MemoryOut`` cannot
+# satisfy ``STMWriteResponse``, which requires target/ttl/posted_at.
+@router.post("/memories", response_model=MemoryOut | STMWriteResponse, status_code=201)
 @write_limit
 async def write_memory(
     request: Request,
@@ -1053,19 +1296,34 @@ async def write_memory(
         auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
     _reject_reserved_memory_type(body.memory_type)
-    # Resolve a missing agent_id. On the standalone single-tenant path there is
-    # one stable identity, so default to the reserved DEFAULT_AGENT_ID (mirrors
-    # the evolve/insights REST routes) — this is what makes the documented
-    # quickstart curl work without an agent_id. Everywhere else (tenant-scoped
-    # key / enterprise gateway) the caller MUST name a real agent, or every
+    # Resolve a missing agent_id. An agent-scoped credential supplies its own
+    # verified identity (ax-0917-m-16) — the value the binding below would
+    # impose anyway, so asking for it in the body bought nothing. On the
+    # standalone single-tenant path there is one stable identity, so default to
+    # the reserved DEFAULT_AGENT_ID (mirrors the evolve/insights REST routes) —
+    # this is what makes the documented quickstart curl work without an
+    # agent_id. Everywhere else (tenant-scoped key / enterprise gateway, both of
+    # which authenticate NO agent) the caller MUST name a real agent, or every
     # anonymous write would collapse onto one shared identity — the same footgun
     # mcp_server._refuse_default_agent_on_gateway guards against. Keep that as an
     # explicit 422 rather than a silent default.
-    if not body.agent_id:
+    #
+    # Bound to a local so the narrowing SURVIVES: ``model_copy`` rebinds
+    # ``body`` and the field stays ``str | None`` on the model, so re-reading
+    # ``body.agent_id`` in the inner function threw the guarantee away and
+    # needed a ``type: ignore`` there. Passed down instead — see
+    # ``_write_memory_inner``'s ``chosen_agent_id``.
+    chosen_agent_id = body.agent_id or _credential_write_agent_id(auth)
+    if not chosen_agent_id:
         if app_settings.is_standalone:
-            body = body.model_copy(update={"agent_id": DEFAULT_AGENT_ID})
+            chosen_agent_id = DEFAULT_AGENT_ID
+            body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
             raise _missing_agent_id_error()
+    # Deterministic auth rejection must happen before claiming idempotency, or
+    # a bad credential leaves a pending receipt that masks the stable 409.
+    chosen_agent_id = _resolve_rest_write_agent_id(auth, chosen_agent_id)
+    body.agent_id = chosen_agent_id
     # Idempotency replay is short-circuited BEFORE the per-tenant slot —
     # a cached retry must not consume a write-concurrency slot, or a
     # tenant retry storm starves its own legitimate new writes.
@@ -1085,7 +1343,7 @@ async def write_memory(
         _body, _status = _replay
         # Replays bypass the per-tenant slot AND the
         # ``check_and_increment`` quota call below, so ``response.headers``
-        # is empty here — emit no rate-limit headers rather than
+        # is empty here — emit no quota headers rather than
         # passing empties. Acceptable trade-off: a replayed request
         # didn't consume quota, so there's no fresh ``remaining`` value
         # to publish.
@@ -1095,7 +1353,7 @@ async def write_memory(
     # queueing requests until they time out at the worker layer. Only
     # the new-write path is gated; replays returned above bypass it.
     async with per_tenant_slot("write", body.tenant_id):
-        return await _write_memory_inner(body, response, auth, _idem)
+        return await _write_memory_inner(body, response, auth, _idem, chosen_agent_id)
 
 
 async def _write_memory_inner(
@@ -1103,20 +1361,18 @@ async def _write_memory_inner(
     response: Response,
     auth: AuthContext,
     idem: IdempotencyGuard | None,
+    # Non-null write identity, already preflighted against the credential by
+    # ``write_memory`` before it claims idempotency.
+    chosen_agent_id: str,
 ):
     from core_api.services.organization_settings import resolve_config
 
     write_config = await resolve_config(body.tenant_id)
-    # Phase 2 (dark, default off): bind to the verified credential identity,
-    # ignoring a client-supplied body override. Enable ONLY after reserved-
-    # `main` creds are re-identified, else it pins them back onto `main`.
-    if app_settings.bind_write_identity_to_auth and auth.agent_id:
-        body.agent_id = auth.agent_id
     # Ownership boundary (gate + owner stamp + post-create re-check), shared
     # with the bulk path so a broker single-write can't attribute a memory to
     # an agent owned by a different install.
     agent, body.agent_id = await resolve_write_agent(
-        body.agent_id,
+        chosen_agent_id,
         body.tenant_id,
         body.fleet_id,
         is_install_credential=auth.is_install_credential,
@@ -1126,7 +1382,10 @@ async def _write_memory_inner(
     if agent.get("trust_level", 0) == 0:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            ),
         )
     # Resolve fleet_id from agent's home fleet if not provided
     if not body.fleet_id and agent.get("fleet_id"):
@@ -1136,9 +1395,8 @@ async def _write_memory_inner(
         await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
         if charges_write_quota("create"):
             usage = await check_and_increment(body.tenant_id, "write")
-    if usage:
-        response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
-        response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
+    set_usage_headers(response, usage)
+    _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
     result = await create_memory(body)
     # STM writes return STMWriteResponse (different shape from MemoryOut)
     if isinstance(result, STMWriteResponse):
@@ -1236,6 +1494,8 @@ async def write_memories_bulk(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    if body.agent_id:
+        body.agent_id = canonical_service_agent_id(body.agent_id)
     for _idx, _item in enumerate(body.items):
         _reject_reserved_memory_type(_item.memory_type, index=_idx)
 
@@ -1262,13 +1522,23 @@ async def write_memories_bulk(
         # gate applies to that result — and to an explicitly-supplied
         # ``agent_id`` — there.
     # Resolve a missing agent_id (mirrors write_memory). Install-credential
-    # callers were already attributed above; everyone else either gets the
-    # reserved standalone identity or must name a real agent. Defaulting
-    # outside standalone would silently collapse anonymous writes onto one
-    # shared identity — see mcp_server._refuse_default_agent_on_gateway.
-    if not body.agent_id:
+    # callers were already attributed above; an agent-scoped credential supplies
+    # its own verified identity (ax-0917-m-16); everyone else either gets the
+    # reserved standalone identity or must name a real agent. Defaulting for a
+    # credential that authenticates no agent would silently collapse anonymous
+    # writes onto one shared identity — see
+    # mcp_server._refuse_default_agent_on_gateway.
+    #
+    # Bound to a local so the narrowing SURVIVES: ``model_copy`` rebinds
+    # ``body`` and the field stays ``str | None`` on the model, so re-reading
+    # ``body.agent_id`` in the inner function threw the guarantee away and
+    # needed a ``type: ignore`` there. Passed down instead — see
+    # ``_write_memories_bulk_inner``'s ``chosen_agent_id``.
+    chosen_agent_id = body.agent_id or _credential_write_agent_id(auth)
+    if not chosen_agent_id:
         if app_settings.is_standalone:
-            body = body.model_copy(update={"agent_id": DEFAULT_AGENT_ID})
+            chosen_agent_id = DEFAULT_AGENT_ID
+            body = body.model_copy(update={"agent_id": chosen_agent_id})
         else:
             raise _missing_agent_id_error()
     if not bulk_attempt_id:
@@ -1286,6 +1556,11 @@ async def write_memories_bulk(
             detail=(f"Invalid {BULK_ATTEMPT_ID_HEADER}: must match ^[A-Za-z0-9._:\\-]{{1,128}}$"),
         )
 
+    # As on the single route, fail deterministic credential errors before an
+    # idempotency receipt is claimed and can be left pending.
+    chosen_agent_id = _resolve_rest_write_agent_id(auth, chosen_agent_id)
+    body.agent_id = chosen_agent_id
+
     # Idempotency replay short-circuits BEFORE the per-tenant slot — a
     # cached retry must not consume a write-concurrency slot.
     _idem = await idempotency_for(request, body.tenant_id, idempotency_key)
@@ -1296,7 +1571,7 @@ async def write_memories_bulk(
         # carry on the cached response.
         return JSONResponse(content=_body, status_code=_status)
     async with per_tenant_slot("write", body.tenant_id):
-        return await _write_memories_bulk_inner(body, response, auth, _idem, bulk_attempt_id)
+        return await _write_memories_bulk_inner(body, response, auth, _idem, bulk_attempt_id, chosen_agent_id)
 
 
 def _broker_write_agent_id(items: list[BulkMemoryItem], install_uuid: str | None) -> str:
@@ -1355,12 +1630,10 @@ async def _write_memories_bulk_inner(
     auth: AuthContext,
     idem: IdempotencyGuard | None,
     bulk_attempt_id: str,
+    # Non-null write identity, already preflighted against the credential by
+    # ``write_memories_bulk`` before it claims idempotency.
+    chosen_agent_id: str,
 ):
-    # Phase 2 (dark, default off): bind to the verified credential identity
-    # (see _write_memory_inner). Enabled only post-re-identification. Runs
-    # before resolve_write_agent so the gate/stamp apply to the bound identity.
-    if app_settings.bind_write_identity_to_auth and auth.agent_id:
-        body.agent_id = auth.agent_id
     # Ownership boundary (gate + owner stamp + post-create re-check), shared
     # with the single-write path.
     #
@@ -1372,7 +1645,7 @@ async def _write_memories_bulk_inner(
     # approval would create trust-0 rows and 403 whole batches, breaking capture.
     # Per-agent approval is an interactive / single-agent concern.
     agent, body.agent_id = await resolve_write_agent(
-        body.agent_id,
+        chosen_agent_id,
         body.tenant_id,
         body.fleet_id,
         is_install_credential=auth.is_install_credential,
@@ -1386,11 +1659,25 @@ async def _write_memories_bulk_inner(
     # Metering deliberately does NOT happen here — see after the write. This
     # used to be ``usage = await bulk_check_and_increment(...)`` on this line,
     # before the try, and no failure path gave it back.
+    _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
+    # ax-0917-h-01/h-02 follow-up. This route opts OUT of
+    # ``RequestTimeoutMiddleware`` (see ``_TIMEOUT_OPT_OUT_PATHS``) and
+    # enforces the budget below instead — which also opted it out of the
+    # phase attribution the middleware arms, leaving this 504 saying exactly
+    # what the middleware's used to say before #1707: the deadline passed,
+    # and nothing about which layer passed it. The recorder is armed here so
+    # the answer is the same one ``/search`` now gives. Bulk is the route
+    # most able to need it: 90s of budget across embed, enrich, an unbounded
+    # ``per_tenant_storage_slot`` acquire and the storage roundtrip, on the
+    # path a customer's bulk ingest runs.
+    bulk_budget = app_settings.bulk_request_timeout_seconds
+    timeout_started_at = time.monotonic()
     try:
-        result = await asyncio.wait_for(
-            create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),
-            timeout=app_settings.bulk_request_timeout_seconds,
-        )
+        with request_phase.own_deadline(bulk_budget) as phases:
+            result = await asyncio.wait_for(
+                create_memories_bulk(body, bulk_attempt_id=bulk_attempt_id),
+                timeout=bulk_budget,
+            )
     except (TimeoutError, httpx.TimeoutException):
         # ``asyncio.wait_for`` documents raising ``asyncio.TimeoutError``,
         # which Python 3.11 aliased to the builtin ``TimeoutError``.
@@ -1415,11 +1702,24 @@ async def _write_memories_bulk_inner(
         # entry is self-explanatory; the actual elapsed time on the
         # request line distinguishes which timer fired (storage cap at
         # ~25s elapsed vs umbrella at ~90s elapsed).
+        attribution = phases.snapshot()
+        elapsed = round(time.monotonic() - timeout_started_at, 3)
         logger.warning(
             "bulk write timed out (storage cap %ss / request cap %ss); client should retry with same %s",
             app_settings.storage_bulk_timeout_seconds,
-            app_settings.bulk_request_timeout_seconds,
+            bulk_budget,
             BULK_ATTEMPT_ID_HEADER,
+            # Flat and top-level, matching the middleware's budget log, so
+            # "which layer is eating bulk budgets, how often" is one
+            # group-by rather than a grep of two differently-shaped lines.
+            extra={
+                "budget_seconds": bulk_budget,
+                "elapsed_seconds": elapsed,
+                "path": "/api/v1/memories/bulk",
+                "phase": attribution["phase"],
+                "phases_cancelled": attribution["phases_cancelled"],
+                "phases_completed": attribution["phases_completed"],
+            },
         )
         # No per-item state to surface — the storage call may have
         # committed some rows, none, or be still in flight. Do NOT
@@ -1427,12 +1727,29 @@ async def _write_memories_bulk_inner(
         # incomplete answer; the per-item attempt-id is the recovery
         # contract and a retry will resolve every committed row to
         # ``duplicate_attempt`` with its canonical id.
+        #
+        # ``coded_detail`` rather than a bare string for the same reason the
+        # middleware does not reuse ``code_for_status(504)``: that maps to
+        # ``UPSTREAM_TIMEOUT``, a claim that a backend reported a failure.
+        # Nothing did — WE cancelled the handler at our own budget, and a
+        # caller sent after the wrong system by the code is the failure
+        # ``REQUEST_BUDGET_EXCEEDED`` was minted for. Top-level ``detail``
+        # stays the same plain sentence, including the header name the
+        # retry contract turns on.
         raise HTTPException(
             status_code=504,
-            detail=(
-                "bulk write timed out before completing; retry with "
-                f"the same {BULK_ATTEMPT_ID_HEADER} to recover any "
-                "committed items."
+            detail=coded_detail(
+                REQUEST_BUDGET_EXCEEDED,
+                (
+                    "bulk write timed out before completing"
+                    + (f" while running {attribution['phase']}" if attribution["phase"] else "")
+                    + f"; retry with the same {BULK_ATTEMPT_ID_HEADER} to recover any "
+                    "committed items."
+                ),
+                budget_seconds=bulk_budget,
+                elapsed_seconds=elapsed,
+                path="/api/v1/memories/bulk",
+                **attribution,
             ),
         )
     except PermanentStorageWriteError as exc:
@@ -1538,13 +1855,20 @@ async def _write_memories_bulk_inner(
     # duplicates or errors. Those are a billing decision, and
     # ``meters_mcp_bulk_write``'s docstring is the precedent for treating one as
     # such rather than shipping it as a deploy side effect.
+    usage = None
     if auth.tenant_id:
         usage = await bulk_check_and_increment(body.tenant_id, len(body.items))
-        if usage:
-            response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
-            response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
 
     bulk_resp = _bulk_response(result)
+    # Onto ``bulk_resp``, NOT the injected ``response`` param. This route
+    # RETURNS a Response, and FastAPI only merges the param's headers into a
+    # response it built itself from a returned model — ``if isinstance(
+    # raw_response, Response): response = raw_response``, with no
+    # ``headers.raw.extend``. So the quota headers set on ``response`` here
+    # were dropped on the floor and no bulk caller has ever seen them. (The
+    # throttle headers survive because slowapi's decorator injects into
+    # whatever the handler RETURNS when that is a Response.)
+    set_usage_headers(bulk_resp, usage)
     if idem:
         # Replay the live status code, not a hardcoded 200 — a 207
         # batch with mixed errors must replay AS 207, not as a 200
@@ -1600,8 +1924,9 @@ async def delete_memory(
             if not allowed:
                 raise HTTPException(
                     status_code=403,
-                    detail=(
-                        f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.get('fleet_id')}'."
+                    detail=coded_detail(
+                        AUTH_FLEET_SCOPE_FORBIDDEN,
+                        f"Agent '{caller_agent_id}' cannot delete memory in fleet '{target.get('fleet_id')}'.",
                     ),
                 )
     # ``soft_delete_memory`` already routes the fetch + delete through the
@@ -1671,7 +1996,10 @@ async def update_memory_status(
         if not allowed:
             raise HTTPException(
                 status_code=403,
-                detail=f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    f"Agent '{auth.agent_id}' cannot modify memory in fleet '{memory.get('fleet_id')}'.",
+                ),
             )
     old_status = memory.get("status")
     await sc.update_memory_status(str(memory_id), status, tenant_id=tenant_id)
@@ -1774,11 +2102,11 @@ async def update_memory_endpoint(
         memory_id,
         tenant_id,
         body,
-        agent_id=(auth.agent_id or agent_id) if auth.tenant_id else None,
+        agent_id=auth.effective_agent_id(agent_id) if auth.tenant_id else None,
     )
 
 
-def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[str | None, bool]:
+def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[AgentIdentity | None, bool]:
     """Resolve the identity a search-shaped read runs as, refusing a spoof.
 
     Returns ``(eff_agent_id, identity_asserted)``.
@@ -1809,36 +2137,225 @@ def _resolve_read_identity(auth: AuthContext, body: SearchRequest) -> tuple[str 
     ``SearchRequest`` must not disagree about what the fields mean; one
     implementation is the only way that stays true.
     """
-    if auth.agent_id and body.filter_agent_id and body.filter_agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"filter_agent_id '{body.filter_agent_id}' does not match the "
-                f"authenticated agent identity '{auth.agent_id}'."
-            ),
-        )
-    # Same rule for the identity knob. ``caller_agent_id`` feeds exactly the two
-    # things ``filter_agent_id`` used to smuggle in — the visibility identity and
-    # the subject of the trust<2 fleet forcing — so leaving it unguarded would
-    # reopen the escalation the check above closes, by a new spelling.
-    if auth.agent_id and body.caller_agent_id and body.caller_agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"caller_agent_id '{body.caller_agent_id}' does not match the "
-                f"authenticated agent identity '{auth.agent_id}'."
-            ),
-        )
+    auth.enforce_self_agent(body.filter_agent_id, field="filter_agent_id")
+    # Same rule for the identity knob: ``caller_agent_id`` feeds the visibility
+    # identity directly, so leaving it unguarded reopens the same escalation
+    # under a different field name.
+    auth.enforce_self_agent(body.caller_agent_id, field="caller_agent_id")
+    if body.filter_agent_id is not None:
+        body.filter_agent_id = canonical_service_agent_id(body.filter_agent_id)
+    if body.caller_agent_id is not None:
+        body.caller_agent_id = canonical_service_agent_id(body.caller_agent_id)
     # Identity, in precedence order: an authenticated agent always wins, then an
     # explicit assertion, then the legacy derivation from the filter so existing
     # callers are untouched. The filter itself is passed separately at the
     # callsite and is unchanged — it was already a distinct parameter all the way
     # down to the storage predicate; only the identity was derived from it.
-    eff_agent_id = auth.agent_id or body.caller_agent_id or body.filter_agent_id
+    asserted = body.caller_agent_id or body.filter_agent_id
+    # ``is not None`` keeps this an exact passthrough of the original
+    # ``auth.agent_id or body.caller_agent_id or body.filter_agent_id``.
+    eff_agent_id = auth.effective_agent_id(asserted)
     # True when the identity was ASSERTED by a tenant-scoped caller rather than
     # authenticated. Gates the recall_count bump — see the note at the callsite.
     identity_asserted = bool(not auth.agent_id and body.caller_agent_id)
     return eff_agent_id, identity_asserted
+
+
+# ax-0917-h-05 — a stable slug, same contract as SUCCESSOR_ENRICHMENT_INCOMPLETE.
+UNRECOGNIZED_PARAMETERS = "unrecognized_parameters"
+SUPERSEDED_PARAMETER_ALIAS = "superseded_parameter_alias"
+
+
+def _declared_alias_spellings(model: type[SearchRequest]) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Map every declared spelling of an aliased field to that field.
+
+    ``{alias -> (field_name, all spellings in priority order)}``. Built by
+    introspection rather than a hand-kept list, so a field that gains an alias
+    later cannot quietly start being reported as junk.
+    """
+    spellings: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for name, field in model.model_fields.items():
+        alias = field.validation_alias
+        choices = getattr(alias, "choices", None)
+        if not choices:
+            continue
+        # ``AliasChoices.choices`` may hold alias PATHS (lists) for nested
+        # lookups; only flat string spellings can collide with an extra key.
+        flat = tuple(c for c in choices if isinstance(c, str))
+        for c in flat:
+            spellings[c] = (name, flat)
+    return spellings
+
+
+# Computed once per model: the classes are static, and this runs on every
+# search request. Keyed by class because ``RecallRequest`` subclasses
+# ``SearchRequest`` and may declare aliases of its own.
+_ALIAS_SPELLINGS_CACHE: dict[type, dict[str, tuple[str, tuple[str, ...]]]] = {}
+
+
+def _alias_spellings_for(model: type[SearchRequest]) -> dict[str, tuple[str, tuple[str, ...]]]:
+    cached = _ALIAS_SPELLINGS_CACHE.get(model)
+    if cached is None:
+        cached = _declared_alias_spellings(model)
+        _ALIAS_SPELLINGS_CACHE[model] = cached
+    return cached
+
+
+def _superseded_winner(choices: tuple[str, ...], extras: dict) -> str | None:
+    """Which spelling pydantic actually used — or None when that is unknowable.
+
+    ``AliasChoices`` resolution takes the FIRST choice present in the input, so
+    every other spelling the caller sent lands in ``model_extra``. Two facts
+    follow, and together they bound what can be inferred from ``extras`` alone:
+
+    * the winner outranks every loser, so it sits strictly above the
+      highest-priority spelling found in ``extras``;
+    * exactly one spelling above that point was sent — the winner — but
+      ``extras`` cannot say WHICH, because a spelling that was never sent is
+      absent from ``extras`` for the same reason a consumed one is.
+
+    So the answer is exact only when one candidate remains above the first
+    loser. With two spellings that is always the case. With three or more it
+    may not be: given ``("a", "b", "c")`` and a caller who sent only ``b`` and
+    ``c``, pydantic used ``b`` while ``a`` and ``b`` are indistinguishable from
+    here — and the earlier ``next(c for c in choices if c not in extras)``
+    answered ``a``, confidently and wrongly.
+
+    Returning None there is the honest answer; the caller is told the field was
+    superseded without being told a spelling it may never have sent. Naming it
+    exactly for N >= 3 needs the raw request keys (a ``mode="wrap"`` validator
+    recording them), which is not worth putting on this path for a case no
+    field currently has.
+    """
+    lost = [i for i, c in enumerate(choices) if c in extras]
+    if not lost:
+        return None
+    candidates = choices[: min(lost)]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+_MAX_REPORTED_UNKNOWN = 20
+
+
+def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
+    """Report the request keys this surface accepted and then ignored.
+
+    ax-0917-h-05. The search/filter/query bodies accept unknown fields on
+    purpose (SAFE-01: a misspelled filter returns the wrong rows, not a wrong
+    write, and the permissiveness is a compatibility promise to integrators).
+    What was never deliberate is that the caller is told NOTHING: ``limit: 2``
+    and ``bogus_param_xyz: 2`` produced byte-identical responses to sending
+    neither, so an agent that asked for 2 rows got the default 5 and 3.5x the
+    payload with no signal anywhere that its parameter had not been read.
+
+    So the field survives (still 2xx, still no rejection) and the silence does
+    not. Two channels, because they answer to different people: a
+    ``logger.warning`` for the operator watching an integration, and an A28
+    ``warnings`` entry for the caller, which is the only one an autonomous agent
+    can act on — it does not read our logs.
+
+    Two kinds of key end up in ``model_extra``, and they need different answers.
+    A declared alias sent ALONE is absorbed and never reaches here — but a caller
+    who sends both spellings (``top_k`` and ``limit``, or ``status_filter`` and
+    ``status``) leaves the losing one behind, and it is a name this endpoint
+    knows. Reporting that as "not read by this endpoint" is false: it was read
+    and then superseded, and for ``status`` / ``memory_type`` it would send an
+    integrator looking for a typo that is not there. So the two are split, and
+    the alias case is named for what it is.
+
+    Capped at ``_MAX_REPORTED_UNKNOWN`` names. A caller that sends two hundred
+    junk keys should not get a warning bigger than the result set it asked
+    for — in a change whose whole point is payload size, an unbounded echo of
+    caller input would be its own bug.
+    """
+    extras = body.model_extra or {}
+    if not extras:
+        return []
+
+    # An extra key is not automatically an unknown one. ``extra="allow"`` keeps
+    # whatever pydantic did not bind, and when a caller sends BOTH spellings of
+    # an aliased field the losing spelling lands here even though it is a name
+    # this endpoint knows — it was read, then superseded. Calling that "not read
+    # by this endpoint" is simply false, and for ``status`` / ``memory_type`` it
+    # would send an integrator hunting a typo that does not exist.
+    alias_spellings = _alias_spellings_for(type(body))
+    superseded: list[tuple[str, str, str | None]] = []
+    unknown: list[str] = []
+    for key in sorted(extras):
+        entry = alias_spellings.get(key)
+        if entry is None:
+            unknown.append(key)
+            continue
+        field_name, choices = entry
+        # ``None`` when the winning spelling cannot be known from extras alone.
+        # The two cases get different sentences: naming a field where a reader
+        # expects a spelling would be its own small lie.
+        superseded.append((key, field_name, _superseded_winner(choices, extras)))
+
+    warnings: list[dict] = []
+
+    if superseded:
+        capped = superseded[:_MAX_REPORTED_UNKNOWN]
+        logger.warning(
+            "request sent two spellings of the same parameter",
+            extra={
+                "path": route,
+                "tenant_id": body.tenant_id,
+                "superseded_parameters": [k for k, _, _ in capped],
+            },
+        )
+        warnings.append(
+            {
+                "code": SUPERSEDED_PARAMETER_ALIAS,
+                "message": (
+                    "These request parameters are accepted aliases, but another "
+                    "spelling of the same field was also sent and won: "
+                    + ", ".join(
+                        f"'{k}' superseded by '{w}'"
+                        if w
+                        else f"'{k}' superseded by another spelling of '{f}'"
+                        for k, f, w in capped
+                    )
+                    + "."
+                ),
+                "details": {
+                    "superseded_parameters": {k: f for k, f, _ in capped},
+                    # The spelling that won, where it is knowable. Absent for an
+                    # alias whose winner cannot be identified from the request.
+                    "superseded_by": {k: w for k, _, w in capped if w},
+                },
+            }
+        )
+
+    if unknown:
+        capped_unknown = unknown[:_MAX_REPORTED_UNKNOWN]
+        logger.warning(
+            "request carried parameters this route does not read",
+            extra={
+                "path": route,
+                "tenant_id": body.tenant_id,
+                "unknown_parameters": capped_unknown,
+            },
+        )
+        # No result-count sentence here. ``limit`` is a DECLARED alias of
+        # ``top_k``: sent alone it is absorbed and never reaches this branch,
+        # sent alongside ``top_k`` it is reported as superseded above. So the
+        # count hint could only ever be attached to keys it has nothing to do
+        # with — it was accurate when ``limit`` was genuinely unread, and the
+        # alias is what made it unreachable.
+        warnings.append(
+            {
+                "code": UNRECOGNIZED_PARAMETERS,
+                "message": (
+                    "These request parameters are not read by this endpoint and had no effect: "
+                    + ", ".join(capped_unknown)
+                    + "."
+                ),
+                "details": {"unknown_parameters": capped_unknown},
+            }
+        )
+
+    return warnings
 
 
 @router.post("/search", response_model=SearchResponse)
@@ -1889,9 +2406,7 @@ async def _search_inner(
             if body.fleet_ids:
                 await enforce_fleet_read_many(body.tenant_id, eff_agent_id, body.fleet_ids)
         usage = await check_and_increment(body.tenant_id, "search")
-    if usage:
-        response.headers["X-RateLimit-Limit"] = str(usage.get("limit", "unlimited"))
-        response.headers["X-RateLimit-Remaining"] = str(usage.get("remaining", "unlimited"))
+    set_usage_headers(response, usage)
     from core_api.services.organization_settings import resolve_config
 
     t_start = time.perf_counter()
@@ -1906,7 +2421,10 @@ async def _search_inner(
     recall_ctx: dict = {}
     # A28 — always collected (no request flag gates it); only serialized below
     # when a step actually put something in it.
-    search_warnings: list = []
+    # ax-0917-h-05 seeds it with any parameter the body carried and this route
+    # does not read — the same silent-drop that hid ``limit`` on /recall is live
+    # on /search, which shares this body.
+    search_warnings: list = _unknown_param_warnings(body, route="memory-search")
     try:
         config = await resolve_config(body.tenant_id)
         # Widen the read predicate when the caller authenticated with
@@ -1945,25 +2463,45 @@ async def _search_inner(
             warnings_ctx=search_warnings,
             min_similarity=body.min_similarity,
             recall_ctx=recall_ctx,
+            # pm-0918-c-03 — the REQUEST layer, passed through as the tri-state
+            # it is. ``None`` here means the caller did not ask, and
+            # ``resolve_include_derived`` then consults the tenant's
+            # ``search.include_derived`` before the global default. Coercing it
+            # to a bool at this boundary would make every request an explicit
+            # vote and the tenant setting could never take effect.
+            include_derived=body.include_derived,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
         # not DB/network failures — don't flag them as ``error=True``.
         raise
-    except Exception:
+    except BaseException:
+        # ``BaseException``, not ``Exception``: the request budget kills this
+        # handler with ``CancelledError``, which is neither — so a search the
+        # server gave up on logged ``error=false`` with ``row_count=0`` and
+        # a duration exactly equal to the budget. In this route's own
+        # telemetry a timed-out search was indistinguishable from a search
+        # that legitimately matched nothing, which put every 45s timeout into
+        # the empty-result rate and none into the error rate.
         success = False
         raise
     finally:
         if logger.isEnabledFor(logging.INFO):
+            cancelled = request_phase.past_deadline()
             logger.info(
                 "search request completed",
                 extra={
                     "path": "memory-search",
                     "tenant_id": body.tenant_id,
                     "top_k": body.top_k,
+                    # Meaningless on a cancelled request — the pipeline never
+                    # filled it — and reported anyway so the pair
+                    # (row_count=0, cancelled=true) reads as one fact rather
+                    # than as an empty result set.
                     "row_count": len(results),
                     "total_ms": (time.perf_counter() - t_start) * 1000,
                     "error": not success,
+                    "cancelled": cancelled,
                 },
             )
     recall_tracked = bool(recall_ctx.get("recall_tracked"))
@@ -1989,6 +2527,10 @@ async def _search_inner(
                 for k, v in (diagnostic_ctx.get("search_params", {}) or {}).items()
             },
             all_candidates=diagnostic_ctx.get("all_candidates", []) or [],
+            # CAURA-722 — no `or` fallback on the count: `0` is a real,
+            # different answer from `None` here (see SearchDiagnostic).
+            entity_matches=diagnostic_ctx.get("entity_matches"),
+            entity_match_declined=diagnostic_ctx.get("entity_match_declined", False),
         ),
     )
 
@@ -2020,6 +2562,8 @@ async def ingest_commit_endpoint(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    if body.agent_id:
+        body.agent_id = canonical_service_agent_id(body.agent_id)
     # Broker ownership boundary: degrade a foreign / reserved agent id to the
     # install's own broker:<install> fallback so a broker can't attribute an
     # ingested memory to an agent owned by another install (parity with the
@@ -2027,7 +2571,20 @@ async def ingest_commit_endpoint(
     if auth.is_install_credential and body.agent_id:
         body.agent_id = await broker_owned_agent_id(body.agent_id, auth.install_uuid, body.tenant_id)
     if auth.tenant_id:  # skip for admin
-        await check_and_increment(body.tenant_id, "write")
+        # One unit PER FACT, not one per request. A commit writes
+        # ``len(body.facts)`` memories, and every other multi-item write path
+        # meters the count — ``caura_write``'s bulk branch calls
+        # ``bulk_check_and_increment(tenant_id, len(bulk_items))``. Charging a
+        # flat 1 here made a 50-fact ingest cost the same as a 1-fact one,
+        # which is both a billing gap and a plan-limit hole: the recalls/writes
+        # counter feeds ``_is_over_plan_limits``, so the cheapest way past a
+        # write cap was to ingest in bulk.
+        #
+        # Before the write, matching the ordering
+        # ``test_billing_happens_before_the_write`` pins for the MCP surface: a
+        # batch that fails partway still costs what it attempted, and two
+        # orderings for one operation is the drift that test exists to stop.
+        await bulk_check_and_increment(body.tenant_id, len(body.facts))
     return await ingest_commit(body)
 
 
@@ -2150,7 +2707,7 @@ async def ingest_undo_endpoint(
 @search_limit
 async def recall_endpoint(
     request: Request,
-    body: SearchRequest,
+    body: RecallRequest,
     response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
@@ -2240,6 +2797,11 @@ async def recall_endpoint(
         diagnostic=body.diagnostic,
         diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
         min_similarity=body.min_similarity,
+        # pm-0918-c-03 — /recall inherits the field from ``SearchRequest`` and
+        # has to pass it on. Honouring it on /search alone is the divergence
+        # ``caller_agent_id`` already paid for once: the same body returned
+        # different rows on the two routes with no error.
+        include_derived=body.include_derived,
     )
 
     # Release the pooled DB connection before the LLM round-trip.
@@ -2247,7 +2809,7 @@ async def recall_endpoint(
     # idempotent, so it's a no-op there.
 
     # ── Phase 2: LLM brief (no DB held) ──────────────────────────
-    return await summarize_memories(
+    brief = await summarize_memories(
         memories,
         body.query,
         config,
@@ -2256,7 +2818,18 @@ async def recall_endpoint(
         diagnostic_ctx=diagnostic_ctx,
         top_k=body.top_k,
         t0=t0,
+        items_alias=body.items_alias,
     )
+    # ax-0917-h-05 — same A28 channel /search uses, and the reason this route
+    # needed it most: ``limit`` is now an alias of ``top_k`` (schemas.py), but
+    # the NEXT plausible guess an agent makes still has to arrive as something
+    # other than silence. Added only when non-empty: unlike ``SearchResponse``
+    # this envelope is a plain dict, so an always-present ``"warnings": null``
+    # would be new bytes on every recall for the case where there is nothing
+    # to say — the opposite of what this PR is for.
+    if warnings := _unknown_param_warnings(body, route="memory-recall"):
+        brief["warnings"] = warnings
+    return brief
 
 
 # ---------------------------------------------------------------------------
@@ -2287,28 +2860,25 @@ async def redistribute_memories(
     auth.enforce_usage_limits()
     auth.enforce_tenant(tenant_id)
 
-    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over
-    # the caller-supplied query param: running the trust gate against a
-    # caller-asserted ``agent_id`` would let a low-trust agent credential
-    # clear it by naming some trust-3 agent in the query string (privilege
-    # escalation). Mirrors the precedence pattern in delete/update_memory.
-    if auth.agent_id and agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"agent_id '{agent_id}' does not match the authenticated agent identity '{auth.agent_id}'."
-            ),
-        )
+    # The query param must MATCH the authenticated agent identity (gateway
+    # X-Agent-ID): running the trust gate below against a caller-asserted
+    # ``agent_id`` would let a low-trust agent credential clear it by naming
+    # some trust-3 agent in the query string (privilege escalation).
+    auth.enforce_self_agent(agent_id)
 
     # Verify requesting agent is admin
     caller = await lookup_agent(tenant_id, agent_id)
     if caller is None or caller.get("trust_level", 0) < 3:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{agent_id}' requires trust_level >= 3 for redistribute.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW, f"Agent '{agent_id}' requires trust_level >= 3 for redistribute."
+            ),
         )
 
-    # Verify target agent exists and is not restricted
+    # Verify target agent exists and is not restricted. Persist only the
+    # canonical identity even when an older client supplies a retired alias.
+    body.target_agent_id = canonical_service_agent_id(body.target_agent_id)
     target = await lookup_agent(tenant_id, body.target_agent_id)
     if target is None:
         raise HTTPException(
@@ -2318,8 +2888,11 @@ async def redistribute_memories(
     if target.get("trust_level", 0) < 1:
         raise HTTPException(
             status_code=403,
-            detail=f"Target agent '{body.target_agent_id}' is restricted (trust_level=0). "
-            "Cannot assign memories to a restricted agent.",
+            detail=coded_detail(
+                AUTH_TARGET_AGENT_RESTRICTED,
+                f"Target agent '{body.target_agent_id}' is restricted (trust_level=0). "
+                "Cannot assign memories to a restricted agent.",
+            ),
         )
 
     # Usage quota
@@ -2420,7 +2993,7 @@ async def admin_list_memories(
     """Admin: list memories across all tenants with full pagination."""
     auth.enforce_admin()
 
-    if cursor and (sort != "created_at" or order != "desc"):
+    if cursor and not cursor_sortable(sort, order):
         raise HTTPException(
             status_code=400,
             detail="Cursor pagination is only supported with sort=created_at and order=desc",
@@ -2448,7 +3021,7 @@ async def admin_list_memories(
     if fleet_id:
         payload["fleet_id"] = fleet_id
     if agent_id:
-        payload["agent_id"] = agent_id
+        payload["agent_id"] = canonical_service_agent_id(agent_id)
     if memory_type:
         payload["memory_type"] = memory_type
     if status:
@@ -2465,7 +3038,9 @@ async def admin_list_memories(
     items = [_memory_to_out(r) for r in page]
 
     next_cursor = None
-    if has_more and page:
+    # OSS 09/02 L-23 — same pairing as ``GET /memories``: mint only what the
+    # gate above would take back.
+    if has_more and page and cursor_sortable(sort, order):
         last = page[limit - 1]
         next_cursor = encode_cursor(
             datetime.fromisoformat(last["created_at"]),

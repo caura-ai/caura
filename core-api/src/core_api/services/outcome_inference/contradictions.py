@@ -47,13 +47,10 @@ logger = logging.getLogger(__name__)
 kind: SignalKind = SignalKind.CONTRADICTION
 
 
-# ``status`` values the detector writes on a contradicted memory. Both
-# are treated as failure evidence for outcome inference. Keep this set
-# in sync with the writes in
-# ``core_api.services.contradiction_detector`` (search for
-# ``_merge_status_update(..., {"status": "outdated"})`` and
-# ``"conflicted"``).
-CONTRADICTED_STATUSES: tuple[str, ...] = ("outdated", "conflicted")
+# Re-exported, not redefined: this module treats both as failure evidence, and
+# the set is now shared with every other guard that reads it. See
+# ``core_api.constants``.
+from core_api.constants import CONTRADICTED_STATUSES
 
 
 async def extract(query: SignalQuery) -> list[SignalEvidence]:

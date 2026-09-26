@@ -22,14 +22,43 @@ class Settings(BaseSettings):
     # defensive short-circuit so that an accidentally-started instance
     # exits cleanly rather than firing cron jobs against a single-tenant
     # standalone DB.
-    standalone: bool = False
+    #
+    # 09/02 L-45 — was ``standalone``, which binds the env var ``STANDALONE``.
+    # Nothing sets that name. The variable every operator actually sets is
+    # ``IS_STANDALONE``: .env.example, env.dev, .env.test, README, AGENT-INSTALL,
+    # docs/, CI and core-api's own ``is_standalone`` all use it, and nothing in
+    # the tree sets the bare spelling. With ``extra="ignore"`` above, pydantic
+    # accepted ``IS_STANDALONE`` and discarded it — so the short-circuit below
+    # could not fire, and a standalone deployment that started this image by
+    # accident fired cron jobs at a single-tenant DB while the log line said
+    # ``standalone: False``. Renaming loses no override precisely because the
+    # old name was never set.
+    is_standalone: bool = False
 
-    # core-storage-api URL for cron tasks that mutate data — the only
-    # service permitted to touch the OSS DB directly. Defaults to the
-    # local docker-compose service name.
-    core_storage_api_url: str = "http://oss-core-storage-api:8002"
-
-    storage_http_timeout_s: float = 30.0
+    # Timeout for this service's HTTP calls, all of which go to core-api.
+    #
+    # Sized ABOVE core-api's own request budget
+    # (``core_api.config.Settings.request_timeout_seconds``, 45s, enforced by
+    # RequestTimeoutMiddleware) so a slow sweep is WAITED OUT rather than
+    # raced, and below the 120s gateway cap. tests/ asserts that ordering
+    # against both real values rather than against a copy of either.
+    #
+    # Racing it is not a cosmetic problem. When the client gives up first the
+    # POST raises, and ``_fire_fanout`` returns from the exception handler
+    # WITHOUT reading the response body — where ``failed`` lives. That count is
+    # the partial-sweep detector added after 2026-09-15, when every action
+    # reported success while 38 orgs were dropped. A client timeout under the
+    # server budget therefore disables that detector on precisely the slow
+    # sweeps it exists to catch. Measured in prod on 2026-09-16: both archive
+    # actions raised at 01:00:30, 28s after the 01:00:02 tick, while core-api
+    # went on to finish the same work at 01:00:46.
+    #
+    # Was ``storage_http_timeout_s``, 30.0. Nothing in this service talks to
+    # core-storage-api — all three call sites POST to core-api — so the name
+    # described a dependency that is not there and the value was inherited
+    # from one. Checked before renaming that no deploy workflow sets
+    # STORAGE_HTTP_TIMEOUT_S, so nothing loses an override.
+    core_api_http_timeout_s: float = 60.0
 
     # CAURA-655: core-operations doesn't talk to the DB directly — its
     # cron ticks POST to core-api's ``/admin/lifecycle/fanout/<action>``
@@ -53,10 +82,34 @@ class Settings(BaseSettings):
     # retention vs. staleness archival), so it gets its own hour and can
     # be moved off the archive slot.
     lifecycle_purge_run_at_hour: int = 2
-    # Pipeline ops (crystallize + entity-link) — LLM-heavy, so an operator
-    # may want these in their own off-peak slot away from the lighter SQL
-    # ops. The consumer-side dedup gate still filters double-fires.
+    # Pipeline ops — LLM-heavy, so an operator may want these in their own
+    # off-peak slot away from the lighter SQL ops. The consumer-side dedup
+    # gate still filters double-fires.
     lifecycle_pipeline_run_at_hour: int = 2
+    # Entity-link used to share the hour above with crystallize, which made
+    # the two heaviest sweeps of the night unseparable: one knob moved both
+    # or neither. On 2026-09-18 that pairing put one staging tenant's
+    # cross-link discovery past its 120s storage budget, and the message
+    # dead-lettered after ten 120s attempts.
+    #
+    # Defaults to the pipeline hour's own default (2) rather than to
+    # ``lifecycle_pipeline_run_at_hour``: a default that TRACKED the other
+    # setting would silently re-pair them for any operator who moved the
+    # pipeline hour, which is the failure this exists to make impossible.
+    # Deployments stagger these explicitly; see the deploy workflow.
+    lifecycle_entity_link_run_at_hour: int = 2
+    # A72 — how often the crystallize tick fires, in hours. 24 keeps today's
+    # single 02:00 run; lower values are the retune's third ground: a heavy
+    # writing day outruns a daily sweep entirely, so everything written after
+    # the tick waits ~24h for the janitor.
+    #
+    # Lowering this is affordable only because of the activity gate that landed
+    # with it: a tenant with nothing written since its last COMPLETED sweep is
+    # answered by two indexed aggregates in core-api and never reaches an LLM.
+    # WITHOUT that gate this knob would multiply spend across every idle tenant,
+    # which is why the two shipped together and why the default stays 24 — the
+    # cadence is an operator's decision, not a deploy's.
+    lifecycle_crystallize_every_hours: int = 24
     # Insights discovery (focus='discover'). Opt-in per-org
     # (``auto_insights_enabled``, default off); the consumer's activity
     # gate further no-ops ticks where no non-insight memories landed since
@@ -92,6 +145,7 @@ class Settings(BaseSettings):
         "lifecycle_archive_run_at_hour",
         "lifecycle_purge_run_at_hour",
         "lifecycle_pipeline_run_at_hour",
+        "lifecycle_entity_link_run_at_hour",
         "lifecycle_insights_run_at_hour",
         "agent_digest_run_at_hour",
         "agent_digest_weekly_run_at_hour",

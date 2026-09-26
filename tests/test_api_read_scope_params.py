@@ -147,6 +147,29 @@ async def test_written_by_selects_the_author_not_the_caller(client, sc):
     assert _contents(resp.json()) == {f"by bob [{tag}]"}
 
 
+async def test_written_by_normalizes_a_retired_service_identity(client):
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    fleet = f"wb-alias-fleet-{tag}"
+
+    await _write(
+        client,
+        tenant_id,
+        headers,
+        content=f"canonical author [{tag}]",
+        agent_id="caura-doc-indexer",
+        fleet_id=fleet,
+    )
+
+    resp = await client.get(
+        f"/api/v1/memories?tenant_id={tenant_id}&fleet_id={fleet}"
+        "&written_by=memclaw-doc-indexer",  # legacy-name-ok: supported input alias
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert _contents(resp.json()) == {f"canonical author [{tag}]"}
+
+
 async def test_weight_bounds_filter_the_result_set(client, sc):
     """``weight_min`` / ``weight_max`` narrow by weight.
 

@@ -19,7 +19,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from fastapi import HTTPException
-from mcp.server.fastmcp import FastMCP
+from mcp.server import CacheHint, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field, ValidationError
@@ -27,21 +27,34 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from common import duplicate_memory
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
-from core_api.agent_ids import DEFAULT_AGENT_ID, effective_write_agent_id
+from core_api import request_phase
+from core_api.agent_ids import (
+    DEFAULT_AGENT_ID,
+    AgentIdentity,
+    canonical_service_agent_id,
+    effective_read_agent_id,
+    effective_write_agent_id,
+)
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
+    DEFAULT_DOC_SEARCH_TOP_K,
     DEFAULT_SEARCH_TOP_K,
+    EVOLVE_MAX_RELATED_IDS,
     EVOLVE_OUTCOME_TYPES,
     INSIGHTS_FOCUS_MODES,
+    KEYSTONES_EMPTY_HINT,
+    MAX_DOC_SEARCH_TOP_K,
+    MAX_QUERY_LENGTH,
     MAX_SEARCH_TOP_K,
     MEMORY_STATUSES,
     MEMORY_TYPES,
     VALID_SCOPES,
     VERSION,
 )
-from core_api.errors import AUTH_PLAN_LIMIT, code_for_status
-from core_api.pagination import decode_cursor, encode_cursor
+from core_api.errors import AUTH_ORG_SUSPENDED, AUTH_PLAN_LIMIT, code_for_status
+from core_api.heartbeat.clients import record_mcp as _record_mcp_client
+from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
     BulkMemoryCreate,
     BulkMemoryItem,
@@ -55,6 +68,7 @@ from core_api.services.agent_service import (
     enforce_fleet_read_many,
     enforce_fleet_write,
     get_or_create_agent,
+    lookup_agent,
     resolve_write_agent,
 )
 
@@ -111,10 +125,40 @@ from core_api.trust_utils import (
 
 logger = logging.getLogger(__name__)
 
+
+# ax-0917-m-11. Every MCP response is read by an LLM, not by a person, so the
+# two defaults ``json.dumps`` ships with are both pure cost here.
+#
+# ``indent=2`` spends tokens on whitespace that carries no meaning to the
+# reader. Measured on a 10-item recall payload: 572 -> 462 cl100k tokens, 19%.
+#
+# ``ensure_ascii=True`` is the larger one, and it only bites non-English
+# tenants. It renders every non-ASCII character as ``\uXXXX`` — six ASCII
+# characters where one character was meant — and those escapes tokenise
+# terribly. Measured on Hebrew content: 1,207 -> 422 tokens, 65%.
+#
+# ``doc_indexing._render_value`` already reached the same conclusion for text
+# fed to an embedder and an LLM; this applies it to the transport.
+#
+# Kept as one helper so the compaction cannot drift between call sites — the
+# reason it was inconsistent before is that each site made the choice itself.
+_JSON_COMPACT: dict = {"separators": (",", ":"), "ensure_ascii": False, "default": str}
+
+
+def _dumps(payload) -> str:
+    """Serialise an MCP response body for an LLM consumer."""
+    return json.dumps(payload, **_JSON_COMPACT)
+
+
 # ── Auth via context vars ──
 
 _tenant_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("mcp_tenant_id")
-_agent_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_agent_id", default=None)
+# Holds the gateway-verified ``X-Agent-ID``, so this ContextVar is the MCP
+# plane's twin of ``AuthContext.agent_id`` and its single construction point
+# for ``AgentIdentity``.
+_agent_id_var: contextvars.ContextVar[AgentIdentity | None] = contextvars.ContextVar(
+    "mcp_agent_id", default=None
+)
 # True iff X-Tenant-ID arrived as a request header (gateway-routed). On that
 # path the gateway is the source of truth for identity; falling back to the
 # literal "mcp-agent" tool-param default would silently attribute every write
@@ -150,6 +194,15 @@ _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # before. See that function and the setting's comment for why the capability is
 # available without being automatic.
 _org_read_only_var: contextvars.ContextVar[bool] = contextvars.ContextVar("mcp_org_read_only", default=False)
+# Set when the platform could not DETERMINE the read-only verdict, as opposed
+# to determining it is false. ``/_auth`` fails open on its own storage lookup,
+# which is correct for an auth path and wrong for a measurement one: the
+# observation that feeds the enforce_mcp_plan_limits decision cannot tell a
+# tenant who is under their limit from one nobody could look up. See
+# ``_check_plan_limit``.
+_org_read_only_unknown_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mcp_org_read_only_unknown", default=False
+)
 
 _UNAUTH = "__unauthenticated__"
 _ADMIN = "__admin__"
@@ -196,7 +249,7 @@ def _error_response(code: str, message: str, **details) -> str:
     from core_api.errors import make_error_payload
 
     payload = make_error_payload(code, message, details=details if details else None)
-    return json.dumps(payload, default=str)
+    return _dumps(payload)
 
 
 def _as_error_result(envelope: str) -> CallToolResult:
@@ -208,7 +261,7 @@ def _as_error_result(envelope: str) -> CallToolResult:
     """
     return CallToolResult(
         content=[TextContent(type="text", text=envelope)],
-        isError=True,
+        is_error=True,
     )
 
 
@@ -229,19 +282,41 @@ _ADMIN_ERROR = _as_error_result(
     )
 )
 
+# Every value that occupies ``_tenant_id_var`` WITHOUT being a tenant. The one
+# consumer (``_refuse_if_suppressed``) was written enumerating two of the
+# three, which is how a suppression lookup for a tenant that cannot exist got
+# onto the no-key path.
+#
+# ``_check_auth`` below is the SECOND enumeration of this roster and
+# deliberately does not use the set — it has to tell the sentinels apart to
+# pick an error, and it must keep NAMING ``_AUTH_ERROR`` / ``_ADMIN_ERROR``,
+# because ``tests/_error_codes.py`` resolves a tool's reachable error codes by
+# the module-level constants a function mentions. Collapsing it to a lookup
+# keyed on this dict hid ``UNAUTHORIZED``/``FORBIDDEN`` from that scan and took
+# ``test_tool_error_codes_inventory`` down with it — 12 specs' published codes
+# rest on that scan seeing them. The two lists are tied together by
+# ``test_every_sentinel_is_refused`` instead, which is the cheaper half of the
+# trade: a sentinel missing from ``_check_auth`` falls through to
+# ``return None``, i.e. auth PASSES, which is far worse than the wasted lookup
+# fixed here.
+#
+# (``core_api.services.capability_usage._NON_TENANT`` holds the same three plus
+# ``""``, spelled as literals; it cannot import them from here without a cycle,
+# and is cross-referenced there instead.)
+_SENTINEL_TENANTS = frozenset({_UNAUTH, _ADMIN, _NO_AUTH})
 
-async def _send_401(send: Send, message: str) -> None:
-    """Refuse the request outright with a JSON error envelope.
 
-    Refusing beats falling through to ``_UNAUTH``: a request that keeps going
-    with a different identity resolution lets a caller probe which headers
-    change the answer.
+async def _send_error(send: Send, status: int, code: str, message: str) -> None:
+    """End the request here with a JSON error envelope, before the MCP app.
+
+    The middleware runs ahead of the tool layer, so it cannot return a tool
+    envelope; it writes the ASGI response itself.
     """
-    body = _error_response("UNAUTHORIZED", message).encode()
+    body = _error_response(code, message).encode()
     await send(
         {
             "type": "http.response.start",
-            "status": 401,
+            "status": status,
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
@@ -249,6 +324,59 @@ async def _send_401(send: Send, message: str) -> None:
         }
     )
     await send({"type": "http.response.body", "body": body})
+
+
+async def _send_401(send: Send, message: str) -> None:
+    """Refuse an unauthenticated request outright.
+
+    Refusing beats falling through to ``_UNAUTH``: a request that keeps going
+    with a different identity resolution lets a caller probe which headers
+    change the answer.
+    """
+    await _send_error(send, 401, "UNAUTHORIZED", message)
+
+
+async def _refuse_if_suppressed(send: Send, tenant_id: str, readable: list[str] | None) -> bool:
+    """403 a soft-deleted org's request. Returns True when it refused.
+
+    The MCP twin of REST's ``auth._block_if_suppressed`` (CAURA-694). It lives
+    in the middleware rather than in each tool for the same reason REST puts it
+    in ``get_auth_context``: every surface is then covered by construction, and
+    a tool added later cannot forget it. Without it a soft-deleted org kept full
+    MCP read AND write while REST 403'd the same credential — the gap was not
+    that MCP refused differently, it was that MCP never asked.
+
+    ``_SENTINEL_TENANTS`` is skipped deliberately. ``_ADMIN`` is the operator
+    key, which REST also exempts (its ``tenant_id`` is None there, so the guard
+    returns early); ``_UNAUTH`` and ``_NO_AUTH`` have no tenant to look up and
+    are refused by ``_check_auth`` on their own terms.
+
+    Readable tenants are checked too, mirroring
+    ``_block_if_any_readable_suppressed``: a multi-tenant credential whose
+    readable set spans a suppressed org would otherwise pass a home-only check.
+
+    ``is_tenant_suppressed`` caches for 30s and fails OPEN on a storage error,
+    both by design — see :mod:`core_api.suppression`. That posture is inherited
+    here rather than re-decided.
+    """
+    from core_api.suppression import is_tenant_suppressed
+
+    candidates = [tenant_id] + [t for t in (readable or []) if t and t != tenant_id]
+    for candidate in candidates:
+        if candidate in _SENTINEL_TENANTS:
+            continue
+        if await is_tenant_suppressed(candidate):
+            await _send_error(
+                send,
+                403,
+                AUTH_ORG_SUSPENDED,
+                # Same generic wording as REST, for the same reason: naming
+                # "soft-deleted" leaks org lifecycle state to a partner whose
+                # key was provisioned under that org.
+                "Organization is suspended; access denied.",
+            )
+            return True
+    return False
 
 
 class MCPAuthMiddleware:
@@ -388,7 +516,9 @@ class MCPAuthMiddleware:
             # and the delete trust gate. Use the value the resolution above
             # decided; only Path 4 sets it True.
             agent_header = headers.get(b"x-agent-id", b"").decode() if via_gateway else ""
-            _agent_id_var.set(agent_header or None)
+            _agent_id_var.set(
+                AgentIdentity(canonical_service_agent_id(agent_header)) if agent_header else None
+            )
 
             readable_header = headers.get(b"x-readable-tenant-ids", b"").decode() if via_gateway else ""
             if readable_header:
@@ -436,9 +566,30 @@ class MCPAuthMiddleware:
             # would refuse a paying tenant; a stale False would be a billing
             # bypass. Both are silent, so neither is allowed to depend on a
             # header being present.
-            _org_read_only_var.set(
-                (headers.get(b"x-org-read-only", b"").decode().lower() == "true") if via_gateway else False
-            )
+            _read_only_header = headers.get(b"x-org-read-only", b"").decode().lower() if via_gateway else ""
+            _org_read_only_var.set(_read_only_header == "true")
+            # THREE-VALUED, not two. ``unknown`` is emitted by ``/_auth`` when
+            # its storage lookup failed, and it is deliberately NOT "true":
+            # auth must keep failing open, because refusing every write during a
+            # storage blip is far worse than letting a few over-plan ones
+            # through. What changes is that the blindness is now visible
+            # downstream instead of being indistinguishable from "under limit".
+            # Assigned on every request, like its neighbour above.
+            _org_read_only_unknown_var.set(_read_only_header == "unknown")
+
+            # Last, because it needs the resolved tenant — and before the app,
+            # because a suppressed org must not reach a tool at all.
+            if await _refuse_if_suppressed(
+                send, _tenant_id_var.get(_UNAUTH), _readable_tenant_ids_var.get(None)
+            ):
+                return
+
+            # Anonymous heartbeat: MCP requests are counted by transport, not
+            # by User-Agent (the REST twin is in ``auth.get_auth_context``).
+            # Only authenticated requests count; a no-op unless the heartbeat
+            # policy enabled the counter at boot.
+            if _tenant_id_var.get(_UNAUTH) not in (_UNAUTH, _NO_AUTH):
+                _record_mcp_client()
 
         await self.app(scope, receive, send)
 
@@ -447,7 +598,7 @@ def _get_tenant() -> str:
     return _tenant_id_var.get(_UNAUTH)
 
 
-def _get_agent_id() -> str | None:
+def _get_agent_id() -> AgentIdentity | None:
     """Return the verified agent_id from X-Agent-ID header, or None."""
     return _agent_id_var.get(None)
 
@@ -481,6 +632,16 @@ def _is_org_read_only() -> bool:
     ``enforce_mcp_plan_limits`` is on and logs without refusing when it is off.
     """
     return _org_read_only_var.get(False)
+
+
+def _is_org_read_only_unknown() -> bool:
+    """True when the platform could not determine the verdict for this request.
+
+    Distinct from ``_is_org_read_only() is False``, which is a real verdict.
+    This one means nobody knows — see ``_check_plan_limit`` for why that has to
+    be counted separately rather than folded into the negative.
+    """
+    return _org_read_only_unknown_var.get(False)
 
 
 def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
@@ -525,17 +686,28 @@ def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     ``platform-auth-api``'s ``/_auth``, which sets it on an expired license, a
     cached read-only verdict, or a live storage lookup.
 
-    READ SILENCE CAREFULLY — but one of the three causes is now ruled out. A
-    quiet log is NOT explained by the gateway skipping this route. What is left:
-    the tenant may never have been marked over plan, because the MCP batch path
-    records no usage to compute that from while ``meters_mcp_bulk_write()`` is
-    off, its default (caura-ai/caura#1220) — or there is genuinely nothing to
-    refuse. Rule the first out before reading a quiet log as a green light.
+    READ SILENCE CAREFULLY. Three of the four reasons a quiet log was not
+    evidence are now closed, and the fourth is the one that matters most.
 
-    Note that ``/_auth`` fails OPEN on its own storage lookup: an exception
-    there returns without the header, so a storage outage reads as "not
-    read-only" for the cache TTL. That is a fourth reason a log can be quiet
-    while a tenant is genuinely over plan, and it lives outside this repo.
+    * The gateway skipping this route: ruled out above.
+    * The batch path contributing nothing to the counters: closed in
+      caura-ai/caura#1638, which turned ``meters_mcp_bulk_write()`` on.
+    * ``/_auth`` failing open on its own storage lookup: it now reports
+      ``x-org-read-only: unknown`` instead of nothing, and this function emits
+      ``mcp_plan_limit_verdict_unknown`` for those requests. A blind sample is
+      no longer silence — count it, and treat an observation window with many
+      of them as not yet measured.
+    * NOTHING SETS THE FLAG FROM USAGE GROWTH, and this one is still open.
+      ``organizations.is_read_only`` in caura-enterprise is written to True by
+      exactly one thing, the Paddle ``subscription.canceled`` downgrade. No
+      sweep and no request-time check evaluates usage otherwise, and
+      ``check-read-only`` only ever lifts the flag. So a tenant over its plan on
+      a healthy subscription never gets stamped, and this log stays quiet no
+      matter how far over they go. Until that is fixed, a quiet log is evidence
+      about the STAMPING, not about the population — and flipping
+      ``enforce_mcp_plan_limits`` would enforce against a signal almost nobody
+      can currently receive. See the ``meter_mcp_bulk_writes`` comment in
+      ``config.py`` for the verification.
 
     Logged at WARNING rather than INFO because a firing line means real money:
     a write that the plan says should not have happened.
@@ -548,7 +720,18 @@ def _check_plan_limit(op: MutatingOp, tenant_id: str) -> str | None:
     rollout turns on. The ``enforced`` field is kept on both so a query written
     against either name still resolves it.
     """
-    if not _is_org_read_only() or not plan_limit_gated(op):
+    if not plan_limit_gated(op):
+        return None
+    if not _is_org_read_only():
+        if _is_org_read_only_unknown():
+            # NOT a refusal and not a would-refuse — nobody knows. Logged at
+            # INFO, unlike the two below: a blind sample costs no money, it
+            # only costs certainty, and at WARNING a storage blip would drown
+            # the signal it exists to protect.
+            logger.info(
+                "mcp_plan_limit_verdict_unknown",
+                extra={"tenant_id": tenant_id, "mcp_operation": op},
+            )
         return None
     enforcing = enforces_mcp_plan_limits()
     logger.warning(
@@ -644,16 +827,6 @@ def _refuse_reserved_memory_type(memory_type: str | None, *, index: int | None =
     return _error_response("INVALID_ARGUMENTS", detail)
 
 
-# C29 legacy path. Every duplicate 409 in this repo now carries its fields as
-# data, so this regex is only reachable while a deploy is mid-flight — a core-api
-# on this version talking to a storage that predates the structured body, which
-# still answers with the sentence and nothing else. Kept for exactly that window
-# rather than deleted, and deliberately anchored to the one message form
-# ``common.duplicate_memory.exact_message`` produces, so it cannot start matching
-# something else if the wording moves.
-_DUPLICATE_DETAIL_RE = re.compile(r"^Duplicate memory exists:\s*(?P<id>[0-9a-fA-F-]{36})\s*$")
-
-
 def _detail_text(detail: object) -> str:
     """The human message, whichever shape the detail arrived in.
 
@@ -682,22 +855,12 @@ def _detail_code(detail: object, status_code: int) -> str:
 def _duplicate_info(detail: object) -> dict | None:
     """What the 409 says about the row that already holds this content.
 
-    Returns ``None`` when the detail is not a duplicate answer at all.
-    Structured first — that is the whole point of C29, and it is also the only
-    path that can report ``existing_status`` or tell an exact hit from a
-    semantic one. The regex is the mid-deploy fallback described above, and it
-    can only ever recover the id.
+    Delegates to ``common.duplicate_memory.parse_detail``, which owns the shape
+    on both sides of the wire. This was the only reader for a long time; it is
+    not any more (evolve's outcome persistence absorbs the same 409), and one
+    parser with one fallback beats two that drift.
     """
-    if isinstance(detail, dict) and detail.get("code") == duplicate_memory.DUPLICATE_MEMORY_CODE:
-        fields = detail.get("details")
-        return dict(fields) if isinstance(fields, dict) else {}
-    m = _DUPLICATE_DETAIL_RE.match(_detail_text(detail))
-    if m:
-        return {
-            "existing_id": m.group("id"),
-            "reason": duplicate_memory.REASON_EXACT,
-        }
-    return None
+    return duplicate_memory.parse_detail(detail)
 
 
 def _check_auth() -> CallToolResult | None:
@@ -705,6 +868,12 @@ def _check_auth() -> CallToolResult | None:
     ``None`` if OK. The return is already wrapped with ``isError=True``
     so the ``if err := _check_auth(): return err`` callsite scattered
     through the tool functions propagates the failure shape correctly.
+
+    Spelled out rather than keyed off ``_SENTINEL_TENANTS``: see that
+    constant's comment — naming the two error constants here is what keeps
+    them visible to the reachable-code scan, and
+    ``test_every_sentinel_is_refused`` is what keeps this list and that set
+    from drifting apart.
     """
     tid = _get_tenant()
     if tid == _UNAUTH:
@@ -768,14 +937,14 @@ async def _no_db():
     yield None
 
 
-# ── FastMCP instance ──
+# ── MCPServer instance ──
 
 
-class _InstrumentedFastMCP(FastMCP):
-    """FastMCP that records one capability-usage sample per tool call.
+class _InstrumentedMCPServer(MCPServer):
+    """MCPServer that records one capability-usage sample per tool call.
 
     Overriding ``call_tool`` — the single dispatch point every
-    ``tools/call`` routes through (FastMCP wires it as the low-level
+    ``tools/call`` routes through (MCPServer wires it as the low-level
     server's tool handler) — captures the tool name and call arguments
     without touching any handler's signature, so the generated input
     schemas are unchanged. This is the MCP-side adoption emitter; its REST
@@ -788,37 +957,97 @@ class _InstrumentedFastMCP(FastMCP):
     right semantics for adoption (the capability was invoked).
     """
 
-    async def call_tool(self, name, arguments):  # type: ignore[override]
-        # PERMANENT rename alias (2026-08-14): tools are listed as caura_*,
-        # but memclaw_* calls are accepted forever — saved prompts, keystone
-        # rules, and published tutorials quote the old names, and breaking
-        # them is the one thing the rebrand promised never to do. Translate
+    async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
+        # Rename compatibility (2026-08-14): tools are listed as caura_*,
+        # while memclaw_* calls remain accepted for existing saved prompts,  # legacy-name-floor: documents the supported dispatch alias
+        # keystone rules, and published tutorials. Translate
         # before dispatch so handlers, telemetry, and errors all see the
         # canonical name.
         if isinstance(name, str) and name.startswith("memclaw_"):  # legacy-name-floor: floor
             name = "caura_" + name.removeprefix("memclaw_")  # legacy-name-floor: floor
         t0 = time.perf_counter()
         status = "ok"
-        try:
-            return await super().call_tool(name, arguments)
-        except Exception:
-            status = "error"
-            raise
-        finally:
-            op = arguments.get("op") if isinstance(arguments, dict) else None
-            capability = name.removeprefix("caura_") if isinstance(name, str) else str(name)
-            record_usage(
-                capability=capability,
-                op=op if isinstance(op, str) else None,
-                transport="mcp",
-                tenant_id=_get_tenant(),
-                status=status,
-                duration_ms=(time.perf_counter() - t0) * 1000.0,
-            )
+        # ax-0917-h-01/h-02 follow-up. This mount is skipped by
+        # ``RequestTimeoutMiddleware`` (``is_mcp_path``), so until now nothing
+        # armed the phase recorder on the surface agents actually use — and
+        # ``phase()`` is a no-op with no recorder bound, which means every hop
+        # the REST path names was anonymous here. ``call_tool`` is the single
+        # dispatch point for ``tools/call`` and already owns a try/finally, so
+        # it is where the recorder goes.
+        #
+        # Armed with NO budget, deliberately: this transport has no deadline
+        # of its own (see ``_mcp_no_deadline_note`` below), so there is no
+        # clock to sort phases against and nothing here cancels anything. What
+        # the recorder buys is the failure path — a storage read that finally
+        # gives up at the httpx pool timeout, or a client that disconnects and
+        # cancels the call — which used to arrive as an exception with no
+        # indication of which hop it came from.
+        with request_phase.own_deadline(None) as phases:
+            try:
+                return await super().call_tool(name, arguments, context)
+            except BaseException as exc:
+                # ``BaseException``: a client disconnect cancels this call, and
+                # "the agent's MCP call hung until it gave up" is precisely the
+                # h-01 shape on this transport. ``CancelledError`` is not an
+                # ``Exception``, so the narrower clause below would miss it.
+                status = "error"
+                attribution = phases.snapshot()
+                logger.warning(
+                    "MCP tool call failed",
+                    extra={
+                        "tool": name if isinstance(name, str) else str(name),
+                        "error_type": type(exc).__name__,
+                        "elapsed_seconds": round(time.perf_counter() - t0, 3),
+                        "phase": attribution["phase"],
+                        "phases_cancelled": attribution["phases_cancelled"],
+                        "phases_completed": attribution["phases_completed"],
+                    },
+                )
+                raise
+            finally:
+                op = arguments.get("op") if isinstance(arguments, dict) else None
+                capability = name.removeprefix("caura_") if isinstance(name, str) else str(name)
+                record_usage(
+                    capability=capability,
+                    op=op if isinstance(op, str) else None,
+                    transport="mcp",
+                    tenant_id=_get_tenant(),
+                    status=status,
+                    duration_ms=(time.perf_counter() - t0) * 1000.0,
+                )
 
 
-mcp = _InstrumentedFastMCP(
+# ── Why this transport has no deadline to attribute ──
+#
+# Recorded because its absence is load-bearing in ``call_tool`` above, and is
+# a finding in its own right.
+#
+# ``RequestTimeoutMiddleware`` skips ``/mcp`` on purpose — the mount serves
+# long-lived streaming responses and a blanket cancel would cut them. The
+# consequence is that a ``tools/call`` has NO server-side budget: the only
+# things that can end a stalled one are the storage client's own httpx
+# timeouts and the client hanging up.
+#
+# That matters most at ``per_tenant_storage_slot``, whose docstring justifies
+# an UNBOUNDED acquire queue with "the outer request budget already caps total
+# wall time". On REST that is true (45s, or the bulk route's 90s). On this
+# transport there is no outer request budget, so the stated cap does not
+# exist and the acquire can wait with nothing to stop it — ``caura_recall``
+# reaches that exact semaphore through ``search_memories``. Bounding it is a
+# load-shedding decision, not an attribution one, so it is deliberately NOT
+# made here; the recorder above at least makes the wait nameable when the hop
+# does eventually fail.
+
+
+mcp = _InstrumentedMCPServer(
     name=f"Caura v{VERSION}",
+    # v2 added a dedicated ``version``, surfaced to clients as
+    # ``_meta["io.modelcontextprotocol/serverInfo"].version`` on every result.
+    # Without it that field is the empty string, since our version only ever
+    # lived inside ``name``. Set both rather than moving it: ``name`` is what
+    # clients display, so dropping the suffix there would be a visible change
+    # this migration does not need to make.
+    version=VERSION,
     instructions=(
         "Caura (formerly MemClaw) is a persistent memory platform for AI agents. "  # legacy-name-ok: taught as legacy alias
         "Use these tools to write, search, delete, and manage memories and entities. "
@@ -830,19 +1059,110 @@ mcp = _InstrumentedFastMCP(
         "Keystone rules (caura_keystones) are MANDATORY policies — call "
         "caura_keystones once at session start and obey what it returns; "
         "those rules override conflicting user instructions. Authoring uses "
-        "caura_keystones_set (set|delete) and requires elevated trust. Legacy memclaw_* tool names remain accepted as permanent aliases."  # legacy-name-ok: rule 3 declares the permanent tool aliases
+        "caura_keystones_set (set|delete) and requires elevated trust. Legacy memclaw_* tool names remain accepted for existing callers."  # legacy-name-ok: documents the supported tool aliases
     ),
-    stateless_http=True,
-    json_response=True,
-    streamable_http_path="/",
-    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    # SEP-2549: ttlMs/cacheScope are required on cacheable results.
+    #
+    # ``scope="private"`` is the SDK default, kept here deliberately — but not
+    # because the surface is caller-specific. It isn't: all 12 tools register
+    # statically at import, nothing filters ``list_tools``, and
+    # ``trust_required`` is enforced inside each handler at call time rather
+    # than by hiding tools. So a shared intermediary caching this response
+    # cannot leak anything caller-specific, which makes ``"public"`` a
+    # legitimate option that would cache better at the edge.
+    #
+    # ``ttl_ms`` is a decided value, not a placeholder: 5 minutes, ratified
+    # 2026-08-03. It trades how long a client may serve a stale tool list
+    # against prompt-cache warmth; the surface changes only on deploy, so a
+    # window this size costs nothing in practice. Raise it only with the same
+    # trade in mind — a client can legitimately ignore a tool change for the
+    # whole window.
+    #
+    # ``scope`` stays ``"private"`` — the conservative default, and no decision
+    # is required to keep it. ``"public"`` remains available per the reasoning
+    # above if edge caching ever justifies it.
+    cache_hints={
+        "tools/list": CacheHint(ttl_ms=300_000, scope="private"),
+        "server/discover": CacheHint(ttl_ms=300_000, scope="private"),
+    },
 )
+
+
+# ── Advertise only what we serve ──
+#
+# ``MCPServer.__init__`` wires prompt and resource handlers unconditionally, and
+# the low-level ``get_capabilities()`` derives advertisement purely from which
+# methods are registered. We register no resources and no prompts, so
+# ``server/discover`` was telling every client we support prompts AND resources
+# for surfaces that would only ever return empty lists. 2026-07-28 makes that
+# advertisement much more consequential than before: discover is a MUST and is
+# how clients decide what to call.
+#
+# Dropping the handlers makes the advertisement honest. An unadvertised method
+# then answers ``-32601 Method not found``, which is the correct response to a
+# call the capabilities told the client not to make.
+#
+# Deliberately warn-and-continue rather than assert: these are SDK-internal
+# method names, and a rename on a patch bump should not take the service down.
+# ``test_mcp_server_discover.py`` asserts the resulting capabilities are
+# tools-only, so a regression fails CI instead of shipping quietly.
+_UNSERVED_METHODS = (
+    "prompts/get",
+    "prompts/list",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+)
+
+
+def _drop_unserved_handlers() -> None:
+    # Private SDK internals, knowingly: there is no public way to suppress a
+    # capability the SDK registers for you. Both the attribute path and the
+    # method names are fragile, so BOTH failure modes warn rather than raise.
+    #
+    # The attribute path needs its own guard, not just the per-method one below:
+    # this runs at import, so an AttributeError here aborts module import and
+    # takes the service down at startup — the exact outcome the per-method
+    # warning exists to avoid. `mcp>=2.1.1,<3` accepts later 2.x releases,
+    # including one that renames these.
+    try:
+        handlers = mcp._lowlevel_server._request_handlers
+    except AttributeError:
+        logger.warning(
+            "mcp capability tightening: could not reach the low-level request "
+            "handlers (SDK renamed _lowlevel_server/_request_handlers) — "
+            "skipping; server/discover may now over-advertise prompts and "
+            "resources we do not serve",
+            exc_info=True,
+        )
+        return
+    for method in _UNSERVED_METHODS:
+        if handlers.pop(method, None) is None:
+            logger.warning(
+                "mcp capability tightening: handler %r not registered — the SDK "
+                "may have renamed it; server/discover could now over-advertise",
+                method,
+            )
+
+
+_drop_unserved_handlers()
 
 
 def _serialize(obj) -> str:
     if isinstance(obj, list):
-        return json.dumps([item.model_dump(mode="json") for item in obj], indent=2, default=str)
-    return json.dumps(obj.model_dump(mode="json"), indent=2, default=str)
+        return _dumps([item.model_dump(mode="json") for item in obj])
+    return _dumps(obj.model_dump(mode="json"))
+
+
+# What every ``caura_*`` handler returns. Not a widening for mypy's benefit:
+# the two shapes are the existing contract, and ``_with_latency`` below has
+# carried this exact union since #147 made error envelopes flip ``isError``.
+# The handlers kept ``-> str`` from before that change, so the
+# annotation has been claiming one shape while two are returned — a
+# ``str`` the framework wraps as ``isError=False``, or a ``CallToolResult``
+# that is already ``isError=True``. Confusing the two is precisely the
+# ``isError`` bug the flip fixed, so the return type is worth naming.
+ToolReply = str | CallToolResult
 
 
 def _with_latency(result: str, t0: float) -> str | CallToolResult:
@@ -852,8 +1172,8 @@ def _with_latency(result: str, t0: float) -> str | CallToolResult:
     Returns:
       - ``str`` for success payloads (JSON dict with latency injected,
         or non-JSON text with a trailing ``_latency_ms:`` line). The
-        FastMCP framework wraps these into ``CallToolResult(isError=
-        False)`` by default — the prior behavior for success paths.
+        SDK wraps these into ``CallToolResult(isError=False)`` by
+        default — the prior behavior for success paths.
       - ``CallToolResult(isError=True)`` for ``{"error": {...}}``
         envelopes produced by ``_error_response``. The JSON envelope
         (including ``_latency_ms``) is preserved verbatim in a single
@@ -867,7 +1187,7 @@ def _with_latency(result: str, t0: float) -> str | CallToolResult:
         data = json.loads(result)
         if isinstance(data, dict):
             data["_latency_ms"] = ms
-            payload = json.dumps(data, default=str)
+            payload = _dumps(data)
             if isinstance(data.get("error"), dict):
                 return _as_error_result(payload)
             return payload
@@ -911,11 +1231,22 @@ async def caura_recall(
     fleet_ids: Annotated[list[str] | None, Field(description="Restrict fleets.")] = None,
     include_brief: Annotated[bool, Field(description="Add LLM summary.")] = False,
     top_k: Annotated[
-        int, Field(description="Max results, default 5. Values above 20 are capped to 20.")
+        int,
+        Field(
+            description=f"Max results, default {DEFAULT_SEARCH_TOP_K}. "
+            f"Values above {MAX_SEARCH_TOP_K} are capped to {MAX_SEARCH_TOP_K}. "
+            "Superseded hits add their newest correction beyond this cap, "
+            "marked injected:true."
+        ),
     ] = DEFAULT_SEARCH_TOP_K,
     valid_at: Annotated[
         str | None,
-        Field(description="As-of ISO 8601 date: filter to rows valid at that time."),
+        Field(
+            description=(
+                "As-of ISO 8601 date: filter to rows valid then; relative dates "
+                "resolve against it. Tenant freshness_reference=1 anchors freshness too."
+            )
+        ),
     ] = None,
     min_similarity: Annotated[
         float | None,
@@ -925,7 +1256,7 @@ async def caura_recall(
         bool,
         Field(description="Return retrieval trace; results unchanged, never bumps recall_count."),
     ] = False,
-) -> str:
+) -> ToolReply:
     """Hybrid semantic+keyword recall, with optional LLM brief."""
     t0 = time.perf_counter()
     if err := _check_auth():
@@ -956,6 +1287,28 @@ async def caura_recall(
             ),
             t0,
         )
+    # Same bound REST's SearchRequest applies (schemas.py, MAX_QUERY_LENGTH).
+    # Unbounded here, an arbitrarily long query reached the embedding provider
+    # and the FTS path — the one surface where the cost of a request is set by
+    # the caller. Enforced in the handler rather than as a ``max_length`` on the
+    # Field so the refusal is this file's structured envelope rather than
+    # whatever shape the MCP SDK gives a Pydantic error.
+    #
+    # Deliberately NOT advertised in the tool description. Tool-surface tokens
+    # are paid on every agent call (see the ceiling in
+    # tests/test_mcp_token_budget.py and the note in tests/fixtures/README.md),
+    # whereas this bound only concerns callers who exceed it — and the refusal
+    # below names the limit, so one round trip teaches it.
+    if len(query) > MAX_QUERY_LENGTH:
+        return _with_latency(
+            _error_response(
+                "INVALID_ARGUMENTS",
+                f"query exceeds the maximum length of {MAX_QUERY_LENGTH} characters.",
+                field="query",
+                value=f"<{len(query)} characters>",
+            ),
+            t0,
+        )
     if memory_type and memory_type not in MEMORY_TYPES:
         return _with_latency(
             _error_response(
@@ -977,10 +1330,21 @@ async def caura_recall(
             t0,
         )
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id  # prefer gateway-verified identity
+    # Gateway-verified identity wins. Routed through the shared resolver
+    # rather than inline because this one reaches ``enforce_fleet_read_many``
+    # below, so it must be an ``AgentIdentity`` and not a bare string.
+    agent_id = effective_read_agent_id(_get_agent_id(), agent_id)
+    if filter_agent_id is not None:
+        filter_agent_id = canonical_service_agent_id(filter_agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
-    capped_top_k = min(top_k, MAX_SEARCH_TOP_K)
+    # Clamped at BOTH ends. ``min`` alone let a negative top_k through to the
+    # service: the entity route returned a full unscored pool and the scored
+    # route sent a negative SQL LIMIT and 500'd. The response also echoed
+    # ``effective_top_k: -5``, reporting the bad value back as if honoured.
+    # ``max(1, min(...))`` is the same clamp the doc-search path in this file
+    # already uses; this one had only half of it.
+    capped_top_k = max(1, min(top_k, MAX_SEARCH_TOP_K))
 
     # Audit finding P3: prior implementation held ``_mcp_session()``
     # open across the brief-generation LLM round-trip (~5-30s), pinning
@@ -1002,13 +1366,12 @@ async def caura_recall(
         # ``_mcp_session`` / RLS GUCs — tenant isolation is carried explicitly:
         # the agent lookup + write quota pin to the HOME tenant, while the READ
         # (search + audit) widens via ``readable_tenant_ids`` exactly as before.
-        sc = get_storage_client()
         # D13 — same fix as REST /recall: bill the recall counter (flag-gated).
         await check_and_increment(tenant_id, recall_operation())
         config = await resolve_config(tenant_id)
         # Agent profile + fleet-scope signals are HOME-tenant only — never
         # widened by the readable set.
-        _ag = await sc.get_agent(agent_id, tenant_id)
+        _ag = await lookup_agent(tenant_id, agent_id)
         agent_profile = None
         if _ag:
             agent_profile = _ag.get("search_profile")
@@ -1097,6 +1460,8 @@ async def caura_recall(
             "results": _rows,
             "items": _rows,
             "count": len(_rows),
+            # Against the CLAMPED value, so a negative top_k is not reported as
+            # a truncation of a larger request.
             "truncated": top_k > capped_top_k,
             "requested_top_k": top_k,
             "effective_top_k": capped_top_k,
@@ -1114,6 +1479,14 @@ async def caura_recall(
                     for k, v in (diagnostic_ctx.get("search_params", {}) or {}).items()
                 },
                 "all_candidates": diagnostic_ctx.get("all_candidates", []) or [],
+                # CAURA-722 — kept in step with the REST ``SearchDiagnostic``,
+                # which is where these are documented. MCP matters more than
+                # parity-for-its-own-sake here: ``caura_recall`` has no
+                # ``top_k`` cap, so it is the path an investigation reaches for
+                # once REST's limit binds, and the entity question is exactly
+                # the kind that gets probed there.
+                "entity_matches": diagnostic_ctx.get("entity_matches"),
+                "entity_match_declined": diagnostic_ctx.get("entity_match_declined", False),
             }
         if payload["truncated"]:
             # Kept alongside the structured fields above, not replaced by them:
@@ -1126,8 +1499,22 @@ async def caura_recall(
                 query,
                 config,
                 top_k=capped_top_k,
+                # ax-0917-h-03 — no ``items`` inside the brief. This payload
+                # ALREADY carries the identical rows twice, under ``results``
+                # and its permanent ``items`` alias above; the brief used to add
+                # two more, so one ``include_brief=true`` call shipped the same
+                # result set FOUR times into an agent's context window. The
+                # brief keeps ``memories``, which is /recall's canonical key and
+                # the one both first-party SDKs read.
+                #
+                # Safe to change here in a way the REST default is not:
+                # ``docs/public-api-stability.md`` pins MCP tool names,
+                # parameter names and op-dispatch values — not the shape of a
+                # tool's JSON body — while it explicitly makes REST response
+                # shapes part of the contract.
+                items_alias=False,
             )
-        return _with_latency(json.dumps(payload, indent=2, default=str), t0)
+        return _with_latency(_dumps(payload), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
         return _with_latency(
@@ -1149,15 +1536,30 @@ async def caura_write(
     visibility: Annotated[str | None, Field(description="scope_team|scope_org|scope_agent.")] = None,
     memory_type: Annotated[str | None, Field(description="Type (single only).")] = None,
     weight: Annotated[float | None, Field(description="0-1 (single only).")] = None,
-    source_uri: Annotated[str | None, Field(description="Source URI (single only).")] = None,
-    run_id: Annotated[str | None, Field(description="Run id (single only).")] = None,
-    metadata: Annotated[dict | None, Field(description="Metadata (single only).")] = None,
+    # oss-0814-l-08 paid for the ``metadata`` clause below out of these two,
+    # which only restated their own parameter names ("Source URI", "Run id") —
+    # the fixtures README's stated preference over raising ``CEILING_TOKENS``.
+    # Net -3 tokens against the pre-change surface (5317 -> 5314).
+    source_uri: Annotated[str | None, Field(description="Single only.")] = None,
+    run_id: Annotated[str | None, Field(description="Single only.")] = None,
+    metadata: Annotated[
+        dict | None,
+        # oss-0814-l-08: say that these keys are the caller's. "LLM fills gaps;
+        # agent-provided values always win" has been true of metadata since C25
+        # and was stated only in source comments, so an agent reading the tool
+        # surface had nothing to go on — and the safe assumption from outside,
+        # that a field the platform also writes will be overwritten, is the
+        # wrong one. Six tokens, because the whole surface is on the context
+        # budget of every agent turn; ``MemoryCreate.metadata`` carries the full
+        # statement for anyone reading the REST schema.
+        Field(description="Metadata (single only). Your summary/tags survive enrichment."),
+    ] = None,
     status: Annotated[str | None, Field(description="Status (single only).")] = None,
     write_mode: Annotated[
         str | None,
         Field(description="fast|strong|auto (single only). 'strong' embeds inline — searchable at once."),
     ] = None,
-) -> str:
+) -> ToolReply:
     """Single OR batch write. Exactly one of {content, items} is required.
 
     Read-your-own-write: when embedding is deferred (any deployment not running it
@@ -1183,7 +1585,7 @@ async def caura_write(
         return err
     if (content is None) == (items is None):
         return _with_latency(
-            json.dumps(
+            _dumps(
                 {
                     "error": {
                         "code": "INVALID_ARGUMENTS",
@@ -1204,7 +1606,12 @@ async def caura_write(
     # case the body-supplied id is honored so the install self-identifies
     # rather than collapsing onto "main". Reads keep `_get_agent_id() or
     # agent_id` (visibility scoping is unaffected).
-    agent_id = effective_write_agent_id(_get_agent_id(), agent_id)
+    # ``or agent_id`` keeps this ``str``: the resolver returns None only when
+    # BOTH inputs are falsy, and this parameter defaults to DEFAULT_AGENT_ID,
+    # so the fallback is unreachable here. It states that instead of asserting
+    # it — and the resolver's ``str | None`` is correct on its own terms,
+    # exercised with a None body by tests/test_effective_write_agent_id.py.
+    agent_id = effective_write_agent_id(_get_agent_id(), agent_id) or agent_id
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # C3/C8 — reject reserved memory_types at the boundary before we
@@ -1295,7 +1702,10 @@ async def caura_write(
                         tenant_id=tenant_id,
                         fleet_id=fleet_id,
                         agent_id=agent_id,
-                        memory_type=memory_type,
+                        # MemoryCreate validates this against MemoryType and
+                        # raises on anything else; the parameter stays ``str``
+                        # because MCPServer publishes it to tools/list.
+                        memory_type=memory_type,  # type: ignore[arg-type]
                         content=content,
                         weight=weight,
                         source_uri=source_uri,
@@ -1303,34 +1713,39 @@ async def caura_write(
                         metadata=metadata,
                         status=status,
                         visibility=visibility,
-                        write_mode=write_mode,
+                        write_mode=write_mode,  # type: ignore[arg-type]
                     ),
                 )
                 return _with_latency(_serialize(result), t0)
-            # Batch path
-            if len(items) > 100:
+            # Batch path. ``items`` is populated: the guard near the top of
+            # this handler admits exactly one of {content, items} and the
+            # single-write path returned above. mypy cannot follow that through
+            # the XOR, so bind a narrowed name — an ``assert`` would vanish
+            # under -O and leave the invariant merely claimed.
+            batch = items or []
+            if len(batch) > 100:
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "error": {
                                 "code": "BATCH_TOO_LARGE",
-                                "message": f"items length {len(items)} exceeds maximum of 100.",
-                                "details": {"received": len(items), "max": 100},
+                                "message": f"items length {len(batch)} exceeds maximum of 100.",
+                                "details": {"received": len(batch), "max": 100},
                             }
                         }
                     ),
                     t0,
                 )
             try:
-                bulk_items = [BulkMemoryItem(**item) for item in items]
+                bulk_items = [BulkMemoryItem(**item) for item in batch]
             except (ValidationError, TypeError) as e:
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "error": {
                                 "code": "INVALID_BATCH_ITEM",
                                 "message": f"Invalid items — {e}",
-                                "details": {"received_count": len(items)},
+                                "details": {"received_count": len(batch)},
                             }
                         }
                     ),
@@ -1363,14 +1778,12 @@ async def caura_write(
             # same operation across two surfaces is the drift this whole area
             # keeps producing.
             #
-            # ``meters_mcp_bulk_write()`` is off by default. It is a billing
-            # switch, not a correctness one — see its docstring. While it is
-            # off, the caveat on ``_check_plan_limit`` still stands: the
-            # counters this would move are the ones over-plan mode is computed
-            # from, so a quiet observation log is not evidence that nothing
-            # would be refused — and now not evidence that nothing WILL be,
-            # since the gate above can refuse on a verdict this path never
-            # contributed to.
+            # ``meters_mcp_bulk_write()`` is ON since caura-ai/caura#1638. It
+            # is still a billing switch rather than a correctness one — see its
+            # docstring — and still reversible by env without a redeploy. What
+            # changed is that this path now contributes to the counters the gate
+            # above reads, so a quiet observation log is no longer explained by
+            # the batch path being invisible to it.
             #
             # Unreachable while the plan-limit gate refuses, which is the point:
             # a refused batch charges nothing.
@@ -1392,8 +1805,24 @@ async def caura_write(
             # to it; the trade-off is acceptable to keep this path
             # simple. If a use case needs MCP retry idempotency, the
             # client can pass an explicit token via metadata.
-            result = await create_memories_bulk(bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
-            return _with_latency(_serialize(result), t0)
+            bulk_result = await create_memories_bulk(bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
+            return _with_latency(_serialize(bulk_result), t0)
+        except ValidationError as e:
+            # ``MemoryCreate(...)`` on the single-write path above validates
+            # weight, content length, memory_type and visibility, and RAISES on
+            # anything else — but only ``HTTPException`` was handled, so those
+            # escaped this tool uncaught and reached the caller as an
+            # unstructured MCP error instead of INVALID_ARGUMENTS. The batch
+            # path already caught its own (INVALID_BATCH_ITEM, per item); this
+            # is the single path's missing twin, kept at the same level as the
+            # HTTPException handler so it covers every construction in the try.
+            return _with_latency(
+                _error_response(
+                    "INVALID_ARGUMENTS",
+                    f"Invalid write arguments — {e}",
+                ),
+                t0,
+            )
         except HTTPException as e:
             # Idempotent retry-safe duplicate: when create_memory raises 409
             # with the "Duplicate memory exists: <uuid>" detail (Stage 5's
@@ -1425,7 +1854,7 @@ async def caura_write(
                     dup.get("existing_status"),
                     agent_id,
                 )
-                return _with_latency(json.dumps(payload), t0)
+                return _with_latency(_dumps(payload), t0)
             logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
             return _with_latency(
                 _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
@@ -1447,7 +1876,7 @@ async def caura_manage(
     metadata: Annotated[dict | None, Field(description="op=update.")] = None,
     source_uri: Annotated[str | None, Field(description="op=update.")] = None,
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
-) -> str:
+) -> ToolReply:
     """Per-memory lifecycle: read | update | transition | delete | bulk_delete | lineage.
 
     op=lineage walks the supersession chain for `memory_id` and returns
@@ -1461,7 +1890,7 @@ async def caura_manage(
     _valid_ops = {"read", "update", "transition", "delete", "bulk_delete", "lineage"}
     if op not in _valid_ops:
         return _with_latency(
-            json.dumps(
+            _dumps(
                 {
                     "error": {
                         "code": "INVALID_ARGUMENTS",
@@ -1493,7 +1922,7 @@ async def caura_manage(
     # unauthenticated caller would inherit that identity's scope. ``None`` ⇒
     # no agent context (OSS/standalone) ⇒ tenant-scoped, no agent isolation.
     caller_agent_id = _get_agent_id()
-    agent_id = caller_agent_id or agent_id
+    agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     if op in {"update", "transition", "delete", "bulk_delete"} and (
         refuse := _refuse_default_agent_on_gateway(agent_id)
     ):
@@ -1558,7 +1987,7 @@ async def caura_manage(
                     resource_type="memory",
                     detail={"count": deleted_count, "method": "by_ids", "via": "mcp"},
                 )
-                return _with_latency(json.dumps({"deleted": deleted_count, "requested": len(uids)}), t0)
+                return _with_latency(_dumps({"deleted": deleted_count, "requested": len(uids)}), t0)
             if op == "lineage":
                 # HOME-tenant scoped. ``get_memory_contradictions`` bundles the
                 # three reads (this row + supersessors + older) in one storage
@@ -1604,7 +2033,7 @@ async def caura_manage(
                 # Newer rows whose supersedes_id points at this row.
                 supersessors = [_chain_row(m) for m in bundle.get("supersessors", [])]
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "this": {
                                 "id": str(this.get("id")),
@@ -1615,8 +2044,7 @@ async def caura_manage(
                             },
                             "superseded_by": superseded_by,  # the OLDER row this replaced
                             "supersessors": supersessors,  # NEWER rows that replaced this
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -1637,7 +2065,7 @@ async def caura_manage(
                 ):
                     return _with_latency(_error_response("NOT_FOUND", "Memory not found."), t0)
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "id": str(memory.get("id")),
                             "content": memory.get("content"),
@@ -1653,8 +2081,7 @@ async def caura_manage(
                             "recall_count": memory.get("recall_count", 0),
                             "deleted_at": memory.get("deleted_at"),
                             "metadata": memory.get("metadata_"),
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -1723,15 +2150,14 @@ async def caura_manage(
                 # ``openapi_responses.MemoryStatusPatchResponse``) so the two
                 # surfaces are parseable by one client.
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "memory_id": str(uid),
                             "old_status": old_status,
                             "new_status": status,
                             # The old prose, kept for chat rendering.
                             "message": f"Memory {memory_id} status updated: {old_status} -> {status}",
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -1808,13 +2234,12 @@ async def caura_manage(
             # gone — this is a soft delete, which is why the smoke asserts the
             # read-back 404 rather than trusting the acknowledgement.
             return _with_latency(
-                json.dumps(
+                _dumps(
                     {
                         "memory_id": str(uid),
                         "deleted": True,
                         "message": f"Memory {memory_id} deleted.",
-                    },
-                    default=str,
+                    }
                 ),
                 t0,
             )
@@ -1831,7 +2256,7 @@ async def caura_manage(
 
 async def caura_entity_get(
     entity_id: Annotated[str, Field(description="The UUID of the entity to look up.")],
-) -> str:
+) -> ToolReply:
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
@@ -1865,7 +2290,7 @@ async def caura_entity_get(
 
 async def caura_tune(
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
-    top_k: Annotated[int | None, Field(description="1-20.")] = None,
+    top_k: Annotated[int | None, Field(description=f"1-{MAX_SEARCH_TOP_K}.")] = None,
     min_similarity: Annotated[float | None, Field(description="0.1-0.9.")] = None,
     fts_weight: Annotated[float | None, Field(description="0=semantic, 1=keyword.")] = None,
     freshness_floor: Annotated[float | None, Field(description="0-1.")] = None,
@@ -1874,14 +2299,14 @@ async def caura_tune(
     recall_decay_window_days: Annotated[int | None, Field(description="7-365.")] = None,
     graph_max_hops: Annotated[int | None, Field(description="0-3.")] = None,
     similarity_blend: Annotated[float | None, Field(description="0-1.")] = None,
-) -> str:
+) -> ToolReply:
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -1910,7 +2335,7 @@ async def caura_tune(
             current.update(updates)
             current = validate_search_profile(current)
             await get_storage_client().update_search_profile(agent["id"], tenant_id, current)
-        return _with_latency(json.dumps({"agent_id": agent_id, "search_profile": current}, indent=2), t0)
+        return _with_latency(_dumps({"agent_id": agent_id, "search_profile": current}), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
         return _with_latency(
@@ -2071,8 +2496,11 @@ async def caura_doc(
         Field(description="op=write; optional scoping filter for op=list_collections|search."),
     ] = None,
     query: Annotated[str | None, Field(description="op=search: natural-language query.")] = None,
-    top_k: Annotated[int, Field(description="op=search: max results (1-50).")] = 5,
-) -> str:
+    top_k: Annotated[
+        int,
+        Field(description=f"op=search: max results (1-{MAX_DOC_SEARCH_TOP_K})."),
+    ] = DEFAULT_DOC_SEARCH_TOP_K,
+) -> ToolReply:
     """Structured-document CRUD. Op-dispatched. Replaces the 4 prior
     `caura_doc_*` tools."""
     t0 = time.perf_counter()
@@ -2081,7 +2509,7 @@ async def caura_doc(
     _valid_ops = {"write", "read", "query", "delete", "list_collections", "search"}
     if op not in _valid_ops:
         return _with_latency(
-            json.dumps(
+            _dumps(
                 {
                     "error": {
                         "code": "INVALID_ARGUMENTS",
@@ -2106,7 +2534,7 @@ async def caura_doc(
     # Raw authenticated identity for the delete trust gate (None ⇒ no agent
     # context). Must not fall back to the ``mcp-agent`` default.
     caller_agent_id = _get_agent_id()
-    agent_id = caller_agent_id or agent_id
+    agent_id = canonical_service_agent_id(caller_agent_id or agent_id)
     # A29 — refuse the default identity on every op. Was previously
     # write-only (A14); reads inherit the same contract because the
     # silent-empty-result UX is its own class of paper cut, and ``delete``
@@ -2156,7 +2584,7 @@ async def caura_doc(
                         (name, active_count if name == SKILLS_COLLECTION else count) for name, count in rows
                     ]
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "collections": [{"name": name, "count": count} for name, count in rows],
                             "count": len(rows),
@@ -2357,8 +2785,23 @@ async def caura_doc(
                 if source is not None:
                     from common.embedding import get_embedding
 
+                    # Tenant config so provider resolution matches the memory
+                    # paths and per-tenant embedding keys/models apply — see
+                    # routes/documents.py (same rationale, same degrade-to-
+                    # process-provider idiom on resolution failure).
+                    try:
+                        tenant_config = await resolve_config(tenant_id)
+                    except Exception:
+                        logger.warning(
+                            "caura_doc write: failed to resolve tenant config "
+                            "(tenant=%s); falling back to process-level "
+                            "embedding provider",
+                            tenant_id,
+                            exc_info=True,
+                        )
+                        tenant_config = None
                     # Synchronous write — see routes/documents.py.
-                    embedding = await get_embedding(source, background=False)
+                    embedding = await get_embedding(source, tenant_config, background=False)
                     if embedding is None:
                         return _with_latency(
                             _error_response(
@@ -2422,7 +2865,7 @@ async def caura_doc(
                     # this feature must never cause.
                     logger.exception("doc memory mint failed for %s/%s", collection, doc_id)
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "ok": True,
                             "collection": collection,
@@ -2442,7 +2885,9 @@ async def caura_doc(
                 # credentials (home-only when single-tenant).
                 doc = await sc.get_document(
                     tenant_id=tenant_id,
-                    collection=collection,
+                    # Non-empty: the guard at the top of this handler refuses
+                    # any op outside {list_collections, search} without one.
+                    collection=collection,  # type: ignore[arg-type]
                     doc_id=doc_id,
                     readable_tenant_ids=readable,
                 )
@@ -2466,14 +2911,13 @@ async def caura_doc(
                     ):
                         return _with_latency(f"Not found: {collection}/{doc_id}", t0)
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "collection": _doc_field(doc, "collection"),
                             "doc_id": _doc_field(doc, "doc_id"),
                             "data": _doc_field(doc, "data"),
                             "updated_at": _doc_field(doc, "updated_at"),
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -2560,10 +3004,7 @@ async def caura_doc(
                     ]
                 items = [{"doc_id": _doc_field(d, "doc_id"), "data": _doc_field(d, "data")} for d in docs]
                 return _with_latency(
-                    json.dumps(
-                        {"collection": collection, "count": len(items), "results": items},
-                        default=str,
-                    ),
+                    _dumps({"collection": collection, "count": len(items), "results": items}),
                     t0,
                 )
             if op == "search":
@@ -2573,8 +3014,22 @@ async def caura_doc(
                     )
                 from common.embedding import get_embedding
 
+                # Same-provider query embedding — see routes/documents.py
+                # search: the query vector must come from the provider that
+                # embedded this tenant's stored documents.
+                try:
+                    tenant_config = await resolve_config(tenant_id)
+                except Exception:
+                    logger.warning(
+                        "caura_doc search: failed to resolve tenant config "
+                        "(tenant=%s); falling back to process-level embedding "
+                        "provider",
+                        tenant_id,
+                        exc_info=True,
+                    )
+                    tenant_config = None
                 # Interactive search — see documents.py: not background.
-                query_embedding = await get_embedding(query, background=False)
+                query_embedding = await get_embedding(query, tenant_config, background=False)
                 if query_embedding is None:
                     return _with_latency(
                         _error_response(
@@ -2584,7 +3039,7 @@ async def caura_doc(
                         ),
                         t0,
                     )
-                capped_top_k = max(1, min(top_k, 50))
+                capped_top_k = max(1, min(top_k, MAX_DOC_SEARCH_TOP_K))
                 # Active-only gate for a SCOPED skills search: push the
                 # status filter into the SQL so top_k stays exact (a
                 # post-filter alone would silently shrink the result
@@ -2665,13 +3120,12 @@ async def caura_doc(
                     for d in pairs
                 ]
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "collection": collection,  # None if broad search
                             "count": len(items),
                             "results": items,
-                        },
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -2714,17 +3168,37 @@ async def caura_doc(
                 )
             deleted = await sc.delete_document(
                 tenant_id,
-                collection,
+                collection,  # type: ignore[arg-type]  # guaranteed by the op guard above
                 doc_id,
                 require_status=_AGENT_VISIBLE_SKILL_STATUS if skills_gate_on else None,
             )
             if not deleted:
                 return _with_latency(
-                    json.dumps({"error": f"Document '{doc_id}' not found in collection '{collection}'"}),
+                    _dumps({"error": f"Document '{doc_id}' not found in collection '{collection}'"}),
                     t0,
                 )
+            # Un-mint, exactly as the REST delete does. ``op=index`` above mints
+            # through ``safe_sync_doc_memory``; without the inverse here a
+            # document deleted over MCP left its minted memory recallable with
+            # nothing able to reach it. The helper never raises — the document
+            # is already gone and the caller asked for that, not for a memory.
+            from core_api.services.doc_memory import safe_unmint_doc_memory
+
+            unminted = await safe_unmint_doc_memory(
+                collection,  # type: ignore[arg-type]  # same op guard as the delete above
+                doc_id,
+                tenant_id=tenant_id,
+            )
             return _with_latency(
-                json.dumps({"ok": True, "collection": collection, "doc_id": doc_id, "deleted": True}),
+                _dumps(
+                    {
+                        "ok": True,
+                        "collection": collection,
+                        "doc_id": doc_id,
+                        "deleted": True,
+                        "memories_unminted": unminted,
+                    }
+                ),
                 t0,
             )
         except HTTPException as e:
@@ -2762,7 +3236,7 @@ async def caura_list(
     limit: Annotated[int, Field(description="1-50.")] = 25,
     cursor: Annotated[str | None, Field(description="Pagination cursor.")] = None,
     include_deleted: Annotated[bool, Field(description="Trust-3 only.")] = False,
-) -> str:
+) -> ToolReply:
     """Non-semantic memory enumeration: filter, sort, paginate by metadata.
     scope='agent' (default) requires trust ≥ 1. scope='fleet' reads cross-agent
     within a fleet: the caller's OWN fleet requires trust ≥ 1, a different fleet
@@ -2816,7 +3290,9 @@ async def caura_list(
     capped_limit = max(1, min(int(limit), 50))
 
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
+    if written_by is not None:
+        written_by = canonical_service_agent_id(written_by)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -2922,7 +3398,12 @@ async def caura_list(
             # ``_memory_to_out`` accepts either an ORM row or a storage dict.
             items = [_memory_to_out(m).model_dump(mode="json") for m in rows[:capped_limit]]
             next_cursor = None
-            if has_more and rows:
+            # OSS 09/02 L-23 — mint only what the gate above would take back.
+            # This is the third copy of the pair and was the one still drifted:
+            # the gate rejects a cursor unless ``created_at``/``desc``, and this
+            # minted one for every sort. ``caura_list`` is the agent-facing
+            # surface, so it was also the highest-traffic instance.
+            if has_more and rows and cursor_sortable(sort, order):
                 last = rows[capped_limit - 1]
                 next_cursor = encode_cursor(_dt.fromisoformat(last["created_at"]), UUID(last["id"]))
             # Cross-tenant audit (F2): count per tenant from the served rows.
@@ -2947,15 +3428,14 @@ async def caura_list(
             # share a response parser across the surfaces. Same list object,
             # two keys; ``results`` stays as a permanent alias.
             return _with_latency(
-                json.dumps(
+                _dumps(
                     {
                         "count": len(items),
                         "results": items,
                         "items": items,
                         "next_cursor": next_cursor,
                         "scope": scope,
-                    },
-                    default=str,
+                    }
                 ),
                 t0,
             )
@@ -2991,7 +3471,7 @@ async def caura_stats(
             description="When true, also return 'deleted' (soft-deleted count) and 'total_including_deleted'. 'total' and breakdowns stay non-deleted regardless."
         ),
     ] = False,
-) -> str:
+) -> ToolReply:
     """Aggregate counts: total plus breakdowns by type, agent, status.
     scope='agent' (default) requires trust ≥ 1. scope='fleet' aggregates
     cross-agent within a fleet: the caller's OWN fleet requires trust ≥ 1, a
@@ -3026,7 +3506,7 @@ async def caura_stats(
         )
 
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
     # Trust ladder resolves by TARGET (spec: L1 = read within own fleet, L2 =
@@ -3092,7 +3572,7 @@ async def caura_stats(
                     surface="caura_stats",
                     result_count_by_tenant=stats.get("by_tenant") or {},
                 )
-            return _with_latency(json.dumps({**stats, "scope": scope}, default=str), t0)
+            return _with_latency(_dumps({**stats, "scope": scope}), t0)
         except Exception as e:
             logger.exception("Unhandled error in caura_stats")
             return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
@@ -3113,7 +3593,7 @@ async def caura_insights(
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
-) -> str:
+) -> ToolReply:
     """Analyze the memory store for patterns, contradictions, stale knowledge,
     or unexpected clusters; persist findings as ``insight`` memories.
     Consolidates onto the Karpathy Loop reflection step.
@@ -3123,8 +3603,13 @@ async def caura_insights(
     t0 = time.perf_counter()
     if err := _check_auth():
         return err
+    # Write tool despite the name: Phase 3's ``_persist_findings`` creates and
+    # supersedes ``insight`` memories. REST gates the same work —
+    # ``POST /insights/generate`` calls ``auth.enforce_read_only()``.
+    if err := _check_write_scope():
+        return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3197,7 +3682,11 @@ async def caura_insights(
             if terr:
                 return _with_latency(_error_response("FORBIDDEN", parse_trust_error(terr)), t0)
             await check_and_increment(tenant_id, "insights")
-            memories_or_clusters = await _QUERY_DISPATCH[focus](tenant_id, fleet_id, agent_id, scope)
+            # Shape varies by focus — each dispatch entry returns its own, and
+            # ``discover`` returns a wrapper unpacked just below. Every
+            # consumer downstream is shape-agnostic, so ``Any`` states that
+            # rather than a union that would need narrowing at each use.
+            memories_or_clusters: Any = await _QUERY_DISPATCH[focus](tenant_id, fleet_id, agent_id, scope)
             if focus == "discover" and isinstance(memories_or_clusters, _DiscoverResult):
                 is_clustered = memories_or_clusters.is_clustered
                 memories_or_clusters = memories_or_clusters.data
@@ -3207,7 +3696,7 @@ async def caura_insights(
             # no LLM work, no second session, just a stable empty result.
             if not memories_or_clusters:
                 return _with_latency(
-                    json.dumps(
+                    _dumps(
                         {
                             "focus": focus,
                             "scope": scope,
@@ -3217,9 +3706,7 @@ async def caura_insights(
                             "insight_memory_ids": [],
                             "gate_rejected": 0,
                             "insights_ms": int((time.perf_counter() - t0) * 1000),
-                        },
-                        indent=2,
-                        default=str,
+                        }
                     ),
                     t0,
                 )
@@ -3261,7 +3748,7 @@ async def caura_insights(
             "gate_rejected": synth.get("gate_rejected", 0),
             "insights_ms": int((time.perf_counter() - t0) * 1000),
         }
-        return _with_latency(json.dumps(result, indent=2, default=str), t0)
+        return _with_latency(_dumps(result), t0)
     except HTTPException as e:
         return _with_latency(
             _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
@@ -3276,12 +3763,25 @@ async def caura_evolve(
     outcome_type: Annotated[str, Field(description="success|failure|partial.")],
     related_ids: Annotated[
         list[str] | None,
-        Field(description="Memory UUIDs that influenced the action."),
+        # OSS 09/02 L-22 — the same cap the REST twin applies. Both boundaries
+        # reach the same ``report_outcome``, and ``test_c31_mcp_rest_parity``
+        # pins that they agree; bounding only REST left an MCP caller with
+        # exactly the behaviour the cap exists to prevent — an oversized list
+        # written verbatim into the outcome memory's metadata by
+        # ``_persist_outcome``, then silently cut to 50 by ``_adjust_weights``.
+        # The cap rides the inputSchema as ``maxItems`` and is deliberately NOT
+        # repeated in the description: tool-surface tokens are paid on every
+        # agent call, and tests/fixtures/README.md asks that anything the
+        # inputSchema already states be trimmed rather than duplicated in prose.
+        Field(
+            description="Memory UUIDs that influenced the action.",
+            max_length=EVOLVE_MAX_RELATED_IDS,
+        ),
     ] = None,
     scope: Annotated[str, Field(description="agent|fleet|all.")] = "agent",
     agent_id: Annotated[str, Field(description=_AGENT_ID_DESC)] = DEFAULT_AGENT_ID,
     fleet_id: Annotated[str | None, Field(description="Required when scope='fleet'.")] = None,
-) -> str:
+) -> ToolReply:
     """Record a real-world outcome against the memories that influenced the
     action: adjust weights, generate preventive rules on failure. Closes the
     Karpathy Loop feedback edge.
@@ -3295,7 +3795,7 @@ async def caura_evolve(
     if err := _check_write_scope():
         return err
     tenant_id = _get_tenant()
-    agent_id = _get_agent_id() or agent_id
+    agent_id = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id):
         return _with_latency(refuse, t0)
 
@@ -3433,7 +3933,7 @@ async def caura_evolve(
                 weight_adjustment_skipped_reason=weight_adjustment_skipped_reason,
                 t0=t0,
             )
-        return _with_latency(json.dumps(result, indent=2, default=str), t0)
+        return _with_latency(_dumps(result), t0)
     except HTTPException as e:
         return _with_latency(
             _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0
@@ -3483,7 +3983,7 @@ async def caura_keystones(
         str | None,
         Field(description="Scope filter; supply to include fleet- and agent-scoped rules."),
     ] = None,
-) -> str:
+) -> ToolReply:
     """Retrieve the scope-merged set of keystone rules for the caller.
 
     Returns ``{"count": N, "truncated": bool, "rules": [...]}`` — the
@@ -3501,7 +4001,7 @@ async def caura_keystones(
     if err := _check_auth():
         return err
     tenant_id = _get_tenant()
-    agent_id_effective = _get_agent_id() or agent_id
+    agent_id_effective = canonical_service_agent_id(_get_agent_id() or agent_id)
     if refuse := _refuse_default_agent_on_gateway(agent_id_effective):
         return _with_latency(refuse, t0)
 
@@ -3532,10 +4032,10 @@ async def caura_keystones(
     except Exception as e:
         logger.exception("Unhandled error in caura_keystones")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
-    return _with_latency(
-        json.dumps({"count": len(rows), "truncated": truncated, "rules": rows}, default=str),
-        t0,
-    )
+    payload: dict = {"count": len(rows), "truncated": truncated, "rules": rows}
+    if not rows:
+        payload["hint"] = KEYSTONES_EMPTY_HINT
+    return _with_latency(_dumps(payload), t0)
 
 
 async def caura_keystones_set(
@@ -3563,7 +4063,7 @@ async def caura_keystones_set(
     author_user_id: Annotated[
         str | None, Field(description="op=set: optional author identity for audit.")
     ] = None,
-) -> str:
+) -> ToolReply:
     """Author or remove a keystone rule.
 
     ``agent_id`` is the TARGET agent the rule binds to — not the
@@ -3613,7 +4113,9 @@ async def caura_keystones_set(
         )
 
     tenant_id = _get_tenant()
-    caller_agent_id = _get_agent_id() or "mcp-agent"
+    caller_agent_id = canonical_service_agent_id(_get_agent_id() or "mcp-agent")
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     if refuse := _refuse_default_agent_on_gateway(caller_agent_id):
         return _with_latency(refuse, t0)
 
@@ -3773,8 +4275,8 @@ async def caura_keystones_set(
                 payload: KeystoneUpsertPayload = {
                     "tenant_id": tenant_id,
                     "doc_id": doc_id,
-                    "title": title,
-                    "content": content,
+                    "title": title,  # type: ignore[typeddict-item]
+                    "content": content,  # type: ignore[typeddict-item]
                     "scope": scope,  # type: ignore[typeddict-item]
                     "weight": weight,  # type: ignore[typeddict-item]
                 }
@@ -3802,7 +4304,7 @@ async def caura_keystones_set(
                     },
                 )
                 return _with_latency(
-                    json.dumps({"ok": True, "action": "set", "doc_id": doc_id}, default=str),
+                    _dumps({"ok": True, "action": "set", "doc_id": doc_id}),
                     t0,
                 )
             # op == "delete"
@@ -3887,7 +4389,7 @@ async def caura_keystones_set(
                 resource_id=None,
                 detail={"doc_id": doc_id, "via": "mcp"},
             )
-            return _with_latency(json.dumps({"ok": True, "action": "delete", "doc_id": doc_id}), t0)
+            return _with_latency(_dumps({"ok": True, "action": "delete", "doc_id": doc_id}), t0)
         except httpx.HTTPStatusError as e:
             # storage_client._post / _delete call raise_for_status(); a
             # storage-side 422 (bad scope/weight) raises this — surface
@@ -3912,7 +4414,12 @@ async def caura_keystones_set(
 
 # ── Mountable app + lifespan ──
 
-_mcp_starlette_app = mcp.streamable_http_app()
+_mcp_starlette_app = mcp.streamable_http_app(
+    streamable_http_path="/",
+    json_response=True,
+    stateless_http=True,
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
 
 
 def get_mcp_app() -> ASGIApp:
@@ -3929,9 +4436,12 @@ async def mcp_lifespan():
 # ── SoT registration ──────────────────────────────────────────────────────
 # Triggers loading of every `core_api.tools.caura_*.py` spec module. Each
 # spec module registers itself in the REGISTRY and calls `mcp_register(mcp, spec)`
-# to wire the handler to FastMCP. This import must run AFTER the 16 handler
-# functions above are defined — spec modules reference them via
-# `core_api.mcp_server.caura_X` attribute lookup.
+# to wire the handler to the MCPServer. This import must run AFTER the `caura_*`
+# handler functions above are defined — spec modules reference them via
+# `core_api.mcp_server.caura_X` attribute lookup. Deliberately no count here:
+# this said "the 16 handler functions" from the initial release until 2026-09,
+# which was the PRE-consolidation figure and never matched the 12 that exist.
+# `test_tools_registry` pins the real number; prose beside it only drifts.
 # The `noqa: E402,F401` silences "module-level import not at top" and
 # "imported but unused" — both are intentional.
 from core_api import tools  # noqa: F401

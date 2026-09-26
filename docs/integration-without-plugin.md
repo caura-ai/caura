@@ -1,6 +1,6 @@
 # Integrate with Caura without the plugin
 
-**Audience:** developers building Python, Node, or any other SDK client against `caura.ai` or a self-hosted Caura (formerly MemClaw) instance, without installing the OpenClaw plugin runtime. <!-- legacy-name-ok: taught as legacy alias -->
+**Audience:** developers building Python, Node, or any other SDK client against `caura.ai` or a self-hosted Caura (formerly MemClaw) instance, without installing the OpenClaw plugin runtime. <!-- legacy-name-floor: taught as legacy alias -->
 
 **Time to first tool call:** ~5 minutes.
 
@@ -52,7 +52,7 @@ Save `raw_key` immediately — it's only returned once. The returned credential 
 **Optional fields** on the provision request:
 
 - `initial_trust` — `0`, `1`, `2`, `3` (default `1`).
-- `initial_fleet` — fleet membership; absent = no fleet (writes default to tenant-wide scope).
+- `initial_fleet` — fleet membership; absent = no fleet, and writes then land `fleet_id: null`, which is **tenant-shared by design**: every fleet's `search` and `recall` see the row. Note the asymmetry before you use counts as a health check — a fleet-filtered `GET /memories` or `/stats` does *not* return those rows today, so a fleet-less agent's writes answer teammates' searches while being absent from their listings.
 - `display_name` — human-readable name surfaced on the dashboard.
 
 ---
@@ -298,6 +298,7 @@ for why the two differ.
   `error.details.unknown_fields`. The named field is not part of the request
   model — it was being discarded before, so the fix is to remove it or move it
   under `metadata`, not to retry.
+- **`scope` and `visibility` are different axes, and `scope` itself means two things.** On a read, `scope=agent|fleet|all` chooses how wide to look. On a write, `visibility=scope_agent|scope_team|scope_org` stamps who may see the row — it is not a read breadth and passing it as one filters rather than widens. Keystone routes take `scope` with a *third* enum, `tenant|fleet|agent`, so `scope=all` there is not a value. And a memory's own `scope` field in a response is none of the above: it carries validity qualifiers such as role or task. Four spellings, one word; check which surface you are on before copying a value between them.
 - **Streaming client hangs on initialize.** If hitting `/mcp` (no slash) caused a hang on older builds, append the trailing slash or upgrade — current builds serve both paths without redirect.
 - **`caura_insights` is cut off by your client's default tool timeout.** It is
   LLM-backed and runs roughly 7–9 s — an order of magnitude slower than the

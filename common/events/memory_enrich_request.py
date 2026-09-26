@@ -28,6 +28,7 @@ the shape of its ``payload`` dict.
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SerializationInfo, field_serializer
@@ -65,7 +66,20 @@ class MemoryEnrichRequest(BaseModel):
     # ``ts_valid_*`` extraction guidance. Worker defaults to ``date.today()``
     # when omitted; sending it explicitly pins the value to the publisher's
     # clock so a delayed delivery doesn't drift the prompt.
-    reference_datetime: str | None = None
+    #
+    # Typed ``datetime``, not ``str``. It was a ``str`` that the publisher
+    # produced with ``.isoformat()`` and the worker turned back with
+    # ``fromisoformat`` — so the schema accepted anything and the real
+    # rejector sat in the consumer, BELOW its poison-payload guard. A
+    # malformed value therefore raised past the handler and nack-looped to
+    # the DLQ, even though every redelivery re-parses the same bytes and
+    # fails identically. Declaring the real type makes pydantic reject it
+    # here, inside the guard that already ack-drops malformed payloads.
+    #
+    # Not a wire change: ``model_dump(mode="json")`` still emits ISO 8601, and
+    # an ISO string on the way in still parses, so in-flight messages survive
+    # a rolling deploy in both directions.
+    reference_datetime: datetime | None = None
 
     # Provider selection — mirrors the ``ResolvedConfig`` attributes
     # ``common.enrichment.service.enrich_memory`` reads.
@@ -136,3 +150,27 @@ class MemoryEnrichRequest(BaseModel):
     # publisher hasn't classified, worker writes everything (used
     # before the core-api hot-path change in PR-C lands).
     agent_provided_fields: list[str] | None = None
+
+    # The metadata-side counterpart, and needed for the same reason: which
+    # CALLER-OWNABLE metadata keys (C25 ``CALLER_OWNABLE_KEYS`` —
+    # ``summary`` / ``tags``) the caller supplied at write time.
+    #
+    # ``agent_provided_fields`` covers ORM COLUMNS only, so nothing told the
+    # worker that ``metadata["summary"]`` was the caller's own. The row's
+    # merged metadata cannot answer it either — a caller's summary and a
+    # platform-written one are the same key. So the worker wrote the LLM's
+    # summary over the caller's on every deferred enrichment, while the
+    # synchronous path had honoured the boundary since C25.
+    #
+    # core-api owns the boundary and ships the decision — but the worker does
+    # NOT trust this list wholesale, and the difference from
+    # ``agent_provided_fields`` is why. That list pins ORM columns the caller
+    # could have set directly at write time, so honouring a forged entry grants
+    # no capability the caller lacked. This one can name a PLATFORM key, and
+    # some of those are read from the legacy top-level position only
+    # (``governance_remediation`` does ``md.get("contains_pii")``), so an
+    # arbitrary entry could silently disable a governance verdict. The worker
+    # intersects against its own ``_CALLER_OWNABLE_KEYS`` on arrival.
+    #
+    # ``None`` = caller owns nothing here.
+    caller_owned_metadata_keys: list[str] | None = None

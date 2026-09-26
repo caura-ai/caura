@@ -8,15 +8,19 @@ import re
 import socket
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
 
+from common.embedding import get_embedding
+from common.enrichment.constants import DEFAULT_MEMORY_TYPE
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
-from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES
+from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES, MEMORY_TYPES_WRITE
 from core_api.providers._retry import call_with_fallback
 from core_api.schemas import (
     BulkMemoryCreate,
@@ -97,6 +101,17 @@ INGEST_MAX_INPUT_BYTES = 3_000_000  # 3 MB
 # Back-compat alias for code/tests written before the unification.
 MAX_INGEST_CONTENT_BYTES = INGEST_MAX_INPUT_BYTES
 
+# M-43. Redirects are walked by hand so every hop can be checked BEFORE it is
+# requested, which means this module owns the cap httpx used to own. Lower than
+# httpx's default of 20: a legitimate document fetch does not need five hops,
+# and each one is an outbound request from inside the deployment network.
+#
+# This also TIGHTENS the wall-clock ceiling rather than loosening it. httpx
+# applies ``timeout`` per hop (``_send_handling_redirects`` calls
+# ``_send_single_request`` in a loop), so the old ``follow_redirects=True`` with
+# the default 20-redirect cap allowed ~21 x 30s. Six hops is 3.5x less.
+MAX_INGEST_REDIRECTS = 5
+
 # Explicit deny-list for cloud-metadata service IPs that aren't always
 # caught by ipaddress.is_link_local (AWS 169.254.169.254 IS link-local;
 # GCP metadata at metadata.google.internal resolves to 169.254.169.254 too;
@@ -109,14 +124,6 @@ _CLOUD_METADATA_IPS = frozenset({"169.254.169.254", "fd00:ec2::254"})
 # avoid rate-limit storms while still parallelizing the ~5s per-section
 # latency.
 _PREVIEW_CONCURRENCY = 4
-
-# Maximum content length the LLM sees. Inputs longer than this get
-# truncated; ``ingest_preview`` reports the post-truncate length as
-# ``content_length`` and sets ``truncated: true`` + ``original_length``
-# so callers know the input was clipped. (Previously ``content_length``
-# returned the pre-truncate length, lying about what the LLM actually
-# processed.)
-_INGEST_MAX_CONTENT_CHARS = 50_000
 
 # Minimum content length before we'll even call the LLM. Whitespace-only
 # inputs and trivially short ones ("hi") used to burn a real LLM call
@@ -161,6 +168,38 @@ _SALIENCE_FLOOR = 0.5
 # the validator drops them. "≥ 5 words" is the boundary — anything shorter
 # is almost always a heading, label, or one-word fragment.
 _MIN_FACT_WORDS = 5
+
+# Scripts that do not put spaces between words. A whitespace split reports 1
+# for an entire Chinese or Japanese sentence, so ``len(body.split())`` dropped
+# every CJK fact as a "sub-5-word fragment" — the filter deleted the content it
+# was meant to protect, and only for those languages.
+#
+# Hangul is deliberately EXCLUDED: Korean is space-delimited, so counting each
+# syllable as a word would over-count it and let real fragments through.
+_CJK_RE = re.compile(
+    "["
+    "\u3040-\u309f"  # hiragana
+    "\u30a0-\u30ff"  # katakana
+    "\u3400-\u4dbf"  # CJK unified ext A
+    "\u4e00-\u9fff"  # CJK unified
+    "\uf900-\ufaff"  # CJK compatibility
+    "\uff66-\uff9f"  # halfwidth katakana
+    "]"
+)
+
+
+def _fact_word_count(text: str) -> int:
+    """Word count that survives a script without spaces.
+
+    Each CJK character counts as one unit and the remainder is split on
+    whitespace, so mixed text ("Acme の売上は 12% 増加した") is counted once,
+    not twice. One character per unit is deliberately generous — a CJK word is
+    typically one to two characters, so this errs toward KEEPING a short fact
+    rather than silently dropping a real one, which is the failure being fixed.
+    """
+    cjk = len(_CJK_RE.findall(text))
+    return len(_CJK_RE.sub(" ", text).split()) + cjk
+
 
 # Drop facts that describe the input itself rather than extracting from it.
 # These show up when the LLM has nothing real to chunk — typical on short
@@ -213,21 +252,16 @@ later without the surrounding document.
      - 0.0 = filler / restatement
    Be honest. Anything below 0.5 will be dropped automatically.
 
-7. **memory_type.** Pick the most specific tag. When in doubt prefer the
-   left option in each pair:
-     - fact         — a stable proposition about the world ("Iron melts at 1538°C")
-     - decision     — a chosen course of action by an identified actor
-     - task         — work item assigned but not yet finished
-     - plan         — intended future action stated as plan
-     - outcome      — past event/result; if you'd write "X happened" or "Y
-                      was completed", use this (not "fact")
-     - preference   — a stated like/dislike
-     - intention    — what someone aims to do
-     - commitment   — explicit promise
-     - action       — something done (granular than outcome)
-     - episode      — narrative event tied to a specific moment
-     - semantic     — definitional/conceptual relationship
-     - cancellation — explicit revocation of a prior plan/commitment
+7. **memory_type.** Pick the most specific tag. Use ONLY these values:
+     - fact       — a stable proposition about the world ("Iron melts at 1538°C"),
+                    including definitional and conceptual relationships
+     - decision   — a chosen course of action by an identified actor
+     - task       — work item assigned but not yet finished
+     - plan       — intended future action, an aim, or an explicit promise
+     - preference — a stated like/dislike
+     - action     — something done; also use this for a completed past
+                    event or result ("X happened", "Y was completed")
+     - episode    — narrative event tied to a specific moment
 
 ## Quantity guidance
 
@@ -333,7 +367,7 @@ async def _chunk_content(
 
         # A5: drop sub-5-word fragments. Prompt forbids them but the LLM
         # still emits short headings/labels on noisy inputs.
-        if len(body.split()) < _MIN_FACT_WORDS:
+        if _fact_word_count(body) < _MIN_FACT_WORDS:
             dropped_short += 1
             continue
 
@@ -394,28 +428,205 @@ def _is_blocked_ip(addr: str) -> bool:
     )
 
 
-def _check_hostname_safe(url: str) -> None:
-    """Resolve the URL's hostname and reject if it points at private infra.
+# Wall-clock ceiling for one hop's DNS. Real answers land in milliseconds; this
+# is generous for a slow-but-honest resolver and short against a hostile one.
+DNS_RESOLUTION_TIMEOUT = 5.0
 
-    Light-weight SSRF defense. Does NOT handle DNS rebinding between this
-    resolution and the actual TCP connect — that's a Tier 3 hardening item.
-    Covers the accidental-misuse case (localhost, RFC1918, cloud metadata).
+# Ceiling for the WHOLE fetch, redirect chain included. Reasoned about in
+# ``_fetch_url_text``; the short version is that per-hop budgets multiply and
+# this is the only number a caller-supplied chain cannot inflate.
+MAX_INGEST_FETCH_SECONDS = 60.0
+
+# DNS runs HERE rather than on the default executor, and the two protections
+# are not interchangeable:
+#
+#   asyncio.wait_for bounds the REQUEST. It does NOT reclaim the thread — a
+#   concurrent.futures future that is already running cannot be cancelled, so
+#   the worker stays inside getaddrinfo until the resolver answers or the OS
+#   gives up. Measured: after a 0.5s wait_for timeout on a 3s blocking call,
+#   the next task on a 1-worker pool still waited 2.52s for its turn.
+#
+#   The dedicated pool bounds the BLAST RADIUS. Because the timeout cannot free
+#   threads, hostile DNS can pin every worker it is allowed to reach; the only
+#   question is which pool those are. On the default executor that is the one
+#   the whole ASGI app shares, so one tenant's slow resolver could stall
+#   unrelated blocking work — a cross-tenant DoS. Confined here, a saturated
+#   pool degrades ingest (later hops queue, then time out with a 400) and
+#   nothing else.
+#
+# The hostname is attacker-supplied by design on this endpoint, so treat both
+# as load-bearing rather than defensive decoration.
+#
+# KNOWN LIMITATION, recorded because there is no call that fixes it. A worker
+# stuck in getaddrinfo delays interpreter exit: concurrent.futures.thread's
+# atexit hook joins it, so SIGTERM during a hostile-DNS fetch can outlast the
+# shutdown grace period. Registering a shutdown on the app's lifespan does NOT
+# help — a running worker cannot be cancelled, the same limitation that makes
+# the timeout above insufficient on its own. Measured, 5s blocking call, time
+# to process exit: no shutdown 5.03s, shutdown(wait=False) 5.03s,
+# shutdown(wait=False, cancel_futures=True) 5.03s.
+#
+# And do not reach for the workaround: dropping these threads from
+# ``concurrent.futures.thread._threads_queues`` so atexit skips them leaves
+# ``threading._shutdown`` waiting on a non-daemon thread that can no longer be
+# woken, and the process hangs forever instead of for seconds. Measured too.
+#
+# What actually bounds this is the OS resolver's own timeout and max_workers.
+_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="ingest-dns")
+
+
+def _resolve_and_vet(url: str) -> list[str]:
+    """Resolve the URL's hostname, reject private infra, and RETURN the addresses.
+
+    Returning the vetted addresses rather than just raising is what lets the
+    caller CONNECT to one of them instead of resolving the name a second time.
+    Every address the name resolves to must pass — an attacker who can return
+    one public and one private answer must not get to pick.
     """
     parsed = urlparse(url)
     host = parsed.hostname
     if not host:
         raise HTTPException(status_code=400, detail=f"Invalid URL: no hostname in {url!r}")
+    # A redirect ``Location`` is attacker-controlled once the fetched server
+    # answers, and nothing downstream rejects a non-HTTP scheme:
+    # ``ftp://public-host/x`` resolves, vets and pins cleanly, then dies inside
+    # httpx's transport selection as ``UnsupportedProtocol`` — an exception
+    # this module does not catch, so it escapes as a 500 from the one function
+    # that turns every other malformed input into a 400.
+    #
+    # AFTER the hostname check, not before: the schemes that reach here are the
+    # ones carrying a host. ``file:///etc/passwd`` and a bare
+    # ``not-a-valid-url`` have none, and both were already refused above —
+    # putting scheme first would only change which message they get.
+    #
+    # An https -> http downgrade stays permitted. This fetches public content,
+    # and credentials cannot ride a downgrade: only an ABSOLUTE ``Location``
+    # can change the scheme, and an absolute reference replaces the whole
+    # authority, dropping userinfo with it.
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported URL scheme {parsed.scheme!r} in {url!r} (http/https only)",
+        )
+    # ``.port`` raises ValueError on a non-integer port, and it is read later by
+    # _pin_url_to_address. Touching it HERE means a malformed port is rejected
+    # at the same point as every other invalid URL, with the same 400, instead
+    # of passing vetting and then escaping this module as a 500.
+    try:
+        _ = parsed.port
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid port in URL {url!r}: {e}")
     try:
         infos = socket.getaddrinfo(host, None)
     except socket.gaierror as e:
         raise HTTPException(status_code=400, detail=f"DNS resolution failed for {host}: {e}")
-    for family, _, _, _, sockaddr in infos:
+    addrs: list[str] = []
+    for _family, _, _, _, sockaddr in infos:
         addr = str(sockaddr[0])
         if _is_blocked_ip(addr) or addr in _CLOUD_METADATA_IPS:
             raise HTTPException(
                 status_code=400,
                 detail=f"Blocked: {host} resolves to {addr} (private/loopback/link-local/metadata)",
             )
+        if addr not in addrs:
+            addrs.append(addr)
+    if not addrs:
+        raise HTTPException(status_code=400, detail=f"DNS resolution failed for {host}: no addresses")
+    return addrs
+
+
+async def _resolve_and_vet_async(url: str) -> list[str]:
+    """``_resolve_and_vet``, off the event loop.
+
+    ``socket.getaddrinfo`` blocks and takes no timeout, and M-43's per-hop loop
+    runs it up to ``MAX_INGEST_REDIRECTS + 1`` times where the old code ran it
+    twice. Six blocking resolutions inline is six chances for one tenant's slow
+    DNS to stall every other request sharing the worker — a fair objection to
+    the per-hop check, and cheaper to answer than to argue with.
+
+    A wrapper rather than making the vetting itself async: it is the policy
+    function and its logic has no business knowing about event loops.
+
+    This deliberately has NO branch for "skip pinning". An earlier cut decided
+    that by comparing the module-level checker against a snapshot taken at
+    import, so that tests substituting a yes/no stand-in kept working — which
+    made a security-critical behaviour toggle on whether a private module
+    attribute had been reassigned, silently and without a log line. Tests patch
+    this function or :func:`_resolve_and_vet` instead.
+
+    The timeout and the dedicated pool do two DIFFERENT jobs, and neither
+    substitutes for the other. See :data:`_DNS_EXECUTOR`.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        return await asyncio.wait_for(
+            loop.run_in_executor(_DNS_EXECUTOR, _resolve_and_vet, url),
+            timeout=DNS_RESOLUTION_TIMEOUT,
+        )
+    except TimeoutError:  # asyncio.TimeoutError is an alias of this since 3.11
+        host = urlparse(url).hostname or url
+        raise HTTPException(
+            status_code=400,
+            detail=f"DNS resolution timed out after {DNS_RESOLUTION_TIMEOUT}s for {host}",
+        )
+
+
+@asynccontextmanager
+async def _stream_request(client: httpx.AsyncClient, request: httpx.Request):
+    """``client.stream(...)``, but for a request built in advance.
+
+    ``client.stream`` builds its own request internally, so it cannot carry the
+    pinned URL, the ``Host`` header and the SNI extension. ``send(stream=True)``
+    can, but hands back a plain ``Response`` that has to be closed by hand —
+    ``httpx.Response`` is not an async context manager.
+    """
+    resp = await client.send(request, stream=True)
+    try:
+        yield resp
+    finally:
+        await resp.aclose()
+
+
+def _pin_url_to_address(url: str, addr: str) -> tuple[str, str]:
+    """Rewrite ``url`` to connect to ``addr``, returning (connect_url, host_header).
+
+    DNS rebinding is the gap :func:`_resolve_and_vet` cannot close on its own:
+    it resolves a name, and then httpx resolves the SAME name again when it
+    connects. An attacker serving a public answer to the first lookup and a
+    private one to the second walks straight through a check that passed
+    honestly. Connecting to the address we already vetted removes the second
+    lookup, and with it the window.
+
+    The hostname still travels — as the ``Host`` header, and as the TLS SNI name
+    the caller sets — so virtual hosting still works and the certificate is
+    still verified against the NAME, not the address. Verified against a real
+    server: with the SNI override the request succeeds; without it, or with the
+    wrong name, the handshake is refused.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    # Both halves need brackets around an IPv6 literal: the authority so the URL
+    # parses back, and the Host header so it is valid per RFC 7230. ``hostname``
+    # strips the brackets the source URL had, so a v6 literal SOURCE host needs
+    # them put back too — otherwise "::1" with port 8443 emits the unparseable
+    # ``Host: ::1:8443``.
+    host_literal = f"[{host}]" if ":" in host else host
+    host_header = f"{host_literal}:{parsed.port}" if parsed.port else host_literal
+    literal = f"[{addr}]" if ":" in addr else addr
+    authority = f"{literal}:{parsed.port}" if parsed.port else literal
+    # Userinfo rides along, or pinning would silently strip credentials that
+    # httpx turns into a Basic auth header — a URL the old code fetched fine
+    # would start coming back 401. Taken verbatim from the netloc rather than
+    # via ``parsed.username``/``password`` so percent-encoding round-trips.
+    # It never belongs in the Host header.
+    #
+    # Cross-host redirects do not carry it: the next hop's URL comes from
+    # joining Location onto the logical URL, and an absolute Location replaces
+    # the whole authority, userinfo included.
+    userinfo = parsed.netloc.rpartition("@")[0]
+    if userinfo:
+        authority = f"{userinfo}@{authority}"
+    return parsed._replace(netloc=authority).geturl(), host_header
 
 
 # Kreuzberg config used by ``_extract_with_kreuzberg``. We request markdown
@@ -513,6 +724,40 @@ async def _extract_with_kreuzberg(body: bytes, mime: str) -> str:
 
 
 async def _fetch_url_text(url: str) -> str:
+    """One deadline for the whole fetch, however the hops divide it up.
+
+    The per-hop budgets do not compose into a bound worth having. Each hop
+    pays its own DNS timeout plus the client's request timeout, and with
+    ``MAX_INGEST_REDIRECTS`` that is 6 x (5 + 30) = 210s of wall clock a
+    caller-supplied chain can spend, every second of it holding a request
+    coroutine — a server answering each hop just under the timeout gets that
+    for free.
+
+    That ceiling is LOWER than what this code replaced, which is why it is
+    being tightened rather than introduced: httpx's ``DEFAULT_MAX_REDIRECTS``
+    is 20 and its timeout applies per hop, so ``follow_redirects=True`` allowed
+    ~21 x 30s, plus two unbounded ``getaddrinfo`` calls ON the event loop.
+    Lower is not the same as low enough: 210s still overruns the 120s request
+    timeout this platform's services are deployed with, so the caller would
+    see the proxy's 504 rather than the clean 400 this module otherwise
+    promises.
+
+    60s is chosen against the size cap, not picked round: at 100 KB/s — far
+    below any real server — ``MAX_INGEST_CONTENT_BYTES`` (3 MB) transfers in
+    30s, so this leaves 2x headroom for the body plus every redirect hop, and
+    still lands well inside 120s.
+    """
+    try:
+        async with asyncio.timeout(MAX_INGEST_FETCH_SECONDS):
+            return await _walk_redirects_and_fetch(url)
+    except TimeoutError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"URL fetch exceeded its {MAX_INGEST_FETCH_SECONDS}s budget: {url!r}",
+        )
+
+
+async def _walk_redirects_and_fetch(url: str) -> str:
     """Fetch URL, validate MIME + size, decode safely, and extract text.
 
     For ``TEXT_INGEST_MIME_TYPES`` the body is decoded with the response
@@ -521,82 +766,209 @@ async def _fetch_url_text(url: str) -> str:
     Kreuzberg for format-specific extraction.
 
     Raises ``HTTPException`` for:
-    - 400: invalid URL, DNS failure, hostname resolves to a blocked IP range
+    - 400: invalid URL, DNS failure, hostname resolves to a blocked IP range,
+           or the redirect chain exceeds ``MAX_INGEST_REDIRECTS``
     - 413: fetched body exceeds ``MAX_INGEST_CONTENT_BYTES``
     - 422: response Content-Type isn't in the allowlist, or Kreuzberg
            rejected the content (encrypted PDF, malformed file, empty
            text extraction, etc.)
     - 4xx/5xx: passed through from the upstream server
+
+    M-43. The redirect chain is walked HERE, one hop at a time, because
+    ``follow_redirects=True`` checks nothing on the way. httpx walks the whole
+    chain inside ``client.stream`` — issuing a real GET to every hop — and only
+    hands back the final response, so a check on ``resp.url`` afterwards runs
+    long after the request to the private host was sent and answered. The
+    previous version did exactly that, and its comment claimed the check
+    "re-validates the FINAL host post-redirect (the upstream may have redirected
+    us to a private host)". It did not prevent that request; it only prevented
+    reading its body. ``raise_for_status()`` even ran first, so the internal
+    host's status code surfaced to the caller too.
+
+    That is a live SSRF: an authenticated tenant submits a URL they control
+    which 302s to ``169.254.169.254`` or any RFC1918 address, and core-api
+    issues the GET from inside the deployment network.
+
+    Checking each hop before requesting it is the only ordering that helps,
+    which is why the cap moved here as well — ``follow_redirects=False`` means
+    httpx no longer enforces one.
+
+    DNS rebinding, the gap this deliberately left open at first, is closed too:
+    each hop CONNECTS to an address that was just vetted rather than resolving
+    the name a second time. See :func:`_pin_url_to_address`.
     """
-    _check_hostname_safe(url)
-
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
-        async with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-
-            # Re-validate the FINAL host post-redirect (the upstream may
-            # have redirected us to a private host). httpx exposes the
-            # ultimate URL via resp.url; ``follow_redirects=True`` already
-            # walked the chain.
-            _check_hostname_safe(str(resp.url))
-
-            # MIME allowlist on the final response, not the initial request.
-            content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-            if content_type and content_type not in ALLOWED_INGEST_MIME_TYPES:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Unsupported content type: {content_type}. "
-                        f"Allowed: {sorted(ALLOWED_INGEST_MIME_TYPES)}"
-                    ),
-                )
-
-            # Pre-check Content-Length if the server bothered to send it.
-            # Saves us from downloading anything when the server is honest.
-            cl_header = resp.headers.get("content-length")
-            if cl_header:
-                try:
-                    if int(cl_header) > MAX_INGEST_CONTENT_BYTES:
-                        raise HTTPException(
-                            status_code=413,
-                            detail=(f"Content too large: {cl_header} bytes (max {MAX_INGEST_CONTENT_BYTES})"),
-                        )
-                except ValueError:
-                    # Malformed Content-Length — fall through to streaming.
-                    pass
-
-            # Stream the body, abort if it exceeds the cap after
-            # decompression. httpx transparently decompresses gzip/br
-            # within ``aiter_bytes`` so this measures decompressed bytes
-            # (gzip-bomb guard).
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in resp.aiter_bytes():
-                total += len(chunk)
-                if total > MAX_INGEST_CONTENT_BYTES:
+    # No keep-alive. httpcore pools connections by the request URL's origin and
+    # reads ``sni_hostname`` only when it OPENS one, so once every hop is pinned
+    # to an address, two hops with different hostnames on one IP look like one
+    # origin — and the second would ride a TLS session verified for the first
+    # one's name. Today nothing is pooled anyway, because a redirect response is
+    # closed without its body being read and httpcore cannot resync a half-read
+    # HTTP/1.1 connection. That is an accident of body handling, not a promise:
+    # draining a redirect body, here or in some later change, restores reuse and
+    # the hole with it. Measured — drained bodies reuse, this setting stops it.
+    async with httpx.AsyncClient(
+        follow_redirects=False,
+        timeout=30.0,
+        limits=httpx.Limits(max_keepalive_connections=0),
+    ) as client:
+        current = url
+        for _hop in range(MAX_INGEST_REDIRECTS + 1):
+            # BEFORE the request, every time — including the first.
+            # Non-empty or it raised — there is no path here that vets a name
+            # and then connects to it by name anyway.
+            addrs = await _resolve_and_vet_async(current)
+            connect_url, host_header = _pin_url_to_address(current, addrs[0])
+            request = client.build_request(
+                "GET",
+                connect_url,
+                headers={"Host": host_header},
+                extensions={"sni_hostname": urlparse(current).hostname or ""},
+            )
+            async with _stream_request(client, request) as resp:
+                if resp.is_redirect and not resp.has_redirect_location:
+                    # A 3xx with no Location. ``is_redirect`` is the STATUS CODE
+                    # ALONE — httpx's own docstring says to use
+                    # ``has_redirect_location`` when the header matters — so
+                    # indexing ``headers["location"]`` behind an ``is_redirect``
+                    # check raises KeyError on a response a hostile server can
+                    # simply choose to send.
+                    #
+                    # 400 rather than falling through to the normal path: there
+                    # ``raise_for_status()`` raises on 3xx as well, and
+                    # ``upstream_http_error_handler`` re-raises anything under
+                    # 500 into the catch-all, so falling through is another 500
+                    # — which is what the pre-M-43 code did here too. Neither
+                    # the old 500 nor a KeyError is right for a malformed
+                    # upstream reply to a caller-supplied URL. Same 400 as the
+                    # redirect cap, for the same reason.
                     raise HTTPException(
-                        status_code=413,
+                        status_code=400,
+                        detail=f"Upstream returned {resp.status_code} with no Location header for {current!r}",
+                    )
+
+                if resp.has_redirect_location:
+                    # Location may be relative, so it is resolved against a
+                    # base.
+                    #
+                    # That base is ``current`` — the LOGICAL url — and NOT
+                    # ``resp.url``, which since pinning is the address-rewritten
+                    # one. Joining "/next" against the pinned form would produce
+                    # an address-based URL, dropping the hostname needed for the
+                    # next hop's Host header, its SNI name and its own vetting.
+                    current = str(httpx.URL(current).join(resp.headers["location"]))
+                    continue
+
+                resp.raise_for_status()
+
+                # MIME allowlist on the final response, not the initial request.
+                content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                if content_type and content_type not in ALLOWED_INGEST_MIME_TYPES:
+                    raise HTTPException(
+                        status_code=422,
                         detail=(
-                            f"Content too large: exceeded {MAX_INGEST_CONTENT_BYTES} bytes "
-                            f"after decompression"
+                            f"Unsupported content type: {content_type}. "
+                            f"Allowed: {sorted(ALLOWED_INGEST_MIME_TYPES)}"
                         ),
                     )
-                chunks.append(chunk)
-            body = b"".join(chunks)
 
-            # ---- PR #8: binary formats route through Kreuzberg ----
-            if content_type in BINARY_INGEST_MIME_TYPES:
-                return await _extract_with_kreuzberg(body, content_type)
+                # Pre-check Content-Length if the server bothered to send it.
+                # Saves us from downloading anything when the server is honest.
+                cl_header = resp.headers.get("content-length")
+                if cl_header:
+                    try:
+                        if int(cl_header) > MAX_INGEST_CONTENT_BYTES:
+                            raise HTTPException(
+                                status_code=413,
+                                detail=(
+                                    f"Content too large: {cl_header} bytes (max {MAX_INGEST_CONTENT_BYTES})"
+                                ),
+                            )
+                    except ValueError:
+                        # Malformed Content-Length — fall through to streaming.
+                        pass
 
-            # Decode using the response's declared charset, falling back
-            # to UTF-8. httpx's default is ISO-8859-1 when no charset is
-            # advertised, which mojibakes any UTF-8 page that omits a
-            # charset declaration.
-            encoding = resp.charset_encoding or "utf-8"
+                # Stream the body, abort if it exceeds the cap after
+                # decompression. httpx transparently decompresses gzip/br
+                # within ``aiter_bytes`` so this measures decompressed bytes
+                # (gzip-bomb guard).
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > MAX_INGEST_CONTENT_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                f"Content too large: exceeded {MAX_INGEST_CONTENT_BYTES} bytes "
+                                f"after decompression"
+                            ),
+                        )
+                    chunks.append(chunk)
+                body = b"".join(chunks)
 
-    # PR #9: shared decoder. HTML still gets the tag-strip path;
-    # markdown / plain / csv preserve newlines.
-    return decode_text_body(body, content_type, encoding)
+                # ---- PR #8: binary formats route through Kreuzberg ----
+                if content_type in BINARY_INGEST_MIME_TYPES:
+                    return await _extract_with_kreuzberg(body, content_type)
+
+                # Decode using the response's declared charset, falling back
+                # to UTF-8. httpx's default is ISO-8859-1 when no charset is
+                # advertised, which mojibakes any UTF-8 page that omits a
+                # charset declaration.
+                encoding = resp.charset_encoding or "utf-8"
+
+            # PR #9: shared decoder. HTML still gets the tag-strip path;
+            # markdown / plain / csv preserve newlines. Outside the ``stream``
+            # context so the connection is released before we decode.
+            return decode_text_body(body, content_type, encoding)
+
+        # Fell out of the loop: every iteration was a redirect. httpx used to
+        # raise ``TooManyRedirects`` here; walking the chain by hand means this
+        # module has to say so itself, and as a 400 rather than a 500 — a URL
+        # that redirects forever is the caller's input, not our fault.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many redirects (max {MAX_INGEST_REDIRECTS}) starting from {url!r}",
+        )
+
+
+async def _prior_ingest_was_complete(tenant_id: str, run_id: str) -> bool:
+    """True only when the run that populated the cache committed every fact.
+
+    09/02 M-44. ``ingest_commit`` tolerates partial failure: it counts
+    ``created`` and ``errored`` and, when facts fail, logs a warning suggesting
+    the operator wipe the batch by ``ingest_run_id``. The rows that DID land
+    still carry ``metadata["doc_hash"]``, so the next preview of the same
+    document found them, returned ``cached: True``, and served an incomplete
+    extraction as the finished one — permanently, because the cache
+    short-circuits before any LLM call, so re-previewing could never recover the
+    missing facts.
+
+    The signal already existed and simply was not read: the parent Document
+    records ``errored`` alongside ``doc_hash``. This consults it.
+
+    A MISSING parent is treated as NOT complete. The parent write is
+    best-effort (its own handler says so), so absence means "cannot prove this
+    cache is whole" — and the whole point here is to stop serving a result we
+    cannot prove. The cost of being wrong that way is one extraction; the cost
+    of the other way is a document that is permanently missing facts.
+    """
+    try:
+        doc = await get_storage_client().get_document(tenant_id, INGEST_DOCUMENTS_COLLECTION, run_id)
+    except Exception:
+        logger.warning(
+            "ingest_preview: could not read parent Document for run %s; "
+            "treating the doc-hash cache as unproven",
+            run_id,
+            exc_info=True,
+        )
+        return False
+    if not doc:
+        return False
+    data = doc.get("data") or {}
+    errored = data.get("errored")
+    # ``errored`` absent means the parent predates this field — same "cannot
+    # prove" reasoning as a missing parent.
+    return errored == 0
 
 
 async def _find_prior_ingest_by_doc_hash(tenant_id: str, doc_hash: str) -> list[dict]:
@@ -661,6 +1033,21 @@ async def ingest_preview(request: IngestRequest) -> dict:
     source_uri_default = request.source_uri or url or "text-input"
     doc_hash = _doc_hash(request.tenant_id, content)
     cached_memories = await _find_prior_ingest_by_doc_hash(request.tenant_id, doc_hash)
+    if cached_memories and not await _prior_ingest_was_complete(
+        request.tenant_id, cached_memories[0]["run_id"]
+    ):
+        # 09/02 M-44 — the prior run did not commit every fact, so its rows are
+        # a partial extraction. Fall through and re-extract rather than serve
+        # them as finished; the cache is an optimisation, and an optimisation
+        # that makes missing data permanent is not one.
+        logger.info(
+            "ingest_preview: doc-hash cache REFUSED (tenant=%s prior_run=%s) — "
+            "the prior commit was partial or unprovable; re-extracting",
+            request.tenant_id,
+            cached_memories[0]["run_id"],
+        )
+        cached_memories = []
+
     if cached_memories:
         prior_run_id = cached_memories[0]["run_id"]
         cached_facts = []
@@ -687,6 +1074,15 @@ async def ingest_preview(request: IngestRequest) -> dict:
             "chunk_ms": 0,
             "cached": True,
             "run_id": prior_run_id,
+            # The contract this response documents: the caller echoes
+            # ``doc_hash`` to commit so the NEXT preview can hit this cache. The
+            # cache-hit branch omitted it, so a client that followed the
+            # documented flow lost the hash precisely when the cache was
+            # working — the second ingest of a document could never cache.
+            "doc_hash": doc_hash,
+            # Zero LLM calls were made, for the same reason ``chunk_ms`` is 0.
+            # Absent would read as "unknown"; 0 is the true count.
+            "sections": 0,
         }
 
     # ---- P2.3: whitespace / too-short short-circuit ----
@@ -834,6 +1230,7 @@ async def _write_parent_ingest_document(
     errored: int,
     skipped: int,
     ingest_ms: int,
+    tenant_config: object | None = None,
 ) -> None:
     """Upsert one row into ``documents (collection='ingest-sources')`` so each
     ingest batch has a queryable parent record. Each persisted memory joins
@@ -873,9 +1270,6 @@ async def _write_parent_ingest_document(
         "agent_id": request.agent_id,
     }
     summary = _summarize_batch_for_embedding(survivors)
-    if summary is not None:
-        data["summary"] = summary  # triggers embedding population in storage
-
     payload: dict = {
         "tenant_id": request.tenant_id,
         "fleet_id": request.fleet_id,
@@ -883,9 +1277,59 @@ async def _write_parent_ingest_document(
         "doc_id": run_id,
         "data": data,
     }
+    if summary is not None:
+        data["summary"] = summary
+        # 09/02 M-45. The line this replaces set ``data["summary"]`` with the
+        # comment "triggers embedding population in storage". It does not.
+        # Storage computes no vector of its own, and the endpoint this parent
+        # was written to — ``POST /documents`` — has no ``embedding`` parameter
+        # AT ALL; only ``POST /documents/upsert-xmax`` does. Nor does the parent
+        # pass through the REST/MCP doc path that calls ``resolve_embed_source``
+        # and embeds, a fact ``doc_indexing``'s own docstring states about
+        # server-written collections. So the summary was stored as text and
+        # never indexed, and the promised semantic search over ingest batches
+        # could not work for any batch.
+        #
+        # Hence the endpoint switch below when a vector exists: the same
+        # if/else ``routes/documents.py`` already makes for exactly this reason.
+        #
+        # ``background=True``, unlike the REST doc route's ``background=False``:
+        # there the client blocks on the write and gets a 502 if the vector is
+        # missing, so it must not sit on the reduced deferred budget. Here
+        # nobody is waiting, and the parent write is explicitly best-effort.
+        #
+        # Which is also why a failure degrades instead of raising. The ingest
+        # itself has already committed by this point; losing the batch over its
+        # index entry would trade a missing search result for lost memories.
+        #
+        # ``tenant_config`` is threaded in from ``ingest_commit`` rather than
+        # re-resolved: that call happens exactly once, to pre-warm the cache so
+        # the per-fact pipeline does not race on the shared session.
+        try:
+            embedding = await get_embedding(summary, tenant_config, background=True)
+        except Exception:
+            logger.warning(
+                "ingest_commit: embedding the parent summary failed (run_id=%s); "
+                "the document is still written, but this batch will not be "
+                "reachable by semantic search over ingest batches",
+                run_id,
+                exc_info=True,
+            )
+            embedding = None
+        if embedding is not None:
+            payload["embedding"] = embedding
+        else:
+            logger.warning(
+                "ingest_commit: no embedding vector for the parent summary "
+                "(run_id=%s); document written unindexed",
+                run_id,
+            )
     try:
         sc = get_storage_client()
-        await sc.upsert_document(payload)
+        if "embedding" in payload:
+            await sc.upsert_document_xmax(payload)
+        else:
+            await sc.upsert_document(payload)
         logger.info(
             "ingest_commit: parent Document written (run_id=%s collection=%s memory_count=%d)",
             run_id,
@@ -952,12 +1396,51 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
             ),
         )
 
+    # ---- 09/02 M-42: coerce types a caller may not WRITE ----
+    # The gate above rejects slugs outside the vocabulary entirely. It does not
+    # catch the band between: ``outcome``/``insight``/``rule`` are server-
+    # reserved ("authored only by internal flows and rejected at the write
+    # boundary") and ``semantic``/``intention``/``commitment``/``cancellation``
+    # are classifier-deprecated, yet all seven are valid ``MEMORY_TYPES``. They
+    # passed straight through to ``memory_type=fact.suggested_type``, so
+    # auto-chunk children minted reserved-type rows from caller content — the
+    # exact thing ``MEMORY_TYPES_WRITE`` exists to prevent.
+    #
+    # COERCED, not rejected, and deliberately so: the ingest prompt itself
+    # offered these types (``outcome`` even preferentially), so a 422 here
+    # would reject the server's OWN prior output and break every preview
+    # generated before this fix that is still being round-tripped. The prompt
+    # is corrected in the same change, which stops new ones appearing.
+    #
+    # Same rule and same reason as ``crystallizer_service`` (CAURA-717): a type
+    # outside ``MEMORY_TYPES_WRITE`` is coerced to the default so a stray LLM
+    # completion cannot smuggle a reserved slug past the write pipeline.
+    coerced = [
+        (i, f.suggested_type) for i, f in enumerate(facts) if f.suggested_type not in MEMORY_TYPES_WRITE
+    ]
+    if coerced:
+        for i, _ in coerced:
+            facts[i] = facts[i].model_copy(update={"suggested_type": DEFAULT_MEMORY_TYPE})
+        logger.info(
+            "ingest_commit: coerced %d non-writeable suggested_type value(s) to %r (run_id=%s): %s",
+            len(coerced),
+            DEFAULT_MEMORY_TYPE,
+            run_id,
+            sorted({t for _, t in coerced}),
+        )
+
     t0 = time.perf_counter()
 
     # Pre-warm the tenant-config cache so every per-fact pipeline below hits
     # the in-process TTLCache instead of each issuing its own storage fetch
     # when the concurrent writes fan out.
-    await resolve_config(request.tenant_id)
+    #
+    # 09/02 M-45: the result is KEPT now and handed to the parent-document
+    # write, which needs a tenant config to resolve the embedding provider.
+    # Calling ``resolve_config`` again there would be the cheap-looking change
+    # and the wrong one — this call is documented as happening exactly once,
+    # and ``test_resolve_config_called_once_before_loop`` pins that.
+    tenant_config = await resolve_config(request.tenant_id)
 
     # ----- P1.4: pre-loop dedup -----
     # Compute the same content-hash the write pipeline uses for its 409
@@ -1046,12 +1529,15 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
             # supplied request URL wins, else the fact's own source_uri
             # from preview, else "text-input".
             effective_source = request_url_override or fact.source_uri or "text-input"
+            # CAURA-703 used to be stamped here as
+            # ``metadata["memory_type_agent_set"] = False``. It moved to the
+            # ``memory_type_is_agent_set`` argument on the bulk call below,
+            # because C25 sanitation now strips PLATFORM_ONLY_KEYS from item
+            # metadata — this dict is caller-adjacent, and a platform flag put
+            # in it is indistinguishable from a forged one.
             metadata: dict = {
                 "source": "ingest",
                 "ingest_url": request_url_override or fact.source_uri or None,
-                # CAURA-703: ingest types come from the extraction LLM's
-                # suggested_type, not the calling agent — mark as not agent-set.
-                "memory_type_agent_set": False,
             }
             if request.doc_hash:
                 metadata["doc_hash"] = request.doc_hash
@@ -1108,7 +1594,13 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                 items=batch,
             )
             try:
-                bulk_response = await create_memories_bulk(bulk_data, bulk_attempt_id=run_id)
+                bulk_response = await create_memories_bulk(
+                    bulk_data,
+                    bulk_attempt_id=run_id,
+                    # CAURA-703: every item's type came from the extraction
+                    # LLM's ``suggested_type``, never from the calling agent.
+                    memory_type_is_agent_set=False,
+                )
                 created += bulk_response.created
                 skipped_in_loop += bulk_response.duplicates
                 errored += bulk_response.errors
@@ -1198,6 +1690,7 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
         errored=errored,
         skipped=skipped,
         ingest_ms=ingest_ms,
+        tenant_config=tenant_config,
     )
 
     return {

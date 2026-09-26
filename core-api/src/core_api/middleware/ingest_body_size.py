@@ -10,10 +10,10 @@ body parameters and path dependencies together; an oversized payload returns
 a 422 from body validation before our 413 dep ever fires. Middleware fixes
 that ordering.
 
-The check is cheap: read ``Content-Length`` from scope headers, return 413
-if it exceeds the cap. If the header is missing (chunked transfer), fall
-through — the per-route handler still re-checks the actual payload size for
-defense in depth.
+The check rejects an oversized ``Content-Length`` immediately, then buffers at
+most the capped body before handing it to FastAPI. Counting the actual ASGI
+body closes the chunked-transfer and dishonest-header bypasses while keeping
+memory usage bounded by the same 3 MB limit the routes advertise.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import json
 import logging
 
 from starlette.types import ASGIApp as ASGIApplication
-from starlette.types import Receive, Scope, Send
+from starlette.types import Message, Receive, Scope, Send
 
 from core_api.services.ingest_service import INGEST_MAX_INPUT_BYTES
 
@@ -44,7 +44,7 @@ def _is_gated(path: str) -> bool:
 
 
 class IngestBodySizeMiddleware:
-    """ASGI middleware that 413s oversized ingest requests on Content-Length."""
+    """ASGI middleware that 413s oversized ingest request bodies."""
 
     def __init__(self, app: ASGIApplication) -> None:
         self.app = app
@@ -63,51 +63,88 @@ class IngestBodySizeMiddleware:
                 cl_bytes = v
                 break
 
-        if cl_bytes is None:
-            # No Content-Length (e.g. chunked transfer encoding). The route
-            # handler still enforces the cap on the actual payload, so we
-            # let this through — middleware just makes the common case cheap.
-            await self.app(scope, receive, send)
+        declared_size: int | None = None
+        if cl_bytes is not None:
+            try:
+                declared_size = int(cl_bytes.decode("ascii", errors="ignore"))
+            except ValueError:
+                # Treat a malformed header like an absent one: the actual-body
+                # counter below remains authoritative.
+                pass
+
+        if declared_size is not None and declared_size > INGEST_MAX_INPUT_BYTES:
+            await self._reject(send, scope["path"], declared_size)
             return
 
-        try:
-            n = int(cl_bytes.decode("ascii", errors="ignore"))
-        except ValueError:
-            # Malformed Content-Length — fall through; route guards still apply.
-            await self.app(scope, receive, send)
-            return
+        body = bytearray()
+        disconnected = False
+        while True:
+            message = await receive()
+            if message["type"] == "http.request":
+                body.extend(message.get("body", b""))
+                if len(body) > INGEST_MAX_INPUT_BYTES:
+                    await self._reject(send, scope["path"], len(body))
+                    return
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                disconnected = True
+                break
 
-        if n > INGEST_MAX_INPUT_BYTES:
-            max_mb = INGEST_MAX_INPUT_BYTES // 1_000_000
-            payload = {
-                "detail": (
-                    f"File must be {max_mb} MB or under (got {n:,} bytes, max {INGEST_MAX_INPUT_BYTES:,})."
-                )
+        replay: list[Message] = []
+        if body:
+            replay.append(
+                {
+                    "type": "http.request",
+                    "body": bytes(body),
+                    "more_body": disconnected,
+                }
+            )
+        if disconnected:
+            replay.append({"type": "http.disconnect"})
+        elif not replay:
+            replay.append({"type": "http.request", "body": b"", "more_body": False})
+
+        next_message = iter(replay)
+
+        async def replay_receive() -> Message:
+            try:
+                return next(next_message)
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _reject(send: Send, path: str, size: int) -> None:
+        """Emit the route's stable 413 response without invoking FastAPI."""
+        max_mb = INGEST_MAX_INPUT_BYTES // 1_000_000
+        payload = {
+            "detail": (
+                f"File must be {max_mb} MB or under (got {size:,} bytes, max {INGEST_MAX_INPUT_BYTES:,})."
+            )
+        }
+        body = json.dumps(payload).encode()
+        logger.info(
+            "ingest body-size cap fired: path=%s body_bytes=%d (max %d)",
+            path,
+            size,
+            INGEST_MAX_INPUT_BYTES,
+        )
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
             }
-            body = json.dumps(payload).encode()
-            logger.info(
-                "ingest body-size cap fired: path=%s content_length=%d (max %d)",
-                scope["path"],
-                n,
-                INGEST_MAX_INPUT_BYTES,
-            )
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 413,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"content-length", str(len(body)).encode()),
-                    ],
-                }
-            )
-            await send(
-                {
-                    "type": "http.response.body",
-                    "body": body,
-                    "more_body": False,
-                }
-            )
-            return
-
-        await self.app(scope, receive, send)
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": body,
+                "more_body": False,
+            }
+        )

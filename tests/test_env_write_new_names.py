@@ -55,7 +55,7 @@ async def test_env_block_writes_every_connection_key_under_the_new_name(client):
 async def test_env_block_writes_no_old_names(client):
     block = _env_block(await _script(client))
     for suffix in CONNECTION_KEYS:
-        old = f"MEMCLAW_{suffix}="  # legacy-name-ok: rule 3 — asserts a NEW file does not mint it
+        old = f"MEMCLAW_{suffix}="  # legacy-name-absent: asserted absent from a new .env
         assert old not in block, (
             f"{old} must not appear in a newly written .env — readers accept both "
             "spellings, so writing the old one only mints a name to carry forever"

@@ -27,10 +27,10 @@ os.environ.setdefault("TESTING", "1")
 # was real in CI and absent everywhere else.
 #
 # Create it once, alongside the database ``tests/`` uses:
-#     createdb memclaw_storage && psql -d memclaw_storage -c 'CREATE EXTENSION IF NOT EXISTS vector'  # legacy-name-floor: the database ci.yml already provisions; a pasteable command naming anything else is wrong
+#     createdb caura_storage && psql -d caura_storage -c 'CREATE EXTENSION IF NOT EXISTS vector'
 os.environ.setdefault(
     "DATABASE_URL",
-    "postgresql+asyncpg://memclaw:changeme@127.0.0.1:5432/memclaw_storage",  # legacy-name-ok: local test DB
+    "postgresql+asyncpg://caura:changeme@127.0.0.1:5432/caura_storage",
 )
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("CORE_STORAGE_SHARED_SECRET", "test-storage-secret")

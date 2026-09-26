@@ -22,7 +22,7 @@ The server refuses to queue a deploy in these cases. Each falls through to the *
 |---|---|---|
 | Plugin version below `MIN_AUTO_DEPLOY_PLUGIN_VERSION` (pre-manifest-aware) | `skipping auto-upgrade for node=… on pre-manifest-aware version <v> (manual re-install required; floor=<F>)` | Run the manual re-install on each affected node |
 | Plugin version in `KNOWN_BROKEN_DEPLOY_VERSIONS` (e.g. 2.3.0) | `skipping auto-upgrade for node=… on broken-deploy version <v> (manual re-install required)` | Run the manual re-install on each affected node |
-| Tenant has `memclaw.auto_upgrade_enabled = false` | (silent skip; opt-out) | Either flip the setting or run the manual path |
+| Tenant has `memclaw.auto_upgrade_enabled = false` | (silent skip; opt-out) | Either flip the setting or run the manual path | <!-- legacy-name-floor: live persisted compatibility setting key -->
 | Node is in deploy cooldown | (silent skip; plugin reported `deploy_blocked_until`) | Wait, or run the manual path |
 | Plugin version unparseable or absent | (silent skip; fail-closed) | Investigate; node may need a fresh install |
 
@@ -35,13 +35,12 @@ The server's `/api/v1/install-plugin` endpoint returns a complete bash installer
 ### Minimal — fresh install or operator-driven re-install with explicit creds
 
 ```bash
-curl -ks -X POST "$CAURA_API_URL/api/v1/install-plugin" \
+curl -s -X POST "$CAURA_API_URL/api/v1/install-plugin" \
   -H "Content-Type: application/json" \
   -d '{
     "api_url":   "https://your-caura-server",
     "api_key":   "mc_…",
     "fleet_id":  "your-fleet",
-    "tenant_id": "your-tenant",
     "node_name": "this-node"
   }' | bash
 ```
@@ -54,10 +53,10 @@ The installer:
 
 ### Identity-preserving — re-install over an existing node
 
-When upgrading an existing install, read its current `.env` first and pass the values back so per-node identity (`tenant_id`, `node_name`, `fleet_id`, `api_key`) is preserved verbatim:
+When upgrading an existing install, read its current `.env` first and pass the values back so per-node identity (`node_name`, `fleet_id`, `api_key`) is preserved verbatim. The tenant is not passed: the server resolves it, and refuses a body that names one.
 
 ```bash
-ENV=$HOME/.openclaw/plugins/memclaw/.env
+ENV=$HOME/.openclaw/plugins/memclaw/.env # legacy-name-floor: live plugin install path used by this pasteable command
 
 # Read one setting, accepting either prefix: the installer writes CAURA_* into
 # new installs, older installs kept the pre-rename prefix, and a re-deploy
@@ -65,7 +64,7 @@ ENV=$HOME/.openclaw/plugins/memclaw/.env
 # present but blank in a hand-edited .env, and blank here silently re-installs
 # the node with no identity at all.
 read_env() {
-  for _p in CAURA MEMCLAW; do  # legacy-name-ok: dual-prefix read, both are live
+  for _p in CAURA MEMCLAW; do  # legacy-name-floor: dual-prefix read, both are live
     _v=$(grep -m1 "^${_p}_$1=" "$ENV" | cut -d= -f2-)
     if [ -n "$_v" ]; then printf '%s\n' "$_v"; return; fi
   done
@@ -74,28 +73,38 @@ read_env() {
 URL=$(read_env API_URL)
 KEY=$(read_env API_KEY)
 FLEET=$(read_env FLEET_ID)
-TENANT=$(read_env TENANT_ID)
 NODE=$(read_env NODE_NAME)
 
-curl -ks -X POST "$URL/api/v1/install-plugin" \
+curl -s -X POST "$URL/api/v1/install-plugin" \
   -H "Content-Type: application/json" \
   -d "$(jq -nc \
         --arg u "$URL" \
         --arg k "$KEY" \
         --arg f "$FLEET" \
-        --arg t "$TENANT" \
         --arg n "$NODE" \
-        '{api_url:$u, api_key:$k, fleet_id:$f, tenant_id:$t, node_name:$n}')" | bash
+        '{api_url:$u, api_key:$k, fleet_id:$f, node_name:$n}')" | bash
 ```
 
 Use this form when re-installing across an existing fleet — it preserves node identity end-to-end, so audit logs, fleet stats, and any per-node trust elevation stay intact.
+
+### Servers with a self-signed certificate
+
+The installer checks the server's TLS certificate, like any HTTPS client, and stops with a clear error if this node doesn't trust it. For an on-prem server with a self-signed certificate, ask for trust on first use explicitly. Add `?tls_bootstrap=tofu` to the URL, and `-k` to the outer `curl`, which meets the same certificate:
+
+```bash
+curl -ks -X POST "$CAURA_API_URL/api/v1/install-plugin?tls_bootstrap=tofu" \
+  -H "Content-Type: application/json" \
+  -d '{"api_url": "https://your-caura-server", "api_key": "mc_…", "fleet_id": "your-fleet"}' | bash
+```
+
+The script then skips verification for its own downloads and saves the server's certificate for the plugin's runtime (`NODE_EXTRA_CA_CERTS`). Use it only on a network you trust: anyone able to intercept that one install could substitute their own certificate. Never use it against a server with a publicly trusted certificate, such as caura.ai — there it gains nothing and exposes the API key.
 
 ### Verify
 
 After the installer exits, confirm the new version is on disk:
 
 ```bash
-grep PLUGIN_VERSION $HOME/.openclaw/plugins/memclaw/dist/version.js
+grep PLUGIN_VERSION $HOME/.openclaw/plugins/memclaw/dist/version.js # legacy-name-floor: live plugin install path used by this pasteable command
 # → export const PLUGIN_VERSION = "<new version>";
 ```
 
@@ -108,9 +117,9 @@ For operators with many nodes (and SSH or OpenClaw-agent reach to all of them), 
 Identifying which nodes need re-install:
 
 ```bash
-curl -s "https://your-caura-server/api/v1/fleet/stats?tenant_id=$TENANT_ID&fleet_id=$FLEET_ID" \
+curl -s "https://your-caura-server/api/v1/fleet/nodes?tenant_id=$TENANT_ID&fleet_id=$FLEET_ID" \
   -H "Authorization: Bearer $JWT" \
-  | jq '.nodes[]
+  | jq '.[]
         | select((.plugin_version // "0") | split(".") | map(tonumber? // 0) | . < [2,6,0])
         | {node_name, plugin_version, last_heartbeat}'
 ```

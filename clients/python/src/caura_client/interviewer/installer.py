@@ -26,11 +26,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
 
 # Marker comment appended to our managed cron line so uninstall/idempotent
 # re-install can find and remove exactly our entry, never the user's others.
-CRON_MARKER = "# memclaw-interviewer (managed)"  # legacy-name-deferred: matches a pre-rename customer's existing crontab line, one release only (docs/plans/rebrand-alias-retirement-policy.md)
+CRON_MARKER = "# memclaw-interviewer (managed)"  # legacy-name-deferred: current writer needs a canonical marker migration before removal (docs/plans/rebrand-alias-migration-notes.md)
 
 # Only the connection identity is persisted to the env file (0600). Non-secret
 # behavior flags (--harness, --all-projects) ride on the cron command instead.
@@ -47,7 +46,7 @@ _INTERVAL_RE = re.compile(r"^(\d+)\s*([mh])$", re.IGNORECASE)
 
 
 def config_dir() -> Path:
-    return Path.home() / ".config" / "memclaw-interviewer"  # legacy-name-deferred: existing customer config directory, one release only (docs/plans/rebrand-alias-retirement-policy.md)
+    return Path.home() / ".config" / "memclaw-interviewer"  # legacy-name-deferred: current writer needs a canonical directory migration before removal (docs/plans/rebrand-alias-migration-notes.md)
 
 
 def env_file_path() -> Path:
@@ -93,14 +92,14 @@ def resolve_cmd() -> str:
     """
     exe = shutil.which("caura-interviewer")
     if not exe:
-        exe = shutil.which("memclaw-interviewer")  # legacy-name-ok: finds a pre-rename install's console script for exactly one release after its removal from pyproject.toml, then drop this fallback (docs/plans/rebrand-alias-retirement-policy.md)
+        exe = shutil.which("memclaw-interviewer")  # legacy-name-ok: finds a pre-rename install's console script for exactly one release after its removal from pyproject.toml, then drop this fallback (docs/plans/rebrand-alias-migration-notes.md)
     if exe:
         return shlex.quote(exe)
     return f"{shlex.quote(sys.executable)} -m caura_client.interviewer.cli"
 
 
 def build_run_command(
-    *, harness: str, all_projects: bool, env_file: Path, log_file: Path, cmd: Optional[str] = None
+    *, harness: str, all_projects: bool, env_file: Path, log_file: Path, cmd: str | None = None
 ) -> str:
     """The shell the cron line executes: source env, then drain.
 
@@ -121,7 +120,7 @@ def build_cron_line(schedule: str, command: str) -> str:
     return f"{schedule} {command} {CRON_MARKER}"
 
 
-def merge_crontab(existing: str, new_line: Optional[str]) -> str:
+def merge_crontab(existing: str, new_line: str | None) -> str:
     """Remove any prior managed line (idempotent), then optionally append.
 
     ``new_line=None`` is the uninstall case (strip only). Preserves every
@@ -158,6 +157,7 @@ def read_crontab() -> str:
         proc = subprocess.run(
             ["crontab", "-l"],
             capture_output=True,
+            check=False,
             text=True,
             # Force C locale so the empty-crontab sentinel below ("no crontab
             # for <user>") is always English, not localized under LANG=fr_FR

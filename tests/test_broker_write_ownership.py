@@ -23,29 +23,39 @@ from __future__ import annotations
 
 import contextlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Request, Response
 
 from core_api import mcp_server
+from core_api.agent_ids import AgentIdentity
 from core_api.auth import AuthContext
+from core_api.config import Settings
 from core_api.config import settings as app_settings
 from core_api.routes import memories
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, MemoryCreate
-from core_api.services import agent_service
+from core_api.services import agent_identity, agent_service
 
 pytestmark = pytest.mark.unit
 
 
 def _broker_auth(
-    install_uuid: str | None = "install-1", *, is_install: bool = True
+    install_uuid: str | None = "install-1",
+    *,
+    is_install: bool = True,
+    agent_id: str | None = None,
 ) -> AuthContext:
     return AuthContext(
         tenant_id="tenant-1",
         is_install_credential=is_install,
         install_uuid=install_uuid,
+        agent_id=AgentIdentity(agent_id) if agent_id is not None else None,
     )
+
+
+def _request(path: str) -> Request:
+    return Request({"type": "http", "method": "POST", "path": path, "headers": []})
 
 
 class _Sentinel(Exception):
@@ -180,10 +190,12 @@ async def test_resolve_passes_require_approval(monkeypatch):
 # ── REST end-to-end: both routes attribute through resolve_write_agent ───
 
 
-async def _drive_single(monkeypatch, *, agent_id, auth, gate_owner, created_owner):
+async def _drive_single(
+    monkeypatch, *, agent_id, auth, gate_owner, created_owner, bind_identity=False
+):
     """Drive ``_write_memory_inner`` with storage/metering mocked; return the
     agent id that reaches ``create_memory``."""
-    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", False)
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", bind_identity)
     monkeypatch.setattr(
         "core_api.services.organization_settings.resolve_config",
         AsyncMock(return_value=SimpleNamespace(require_agent_approval=False)),
@@ -219,15 +231,19 @@ async def _drive_single(monkeypatch, *, agent_id, auth, gate_owner, created_owne
 
     monkeypatch.setattr(memories, "create_memory", _create)
     body = MemoryCreate(tenant_id="tenant-1", agent_id=agent_id, content="hello world")
+    agent_id = memories._resolve_rest_write_agent_id(auth, agent_id)
+    body.agent_id = agent_id
     with pytest.raises(_Sentinel):
-        await memories._write_memory_inner(body, Response(), auth, None)
+        await memories._write_memory_inner(body, Response(), auth, None, agent_id)
     return captured["agent_id"]
 
 
-async def _drive_bulk(monkeypatch, *, agent_id, auth, gate_owner, created_owner):
+async def _drive_bulk(
+    monkeypatch, *, agent_id, auth, gate_owner, created_owner, bind_identity=False
+):
     """Drive ``_write_memories_bulk_inner`` with storage/metering mocked; return
     the agent id that reaches ``create_memories_bulk``."""
-    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", False)
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", bind_identity)
     monkeypatch.setattr(
         agent_service,
         "lookup_agent",
@@ -258,9 +274,11 @@ async def _drive_bulk(monkeypatch, *, agent_id, auth, gate_owner, created_owner)
         agent_id=agent_id,
         items=[BulkMemoryItem(content="hello world")],
     )
+    agent_id = memories._resolve_rest_write_agent_id(auth, agent_id)
+    body.agent_id = agent_id
     with pytest.raises(_Sentinel):
         await memories._write_memories_bulk_inner(
-            body, Response(), auth, None, "attempt-1"
+            body, Response(), auth, None, "attempt-1", agent_id
         )
     return captured["agent_id"]
 
@@ -399,3 +417,271 @@ async def test_mcp_write_passes_credential_identity(mcp_env, monkeypatch):
         await mcp_server.caura_write(content="x", agent_id="a1")
     assert captured["is_install"] is True
     assert captured["install_uuid"] == "install-7"
+
+
+# ── Phase 2: bind_write_identity_to_auth ─────────────────────────────────────
+# The flag now ships enabled. These tests pin both the secure default and the
+# emergency compatibility rollback. A normal verified credential identity wins;
+# reserved ``main`` remains caller-named during allow/warn migration and is
+# rejected only when the reserved-id policy reaches reject.
+
+
+def test_phase2_identity_binding_is_secure_by_default():
+    assert Settings.model_fields["bind_write_identity_to_auth"].default is True
+
+
+async def test_phase2_binds_the_verified_identity_over_the_body_single(monkeypatch):
+    agent_id = await _drive_single(
+        monkeypatch,
+        agent_id="body-claimed-agent",
+        auth=_broker_auth(None, is_install=False, agent_id="verified-agent"),
+        gate_owner=None,
+        created_owner=None,
+        bind_identity=True,
+    )
+    assert agent_id == "verified-agent"
+
+
+async def test_phase2_binds_the_verified_identity_over_the_body_bulk(monkeypatch):
+    agent_id = await _drive_bulk(
+        monkeypatch,
+        agent_id="body-claimed-agent",
+        auth=_broker_auth(None, is_install=False, agent_id="verified-agent"),
+        gate_owner=None,
+        created_owner=None,
+        bind_identity=True,
+    )
+    assert agent_id == "verified-agent"
+
+
+async def test_phase2_rejects_reserved_verified_main_single(monkeypatch):
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "reject")
+    observe = Mock(
+        side_effect=AssertionError("rejected attempt was counted as a write")
+    )
+    monkeypatch.setattr(memories, "reserved_write_refusal", observe)
+    with pytest.raises(HTTPException) as exc:
+        await _drive_single(
+            monkeypatch,
+            agent_id="victim-agent",
+            auth=_broker_auth(None, is_install=False, agent_id="main"),
+            gate_owner=None,
+            created_owner=None,
+            bind_identity=True,
+        )
+    assert exc.value.status_code == 409
+    assert "Re-provision the credential" in exc.value.detail
+    observe.assert_not_called()
+
+
+async def test_phase2_rejects_reserved_verified_main_bulk(monkeypatch):
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "reject")
+    with pytest.raises(HTTPException) as exc:
+        await _drive_bulk(
+            monkeypatch,
+            agent_id="victim-agent",
+            auth=_broker_auth(None, is_install=False, agent_id="main"),
+            gate_owner=None,
+            created_owner=None,
+            bind_identity=True,
+        )
+    assert exc.value.status_code == 409
+    assert "Re-provision the credential" in exc.value.detail
+
+
+async def test_reserved_main_rejection_precedes_single_idempotency_claim(monkeypatch):
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", True)
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "reject")
+    idempotency = AsyncMock(side_effect=AssertionError("idempotency was claimed"))
+    monkeypatch.setattr(memories, "idempotency_for", idempotency)
+
+    with pytest.raises(HTTPException) as exc:
+        await memories.write_memory.__wrapped__(
+            request=_request("/api/v1/memories"),
+            body=MemoryCreate(
+                tenant_id="tenant-1",
+                agent_id="victim-agent",
+                content="hello world",
+            ),
+            response=Response(),
+            auth=_broker_auth(None, is_install=False, agent_id="main"),
+            idempotency_key="idem-1",
+        )
+
+    assert exc.value.status_code == 409
+    idempotency.assert_not_awaited()
+
+
+async def test_reserved_main_rejection_precedes_bulk_idempotency_claim(monkeypatch):
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", True)
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "reject")
+    idempotency = AsyncMock(side_effect=AssertionError("idempotency was claimed"))
+    monkeypatch.setattr(memories, "idempotency_for", idempotency)
+
+    with pytest.raises(HTTPException) as exc:
+        await memories.write_memories_bulk.__wrapped__(
+            request=_request("/api/v1/memories/bulk"),
+            body=BulkMemoryCreate(
+                tenant_id="tenant-1",
+                agent_id="victim-agent",
+                items=[BulkMemoryItem(content="hello world")],
+            ),
+            response=Response(),
+            auth=_broker_auth(None, is_install=False, agent_id="main"),
+            idempotency_key="idem-1",
+            bulk_attempt_id="attempt-1",
+        )
+
+    assert exc.value.status_code == 409
+    idempotency.assert_not_awaited()
+
+
+async def test_phase2_warn_observes_single_request_once(monkeypatch):
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "warn")
+    observe = Mock(return_value=None)
+    monkeypatch.setattr(memories, "reserved_write_refusal", observe)
+    agent_id = await _drive_single(
+        monkeypatch,
+        agent_id="main-install-7",
+        auth=_broker_auth(None, is_install=False, agent_id="main"),
+        gate_owner=None,
+        created_owner=None,
+        bind_identity=True,
+    )
+
+    observe.assert_called_once_with("main")
+    assert agent_id == "main-install-7"
+
+
+async def test_phase2_warn_observes_bulk_request_once(monkeypatch):
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "warn")
+    observe = Mock(return_value=None)
+    monkeypatch.setattr(memories, "reserved_write_refusal", observe)
+    agent_id = await _drive_bulk(
+        monkeypatch,
+        agent_id="main-install-7",
+        auth=_broker_auth(None, is_install=False, agent_id="main"),
+        gate_owner=None,
+        created_owner=None,
+        bind_identity=True,
+    )
+
+    observe.assert_called_once_with("main")
+    assert agent_id == "main-install-7"
+
+
+def test_phase2_warn_logs_reserved_final_identity_once(monkeypatch):
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", True)
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "warn")
+    warning = Mock()
+    monkeypatch.setattr(agent_identity.logger, "warning", warning)
+
+    chosen = memories._resolve_rest_write_agent_id(
+        _broker_auth(None, is_install=False, agent_id="main"),
+        "main",
+    )
+    memories._observe_rest_reserved_write(
+        _broker_auth(None, is_install=False, agent_id="main"),
+        chosen,
+    )
+    agent_identity.enforce_reserved_write_id(chosen)
+
+    assert chosen == "main"
+    warning.assert_called_once()
+    assert warning.call_args.args[0] == "reserved_agent_write"
+
+
+async def test_phase2_warn_does_not_count_single_cached_replay(monkeypatch):
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", True)
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "warn")
+    observe = Mock(return_value=None)
+    monkeypatch.setattr(memories, "reserved_write_refusal", observe)
+    monkeypatch.setattr(
+        memories,
+        "idempotency_for",
+        AsyncMock(return_value=SimpleNamespace(cached_replay=({"id": "m-1"}, 201))),
+    )
+
+    response = await memories.write_memory.__wrapped__(
+        request=_request("/api/v1/memories"),
+        body=MemoryCreate(
+            tenant_id="tenant-1",
+            agent_id="main-install-7",
+            content="hello world",
+        ),
+        response=Response(),
+        auth=_broker_auth(None, is_install=False, agent_id="main"),
+        idempotency_key="idem-1",
+    )
+
+    assert response.status_code == 201
+    observe.assert_not_called()
+
+
+async def test_phase2_warn_does_not_count_bulk_cached_replay(monkeypatch):
+    monkeypatch.setattr(app_settings, "bind_write_identity_to_auth", True)
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "warn")
+    observe = Mock(return_value=None)
+    monkeypatch.setattr(memories, "reserved_write_refusal", observe)
+    monkeypatch.setattr(
+        memories,
+        "idempotency_for",
+        AsyncMock(return_value=SimpleNamespace(cached_replay=({"items": []}, 200))),
+    )
+
+    response = await memories.write_memories_bulk.__wrapped__(
+        request=_request("/api/v1/memories/bulk"),
+        body=BulkMemoryCreate(
+            tenant_id="tenant-1",
+            agent_id="main-install-7",
+            items=[BulkMemoryItem(content="hello world")],
+        ),
+        response=Response(),
+        auth=_broker_auth(None, is_install=False, agent_id="main"),
+        idempotency_key="idem-1",
+        bulk_attempt_id="attempt-1",
+    )
+
+    assert response.status_code == 200
+    observe.assert_not_called()
+
+
+async def test_phase2_rollback_preserves_body_id_for_reserved_main(monkeypatch):
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "reject")
+    observe = Mock(side_effect=AssertionError("rollback emitted reject telemetry"))
+    monkeypatch.setattr(memories, "reserved_write_refusal", observe)
+    agent_id = await _drive_single(
+        monkeypatch,
+        agent_id="victim-agent",
+        auth=_broker_auth(None, is_install=False, agent_id="main"),
+        gate_owner=None,
+        created_owner=None,
+        bind_identity=False,
+    )
+    assert agent_id == "victim-agent"
+    observe.assert_not_called()
+
+
+async def test_phase2_bulk_rollback_preserves_body_id_for_reserved_main(monkeypatch):
+    monkeypatch.setattr(app_settings, "reserved_agent_id_policy", "reject")
+    agent_id = await _drive_bulk(
+        monkeypatch,
+        agent_id="victim-agent",
+        auth=_broker_auth(None, is_install=False, agent_id="main"),
+        gate_owner=None,
+        created_owner=None,
+        bind_identity=False,
+    )
+    assert agent_id == "victim-agent"
+
+
+async def test_phase2_off_leaves_the_body_identity_alone_single(monkeypatch):
+    """The emergency rollback keeps the legacy caller-named behaviour."""
+    agent_id = await _drive_single(
+        monkeypatch,
+        agent_id="body-claimed-agent",
+        auth=_broker_auth(None, is_install=False, agent_id="verified-agent"),
+        gate_owner=None,
+        created_owner=None,
+    )
+    assert agent_id == "body-claimed-agent"

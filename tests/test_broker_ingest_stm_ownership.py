@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import Response
 
+from core_api.agent_ids import DOC_INDEXER_AGENT_ID
 from core_api.auth import AuthContext
 from core_api.routes import memories, stm
 from core_api.schemas import IngestCommitRequest, IngestFact
@@ -80,6 +81,16 @@ async def test_ingest_commit_non_broker_not_degraded(monkeypatch):
     gate.assert_not_awaited()
 
 
+async def test_ingest_commit_normalizes_retired_input(monkeypatch):
+    agent_id, gate = await _drive_ingest(
+        monkeypatch,
+        agent_id="memclaw-doc-indexer",  # legacy-name-ok: supported client input alias
+        auth=_broker_auth(None, is_install=False),
+    )
+    assert agent_id == DOC_INDEXER_AGENT_ID
+    gate.assert_not_awaited()
+
+
 # ── /stm/promote ────────────────────────────────────────────────────────
 
 
@@ -106,7 +117,10 @@ async def _drive_stm(monkeypatch, *, agent_id, auth):
     # through FastAPI, so the parameter default would be the ``Query(None)``
     # marker object rather than None — and a non-None explicit tenant reads
     # as a cross-tenant request to ``_require_tenant`` (403).
-    await stm.promote_stm(body, auth, tenant_id=None)
+    # request/response args: required since /stm/promote grew ``@write_limit``
+    # and its ``request: Request`` / ``response: Response`` parameters (H-17
+    # residual, M-35) — same shape as the ``/ingest/commit`` call above.
+    await stm.promote_stm(SimpleNamespace(), body, Response(), auth, tenant_id=None)
     return captured["agent_id"], gate
 
 

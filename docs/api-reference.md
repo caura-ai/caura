@@ -24,7 +24,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories` | DELETE | Bulk soft-delete |
 | `/memories/stats` | GET | Counts by type, agent, and status |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
-| `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under both `memories` and `items` |
+| `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under `memories` (also mirrored to `items` for /search-shaped consumers — **`items` is deprecated and scheduled for removal in v4.0.0**; send `items_alias: false` to drop that copy now and halve the response, and read `memories`. The MCP recall brief already omits it by default). `top_k` is the result count — `limit` is accepted as an alias for it |
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
 | `/ingest/commit` | POST | Write previewed facts as memories |
 
@@ -79,10 +79,10 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/documents` | POST | Store or update a structured JSON document |
+| `/documents` | POST | Store or update a structured JSON document. Also mints a memory carrying the document's `data`, so the body is reachable by recall — the doc row embeds only `data["summary"]`. Independent of the summary: a doc without one is invisible to `/documents/search` and still mints. Not minted for `collection="skills"`, `_`-prefixed collections, an empty `data`, or a payload over the memory size limit |
 | `/documents/{id}` | GET | Retrieve document by ID |
 | `/documents/query` | POST | Query by field equality filters |
-| `/documents/{id}` | DELETE | Delete a document |
+| `/documents/{id}` | DELETE | Delete a document, and un-mint the memory its write minted |
 
 **Fleet**
 
@@ -119,7 +119,7 @@ routes expose generic software or identity-probe data, not tenant data.
 | Header | Effect |
 |---|---|
 | `X-Agent-ID` | Scopes the request to this agent |
-| `X-Org-Read-Only: true` | Read-only mode — creates/updates return 403 |
+| `X-Org-Read-Only: true` | Plan-limit read-only mode — creates and other writes that grow the store return 403 `PLAN_LIMIT_READ_ONLY`. Deletes, memory status transitions, agent trust changes and `PUT /settings` stay allowed so an over-limit org can get back under its plan |
 | `X-Tenant-ID` | Tenant identity when using the shared `CAURA_API_KEY` gate |
 
 The identity headers are trusted on the gateway-header auth path. Set
@@ -147,6 +147,8 @@ These limits apply to the managed platform at `caura.ai`. A self-hosted deployme
 | Global DDoS floor | 1000 req/min per IP |
 
 Exceeded limits return HTTP 429 with a `Retry-After` header. Rate-limited routes also carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` on **successful** responses, so a client can back off before it is throttled rather than after.
+
+Those three headers describe the throttle only. The per-period plan quota is reported separately as `X-Usage-Limit` / `X-Usage-Remaining` on `POST /memories`, `POST /memories/bulk` and `POST /search`, and only where a usage meter is wired — a deployment without one (OSS standalone) omits them rather than reporting a placeholder.
 
 </details>
 

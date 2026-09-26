@@ -356,30 +356,21 @@ async def test_no_other_router_declares_a_probe_path():
     the assumption here: exactly one declaration per probe path, across the
     whole real app.
 
-    The walk descends through FastAPI's ``_IncludedRouter`` via
-    ``original_router``, since ``include_router(prefix=...)`` mounts the
-    router opaquely (``app.py`` documents the same obstacle). That is a
-    private attribute, so the count assertions below double as a check that
-    the walk still works: if it stops descending, the probes are found zero
-    times and this test fails rather than quietly passing.
+    The walk descends through a private FastAPI attribute — see
+    ``tests/_route_table``, which explains why and why it is not the same walk
+    as the authz inventory's. Because the attribute is private, the count
+    assertions below double as a check that it still works: if it stops
+    descending, the probes are found zero times and this fails rather than
+    quietly passing.
     """
     import collections
 
     from core_api.app import app
+    from tests._route_table import iter_route_declarations
 
     counts: collections.Counter = collections.Counter()
-
-    def walk(routes):
-        for r in routes:
-            inner = getattr(r, "original_router", None)
-            if inner is not None:
-                walk(inner.routes)
-                continue
-            path = getattr(r, "path", None)
-            if path is not None and hasattr(r, "methods"):
-                counts[path] += 1
-
-    walk(app.routes)
+    for path, _methods in iter_route_declarations(app.routes):
+        counts[path] += 1
 
     for probe in sorted(PROBE_ROUTES):
         assert counts[probe] == 1, (

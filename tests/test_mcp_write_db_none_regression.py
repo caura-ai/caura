@@ -31,7 +31,6 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-import core_api.services.memory_service as memory_service
 from core_api.schemas import MemoryCreate, MemoryOut
 from core_api.services.memory_service import create_memory
 
@@ -41,15 +40,6 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 _PADDING = (
     " This memory carries enough surrounding context to pass the content-length gate."
 )
-
-
-@pytest.fixture(autouse=True)
-def _use_pipeline_write():
-    """The regression is specific to the pipeline write path; pin it on."""
-    original = memory_service._USE_PIPELINE_WRITE
-    memory_service._USE_PIPELINE_WRITE = True
-    yield
-    memory_service._USE_PIPELINE_WRITE = original
 
 
 def _tenant() -> str:

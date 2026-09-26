@@ -2,7 +2,7 @@
   "id": "memclaw",
   "name": "Caura",
   "kind": "memory",
-  "version": "2.20.0",
+  "version": "2.23.2",
   "description": "Central persistent memory for OpenClaw agents — write, search, and entity lookup tools.",
   "entry": "dist/index.js",
   "skills": [
@@ -15,9 +15,9 @@
         "type": "string",
         "description": "Optional but recommended: a stable, human-readable identity for THIS install (e.g. \"webclaw\", \"vm-01\"); surfaces as the agent_id on writes. If unset, the plugin uses a stable per-install id (main-<install_id>) so installs don't collide."
       },
-      "MEMCLAW_AGENT_ID": {
+      "MEMCLAW_AGENT_ID": { "$comment": "legacy-name-ok: supported configuration alias for existing installs",
         "type": "string",
-        "description": "Accepted forever as an alias for CAURA_AGENT_ID; the new name wins when both are set."
+        "description": "Supported alias for CAURA_AGENT_ID; the new name wins when both are set."
       }
     },
     "required": []

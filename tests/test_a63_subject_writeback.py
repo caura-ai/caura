@@ -24,6 +24,7 @@ from uuid import uuid4
 import pytest
 
 from core_api.services.entity_extraction_worker import process_entity_extraction
+from tests.conftest import close_scheduled_coro
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -58,6 +59,10 @@ def _sc(entity_ids: list[str]) -> MagicMock:
     """Storage mock where entity i resolves as a fresh create with
     ``entity_ids[i]``."""
     sc = MagicMock()
+    # H-02: the worker re-reads the memory before persisting, so nothing is
+    # written to the graph of a row governance dropped mid-extraction. These
+    # tests exercise a live row.
+    sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     sc.bulk_resolve_entities = AsyncMock(return_value=[None] * len(entity_ids))
     sc.bulk_upsert_entities = AsyncMock(
         return_value=[
@@ -91,7 +96,7 @@ async def _run(mock_extract_graph, sc, memory_id=None):
             new=AsyncMock(return_value=[0.1] * 8),
         ),
         patch("core_api.services.entity_extraction_worker.log_action", new=AsyncMock()),
-        patch("core_api.tasks.track_task"),
+        patch("core_api.tasks.track_task", side_effect=close_scheduled_coro),
     ):
         await process_entity_extraction(
             memory_id=memory_id or uuid4(),
@@ -150,6 +155,10 @@ async def test_no_subject_role_skips() -> None:
 async def test_two_surface_forms_same_entity_count_as_one_subject() -> None:
     shared_id = str(uuid4())
     sc = MagicMock()
+    # H-02: the worker re-reads the memory before persisting, so nothing is
+    # written to the graph of a row governance dropped mid-extraction. These
+    # tests exercise a live row.
+    sc.get_memory = AsyncMock(return_value={"id": "m", "deleted_at": None})
     sc.bulk_resolve_entities = AsyncMock(return_value=[None, None])
     # Both surface forms upsert to the SAME entity row.
     sc.bulk_upsert_entities = AsyncMock(

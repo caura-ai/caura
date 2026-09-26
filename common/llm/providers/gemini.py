@@ -17,6 +17,7 @@ import logging
 import time
 
 from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
+from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
 from common.provider_names import ProviderName
@@ -100,7 +101,9 @@ class GeminiLLMProvider:
             model=self._model,
             max_tokens=LLM_JSON_MAX_OUTPUT_TOKENS,
         )
-        parsed = json.loads(text)
+        parsed = unwrap_singleton_array(
+            json.loads(text), provider="Gemini", model=self._model, log=logger
+        )
         if not isinstance(parsed, dict):
             raise GeminiResponseShapeError(text, type(parsed).__name__)
         return parsed

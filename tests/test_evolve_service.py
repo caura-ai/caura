@@ -1280,3 +1280,61 @@ def test_mcp_session_helper_is_deleted():
     src = inspect.getsource(mcp_server)
     assert "async def _mcp_session" not in src
     assert "from core_api.db.session import async_session" not in src
+
+
+@pytest.mark.asyncio
+async def test_repeating_an_identical_outcome_still_adjusts_weights(sc):
+    """OSS 08/14 M-14 — a repeat outcome must not abort the report that carries it.
+
+    The outcome memory goes through the ordinary write path, so the same outcome
+    TEXT from the same agent trips ``CheckExactDuplicate`` and comes back 409.
+    That 409 used to propagate out of Phase 3 and kill the whole call — the
+    worst possible place to stop, because Phase 2 has already COMMITTED a rule
+    memory and Phase 4, the weight adjustment that is the entire point of
+    reporting an outcome, had not run yet and now never would. The caller saw a
+    409, a rule row appeared from nowhere, and no weight moved.
+
+    And a repeat is ordinary rather than exotic: the content is
+    ``[Outcome/success] <text>`` scoped to one agent, so "the deploy succeeded"
+    reported after two different deploys collides by construction. The outcome
+    is a fact recorded once; the adjustment is an action that should happen each
+    time it is reported.
+
+    Two memories, one per call, so the second call's adjustment is visible as
+    its own row rather than as a second write to the first one.
+    """
+    tag = _uid()
+    tenant_id = f"test-tenant-{tag}"
+    first_id, _ = await _create_test_memory_via_sc(sc, tenant_id, weight=0.5)
+    second_id, _ = await _create_test_memory_via_sc(sc, tenant_id, weight=0.5)
+
+    from core_api.services.evolve_service import report_outcome
+
+    text = f"The deploy succeeded [{tag}]"
+    first = await report_outcome(
+        tenant_id=tenant_id,
+        outcome=text,
+        outcome_type="success",
+        related_ids=[first_id],
+        agent_id="evolve-test-agent",
+    )
+    second = await report_outcome(
+        tenant_id=tenant_id,
+        outcome=text,
+        outcome_type="success",
+        related_ids=[second_id],
+        agent_id="evolve-test-agent",
+    )
+
+    assert len(second["weight_adjustments"]) == 1, (
+        "the repeat report must still adjust the weights it names; "
+        f"got {second['weight_adjustments']!r}"
+    )
+    assert second["weight_adjustments"][0]["old_weight"] == 0.5
+
+    # The outcome memory stays single, and the second call adopts it rather
+    # than minting a duplicate — which is what lets Phase 4 attribute its clamp
+    # and its rule backfill to a row that exists.
+    assert second["outcome_id"] == first["outcome_id"]
+    rows = await _outcome_memories(tenant_id)
+    assert len(rows) == 1, f"expected one outcome memory, got {len(rows)}"

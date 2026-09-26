@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 from common.events import Topics
-from tests._legacy_contracts import frozen_topic
 
 
-# memory is contracted, so its wire name is now the caura one and these
-# assertions carry the new literal. ``frozen_topic`` stays for ``audit``, which
-# has not flipped: the helper pins the LEGACY namespace independently of the
-# enum, and using it for a contracted family would assert the wrong thing.
+# Every family is contracted now — audit was the last, on 2026-09-10 — so both
+# assertions carry the current literal. This used ``frozen_topic`` for audit
+# while it was the one member still on the legacy namespace; that helper pins
+# the LEGACY prefix independently of the enum, and pointing it at a contracted
+# family would assert the wrong thing.
 # Literals here rather than the enum on both sides, so the test still fails if
 # the value moves — comparing the enum to itself would pass through any rename.
 def test_members_compare_equal_to_their_string_value() -> None:
     assert Topics.Memory.ENRICHED == "caura.memory.enriched"
-    assert frozen_topic("audit.event-recorded") == Topics.Audit.EVENT_RECORDED
+    assert Topics.Audit.EVENT_RECORDED == "caura.audit.event-recorded"
 
 
 def test_members_format_as_their_string_value() -> None:

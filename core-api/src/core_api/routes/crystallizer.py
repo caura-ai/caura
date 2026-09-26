@@ -11,7 +11,7 @@ from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.errors import coded_detail
-from core_api.schemas import STRICT_WRITE_BODY
+from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.crystallizer_service import start_crystallization
 
 router = APIRouter(tags=["Memory Crystallizer"])
@@ -20,10 +20,8 @@ router = APIRouter(tags=["Memory Crystallizer"])
 # --- Schemas ---
 
 
-class CrystallizeRequest(BaseModel):
+class CrystallizeRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
-
-    tenant_id: str
     fleet_id: str | None = None
 
 
@@ -56,7 +54,36 @@ async def trigger_crystallization(
     body: CrystallizeRequest,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Trigger crystallization for a tenant (analysis + auto-curate)."""
+    """Trigger crystallization for a tenant (analysis + auto-curate).
+
+    Auth: a write-capable credential for the target tenant.
+    """
+    # Found by ``tests/test_authz_gate_inventory.py`` on its first run — the
+    # same class as H-12/H-13/M-25/#1335/#1337, and the reason that file exists.
+    #
+    # ``enforce_tenant`` alone says WHICH tenant, never whether this credential
+    # may write to it. A run is not read-shaped despite the response being a
+    # bare report id: ``start_crystallization`` reserves a report row and then
+    # does "a create per extracted fact, each with its own embedding and dedup
+    # lookups" (see its docstring), so a demo-sandbox or capabilities={'read'}
+    # credential could author memories across the tenant.
+    #
+    # ``enforce_usage_limits`` is NOT added, and this one IS settled — do not
+    # "finish" it by adding the gate. The gate's set is
+    # ``PLAN_LIMIT_GATED_OPS`` (create / bulk_create / redistribute), not
+    # ``WRITE_QUOTA_OPS``, and this route performs none of those: it reserves a
+    # report row and publishes a request to the event bus, so the creates
+    # happen later in a worker that holds no ``AuthContext``. Gating here would
+    # gate the TRIGGER, not the writes.
+    #
+    # And a run is a reduction path, which is the case ``enforce_usage_limits``
+    # explicitly carves out ("users in read-only mode must be able to delete
+    # data to get back under limits"): each cluster archives its members —
+    # ``batch_update_status`` to ``archived``, a status change, not a delete —
+    # and emits fewer crystallized facts than the ``CRYSTALLIZER_MIN_CLUSTER_SIZE``
+    # (3) rows it consumed. Blocking an over-quota org here would deny it the
+    # operation that shrinks its live set.
+    auth.enforce_read_only()
     auth.enforce_tenant(body.tenant_id)
     from core_api.services.organization_settings import resolve_config
 
@@ -78,12 +105,35 @@ async def trigger_crystallization(
 async def trigger_crystallization_all(
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Trigger crystallization for ALL tenants (nightly batch)."""
+    """Trigger crystallization for ALL tenants (nightly batch).
+
+    Standalone-only. The fan-out needs a list of tenants and there is no tenant
+    enumeration on the storage client, so the single standalone tenant is the
+    only set this endpoint can build. On a multi-tenant deployment it therefore
+    cannot do what its name promises.
+
+    It used to say so with a 500: ``get_standalone_tenant_id()`` raises
+    ``RuntimeError`` when standalone was never initialised, nothing caught it,
+    and every hosted call returned "internal server error" — which reads as an
+    outage and sends whoever is on call looking for a broken crystallizer. The
+    condition is not a fault, it is a deployment mode, so it answers 501 with
+    the route that DOES work.
+    """
     auth.enforce_admin()
     # In OSS standalone mode, only one tenant exists
     from core_api.standalone import get_standalone_tenant_id
 
-    tenant_ids = [get_standalone_tenant_id()]
+    try:
+        tenant_ids = [get_standalone_tenant_id()]
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "POST /crystallize/all is standalone-only: there is no tenant "
+                "enumeration to fan out over on a multi-tenant deployment. "
+                "Trigger each tenant with POST /crystallize?tenant_id=..."
+            ),
+        ) from exc
     reports = []
     for tid in tenant_ids:
         from core_api.services.organization_settings import resolve_config
@@ -109,10 +159,16 @@ async def list_reports(
     offset: int = Query(default=0, ge=0),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """List crystallization reports for a tenant."""
+    """List crystallization reports for a tenant, newest first.
+
+    09/02 M-12 — ``limit`` and ``offset`` are now actually applied. They were
+    declared and validated here but never passed on, so the storage service ran
+    its own default window: every request returned the same first 10 reports,
+    ``offset`` did nothing, and a caller paging through got page 1 forever.
+    """
     auth.enforce_tenant(tenant_id)
     sc = get_storage_client()
-    reports = await sc.list_reports(tenant_id)
+    reports = await sc.list_reports(tenant_id, limit=limit, offset=offset)
     return [
         ReportSummaryOut(
             id=str(r.get("id", "")),

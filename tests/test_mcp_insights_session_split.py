@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core_api import mcp_server
+from core_api.agent_ids import INSIGHTER_AGENT_ID
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -107,14 +108,20 @@ async def test_insights_closes_first_session_before_llm(mcp_env, monkeypatch):
     )
 
     # Phase-3 persistence — return an empty list of ids.
+    persist = AsyncMock(return_value=[])
     monkeypatch.setattr(
         "core_api.services.insights_service._persist_findings",
-        AsyncMock(return_value=[]),
+        persist,
     )
 
     await mcp_server.caura_insights(
-        focus="contradictions", scope="agent", agent_id="a1"
+        focus="contradictions",
+        scope="agent",
+        agent_id="memclaw-insighter",  # legacy-name-ok: supported client input alias
     )
+
+    assert fake_query.await_args.args[2] == INSIGHTER_AGENT_ID
+    assert persist.await_args.args[1] == INSIGHTER_AGENT_ID
 
     # Locate the events. We expect the LLM start strictly between two
     # session entries (phase 1 closed, phase 3 not yet open).

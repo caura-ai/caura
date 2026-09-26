@@ -9,9 +9,13 @@ from pathlib import Path
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from core_storage_api.config import settings
+from core_storage_api.config import db_connect_args, settings
 
 logger = logging.getLogger(__name__)
+
+# Table created only by the migration chain (019, raw SQL, no ORM model).
+# See ``init_database``'s stamp decision for why this specific name.
+_CHAIN_SENTINEL_TABLE = "tenant_suppression"
 
 _engine: AsyncEngine | None = None
 _read_engine: AsyncEngine | None = None
@@ -42,9 +46,44 @@ def _schema_is_at_head(connection: Connection, head: str | None) -> bool:
     return current is not None and current == head
 
 
+def schema_bootstrap_action(*, has_tables: bool, has_alembic_version: bool, has_chain_evidence: bool) -> str:
+    """What to do with a database before serving: ``upgrade``, ``stamp`` or ``refuse``.
+
+    A pure function of the three probes so the decision can be read — and
+    tested — without a database. It used to be two branches inline, and the
+    branch that mattered was the one with no evidence behind it.
+
+    ``stamp`` records that every migration through head has already been
+    applied. That is a claim about a database, and the only thing the old code
+    checked before making it was that a ``memories`` table existed. Any schema
+    built some other way — ``Base.metadata.create_all`` is the one in this
+    repo, in ``tests/conftest.py`` — was certified as current. The error is
+    permanent and silent: once stamped, every future ``upgrade head`` is a
+    no-op, so the 17 partial/GIN/HNSW indexes that live only in migrations
+    (measured in #1602) never arrive, and nothing ever says so. Searches
+    quietly stop using an index.
+
+    So ``stamp`` now requires evidence that the chain really ran, and the
+    absence of evidence is a refusal rather than a guess.
+    """
+    if has_alembic_version or not has_tables:
+        # Either Alembic already tracks this database, or it is empty. Both are
+        # the ordinary path: run whatever is pending, which may be everything.
+        return "upgrade"
+    if has_chain_evidence:
+        # Chain-built but missing its version row — e.g. a dump restored
+        # without ``alembic_version``. Stamping records what the schema shows.
+        return "stamp"
+    return "refuse"
+
+
 def _build_engine(url: str) -> AsyncEngine:
     return create_async_engine(
         url,
+        # Empty unless POSTGRES_REQUIRE_SSL is on, so the default deployment's
+        # call is unchanged. ``url`` is passed so a DSN that already asks for
+        # verification keeps it instead of being downgraded to ``require``.
+        connect_args=db_connect_args(url),
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
         pool_timeout=settings.db_pool_timeout,
@@ -86,8 +125,23 @@ async def get_session():
 async def init_database() -> None:
     """Run all pending Alembic migrations to initialize/update the database schema.
 
-    If tables already exist (e.g., created by the legacy backend), stamps the
-    current revision so Alembic skips the initial migration.
+    What happens to an existing database is decided by
+    :func:`schema_bootstrap_action`, which this calls with three probes:
+
+    * ``alembic_version`` present, or no tables at all → ``upgrade``, the
+      ordinary path.
+    * tables but no ``alembic_version``, and the chain's sentinel table is
+      present → ``stamp`` head. The schema was built by the chain and merely
+      lost its version row.
+    * tables but no ``alembic_version`` and no sentinel → ``refuse``, raising
+      ``RuntimeError``. An operator who is sure the schema is current can
+      stamp it deliberately.
+
+    This used to stamp head on the first case alone — any database with a
+    ``memories`` table. That certified a schema which may never have run the
+    chain (a ``Base.metadata.create_all`` one is missing every migration-only
+    index), and because a stamped database treats each later ``upgrade head``
+    as a no-op, the mistake was permanent and raised nothing.
 
     Uses a PostgreSQL advisory lock so that when multiple uvicorn workers start
     concurrently, only one runs migrations; the others wait and then no-op.
@@ -207,18 +261,66 @@ async def init_database() -> None:
                         "WHERE table_schema = 'public' AND table_name = 'alembic_version')"
                     )
                 )
+                # Evidence that the migration chain — not something else — built
+                # this schema. ``tenant_suppression`` is created in raw SQL by
+                # migration 019 and has NO ORM model, so it is present in a
+                # chain-built database and absent from one built with
+                # ``Base.metadata.create_all``. That is the only discriminator
+                # available before the stamp decision below, and
+                # ``test_the_stamp_sentinel_is_still_a_migration_only_table``
+                # keeps it true.
+                has_chain_evidence = await work_conn.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema = 'public' AND table_name = :name)"
+                    ),
+                    {"name": _CHAIN_SENTINEL_TABLE},
+                )
                 # End the implicit read tx so Alembic owns transaction lifecycle
                 # on this connection — required for ``autocommit_block``.
                 await work_conn.commit()
 
+                action = schema_bootstrap_action(
+                    has_tables=bool(has_tables),
+                    has_alembic_version=bool(has_alembic),
+                    has_chain_evidence=bool(has_chain_evidence),
+                )
+
                 def _run_upgrade(connection: Connection) -> None:
                     alembic_cfg.attributes["connection"] = connection
-                    if has_tables and not has_alembic:
-                        # Tables exist from legacy backend — stamp as current, skip creation
-                        logger.info("Existing tables detected, stamping Alembic at head")
-                        command.stamp(alembic_cfg, "head")
-                    else:
+                    if action == "upgrade":
                         command.upgrade(alembic_cfg, "head")
+                        return
+                    if action == "refuse":
+                        # REFUSE rather than stamp. Stamping says "every
+                        # migration through head has been applied here", and
+                        # about this database that is a guess — the tables came
+                        # from somewhere other than the chain. Getting it wrong
+                        # is permanent in the quiet direction: once stamped,
+                        # every future ``upgrade head`` is a no-op, so whatever
+                        # the chain would have added (17 partial/GIN/HNSW
+                        # indexes and this very table, measured in #1602) is
+                        # missing from a database that reports itself current.
+                        # Search stops using an index and starts scanning; no
+                        # error is raised, then or ever.
+                        raise RuntimeError(
+                            "Refusing to stamp Alembic at head: this database has a "
+                            f"'memories' table but no 'alembic_version' and no "
+                            f"'{_CHAIN_SENTINEL_TABLE}', so its schema was not built by the "
+                            "migration chain (most likely Base.metadata.create_all — see "
+                            "CONTRIBUTING.md on the two test databases). Stamping would "
+                            "certify migrations that never ran and silence every future "
+                            "upgrade. Point this service at a database built by "
+                            "'alembic upgrade head', or — if you are certain the schema "
+                            "really is current — stamp it deliberately: 'alembic stamp head' "
+                            "from the repository root, the same way AGENT-INSTALL.md runs "
+                            "'alembic upgrade head'."
+                        )
+                    # Chain-built but missing its version row (e.g. restored
+                    # without ``alembic_version``): stamping is recording what
+                    # the evidence already shows.
+                    logger.info("Existing chain-built schema with no alembic_version — stamping at head")
+                    command.stamp(alembic_cfg, "head")
 
                 await work_conn.run_sync(_run_upgrade)
         finally:

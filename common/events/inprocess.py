@@ -25,8 +25,19 @@ class InProcessEventBus(EventBus):
     """Dispatches events to handlers registered in the same process.
 
     Exceptions raised by a handler are logged but do not propagate to the
-    publisher — matches Pub/Sub-style fire-and-forget semantics. A test
-    helper (`drain`) is exposed for tests that need to assert handlers
+    publisher, so one failing subscriber cannot break its siblings or the
+    caller that published. The event is then GONE: this bus has no queue to
+    return it to and no dead-letter to divert it into, which makes it
+    at-most-once.
+
+    That is a real difference from the Pub/Sub backend rather than a match
+    for it, and this docstring used to claim the opposite — "matches
+    Pub/Sub-style fire-and-forget semantics", when Pub/Sub is not
+    fire-and-forget at all: it redelivers precisely the messages this bus
+    discards. Standalone and OSS deployments run on this backend, so a
+    handler doing work that must not be lost has to persist it itself.
+
+    A test helper (`drain`) is exposed for tests that need to assert handlers
     ran to completion.
     """
 
@@ -68,11 +79,19 @@ class InProcessEventBus(EventBus):
         try:
             await handler(event)
         except Exception:
-            # Don't let a single bad subscriber take down the bus. Log
-            # with event metadata so the failure is traceable.
+            # Don't let a single bad subscriber take down the bus. Say the
+            # event was DROPPED, not merely that a handler raised: on this
+            # backend those are the same fact, and only the first spelling
+            # tells a reader of the logs that the work will not be retried.
+            # ``dropped=True`` matches the alert hook the worker's own
+            # ack-drop paths use.
             logger.exception(
-                "event handler raised",
-                extra={"event_type": event.event_type, "event_id": str(event.event_id)},
+                "event handler raised — event dropped, no redelivery on this bus",
+                extra={
+                    "event_type": event.event_type,
+                    "event_id": str(event.event_id),
+                    "dropped": True,
+                },
             )
 
     async def drain(self, max_rounds: int = 100) -> None:

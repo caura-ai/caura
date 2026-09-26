@@ -19,6 +19,25 @@ import { getPluginDir, getPluginSrcPath } from "./config.js";
 import { BUILD_TIMEOUT_MS, MAX_SOURCE_SIZE, hasPluginEnvPrefix } from "./env.js";
 import { logError } from "./logger.js";
 
+const BUILD_COMMAND = "npx tsc 2>&1";
+
+type BuildRunner = (
+  command: string,
+  options: { cwd: string; encoding: "utf-8"; timeout: number },
+) => string;
+
+/** Compile without package lifecycle hooks that only exist in the monorepo. */
+export function runPluginBuild(
+  pluginDir: string,
+  runner: BuildRunner = execSync,
+): string {
+  return runner(BUILD_COMMAND, {
+    cwd: pluginDir,
+    encoding: "utf-8",
+    timeout: BUILD_TIMEOUT_MS,
+  });
+}
+
 export async function deployPlugin(
   source: string,
   envVars?: Record<string, string>,
@@ -78,12 +97,11 @@ export async function deployPlugin(
       }
     }
 
-    // 4. Run build
-    const buildOutput = execSync("npm run build 2>&1", {
-      cwd: pluginDir,
-      encoding: "utf-8",
-      timeout: BUILD_TIMEOUT_MS,
-    });
+    // 4. Run tsc directly. ``npm run build`` triggers the package's
+    // monorepo-only prebuild hook (../scripts/gen-version.sh), which is not
+    // present in flat plugin installs. Manifest deploys already stamp the
+    // version explicitly; source-push deploys must be equally self-contained.
+    const buildOutput = runPluginBuild(pluginDir);
 
     return {
       ok: true,

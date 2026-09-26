@@ -682,7 +682,7 @@ async def test_kill_switch_enabled_default_allows_retraction():
 
 @pytest.mark.asyncio
 async def test_retraction_context_fetch_failure_logs_exc_type(caplog):
-    """CAURA-134 — when ``_fetch_entity_context`` raises (timeout,
+    """CAURA-134 — when ``_fetch_entity_contexts`` raises (timeout,
     network, malformed response), the retraction path's WARNING log
     must include the exception class name. The original log used
     plain ``%s`` for the exception, which renders as empty for
@@ -700,10 +700,10 @@ async def test_retraction_context_fetch_failure_logs_exc_type(caplog):
     new_id, cand_id = uuid4(), uuid4()
     sc = _mock_sc_with_retraction_setup(new_id, cand_id)
 
-    # Patch ``_fetch_entity_context`` directly so the TimeoutError
+    # Patch ``_fetch_entity_contexts`` directly so the TimeoutError
     # surfaces at the OUTER ``asyncio.wait_for`` boundary in
-    # ``_attempt_entity_retraction``. The inner helper swallows
-    # storage failures and returns ``[]``; patching it is the only
+    # ``_attempt_entity_retraction``. The helper swallows storage
+    # failures and returns empty contexts; patching it is the only
     # way to exercise the outer ``except Exception`` where the
     # CAURA-134 WARNING + symmetric INFO logs live.
     fetch_ctx = AsyncMock(side_effect=TimeoutError())
@@ -719,7 +719,7 @@ async def test_retraction_context_fetch_failure_logs_exc_type(caplog):
             return_value=sc,
         ),
         _patch(
-            "core_api.services.contradiction_detector._fetch_entity_context",
+            "core_api.services.contradiction_detector._fetch_entity_contexts",
             fetch_ctx,
         ),
         _patch(

@@ -3,8 +3,10 @@
 import asyncio
 import logging
 import re
+from typing import Any, Final, Literal
 from uuid import UUID
 
+from common.constants import SINGLE_VALUE_PREDICATES
 from common.embedding import get_embedding
 from common.entity_naming import canonical_match_key
 from core_api.clients.storage_client import get_storage_client
@@ -20,8 +22,61 @@ from core_api.schemas import RelationUpsert
 from core_api.services.audit_service import log_action
 from core_api.services.entity_extraction import extract_entities_from_content
 from core_api.services.entity_service import upsert_relation
+from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
+
+# 09/02 L-37. Relation upserts are one HTTP POST each and run concurrently;
+# this bounds the fan-out so a memory with a large graph cannot open dozens of
+# simultaneous connections to core-storage-api. Matches the order of magnitude
+# of the other per-item caps in this codebase (ingest preview 4, A19 admission
+# 16) — high enough that the serial round-trips stop dominating, low enough
+# that one memory's extraction is not a load event.
+_RELATION_UPSERT_CONCURRENCY = 8
+
+# A65 — map the extractor's free-form ``relation_type`` onto the canonical
+# predicate vocabulary, so two rows that state the same attribute in different
+# words compare equal on the deterministic RDF path.
+#
+# The extractor is asked for "a short verb phrase like works_on, uses,
+# belongs_to" and answers in whatever shape it likes: "Managed By", "reports-to",
+# "is located in". None of those equal ``managed_by`` / ``reports_to`` /
+# ``located_in`` as strings, so without normalisation the write-back below would
+# populate ``predicate`` with values that never match another row's.
+#
+# Deliberately conservative. It normalises SHAPE (case, spaces, hyphens, a
+# leading "is_"/"has_" where the bare form is canonical) and nothing else — no
+# synonym table, no stemming, no inference. A predicate that does not land in
+# ``SINGLE_VALUE_PREDICATES`` after that is returned as None and the row keeps a
+# NULL predicate, because a wrong predicate is worse than none: the RDF path
+# treats (subject, predicate) as authoritative and would compare two unrelated
+# attributes as if they were the same one.
+_PREDICATE_PREFIXES: Final[tuple[str, ...]] = ("is_", "has_", "was_", "the_")
+
+
+def _canonical_predicate(raw: str | None) -> str | None:
+    """The canonical single-value predicate for an extracted relation, or None."""
+    if not raw:
+        return None
+    norm = re.sub(r"[\s\-]+", "_", str(raw).strip().lower())
+    norm = re.sub(r"[^a-z0-9_]", "", norm).strip("_")
+    if not norm:
+        return None
+    # Strip FIRST, not last. The canonical set contains both spellings of
+    # several predicates — ``is_located_in`` AND ``located_in``,
+    # ``is_based_in`` AND ``based_in``, ``has_status`` AND ``status`` — so
+    # returning the raw form when it happens to be canonical would let two rows
+    # stating the SAME attribute land on two different canonical predicates and
+    # never match. That is precisely the failure this function exists to remove,
+    # so the bare form always wins and both spellings converge on it.
+    for prefix in _PREDICATE_PREFIXES:
+        if norm.startswith(prefix):
+            stripped = norm[len(prefix) :]
+            if stripped in SINGLE_VALUE_PREDICATES:
+                return stripped
+    if norm in SINGLE_VALUE_PREDICATES:
+        return norm
+    return None
 
 
 # CAURA graph-build fix (A): reject literal VALUES and attribute/field NAMES so they
@@ -40,14 +95,47 @@ _LITERAL_OR_ATTR_RE = re.compile(
 )
 
 
+# A42 — parenthetical qualifiers, e.g. the "(delaware)" in "acme (delaware)".
+# Matches the discriminator vocabulary ``_reattach_subject_discriminators``
+# already established ("#NNNN" and parentheticals); deliberately NOT any
+# trailing word, because unbracketed tokens are usually harmless surface
+# variation ("acme" / "acme corp") rather than a distinguisher.
+_QUALIFIER_RE = re.compile(r"[(\[]([^)\]]{1,64})[)\]]")
+
+
+def _qualifier_signature(name: str) -> frozenset[str]:
+    """Bracketed qualifiers in ``name``, normalised for comparison."""
+    return frozenset(" ".join(m.strip().lower().split()) for m in _QUALIFIER_RE.findall(name) if m.strip())
+
+
 def _same_identifier_signature(a: str, b: str) -> bool:
-    """CAURA graph-build fix (B): two names may only merge if they carry the SAME set
-    of digit-bearing identifier tokens. Synthetic suffix-distinct names like
-    'comet #0002' vs 'comet #0012' embed near-identically and trip the 0.85 similarity
-    merge, collapsing distinct entities into one contaminated mega-node."""
+    """Two names may only merge if nothing in them says they are different things.
+
+    CAURA graph-build fix (B): same set of digit-bearing identifier tokens.
+    Synthetic suffix-distinct names like 'comet #0002' vs 'comet #0012' embed
+    near-identically and trip the 0.85 similarity merge, collapsing distinct
+    entities into one contaminated mega-node.
+
+    A42 (A33 mechanism ②): digits alone are too narrow. Two genuinely distinct
+    entities distinguished by a NON-digit qualifier — 'acme (delaware)' vs
+    'acme (ohio)' — both yield an empty digit set, compare equal, and merge.
+    Downstream that reads as same_subject=true and produces a false
+    contradiction between two different things.
+
+    Asymmetry is deliberate: a name with NO qualifier merges freely with a
+    qualified one ('acme' vs 'acme (ohio)' -> allowed). An absent qualifier
+    means "unspecified", not "different", and blocking it would strand every
+    qualified mention from its own plain surface form. The chosen failure
+    direction favours coalescence — an over-merge is visible and recoverable,
+    whereas an entity that never coalesces fragments the graph silently.
+    """
     ta = set(re.findall(r"\d[\w.\-]*", a.lower()))
     tb = set(re.findall(r"\d[\w.\-]*", b.lower()))
-    return ta == tb
+    if ta != tb:
+        return False
+    qa, qb = _qualifier_signature(a), _qualifier_signature(b)
+    # Only a CONFLICT between two present qualifiers blocks the merge.
+    return not qa or not qb or qa == qb
 
 
 def _is_valid_entity(name: str, blocklist: frozenset[str] | None = None) -> bool:
@@ -61,6 +149,28 @@ def _is_valid_entity(name: str, blocklist: frozenset[str] | None = None) -> bool
     if _LITERAL_OR_ATTR_RE.match(name.strip()):
         return False
     return True
+
+
+def _merge_alias_into(item: dict, *names: str) -> None:
+    """Fold ``names`` into an already-built upsert item's ``_aliases``.
+
+    L-32. The second surface form that lands on a row already claimed by this
+    batch contributes its alias to the FIRST item rather than becoming a second
+    item for the same ``entity_id``. Everything else about the row is
+    first-seen-wins — ``canonical_name``, ``entity_type``, ``name_embedding`` —
+    so the alias list is the only field that has to accumulate, and it is
+    exactly the field the lost update was destroying.
+
+    Order-preserving and idempotent: appended in the order the extraction named
+    them, and a name already present is not repeated. The ``_aliases`` value is
+    read defensively because it comes from a storage response.
+    """
+    attrs = item.setdefault("attributes", {})
+    aliases = list(attrs.get("_aliases") or [])
+    for name in names:
+        if name and name not in aliases:
+            aliases.append(name)
+    attrs["_aliases"] = aliases
 
 
 async def _discover_cross_links_for_memory(
@@ -93,6 +203,129 @@ async def _discover_cross_links_for_memory(
         )
 
 
+async def _purge_written_artifacts_if_dropped(
+    sc: Any, memory_id: UUID, tenant_id: str
+) -> Literal["live", "dropped", "unknown"]:
+    """Undo our own graph writes when the memory died while we were making them.
+
+    Reports WHAT IT FOUND and leaves the policy to the caller, because the two
+    call sites want different things from the same answer. An earlier revision
+    returned a bool meaning "you must stop", which forced the indeterminate case
+    to pick one of the two real answers and pretend — it chose "stop", and that
+    silently discarded the audit-log entry, the contradiction trigger and
+    cross-link discovery for a memory that a transient read timeout had said
+    nothing bad about. Three states, named:
+
+    ``dropped``
+        The row is gone or soft-deleted, and its graph rows have been purged
+        (or the purge failed, loudly — either way it is not coming back).
+    ``live``
+        The row is there. Nothing was purged and nothing should stop.
+    ``unknown``
+        The read itself failed. Nothing is known and nothing was purged.
+
+    Purging is only half of the job at the first call site: everything after the
+    link upsert — relation upserts carrying ``evidence_memory_id``, the subject
+    write-back, cross-link discovery — writes MORE graph rows for this memory. A
+    version that purged and fell through cleaned the table and then immediately
+    refilled it, moving the leak from the link table to the relation table rather
+    than closing it.
+
+    H-02. The liveness check before the persistence block narrows the window; it
+    cannot close it. Between that check and the links landing there are embedding
+    round-trips and three storage calls, and a governance drop can complete
+    inside them — including its own purge, which finds nothing because these rows
+    do not exist yet. The entities then land moments later and nothing ever
+    revisits them: the memory is gone, so no verdict names it again.
+
+    Re-checking AFTER the writes closes it, and the argument is about what is
+    observable rather than about timing:
+
+    * the drop committed before our writes — its purge found nothing, but this
+      check sees the row deleted, and we purge what we just wrote,
+    * the drop commits after our writes — its own purge sees our rows and takes
+      them,
+    * the drop commits between the two — whichever purge runs later sees the
+      rows, and both are keyed on the same ``memory_id``.
+
+    That argument only holds for rows written BEFORE the call, which is why
+    ``process_entity_extraction`` calls this THREE times rather than once. An
+    earlier revision called it once, after the link upsert, and claimed "there is
+    no ordering left in which the rows survive" — untrue of everything written
+    afterwards: the subject write-back, the relation upserts, the links
+    cross-link discovery creates. The call sites, and what each is for:
+
+    * after the link upsert — an optimisation. It saves the relation upserts and
+      a cross-link pass when the row is already gone, and is allowed to fall
+      through on anything short of ``dropped``.
+    * at the end of the ``try`` — the guarantee for the path that completes. It
+      sits after every graph-mutating write, so the rows it can find are all of
+      them.
+    * in the ``except`` — the same guarantee for the path that leaves by
+      raising, which the previous one cannot reach.
+
+    Both of the trailing two are guarded on ``wrote_graph_rows``, so a run that
+    wrote nothing does not pay for a read, and the ``except`` one also runs on
+    failures early enough that ``sc`` does not exist yet.
+
+    The WRITER read is load-bearing at every site for the same reason as the
+    pre-write check: the whole question is whether a delete that just committed
+    is visible.
+
+    A failed PURGE still reports ``dropped``: the memory is gone whether or not
+    the cleanup worked, and the caller's decision does not change. Only a failed
+    READ is ``unknown``.
+    """
+    try:
+        live = await sc.get_memory(str(memory_id), tenant_id, read=False)
+    except Exception:
+        logger.exception(
+            "entity extraction: could not establish whether memory %s survived its own "
+            "extraction; nothing purged and nothing concluded",
+            memory_id,
+            extra={"liveness_check": "unknown", "memory_id": str(memory_id)},
+        )
+        return "unknown"
+
+    if live is not None and live.get("deleted_at") is None:
+        return "live"
+
+    try:
+        counts = await sc.purge_entity_artifacts(tenant_id, str(memory_id))
+    except Exception:
+        logger.exception(
+            "entity extraction: memory %s was dropped while its entities were being "
+            "written, and the rows just written could NOT be purged; they are live in "
+            "the graph for content the policy removed",
+            memory_id,
+        )
+        return "dropped"
+    if not isinstance(counts, dict):
+        # Same gap as the governance-side purge: reading ``counts`` as a dict
+        # would raise from outside the try above. Lower stakes at two of this
+        # function's three call sites, which sit inside the worker's catch-all —
+        # but NOT at the one in the ``except`` handler, where a raise escapes
+        # ``process_entity_extraction`` entirely and surfaces as an unhandled
+        # task exception. The purge still happened as far as anything here can
+        # tell; only the counts are unreadable.
+        logger.warning(
+            "entity extraction: memory %s was dropped mid-extraction and the purge "
+            "answered with %s rather than an object, so what it removed is unknown",
+            memory_id,
+            type(counts).__name__,
+        )
+        return "dropped"
+    logger.warning(
+        "entity extraction: memory %s was dropped mid-extraction; purged the graph "
+        "rows just written for it (links=%s relations=%s entities=%s)",
+        memory_id,
+        counts.get("links"),
+        counts.get("relations"),
+        counts.get("entities"),
+    )
+    return "dropped"
+
+
 async def process_entity_extraction(
     memory_id: UUID,
     tenant_id: str,
@@ -107,8 +340,20 @@ async def process_entity_extraction(
     # the scaling plan, which was to land the work on a dedicated worker
     # fleet so core-api isn't CPU/memory-contended by burst-time LLM
     # calls. Full migration: CAURA-593 lands Pub/Sub first, then a new
-    # worker service subscribes to ``Topics.Pipeline.ENTITY_EXTRACT_REQUESTED``
-    # and this function becomes its handler body.
+    # worker service and topic contract land together, with this function as
+    # the handler body.
+    #
+    # H-02. Guards both of the trailing liveness checks — the one at the end of
+    # the ``try`` and the one in the ``except``. It means "this memory MAY have
+    # graph rows", not "the persistence block ran": there are two independent
+    # writers below (the entity/link upserts, and cross-link discovery, which
+    # runs even when every extracted name was filtered out), and both set it.
+    #
+    # False means nothing was written, so there is nothing to purge and no reason
+    # to spend a writer read. That matters because the early exits above the
+    # persistence block — no entities extracted, row already gone — are the
+    # common case, and because ``sc`` is not yet bound on the first of them.
+    wrote_graph_rows = False
     try:
         # A5c: resolve tenant_config BEFORE the extraction call so the
         # tenant-level ``entity_extraction.provider`` / ``.model``
@@ -124,6 +369,33 @@ async def process_entity_extraction(
             return
 
         sc = get_storage_client()
+
+        # H-02: is the memory still there? This is scheduled fire-and-forget at
+        # write time on both non-inline paths, in parallel with the enrichment
+        # that carries the governance verdict — so by the time the LLM call above
+        # returns, the policy may already have dropped the row. Writing entities
+        # for it would re-create the leak the drop exists to close, in a table
+        # the drop does not reach.
+        #
+        # ``read=False`` — the WRITER. The whole point is to observe a delete
+        # that just committed; a replica under lag would report the row live and
+        # this check would pass exactly when it most needed to fail.
+        #
+        # This check alone does NOT close the window, and it is not claimed to:
+        # the writes below are several round-trips away, so a drop can land after
+        # it passes. ``_purge_written_artifacts_if_dropped`` at the end of the
+        # persistence block is what closes that; this one is here to avoid doing
+        # the work at all in the common case where the row is already gone.
+        live = await sc.get_memory(str(memory_id), tenant_id, read=False)
+        if live is None or live.get("deleted_at") is not None:
+            logger.info(
+                "entity extraction: memory %s is gone by the time extraction finished; "
+                "discarding %d extracted entit(ies) rather than writing them to a "
+                "dropped row's graph",
+                memory_id,
+                len(graph.entities),
+            )
+            return
 
         blocklist = tenant_cfg.entity_blocklist
 
@@ -170,8 +442,12 @@ async def process_entity_extraction(
             # carries the prior skip-on-failure semantics — a single
             # entity that fails to embed becomes ``None`` in its slot
             # rather than aborting the whole batch.
+            # ``tenant_cfg`` (resolved above for the extraction call) also
+            # routes the embeds: tenant provider/key overrides apply, and
+            # resolution can't fall to the raw env default — entity vectors
+            # must live in the same space as this tenant's memory vectors.
             embed_results = await asyncio.gather(
-                *(get_embedding(name, background=True) for name, _et, _role in filtered),
+                *(get_embedding(name, tenant_cfg, background=True) for name, _et, _role in filtered),
                 return_exceptions=True,
             )
             name_embeddings: dict[str, list[float] | None] = {}
@@ -253,7 +529,13 @@ async def process_entity_extraction(
             # about the prior "longest-wins" regression that turned LLM
             # hallucinations into canonical rows — this preservation is
             # the audit P1 fix's correctness gate.
+            # L-32. ``upsert_names[j]`` is every surface form that item ``j``
+            # stands for — usually one, more when two of them resolved to the
+            # same existing row. See the coalescing branch below for why the
+            # items cannot simply be 1:1 with ``filtered`` any more.
             upsert_items: list[dict] = []
+            upsert_names: list[list[str]] = []
+            entity_id_to_item: dict[str, int] = {}
             for i, (name, entity_type, _role) in enumerate(filtered):
                 match = resolved[i] if i < len(resolved) else None
                 # CAURA graph-build fix (B): reject a similarity-merge when the two
@@ -262,7 +544,11 @@ async def process_entity_extraction(
                 if match and not _same_identifier_signature(name, match.get("canonical_name") or ""):
                     match = None
                 item: dict = {
-                    "input_idx": i,
+                    # Index into ``upsert_items``, NOT into ``filtered`` — the
+                    # two stop being the same list the moment anything
+                    # coalesces, and storage validates that these tile
+                    # ``[0, len(items))`` contiguously.
+                    "input_idx": len(upsert_items),
                     "tenant_id": tenant_id,
                     "fleet_id": fleet_id,
                     "entity_type": entity_type,
@@ -323,16 +609,52 @@ async def process_entity_extraction(
                         item["canonical_name"] = name
                         item["attributes"] = {}
                     else:
+                        # L-32: intra-batch alias lost-update.
+                        #
+                        # Two surface forms in ONE extraction can resolve to the
+                        # SAME existing row — "IBM" exact-matches it while
+                        # "I.B.M." reaches it by embedding similarity, and the
+                        # WT-2 dedupe above does not collapse them because their
+                        # ``canonical_match_key``s genuinely differ. Both then
+                        # built ``merged_attrs`` from the SAME resolve snapshot,
+                        # so neither payload contained the other's alias, and
+                        # storage applies ``attributes`` wholesale per item in
+                        # list order (``entity_bulk_upsert``: "caller
+                        # pre-computed the merged attributes — server side does
+                        # not re-merge"). Last item won; the first surface form's
+                        # alias was written and then overwritten in the same
+                        # batch. Deterministic, not racy — which is why it never
+                        # looked like a race and never got chased.
+                        #
+                        # Fixed by coalescing here rather than storage-side,
+                        # because the merge contract is the caller's: this is the
+                        # same "dedupe at the write site" the link batch below
+                        # already does for the same cause, and the same
+                        # first-seen-wins rule applies to everything except the
+                        # alias list, which accumulates.
+                        #
+                        # Only the UPDATE path can collide. Two creates cannot
+                        # name the same row: the natural key is
+                        # ``lower(canonical_name)``, and two names that differ
+                        # only in case share a ``canonical_match_key`` and were
+                        # already deduped.
+                        prior = entity_id_to_item.get(str(match_entity_id))
+                        if prior is not None:
+                            _merge_alias_into(upsert_items[prior], name, existing_name)
+                            upsert_names[prior].append(name)
+                            continue
                         item["action"] = "update"
                         item["entity_id"] = match_entity_id
                         item["canonical_name"] = existing_name  # first-seen wins
                         item["attributes"] = merged_attrs
+                        entity_id_to_item[str(match_entity_id)] = len(upsert_items)
                 else:
                     # No match — create.
                     item["action"] = "create"
                     item["canonical_name"] = name
                     item["attributes"] = {}
                 upsert_items.append(item)
+                upsert_names.append([name])
 
             # ---- Step 2c: bulk upsert ----
             #
@@ -342,6 +664,18 @@ async def process_entity_extraction(
             # the TOCTOU race where another writer created the natural-
             # key match between our resolve and our upsert — semantically
             # equivalent to ``updated`` for the worker.
+            # H-02. From here this memory MAY have graph rows, so every exit
+            # from this function owes it a liveness check — including the ones
+            # that leave by raising.
+            #
+            # Set BEFORE the await, not after. "The call raised" does not mean
+            # "nothing was written": a timeout can land on a request the storage
+            # side already committed, and a malformed response does not un-write
+            # rows either. The flag has to mean "might have written", because
+            # the only failure it is allowed to make is the cheap one — a wasted
+            # writer read on a call that never landed, on a path that is already
+            # an error. Getting it wrong the other way leaks the rows.
+            wrote_graph_rows = True
             upserted = await sc.bulk_upsert_entities(items=upsert_items)
             # Explicit loop (not a comprehension) so an out-of-range
             # ``input_idx`` from a misbehaving storage response surfaces
@@ -349,18 +683,31 @@ async def process_entity_extraction(
             # length-mismatch warning above on ``bulk_resolve_entities``
             # — same "treat malformed responses defensively" pattern.
             name_to_id: dict[str, UUID] = {}
+            # H-02. Only the rows THIS run brought into existence. An entity that
+            # already existed is reachable through whatever linked it before and
+            # is nobody's orphan; a created one is reachable only through the link
+            # we are about to write. See the link upsert below for why that
+            # distinction is worth carrying.
+            created_entity_ids: list[str] = []
             for r in upserted:
                 if not r.get("entity_id"):
                     continue
                 idx = r["input_idx"]
-                if idx >= len(filtered):
+                if idx >= len(upsert_names):
                     logger.warning(
-                        "bulk_upsert_entities returned out-of-range input_idx %d (filtered len=%d); skipping",
+                        "bulk_upsert_entities returned out-of-range input_idx %d (items len=%d); skipping",
                         idx,
-                        len(filtered),
+                        len(upsert_names),
                     )
                     continue
-                name_to_id[filtered[idx][0]] = UUID(r["entity_id"])
+                # L-32: one item can stand for several surface forms. Every one
+                # of them has to reach ``name_to_id``, or the relation loop
+                # below cannot resolve an endpoint the extractor named by the
+                # coalesced form and silently drops that edge.
+                for nm in upsert_names[idx]:
+                    name_to_id[nm] = UUID(r["entity_id"])
+                if r.get("action") == "created":
+                    created_entity_ids.append(str(r["entity_id"]))
 
             # ---- Step 3: bulk entity-link upsert ----
             #
@@ -401,7 +748,74 @@ async def process_entity_extraction(
                 )
                 link_idx += 1
             if link_items:
-                link_result = await sc.bulk_upsert_entity_links(tenant_id, items=link_items)
+                try:
+                    link_result = await sc.bulk_upsert_entity_links(tenant_id, items=link_items)
+                except Exception:
+                    # H-02, and this is the one gap the purge cannot close from
+                    # its own side. ``memory_purge_entity_artifacts`` finds
+                    # entities THROUGH the memory's links — deliberately, because
+                    # the first draft swept every unlinked entity in the tenant
+                    # and would have raced a concurrent writer that had created
+                    # an entity but not yet linked it. Over-deleting is the
+                    # direction that does not come back.
+                    #
+                    # The cost of that bounding is exactly here: entities
+                    # committed a moment ago whose links never landed are
+                    # reachable by nothing, so a purge for this memory runs,
+                    # finds no links, and honestly reports zero. Indistinguishable
+                    # in the audit trail from "there was nothing to purge" —
+                    # which is what makes it worth a log rather than nothing.
+                    #
+                    # Widening the candidate set instead was considered and not
+                    # done: passing these ids to the purge re-introduces the same
+                    # race the bounding exists to prevent, since an id we upserted
+                    # may be a row another writer created and is about to link.
+                    # A person with a concrete list can check that; a query
+                    # cannot.
+                    #
+                    # Re-raised, so the except handler below still runs its
+                    # liveness check and purges whatever IS reachable.
+                    if created_entity_ids:
+                        logger.exception(
+                            "entity extraction: entity rows for memory %s were committed but "
+                            "their links were not, so a governance purge for this memory will "
+                            "find and report nothing while these rows survive; entity ids "
+                            "created by this run: %s",
+                            memory_id,
+                            ", ".join(created_entity_ids),
+                            extra={
+                                "unlinked_entity_ids": created_entity_ids,
+                                "memory_id": str(memory_id),
+                                "tenant_id": tenant_id,
+                            },
+                        )
+                    raise
+                # H-02: the rows exist NOW, so from here the leak is recoverable
+                # by the same purge governance uses. See the helper for why this
+                # is where the window actually closes.
+                #
+                # The RETURN has to be honoured, not just the purge. Everything
+                # below writes more graph rows for this memory — relations
+                # carrying ``evidence_memory_id``, the subject write-back,
+                # cross-link discovery. Purging and then falling through refills
+                # the table we just cleaned.
+                #
+                # ``dropped`` ONLY. This site is an optimisation — it saves the
+                # relation upserts and a cross-link discovery pass — so it must
+                # not act on ``unknown``. Stopping here also skips the audit-log
+                # entry below, and losing an audit record to a read timeout is a
+                # real cost with no later repair.
+                #
+                # Falling through on ``unknown`` is safe because a later check
+                # covers every remaining exit: the one at the end of the ``try``
+                # if the rest of the run succeeds, the one in the ``except`` if
+                # it raises. Neither is a guarantee that the rows are cleaned —
+                # both call the same read, and a read that failed once will
+                # likely fail again — but the failure is a bounded leak that
+                # governance's purge can still reach, and the alternative was
+                # destroying an audit record nothing rebuilds.
+                if await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id) == "dropped":
+                    return
                 # Surface any FK violations from the per-item path
                 # (storage-side reports ``error="fk_violation"`` for rows
                 # whose memory_id or entity_id no longer exists). Same
@@ -464,6 +878,24 @@ async def process_entity_extraction(
                     memory_id,
                     len(subject_ids),
                 )
+            else:
+                # The silent branch. "Set a subject" and "found two and refused"
+                # both logged; "no entity claimed one" logged nothing, so a row
+                # that will never take part in subject-scoped contradiction
+                # detection looked identical to a row that was never processed
+                # — the same "ran and found nothing" vs "never ran" ambiguity
+                # D3 closed for the contradiction detector.
+                #
+                # Zero subjects is the SIGNATURE of a degraded extraction:
+                # ``_fake_extract`` stamps role="mentioned" on everything it
+                # finds, so a heuristic graph never names a subject. Together
+                # with ``entity_extraction_degraded_to_heuristic`` this makes
+                # the degrade countable from the outside, per memory.
+                logger.info(
+                    "subject_writeback memory=%s outcome=skipped_no_subject n_links=%d",
+                    memory_id,
+                    len(filtered),
+                )
 
         # Upsert relations. Endpoints resolve by raw name first (today's
         # contract), then by ``canonical_match_key`` — the WT-2 dedupe above
@@ -471,22 +903,169 @@ async def process_entity_extraction(
         # service`` deduped under ``new analytics service``), and a relation
         # that names the collapsed form must still land on the merged row.
         key_to_id: dict[str, UUID] = {canonical_match_key(n): i for n, i in name_to_id.items()}
-        rel_count = 0
-        for rel in graph.relations:
+        # 09/02 L-37: the upserts below run CONCURRENTLY under a bounded
+        # semaphore. Everything else this worker does is already batched —
+        # ``bulk_upsert_entities``, ``bulk_upsert_entity_links`` — and then
+        # relations went back to one sequential HTTP POST each, so a memory
+        # with a dozen relations paid a dozen serial round-trips while the rest
+        # of the extraction had been reduced to two.
+        #
+        # Concurrency rather than a bulk endpoint, deliberately. There is no
+        # bulk relations route, and adding one means a router, a service method
+        # and a client method — plus PER-ITEM result reporting, because the
+        # per-relation guard below is load-bearing (see its comment: one failed
+        # upsert used to skip the A65 predicate write-back and the
+        # ``Trigger.ENTITY`` fire that is the only thing running A40's RDF
+        # pass). A single bulk call that succeeds-or-fails as a unit would
+        # throw that isolation away to save round-trips. This keeps every
+        # relation's own request and its own ``try``, and only stops them
+        # queueing behind each other.
+        #
+        # Safe to gather here because ``upsert_relation`` goes through the
+        # storage HTTP client, not a shared ``AsyncSession`` — gathering two
+        # ``db.execute`` calls on one session is what is unsafe.
+        rel_sem = asyncio.Semaphore(_RELATION_UPSERT_CONCURRENCY)
+
+        async def _upsert_one(rel) -> bool | None:
+            """True = landed, False = failed, None = endpoints unresolvable.
+
+            Never raises: the caller counts outcomes, and one relation's
+            failure must not cost the others (or the stages after this loop).
+            """
             from_id = name_to_id.get(rel.from_entity) or key_to_id.get(canonical_match_key(rel.from_entity))
             to_id = name_to_id.get(rel.to_entity) or key_to_id.get(canonical_match_key(rel.to_entity))
-            if from_id and to_id:
-                await upsert_relation(
-                    RelationUpsert(
+            if not (from_id and to_id):
+                # Unresolvable endpoints are not a failure — the same silent
+                # skip the sequential loop did, counted in neither bucket.
+                return None
+
+            # Guarded PER RELATION, matching ``subject_writeback`` /
+            # ``predicate_writeback`` below. Unguarded, ONE failing upsert
+            # threw out of this whole function into the outer "(non-fatal)"
+            # handler — and everything after this loop is what actually
+            # feeds the deterministic contradiction path: the A65 predicate
+            # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY
+            # thing that runs A40's RDF pass. So a single transient storage
+            # error on one relation out of dozens left that memory with a
+            # NULL predicate forever and no Path C detection at all, and
+            # said "non-fatal" while doing it. Nothing retries.
+            #
+            # Observed, not hypothesised: a storage 500 on
+            # ``POST /entities/relations`` produced exactly this — every
+            # later stage skipped, one warning line, predicate never set.
+            async with rel_sem:
+                try:
+                    await upsert_relation(
+                        RelationUpsert(
+                            tenant_id=tenant_id,
+                            fleet_id=fleet_id,
+                            from_entity_id=from_id,
+                            relation_type=rel.relation_type,
+                            to_entity_id=to_id,
+                            evidence_memory_id=memory_id,
+                        ),
+                    )
+                    return True
+                except Exception:
+                    logger.warning(
+                        "relation_upsert failed for memory %s (%s -[%s]-> %s) (non-fatal)",
+                        memory_id,
+                        rel.from_entity,
+                        rel.relation_type,
+                        rel.to_entity,
+                        exc_info=True,
+                    )
+                    return False
+
+        # ``return_exceptions=True`` as a backstop: ``_upsert_one`` already
+        # swallows everything, but a bug in the resolution above it would
+        # otherwise cancel the siblings mid-flight and lose relations that had
+        # already succeeded.
+        outcomes = await asyncio.gather(
+            *(_upsert_one(rel) for rel in graph.relations), return_exceptions=True
+        )
+        # Counted from the outcomes themselves rather than by re-deriving which
+        # relations were resolvable — one source of truth, and the two cannot
+        # drift. A ``BaseException`` in the list means the backstop fired and
+        # is counted as a failure, which is what it is.
+        rel_count = sum(1 for o in outcomes if o is True)
+        rel_failed = sum(1 for o in outcomes if o is not True and o is not None)
+        if rel_failed:
+            # Surfaced as its own line so a partial graph is visible as a
+            # COUNT rather than N scattered warnings — a spike here means the
+            # entity graph is degrading quietly.
+            logger.warning(
+                "relation_upsert_partial memory=%s created=%d failed=%d",
+                memory_id,
+                rel_count,
+                rel_failed,
+            )
+
+        # ---- A65: predicate write-back ----
+        #
+        # A63 filled in ``subject_entity_id`` from the extractor and stopped
+        # there, so ``predicate`` and ``object_value`` stayed NULL on nearly
+        # every row — and the deterministic RDF contradiction path keys on
+        # (subject, predicate), so populating one of the three columns left it
+        # exactly as dormant as before. This is the same write-back for the
+        # other two.
+        #
+        # Only when EXACTLY ONE relation canonicalises, and it starts at the
+        # subject we just wrote back. The ambiguity rule is A63's, for A63's
+        # reason: downstream gates treat these columns as authoritative, so a
+        # wrong predicate is worse than none — it makes two unrelated attributes
+        # compare as the same one. Two canonical relations about one subject is
+        # exactly that risk, so it skips.
+        # Recomputed here rather than reused from the subject write-back above:
+        # that block is nested inside a conditional, so reaching into its locals
+        # would NameError on every path where it did not run. Same expression,
+        # same inputs, no cross-scope dependency.
+        subject_names = {name for name, _et, role in filtered if role == "subject" and name in name_to_id}
+        if len(subject_names) == 1:
+            subject_name = next(iter(subject_names))
+            canonical_rels = [
+                (p, rel.to_entity)
+                for rel in graph.relations
+                if rel.from_entity == subject_name and (p := _canonical_predicate(rel.relation_type))
+            ]
+            if len(canonical_rels) == 1:
+                pred, obj = canonical_rels[0]
+                try:
+                    updated = await sc.set_predicate_if_null(
+                        memory_id=str(memory_id),
                         tenant_id=tenant_id,
-                        fleet_id=fleet_id,
-                        from_entity_id=from_id,
-                        relation_type=rel.relation_type,
-                        to_entity_id=to_id,
-                        evidence_memory_id=memory_id,
-                    ),
+                        predicate=pred,
+                        object_value=str(obj),
+                    )
+                    logger.info(
+                        "predicate_writeback memory=%s predicate=%s outcome=%s",
+                        memory_id,
+                        pred,
+                        "set" if updated else "kept_existing",
+                    )
+                except Exception:
+                    # Non-fatal, exactly like the subject write-back: the row
+                    # simply keeps a NULL predicate, which is today's behaviour.
+                    logger.warning(
+                        "predicate_writeback failed for memory %s (non-fatal)",
+                        memory_id,
+                        exc_info=True,
+                    )
+            elif canonical_rels:
+                logger.info(
+                    "predicate_writeback memory=%s outcome=skipped_ambiguous n_predicates=%d",
+                    memory_id,
+                    len(canonical_rels),
                 )
-                rel_count += 1
+            else:
+                # The common case: the extractor named relations, none of which
+                # are single-valued attributes. Logged so "no canonical
+                # predicate" stays distinguishable from "never ran".
+                logger.info(
+                    "predicate_writeback memory=%s outcome=skipped_no_canonical n_relations=%d",
+                    memory_id,
+                    len(graph.relations),
+                )
 
         # Audit log
         await log_action(
@@ -520,6 +1099,17 @@ async def process_entity_extraction(
 
         # Cross-link discovery (non-fatal)
         if tenant_cfg.auto_entity_linking_enabled:
+            # H-02. This writes ``memory_entity_links`` rows for THIS memory —
+            # storage-side it is an ON CONFLICT DO NOTHING insert into exactly
+            # the table the purge deletes from — and it does not go through the
+            # persistence block above, so it is a second, independent way for
+            # this memory to acquire graph rows. It runs even when every
+            # extracted name was filtered out and ``bulk_upsert_entities`` was
+            # never called.
+            #
+            # Before the await, for the same reason as the upsert: a call that
+            # raised may still have committed.
+            wrote_graph_rows = True
             try:
                 await _discover_cross_links_for_memory(memory_id, tenant_id, fleet_id)
             except Exception:
@@ -529,5 +1119,84 @@ async def process_entity_extraction(
                     exc_info=True,
                 )
 
-    except Exception:
+        # H-02, and this is the call that actually closes the window. The check
+        # after the link upsert only covers rows written UP TO it; everything
+        # between the two — the subject write-back, the relation upserts carrying
+        # ``evidence_memory_id``, the links cross-link discovery creates — is
+        # written after it has already passed. A drop landing in that stretch
+        # runs its own purge against rows that do not exist yet, and nothing
+        # revisits them.
+        #
+        # This one runs after every graph-mutating write for this memory, so the
+        # rows it finds are all of them. The earlier check is kept as an early
+        # exit: it saves the relation upserts and a cross-link discovery pass in
+        # the common case where the row was already gone.
+        #
+        # It covers the SUCCESSFUL path only. The ``except`` handler carries the
+        # same check for the path where something in between raised.
+        #
+        # Contradiction detection above is deliberately not covered here. It is
+        # spawned via ``track_task`` and writes conflict rows rather than graph
+        # rows, and it re-checks ``deleted_at`` itself for exactly this race.
+        #
+        # Guarded on the flag, so a run that reached here having written nothing
+        # — every extracted name filtered out AND cross-link discovery disabled —
+        # does not pay for a writer read to find nothing. Note what the flag has
+        # to mean for that to be safe: "this memory may have graph rows", not
+        # "the persistence block ran". Cross-link discovery sets it too, and
+        # gating on the narrower reading would leak exactly the links it creates.
+        #
+        # The result is not branched on: nothing follows this, so ``live`` and
+        # ``unknown`` are the same instruction — do nothing — and ``dropped`` has
+        # already purged by the time it returns.
+        if wrote_graph_rows:
+            await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
+
+    except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
+        # 09/02 M-40 — make the failure a ROW, not just a LINE.
+        #
+        # Every call site wraps this coroutine in ``tracked_task``, but that
+        # wrapper writes a ``BackgroundTaskLog`` row ONLY when the coroutine
+        # raises. This handler catches and returns normally — deliberately, and
+        # several tests pin that — so the wrapper saw success, the table an
+        # operator actually inspects stayed empty, the memory kept no entities,
+        # and nothing retried it or knew to.
+        #
+        # Recording here rather than re-raising keeps the non-raising contract
+        # intact. Raising would also work for the six production call sites,
+        # which are all wrapped, but it would turn a documented "logged
+        # non-fatal failure" into an unhandled task exception for any caller
+        # that is not — a distinction this module's handler comments reason
+        # about repeatedly.
+        #
+        # Observed cost of the silence: a storage 500 on
+        # ``POST /entities/relations`` killed the predicate write-back and the
+        # whole ``Trigger.ENTITY`` path for that memory, and presented as "A40
+        # does not work" — because nothing anywhere recorded a task had failed.
+        await record_task_failure("entity_extraction", memory_id, tenant_id, exc)
+        # H-02, and the reason the check below is duplicated rather than moved
+        # into a ``finally``. The normal-path call at the end of the ``try`` is
+        # unreachable once anything between the link upsert and it raises — the
+        # relation upserts, the subject write-back, the audit log — and the rows
+        # already written stay behind for a memory that may have been dropped.
+        # That is the leak this PR exists to close, arriving by a different door.
+        #
+        # A ``finally`` would cover this in one place, but it also fires on the
+        # three early ``return``s in the ``try``, and all three are wrong for it:
+        # the no-entities exit happens before ``sc`` is even bound, so an
+        # unguarded ``finally`` raises ``NameError`` out of a fire-and-forget
+        # task; the already-dropped exit would spend a writer read to learn what
+        # it just learned; and the ``dropped`` exit would repeat a purge that had
+        # just run. Those are the common paths, not the rare ones. The flag would
+        # have to gate a ``finally`` anyway, so all ``finally`` buys is one fewer
+        # call site.
+        #
+        # Nothing is branched on. ``dropped`` has purged by the time it returns;
+        # ``live`` and ``unknown`` both mean leave it alone. ``unknown`` is the
+        # likely answer when the storage failure that landed us here is still
+        # going, and the rows do leak in that case — bounded to what was written
+        # before the raise, and reachable by governance's own purge later. The
+        # alternative was losing the audit record outright.
+        if wrote_graph_rows:
+            await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)

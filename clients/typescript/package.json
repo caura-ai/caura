@@ -1,6 +1,6 @@
 {
   "name": "@caura/client",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Official TypeScript/JavaScript client for Caura — governed shared memory for AI agent fleets (multi-agent, multi-tenant, MCP-native).",
   "license": "Apache-2.0",
   "author": "Caura <hello@caura.ai>",
@@ -14,8 +14,11 @@
     }
   },
   "files": [
+    "LICENSE",
     "dist/index.js",
     "dist/index.d.ts",
+    "dist/version.js",
+    "dist/version.d.ts",
     "README.md"
   ],
   "engines": {
@@ -42,11 +45,14 @@
   },
   "scripts": {
     "build": "tsc",
+    "lint": "prettier --check src",
+    "format": "prettier --write src",
     "test": "tsc && node --test dist/index.test.js",
     "prepublishOnly": "tsc"
   },
   "devDependencies": {
-    "@types/node": "^20",
-    "typescript": "^5.4"
+    "@types/node": "^26",
+    "prettier": "^3.6",
+    "typescript": "^7.0"
   }
 }

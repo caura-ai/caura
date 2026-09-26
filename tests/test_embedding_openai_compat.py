@@ -115,7 +115,7 @@ def test_timeout_sets_connect_phase_not_bare_float(
     already sets per-phase timeouts; this asserts the embedding provider
     does too, so the two cannot drift apart again.
     """
-    import httpx
+    import httpx2 as httpx
 
     from common.embedding.constants import (
         EMBEDDING_HTTPX_CONNECT_TIMEOUT_SECONDS,

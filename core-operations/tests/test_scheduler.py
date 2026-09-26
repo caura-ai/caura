@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from core_operations.scheduler import (
     Scheduler,
+    seconds_until_next_utc_half_past,
     seconds_until_next_utc_hour,
+    seconds_until_next_utc_top_of_hour,
     seconds_until_next_utc_weekday_hour,
 )
 
@@ -339,3 +341,46 @@ async def test_cancel_during_sleep_logs_cancelled(caplog):
     assert any("scheduled task cancelled" in rec.message for rec in caplog.records), (
         "expected the CancelledError handler to log on shutdown"
     )
+
+
+class TestSecondsUntilNextUtcHalfPast:
+    """The reconcile sweep aims at :30, and the obvious arithmetic misses it.
+
+    ``seconds_until_next_utc_top_of_hour() + 1800`` reads like "half past"
+    but is not: that helper returns the distance to the next :00, so adding
+    half an hour lands half past the FOLLOWING hour. Evaluated at 10:05 it
+    schedules 11:30 rather than 10:30 — skipping the mark and waiting 85
+    minutes instead of 25. Delay providers are recomputed every cycle, so the
+    error surfaces on every process start landing in the first half of an hour.
+    """
+
+    def test_before_the_mark_waits_only_until_this_hours_half_past(self) -> None:
+        now = datetime(2026, 9, 16, 10, 5, tzinfo=UTC)
+        assert seconds_until_next_utc_half_past(now=now) == 25 * 60
+
+    def test_after_the_mark_rolls_to_the_next_hour(self) -> None:
+        now = datetime(2026, 9, 16, 10, 45, tzinfo=UTC)
+        assert seconds_until_next_utc_half_past(now=now) == 45 * 60
+
+    def test_exactly_on_the_mark_is_strictly_future(self) -> None:
+        """Never returns 0, or an aligned task hot-loops after a fast failure."""
+        now = datetime(2026, 9, 16, 10, 30, tzinfo=UTC)
+        assert seconds_until_next_utc_half_past(now=now) == 3600
+
+    def test_always_lands_on_a_half_past_mark_and_stays_within_an_hour(self) -> None:
+        for minute in range(0, 60, 7):
+            for second in (0, 31):
+                now = datetime(2026, 9, 16, 10, minute, second, tzinfo=UTC)
+                delay = seconds_until_next_utc_half_past(now=now)
+                assert 0 < delay <= 3600
+                landed = now + timedelta(seconds=delay)
+                assert (landed.minute, landed.second) == (30, 0), (
+                    f"from {now.time()} landed on {landed.time()}"
+                )
+
+    def test_is_not_the_add_1800_formula_it_replaces(self) -> None:
+        """Pins the actual defect, so a revert to the old arithmetic fails."""
+        now = datetime(2026, 9, 16, 10, 5, tzinfo=UTC)
+        buggy = seconds_until_next_utc_top_of_hour(now=now) + 1800
+        assert buggy == 85 * 60, "the old formula's error, for the record"
+        assert seconds_until_next_utc_half_past(now=now) != buggy

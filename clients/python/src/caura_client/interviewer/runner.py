@@ -21,7 +21,6 @@ import hashlib
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import httpx
 
@@ -61,7 +60,7 @@ def watermark_doc_id(node_id: str) -> str:
 class RunConfig:
     agent_id: str
     machine12: str
-    fleet_id: Optional[str] = None
+    fleet_id: str | None = None
     max_event_chars: int = 4_000
     max_windows: int = 8
     min_events: int = 10
@@ -76,8 +75,8 @@ class FileResult:
     windows_submitted: int = 0
     events_submitted: int = 0
     memories_written: int = 0
-    skipped_reason: Optional[str] = None
-    error: Optional[str] = None
+    skipped_reason: str | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -232,7 +231,7 @@ def run_all(mc: Caura, transcripts: list[Transcript], cfg: RunConfig) -> RunSumm
             print(f"[interviewer] ABORT: {exc} (tenant not enabled, or bad credentials)", file=sys.stderr)
             summary.aborted = True
             break
-        except Exception as exc:  # per-file isolation: one bad file never stops the run
+        except Exception as exc:  # noqa: BLE001 - per-file isolation must keep the run going.
             result = FileResult(path=transcript.path, error=f"unexpected: {exc}")
             print(f"[interviewer] ERROR {transcript.path.name}: {exc}", file=sys.stderr)
         summary.windows_budget_left -= result.windows_submitted

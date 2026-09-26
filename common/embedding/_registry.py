@@ -26,6 +26,31 @@ from common.provider_names import ProviderName
 
 logger = logging.getLogger(__name__)
 
+# C38 — default model for ``EMBEDDING_PROVIDER=local``. MUST emit VECTOR_DIM
+# dimensions: ``memories.embedding`` is ``vector(VECTOR_DIM)``, so a narrower
+# model is rejected by Postgres at INSERT — far from the misconfiguration that
+# caused it. bge-large is 1024; the previously hard-coded bge-BASE is 768 and
+# could never have worked against this schema.
+DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
+
+# Cache ``LocalEmbedding`` instances by model name. The loaded
+# ``SentenceTransformer`` lives on the *instance* (``self._model``), and
+# ``get_embedding_provider`` runs on every embed/search request — so a
+# fresh instance per call meant every request paid a full model load
+# from disk (seconds, plus its own copy of the weights in RAM until GC)
+# instead of hitting the already-warm model. This is the "registry's
+# per-model instance cache" that ``LocalEmbedding.dedup_scope`` was
+# already written against.
+#
+# Unlike ``_openai_provider_cache`` there is no eviction: nothing to
+# close (no connection pool, no credential to rotate), and the key space
+# is env-driven (``LOCAL_EMBEDDING_MODEL``), so a process realistically
+# holds one entry. No lock either — there is no await between lookup and
+# insert, so coroutines can't interleave a double-construct, and
+# construction is cheap anyway (the model load is lazy and
+# single-flighted behind the instance's ``_load_lock``).
+_local_provider_cache: dict[str, LocalEmbedding] = {}
+
 # Cache OpenAI provider instances by (api_key, model). Each instance
 # holds a long-lived ``AsyncOpenAI`` (and therefore a long-lived
 # ``httpx.AsyncClient`` connection pool); without the cache, every
@@ -339,6 +364,18 @@ def get_embedding_provider(
         )
 
     if name == ProviderName.LOCAL:
-        return LocalEmbedding()
+        # C38 — read from the environment, not a service's settings: this
+        # registry is shared with core-worker and must not import one service's
+        # config. pydantic-settings maps core-api's ``local_embedding_model`` to
+        # this same var, so the two stay in step. ``or`` (not a default=) so an
+        # empty value falls back rather than loading a model named "".
+        model_name = (
+            os.environ.get("LOCAL_EMBEDDING_MODEL") or DEFAULT_LOCAL_EMBEDDING_MODEL
+        )
+        provider = _local_provider_cache.get(model_name)
+        if provider is None:
+            provider = LocalEmbedding(model_name)
+            _local_provider_cache[model_name] = provider
+        return provider
 
     raise ValueError(f"Unknown embedding provider: {name}")

@@ -46,6 +46,10 @@ OPENROUTER_CHAT_BASE_URL = os.environ.get(
 OPENROUTER_DEFAULT_MODEL = os.environ.get(
     "OPENROUTER_DEFAULT_MODEL", "openai/gpt-5.4-nano"
 )
+ATLASCLOUD_CHAT_BASE_URL = "https://api.atlascloud.ai/v1"
+ATLASCLOUD_DEFAULT_MODEL = os.environ.get(
+    "ATLASCLOUD_DEFAULT_MODEL", "openai/gpt-4.1-mini"
+)
 
 # ── Retry policy ─────────────────────────────────────────────────────
 

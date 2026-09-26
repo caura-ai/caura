@@ -35,6 +35,8 @@ committed, which inverts the trade.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -53,6 +55,35 @@ TENANT = "t-h09"
 FLEET = "f1"
 AGENT = "a"
 CHUNKS = ("chunk one", "chunk two", "chunk three")
+
+
+def _errors_from_this_task(caplog) -> list[logging.LogRecord]:
+    """ERROR records emitted by the work this test awaited.
+
+    ``caplog.records`` is the root handler's capture, so it also holds records
+    from background tasks an EARLIER test scheduled: this suite runs on a
+    session-scoped event loop, so those tasks outlive the test that started
+    them and surface in whichever test is running when they complete.
+
+    Filtering by logger name cannot separate them here. The observed intruder
+    is ``core_api.services.contradiction_detector``, and the code under test
+    logs from both ``core_api.services.memory_service`` and
+    ``core_api.pipeline.runner`` — a shared prefix, so any name-based rule
+    either lets the intruder through or drops a real ERROR from the runner.
+
+    ``taskName`` (3.12+) names the asyncio task that emitted the record, which
+    is the question actually being asked: was this logged by the work I
+    awaited? The awaited path spawns no task of its own — ``tracked_task`` is
+    patched to close the coroutine unawaited — so every legitimate record
+    carries this task's name.
+
+    ``r.taskName`` is read directly rather than through
+    ``getattr(r, "taskName", None)``. On a runtime without the attribute an
+    AttributeError is far better than an absence assertion that passes because
+    every record was silently dropped.
+    """
+    me = asyncio.current_task().get_name()
+    return [r for r in caplog.records if r.levelname == "ERROR" and r.taskName == me]
 
 
 class EmbedDown(RuntimeError):
@@ -111,7 +142,6 @@ async def _run(
     embed_raises: bool,
     return_ids: bool = True,
     inline: bool = True,
-    legacy: bool = False,
     rotate_results: bool = False,
     duplicate_refusal: bool = False,
     bad_id_index: int | None = None,
@@ -121,9 +151,7 @@ async def _run(
     ``embed_raises`` makes the CHILD batch embed fail the way a degraded
     provider does. ``return_ids`` controls whether the bulk insert reports a
     usable id per row, which is the difference between a queued repair and the
-    loud no-id log. ``legacy`` flips ``_USE_PIPELINE_WRITE`` and enters through
-    ``create_memory``, so the rollback path is exercised through the real
-    dispatch rather than by calling its private handler.
+    loud no-id log.
 
     ``rotate_results`` returns the bulk-insert results in an order that matches
     no payload position, to pin the payload-to-result join. Storage guarantees
@@ -146,10 +174,10 @@ async def _run(
     sc = AsyncMock(name="storage_client")
     sc.create_memory = AsyncMock(return_value=parent_row)
     sc.bulk_find_by_content_hashes = AsyncMock(return_value={})
-    # The legacy path runs a dedup pre-check the pipeline path does not. A bare
-    # AsyncMock answers it with a truthy mock, which the handler reads as "this
-    # content already exists" and 409s before ever reaching the embed — so
-    # without this the legacy tests fail on a duplicate that does not exist.
+    # Explicitly ``None`` because a bare AsyncMock answers the exact-duplicate
+    # pre-check with a truthy mock, which reads as "this content already
+    # exists" and 409s before ever reaching the embed — a duplicate that does
+    # not exist, failing the run for the wrong reason.
     sc.find_by_content_hash = AsyncMock(return_value=None)
 
     async def _create_memories(payloads):
@@ -244,28 +272,17 @@ async def _run(
         patch.object(memory_service, "get_embeddings_batch", new=_embeddings),
         patch.object(memory_service, "_schedule_embed_or_reembed", new=_schedule),
         patch("core_api.services.ingest_service._chunk_content", new=_chunk_content),
-        patch.object(memory_service, "_USE_PIPELINE_WRITE", not legacy),
-        # Both dedup pre-checks are legacy-path-only and answer truthy off a
-        # bare AsyncMock, which the handler reads as "already exists" and 409s
-        # before reaching the embed. Neither is what these tests are about.
-        patch.object(
-            memory_service, "_find_semantic_duplicate", AsyncMock(return_value=None)
-        ),
-        # The legacy handler resolves its OWN config rather than taking the
-        # ctx one, so ``auto_chunk_enabled`` has to be supplied here or the
-        # branch under test is never entered and the run looks like a pass.
+        # ``auto_chunk_enabled`` has to be supplied here or the branch under
+        # test is never entered and the run looks like a pass. The pipeline
+        # handler imports ``resolve_config`` inside the function, so patching
+        # the module attribute reaches it.
         patch(
             "core_api.services.organization_settings.resolve_config",
             AsyncMock(return_value=config),
         ),
     ):
         try:
-            if legacy:
-                # Through the public entry point, so the dispatch that selects
-                # the rollback handler is part of what is under test.
-                await memory_service.create_memory(data)
-            else:
-                await memory_service._handle_auto_chunk_from_ctx(data, ctx)
+            await memory_service._handle_auto_chunk_from_ctx(data, ctx)
         except Exception as exc:
             # Captured rather than propagated: the escape IS the defect, so the
             # tests assert on ``run.raised`` instead of wrapping each call in
@@ -401,7 +418,7 @@ async def test_a_duplicate_refusal_reports_no_unrepairable_rows(caplog) -> None:
     assert run.raised is None
     assert run.reembeds == [], "a repair was queued for a row that was never written"
 
-    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    errors = _errors_from_this_task(caplog)
     assert errors == [], (
         "a duplicate refusal is a fully-explained WARNING-level outcome; "
         f"it must not raise ERRORs: {[r.getMessage()[:90] for r in errors]}"
@@ -412,6 +429,42 @@ async def test_a_duplicate_refusal_reports_no_unrepairable_rows(caplog) -> None:
     assert any("refused as duplicates" in r.getMessage() for r in caplog.records), (
         f"the refusal itself went unlogged: {[r.getMessage()[:60] for r in caplog.records]}"
     )
+
+
+async def test_the_error_absence_ignores_another_tasks_record(caplog) -> None:
+    """An absence claim must not be breakable by an unrelated background task.
+
+    The assertion above is ``errors == []``, so unlike an ``any(<substring>)``
+    check a foreign ERROR does not merely weaken it — it turns it RED. That is
+    how a test which is right about the code becomes a red build nobody can
+    reproduce: the same shape took CI down on #1349, from
+    ``detect_contradictions_async``'s fire-and-forget ``logger.exception``.
+
+    The stand-in is scheduled as its own task, because that is what makes it
+    distinguishable from the awaited work — and what makes this test fail
+    without the fix.
+    """
+
+    async def _leak() -> None:
+        logging.getLogger("core_api.services.contradiction_detector").error(
+            "Async contradiction detection failed for memory %s", "some-uuid"
+        )
+
+    with caplog.at_level("DEBUG"):
+        run = await _run(embed_raises=True, duplicate_refusal=True)
+        await asyncio.create_task(_leak())
+
+    assert run.raised is None
+    mine = _errors_from_this_task(caplog)
+    assert mine == [], (
+        "another task's ERROR was attributed to this one: "
+        f"{[(r.name, r.taskName) for r in mine]}"
+    )
+    # Anti-vacuity: the stand-in really did reach the capture, so the filter is
+    # what excluded it rather than a foreign record that never arrived.
+    assert [r.name for r in caplog.records if r.levelname == "ERROR"] == [
+        "core_api.services.contradiction_detector"
+    ], "the stand-in intruder was not captured, so this proves nothing"
 
 
 async def test_an_unparseable_child_id_does_not_escape_the_request(caplog) -> None:
@@ -521,46 +574,30 @@ async def test_a_child_with_no_returned_id_is_logged_not_silently_dropped(
     )
 
 
-async def test_the_legacy_handler_degrades_too(caplog) -> None:
-    """The rollback path carries the same fix, driven through the real handler.
-
-    ``_create_memory_legacy`` had the identical shape and I first left it alone
-    on the grounds that it was dead behind ``_USE_PIPELINE_WRITE=True``. That
-    was wrong: the flag's own comment documents flipping it as the
-    emergency-rollback lever, so the path is DORMANT, not dead. And the
-    correlation is adverse — an emergency rollback is plausibly happening
-    BECAUSE something is degraded, which is the same condition that trips this
-    bug. The defect would have resurfaced during exactly the incident the lever
-    exists for.
-
-    Driven with the flag flipped, so this exercises the dispatch too rather
-    than calling the private handler directly.
-    """
-    run = await _run(embed_raises=True, legacy=True)
-    assert run.raised is None, (
-        f"legacy child embed failure escaped as {type(run.raised).__name__}: {run.raised}"
-    )
-    assert len(run.children) == len(CHUNKS), "legacy path wrote no children"
-    assert all(c["embedding"] is None for c in run.children)
-    assert all(c["metadata_"].get("embedding_pending") is True for c in run.children)
-    assert len(run.scheduled_for("embed_or_publish")) == len(CHUNKS)
-
-
-async def test_the_legacy_healthy_path_schedules_nothing() -> None:
-    """OVER-REFUSAL GUARD for the rollback path, same as the pipeline one."""
-    run = await _run(embed_raises=False, legacy=True)
-    assert run.raised is None
-    assert all(c["embedding"] is not None for c in run.children)
-    assert run.scheduled_for("embed_or_publish") == set()
-
-
-async def test_both_paths_share_one_degrade_policy() -> None:
-    """Anti-drift: the two handlers must not grow separate copies.
+async def test_the_degrade_policy_lives_in_one_place() -> None:
+    """Anti-drift: the auto-chunk degrade logic must not be written twice again.
 
     H-09 existed in two places at once because the auto-chunk logic was
-    written twice. The embed-degrade, the pending flag and the repair
-    scheduling now live in one helper each; this pins that both handlers route
-    through them, so a change to one cannot silently miss the other.
+    written twice — once in the pipeline handler and once in
+    ``_create_memory_legacy``. Deleting the legacy handler removed that pair
+    structurally, so this no longer checks that BOTH handlers route through
+    the shared helpers, as it did while there were two.
+
+    What is still worth pinning is the shape that made the fix hold: the raw
+    child batch embed appears in exactly one place. Re-inlining that call is
+    how H-09 would come back — a second batch embed with its own, unfixed,
+    error handling.
+
+    ``_embed_children_or_degrade`` is checked for callers but NOT held to
+    exactly one. It gained a second when the atomic-fact fan-out stopped
+    embedding one fact at a time (OSS 08/14 L-38) and routed its batch through
+    this helper. That is the opposite of the H-09 shape: H-09 was two
+    implementations of the degrade decision, of which one got fixed, and a
+    caller reusing the single implementation cannot reproduce it. The assertion
+    that actually forbids H-09 is the ``raw == 1`` check above, which a
+    second-implementation caller would fail no matter how many call sites were
+    permitted. The other two helpers stay pinned at one caller because they are
+    still auto-chunk-only; a second caller there would be a real new path.
     """
     import inspect
 
@@ -571,13 +608,27 @@ async def test_both_paths_share_one_degrade_policy() -> None:
         f"expected the child batch embed to be called in exactly one place "
         f"(the shared helper); found {raw}"
     )
-    assert src.count("_embed_children_or_degrade(") >= 3, (
-        "both handlers must call the helper"
-    )
-    assert src.count("_queue_child_reembeds(") >= 3, "both handlers must queue repairs"
-    assert src.count("_mark_child_embedding_pending(") >= 3, (
-        "both handlers must mark pending"
-    )
+    # helper -> exact call-site count, or None for "at least one".
+    for helper, expected_calls in (
+        ("_embed_children_or_degrade", None),
+        ("_queue_child_reembeds", 1),
+        ("_mark_child_embedding_pending", 1),
+    ):
+        defs = src.count(f"def {helper}(")
+        calls = src.count(f"{helper}(") - defs
+        assert defs == 1, f"{helper} is defined {defs} times, expected 1"
+        if expected_calls is None:
+            assert calls >= 1, (
+                f"{helper} has no call sites — the degrade policy is defined "
+                f"but nothing routes through it, which is H-09 with the fix "
+                f"orphaned rather than duplicated."
+            )
+        else:
+            assert calls == expected_calls, (
+                f"{helper} has {calls} call sites, expected exactly "
+                f"{expected_calls}. A second caller is the H-09 shape: two "
+                f"copies of the auto-chunk path, one of which gets fixed."
+            )
 
 
 async def test_the_no_id_log_carries_no_memory_content(caplog) -> None:

@@ -9,6 +9,7 @@
 
 import { CAURA_API_PREFIX, CAURA_API_URL, CAURA_API_KEY } from "./env.js";
 import { resolveAgentKey, evictAgentKey } from "./agent-auth.js";
+import { withUserAgent } from "./user-agent.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -48,7 +49,7 @@ export async function apiCall(
     if (agentKey) effectiveKey = agentKey;
   }
 
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = withUserAgent();
   if (body) headers["Content-Type"] = "application/json";
   if (effectiveKey) headers["X-API-Key"] = effectiveKey;
   // Caller-supplied headers (e.g. the per-attempt `X-Bulk-Attempt-Id`
@@ -67,22 +68,27 @@ export async function apiCall(
   }
 
   try {
-    const res = await fetch(url.toString(), {
+    const requestInit: RequestInit = {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
       signal: effectiveSignal,
-    });
+    };
+    let res = await fetch(url.toString(), requestInit);
+
+    // A rejected agent credential gets exactly one fallback attempt with the
+    // tenant key. Retrying in this frame avoids re-deriving ``agent_id`` from
+    // the body/query and recursively provisioning the same rejected key.
+    if (res.status === 401 && effectiveKey !== CAURA_API_KEY && effectiveAgentId) {
+      evictAgentKey(effectiveAgentId);
+      console.warn(`[caura] Agent key rejected for '${effectiveAgentId}', retrying with tenant key`);
+      const retryHeaders = { ...headers };
+      if (CAURA_API_KEY) retryHeaders["X-API-Key"] = CAURA_API_KEY;
+      else delete retryHeaders["X-API-Key"];
+      res = await fetch(url.toString(), { ...requestInit, headers: retryHeaders });
+    }
 
     if (!res.ok) {
-      // 401 with agent key → evict and retry once with tenant key
-      if (res.status === 401 && effectiveKey !== CAURA_API_KEY && effectiveAgentId) {
-        evictAgentKey(effectiveAgentId);
-        console.warn(`[caura] Agent key rejected for '${effectiveAgentId}', retrying with tenant key`);
-        // Forward extraHeaders so the retry reuses the same per-attempt
-        // idempotency id (a fresh id would defeat bulk de-dup on retry).
-        return apiCall(method, path, body, query, signal, undefined, extraHeaders);  // retry without agentId → uses tenant key
-      }
       const text = await res.text();
       // Truncate server error body to avoid leaking internal details
       const safeText = text.length > 200 ? text.slice(0, 200) + "..." : text;

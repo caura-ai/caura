@@ -33,7 +33,7 @@
 
    ```bash
    docker compose up -d db    # bring just the DB back
-   docker exec <container> pg_dump -U memclaw memclaw > backup-pre-v2.sql
+   docker exec <container> pg_dump -U memclaw memclaw > backup-pre-v2.sql # legacy-name-floor: historical v1 database role and name required by this migration command
    docker compose down
    ```
 
@@ -136,3 +136,10 @@ No public API changes. Code that reads memory embeddings via the search/recall
 endpoints is unaffected. External clients should not assume a vector width;
 custom integrations that directly handle the internal storage schema must
 migrate from 768 to 1024 dimensions with the database.
+
+## Upgrading the plugin
+
+Everything above is the server. Nodes running the OpenClaw plugin upgrade on
+their own path — heartbeat-driven auto-upgrade, with a manual re-install for
+the cases the server refuses to auto-deploy. See
+[`plugin-upgrade.md`](plugin-upgrade.md).

@@ -47,19 +47,23 @@ describe("isNetworkClassError", () => {
   // runtime to silently absorb application-level errors into "unreachable".
   test("HTTP 5xx is network-class", () => {
     for (const code of [500, 502, 503, 504]) {
-      assert.ok(
-        isNetworkClassError(new Error(`http ${code}: something`)),
-        `${code} should be network-class`,
-      );
+      for (const prefix of ["http", "Caura API"]) {
+        assert.ok(
+          isNetworkClassError(new Error(`${prefix} ${code}: something`)),
+          `${prefix} ${code} should be network-class`,
+        );
+      }
     }
   });
 
   test("HTTP 4xx is NOT network-class", () => {
     for (const code of [400, 401, 403, 404, 409, 422, 429]) {
-      assert.ok(
-        !isNetworkClassError(new Error(`http ${code}: nope`)),
-        `${code} must not be network-class`,
-      );
+      for (const prefix of ["http", "Caura API"]) {
+        assert.ok(
+          !isNetworkClassError(new Error(`${prefix} ${code}: nope`)),
+          `${prefix} ${code} must not be network-class`,
+        );
+      }
     }
   });
 
@@ -113,13 +117,13 @@ describe("trackReachability", () => {
   test("network-class failure marks unreachable and re-throws", async () => {
     await assert.rejects(
       trackReachability(async () => {
-        throw new Error("fetch failed");
+        throw new Error("Caura API 503: unavailable");
       }),
-      /fetch failed/,
+      /503/,
     );
     const s = getReachability();
     assert.equal(s.state, "unreachable");
-    assert.match(s.reason ?? "", /fetch failed/);
+    assert.match(s.reason ?? "", /503/);
   });
 
   test("4xx failure re-throws but leaves tracker untouched", async () => {

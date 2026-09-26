@@ -181,6 +181,30 @@ async def test_recall_refuses_a_caller_agent_id_that_is_not_the_caller(
     assert "does not match the authenticated agent identity" in resp.text
 
 
+async def test_recall_refuses_an_explicitly_empty_filter_agent_id(client, sc, as_auth):
+    """An empty string is an assertion, not an omission.
+
+    #1364 collapsed eight hand-written self-plane conditions onto one gate and
+    had to reconcile their one genuine disagreement: five compared
+    unconditionally, so an empty string was already a 403 there; three guarded
+    on truthiness and let it through, and these two ``/recall`` knobs were two
+    of the three. The gate took the stricter reading and pinned it only as a
+    unit test on the helper. This is that decision at the route level, in the
+    spelling a client actually produces — not ``?agent_id=`` but a serializer
+    that emits ``""`` for an unset field, which reaches ``/recall`` and
+    ``/search`` through this body. Measured: answers 200, not 403, if the gate
+    goes back to a truthiness guard.
+    """
+    tenant_id, _, query, _peer, attacker = await _setup(client, sc)
+    as_auth(tenant_id, attacker)
+
+    resp = await client.post(
+        "/api/v1/recall",
+        json={"tenant_id": tenant_id, "query": query, "filter_agent_id": ""},
+    )
+    assert resp.status_code == 403, resp.text
+
+
 async def test_recall_allows_an_agent_naming_itself(client, sc, as_auth):
     """The gate must not over-refuse: naming yourself is the normal case."""
     tenant_id, _, query, _peer, attacker = await _setup(client, sc)

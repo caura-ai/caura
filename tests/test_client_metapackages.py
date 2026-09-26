@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -60,6 +62,13 @@ NPM_REEXPORT_TARGET = {
 # Metapackages only — the implementation is excluded, since it is the thing
 # they all depend on.
 PY_METAPACKAGES = ("caura-meta", "caura-sdk-meta")
+
+# The former client name, held on PyPI as an empty redirect shell that installs
+# ``caura-client``. It ships no import package, so the collision check below
+# skips it, but it must still be releasable from CI like every other alias.
+PY_SHELLS = {
+    "memclaw-client-shim": "memclaw-client",  # legacy-name-ok: the retired distribution name held as a redirect
+}
 NPM_METAPACKAGES = ("npm-sdk",)
 
 
@@ -119,7 +128,9 @@ def _run_workflow_step(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("directory,expected_name", sorted(PY_DISTS.items()))
+@pytest.mark.parametrize(
+    "directory,expected_name", sorted({**PY_DISTS, **PY_SHELLS}.items())
+)
 def test_python_distribution_names_are_stable(
     directory: str, expected_name: str
 ) -> None:
@@ -128,11 +139,53 @@ def test_python_distribution_names_are_stable(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("directory", PY_METAPACKAGES)
+@pytest.mark.parametrize("directory", (*PY_METAPACKAGES, *PY_SHELLS))
 def test_python_metapackages_depend_on_the_real_client(directory: str) -> None:
     """A metapackage that installs nothing is a stub — the thing we said these are not."""
     deps = _pyproject(directory)["project"]["dependencies"]
     assert any(d.startswith("caura-client") for d in deps), deps
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("directory", "import_package"),
+    (("caura-meta", "caura"), ("caura-sdk-meta", "caura_sdk")),
+)
+def test_python_metapackages_publish_typing_markers(
+    directory: str, import_package: str, tmp_path: Path
+) -> None:
+    """Re-export packages remain typed instead of degrading imports to ``Any``."""
+    package_root = CLIENTS / directory / "src" / import_package
+    assert (package_root / "py.typed").is_file()
+    package_data = _pyproject(directory)["tool"]["setuptools"]["package-data"]
+    assert package_data[import_package] == ["py.typed"]
+
+    source_copy = tmp_path / directory
+    wheel_dir = tmp_path / "wheel"
+    shutil.copytree(
+        CLIENTS / directory,
+        source_copy,
+        ignore=shutil.ignore_patterns("*.egg-info", "build", "dist"),
+    )
+    wheel_dir.mkdir()
+    result = subprocess.run(
+        [
+            "uv",
+            "build",
+            "--wheel",
+            str(source_copy),
+            "--out-dir",
+            str(wheel_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    wheels = list(wheel_dir.glob("*.whl"))
+    assert len(wheels) == 1, wheels
+    with zipfile.ZipFile(wheels[0]) as wheel:
+        assert f"{import_package}/py.typed" in wheel.namelist()
 
 
 @pytest.mark.unit
@@ -188,14 +241,26 @@ def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() ->
     assert "if: startsWith(github.ref, 'refs/tags/')" in guard_header
 
 
+# The version the TypeScript client currently declares, so a bump does not
+# have to touch this test: the guard's job is agreement, not a fixed number.
+_TS_CLIENT_VERSION = json.loads((CLIENTS / "typescript" / "package.json").read_text())[
+    "version"
+]
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("tag", "directory", "should_pass", "message"),
     [
-        ("caura-client-ts-v1.0.1", "typescript", True, "both Caura-spelled"),
-        ("caura-npm-v1.0.1", "typescript", True, "both Caura-spelled"),
         (
-            "unrelated-v1.0.1",
+            f"caura-client-ts-v{_TS_CLIENT_VERSION}",
+            "typescript",
+            True,
+            "both Caura-spelled",
+        ),
+        (f"caura-npm-v{_TS_CLIENT_VERSION}", "typescript", True, "both Caura-spelled"),
+        (
+            f"unrelated-v{_TS_CLIENT_VERSION}",
             "typescript",
             False,
             "does not use a supported client prefix",
@@ -204,7 +269,7 @@ def test_npm_client_tag_package_agreement_precedes_build_and_skips_dispatch() ->
             "caura-client-ts-v9.9.9",
             "typescript",
             False,
-            "says 9.9.9 but package.json says 1.0.1",
+            f"says 9.9.9 but package.json says {_TS_CLIENT_VERSION}",
         ),
     ],
 )
@@ -244,7 +309,7 @@ def test_npm_client_tag_package_agreement_rejects_an_unknown_brand(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "directory", sorted({*PY_DISTS, *NPM_DISTS} - {"typescript", "python"})
+    "directory", sorted({*PY_DISTS, *PY_SHELLS, *NPM_DISTS} - {"typescript", "python"})
 )
 def test_every_metapackage_has_a_publish_workflow(directory: str) -> None:
     """`caura` shipped for a week with no workflow. Nothing else does that."""

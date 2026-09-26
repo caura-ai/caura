@@ -84,6 +84,41 @@ async def list_entities(
     return [orm_to_dict(e, ENTITY_FIELDS) for e in entities]
 
 
+@router.post("/by-ids")
+async def get_entities_by_ids(request: Request) -> dict:
+    """Fetch many entities by id in one round-trip, scoped to one tenant.
+
+    POST rather than GET because the id list is unbounded in principle and a
+    query string is not where a caller should be discovering a URL-length
+    limit; the body is the same shape ``/memory-ids-by-entity-ids`` and
+    ``/count-memories`` already take.
+
+    Ids outside ``tenant_id`` are absent from the response rather than an
+    error — see ``entity_get_by_ids`` for why a batch read must filter where
+    the per-id route 404s. ``tenant_id`` is required (422 without it), so this
+    route can never degrade into the bare primary-key lookup #1174 removed
+    from ``GET /entities/{entity_id}``.
+
+    Declared above the parameterised ``/{entity_id}`` routes only for the
+    file's ordering convention — being a POST, it could not be shadowed by
+    the GET anyway.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    raw_ids = body.get("entity_ids") or []
+    if not isinstance(raw_ids, list):
+        raise HTTPException(status_code=422, detail="entity_ids must be a list")
+    try:
+        entity_ids = [UUID(eid) for eid in raw_ids]
+    except (ValueError, AttributeError, TypeError) as exc:
+        # A malformed id in the list is the caller's bug, not a 500. The
+        # per-id route gets this for free from FastAPI's ``entity_id: UUID``
+        # path coercion; a body-carried list has to say it itself.
+        raise HTTPException(status_code=422, detail=f"invalid entity_id UUID: {exc}") from exc
+    entities = await _svc.entity_get_by_ids(entity_ids, tenant_id)
+    return {str(eid): orm_to_dict(e, ENTITY_FIELDS) for eid, e in entities.items()}
+
+
 @router.get("/exact")
 async def find_exact_entity(
     tenant_id: str,
@@ -109,6 +144,7 @@ async def fts_search_entities(request: Request) -> list[str]:
         tokens=body["tokens"],
         tenant_id=body["tenant_id"],
         fleet_ids=body.get("fleet_ids"),
+        strict_fleet_scoping=body.get("strict_fleet_scoping", False),
     )
     return [str(eid) for eid in ids]
 
@@ -346,7 +382,15 @@ async def get_full_graph(
 @router.post("/relations")
 async def create_relation(request: Request) -> dict:
     body: dict = await request.json()
-    relation = await _svc.relation_add(body)
+    try:
+        relation = await _svc.relation_add(body)
+    except ValueError as e:
+        # M-64. Without this the service's endpoint-ownership refusal would
+        # surface as a 500 — indistinguishable from storage being broken, which
+        # is the same conflation ``entity_add`` and ``create_memory_entity_link``
+        # already resolved as 409. A caller naming an entity it does not own is
+        # a client error.
+        raise HTTPException(status_code=409, detail=str(e))
     return orm_to_dict(relation, RELATION_FIELDS)
 
 
@@ -462,14 +506,18 @@ async def count_memories_per_entity(request: Request) -> dict:
 
 
 @router.get("/orphaned")
-async def find_orphaned_entities(tenant_id: str) -> list[dict]:
-    rows = await _svc.entity_find_orphaned(tenant_id, fleet_id=None)
+async def find_orphaned_entities(tenant_id: str, fleet_id: str | None = None) -> list[dict]:
+    # ``fleet_id`` was hardcoded None here while the service below has always
+    # taken it, so a fleet-scoped crystallizer report carried TENANT-WIDE
+    # counts. Optional with a None default, so a storage instance deployed
+    # ahead of core-api keeps serving callers that don't send it.
+    rows = await _svc.entity_find_orphaned(tenant_id, fleet_id=fleet_id)
     return [{"id": str(row[0]), "canonical_name": row[1]} for row in rows]
 
 
 @router.get("/broken-links")
-async def find_broken_entity_links(tenant_id: str) -> list[dict]:
-    rows = await _svc.entity_find_broken_links(tenant_id, fleet_id=None)
+async def find_broken_entity_links(tenant_id: str, fleet_id: str | None = None) -> list[dict]:
+    rows = await _svc.entity_find_broken_links(tenant_id, fleet_id=fleet_id)
     return [{"memory_id": str(row[0]), "entity_id": str(row[1])} for row in rows]
 
 

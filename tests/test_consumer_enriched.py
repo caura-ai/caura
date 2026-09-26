@@ -30,6 +30,22 @@ from common.events.base import Event
 from common.events.topics import Topics
 from core_api import consumer
 
+
+def _consumer_errors(caplog) -> list[logging.LogRecord]:
+    """The ERROR records this module's tests are about.
+
+    ``caplog.records`` is the root handler's capture, so it holds records from
+    every logger that propagates — including background tasks unrelated to the
+    test. Filtering on level alone lets those through, which matters wherever a
+    test indexes or counts the result.
+    """
+    return [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.ERROR and r.name == consumer.logger.name
+    ]
+
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -366,8 +382,55 @@ async def test_embedded_handler_does_not_silently_absorb_a_missing_embedding(
     await consumer.handle_memory_embedded(_embedded_event(memory_id))
 
     mock_detect.assert_not_awaited()
-    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    # Scoped to the consumer's own logger. ``caplog.set_level(..., logger=...)``
+    # sets the level on that logger, but ``caplog.records`` is the root
+    # handler's capture — every logger that propagates — so an unrelated ERROR
+    # arriving mid-test would take slot [0] and this would assert against the
+    # wrong record. See the test below.
+    errors = _consumer_errors(caplog)
     assert errors, (
         f"expected an ERROR; got {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+    )
+    assert "embedding missing on read-back" in errors[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_the_missing_embedding_error_is_read_off_the_consumer_logger(
+    mock_storage_client, mock_detect, caplog
+) -> None:
+    """A foreign ERROR must not be mistaken for the consumer's.
+
+    The sibling above indexes ``[0]``, and its filter used to select on level
+    alone, so any unrelated ERROR captured during the test was read instead of
+    the consumer's. The real intruder was ``detect_contradictions_async``'s
+    ``logger.exception`` — fire-and-forget, so with a session-scoped event loop
+    its failure surfaces in whatever test happens to be running rather than the
+    one that scheduled it. That made the failure look like flakiness.
+
+    This stands in for the intruder deterministically instead of waiting for
+    the interleaving that produced it.
+    """
+    caplog.set_level(logging.WARNING, logger="core_api.consumer")
+    memory_id = uuid.uuid4()
+    mock_storage_client.get_memory.return_value = {
+        "id": str(memory_id),
+        "tenant_id": "tenant-A",
+        "fleet_id": None,
+        "content": "x",
+        "embedding": None,
+    }
+
+    # Lands ahead of the consumer's own record, exactly as a background task's
+    # would, and at a level the filter selects.
+    logging.getLogger("core_api.services.contradiction_detector").error(
+        "Async contradiction detection failed for memory %s", memory_id
+    )
+
+    await consumer.handle_memory_embedded(_embedded_event(memory_id))
+
+    errors = _consumer_errors(caplog)
+    assert len(errors) == 1, (
+        "expected only the consumer's own ERROR; got "
+        f"{[(r.name, r.getMessage()) for r in errors]}"
     )
     assert "embedding missing on read-back" in errors[0].getMessage()

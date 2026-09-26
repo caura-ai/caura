@@ -23,6 +23,9 @@ per test keeps concurrent suite runs isolated. Mirrors test_ph5b_evolve_storage.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import logging
 from uuid import uuid4
 
 import pytest
@@ -396,6 +399,82 @@ async def test_discover_no_candidates_returns_zero(sc):
         target_memory_ids=None,
     )
     assert resp == {"skipped": True, "links_created": 0}
+
+
+async def test_discover_logs_a_phase_breakdown(sc, caplog: pytest.LogCaptureFixture):
+    """caura#1616: the success line carries where the time went.
+
+    Not cosmetic. This endpoint is the one that times out for one tenant, and
+    a 504 names only the endpoint — it cannot tell a candidate query that
+    aggregates every memory in the tenant from a LATERAL running one ANN scan
+    per candidate, which want opposite fixes. The four phases are asserted by
+    name because the breakdown is only useful if it distinguishes them; the
+    durations are not, since a seeded test tenant answers in microseconds."""
+    tenant = _t()
+    emb = fake_embedding("dave")
+    await _seed_entity(
+        tenant_id=tenant,
+        canonical_name="Dave",
+        entity_type="person",
+        name_embedding=emb,
+    )
+    await _seed_memory(tenant_id=tenant, content="Dave plays bass", embedding=emb)
+
+    caplog.set_level(logging.INFO, logger="core_storage_api.services.postgres_service")
+    resp = await sc.discover_cross_links(
+        tenant_id=tenant,
+        fleet_id=None,
+        batch_size=200,
+        threshold=0.75,
+        text_verify=True,
+        target_memory_ids=None,
+    )
+    assert resp["links_created"] == 1
+
+    lines = [r.getMessage() for r in caplog.records if "cross-links" in r.getMessage()]
+    assert lines, "expected the cross-link summary line"
+    for phase in ("candidates=", "lateral=", "text_verify=", "insert=", "other="):
+        assert phase in lines[-1], f"{phase} missing from {lines[-1]!r}"
+
+
+async def test_discover_logs_its_summary_after_the_commit():
+    """The summary must sit OUTSIDE the ``async with``, and only source can say so.
+
+    ``get_session`` yields from inside ``session.begin()``, so COMMIT runs in
+    its ``__aexit__``. A summary logged one indent level in is emitted before
+    that commit, and ``other`` then silently excludes it — while still being
+    the figure an on-call reader consults to decide whether the time went to
+    the database or to the connection. No runtime assertion can see the
+    difference on a test database that commits in microseconds, so this reads
+    the tree instead. A review caught this once already (#1620)."""
+    from core_storage_api.services.postgres_service import PostgresService
+
+    func = ast.parse(
+        inspect.cleandoc(inspect.getsource(PostgresService.entity_discover_cross_links))
+    ).body[0]
+    summary = [
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "info"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and "cross-links for" in str(node.args[0].value)
+    ]
+    assert len(summary) == 1, "expected exactly one cross-link summary log call"
+
+    nested = [
+        node
+        for block in ast.walk(func)
+        if isinstance(block, ast.AsyncWith)
+        for node in ast.walk(block)
+        if node is summary[0]
+    ]
+    assert not nested, (
+        "the cross-link summary is logged inside the session block, so its "
+        "``other`` figure excludes the COMMIT that runs on the way out"
+    )
 
 
 # ===========================================================================

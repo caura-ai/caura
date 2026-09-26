@@ -10,6 +10,805 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.19.2](https://github.com/caura-ai/caura/compare/backend-v3.19.1...backend-v3.19.2) (2026-09-25)
+
+
+### Dependencies
+
+* cap SQLAlchemy below 2.1, whose typing change broke CI ([#1719](https://github.com/caura-ai/caura/issues/1719)) ([429824f](https://github.com/caura-ai/caura/commit/429824f604caadb318444fa9195f2f56502a968b))
+
+## [3.19.1](https://github.com/caura-ai/caura/compare/backend-v3.19.0...backend-v3.19.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **observability:** carry timeout attribution to the opt-out routes and MCP ([#1715](https://github.com/caura-ai/caura/issues/1715)) ([ebe8881](https://github.com/caura-ai/caura/commit/ebe8881cd9fb719cbefc2db249fd726bf6b38763))
+
+
+### Documentation
+
+* **c-03:** qualify the +2.4pp claim, which shipped unqualified on a public repo ([#1716](https://github.com/caura-ai/caura/issues/1716)) ([97fa519](https://github.com/caura-ai/caura/commit/97fa51918079df9be3f009646d095888c9be6963))
+* **search:** the pm-0918-c-01 search-path bisect (09/18 c-01) ([#1712](https://github.com/caura-ai/caura/issues/1712)) ([a4b4314](https://github.com/caura-ai/caura/commit/a4b431403f17926f6a04f45f579f3a9c23a5cce0))
+
+## [3.19.0](https://github.com/caura-ai/caura/compare/backend-v3.18.1...backend-v3.19.0) (2026-09-24)
+
+
+### Features
+
+* **search:** let a caller or a tenant exclude fan-out children (09/18 c-03) ([#1708](https://github.com/caura-ai/caura/issues/1708)) ([1c98ce1](https://github.com/caura-ai/caura/commit/1c98ce188ce2bf2e5835e16906f0fdbc077456b3))
+
+
+### Bug Fixes
+
+* **api:** make the 504 name the layer that ate the request budget (ax-0917-h-01/h-02) ([#1707](https://github.com/caura-ai/caura/issues/1707)) ([68d49fa](https://github.com/caura-ai/caura/commit/68d49fa9ce9d1a008c99806c032f745c92dce85b))
+* **installer:** verify TLS unless asked to trust on first use ([#1711](https://github.com/caura-ai/caura/issues/1711)) ([cab9eed](https://github.com/caura-ai/caura/commit/cab9eed7334863dd3e6f0c3fa2285de2eb5209b1))
+
+
+### Documentation
+
+* **c-01:** measure what a deferred title does to FTS rank and ordering ([#1704](https://github.com/caura-ai/caura/issues/1704)) ([2e7937a](https://github.com/caura-ai/caura/commit/2e7937a9e28808acaeacba6a9b901edafd7ec54e))
+* **comments:** give the a57 findings doc a findable path ([#1709](https://github.com/caura-ai/caura/issues/1709)) ([ea4d066](https://github.com/caura-ai/caura/commit/ea4d06687064d28b948f286d65e217158861e582))
+* **search:** measure the include_derived blast radius (09/18 c-03) ([#1703](https://github.com/caura-ai/caura/issues/1703)) ([ee482a9](https://github.com/caura-ai/caura/commit/ee482a9f6bc4172dd298c430450dd17d48b91986))
+
+## [3.18.1](https://github.com/caura-ai/caura/compare/backend-v3.18.0...backend-v3.18.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **contradiction:** stop Path C orphaning a conflicted row (09/22 L-12) ([#1690](https://github.com/caura-ai/caura/issues/1690)) ([469f597](https://github.com/caura-ai/caura/commit/469f597371cbf330b11c7d759f917bae380890c3))
+* **documents:** answer a memories-shaped write body with the document shape (09/17 m-13) ([#1688](https://github.com/caura-ai/caura/issues/1688)) ([9f3aecc](https://github.com/caura-ai/caura/commit/9f3aecc733128fc0989814d71348dea953ad5dda))
+* **forge:** stop skipped clusters from spending the run's write budget ([#1687](https://github.com/caura-ai/caura/issues/1687)) ([5132e20](https://github.com/caura-ai/caura/commit/5132e20e3bc2a568e152537c62acf39c2fd304bf))
+* **memory:** make caller ownership of summary/tags durable on the row (09/02 L-08) ([#1693](https://github.com/caura-ai/caura/issues/1693)) ([6cce76a](https://github.com/caura-ai/caura/commit/6cce76aad6fc7df4d0c89a1e9e4b0aa85c87e845))
+* **sentinel:** scan name + tags, and settle the support_files checks (09/02 L-01, L-02) ([#1689](https://github.com/caura-ai/caura/issues/1689)) ([7527a71](https://github.com/caura-ai/caura/commit/7527a7121141ae2cf0c227bd9d0e821176f423ca))
+* **storage:** say when an unapplied migration is the expected outcome ([#1700](https://github.com/caura-ai/caura/issues/1700)) ([d83a0a3](https://github.com/caura-ai/caura/commit/d83a0a37636a20ccf42d4e6fd476a2773e58e50a))
+
+
+### Dependencies
+
+* bump the uv-majors group across 2 directories with 1 update ([#1590](https://github.com/caura-ai/caura/issues/1590)) ([5c86e9d](https://github.com/caura-ai/caura/commit/5c86e9d7a046cc1f8cf331e0dbfcbe46180b2916))
+
+## [3.18.0](https://github.com/caura-ai/caura/compare/backend-v3.17.2...backend-v3.18.0) (2026-09-23)
+
+
+### Features
+
+* add dual-read service agent identities (step 1) ([#1676](https://github.com/caura-ai/caura/issues/1676)) ([1d8d55e](https://github.com/caura-ai/caura/commit/1d8d55e8a65e56e3538a1be3442a42d839263135))
+* **api:** resolve tenant_id from the credential when a body omits it ([#1634](https://github.com/caura-ai/caura/issues/1634)) ([f496b27](https://github.com/caura-ai/caura/commit/f496b2723b41a0be4c44f8a8a22c95bbb0a76d51))
+* **clients:** hold the memclaw-client name as a truthful redirect shell (0.5.1) ([#1646](https://github.com/caura-ai/caura/issues/1646)) ([5e2a3a9](https://github.com/caura-ai/caura/commit/5e2a3a90fbde6a779539ef4d7bb389b8baee080b))
+* **contradiction:** treat provenance and containment as single-valued ([#1678](https://github.com/caura-ai/caura/issues/1678)) ([352f616](https://github.com/caura-ai/caura/commit/352f616516624680b952a69d402550c8052695b4))
+* **documents:** record which agent wrote a document ([#1652](https://github.com/caura-ai/caura/issues/1652)) ([1989376](https://github.com/caura-ai/caura/commit/19893762ace6e5aecf7692697553f4b00f34a01e))
+* **enrichment:** make the atomic-fact fan-out switchable per tenant ([#1677](https://github.com/caura-ai/caura/issues/1677)) ([4ab590f](https://github.com/caura-ai/caura/commit/4ab590f933cd668de2d2f65a3cda2158cc042ff4))
+* **mcp:** bill the batch write, and count the verdicts nobody could determine ([#1675](https://github.com/caura-ai/caura/issues/1675)) ([0f3fd2b](https://github.com/caura-ai/caura/commit/0f3fd2b79ab056030be1f3b40032510bc6609183))
+
+
+### Bug Fixes
+
+* **agents:** confirm a lookup miss against the primary before creating ([#1647](https://github.com/caura-ai/caura/issues/1647)) ([88e8a1b](https://github.com/caura-ai/caura/commit/88e8a1b33f58c48121cc26a78d71964a64644719))
+* **agents:** read the agent back from the primary after writing it ([#1641](https://github.com/caura-ai/caura/issues/1641)) ([2334d19](https://github.com/caura-ai/caura/commit/2334d1916f63b6269e337cc00972398001bd94bb))
+* **api:** give an unmatched route the error envelope, and name the real ones ([#1636](https://github.com/caura-ai/caura/issues/1636)) ([c297e0e](https://github.com/caura-ai/caura/commit/c297e0edab82611dd654dbdf3d161be1496c9dad))
+* **api:** let an agent credential's own identity fill an omitted agent_id (ax-0917-m-16) ([#1696](https://github.com/caura-ai/caura/issues/1696)) ([9311e43](https://github.com/caura-ai/caura/commit/9311e43adc6624b882cd8a260ba4fbd90a3a75d2))
+* **api:** make the request-budget 504 readable instead of `{"detail":...}` ([#1633](https://github.com/caura-ai/caura/issues/1633)) ([fe096f7](https://github.com/caura-ai/caura/commit/fe096f7955bcae2db0b19358f4f0b069260ff7d4))
+* **api:** retire legacy service agent ids (step 3) ([#1694](https://github.com/caura-ai/caura/issues/1694)) ([c944bec](https://github.com/caura-ai/caura/commit/c944bece013ffd5f6aeaf0b0bd72ce549c32d491))
+* **api:** stop the plan quota from squatting on X-RateLimit-* ([#1679](https://github.com/caura-ai/caura/issues/1679)) ([6242aba](https://github.com/caura-ai/caura/commit/6242aba0c4fbddaeba6904685434b86c4c491c31))
+* **c-04:** make the worker-path test able to fail, and close the review's remainder ([#1682](https://github.com/caura-ai/caura/issues/1682)) ([4c0b3bb](https://github.com/caura-ai/caura/commit/4c0b3bbb65c5fabdda846d4b997bfffcbe95befc))
+* **extraction:** stop two surface forms clobbering each other's aliases (09/02 L-32) ([#1681](https://github.com/caura-ai/caura/issues/1681)) ([9e57349](https://github.com/caura-ai/caura/commit/9e57349c967ec62e9eed611de860432e2d8f4e4a))
+* **idempotency:** record the key even when the caller disconnects (ax-0917-h-09) ([#1629](https://github.com/caura-ai/caura/issues/1629)) ([33e9692](https://github.com/caura-ai/caura/commit/33e9692427045e70fbed4ffa62748e9af383a419))
+* **memories:** make the expiry sweep cover expires_at (09/02 M-60) ([#1692](https://github.com/caura-ai/caura/issues/1692)) ([6230230](https://github.com/caura-ai/caura/commit/62302301d618c81a9a488d13aeb9e6f589ef4b8b))
+* **sentinel:** point the memory-id stuffing check at the field Forge writes (09/02 L-35) ([#1541](https://github.com/caura-ai/caura/issues/1541)) ([3a5fccd](https://github.com/caura-ai/caura/commit/3a5fccdf6fd815f85e70b67b2fe8bcd9a8ff9a3d))
+* **storage:** migrate legacy service agent ids (step 2) ([#1683](https://github.com/caura-ai/caura/issues/1683)) ([f664d86](https://github.com/caura-ai/caura/commit/f664d86f73479f649441180bb79d7b43871c3f4b))
+* **storage:** report schema drift at startup ([#1655](https://github.com/caura-ai/caura/issues/1655)) ([8bf3012](https://github.com/caura-ai/caura/commit/8bf301241008b1b34d273e162996c72b90976d8b))
+* **storage:** stop 044's post-condition claiming harm it does not cause ([#1684](https://github.com/caura-ai/caura/issues/1684)) ([64b3f54](https://github.com/caura-ai/caura/commit/64b3f54d2aac5984a9546746380063af7a324faa))
+
+
+### Performance
+
+* **extraction:** upsert relations concurrently instead of one POST at a time (09/02 L-37) ([#1543](https://github.com/caura-ai/caura/issues/1543)) ([f99f7bf](https://github.com/caura-ai/caura/commit/f99f7bfaf672f1b953d0d17c198b3a544042f816))
+* **recall:** stop shipping the result set twice and the telemetry three times ([#1557](https://github.com/caura-ai/caura/issues/1557)) ([9e7c3bc](https://github.com/caura-ai/caura/commit/9e7c3bc49bc267a1d6eeae00d91754f04c10269b))
+
+
+### Dependencies
+
+* **actions:** bump the actions group with 6 updates ([#1663](https://github.com/caura-ai/caura/issues/1663)) ([c985da4](https://github.com/caura-ai/caura/commit/c985da430f286b8f6bbf69941f630543a9a3429b))
+* **clients:** bump @types/node from 26.5.1 to 26.6.1 in /clients/typescript in the clients-npm-minor-patch group across 1 directory ([#1664](https://github.com/caura-ai/caura/issues/1664)) ([58dc455](https://github.com/caura-ai/caura/commit/58dc455eefbcb7cb9c47e6dff7659da83e42b392))
+* **clients:** update ruff requirement from &lt;0.16,&gt;=0.15.4 to &gt;=0.15.4,&lt;0.17 in /clients/python ([#1576](https://github.com/caura-ai/caura/issues/1576)) ([e56ac7e](https://github.com/caura-ai/caura/commit/e56ac7eda0dc456b286ab6011102e8445923e8c3))
+* **docker:** bump datadog/serverless-init from `2f498f4` to `f494334` in /core-api ([#1563](https://github.com/caura-ai/caura/issues/1563)) ([ccbf60b](https://github.com/caura-ai/caura/commit/ccbf60b936148b44d29be6ad83084e9007192076))
+* **docker:** bump datadog/serverless-init from `2f498f4` to `f494334` in /core-operations ([#1564](https://github.com/caura-ai/caura/issues/1564)) ([5dbe7fb](https://github.com/caura-ai/caura/commit/5dbe7fb6971b38630a88f1e57079bd14ba4554ae))
+* **docker:** bump datadog/serverless-init from `2f498f4` to `f494334` in /core-worker ([#1565](https://github.com/caura-ai/caura/issues/1565)) ([04f6b7b](https://github.com/caura-ai/caura/commit/04f6b7b92621dd859abfdc3bfb597188f1d576f7))
+* **plugin:** bump @types/node from 26.5.1 to 26.6.1 in /plugin in the npm-minor-patch group ([#1658](https://github.com/caura-ai/caura/issues/1658)) ([b4c43f2](https://github.com/caura-ai/caura/commit/b4c43f2620ac9e275630fbe47f5e344e5c911f2d))
+* update cachetools requirement from &gt;=7.1.8 to &gt;=7.2.0 ([#1661](https://github.com/caura-ai/caura/issues/1661)) ([273ac33](https://github.com/caura-ai/caura/commit/273ac3397911b091a4553588a45886682990f47b))
+* update google-cloud-aiplatform requirement from &lt;3,&gt;=2.1.0 to &gt;=2.1.3,&lt;3 ([#1660](https://github.com/caura-ai/caura/issues/1660)) ([140a67a](https://github.com/caura-ai/caura/commit/140a67a2bf052e6d3c0f11ac8f2bc30104711b02))
+* update httpx requirement from &lt;1,&gt;=0.27 to &gt;=0.28.1,&lt;1 ([#1566](https://github.com/caura-ai/caura/issues/1566)) ([b3bd76d](https://github.com/caura-ai/caura/commit/b3bd76d2684b00d9962828afdc421385afc1f373))
+* update python-dateutil requirement from &lt;3,&gt;=2.8 to &gt;=2.9.0.post0,&lt;3 ([#1567](https://github.com/caura-ai/caura/issues/1567)) ([1871882](https://github.com/caura-ai/caura/commit/187188250fd38ae31f8a18e0a6974e8435840bc0))
+* update sentry-sdk requirement from &lt;3,&gt;=2.69.1 to &gt;=2.69.2,&lt;3 ([#1662](https://github.com/caura-ai/caura/issues/1662)) ([bd4135e](https://github.com/caura-ai/caura/commit/bd4135e42fc780c2952a733cbc6f3de573e1cfa5))
+* update uvicorn requirement from &lt;1,&gt;=0.52.4 to &gt;=0.53.0,&lt;1 ([#1659](https://github.com/caura-ai/caura/issues/1659)) ([71c48de](https://github.com/caura-ai/caura/commit/71c48dec967fbd76beda63268bdb9f35a19a4c5e))
+
+
+### Reverts
+
+* "fix(storage): apply the cross-link threshold outside the LIMIT" ([#1639](https://github.com/caura-ai/caura/issues/1639)) ([c06f215](https://github.com/caura-ai/caura/commit/c06f2151e0f3fd4b923952c60b28de1f236c9f84))
+
+
+### Documentation
+
+* align setup and agent guides with live contracts ([#1643](https://github.com/caura-ai/caura/issues/1643)) ([c52d517](https://github.com/caura-ai/caura/commit/c52d517f52db3a644f7308b5d40d1df60da10143))
+* **api:** correct the fleet-less recall claim and name all four scope axes (ax-0917-m-19/m-20) ([#1697](https://github.com/caura-ai/caura/issues/1697)) ([8b235f7](https://github.com/caura-ai/caura/commit/8b235f7459bcedfff81c466e33534ce1145b66ff))
+* **documents:** disclose that a doc write mints a memory (ax-0917-m-15) ([#1695](https://github.com/caura-ai/caura/issues/1695)) ([005e607](https://github.com/caura-ai/caura/commit/005e607a4c07ecd3dfe8a795354251c7f106498a))
+* **rebrand:** classify remaining legacy names ([#1674](https://github.com/caura-ai/caura/issues/1674)) ([0d2d077](https://github.com/caura-ai/caura/commit/0d2d07794475cbecb2201360091b84569725c54a))
+* **rebrand:** classify skill and migration legacy names ([#1671](https://github.com/caura-ai/caura/issues/1671)) ([87f9bde](https://github.com/caura-ai/caura/commit/87f9bdeba16a5df69b5095efa09e3c1e15cf773a))
+* **search:** six cosine renders were two evaluations per row, not six ([#1685](https://github.com/caura-ai/caura/issues/1685)) ([e31b18c](https://github.com/caura-ai/caura/commit/e31b18c0c06e8c482fe57a8838099eb63056a9f5))
+
+## [3.17.2](https://github.com/caura-ai/caura/compare/backend-v3.17.1...backend-v3.17.2) (2026-09-19)
+
+
+### Bug Fixes
+
+* **bulk:** flag a deferred embedding so bulk callers can see it (ax-0917-h-06) ([#1628](https://github.com/caura-ai/caura/issues/1628)) ([c263ddb](https://github.com/caura-ai/caura/commit/c263ddbc2a854770bd8f61fe5702b867b47d9324))
+* **documents:** let GET accept the `id` that POST returns (ax-0917-h-07) ([#1626](https://github.com/caura-ai/caura/issues/1626)) ([fd3a3f8](https://github.com/caura-ai/caura/commit/fd3a3f88c3dcc03cf21de992ce3fc0292c69b63b))
+* **documents:** say when a document is unsearchable instead of returning a bare 0 (ax-0917-h-08) ([#1627](https://github.com/caura-ai/caura/issues/1627)) ([4a75aef](https://github.com/caura-ai/caura/commit/4a75aefc670e6cffe0bf3c0052055fe7ec4e5c51))
+* **storage:** apply the cross-link threshold outside the LIMIT, not inside it ([#1635](https://github.com/caura-ai/caura/issues/1635)) ([c02e578](https://github.com/caura-ai/caura/commit/c02e578320ff73bb50d9d4ee9e6deea6e9569190))
+
+
+### Performance
+
+* **mcp:** stop pretty-printing and ASCII-escaping MCP responses ([#1631](https://github.com/caura-ai/caura/issues/1631)) ([721038d](https://github.com/caura-ai/caura/commit/721038d8fe1a0b04ecf05e0c63287293ba57634a))
+
+## [3.17.1](https://github.com/caura-ai/caura/compare/backend-v3.17.0...backend-v3.17.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* **core-api:** send exactly one heartbeat per container and fail loudly on a bad collector URL ([#1623](https://github.com/caura-ai/caura/issues/1623)) ([a9f417b](https://github.com/caura-ai/caura/commit/a9f417b49ada2a498d022b71f9e872799efaab94))
+
+## [3.17.0](https://github.com/caura-ai/caura/compare/backend-v3.16.3...backend-v3.17.0) (2026-09-19)
+
+
+### Features
+
+* **clients:** identify the SDK with a User-Agent header ([#1561](https://github.com/caura-ai/caura/issues/1561)) ([42e537b](https://github.com/caura-ai/caura/commit/42e537b23bcdda8d5e0ae4335218c0490baed40c))
+* **core-api:** send an anonymous daily heartbeat from self-hosted servers ([#1577](https://github.com/caura-ai/caura/issues/1577)) ([35ef4ca](https://github.com/caura-ai/caura/commit/35ef4ca2a0884c31c7a56c6e3962eb78e4ead82e))
+* **plugin:** identify the plugin with a User-Agent header ([#1578](https://github.com/caura-ai/caura/issues/1578)) ([3cdb2f7](https://github.com/caura-ai/caura/commit/3cdb2f73e6a2ead2a2d4de23b70fcb9683d4d734))
+
+
+### Bug Fixes
+
+* **clients:** wrap network failures in the SDK error hierarchy ([#1588](https://github.com/caura-ai/caura/issues/1588)) ([99ee1ea](https://github.com/caura-ai/caura/commit/99ee1eae25063906cb5eef247eaaeb97a5645c43))
+* **events:** make a failed publish visible to the platform, not just the SDK ([#1617](https://github.com/caura-ai/caura/issues/1617)) ([f26e45d](https://github.com/caura-ai/caura/commit/f26e45d5e4dceb47161a0b3a62f6bb36dd4d7bfa))
+* **storage:** name the phase when cross-link discovery times out ([#1620](https://github.com/caura-ai/caura/issues/1620)) ([7d3fbcb](https://github.com/caura-ai/caura/commit/7d3fbcbd3f5452cbaf73c06b7832535449a3a28e))
+
+
+### Dependencies
+
+* update alembic requirement from &lt;2,&gt;=1.19.1 to &gt;=1.20.0,&lt;2 ([#1569](https://github.com/caura-ai/caura/issues/1569)) ([3f07940](https://github.com/caura-ai/caura/commit/3f079409f339baf10370586a0cd20cd9cde5df46))
+* update google-cloud-aiplatform requirement from &lt;3,&gt;=2.0.1 to &gt;=2.1.0,&lt;3 ([#1570](https://github.com/caura-ai/caura/issues/1570)) ([132981b](https://github.com/caura-ai/caura/commit/132981b437a3c6bf61ae78e966639c5773ed00a2))
+
+
+### Documentation
+
+* **clients:** make the PyPI pages answer what Caura is and how to use it ([#1587](https://github.com/caura-ai/caura/issues/1587)) ([f5e4c5c](https://github.com/caura-ai/caura/commit/f5e4c5c354317f73a6833498d52414b4d0b28013))
+
+
+### Code Refactoring
+
+* **storage:** drop three zero-caller service methods, and gate the topic registry ([#1618](https://github.com/caura-ai/caura/issues/1618)) ([1c206e0](https://github.com/caura-ai/caura/commit/1c206e0b0354f6b933248a7afad88abd99fb9547))
+
+## [3.16.3](https://github.com/caura-ai/caura/compare/backend-v3.16.2...backend-v3.16.3) (2026-09-19)
+
+
+### Bug Fixes
+
+* **api:** three operations that reported success for something else ([#1612](https://github.com/caura-ai/caura/issues/1612)) ([4bc3e15](https://github.com/caura-ai/caura/commit/4bc3e15bf75059bdbfdd930223c1005884e8337e))
+* **events:** close the gaps between what the bus promises and what it does ([#1611](https://github.com/caura-ai/caura/issues/1611)) ([e93cf2d](https://github.com/caura-ai/caura/commit/e93cf2d8cba2226787636091f6dca27e6e6c2f5d))
+* **events:** log the lease keeper's escapes instead of suppressing them ([#1607](https://github.com/caura-ai/caura/issues/1607)) ([cad6014](https://github.com/caura-ai/caura/commit/cad60141bb6456bbeda2114fdf7a3edf90c606c8))
+* **lifecycle:** unpair entity-link from crystallize, and give cross-link a budget it can name ([#1604](https://github.com/caura-ai/caura/issues/1604)) ([a87663f](https://github.com/caura-ai/caura/commit/a87663f8850b435d9accba5fe448389212aa0d57))
+* **migrations:** stop reporting work that was never done ([#1608](https://github.com/caura-ai/caura/issues/1608)) ([7741e37](https://github.com/caura-ai/caura/commit/7741e373cd56aa49457603d01a669da3dced13fb))
+* **quickstart:** stop publishing default credentials, and delete a control surface that controls nothing ([#1613](https://github.com/caura-ai/caura/issues/1613)) ([fd51860](https://github.com/caura-ai/caura/commit/fd5186052994677bb7275172c64990a3e5e75b44))
+* **scripts:** repair developer tooling that cannot run as shipped ([#1610](https://github.com/caura-ai/caura/issues/1610)) ([911b62b](https://github.com/caura-ai/caura/commit/911b62ba93151cf34eadb90bb8138f3adc8617a2))
+
+## [3.16.2](https://github.com/caura-ai/caura/compare/backend-v3.16.1...backend-v3.16.2) (2026-09-18)
+
+
+### Bug Fixes
+
+* **dead-code:** remove declarations that describe a contract the code lacks ([#1605](https://github.com/caura-ai/caura/issues/1605)) ([4f66f02](https://github.com/caura-ai/caura/commit/4f66f02709fcce8be9fd794babb172021a7710cc))
+
+## [3.16.1](https://github.com/caura-ai/caura/compare/backend-v3.16.0...backend-v3.16.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **core-storage-api:** make POSTGRES_REQUIRE_SSL real, and stop .env.example overriding the pool baseline ([#1595](https://github.com/caura-ai/caura/issues/1595)) ([5aafb8a](https://github.com/caura-ai/caura/commit/5aafb8ae3687f2cb9b686c33d3a912b02deed330))
+* **core-storage-api:** make status writes respect soft-delete, and the org purge report what it deletes ([#1594](https://github.com/caura-ai/caura/issues/1594)) ([781a5be](https://github.com/caura-ai/caura/commit/781a5bebfacc72223f682e824406fa64beeb8e43))
+* **dead-code:** drop four unreachable helpers, and make IS_STANDALONE reach the flag it names ([#1600](https://github.com/caura-ai/caura/issues/1600)) ([b52f88e](https://github.com/caura-ai/caura/commit/b52f88eeb00cdd395600c560b24c7cc8b8f2f0d1))
+* **events:** hold the Pub/Sub lease while a batch drains, instead of letting finished work redeliver ([#1592](https://github.com/caura-ai/caura/issues/1592)) ([479dcf6](https://github.com/caura-ai/caura/commit/479dcf629e74e8dccea75420cad76a6aa3790c38))
+* **reports:** delete the dead report_type filter, make fleet_id on /reports/latest real ([#1599](https://github.com/caura-ai/caura/issues/1599)) ([7811a33](https://github.com/caura-ai/caura/commit/7811a334f11e226819e1ed2d7febe490d7635d7f))
+
+
+### Dependencies
+
+* update pydantic requirement from &lt;3,&gt;=2.0 to &gt;=2.13.5,&lt;3 ([#1571](https://github.com/caura-ai/caura/issues/1571)) ([6fe9fdb](https://github.com/caura-ai/caura/commit/6fe9fdb926f39ef4c7e374d0448d084d301fdb8e))
+
+## [3.16.0](https://github.com/caura-ai/caura/compare/backend-v3.15.1...backend-v3.16.0) (2026-09-18)
+
+
+### Features
+
+* **clients:** map HTTP 429 to RateLimitError ([#1139](https://github.com/caura-ai/caura/issues/1139)) ([67a6f66](https://github.com/caura-ai/caura/commit/67a6f66d48392c0f845b2ba3c063c4a45e36bf01))
+
+
+### Bug Fixes
+
+* **api:** honor documented route parameters and validate request bodies ([#1572](https://github.com/caura-ai/caura/issues/1572)) ([172e54f](https://github.com/caura-ai/caura/commit/172e54fc123275c236cfd179b1438e2356dabac8))
+* **ci:** say when a review runs without recalled guidance ([#1581](https://github.com/caura-ai/caura/issues/1581)) ([030c7aa](https://github.com/caura-ai/caura/commit/030c7aa639a87357ca76225639bfcadb9665ba58))
+* **client-typescript:** recall() silently drops caller extras that write() and search() forward ([#1467](https://github.com/caura-ai/caura/issues/1467)) ([141926a](https://github.com/caura-ai/caura/commit/141926a67e3dcb59b0a84006b3565fa6645a67b7))
+* **clients:** validate recall() response body before parsing ([#1243](https://github.com/caura-ai/caura/issues/1243)) ([c25d91a](https://github.com/caura-ai/caura/commit/c25d91ab9c2fe4421ad29d9a306418eb3e8fc0af))
+* **core-api:** bound the fleet heartbeat's per-agent storage fan-out ([#1583](https://github.com/caura-ai/caura/issues/1583)) ([0434fa3](https://github.com/caura-ai/caura/commit/0434fa396f9039b8289205d8d2cf0b4e9726f6b9))
+* **core-api:** make the update path's derived state follow the write ([#1555](https://github.com/caura-ai/caura/issues/1555)) ([17d1995](https://github.com/caura-ai/caura/commit/17d199548daa79939061f2d87358e9a2d326b4d3))
+* **core-api:** make the write path discover a duplicate before it pays for one ([#1559](https://github.com/caura-ai/caura/issues/1559)) ([612aadc](https://github.com/caura-ai/caura/commit/612aadcc2ac8fed683c300fd9a895e398690f21b))
+* **core-api:** report the write path's background work honestly ([#1560](https://github.com/caura-ai/caura/issues/1560)) ([331ecf7](https://github.com/caura-ai/caura/commit/331ecf73bf163366997a018beebce945fec2682d))
+* **core-api:** stop losing and double-counting in-flight work at shutdown ([#1580](https://github.com/caura-ai/caura/issues/1580)) ([a1b0d92](https://github.com/caura-ai/caura/commit/a1b0d924c00cf082bfa77622ae6c712471a98072))
+* **core-storage-api:** make audit and entity read paths answer the question asked ([#1586](https://github.com/caura-ai/caura/issues/1586)) ([28fa1c8](https://github.com/caura-ai/caura/commit/28fa1c87a98a52c20588728f3bf900874ec93a9b))
+* **core-worker:** stop the deferred enricher overwriting lifecycle state and caller tags ([#1584](https://github.com/caura-ai/caura/issues/1584)) ([262d29e](https://github.com/caura-ai/caura/commit/262d29ee9772f418910e08df9b785173ce87e377))
+* **enrichment:** honour the caller's metadata on every write path, not one ([#1585](https://github.com/caura-ai/caura/issues/1585)) ([f0f8a0c](https://github.com/caura-ai/caura/commit/f0f8a0c0ccb964b360aa1dca44f4170455650ba8))
+* **plugin:** create openclaw.json so a fresh install has callable tools ([#1556](https://github.com/caura-ai/caura/issues/1556)) ([9df2379](https://github.com/caura-ai/caura/commit/9df2379ad41df98ba1b791d3208a7a7056f1dd8a))
+
+
+### Dependencies
+
+* **actions:** bump codecov/codecov-action from 7.0.0 to 7.1.0 in the actions group across 1 directory ([#1573](https://github.com/caura-ai/caura/issues/1573)) ([8a55e61](https://github.com/caura-ai/caura/commit/8a55e61f7a2ae638648b7d8b22945d0655ccd9a2))
+* bump the uv-minor-patch group across 2 directories with 2 updates ([#1574](https://github.com/caura-ai/caura/issues/1574)) ([23db93d](https://github.com/caura-ai/caura/commit/23db93d6381b3005aae50ebb474bd30c31c8982f))
+* **clients:** bump the clients-npm-majors group across 1 directory with 2 updates ([#1575](https://github.com/caura-ai/caura/issues/1575)) ([c7cb850](https://github.com/caura-ai/caura/commit/c7cb8501fadceb491f69f3be9d7f5e4b8b5e72c1))
+* **docker:** bump datadog/serverless-init from `2f498f4` to `f494334` in /core-storage-api ([#1568](https://github.com/caura-ai/caura/issues/1568)) ([35102dc](https://github.com/caura-ai/caura/commit/35102dcbebf39f43c1a560eceb65a3f3782e5cd6))
+
+
+### Documentation
+
+* add a docs/ index and link plugin-upgrade.md ([#1409](https://github.com/caura-ai/caura/issues/1409)) ([cc4387d](https://github.com/caura-ai/caura/commit/cc4387da69c40221bcc06fdebcb6aa504f30a02c))
+
+## [3.15.1](https://github.com/caura-ai/caura/compare/backend-v3.15.0...backend-v3.15.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **core-api:** close five surface-parity and authz gaps on MCP and /memories/count ([#1552](https://github.com/caura-ai/caura/issues/1552)) ([8619e9c](https://github.com/caura-ai/caura/commit/8619e9c08163b91b63120af4e1c77de3b73d2c4f))
+* **core-api:** make short-term memory report what actually happened ([#1554](https://github.com/caura-ai/caura/issues/1554)) ([190e319](https://github.com/caura-ai/caura/commit/190e31962b924d285fd76d6331529966743dad85))
+
+## [3.15.0](https://github.com/caura-ai/caura/compare/backend-v3.14.0...backend-v3.15.0) (2026-09-17)
+
+
+### Features
+
+* **lifecycle:** republish audit rows the fanout stranded ([#1549](https://github.com/caura-ai/caura/issues/1549)) ([27646ff](https://github.com/caura-ai/caura/commit/27646ffe98e6f199c4c25a5f2b80e773b0ea47ce))
+
+
+### Bug Fixes
+
+* **common:** type _dd_tracer as Tracer | None ([#1551](https://github.com/caura-ai/caura/issues/1551)) ([ff25d19](https://github.com/caura-ai/caura/commit/ff25d196bd93a19b5af3218d72b34b2be945379d))
+
+## [3.14.0](https://github.com/caura-ai/caura/compare/backend-v3.13.0...backend-v3.14.0) (2026-09-16)
+
+
+### Features
+
+* **operations:** lease each scheduled tick so replicas fire it once ([#1546](https://github.com/caura-ai/caura/issues/1546)) ([c1d21a6](https://github.com/caura-ai/caura/commit/c1d21a6bdc1a242c9c8c6b1c8f3398ff486228f0))
+
+## [3.13.0](https://github.com/caura-ai/caura/compare/backend-v3.12.5...backend-v3.13.0) (2026-09-16)
+
+
+### Features
+
+* **ratchet:** add the absence-assertion marker ([#1544](https://github.com/caura-ai/caura/issues/1544)) ([2ab011a](https://github.com/caura-ai/caura/commit/2ab011ab75fe31264d32abeb5c7e65aabf2ebddc))
+
+
+### Bug Fixes
+
+* **forge:** don't re-buy the mining half when promotion blips (09/02 L-34) ([#1539](https://github.com/caura-ai/caura/issues/1539)) ([2a9a78c](https://github.com/caura-ai/caura/commit/2a9a78cebda22315ee885dc3c08158f2583dbf24))
+
+
+### Documentation
+
+* **benchmarks:** publish the September LongMemEval run, 72.5% -&gt; 92.2% ([#1545](https://github.com/caura-ai/caura/issues/1545)) ([ccd11eb](https://github.com/caura-ai/caura/commit/ccd11eb85d15dc936a2ba2f6abaa60f47e323162))
+
+## [3.12.5](https://github.com/caura-ai/caura/compare/backend-v3.12.4...backend-v3.12.5) (2026-09-16)
+
+
+### Bug Fixes
+
+* **forge:** read the primary for the clobber guard and same-tick promotion (09/02 L-33) ([#1538](https://github.com/caura-ai/caura/issues/1538)) ([276d857](https://github.com/caura-ai/caura/commit/276d857eccd7b44fe5ab4a2d64fc35187fff36a0))
+* **ingest:** actually embed the parent batch summary (09/02 M-45) ([#1528](https://github.com/caura-ai/caura/issues/1528)) ([f589592](https://github.com/caura-ai/caura/commit/f58959262c7abe8ba17ec7a75f288d27f2dc77ab))
+* **ingest:** enforce the token cap the paragraph splitter promises (09/02 M-41) ([#1523](https://github.com/caura-ai/caura/issues/1523)) ([07cfc0a](https://github.com/caura-ai/caura/commit/07cfc0a90e80ebee1f9be9d16b6a55de861c0fce))
+* **ingest:** stop minting server-reserved memory types from caller content (09/02 M-42) ([#1533](https://github.com/caura-ai/caura/issues/1533)) ([c660aab](https://github.com/caura-ai/caura/commit/c660aabc71115502a70054cdba8a47298b5b7a53))
+* **interview:** contain a tenant's settings failure so the sweep finishes (09/02 M-15) ([#1535](https://github.com/caura-ai/caura/issues/1535)) ([e8d1ec7](https://github.com/caura-ai/caura/commit/e8d1ec7e7a3119f20dc2e3ef7a9d2c91bad5d4bc))
+* **operations:** wait out core-api's request budget instead of racing it ([#1540](https://github.com/caura-ai/caura/issues/1540)) ([50442c5](https://github.com/caura-ai/caura/commit/50442c5bba076f7212e574751b63e67dd62626c0))
+* **outcome:** window contradiction evidence on the status flip, not creation (09/02 M-55) ([#1537](https://github.com/caura-ai/caura/issues/1537)) ([ac7ffb8](https://github.com/caura-ai/caura/commit/ac7ffb8c939fc2fec13a69408baea891387ee698))
+
+## [3.12.4](https://github.com/caura-ai/caura/compare/backend-v3.12.3...backend-v3.12.4) (2026-09-15)
+
+
+### Bug Fixes
+
+* **reports:** filter the canonical smoke-probe title too ([#1531](https://github.com/caura-ai/caura/issues/1531)) ([a908a60](https://github.com/caura-ai/caura/commit/a908a60b2caa0b79707f2aac53d0d23001753337))
+
+## [3.12.3](https://github.com/caura-ai/caura/compare/backend-v3.12.2...backend-v3.12.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **lifecycle:** nack a flaked skip-write instead of stranding the audit row ([#1530](https://github.com/caura-ai/caura/issues/1530)) ([840c625](https://github.com/caura-ai/caura/commit/840c62589f451fbbd0b2f5b388683304064035cf))
+
+
+### Dependencies
+
+* update sentry-sdk requirement from &lt;3,&gt;=2.68.1 to &gt;=2.69.1,&lt;3 ([#1485](https://github.com/caura-ai/caura/issues/1485)) ([db84053](https://github.com/caura-ai/caura/commit/db84053c2ed5846e0cdeb87f26a3f408a3de502f))
+
+## [3.12.2](https://github.com/caura-ai/caura/compare/backend-v3.12.1...backend-v3.12.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **governance:** stop the SSN rule matching invoice numbers and ZIP+4 (09/02 M-03) ([#1521](https://github.com/caura-ai/caura/issues/1521)) ([6f829f2](https://github.com/caura-ai/caura/commit/6f829f296ec76fa1ac207a008cb9a4adcf961c0c))
+* **llm:** resolve models per provider so the per-service knobs work and Gemini stops 404ing (09/02 M-10, M-11) ([#1522](https://github.com/caura-ai/caura/issues/1522)) ([a8cca8a](https://github.com/caura-ai/caura/commit/a8cca8a8e5ffba53d40dd577740dd47e51556950))
+
+
+### Dependencies
+
+* update cryptography requirement from &gt;=42.0 to &gt;=50.0.1 ([#1486](https://github.com/caura-ai/caura/issues/1486)) ([e05552b](https://github.com/caura-ai/caura/commit/e05552bf6f5e3b78f17c68eb1b8262b7a918747b))
+
+## [3.12.1](https://github.com/caura-ai/caura/compare/backend-v3.12.0...backend-v3.12.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* **lifecycle:** bound the fanout across actions, and stop hiding dropped orgs ([#1525](https://github.com/caura-ai/caura/issues/1525)) ([3ccfa2e](https://github.com/caura-ai/caura/commit/3ccfa2efd92689f33d5f0509e7307590767b5903))
+
+## [3.12.0](https://github.com/caura-ai/caura/compare/backend-v3.11.0...backend-v3.12.0) (2026-09-15)
+
+
+### Features
+
+* **crystallizer:** activity-gate the sweep and make its cadence configurable (A72, third ground) ([#1509](https://github.com/caura-ai/caura/issues/1509)) ([43c7e6a](https://github.com/caura-ai/caura/commit/43c7e6a0d827e6e6371920debfeb24ec7625b551))
+* **triple:** resolve proper-noun subjects by lookup so the subject column fills (A59) ([#1514](https://github.com/caura-ai/caura/issues/1514)) ([34d37a7](https://github.com/caura-ai/caura/commit/34d37a7238e5c17059441aaa6b512b4e5e52acf2))
+
+
+### Bug Fixes
+
+* **crystallizer:** send duration_ms so the publish-failure recovery can't wedge the report (09/02 M-38) ([#1518](https://github.com/caura-ai/caura/issues/1518)) ([d9b6b7a](https://github.com/caura-ai/caura/commit/d9b6b7a7c3e4571f6d725a5a243a2a4aebf15cd7))
+* **ingest:** stop serving a partial extraction as the cached complete one (09/02 M-44) ([#1516](https://github.com/caura-ai/caura/issues/1516)) ([cadddb9](https://github.com/caura-ai/caura/commit/cadddb9372eaec557f5751cf30a8ff63c929ca0b))
+* **llm:** cache OpenAI providers so every call stops minting an unclosed pool (09/02 M-36) ([#1520](https://github.com/caura-ai/caura/issues/1520)) ([3a2974d](https://github.com/caura-ai/caura/commit/3a2974d304d4249b1d5f958bdf6009b005091fda))
+* **scripts:** route forge_dry_run through storage instead of the deleted DB pool (09/02 M-07) ([#1519](https://github.com/caura-ai/caura/issues/1519)) ([1c6f6cb](https://github.com/caura-ai/caura/commit/1c6f6cbb69882d52a69988cd89d48bf77c2a6aec))
+* **triple:** stop reporting sentence openers as missing subject entities (A59) ([#1515](https://github.com/caura-ai/caura/issues/1515)) ([fecdb0d](https://github.com/caura-ai/caura/commit/fecdb0df3477e85d8c8c14d96585d3ce2cd12c0b))
+
+
+### Dependencies
+
+* update fastapi requirement from &lt;1,&gt;=0.115 to &gt;=0.141.1,&lt;1 ([#1487](https://github.com/caura-ai/caura/issues/1487)) ([b73e670](https://github.com/caura-ai/caura/commit/b73e6701da3ef4106605c42b8eb86e5a6403c52a))
+
+
+### Documentation
+
+* **forge-cron:** correct the fanout URL prefix and the dedup window (09/02 M-69, M-70) ([#1517](https://github.com/caura-ai/caura/issues/1517)) ([7bc22d4](https://github.com/caura-ai/caura/commit/7bc22d4f6a0d7a2605474e76efc066e0a0276657))
+
+## [3.11.0](https://github.com/caura-ai/caura/compare/backend-v3.10.1...backend-v3.11.0) (2026-09-14)
+
+
+### Features
+
+* **crystallizer:** let a tenant retune the sweep into the crowding band (A72) ([#1508](https://github.com/caura-ai/caura/issues/1508)) ([755b673](https://github.com/caura-ai/caura/commit/755b673408f62d1b740dfbc5a909377c732f4e24))
+
+
+### Bug Fixes
+
+* **crystallizer:** actually apply the reports pagination the API advertises (09/02 M-12) ([#1505](https://github.com/caura-ai/caura/issues/1505)) ([53798e4](https://github.com/caura-ai/caura/commit/53798e4216ffd0bd42fc8d10053c7cb74ef11afb))
+* **extraction:** record extraction failures instead of only logging them (09/02 M-40) ([#1504](https://github.com/caura-ai/caura/issues/1504)) ([0696f5f](https://github.com/caura-ai/caura/commit/0696f5f81652418b6822248e42774fc16306dfd4))
+* **plugin:** evict the least recently used session, not the oldest one (F1) ([#1507](https://github.com/caura-ai/caura/issues/1507)) ([138b2d9](https://github.com/caura-ai/caura/commit/138b2d9ac452ff54e99c227dd099223ed0da24d8))
+
+
+### Performance
+
+* **contradiction:** fetch every candidate's entity context in one batched pair of calls (m-05) ([#1500](https://github.com/caura-ai/caura/issues/1500)) ([2d6ad69](https://github.com/caura-ai/caura/commit/2d6ad695093bbde2435ee17fff4d46c8a5b17f74))
+* **crystallizer:** stop the near-duplicate scan making one round-trip per row and relaying every vector ([#1496](https://github.com/caura-ai/caura/issues/1496)) ([43c5487](https://github.com/caura-ai/caura/commit/43c5487203e6c07f51fc92a7ae1fd73ba8b9892e))
+
+
+### Dependencies
+
+* **actions:** bump the actions group with 2 updates ([#1489](https://github.com/caura-ai/caura/issues/1489)) ([95f7499](https://github.com/caura-ai/caura/commit/95f74998fcc5fc22e9d3b7c0fc77a23bd937d233))
+* update google-genai requirement from &gt;=2.22.0 to &gt;=2.23.0 ([#1484](https://github.com/caura-ai/caura/issues/1484)) ([c789014](https://github.com/caura-ai/caura/commit/c7890145317092fab4602dc848f7cc34474fa516))
+
+
+### Documentation
+
+* add the Caura Rail SDK to the quick start and agent install guide ([#1501](https://github.com/caura-ai/caura/issues/1501)) ([ff1007a](https://github.com/caura-ai/caura/commit/ff1007a045086f72ccb93d4c4c23e124ea013cf7))
+
+## [3.10.1](https://github.com/caura-ai/caura/compare/backend-v3.10.0...backend-v3.10.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **keystones:** tell a caller why the rule set is empty (F9) ([#1497](https://github.com/caura-ai/caura/issues/1497)) ([d9e2eb5](https://github.com/caura-ai/caura/commit/d9e2eb53a22ae94791dd6a0f39173ae0edae80a7))
+
+
+### Dependencies
+
+* bump sentence-transformers from 5.7.0 to 6.0.1 ([#1491](https://github.com/caura-ai/caura/issues/1491)) ([e5c9bb8](https://github.com/caura-ai/caura/commit/e5c9bb800fc947ff564ac1edfeb7901dcb569472))
+* **plugin:** bump @types/node from 26.4.1 to 26.5.1 in /plugin in the npm-minor-patch group ([#1482](https://github.com/caura-ai/caura/issues/1482)) ([5caf8ef](https://github.com/caura-ai/caura/commit/5caf8ef04cffb10e01a7abe2692f5468ea74eff8))
+
+## [3.10.0](https://github.com/caura-ai/caura/compare/backend-v3.9.1...backend-v3.10.0) (2026-09-14)
+
+
+### Features
+
+* **recall:** gate the boost-feeding bump on a confirmed-use signal (A41) ([#1494](https://github.com/caura-ai/caura/issues/1494)) ([f236f34](https://github.com/caura-ai/caura/commit/f236f34ae46b63031968518bf5951221a0c577b4))
+
+
+### Bug Fixes
+
+* **bench:** supersession-aware recall for the regression sample — correct supersession no longer reads as a regression (reg-d15) ([#1493](https://github.com/caura-ai/caura/issues/1493)) ([0d5863b](https://github.com/caura-ai/caura/commit/0d5863b787cb20b2fe68cb79945f916d5b931757))
+* **extraction:** stop one failed relation disabling the deterministic contradiction path ([#1495](https://github.com/caura-ai/caura/issues/1495)) ([83913d1](https://github.com/caura-ai/caura/commit/83913d1c9492c29b2f9a0e50308b42fb6d4e25ef))
+
+
+### Performance
+
+* **storage:** stop shipping the embedding + tsvector on every scored-search row ([#1466](https://github.com/caura-ai/caura/issues/1466)) ([79d653c](https://github.com/caura-ai/caura/commit/79d653c3b69731a7177e7d0acfa6d3eb9e65a796))
+
+## [3.9.1](https://github.com/caura-ai/caura/compare/backend-v3.9.0...backend-v3.9.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **contradiction:** let the deterministic check run where it was needed (A40) ([#1463](https://github.com/caura-ai/caura/issues/1463)) ([1e2d38d](https://github.com/caura-ai/caura/commit/1e2d38d6cd4da6642fc36425ddf4be4ad7cba99d))
+
+## [3.9.0](https://github.com/caura-ai/caura/compare/backend-v3.8.2...backend-v3.9.0) (2026-09-11)
+
+
+### Features
+
+* **client-typescript:** add getDocument() ([#1404](https://github.com/caura-ai/caura/issues/1404)) ([#1468](https://github.com/caura-ai/caura/issues/1468)) ([239098f](https://github.com/caura-ai/caura/commit/239098f3c8a1b48d1485a82c53fe836ecb5fd092))
+
+## [3.8.2](https://github.com/caura-ai/caura/compare/backend-v3.8.1...backend-v3.8.2) (2026-09-11)
+
+
+### Documentation
+
+* fix relative link to README in static/docs/integration-guide.md ([#1406](https://github.com/caura-ai/caura/issues/1406)) ([#1470](https://github.com/caura-ai/caura/issues/1470)) ([552f271](https://github.com/caura-ai/caura/commit/552f27161483249c3ef2e29bc2aa7c644c0955e8))
+
+## [3.8.1](https://github.com/caura-ai/caura/compare/backend-v3.8.0...backend-v3.8.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* **api:** give every auth refusal a code that names the reason (C32) ([#1464](https://github.com/caura-ai/caura/issues/1464)) ([1a8cd24](https://github.com/caura-ai/caura/commit/1a8cd245edf5a08ff4f659548198f29388061eb2))
+
+## [3.8.0](https://github.com/caura-ai/caura/compare/backend-v3.7.0...backend-v3.8.0) (2026-09-10)
+
+
+### Features
+
+* **search:** ANN-pool shadow mode, D12 arm provenance, pool-selector validation (HNSW plan PR3) ([#1460](https://github.com/caura-ai/caura/issues/1460)) ([84c4b62](https://github.com/caura-ai/caura/commit/84c4b62df8ae3986a377d0cd4568ddc94e3dc5d8))
+* **search:** freshness_reference — As-Of Recall for backfilled corpora ([#1471](https://github.com/caura-ai/caura/issues/1471)) ([c13b720](https://github.com/caura-ai/caura/commit/c13b720336bdcf926d6dc43fb93347693570ec69))
+
+
+### Performance
+
+* **contradiction:** admission-gate detection passes so stacked bursts queue instead of stampeding (A19) ([#1461](https://github.com/caura-ai/caura/issues/1461)) ([731ba53](https://github.com/caura-ai/caura/commit/731ba53f067d53613c60d7fab041d22e72bb458c))
+
+## [3.7.0](https://github.com/caura-ai/caura/compare/backend-v3.6.3...backend-v3.7.0) (2026-09-10)
+
+
+### Features
+
+* **bulk:** one contradiction pass per subject on a coherent batch (A73) ([#1455](https://github.com/caura-ai/caura/issues/1455)) ([bb74b9b](https://github.com/caura-ai/caura/commit/bb74b9b15bad9c60717c3875b75d7b8c53412101))
+* **dedup:** merge a same-claim near-duplicate instead of appending beside it (A71) ([#1433](https://github.com/caura-ai/caura/issues/1433)) ([350c3ab](https://github.com/caura-ai/caura/commit/350c3ab21944a4c4f01b7b85a68e1f382043a6b3))
+* **extraction:** write back the predicate so the RDF path can fire (A65 groundwork) ([#1458](https://github.com/caura-ai/caura/issues/1458)) ([92eb5b5](https://github.com/caura-ai/caura/commit/92eb5b5e2482ffb113345a577b36234f993db6b4))
+* **search:** opt-in ANN candidate pool — HNSW finally serves the primary path (HNSW plan PR2) ([#1448](https://github.com/caura-ai/caura/issues/1448)) ([382c060](https://github.com/caura-ai/caura/commit/382c0607efc68dfefe99458a04abf13cd4ca89d2))
+
+
+### Bug Fixes
+
+* **contradiction:** stop a paraphrased predicate hiding a real contradiction (A36) ([#1462](https://github.com/caura-ai/caura/issues/1462)) ([051a02e](https://github.com/caura-ai/caura/commit/051a02e8715055357de0b89ddbfbd3bf9e0ae949))
+* **memory:** populate is_inferred so the invariant that reads it can fire (A62) ([#1457](https://github.com/caura-ai/caura/issues/1457)) ([6cb951c](https://github.com/caura-ai/caura/commit/6cb951c3f161a799fd7128df33b5b3f6a8a497ac))
+* **search:** fall back to hop-0 seeds when expand_graph fails for all fleets ([#1444](https://github.com/caura-ai/caura/issues/1444)) ([769d9de](https://github.com/caura-ai/caura/commit/769d9defab30f81b9bb2ad9b959fe1a5428d0570))
+
+
+### Documentation
+
+* **openapi:** declare recall_raw on RecallDiagnostic (oss-0902-l-16) ([#1443](https://github.com/caura-ai/caura/issues/1443)) ([3768862](https://github.com/caura-ai/caura/commit/37688623aeffd347bb5b76568807245f85a9b870))
+
+## [3.6.3](https://github.com/caura-ai/caura/compare/backend-v3.6.2...backend-v3.6.3) (2026-09-09)
+
+
+### Documentation
+
+* reconcile remaining marker records ([#1452](https://github.com/caura-ai/caura/issues/1452)) ([0b4ad54](https://github.com/caura-ai/caura/commit/0b4ad54c948a5f1f624b3188c815f15a205d0b79))
+
+## [3.6.2](https://github.com/caura-ai/caura/compare/backend-v3.6.1...backend-v3.6.2) (2026-09-09)
+
+
+### Documentation
+
+* refresh rebrand sunset status ([#1449](https://github.com/caura-ai/caura/issues/1449)) ([4aa838c](https://github.com/caura-ai/caura/commit/4aa838c861432d31a46ba042806235f0caa56726))
+
+## [3.6.1](https://github.com/caura-ai/caura/compare/backend-v3.6.0...backend-v3.6.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **search:** hold the per-tenant storage bulkhead on the entity-lookup fall-through (oss-0814-l-06) ([#1442](https://github.com/caura-ai/caura/issues/1442)) ([5ac5111](https://github.com/caura-ai/caura/commit/5ac511162f553dd7bb374eeb5e434b10370ae7e8))
+
+
+### Dependencies
+
+* bump the uv-majors group across 1 directory with 3 updates ([#1446](https://github.com/caura-ai/caura/issues/1446)) ([d0f20b2](https://github.com/caura-ai/caura/commit/d0f20b249ffca78a02f653dc8357cf94019b1606))
+
+## [3.6.0](https://github.com/caura-ai/caura/compare/backend-v3.5.0...backend-v3.6.0) (2026-09-09)
+
+
+### Features
+
+* **mcp:** migrate core-api to MCP Python SDK v2, serving both protocol eras ([#682](https://github.com/caura-ai/caura/issues/682)) ([c021c15](https://github.com/caura-ai/caura/commit/c021c155d65cb0f8296de5eefca959f399b8bd6a))
+
+
+### Bug Fixes
+
+* **api:** rate-limit and slot-gate POST /stm/promote like POST /memories ([#1425](https://github.com/caura-ai/caura/issues/1425)) ([ce24332](https://github.com/caura-ai/caura/commit/ce2433292965c2130a13386dfe768f19552dcde7))
+* **api:** settings derive admin from is_admin; pin PUT /settings as a mitigation route ([#1426](https://github.com/caura-ai/caura/issues/1426)) ([068edd6](https://github.com/caura-ai/caura/commit/068edd6d09ec89ef8caded1bf8e8cfd8baefd3ff))
+* **search:** budget and label successor injection (D16) ([#1439](https://github.com/caura-ai/caura/issues/1439)) ([b17771f](https://github.com/caura-ai/caura/commit/b17771f5ebf65aaec3fda67533b1301ace31b094))
+
+
+### Performance
+
+* **search:** compute scored-search primitives once via a fenced ingredients CTE (HNSW plan PR1) ([#1429](https://github.com/caura-ai/caura/issues/1429)) ([fef5b3d](https://github.com/caura-ai/caura/commit/fef5b3de9c01331204e2f7bd879563b72d8f5a5a))
+
+
+### Documentation
+
+* remove safe legacy-name prose ([#1437](https://github.com/caura-ai/caura/issues/1437)) ([719121b](https://github.com/caura-ai/caura/commit/719121b85e5453b4d2933e4e44d8b8faa1c047eb))
+
+## [3.5.0](https://github.com/caura-ai/caura/compare/backend-v3.4.1...backend-v3.5.0) (2026-09-09)
+
+
+### Features
+
+* **consumer:** fan out atomic facts on the deferred path (A70 step 2b) ([#1430](https://github.com/caura-ai/caura/issues/1430)) ([2a88514](https://github.com/caura-ai/caura/commit/2a88514de769df4f666627cf9712314daa7ad578))
+
+
+### Bug Fixes
+
+* **crystallizer:** stop the sweep destroying knowledge, re-paying LLM calls, and mislabelling fleet scope ([#1414](https://github.com/caura-ai/caura/issues/1414)) ([2c1df96](https://github.com/caura-ai/caura/commit/2c1df9658b6fd51ff76dc9abb2410288e0966931))
+* **embedding:** cache LocalEmbedding per model so the local provider stops reloading the model on every request ([#1420](https://github.com/caura-ai/caura/issues/1420)) ([d71250d](https://github.com/caura-ai/caura/commit/d71250d4f52c816c5638d7b49560e848b20adc7b))
+* **embedding:** unify the EMBEDDING_PROVIDER default and stop silent fake-vector persistence ([#1423](https://github.com/caura-ai/caura/issues/1423)) ([429e86c](https://github.com/caura-ai/caura/commit/429e86cb2a313692d8d41715c5d883952510c6d4))
+* **ingest:** stop dropping CJK facts, honour the cache contract, delete a dead constant ([#1418](https://github.com/caura-ai/caura/issues/1418)) ([4dd83af](https://github.com/caura-ai/caura/commit/4dd83afc07b267695c3066b723c049eb97b25cde))
+* narrow the Path C revert, drop three unreachable builders, clamp the interviewer flag ([#1419](https://github.com/caura-ai/caura/issues/1419)) ([a69ba38](https://github.com/caura-ai/caura/commit/a69ba3880bc4e4bbc4d6861329d382e6e1bfdb7f))
+* **search:** ENTITY_LOOKUP silently drops temporal hints — decline the short-circuit when one is present ([#1422](https://github.com/caura-ai/caura/issues/1422)) ([629daba](https://github.com/caura-ai/caura/commit/629daba9c04508e66ec3645802db06a70a23eb2c))
+* **search:** honor search.graph_retrieval on the ENTITY_LOOKUP short-circuit ([#1427](https://github.com/caura-ai/caura/issues/1427)) ([0bf240b](https://github.com/caura-ai/caura/commit/0bf240bff80a3ddd056c635063941bf474dd7a9d))
+* **worker:** stop discarding atomic facts on the async enrichment path (A70 step 1) ([#1424](https://github.com/caura-ai/caura/issues/1424)) ([1171c13](https://github.com/caura-ai/caura/commit/1171c1300087ecde31b2c04dd6b2b1263498e07b))
+
+
+### Documentation
+
+* **settings:** pin and document the reset shape and propagation contract (D17) ([#1421](https://github.com/caura-ai/caura/issues/1421)) ([8198260](https://github.com/caura-ai/caura/commit/8198260e9ac8fc62e1be8327d24878663ac00097))
+
+
+### Code Refactoring
+
+* **memory:** lift the atomic-fact fan-out out of the background task (A70 step 2a) ([#1428](https://github.com/caura-ai/caura/issues/1428)) ([0a65886](https://github.com/caura-ai/caura/commit/0a658863e9008a7c13c9a44ff80ce94e371b0de9))
+
+## [3.4.1](https://github.com/caura-ai/caura/compare/backend-v3.4.0...backend-v3.4.1) (2026-09-09)
+
+
+### Code Refactoring
+
+* **doc-search:** give the document top_k cap one source of truth ([#1413](https://github.com/caura-ai/caura/issues/1413)) ([339f3be](https://github.com/caura-ai/caura/commit/339f3bebbdc5656ed81dfa94ea9792868540df1c))
+
+## [3.4.0](https://github.com/caura-ai/caura/compare/backend-v3.3.1...backend-v3.4.0) (2026-09-09)
+
+
+### Features
+
+* **search:** opt-in strict fleet scoping (C27) ([#1410](https://github.com/caura-ai/caura/issues/1410)) ([5783f8f](https://github.com/caura-ai/caura/commit/5783f8f3f07603c30c9a794ba807f7648491c7e7))
+* **search:** raise the top_k ceiling to 200 and give it one source of truth ([#1411](https://github.com/caura-ai/caura/issues/1411)) ([1d86102](https://github.com/caura-ai/caura/commit/1d86102e3ca70bb04c8a05fd61e26f35addf0296))
+
+## [3.3.1](https://github.com/caura-ai/caura/compare/backend-v3.3.0...backend-v3.3.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **extraction:** make a degraded extraction visible, and stop one absent field causing it (A69) ([#1397](https://github.com/caura-ai/caura/issues/1397)) ([2903c07](https://github.com/caura-ai/caura/commit/2903c07d00fd73d080e1b016288de120a22430cf))
+
+
+### Code Refactoring
+
+* **routes:** pass the write identity down instead of re-reading a nullable field ([#1396](https://github.com/caura-ai/caura/issues/1396)) ([a776c6d](https://github.com/caura-ai/caura/commit/a776c6d8f300ae8fee246df10466158fd3e94d86))
+
+## [3.3.0](https://github.com/caura-ai/caura/compare/backend-v3.2.1...backend-v3.3.0) (2026-09-08)
+
+
+### Features
+
+* **auth:** give the caller identity its own type so stored data can't become one ([#1395](https://github.com/caura-ai/caura/issues/1395)) ([d8b5cf7](https://github.com/caura-ai/caura/commit/d8b5cf7cfa7f570a0300564a92e8e701af464159))
+
+
+### Bug Fixes
+
+* **extraction:** keep bracketed qualifiers in canonical_name (A67) ([#1392](https://github.com/caura-ai/caura/issues/1392)) ([eb84cf4](https://github.com/caura-ai/caura/commit/eb84cf4b6dd3a2885f07d0d4b5213f92ea857661))
+
+## [3.2.1](https://github.com/caura-ai/caura/compare/backend-v3.2.0...backend-v3.2.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **routes:** type-check routes.memories and drop it from the ignore_errors list ([#1387](https://github.com/caura-ai/caura/issues/1387)) ([1d2120b](https://github.com/caura-ai/caura/commit/1d2120b905d25a045232b241399b2d3e0cd0d7da))
+
+## [3.2.0](https://github.com/caura-ai/caura/compare/backend-v3.1.1...backend-v3.2.0) (2026-09-08)
+
+
+### Features
+
+* **clients:** claim the unscoped npm aliases for the client ([#1386](https://github.com/caura-ai/caura/issues/1386)) ([b2eb816](https://github.com/caura-ai/caura/commit/b2eb8164a1134ae49f23ff35501bd95c11845445))
+* **conflicts:** human review of detected conflicts — backend (D11) ([#1389](https://github.com/caura-ai/caura/issues/1389)) ([c598a39](https://github.com/caura-ai/caura/commit/c598a3945d3e45c88fe633a01c996dd83b6fe754))
+* **scripts:** add ref-only legacy-name census ([#1382](https://github.com/caura-ai/caura/issues/1382)) ([8b634a9](https://github.com/caura-ai/caura/commit/8b634a96cd00ca3dfcb7fbe749d3861917de4e9d))
+
+
+### Bug Fixes
+
+* **mcp:** annotate the return type the handlers have actually had since [#147](https://github.com/caura-ai/caura/issues/147) ([#1383](https://github.com/caura-ai/caura/issues/1383)) ([244050d](https://github.com/caura-ai/caura/commit/244050d507bbc761e21d58426b5e03bb4e85b66e))
+* **mcp:** type-check mcp_server and drop it from the ignore_errors list ([#1384](https://github.com/caura-ai/caura/issues/1384)) ([822f73d](https://github.com/caura-ai/caura/commit/822f73dccb9d9eec5910a0d2f16735b5f6ef27a6))
+* **plugin:** make a missing op branch a build error, and pin every op's route ([#1379](https://github.com/caura-ai/caura/issues/1379)) ([fbf68d0](https://github.com/caura-ai/caura/commit/fbf68d0dfdba7bc3337b04f0c25e012ddf55d3b6))
+* **plugin:** stop an unrecognised op falling through to a write ([#1376](https://github.com/caura-ai/caura/issues/1376)) ([23a9895](https://github.com/caura-ai/caura/commit/23a98953b71575c4744c1991c09ee03975c594f1))
+
+
+### Performance
+
+* **tools:** stop buying five op roll-calls twice in tools/list ([#1381](https://github.com/caura-ai/caura/issues/1381)) ([05f39e8](https://github.com/caura-ai/caura/commit/05f39e8a4d2812b7ea00ac1ac1b6089187d4187f))
+
+## [3.1.1](https://github.com/caura-ai/caura/compare/backend-v3.1.0...backend-v3.1.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **tools:** declare the two caura_manage ops the manifest already advertised ([#1373](https://github.com/caura-ai/caura/issues/1373)) ([c14b812](https://github.com/caura-ai/caura/commit/c14b81267961e4af70d12d783f641ba4e4bc2323))
+
+## [3.1.0](https://github.com/caura-ai/caura/compare/backend-v3.0.4...backend-v3.1.0) (2026-09-08)
+
+
+### Features
+
+* **events:** flip the org family's publishers to the caura twin ([#1372](https://github.com/caura-ai/caura/issues/1372)) ([5457776](https://github.com/caura-ai/caura/commit/5457776023d4b5ef737c50ad5296095b97c82655))
+
+## [3.0.4](https://github.com/caura-ai/caura/compare/backend-v3.0.3...backend-v3.0.4) (2026-09-07)
+
+
+### Bug Fixes
+
+* **auth:** name the identity-precedence policy so the self-plane rule works ([#1369](https://github.com/caura-ai/caura/issues/1369)) ([57bf64b](https://github.com/caura-ai/caura/commit/57bf64b366b1d6bd7e8022c6a16d37bc75a8823b))
+
+
+### Documentation
+
+* **tools:** correct four stale claims, and share the route walk they hid behind ([#1371](https://github.com/caura-ai/caura/issues/1371)) ([df099f4](https://github.com/caura-ai/caura/commit/df099f42dd6a9a5261d77f43a34024cf8f16abc8))
+
+## [3.0.3](https://github.com/caura-ai/caura/compare/backend-v3.0.2...backend-v3.0.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **auth:** give the self plane its own error code, and make its docstring true ([#1365](https://github.com/caura-ai/caura/issues/1365)) ([cf96569](https://github.com/caura-ai/caura/commit/cf96569e3f158f28119c2be60672fb57702937a1))
+* **entities:** block a merge when two bracketed qualifiers conflict (A42) ([#1366](https://github.com/caura-ai/caura/issues/1366)) ([d301525](https://github.com/caura-ai/caura/commit/d3015254be04121fb475ac95b850c00a4e734a05))
+* **storage:** lock parent memories in one order, and correct the deadlock note ([#1362](https://github.com/caura-ai/caura/issues/1362)) ([fc09833](https://github.com/caura-ai/caura/commit/fc09833204b4840b39f1b3faf93df8b6572ec30c))
+
+
+### Documentation
+
+* **observability:** the query contract for contradiction quality (D4) ([#1359](https://github.com/caura-ai/caura/issues/1359)) ([9711fac](https://github.com/caura-ai/caura/commit/9711facd28efa8b1f9dcb21f01781c5425a70523))
+
+
+### Code Refactoring
+
+* **auth:** give the self plane one gate instead of eight hand-written ifs ([#1364](https://github.com/caura-ai/caura/issues/1364)) ([98ed5f8](https://github.com/caura-ai/caura/commit/98ed5f8094adb5a9d71356679494ff730f8afd79))
+
+## [3.0.2](https://github.com/caura-ai/caura/compare/backend-v3.0.1...backend-v3.0.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* **embedding:** make the local provider's model configurable and refuse a width mismatch (C38) ([#1342](https://github.com/caura-ai/caura/issues/1342)) ([888292e](https://github.com/caura-ai/caura/commit/888292e370cb699cfe5b8d71f44b478f731fed9e))
+* **mcp:** gate caura_insights on write scope ([#1361](https://github.com/caura-ai/caura/issues/1361)) ([aecd1a2](https://github.com/caura-ai/caura/commit/aecd1a2527afa320ed01250e5e68509cec665cf2))
+
+## [3.0.1](https://github.com/caura-ai/caura/compare/backend-v3.0.0...backend-v3.0.1) (2026-09-07)
+
+
+### Code Refactoring
+
+* **core-api:** name the write entry point for what it does ([#1349](https://github.com/caura-ai/caura/issues/1349)) ([668effe](https://github.com/caura-ai/caura/commit/668effe28dc049a7cad24f45e8c5726c4aacda82))
+
+## [3.0.0](https://github.com/caura-ai/caura/compare/backend-v2.48.11...backend-v3.0.0) (2026-09-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **core-api:** delete the legacy write path ([#1347](https://github.com/caura-ai/caura/issues/1347))
+
+### Code Refactoring
+
+* **core-api:** delete the legacy write path ([#1347](https://github.com/caura-ai/caura/issues/1347)) ([f79e52e](https://github.com/caura-ai/caura/commit/f79e52e0c8eb043282fa2a0a05652b9744f5bdbe))
+
+## [2.48.11](https://github.com/caura-ai/caura/compare/backend-v2.48.10...backend-v2.48.11) (2026-09-07)
+
+
+### Bug Fixes
+
+* **skills-inbox:** add the missing write gate on the five inbox actions ([#1343](https://github.com/caura-ai/caura/issues/1343)) ([3239f84](https://github.com/caura-ai/caura/commit/3239f84292eba2dd6f5b5e7bcff41da3f6c3a828))
+* **storage:** insert entity links in one global lock order ([#1346](https://github.com/caura-ai/caura/issues/1346)) ([d7f4cb7](https://github.com/caura-ai/caura/commit/d7f4cb701d7303e354dc6cdec8dc405d52910e8c))
+* **tests:** stop test_pipeline_equivalence leaking the legacy write path ([#1345](https://github.com/caura-ai/caura/issues/1345)) ([887c67a](https://github.com/caura-ai/caura/commit/887c67a912f77d781e53eacbff2c09babf904db7))
+
+## [2.48.10](https://github.com/caura-ai/caura/compare/backend-v2.48.9...backend-v2.48.10) (2026-09-07)
+
+
+### Dependencies
+
+* update alembic requirement from &lt;2,&gt;=1.14 to &gt;=1.19.1,&lt;2 ([#1331](https://github.com/caura-ai/caura/issues/1331)) ([ce008da](https://github.com/caura-ai/caura/commit/ce008daaa6cd010ebb9e4710c815464b61f6cd06))
+* update cachetools requirement from &gt;=7.1.7 to &gt;=7.1.8 ([#1332](https://github.com/caura-ai/caura/issues/1332)) ([06e1744](https://github.com/caura-ai/caura/commit/06e1744a025d8f36d0a74da433c8b8a97cf0d387))
+* update python-jose requirement from &gt;=3.3 to &gt;=3.5.0 ([#1330](https://github.com/caura-ai/caura/issues/1330)) ([be76b1e](https://github.com/caura-ai/caura/commit/be76b1e61c4d17ae8f98aca16ce03f4c2636d994))
+
+## [2.48.9](https://github.com/caura-ai/caura/compare/backend-v2.48.8...backend-v2.48.9) (2026-09-07)
+
+
+### Bug Fixes
+
+* **agents:** add the missing write gate on PATCH /agents/{id}/tune ([#1337](https://github.com/caura-ai/caura/issues/1337)) ([d055f6a](https://github.com/caura-ai/caura/commit/d055f6aa8ceb99b0f70c048ec38b6abfc437c37b))
+* **fleet:** refuse an agent-scoped credential at POST /fleet/commands ([#1335](https://github.com/caura-ai/caura/issues/1335)) ([685a31f](https://github.com/caura-ai/caura/commit/685a31f264c154b666f91f69f050d54f9fe305c8))
+
+## [2.48.8](https://github.com/caura-ai/caura/compare/backend-v2.48.7...backend-v2.48.8) (2026-09-07)
+
+
+### Dependencies
+
+* **plugin:** bump @types/node from 26.4.0 to 26.4.1 in /plugin in the npm-minor-patch group ([#1327](https://github.com/caura-ai/caura/issues/1327)) ([93d9974](https://github.com/caura-ai/caura/commit/93d9974fb60d9a9168252443ee31dc321a8f0d02))
+* update google-genai requirement from &gt;=2.17.0 to &gt;=2.22.0 ([#1329](https://github.com/caura-ai/caura/issues/1329)) ([ba6150a](https://github.com/caura-ai/caura/commit/ba6150a6ff459ac6cf41d1b3a9d79398d825d67b))
+* update pyotp requirement from &gt;=2.9 to &gt;=2.10.0 ([#1328](https://github.com/caura-ai/caura/issues/1328)) ([8ddeb95](https://github.com/caura-ai/caura/commit/8ddeb956c37ac31eb4fd0dfecdeeb839bbcb898c))
+
+## [2.48.7](https://github.com/caura-ai/caura/compare/backend-v2.48.6...backend-v2.48.7) (2026-09-07)
+
+
+### Bug Fixes
+
+* **reports:** stop leaking the caller's own private rows into group reports ([#1325](https://github.com/caura-ai/caura/issues/1325)) ([1217bd6](https://github.com/caura-ai/caura/commit/1217bd6f86bbcffc148184c48b23f9e7c2e427a1))
+
+
+### Dependencies
+
+* **actions:** bump docker/setup-qemu-action from 4.2.0 to 4.3.0 in the actions group ([#1333](https://github.com/caura-ai/caura/issues/1333)) ([8b33bc1](https://github.com/caura-ai/caura/commit/8b33bc1ae1ce2f79f98183f9fc750aba6e6b4f71))
+
+## [2.48.6](https://github.com/caura-ai/caura/compare/backend-v2.48.5...backend-v2.48.6) (2026-09-06)
+
+
+### Bug Fixes
+
+* **memory:** reserve the platform-written keys C25 left forgeable ([#1324](https://github.com/caura-ai/caura/issues/1324)) ([74ba88e](https://github.com/caura-ai/caura/commit/74ba88ea0f3d607357496dced50b5e6e59be2d6c))
+* **memory:** sanitize caller metadata on the bulk and update write paths ([#1322](https://github.com/caura-ai/caura/issues/1322)) ([882367c](https://github.com/caura-ai/caura/commit/882367c131bca8d69f78923bd83fd87c0857bcf8))
+
+## [2.48.5](https://github.com/caura-ai/caura/compare/backend-v2.48.4...backend-v2.48.5) (2026-09-06)
+
+
+### Bug Fixes
+
+* **extraction:** define what "subject" means, so updates can supersede (A66) ([#1317](https://github.com/caura-ai/caura/issues/1317)) ([a1e278e](https://github.com/caura-ai/caura/commit/a1e278e31318a586ac1c487efd449755181557ed))
+* **fleet:** block agent-scoped keys from DELETE /fleet/{fleet_id} ([#1321](https://github.com/caura-ai/caura/issues/1321)) ([7f4a1a5](https://github.com/caura-ai/caura/commit/7f4a1a5f1e2e58b300af3963b4fbdbf3d1b95f13))
+* **llm:** unwrap singleton JSON arrays instead of discarding valid answers ([#1320](https://github.com/caura-ai/caura/issues/1320)) ([c8c35bd](https://github.com/caura-ai/caura/commit/c8c35bda493817882207b255e02198e2b2752445))
+
+## [2.48.4](https://github.com/caura-ai/caura/compare/backend-v2.48.3...backend-v2.48.4) (2026-09-06)
+
+
+### Bug Fixes
+
+* **storage:** scope a relation's ENDPOINTS to the tenant, not just the edge ([#1314](https://github.com/caura-ai/caura/issues/1314)) ([3e1fe1b](https://github.com/caura-ai/caura/commit/3e1fe1b9b22484b9ee2bd9a59e511ccf2ed1b5f3))
+
+## [2.48.3](https://github.com/caura-ai/caura/compare/backend-v2.48.2...backend-v2.48.3) (2026-09-06)
+
+
+### Bug Fixes
+
+* **crystallizer:** stop the dedup sweep re-clustering rows it archived itself ([#1313](https://github.com/caura-ai/caura/issues/1313)) ([ef2f58d](https://github.com/caura-ai/caura/commit/ef2f58dec643ac2719465eb257fd31f0d5962972))
+* **governance:** remove the entity rows mined out of a dropped memory ([#1297](https://github.com/caura-ai/caura/issues/1297)) ([89223d3](https://github.com/caura-ai/caura/commit/89223d34b4d2e363db575a022e44219195987ab8))
+
 ## [2.48.2](https://github.com/caura-ai/caura/compare/backend-v2.48.1...backend-v2.48.2) (2026-09-05)
 
 

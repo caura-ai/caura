@@ -28,8 +28,11 @@
 
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import cauraPlugin from "./index.js";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 import {
   _resetReachabilityForTests,
   getReachability,
@@ -900,7 +903,11 @@ describe("CauraContextEngine.constructor — undefined-config tolerance (v2.6.5)
 
 // CauraContextEngine already imported above for the assemble-contract
 // block. Import only what's new for the compaction-bridge contract.
-import { _resetSdkBridgeCache, getOpenClawSdk } from "./openclaw-sdk-bridge.js";
+import {
+  _resetSdkBridgeCache,
+  resolveSdkFromLauncher,
+  getOpenClawSdk,
+} from "./openclaw-sdk-bridge.js";
 
 describe("ContextEngine.info compaction-ownership (v2.6.4)", () => {
   test("info.ownsCompaction === true (we own compaction by delegating to SDK)", () => {
@@ -921,6 +928,30 @@ describe("ContextEngine.info compaction-ownership (v2.6.4)", () => {
 });
 
 describe("openclaw-sdk-bridge resolver", () => {
+  test("imports the SDK when its absolute path contains URL delimiters", async (t) => {
+    const pkgRoot = await mkdtemp(join(tmpdir(), "caura-openclaw#fixture-"));
+    t.after(() => rm(pkgRoot, { recursive: true, force: true }));
+
+    const launcher = join(pkgRoot, "bin", "openclaw.mjs");
+    const sdkDir = join(pkgRoot, "dist", "plugin-sdk");
+    await mkdir(join(pkgRoot, "bin"), { recursive: true });
+    await mkdir(sdkDir, { recursive: true });
+    await writeFile(
+      join(pkgRoot, "package.json"),
+      JSON.stringify({ name: "openclaw", type: "module" }),
+    );
+    await writeFile(launcher, "// synthetic launcher\n");
+    await writeFile(
+      join(sdkDir, "index.js"),
+      "export async function delegateCompactionToRuntime() { return { ok: true }; }\n",
+    );
+
+    const result = await resolveSdkFromLauncher(launcher);
+
+    assert.equal(result.pkgRoot, await realpath(pkgRoot));
+    assert.equal(typeof result.sdk?.delegateCompactionToRuntime, "function");
+  });
+
   test("returns {sdk: null, pkgRoot: null} in test runtime (argv[1] is the test runner, not openclaw)", async () => {
     _resetSdkBridgeCache();
     const res = await getOpenClawSdk();

@@ -10,11 +10,11 @@ third-party loggers once they're all imported.
 
 Lifespan ordering:
 1. Re-route third-party loggers (uvicorn / scheduler) onto the JSON handler.
-2. If ``settings.standalone``: skip scheduler entirely. The service runs
+2. If ``settings.is_standalone``: skip scheduler entirely. The service runs
    as a no-op; OSS standalone deployments should not deploy this image
    at all, but the flag is a defensive short-circuit.
 3. Otherwise: register cron jobs via ``scheduler.register(...)`` and call
-   ``scheduler.start()``. Ten jobs are registered unconditionally: six daily
+   ``scheduler.start()``. Eleven jobs are registered unconditionally: six daily
    lifecycle ticks (``lifecycle-archive-expired``, ``lifecycle-archive-stale``,
    ``lifecycle-purge-soft-deleted``, ``lifecycle-crystallize``,
    ``lifecycle-entity-link``, ``lifecycle-insights``), each wall-clock
@@ -23,10 +23,17 @@ Lifespan ordering:
    ``interviewer-schedule`` (hourly, top of hour) which queues Interviewer
    work — per-tenant settings gate actual command creation; and
    ``embedding-coverage`` (hourly, top of hour), a read-only sample that logs
-   how many live memories are still unembedded. An eleventh,
+   how many live memories are still unembedded; and ``lifecycle-reconcile``
+   (hourly, half past), which republishes audit rows a fanout wrote but never
+   published a message for, offset off the fanout hours it repairs. A twelfth,
    ``embed-backfill``, registers only when ``embed_backfill_enabled`` is set,
    because its Pub/Sub topic is Terraform-provisioned and firing into an
    unprovisioned topic would just error every night.
+
+   Every one of those is wall-clock aligned, so every one of them fires
+   once per live replica of this service unless something coordinates
+   across processes. ``scheduler.set_lease`` installs that coordination
+   immediately before ``start()``; see ``core_operations.lease``.
 4. Shutdown cancels all running tasks and awaits their unwind.
 """
 
@@ -40,6 +47,7 @@ from fastapi import FastAPI, HTTPException
 
 from common.structlog_config import configure_logging, reroute_third_party_loggers
 from core_operations.config import settings
+from core_operations.lease import claim_tick_lease
 
 # Configure logging at import — before the scheduler/tasks imports below AND
 # before uvicorn emits its startup lines. uvicorn imports this module during
@@ -61,6 +69,7 @@ configure_logging(
 
 from core_operations.scheduler import (
     scheduler,
+    seconds_until_next_utc_half_past,
     seconds_until_next_utc_hour,
     seconds_until_next_utc_top_of_hour,
     seconds_until_next_utc_weekday_hour,
@@ -76,6 +85,7 @@ from core_operations.tasks import (
     run_entity_link_tick,
     run_insights_tick,
     run_interviewer_schedule_tick,
+    run_lifecycle_reconcile_tick,
     run_purge_soft_deleted_tick,
 )
 
@@ -119,17 +129,30 @@ def _register_scheduled_tasks() -> None:
         run_purge_soft_deleted_tick,
         delay_provider=_daily_at("lifecycle_purge_run_at_hour"),
     )
+    # A72 — cadence is configurable. At the default (24) this is byte-for-byte
+    # today's behaviour: one run, wall-clock aligned to
+    # ``lifecycle_pipeline_run_at_hour``. Below 24 the alignment changes meaning
+    # — "every N hours from the next top of hour" rather than "at 02:00" — so
+    # the delay provider switches with it rather than pretending a sub-daily
+    # cadence can still anchor to one hour of the day.
+    _crystallize_hours = max(1, settings.lifecycle_crystallize_every_hours)
     scheduler.register(
         "lifecycle-crystallize",
-        24 * 3600,
+        _crystallize_hours * 3600,
         run_crystallize_tick,
-        delay_provider=_daily_at("lifecycle_pipeline_run_at_hour"),
+        delay_provider=(
+            _daily_at("lifecycle_pipeline_run_at_hour")
+            if _crystallize_hours >= 24
+            else (lambda: seconds_until_next_utc_top_of_hour())
+        ),
     )
     scheduler.register(
         "lifecycle-entity-link",
         24 * 3600,
         run_entity_link_tick,
-        delay_provider=_daily_at("lifecycle_pipeline_run_at_hour"),
+        # Its OWN hour, not the pipeline hour crystallize uses — see
+        # ``lifecycle_entity_link_run_at_hour`` for why the two were split.
+        delay_provider=_daily_at("lifecycle_entity_link_run_at_hour"),
     )
     scheduler.register(
         "lifecycle-insights",
@@ -159,6 +182,22 @@ def _register_scheduled_tasks() -> None:
         7 * 24 * 3600,
         run_agent_digest_weekly_tick,
         delay_provider=_weekly_at("agent_digest_weekly_run_at_weekday", "agent_digest_weekly_run_at_hour"),
+    )
+    # Repairs audit rows an earlier fanout wrote but never published a
+    # message for. Hourly, so a drop is repaired within the hour rather
+    # than at the action's next daily run.
+    #
+    # Offset to half past deliberately. Every lifecycle fanout is aligned
+    # to the top of its hour, so firing there would put the sweep's own
+    # storage reads in the same instant as the burst it exists to clean up
+    # after. Half past also sits clear of the 30-minute strand threshold,
+    # so a row from the top of this hour is never young enough to be swept
+    # while its consumer may still be working on it.
+    scheduler.register(
+        "lifecycle-reconcile",
+        3600,
+        run_lifecycle_reconcile_tick,
+        delay_provider=lambda: seconds_until_next_utc_half_past(),
     )
     # Interviewer Phase 1: hourly queue-only tick; per-tenant period_hours
     # gates actual command creation, so opted-out tenants pay zero cost.
@@ -191,10 +230,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     logger.info(
         "Starting core-operations",
-        extra={"environment": settings.environment, "standalone": settings.standalone},
+        extra={"environment": settings.environment, "standalone": settings.is_standalone},
     )
 
-    if settings.standalone:
+    if settings.is_standalone:
         # OSS standalone deployments shouldn't deploy this image at all.
         # If we're here it's a misconfiguration — escalate so it shows up
         # in alerts rather than silently consuming a Cloud Run slot.
@@ -216,6 +255,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
 
     _register_scheduled_tasks()
+    # Cross-process guard for the aligned ticks. Cloud Run may run more
+    # than one replica of this service, and each runs its own copy of the
+    # scheduler loop, so without this every wall-clock task fires once per
+    # replica inside the same second. Installed before ``start()`` because
+    # ``set_lease`` refuses once the scheduler is running.
+    scheduler.set_lease(claim_tick_lease)
     await scheduler.start()
     logger.info(
         "Scheduler started",

@@ -72,12 +72,133 @@ class TestBodySizeMiddleware:
 
     def test_under_cap_passes_middleware(self, monkeypatch) -> None:
         """A small valid JSON body must not 413."""
-        client, _ = _build_app(monkeypatch)
+        client, preview_mock = _build_app(monkeypatch)
         resp = client.post(
             "/api/v1/ingest/preview",
             json={"tenant_id": "t", "content": "hello world"},
         )
-        assert resp.status_code != 413
+        assert resp.status_code == 200, resp.text
+        assert preview_mock.await_args.args[0].content == "hello world"
+
+    async def test_chunked_oversize_body_returns_413_before_route(self) -> None:
+        """A missing Content-Length must not turn the cap into an opt-out."""
+        route_called = False
+
+        async def app(scope, receive, send):
+            nonlocal route_called
+            route_called = True
+            while (await receive()).get("more_body", False):
+                pass
+
+        messages = iter(
+            [
+                {
+                    "type": "http.request",
+                    "body": b"x" * INGEST_MAX_INPUT_BYTES,
+                    "more_body": True,
+                },
+                {"type": "http.request", "body": b"x", "more_body": False},
+            ]
+        )
+        sent: list[dict] = []
+
+        async def receive() -> dict:
+            return next(messages)
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        middleware = IngestBodySizeMiddleware(app)
+        await middleware(
+            {
+                "type": "http",
+                "path": "/api/v1/ingest/preview",
+                "headers": [(b"transfer-encoding", b"chunked")],
+            },
+            receive,
+            send,
+        )
+
+        assert route_called is False
+        assert sent[0]["type"] == "http.response.start"
+        assert sent[0]["status"] == 413
+
+    async def test_dishonest_small_content_length_still_returns_413(self) -> None:
+        """The observed body, not a caller-supplied length, is authoritative."""
+        route_called = False
+
+        async def app(scope, receive, send):
+            nonlocal route_called
+            route_called = True
+
+        messages = iter(
+            [
+                {
+                    "type": "http.request",
+                    "body": b"x" * (INGEST_MAX_INPUT_BYTES + 1),
+                    "more_body": False,
+                }
+            ]
+        )
+        sent: list[dict] = []
+
+        async def receive() -> dict:
+            return next(messages)
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        middleware = IngestBodySizeMiddleware(app)
+        await middleware(
+            {
+                "type": "http",
+                "path": "/api/v1/ingest/commit",
+                "headers": [(b"content-length", b"1")],
+            },
+            receive,
+            send,
+        )
+
+        assert route_called is False
+        assert sent[0]["status"] == 413
+
+    async def test_empty_chunks_are_consolidated_before_route(self) -> None:
+        """Empty chunk spam must not create an unbounded replay buffer."""
+        received: list[dict] = []
+
+        async def app(scope, receive, send):
+            received.append(await receive())
+
+        messages = iter(
+            [
+                *[
+                    {"type": "http.request", "body": b"", "more_body": True}
+                    for _ in range(100)
+                ],
+                {"type": "http.request", "body": b"hello", "more_body": False},
+            ]
+        )
+
+        async def receive() -> dict:
+            return next(messages)
+
+        async def send(message: dict) -> None:
+            raise AssertionError(f"unexpected response: {message}")
+
+        middleware = IngestBodySizeMiddleware(app)
+        await middleware(
+            {
+                "type": "http",
+                "path": "/api/v1/ingest/preview",
+                "headers": [(b"transfer-encoding", b"chunked")],
+            },
+            receive,
+            send,
+        )
+
+        assert received == [
+            {"type": "http.request", "body": b"hello", "more_body": False}
+        ]
 
     def test_middleware_skips_non_ingest_paths(self, monkeypatch) -> None:
         """A different path with an oversize body must not be blocked by

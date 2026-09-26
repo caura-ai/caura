@@ -11,7 +11,7 @@ pipeline, and both entry points reach it through the same ``create_memory``:
     MCP   caura_write       -> create_memory
                                      |
                                      v
-                        _create_memory_pipeline
+                          _run_write_pipeline
                                      |
                                      v
                         ScheduleBackgroundTasks   <- entity extraction +
@@ -49,7 +49,11 @@ def test_create_memory_runs_the_pipeline():
     from core_api.services import memory_service
 
     src = inspect.getsource(memory_service.create_memory)
-    assert "_create_memory_pipeline" in src
+    assert "_run_write_pipeline" in src, (
+        "create_memory no longer hands the write to the pipeline entry point, "
+        "which is where detection is scheduled — either the entry point was "
+        "renamed, or A38 is real again."
+    )
 
 
 def test_rest_and_mcp_share_the_same_write_entry():

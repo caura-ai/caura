@@ -70,9 +70,10 @@ export function isNetworkClassError(err: unknown): boolean {
   // Guard by name before falling through to the message heuristic.
   if ((err as { name?: unknown })?.name === "AbortError") return false;
   const msg = String((err as { message?: unknown })?.message ?? err).toLowerCase();
-  // Explicit HTTP-status classifications from transport.ts surface as
-  // "http <status>: ..." — anything <500 is NOT network-class.
-  const httpMatch = msg.match(/\bhttp\s+(\d{3})\b/);
+  // transport.ts emits "Caura API <status>: ..."; keep accepting the
+  // older generic "http <status>: ..." shape too. Anything below 500 is
+  // server logic, not a reachability failure.
+  const httpMatch = msg.match(/\b(?:http|caura api)\s+(\d{3})\b/);
   if (httpMatch) {
     const code = Number(httpMatch[1]);
     return code >= 500 && code < 600;

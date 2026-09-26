@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/caura-ai/caura/blob/main/docs/telemetry-schema-v1.json",
+  "title": "Caura server anonymous heartbeat, schema 1",
+  "description": "The one payload a self-hosted Caura server sends once a day when telemetry is on. Every count is a bucket string, every provider a closed enum. See docs/telemetry.md. Adding a field means a schema bump, a changelog entry and a minor release.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "product",
+    "deployment_id",
+    "sent_at",
+    "version",
+    "runtime",
+    "mode",
+    "uptime_bucket",
+    "providers",
+    "counts",
+    "clients_24h"
+  ],
+  "$defs": {
+    "bucket": {
+      "description": "Shared count scale. Small installs cannot be fingerprinted by exact numbers.",
+      "type": "string",
+      "enum": ["0", "1", "2-5", "6-20", "21-100", "101-1k", "1k-10k", "10k-100k", ">100k"]
+    }
+  },
+  "properties": {
+    "schema": { "const": 1 },
+    "product": { "const": "caura-server" },
+    "deployment_id": {
+      "description": "Random uuid4, stored once, rotatable via POST /api/v1/telemetry/rotate. Not derived from hardware, hostname or MAC.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sent_at": {
+      "description": "Clock at send, UTC, second precision.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "version": {
+      "description": "core-api version (CAURA_VERSION env, /app/VERSION, dist metadata, else \"dev\").",
+      "type": "string",
+      "maxLength": 64
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "os", "arch", "deploy"],
+      "properties": {
+        "python": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+        "os": { "type": "string", "maxLength": 32 },
+        "arch": { "type": "string", "maxLength": 32 },
+        "deploy": { "type": "string", "enum": ["docker", "source"] }
+      }
+    },
+    "mode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["standalone"],
+      "properties": {
+        "standalone": { "type": "boolean" }
+      }
+    },
+    "uptime_bucket": {
+      "type": "string",
+      "enum": ["<1h", "1h-1d", "1d-7d", "7d-30d", ">30d"]
+    },
+    "providers": {
+      "description": "Provider kinds only. No model names, no keys, no URLs.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["embedding", "entity_extraction", "rank", "event_bus", "redis", "sentry"],
+      "properties": {
+        "embedding": { "type": "string", "enum": ["none", "openai", "local", "other"] },
+        "entity_extraction": {
+          "type": "string",
+          "enum": ["none", "openai", "anthropic", "openrouter", "gemini", "other"]
+        },
+        "rank": { "type": "string", "enum": ["noop", "local", "other"] },
+        "event_bus": { "type": "string", "enum": ["inprocess", "pubsub"] },
+        "redis": { "type": "boolean" },
+        "sentry": { "type": "boolean" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memories", "agents", "tenants", "plugin_nodes_7d", "plugin_versions"],
+      "properties": {
+        "memories": { "$ref": "#/$defs/bucket" },
+        "agents": { "$ref": "#/$defs/bucket" },
+        "tenants": { "$ref": "#/$defs/bucket" },
+        "plugin_nodes_7d": { "$ref": "#/$defs/bucket" },
+        "plugin_versions": {
+          "description": "Distinct major.minor of OpenClaw plugin nodes seen in the last 7 days.",
+          "type": "array",
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" }
+        }
+      }
+    },
+    "clients_24h": {
+      "description": "Authenticated requests since the last accepted heartbeat, by User-Agent family. MCP is counted by transport.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "openclaw-plugin",
+        "caura-client-python",
+        "caura-client-node",
+        "caura-rail-python",
+        "caura-rail-node",
+        "mcp",
+        "other"
+      ],
+      "properties": {
+        "openclaw-plugin": { "$ref": "#/$defs/bucket" },
+        "caura-client-python": { "$ref": "#/$defs/bucket" },
+        "caura-client-node": { "$ref": "#/$defs/bucket" },
+        "caura-rail-python": { "$ref": "#/$defs/bucket" },
+        "caura-rail-node": { "$ref": "#/$defs/bucket" },
+        "mcp": { "$ref": "#/$defs/bucket" },
+        "other": { "$ref": "#/$defs/bucket" }
+      }
+    }
+  }
+}

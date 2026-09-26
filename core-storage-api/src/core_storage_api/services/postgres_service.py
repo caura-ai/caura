@@ -23,6 +23,9 @@ from uuid import UUID
 
 from sqlalchemy import (
     ColumnElement,
+    Date,
+    DateTime,
+    Integer,
     String,
     Table,
     and_,
@@ -33,7 +36,9 @@ from sqlalchemy import (
     distinct,
     false,
     func,
+    literal,
     literal_column,
+    null,
     or_,
     select,
     text,
@@ -46,6 +51,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import load_only
 from sqlalchemy.sql.dml import ReturningInsert
+from sqlalchemy.sql.selectable import Select
 
 from common import duplicate_memory, permanent_failure
 from common.constants import (
@@ -62,6 +68,7 @@ from common.constants import (
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
     SEMANTIC_DEDUP_THRESHOLD,
     TYPE_DECAY_DAYS,
+    predicate_cluster,
 )
 from common.entity_naming import canonical_match_key, normalize_entity_name
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
@@ -86,11 +93,12 @@ from common.models import (
     Relation,
 )
 from common.models.capability_usage import CapabilityUsage
+from common.models.entity import LINK_SOURCE_CALLER, LINK_SOURCE_EXTRACTION
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
 from common.organization_settings_merge import deep_merge, diff_settings
-from core_storage_api.observability import db_measure
+from core_storage_api.observability import PhaseTimer, db_measure
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
@@ -139,6 +147,66 @@ def _get_read_session_factory() -> async_sessionmaker[AsyncSession]:
     return _read_session_factory
 
 
+def _ordered_link_rows(rows: list[dict]) -> list[dict]:
+    """Dedup ``memory_entity_links`` rows by key and fix one global insert order.
+
+    A statement carrying several pairs takes its row locks in the order it is
+    given them. Two concurrent statements covering an overlapping set in
+    different orders each take one key and then wait on the other's
+    transaction — a cycle Postgres resolves by killing one of them, which
+    reaches the caller as a 500 on an ordinary write rather than as anything
+    about locking.
+
+    ``ON CONFLICT`` does not help with that, which an earlier comment on
+    ``memory_add_entity_links`` claimed it did. The clause decides what happens
+    once the wait resolves, not whether there is a wait: an inserter whose key
+    is held by an in-flight transaction blocks until that transaction ends,
+    measured at the shape used here. Sorting is the whole mitigation, and it is
+    the one ``evolve_service`` already applies to ``related_ids`` before its
+    multi-row UPDATE.
+
+    Sorted on the STRING form of each id so the order is the same for callers
+    that pass ``UUID`` objects and callers that pass strings; a mixed batch
+    would otherwise order by object identity and defeat the point.
+
+    First occurrence of a repeated key wins — the row a single ``DO NOTHING``
+    statement would have kept anyway, so deduping here changes no result.
+    """
+    by_key: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        by_key.setdefault((str(row["memory_id"]), str(row["entity_id"])), row)
+    return [by_key[key] for key in sorted(by_key)]
+
+
+def _ordered_memory_lock_select(memory_ids: list[UUID], tenant_id: str) -> Select[tuple[Memory]]:
+    """``SELECT ... FOR UPDATE`` over ``memories``, locked in one global order.
+
+    Same hazard as ``_ordered_link_rows`` one table up. A multi-row
+    ``FOR UPDATE`` takes its row locks in the order the executor produces
+    them, and ``WHERE id IN (...)`` fixes no order at all — so this statement
+    and a concurrent link insert can take the same two parent memories in
+    opposite orders and cycle. Measured: with the orders crossed, Postgres
+    kills one side; with them agreed, the later writer only waits.
+
+    ``ORDER BY id`` is the whole mitigation, and it has to be THIS key to be
+    worth anything: the link path sorts on the string form of the id
+    (``_ordered_link_rows``), and Postgres orders the ``uuid`` type by its 16
+    bytes. Those two agree — checked over 500 random v4 ids, both against
+    ``sorted(str(...))`` and against ``sorted(key=.int)`` — which is what makes
+    the two paths agree rather than merely each being internally consistent.
+    """
+    return (
+        select(Memory)
+        .where(
+            Memory.id.in_(memory_ids),
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+        )
+        .order_by(Memory.id)
+        .with_for_update()
+    )
+
+
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
     """Transactional writer session; commits on success, rolls back on error."""
@@ -167,6 +235,95 @@ async def get_read_session() -> AsyncIterator[AsyncSession]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _normalized_object_sql(column):
+    """SQL-side object normalisation for the RDF conflict compare (A35).
+
+    ``memory_find_rdf_conflicts`` selects a conflict with
+    ``Memory.object_value != object_value`` — raw string inequality. So
+    "7,500 rpm" and "7500 RPM" read as two DIFFERENT values for one
+    (subject, predicate) and the row is flagged as a contradiction it is not.
+    A false conflict is not free: the loser carries a 0.5 ranking penalty, so
+    a formatting difference quietly demotes a correct memory.
+
+    Normalises SHAPE only — case, whitespace, thousands separators — and
+    deliberately nothing semantic. "7500 rpm" and "7500 per minute" still
+    compare as different, because unit synonymy is open-ended and getting it
+    wrong in the other direction SUPPRESSES a real contradiction, which is the
+    worse failure. Same conservative line as A65's predicate canonicaliser.
+
+    Applied identically to the column and the bound parameter so the two can
+    never drift apart. It does cost the index on ``object_value``, which is
+    acceptable here: the query has already narrowed to one
+    (tenant, subject_entity_id, predicate) before this predicate is evaluated.
+    """
+    return func.lower(func.regexp_replace(column, r"[\s,]", "", "g"))
+
+
+def _fleet_scope_clause(
+    model,
+    fleet_ids: Sequence[str],
+    *,
+    strict: bool,
+    include_org_visibility: bool = True,
+):
+    """The fleet predicate for a read, in one place (C27).
+
+    Wire contract D4 (RATIFIED) defines a NULL ``fleet_id`` as tenant-shared BY
+    DESIGN: a row written without a fleet is readable by every fleet in the
+    tenant. That is the default here and stays the default — this is an opt-in
+    strict mode, not a bug fix, and flipping the default would silently hide
+    rows that tenants deliberately wrote as shared.
+
+    ``strict=True`` drops ONLY the null-fleet disjunct. ``scope_org`` survives
+    in both modes: it is an explicit visibility TIER a writer chose, not an
+    accident of a missing fleet, so a tenant asking for fleet isolation is not
+    asking to revoke it. Narrowing that too would make the switch mean two
+    things at once.
+
+    Centralised because A54 established what happens otherwise — the identical
+    predicate lived in several queries, one was fixed, and the leak simply moved
+    to the next copy. Every fleet-scoped read builds its clause here so "strict"
+    cannot mean different things in different queries.
+    """
+    disjuncts = [model.fleet_id.in_(fleet_ids)]
+    if not strict:
+        disjuncts.append(model.fleet_id.is_(None))
+    if include_org_visibility:
+        disjuncts.append(model.visibility == "scope_org")
+    return or_(*disjuncts)
+
+
+def _visibility_scope_clause(caller_agent_id: str | None) -> ColumnElement[bool]:
+    """The read visibility predicate, in one place — the sibling of
+    ``_fleet_scope_clause`` above, and centralised for the reason its docstring
+    gives.
+
+    With an identity: ``scope_org``/``scope_team`` always, plus the caller's OWN
+    ``scope_agent`` rows. Without one, every ``scope_agent`` row is dropped —
+    a credential that authenticates no agent is entitled to none of them.
+
+    Spelled as an allow-list, NOT as ``!= "scope_agent" OR agent_id ==
+    caller``. ``Memory.visibility`` is plain Text with no CHECK constraint, so
+    the two forms differ on any value outside the three: the allow-list omits
+    it, the negation admits it. Every reader here has to make the same choice,
+    which is the argument for the predicate living in one place — a count that
+    disagrees with the list it summarises is the bug this was extracted for.
+
+    (``Memory.visibility`` is NOT NULL with a server default, so the
+    three-valued-logic NULL pitfall does not apply to either form.)
+    """
+    if not caller_agent_id:
+        return Memory.visibility != "scope_agent"
+    return or_(
+        Memory.visibility == "scope_org",
+        Memory.visibility == "scope_team",
+        and_(
+            Memory.visibility == "scope_agent",
+            Memory.agent_id == caller_agent_id,
+        ),
+    )
 
 
 def _scope_sql(
@@ -277,6 +434,106 @@ def _entity_uf_union(parent: dict[UUID, UUID], rank: dict[UUID, int], a: UUID, b
 # import core-api, so the coupling is documented here rather than enforced.
 _FTS_RESERVED_CANDIDATES = 3
 
+# ── ANN candidate pool (HNSW two-stage retrieval, PR2) ──────────────────────
+# Side-arm LIMITs for the candidate pool built when ``ann_pool_size`` > 0.
+# The ANN arm's size is the knob itself; these bound the supplementary arms
+# that keep non-cosine admission contracts intact (FTS-matching rows incl.
+# NULL-embedding ones, fresh rows, date-window rows). Constants rather than
+# knobs: they shape pool COVERAGE, not ranking, and every admitted row still
+# competes on the full score — oversizing them costs pool width, not rank.
+_ANN_POOL_SIDE_ARM_LIMIT = 50
+# ``hnsw.ef_search`` floor for the ANN arm. pgvector clamps the GUC to
+# [1, 1000]; a value below the arm's LIMIT would cap a non-iterative scan
+# below the requested pool, and tiny values hurt recall even with iterative
+# scans picking up the slack.
+_ANN_EF_SEARCH_FLOOR = 100
+# Iterative index scans (hnsw.iterative_scan) shipped in pgvector 0.8.0 —
+# the mechanism that lets a filtered ANN arm keep scanning until the LIMIT
+# is satisfied instead of post-filtering a fixed ef_search batch. Below this
+# version the GUC does not exist (SET fails), so the ANN pool declines
+# entirely and the statement keeps its pre-pool shape.
+_PGVECTOR_ITERATIVE_MIN = (0, 8)
+# Process-wide probe cache: extversion cannot change under a running service
+# (ALTER EXTENSION requires a restart window in every deployment shape we
+# ship), so one successful probe answers for the process lifetime. ``None``
+# means "not probed yet"; probe FAILURES do not populate it — a transient
+# read error must not stick the process on the fallback path forever.
+_pgvector_version: tuple[int, ...] | None = None
+# Probe coalescing: without it, every search that arrives in the window
+# between process start and the first probe completing sees ``None`` and
+# issues its own ``pg_extension`` read — a thundering herd exactly when a
+# big tenant with the knob on comes back after a deploy. The lock is
+# REBUILT when the running event loop changes rather than created at import:
+# an asyncio primitive binds to the loop that first awaits it, the test
+# suite runs each test on a fresh loop, and a lock carried across loops
+# raises "attached to a different loop". Production has one loop for the
+# process lifetime, so the rebuild branch never fires there.
+_probe_lock: asyncio.Lock | None = None
+_probe_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_probe_lock() -> asyncio.Lock:
+    global _probe_lock, _probe_lock_loop
+    loop = asyncio.get_running_loop()
+    if _probe_lock is None or _probe_lock_loop is not loop:
+        _probe_lock = asyncio.Lock()
+        _probe_lock_loop = loop
+    return _probe_lock
+
+
+async def _ann_pool_available() -> bool:
+    """True when the ANN candidate pool may run: pgvector >= 0.8 on this DB.
+
+    Called only when ``ann_pool_size`` > 0, so the default path never pays
+    the probe. The first caller runs one ``pg_extension`` lookup on a read
+    session and caches the parsed version; concurrent first callers coalesce
+    on the probe lock instead of each issuing their own lookup. The fallback
+    decision is logged once, at WARNING, because a tenant explicitly asked
+    for the pool and is silently getting the full scan instead — on-call
+    should be able to grep why.
+
+    A probe FAILURE deliberately caches nothing (a transient read error must
+    not stick the process on the fallback path), so callers queued behind a
+    failing probe retry it one at a time under the lock — serial, not a herd.
+    """
+    global _pgvector_version
+    if _pgvector_version is not None:
+        return _pgvector_version >= _PGVECTOR_ITERATIVE_MIN
+
+    async with _get_probe_lock():
+        if _pgvector_version is not None:  # a queued waiter after the winner
+            return _pgvector_version >= _PGVECTOR_ITERATIVE_MIN
+        try:
+            async with get_read_session() as session:
+                raw = (
+                    await session.execute(
+                        text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                    )
+                ).scalar()
+        except Exception:
+            logger.warning(
+                "ann_pool: pgvector version probe failed; falling back to the "
+                "full-scan candidate window for this call (will re-probe)",
+                exc_info=True,
+            )
+            return False
+        parts: list[int] = []
+        for piece in str(raw or "0").split("."):
+            if not piece.isdigit():
+                break
+            parts.append(int(piece))
+        _pgvector_version = tuple(parts) or (0,)
+        if _pgvector_version >= _PGVECTOR_ITERATIVE_MIN:
+            logger.info("ann_pool: pgvector %s supports iterative scans; ANN pool enabled", raw)
+        else:
+            logger.warning(
+                "ann_pool: pgvector %s < 0.8 (no hnsw.iterative_scan); ann_pool_size "
+                "is set but the statement keeps the full-scan candidate window. "
+                "ALTER EXTENSION vector UPDATE to enable the two-stage path.",
+                raw,
+            )
+    return _pgvector_version >= _PGVECTOR_ITERATIVE_MIN
+
 
 def _saturate_rank(scaled_rank: Any) -> Any:
     """Map a scaled ``ts_rank_cd`` onto ``[0, 1)``, naming the rank ONCE.
@@ -307,8 +564,9 @@ def _saturate_rank(scaled_rank: Any) -> Any:
     matches (scoring 2 renders vs 1, ordered and limited): **32-39% faster**
     across queries matching 1,875-11,505 rows — 92.0ms -> 56.4ms at 11,505,
     medians of 7 runs. Read that as the gain on the FTS scoring component
-    alone; the full search also pays six pgvector distance computations per
-    row, so end-to-end it is smaller.
+    alone; the full search also paid the pgvector distance more than once per
+    row (two evaluations per scanned row at the default function cost; see the
+    two-layer note in ``memory_scored_search``), so end-to-end it is smaller.
 
     NOT bit-identical, and the difference is real but negligible: the two forms
     disagree by at most one ULP (measured max ``|a - b|`` = 5.55e-17 over every
@@ -353,6 +611,63 @@ _MEMORY_IMMUTABLE_FIELDS = frozenset({"id", "tenant_id", "fleet_id", "search_vec
 # enumerated exactly. Both arrive at the same guarantee.
 _MEMORY_UPDATABLE_FIELDS = _MEMORY_VALID_FIELDS - _MEMORY_IMMUTABLE_FIELDS
 
+# oss-0814-l-08 — the C25 caller/platform metadata boundary, enforced where the
+# ROW is. Mirrors ``core_api.services.system_metadata``; duplicated because this
+# service does not import core-api, exactly as core-worker duplicates it. The
+# root ``tests/`` package can import all three and asserts the copies agree.
+_SYSTEM_NAMESPACE = "_system"
+_CALLER_OWNED_KEY = "caller_owned"
+_CALLER_OWNABLE_KEYS: frozenset[str] = frozenset({"summary", "tags"})
+
+
+def _withhold_caller_owned_keys(metadata_patch: dict | None, stored: dict | None) -> dict | None:
+    """Drop top-level ``summary``/``tags`` a PLATFORM patch must not mirror.
+
+    C25 lets the platform write these two keys into ``_system`` always, and
+    mirror them to the legacy top-level position only when the caller has not
+    claimed them. Who has claimed what was decided in core-api from a snapshot
+    taken at write time — which answers for that write and no other. A caller
+    who claims ``summary`` through ``PATCH /memories/{id}`` afterwards is
+    invisible to an enrichment already in flight, and core-worker cannot ask:
+    it PATCHes this service directly and never reads the row.
+
+    This service does read the row, under the lock the merge runs beneath, so it
+    is the one place that can answer for every writer regardless of surface or
+    deployment mode. A patch reaching here in the deferred deployment is the
+    last chance to get it right.
+
+    A patch that CARRIES the marker is a caller write (core-api attaches it to
+    the caller's own metadata patch and to nothing else) and is applied
+    untouched — otherwise a caller's first claim on a key would block their
+    second, and ``summary`` would become permanently unwritable by anyone.
+
+    Only the top-level mirror is withheld. The patch's ``_system`` half is left
+    alone: the platform's value must still be recorded, because the whole point
+    of the boundary is that the loser is preserved rather than discarded.
+
+    Returns the patch unchanged (same object) whenever nothing is withheld, so
+    the common path allocates nothing.
+    """
+    if not metadata_patch or not stored:
+        return metadata_patch
+    contested = _CALLER_OWNABLE_KEYS & metadata_patch.keys()
+    if not contested:
+        return metadata_patch
+    patch_system = metadata_patch.get(_SYSTEM_NAMESPACE)
+    if isinstance(patch_system, dict) and _CALLER_OWNED_KEY in patch_system:
+        return metadata_patch  # caller's own write — see above
+    stored_system = stored.get(_SYSTEM_NAMESPACE)
+    if not isinstance(stored_system, dict):
+        return metadata_patch
+    owned = stored_system.get(_CALLER_OWNED_KEY)
+    if not isinstance(owned, list):
+        return metadata_patch
+    withheld = contested & {k for k in owned if isinstance(k, str)}
+    if not withheld:
+        return metadata_patch
+    return {k: v for k, v in metadata_patch.items() if k not in withheld}
+
+
 # Columns ``entity_update`` may write. Deliberately a subset, not
 # ``Entity.__table__.columns`` the way ``_MEMORY_VALID_FIELDS`` above is: the
 # previous ``hasattr(entity, key)`` test admitted every mapped column, so a
@@ -371,6 +686,11 @@ _ENTITY_UPDATABLE_FIELDS = frozenset({"canonical_name", "entity_type", "attribut
 # wire — two copies could drift apart and reintroduce the existence oracle one
 # word at a time. The true cause is logged, never returned.
 _LINK_REJECTED = "entity link rejected: memory_id or entity_id does not exist, or the link already exists"
+# M-64. One answer for "no such entity" and "that entity is another tenant's",
+# for the reason ``_LINK_REJECTED`` already carries: this service authenticates
+# no request, so a distinguishable refusal turns the route into an existence
+# oracle over the whole entity id space (GHSA-wgvw-28pq-jc36).
+_RELATION_REJECTED = "relation rejected: from_entity_id or to_entity_id does not exist"
 
 
 # Migration 037 added ``embedded_content_hash`` on 2026-08-16, and every writer
@@ -558,6 +878,17 @@ _ADMIN_LIST_SORTABLE = frozenset(
 _PURGE_TENANT_TABLES: tuple[str, ...] = (
     "relations",
     "fleet_commands",
+    # Both ride the ON DELETE CASCADE from ``memories`` (all four foreign keys
+    # are CASCADE and NOT NULL, verified on the model and in the database), so
+    # unlisted they were still DELETED — this is a reporting gap, not surviving
+    # data. Listed anyway, ahead of their parent, for the reason ``relations``
+    # and ``fleet_commands`` above are: a cascade hides the row count, and the
+    # per-table breakdown is a reported feature of both the purge and its
+    # preview. Unlisted they also read as an oversight rather than a decision,
+    # which is precisely what ``_RETAINED_TENANT_TABLES`` below exists to
+    # prevent. Added by migration 036, after H-09 swept for exactly this.
+    "memory_conflicts",
+    "memory_derivations",
     "memories",
     "entities",
     "agents",
@@ -644,6 +975,14 @@ _PURGE_ORG_KEYED_TABLES: tuple[str, ...] = (
 # fleet-scoped run data.
 _PURGE_FLEET_TABLES: tuple[str, ...] = (
     "relations",
+    # Carries its own ``fleet_id``, so once it joined the tenant purge it had
+    # to join this one: a fleet teardown that skipped it would leave the
+    # fleet's conflict rows behind in a SHARED tenant, which is the one thing
+    # this tuple exists to prevent. ``memory_derivations`` is correctly absent
+    # — it has no ``fleet_id``, so a fleet-scoped DELETE cannot address it and
+    # it rides the CASCADE from ``memories`` the way ``memory_entity_links``
+    # does. Caught by ``test_the_fleet_purge_covers_every_fleet_scoped_purged_table``.
+    "memory_conflicts",
     "memories",
     "entities",
     "agents",
@@ -665,7 +1004,12 @@ _PURGE_FLEET_TABLES: tuple[str, ...] = (
 
 
 def _verify_audit_chain_rows(
-    tenant_id: str, rows: list[AuditLog], head: AuditChainHead | None, limit: int
+    tenant_id: str,
+    rows: list[AuditLog],
+    head: AuditChainHead | None,
+    limit: int,
+    start_seq: int = 1,
+    seed_prev: bytes | None = GENESIS_PREV_HASH,
 ) -> dict:
     """Walk pre-fetched chain rows and verify integrity (pure CPU, no I/O).
 
@@ -674,8 +1018,24 @@ def _verify_audit_chain_rows(
     ``asyncio.to_thread`` instead of blocking the event loop. Operates only on
     already-loaded ORM attributes, so it's safe off the event loop.
     """
-    expected_prev = GENESIS_PREV_HASH
-    expected_seq = 1
+    if seed_prev is None:
+        # Asked to resume from ``start_seq`` but row ``start_seq - 1`` is gone.
+        # Reported rather than tolerated: verifying this window against genesis
+        # would declare it sound while the rows it should have been anchored to
+        # are missing, which is precisely the deletion a chain walk exists to
+        # catch.
+        return {
+            "tenant_id": tenant_id,
+            "valid": False,
+            "verified_count": 0,
+            "first_broken": {
+                "seq": start_seq,
+                "reason": "missing_predecessor",
+            },
+        }
+
+    expected_prev = seed_prev
+    expected_seq = start_seq
     for row in rows:
         reason: str | None = None
         if row.seq != expected_seq:
@@ -699,7 +1059,10 @@ def _verify_audit_chain_rows(
             return {
                 "tenant_id": tenant_id,
                 "valid": False,
-                "verified_count": expected_seq - 1,
+                # Rows verified in THIS window, not since genesis — with a
+                # ``start_seq`` above 1 the two differ, and the caller already
+                # knows how far the earlier windows got.
+                "verified_count": expected_seq - start_seq,
                 "first_broken": {
                     "seq": row.seq,
                     "id": str(row.id),
@@ -717,7 +1080,27 @@ def _verify_audit_chain_rows(
 
     truncated = len(rows) >= limit
     head_seq, head_hash = (head.last_seq, head.last_hash) if head is not None else (0, GENESIS_PREV_HASH)
-    last_seq, last_hash = (rows[-1].seq, rows[-1].event_hash) if rows else (0, GENESIS_PREV_HASH)
+    if rows:
+        last_seq, last_hash = rows[-1].seq, rows[-1].event_hash
+    elif start_seq > 1:
+        # An empty window above genesis is how a paginated walk terminates: the
+        # caller followed ``next_seq`` one step past the final row. The chain
+        # tail is therefore row ``start_seq - 1``, whose hash we are holding in
+        # ``seed_prev`` — so ANCHOR the tail check to it rather than skipping
+        # the check.
+        #
+        # Skipping the check here instead — the obvious reading of "past the
+        # end" — is a hole, not a shortcut. ``truncated`` ALSO skips this
+        # check, so a chain whose length is an exact multiple of ``limit`` ends
+        # its last non-empty window truncated (check skipped) and its next
+        # window empty (check skipped again) — no window runs it, and a walk
+        # over a chain with rows DELETED off the tail reports ``valid: true``.
+        # ``DELETE ... WHERE seq > 100000`` reaches that, 100_000 being the
+        # default ``limit``, and a contiguous tail deletion raises no seq_gap,
+        # so this check is the only thing that catches it.
+        last_seq, last_hash = start_seq - 1, seed_prev
+    else:
+        last_seq, last_hash = 0, GENESIS_PREV_HASH
     if not truncated and (head_seq != last_seq or head_hash != last_hash):
         return {
             "tenant_id": tenant_id,
@@ -735,6 +1118,16 @@ def _verify_audit_chain_rows(
         "verified_count": len(rows),
         "head_seq": last_seq,
         "truncated": truncated,
+        # The cursor for the next window, present only when there is one. The
+        # caller previously had to infer it from ``head_seq``, which worked
+        # only because the walk always started at genesis.
+        #
+        # ``last_seq`` is ``int | None`` because the COLUMN is nullable, but it
+        # cannot be NULL here: the query filters ``seq IS NOT NULL``, and
+        # ``truncated`` (``len(rows) >= limit``, with ``limit >= 1``) implies a
+        # non-empty page. Narrowed rather than asserted so a future change that
+        # breaks either of those produces no cursor instead of a crash.
+        **({"next_seq": last_seq + 1} if truncated and last_seq is not None else {}),
     }
 
 
@@ -793,6 +1186,19 @@ class DuplicateContentHashError(ValueError):
         self.fields: dict = fields or {}
 
 
+def _fleet_scope(column, fleet_id: str | None):
+    """Fleet predicate matching an index that groups on ``COALESCE(fleet_id, '')``.
+
+    Every unique index here that spans a nullable ``fleet_id`` groups it that
+    way — ``uq_memories_live_content_hash``, ``ix_memories_attempt_unique``,
+    ``uq_entities_tenant_type_name_fleet`` — so every lookup that has to agree
+    with one of them needs THIS predicate rather than a falsiness branch. One
+    function for all three tables so a caller cannot half-remember the rule; see
+    :func:`_content_hash_fleet_scope` for the full argument and the reproduction.
+    """
+    return func.coalesce(column, "") == (fleet_id or "")
+
+
 def _content_hash_fleet_scope(fleet_id: str | None):
     """Fleet predicate matching ``uq_memories_live_content_hash``'s grouping.
 
@@ -817,7 +1223,7 @@ def _content_hash_fleet_scope(fleet_id: str | None):
     Also index-friendly: equality on the same ``COALESCE`` expression the index
     is built over remains usable by the planner.
     """
-    return func.coalesce(Memory.fleet_id, "") == (fleet_id or "")
+    return _fleet_scope(Memory.fleet_id, fleet_id)
 
 
 def _divergent_keys(key_sets: list[frozenset[str]]) -> list[str]:
@@ -878,6 +1284,15 @@ class BulkRowShapeError(permanent_failure.PermanentWriteFailure):
     twice, so it silently took the tenancy invariant offline until the base was
     factored out.
     """
+
+
+# How long a consumer's claim on an ``in_progress`` lifecycle audit row is
+# honoured before another delivery may take it. Sized well past any single-org
+# lifecycle op -- the Pub/Sub client extends the 60s ack deadline while a
+# handler is alive, so a redelivery generally means the consumer died rather
+# than that it is slow -- and short enough that a died-mid-run row is picked up
+# again the same hour instead of being parked indefinitely.
+LIFECYCLE_CLAIM_LEASE_MINUTES = 60
 
 
 class Unscoped:
@@ -1307,9 +1722,17 @@ class PostgresService:
                 # asyncpg's 32k bind-arg ceiling. 500 mirrors the bulk
                 # batch ceiling so a single-batch retry is one query;
                 # larger calls (auto-chunk) split cleanly.
-                fleet_predicate = (
-                    Memory.fleet_id == fleet_id if fleet_id is not None else Memory.fleet_id.is_(None)
-                )
+                # Must group ``fleet_id`` the way the ARBITER does — this
+                # lookup exists to find the rows that index swallowed, so a
+                # different grouping asks a different question. It branched on
+                # NULL-ness while the ON CONFLICT above groups on
+                # ``COALESCE(fleet_id, '')``, and the two disagree exactly where
+                # the index says "duplicate": a caller passing ``""`` against a
+                # row stored NULL (or the reverse) conflicts in the index and
+                # then misses here, so the item fell through to the ``id: None``
+                # branch below and was reported as a per-item error for a write
+                # that had in fact already committed.
+                fleet_predicate = _fleet_scope(Memory.fleet_id, fleet_id)
                 for chunk_start in range(0, len(unresolved), 500):
                     chunk = unresolved[chunk_start : chunk_start + 500]
                     result = await session.execute(
@@ -1406,6 +1829,14 @@ class PostgresService:
             values["embedded_content_hash"] = (
                 values["content_hash"] if values["embedding"] is not None else None
             )
+        # 09/02 M-55: this generic patch path also accepts ``status`` (the
+        # docstring lists it), so it is the SECOND way a status can change and
+        # has to stamp the transition time too — otherwise a contradiction
+        # applied through here would still be invisible to the outcome window.
+        # An explicit ``status_changed_at`` in the patch wins, so a caller
+        # replaying a known transition can supply the real time.
+        if "status" in values and "status_changed_at" not in values:
+            values["status_changed_at"] = datetime.now(UTC)
         async with get_session() as session:
             # Existence check FIRST — runs even on empty / all-unknown-
             # keys patches so a PATCH on an absent or soft-deleted row
@@ -1426,9 +1857,16 @@ class PostgresService:
             # (None tuple) and "row exists, deleted_at IS NULL" (live)
             # are distinguishable — ``scalar_one_or_none`` on
             # ``deleted_at`` alone would collapse both into None.
+            #
+            # ``metadata_`` joins the projection for oss-0814-l-08 (see
+            # ``_withhold_caller_owned_keys``). Free: the row is being read and
+            # locked either way, and doing it HERE rather than in a second
+            # statement is what makes the read-then-merge atomic — the decision
+            # about which keys a platform patch may mirror is taken under the
+            # same ``FOR UPDATE`` that the merge itself runs beneath.
             row = (
                 await session.execute(
-                    select(Memory.id, Memory.deleted_at)
+                    select(Memory.id, Memory.deleted_at, Memory.metadata_)
                     .where(Memory.id == memory_id, Memory.tenant_id == tenant_id)
                     .with_for_update()
                 )
@@ -1437,6 +1875,8 @@ class PostgresService:
                 return False  # row truly absent — caller → 404
             if row.deleted_at is not None:
                 return False  # soft-deleted — caller → 404, no UPDATE runs
+
+            metadata_patch = _withhold_caller_owned_keys(metadata_patch, row.metadata_)
 
             # No-op patches on a live row are valid: existence check
             # already passed, so report success without burning UPDATEs.
@@ -1541,6 +1981,47 @@ class PostgresService:
             )
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
+    async def memory_set_predicate_if_null(
+        self, memory_id: UUID, tenant_id: str, predicate: str, object_value: str
+    ) -> bool:
+        """A65 — write-back of the extraction-derived predicate and object.
+
+        The sibling of ``memory_set_subject_entity_if_null`` (A63), and it
+        exists for the reason that one's docstring already names: the
+        write-time triple path (``EmitMemoryTriple``, CAURA-123) only fires on
+        narrow phrase regexes, so ``predicate`` and ``object_value`` are NULL on
+        nearly every row. A63 filled in the subject and left those two behind —
+        which means the deterministic RDF contradiction path still cannot fire,
+        because it keys on (subject, predicate) and only one of the three
+        columns was ever populated.
+
+        Guarded by ``predicate IS NULL``, same as A63's guard and for the same
+        reason: when the regex path DID fire, its value came from a
+        deterministic match on the original text and is the higher-fidelity
+        source, so this async write-back must never clobber it. The guard also
+        makes concurrent deliveries race-safe without a read-modify-write.
+
+        Both columns are set together. A predicate without an object names an
+        attribute with no value, which the RDF comparison reads as a claim that
+        nothing can conflict with — worse than leaving the row untouched.
+
+        Returns ``True`` when the row was updated; ``False`` when it is absent,
+        soft-deleted, foreign-tenant, or already carries a predicate — all of
+        which callers treat as a benign skip.
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.predicate.is_(None),
+                )
+                .values(predicate=predicate, object_value=object_value)
+            )
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+
     async def memory_update_status(
         self,
         memory_id: UUID,
@@ -1576,7 +2057,14 @@ class PostgresService:
             exist. Existing callers ignore the return value — adding it is
             backward-compatible.
         """
-        values: dict[str, Any] = {"status": status}
+        # 09/02 M-55: stamp WHEN the status changed. A contradiction is a flip
+        # on an existing row, and that event previously had no timestamp — so
+        # the outcome-inference window had to use ``created_at`` and dropped
+        # evidence for any memory older than the scan window.
+        values: dict[str, Any] = {
+            "status": status,
+            "status_changed_at": datetime.now(UTC),
+        }
         if unset_supersedes:
             values["supersedes_id"] = None
         elif supersedes_id is not None:
@@ -1586,6 +2074,20 @@ class PostgresService:
             stmt = sql_update(Memory).where(
                 Memory.id == memory_id,
                 Memory.tenant_id == tenant_id,
+                # A soft-deleted row is gone as far as every read path is
+                # concerned, and its sibling ``memory_update`` has always said
+                # so. Without this, a delete racing a supersession flip let the
+                # flip land on the deleted row — rewriting ``status`` and
+                # ``supersedes_id``, and so the lineage, of a memory nothing
+                # can read back.
+                #
+                # It also makes the caller's contract true rather than
+                # aspirational: ``routers/memories.py`` states that this
+                # "returns False when the target row doesn't exist (or was
+                # already deleted); surface as 404". It did not — a deleted row
+                # matched, updated, and returned True, so the route answered
+                # 200 for a write the caller is told is impossible.
+                Memory.deleted_at.is_(None),
             )
             if expected_supersedes_id is not None:
                 stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
@@ -1816,6 +2318,7 @@ class PostgresService:
         exclude_id: UUID | None = None,
         visibility: str | None = None,
         min_similarity: float | None = None,
+        agent_id: str | None = None,
     ) -> tuple[Memory, float] | None:
         """Find the closest memory above ``min_similarity``.
 
@@ -1824,6 +2327,33 @@ class PostgresService:
         back-compat with single-tier callers; A1 #16's tier-dispatching
         pipeline step passes ``SEMANTIC_DEDUP_JUDGE_THRESHOLD`` (0.85)
         so candidates in the judge band become visible.
+
+        ``agent_id`` (CAURA-721): pins the write's owner, so a candidate
+        belonging to a DIFFERENT agent in the same fleet cannot refuse
+        it. Without it this lookup dedups on ``(tenant, fleet)`` while
+        the exact-hash gate beside it dedups on
+        ``(tenant, fleet, agent, content_hash)`` — see
+        ``uq_memories_live_content_hash``, whose own comment gives the
+        rule both gates are meant to share: "two agents recording
+        identical content are two independent observations". Only the
+        semantic tier disagreed, so an exact cross-agent duplicate was
+        admitted while a mere paraphrase of it was refused.
+
+        The refusal was not a deduplication: reads can be narrowed with
+        ``filter_agent_id``, so the refused agent could not retrieve the
+        row that replaced its write — for ``scope_agent`` candidates the
+        409 also returned the id of a row the caller cannot read.
+
+        Same fix, same reason, as A54 on
+        ``memory_find_entity_overlap_candidates`` below; that one is
+        gated on the ``scope_agent`` tier only because visibility there
+        selects a chain to link INTO, whereas a write gate has to be no
+        wider than the narrowest scope a reader may ask for.
+
+        Defaults to ``None`` — meaning "do not pin" — so existing
+        callers keep the pre-CAURA-721 behaviour until they pass it, and
+        a core-api newer than its storage degrades to over-rejection
+        rather than failing.
 
         Returns ``(memory, similarity)`` or ``None``. The similarity
         field is what callers use to decide auto-reject vs judge-dispatch
@@ -1855,6 +2385,14 @@ class PostgresService:
                 stmt = stmt.where(Memory.visibility == visibility)
             if exclude_id is not None:
                 stmt = stmt.where(Memory.id != exclude_id)
+            # CAURA-721. Plain equality, not ``_content_hash_fleet_scope``'s
+            # COALESCE dance: ``Memory.agent_id`` is ``nullable=False``, so
+            # there is no NULL-vs-empty-string group to reconcile the way
+            # ``fleet_id`` needs. Falsy (``""``) is treated as absent, which
+            # matches every other optional predicate here — an unowned write
+            # has no owner to pin.
+            if agent_id:
+                stmt = stmt.where(Memory.agent_id == agent_id)
 
             result = await session.execute(stmt)
             row = result.first()
@@ -1905,6 +2443,95 @@ class PostgresService:
             session.add(row)
             await session.flush()
             return row
+
+    async def memory_conflicts_list(
+        self,
+        tenant_id: str,
+        review_status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryConflict]:
+        """D11 — the review queue for one tenant.
+
+        Tenant scoping is not a filter here, it is the boundary: a conflict row
+        names two memory ids and their contents are reachable from it, so an
+        unscoped read would hand one tenant another's memories. Ordered oldest
+        first — a review queue is worked front to back, and newest-first would
+        leave the oldest unreviewed rows permanently at the bottom.
+        """
+        from common.models.memory_conflict import REVIEW_STATUSES
+
+        if review_status is not None and review_status not in REVIEW_STATUSES:
+            raise ValueError(f"review_status {review_status!r} must be one of {REVIEW_STATUSES}")
+        async with get_session() as session:
+            stmt = select(MemoryConflict).where(MemoryConflict.tenant_id == tenant_id)
+            if review_status:
+                stmt = stmt.where(MemoryConflict.review_status == review_status)
+            stmt = (
+                stmt.order_by(MemoryConflict.created_at.asc())
+                .limit(max(1, min(limit, 200)))
+                .offset(max(0, offset))
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
+    async def memory_conflict_get(self, conflict_id: UUID, tenant_id: str) -> MemoryConflict | None:
+        """One conflict row, scoped to its tenant. ``None`` when absent OR owned
+        by another tenant — the caller cannot distinguish the two, which is the
+        point: a bare 404 leaks nothing about what exists elsewhere."""
+        async with get_session() as session:
+            stmt = select(MemoryConflict).where(
+                MemoryConflict.id == conflict_id,
+                MemoryConflict.tenant_id == tenant_id,
+            )
+            return (await session.execute(stmt)).scalar_one_or_none()
+
+    async def memory_conflict_resolve(
+        self,
+        conflict_id: UUID,
+        tenant_id: str,
+        review_status: str,
+        resolution_action: str | None = None,
+        resolution_note: str | None = None,
+        resolved_by: str | None = None,
+    ) -> bool:
+        """D11 — record a reviewer's decision. Returns True iff a row moved.
+
+        CAS on ``review_status = 'pending'``. Two reviewers opening the same
+        queue is the normal case, not the edge case: without the compare the
+        second write silently overwrites the first's decision and the audit trail
+        records only the loser's disappearance. The False return is what lets the
+        route answer 409 instead of pretending it worked.
+        """
+        from common.models.memory_conflict import ACTIONS, REVIEW_STATUSES
+
+        if review_status not in REVIEW_STATUSES or review_status == "pending":
+            raise ValueError(
+                f"review_status {review_status!r} must be a terminal state "
+                f"({[s for s in REVIEW_STATUSES if s != 'pending']})"
+            )
+        if resolution_action is not None and resolution_action not in ACTIONS:
+            raise ValueError(f"resolution_action {resolution_action!r} must be one of {ACTIONS}")
+        async with get_session() as session:
+            stmt = (
+                sql_update(MemoryConflict)
+                .where(
+                    MemoryConflict.id == conflict_id,
+                    MemoryConflict.tenant_id == tenant_id,
+                    MemoryConflict.review_status == "pending",
+                )
+                .values(
+                    review_status=review_status,
+                    resolution_action=resolution_action,
+                    resolution_note=resolution_note,
+                    resolved_by=resolved_by,
+                    resolved_at=func.now(),
+                )
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            # ``rowcount`` lives on CursorResult; the async ``execute`` is typed
+            # as Result. Same ignore the sibling CAS updates in this file use.
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def memory_conflict_record(self, payload: dict) -> MemoryConflict:
         """Insert an A55 ``memory_conflicts`` classification record.
@@ -2127,6 +2754,7 @@ class PostgresService:
         date_range_end: str | None = None,
         readable_tenant_ids: list[str] | None = None,
         history_query: bool = False,
+        strict_fleet_scoping: bool = False,
     ) -> list[SimpleNamespace]:
         """Execute the full CTE-based scored search with entity-link JOIN.
 
@@ -2136,6 +2764,15 @@ class PostgresService:
         boosted_memory_ids = boosted_memory_ids or set()
         memory_boost_factor = memory_boost_factor or {}
         sp = search_params
+
+        # ``valid_at`` is compared with timestamptz columns in multiple parts
+        # of this query. Normalize it once so every bind observes the public
+        # contract that a naive value means UTC.
+        if valid_at is not None and valid_at.tzinfo is None:
+            valid_at = valid_at.replace(tzinfo=UTC)
+        valid_at_ts: ColumnElement[Any] | None = (
+            literal(valid_at, type_=DateTime(timezone=True)) if valid_at is not None else None
+        )
 
         _fts_weight = sp["fts_weight"]
         _freshness_floor = sp["freshness_floor"]
@@ -2153,8 +2790,71 @@ class PostgresService:
         # A50 unified: which ranking formula computes `score`. 0 = legacy multiplicative
         # boost stack; 1 = unified relevance-dominant additive formula (see below).
         _score_formula = int(sp.get("score_formula", 0) or 0)
+        # A41: which counter feeds recall_boost. 0 = ``recall_count`` (bumped on
+        # RETURN by TrackRecalls — the returned→boosted→returned loop, current
+        # behaviour and byte-identical SQL). 1 = the confirmed-use counter
+        # (``metadata._system.recall_used_count``, bumped by evolve outcome
+        # reports) — the boost then compounds only retrievals an agent actually
+        # acted on; a value other than 1 fails closed to 0.
+        _recall_boost_source = int(sp.get("recall_boost_source", 0) or 0)
+        # HNSW two-stage retrieval (PR2): 0 = off (full-scan candidate window,
+        # unchanged); >0 = admit candidates through index-served pool arms and
+        # run the scoring formula over that pool only. Gated below on a
+        # pgvector >= 0.8 probe — the shape silently stays full-scan on older
+        # extensions so an on-prem box that predates iterative scans keeps
+        # byte-identical behaviour.
+        _ann_pool_size = int(sp.get("ann_pool_size", 0) or 0)
+        # Reference clock for freshness and temporal_boost. 0 = now() (default);
+        # 1 = the request's ``valid_at`` when one was sent. The knob alone changes
+        # nothing (no valid_at → now()) and valid_at alone changes nothing new
+        # (knob off → now()); only the conjunction retargets the clock, so no
+        # caller that exists today moves.
+        _freshness_reference = int(sp.get("freshness_reference", 0) or 0)
+        ref_ts: ColumnElement[Any]
+        anchor_to_valid_at = False
+        if _freshness_reference == 1 and valid_at_ts is not None:
+            anchor_to_valid_at = True
+            ref_ts = valid_at_ts
+        else:
+            ref_ts = func.now()
+        use_ann_pool = _ann_pool_size > 0 and await _ann_pool_available()
+        if use_ann_pool and _candidate_pool_size > 0:
+            # The two pool selectors are mutually exclusive by design —
+            # core-api's profile validation rejects the combination up front;
+            # if a payload carries both anyway (skew, hand-built params), the
+            # ANN pool wins and A49's similarity-ordered window is ignored:
+            # the pool already admits by relevance, so layering the A49
+            # ORDER BY on top would only narrow it for no benefit.
+            logger.info(
+                "memory_scored_search: ann_pool_size=%d supersedes candidate_pool_size=%d",
+                _ann_pool_size,
+                _candidate_pool_size,
+            )
+            _candidate_pool_size = 0
 
         # -- Scoring expressions --
+        #
+        # Two-layer build. The per-row primitives that are expensive to
+        # evaluate — the pgvector cosine distance and ``ts_rank_cd`` — are
+        # projected exactly ONCE into a fenced ``ingredients`` CTE, and every
+        # derived factor (similarity, freshness, boosts, penalties, score) is
+        # computed in the branch layer above it from those columns. This is the
+        # inner-projection work ``_saturate_rank``'s note promised: before it,
+        # SQLAlchemy inlined the ``vec_sim`` CASE at every site that named it
+        # and the compiled statement carried SIX cosine renders (three per
+        # UNION branch). Renders are not evaluations: the planner postpones
+        # expensive non-sort-key columns above the Sort/Limit, so the scan
+        # evaluated the distance TWICE per candidate row at the default
+        # ``cosine_distance`` cost (once at COST 100, migration 044).
+        # Re-measured 2026-09-17 on a standalone rig (pgvector 0.8.1, PG 16.12,
+        # 50k rows x 1024-dim, M4 Pro): this change alone takes the serial
+        # scored select from ~196 ms to ~157 ms, and the materialised CTE does
+        # not parallelise, so two-worker wall-clock went 123 -> 156 ms. The
+        # order-of-magnitude win is the ANN candidate pool below (~5 ms), not
+        # this dedup. An earlier "427ms -> 90ms" figure for this change did not
+        # reproduce. The ratchet in test_fts_score_single_render pins the
+        # render counts in both directions.
+        #
         # CAURA-594: pgvector's `<=>` is strict — NULL in → NULL out. A
         # bare `1 - cosine_distance` would therefore propagate NULL up
         # through the similarity blend into `score`, and PostgreSQL's
@@ -2190,6 +2890,358 @@ class PostgresService:
         scaled_keyword_rank = _fts_rank_scale * raw_keyword_rank
         fts_score = _saturate_rank(scaled_keyword_rank).label("fts_score")
 
+        # CAURA-594 admission guard + exact-lexical-match gate share ONE
+        # expression. `plainto_tsquery('english', '')` (and any whitespace-only
+        # or stop-word-only input it normalises down to empty) returns the
+        # empty `tsquery`, which `@@`-matches every non-NULL `tsvector` — that
+        # would silently re-admit every NULL-embedding row when callers pass
+        # `query=""` or `query="   "` (e.g. entity-only / vector-only search
+        # modes), bringing back the displacement-by-weight bug. Gate on the
+        # Python-side query string so the operator is only emitted when there's
+        # actual text to match.
+        #
+        # ``_fts_guard`` is used in WHERE clauses (admission, the conflicted
+        # carve-out, and its projection below); the ``fts_match`` COLUMN it
+        # projects is what the derived layer reads for the status-penalty gate
+        # and the FTS-reserve filter — the exact-lexical-match signal and the
+        # fts-match signal are the same expression, so one column serves both.
+        _fts_guard = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
+        _exact_lexical_match = _fts_guard
+        fts_match = _fts_guard.label("fts_match")
+
+        # Row-level filters, built once and applied to BOTH the ingredients
+        # CTE and — when the ANN candidate pool is active — every pool arm.
+        # An arm that filtered less would admit rows the caller must not see
+        # (the boosted-id arm especially: entity expansion knows nothing about
+        # visibility), and an arm that filtered more would waste its LIMIT on
+        # rows the scorer then discards. One list keeps every consumer in
+        # lockstep; drift here is the same cross-tenant leak risk the
+        # ENTITY_LOOKUP short-circuit documents.
+        row_filters: list[Any] = [
+            # Multi-tenant read predicate: when ``readable_tenant_ids``
+            # is provided (cross-tenant agent key), reads widen across
+            # the full set; otherwise we stay single-tenant for the
+            # common case. Result rows still carry ``Memory.tenant_id``
+            # so the caller can attribute each row to its source tenant.
+            (
+                Memory.tenant_id.in_(readable_tenant_ids)
+                if readable_tenant_ids
+                else Memory.tenant_id == tenant_id
+            ),
+            Memory.deleted_at.is_(None),
+            # CAURA-594: NULL-embedding rows are admitted only if they also
+            # match the FTS query — otherwise they'd rank on `Memory.weight *
+            # freshness * ...` alone and could fill top_k slots with rows
+            # that have no relationship to the query during a large backfill
+            # window. `search_vector @@ ts_query` is GIN-indexed, so the
+            # extra predicate is free for rows that already had to scan
+            # the tenant/fleet slice.
+            # Other paths (find_semantic_duplicate, find_similar_candidates,
+            # find_near_duplicate_pairs, compute_health_stats) keep their
+            # NULL guards — vector-pure operations where a NULL operand has
+            # no comparable semantics.
+            #
+            # THIS PREDICATE IS LOAD-BEARING FOR THE OTHER SERVICE, which is not
+            # visible from here: core-api's ``passes_relevance_filter`` returns
+            # True unconditionally for a NULL-embedding row, because the floor it
+            # applies compares against ``vec_sim`` and these rows only carry the
+            # 0.0 sentinel above. The guard below is therefore the ONLY relevance
+            # test such a row ever faces end to end — drop it and nothing
+            # downstream can judge what it admits. See that function's docstring
+            # and tests/test_oss_0923_unembedded_relevance_floor.py.
+            or_(
+                Memory.embedding.is_not(None),
+                _fts_guard,
+            ),
+        ]
+
+        if fleet_ids:
+            row_filters.append(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
+
+        if caller_agent_id:
+            row_filters.append(
+                or_(
+                    Memory.visibility == "scope_org",
+                    Memory.visibility == "scope_team",
+                    and_(
+                        Memory.visibility == "scope_agent",
+                        Memory.agent_id == caller_agent_id,
+                    ),
+                )
+            )
+        else:
+            row_filters.append(Memory.visibility != "scope_agent")
+
+        if filter_agent_id:
+            row_filters.append(Memory.agent_id == filter_agent_id)
+        if memory_type_filter:
+            row_filters.append(Memory.memory_type == memory_type_filter)
+        if status_filter:
+            row_filters.append(Memory.status == status_filter)
+        elif history_query:
+            # A63 — a history question ("what was…", "did I switch…",
+            # "how long have I been…") needs the superseded value: the
+            # older side of an update is EXACTLY what the caller asked
+            # for, so neither the exclusion below nor the status_penalty
+            # applies. Ranking is pure relevance; present-state queries
+            # keep both protections.
+            pass
+        else:
+            # Exclude superseded memories from default search results. The
+            # contradiction detector marks the older row ``outdated`` (RDF
+            # path) or ``conflicted`` (semantic path) and points the newer
+            # one at it via ``supersedes_id``. Surfacing both would dilute
+            # ranking with stale claims agents shouldn't act on. Callers
+            # that need to inspect superseded rows pass an explicit
+            # ``status_filter`` to override.
+            #
+            # Carve-out: a ``conflicted`` row that is an EXACT lexical match
+            # for the query is kept. ``conflicted`` (unlike ``outdated``) means
+            # "a competing claim exists", not "definitively retracted" — and the
+            # semantic contradiction path mismarks near-duplicate-but-distinct
+            # entities (e.g. ``Wayne #0000`` vs ``Wayne #0704``), so a blanket
+            # exclusion silently drops the very row the caller named. The
+            # exact-match gate scopes the carve-out to rows the caller clearly
+            # asked for; status_penalty above keeps a surfaced exact-match
+            # conflicted row un-demoted, and load_and_serialize still injects its
+            # supersedes successor so both sides are visible. ``outdated`` stays
+            # fully excluded.
+            row_filters.append(
+                or_(
+                    Memory.status.notin_(("outdated", "conflicted")),
+                    and_(Memory.status == "conflicted", _exact_lexical_match),
+                )
+            )
+        if valid_at:
+            from datetime import date as _date_type
+
+            from sqlalchemy import Date as _Date
+            from sqlalchemy import cast as _cast
+            from sqlalchemy import literal as _literal
+
+            # Hard filter on the START side, compared at DAY granularity.
+            # Future-dated memories can't answer past questions — but strict
+            # timestamp comparison also excludes same-day memories written a
+            # few hours after the query was asked, which is too aggressive
+            # for workflows where the question + its evidence share a day.
+            # We cast both sides to DATE so same-day-later memories pass.
+            _valid_at_date = (
+                valid_at.date() if hasattr(valid_at, "date") else _date_type.fromisoformat(str(valid_at)[:10])
+            )
+            row_filters.append(
+                or_(
+                    Memory.ts_valid_start.is_(None),
+                    _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
+                )
+            )
+            # NOTE: the END side (`ts_valid_end >= valid_at`) is NO LONGER
+            # a hard filter.  A past ts_valid_end now triggers the soft
+            # ``currency_factor`` below (default 0.5x) — so an over-eager
+            # enrichment date can't silently hide a semantically strong
+            # memory from historical-question queries.
+
+        # NOTE: date_range_start/end no longer produces a hard WHERE filter;
+        # the multiplier ``date_range_boost`` below handles it softly.
+
+        # -- Layer 0: the ``ingredients`` CTE --
+        # Row filters are identical to the pre-split statement; only the select
+        # list changed. Raw row fields ride along so the derived layer never
+        # touches ``memories`` again before the final top_k join.
+        ingredient_cols: list[Any] = [
+            Memory.id.label("mem_id"),
+            vec_sim,
+            has_embedding,
+            fts_score,
+            fts_match,
+            Memory.created_at.label("created_at"),
+            Memory.ts_valid_start.label("ts_valid_start"),
+            Memory.ts_valid_end.label("ts_valid_end"),
+            Memory.memory_type.label("memory_type"),
+            Memory.weight.label("weight"),
+            Memory.status.label("status"),
+            Memory.recall_count.label("recall_count"),
+            Memory.last_recalled_at.label("last_recalled_at"),
+        ]
+        if _recall_boost_source == 1:
+            # A41 — the confirmed-use counter, extracted only when a tenant has
+            # flipped ``recall_boost_source``: conditional so the DEFAULT
+            # statement stays byte-identical (the compiled-text ratchets in
+            # test_fts_score_single_render / test_ann_pool_statement pin that).
+            # Written exclusively by ``evolve_apply_weights(mark_used=True)`` as
+            # an int and a ``to_jsonb(now())`` ISO string, so the casts see
+            # NULL-or-well-typed values; COALESCE covers rows never confirmed.
+            ingredient_cols.append(
+                func.coalesce(
+                    cast(Memory.metadata_[("_system", "recall_used_count")].astext, Integer),
+                    0,
+                ).label("recall_used_count")
+            )
+            ingredient_cols.append(
+                func.coalesce(
+                    cast(
+                        Memory.metadata_[("_system", "recall_used_at")].astext,
+                        DateTime(timezone=True),
+                    ),
+                    Memory.created_at,
+                ).label("recall_used_at")
+            )
+        ingredients_stmt = select(*ingredient_cols).where(*row_filters)
+
+        if use_ann_pool:
+            # -- ANN candidate pool (HNSW two-stage retrieval, PR2) --
+            # Restrict the ingredients CTE to a bounded, index-served candidate
+            # pool instead of scanning the whole tenant slice. Each admission
+            # signal gets its own arm on its own index, because the scoring
+            # formula can elevate rows above their pure-cosine rank and a
+            # single ANN cut would silently drop them:
+            #
+            #   ann     — top-N by cosine via ix_memories_embedding_hnsw; the
+            #             relevance workhorse. Explicit ``embedding IS NOT
+            #             NULL`` keeps the scan pure-ANN (`<=>` on NULL sorts
+            #             NULLS LAST but wastes scan budget).
+            #   fts     — GIN-served lexical matches, ordered by raw rank
+            #             (monotonic with the saturated fts_score, one render
+            #             cheaper). Carries the CAURA-594/679 contract: an
+            #             FTS-matching row with a NULL embedding stays
+            #             discoverable during the deferred-embed window.
+            #   recency — newest rows via ix_memories_tenant_created_active,
+            #             covering freshness/temporal elevation (legacy
+            #             formula multiplies by freshness and temporal_boost).
+            #   date    — only when the caller extracted a hard date window:
+            #             rows whose temporal anchor falls inside it, so
+            #             date_range_boost has candidates to boost.
+            #   boosted — the entity-expansion ids, verbatim: they are already
+            #             ≤ GRAPH_MAX_BOOSTED_MEMORIES and exact by
+            #             construction, and they MUST pass row_filters here
+            #             because graph expansion knows nothing about
+            #             visibility.
+            #
+            # Every arm applies the full ``row_filters`` so pool admission can
+            # never widen visibility, and UNION (not UNION ALL) dedups ids.
+            # Rows the pool misses are the two-stage trade-off: bounded,
+            # measured, and gated by the offline harness — see
+            # docs/plans/hnsw-two-stage-retrieval.md for the parity analysis.
+            #
+            # Each arm is wrapped in its own subquery so its ORDER BY/LIMIT
+            # binds before the union — same construction as the scored-CTE
+            # union below.
+            ann_arm = (
+                select(Memory.id, literal("ann").label("arm"))
+                .where(*row_filters)
+                .where(Memory.embedding.is_not(None))
+                .order_by(Memory.embedding.cosine_distance(embedding))
+                .limit(_ann_pool_size)
+            )
+            arm_selects = [select(ann_arm.subquery())]
+
+            if query and query.strip():
+                fts_arm = (
+                    select(Memory.id, literal("fts").label("arm"))
+                    .where(*row_filters)
+                    .where(_fts_guard)
+                    .order_by(raw_keyword_rank.desc(), Memory.created_at.desc())
+                    .limit(_ANN_POOL_SIDE_ARM_LIMIT)
+                )
+                arm_selects.append(select(fts_arm.subquery()))
+
+            recency_arm = (
+                select(Memory.id, literal("recency").label("arm"))
+                .where(*row_filters)
+                .order_by(Memory.created_at.desc())
+                .limit(_ANN_POOL_SIDE_ARM_LIMIT)
+            )
+            arm_selects.append(select(recency_arm.subquery()))
+
+            if date_range_start and date_range_end:
+                from datetime import date as _dr_date_type
+
+                from sqlalchemy import Date as _DrDate
+                from sqlalchemy import cast as _dr_cast
+                from sqlalchemy import literal as _dr_literal
+
+                # Parsed again in the date_range_boost block below,
+                # deliberately: the boost runs whether or not the pool is
+                # active, and threading parsed dates between the two blocks
+                # couples them for the price of two date.fromisoformat calls.
+                _arm_start = _dr_date_type.fromisoformat(date_range_start)
+                _arm_end = _dr_date_type.fromisoformat(date_range_end)
+                _arm_anchor = func.coalesce(
+                    _dr_cast(Memory.ts_valid_start, _DrDate),
+                    _dr_cast(Memory.created_at, _DrDate),
+                )
+                date_arm = (
+                    select(Memory.id, literal("date").label("arm"))
+                    .where(*row_filters)
+                    .where(
+                        and_(
+                            _arm_anchor >= _dr_cast(_dr_literal(_arm_start), _DrDate),
+                            _arm_anchor <= _dr_cast(_dr_literal(_arm_end), _DrDate),
+                        )
+                    )
+                    .order_by(Memory.created_at.desc())
+                    .limit(_ANN_POOL_SIDE_ARM_LIMIT)
+                )
+                arm_selects.append(select(date_arm.subquery()))
+
+            if boosted_memory_ids:
+                boosted_arm = (
+                    select(Memory.id, literal("boosted").label("arm"))
+                    .where(*row_filters)
+                    .where(Memory.id.in_(list(boosted_memory_ids)))
+                )
+                arm_selects.append(select(boosted_arm.subquery()))
+
+            # D12 arm provenance: every arm tags its rows, UNION ALL keeps the
+            # duplicates, and the GROUP BY collapses them into one row per id
+            # with the set of admitting arms ("ann+fts", "boosted", ...). The
+            # dedup the old plain UNION did now happens here; the aggregate runs
+            # over at most (pool + 3 x side arm + boosted) rows, so provenance
+            # is effectively free — and it is what turns a shadow-mode
+            # divergence from "the pool missed it" into "WHICH signal's arm
+            # missed it".
+            arm_union = arm_selects[0].union_all(*arm_selects[1:]).subquery("candidate_arms")
+            pool_cte = (
+                select(
+                    arm_union.c.id,
+                    func.string_agg(arm_union.c.arm.distinct(), "+").label("arms"),
+                )
+                .group_by(arm_union.c.id)
+                .cte("candidate_pool")
+            )
+            ingredients_stmt = ingredients_stmt.where(Memory.id.in_(select(pool_cte.c.id)))
+
+        # ``AS MATERIALIZED`` is a deliberate optimisation fence. With the
+        # FTS-reserved branch present the CTE is referenced twice and
+        # PostgreSQL materialises it anyway; but on blank-query paths
+        # (entity-only / vector-only search) only the main branch remains, a
+        # single-reference CTE is inlined back into its consumer, and inlining
+        # substitutes the defining expression at every column reference —
+        # putting the repeated cosine evaluations straight back.
+        #
+        # The modifier is the documented PostgreSQL 12+ contract for exactly
+        # this ("MATERIALIZED ... prevents folding into the parent query"),
+        # unlike the earlier ``.offset(0)`` draft of this fence, which leaned
+        # on the incidental planner rule that a set limitOffset disqualifies a
+        # subquery from pull-up. PG < 12 would reject the syntax, but the
+        # schema already floors on 12+ (pgvector, HNSW). SQLAlchemy 2.0 has no
+        # ``materialized=`` argument on ``cte()``; ``CTE.prefix_with`` is the
+        # documented way to emit the modifier and renders
+        # ``WITH ingredients AS MATERIALIZED (...)``.
+        #
+        # Guarded twice: test_fts_score_single_render pins the compiled text
+        # (modifier present, one ``<=>`` render), and
+        # test_scored_search_materialized_plan pins the PLAN — EXPLAIN must
+        # show the CTE as its own node on the single-branch statement, so a
+        # future PostgreSQL/SQLAlchemy behaviour change surfaces in CI rather
+        # than as a silent hot-path regression (six renders in the text, two
+        # distance evaluations per scanned row at the default function cost).
+        ing = ingredients_stmt.cte("ingredients").prefix_with("MATERIALIZED")
+
+        # -- Layer 1: derived factors over ingredient columns --
+        # Everything below is CASE/arithmetic over already-computed columns, so
+        # SQLAlchemy re-rendering an expression at another naming site costs a
+        # few flops per row, not another 1024-dim distance or rank call.
+        #
         # CAURA-679: NULL-embedding rows fall back to `fts_score` alone
         # rather than the `(1 - w) * 0 + w * fts_score` haircut that
         # the unconditional blend would apply. The haircut multiplies
@@ -2203,32 +3255,46 @@ class PostgresService:
         # than silently undiscoverable.
         similarity = case(
             (
-                Memory.embedding.is_not(None),
-                (1.0 - _fts_weight) * vec_sim + _fts_weight * fts_score,
+                ing.c.has_embedding,
+                (1.0 - _fts_weight) * ing.c.vec_sim + _fts_weight * ing.c.fts_score,
             ),
-            else_=fts_score,
+            else_=ing.c.fts_score,
         ).label("similarity")
 
-        anchor = func.greatest(
-            Memory.created_at,
-            func.coalesce(Memory.ts_valid_start, Memory.created_at),
-        )
-        age_days = func.extract("epoch", func.now() - anchor) / 86400.0
+        anchor: ColumnElement[Any]
+        if anchor_to_valid_at:
+            # Event-time anchor: a backfilled row is as old as the event it
+            # records, not as old as its ingest. Only reachable when the tenant
+            # opted in AND the request said as-of when — see the knob's contract
+            # in ``common.constants``.
+            anchor = func.coalesce(ing.c.ts_valid_start, ing.c.created_at)
+        else:
+            # ``greatest`` is the guard for tenants whose ts_valid_start is a
+            # validity-window start rather than event time: such a row must
+            # never rank as older than its ingest.
+            anchor = func.greatest(
+                ing.c.created_at,
+                func.coalesce(ing.c.ts_valid_start, ing.c.created_at),
+            )
+        age_days = func.extract("epoch", ref_ts - anchor) / 86400.0
 
         type_decay = case(
-            *[(Memory.memory_type == mt, float(days)) for mt, days in TYPE_DECAY_DAYS.items()],
+            *[(ing.c.memory_type == mt, float(days)) for mt, days in TYPE_DECAY_DAYS.items()],
             else_=float(_freshness_decay_days),
         ).label("type_decay_days")
 
         freshness = case(
             (
                 and_(
-                    Memory.ts_valid_end.is_not(None),
-                    Memory.ts_valid_end < func.now(),
+                    ing.c.ts_valid_end.is_not(None),
+                    # Against the reference clock, not the wall clock: a row
+                    # whose validity ended AFTER the question's as-of time was
+                    # still current when the question was asked.
+                    ing.c.ts_valid_end < ref_ts,
                 ),
                 _freshness_floor,
             ),
-            (Memory.ts_valid_end.is_not(None), 1.0),
+            (ing.c.ts_valid_end.is_not(None), 1.0),
             (
                 age_days < type_decay,
                 # Clamp age to >= 0 so a FUTURE anchor (e.g. an enrichment-set
@@ -2243,10 +3309,27 @@ class PostgresService:
         ).label("freshness")
 
         if recall_boost_enabled:
+            # A41 — ``recall_boost_source`` switches WHICH counter the boost
+            # reads, never the boost's shape: cap, window, scale and the
+            # saturation curve are identical under both sources, so the boost
+            # still compounds correct repeat retrievals (the property the A50
+            # live replay validated) — under source=1 only CONFIRMED ones
+            # (evolve outcome reports), which breaks the returned→boosted→
+            # returned loop because merely being returned no longer moves the
+            # counter the score reads. A never-confirmed row has count 0 →
+            # boost exactly 1.0, whatever its recall_count says.
+            boost_count: ColumnElement[Any]
+            boost_anchor: ColumnElement[Any]
+            if _recall_boost_source == 1:
+                boost_count = ing.c.recall_used_count
+                boost_anchor = ing.c.recall_used_at  # already coalesced to created_at
+            else:
+                boost_count = ing.c.recall_count
+                boost_anchor = func.coalesce(ing.c.last_recalled_at, ing.c.created_at)
             days_since_recall = (
                 func.extract(
                     "epoch",
-                    func.now() - func.coalesce(Memory.last_recalled_at, Memory.created_at),
+                    func.now() - boost_anchor,
                 )
                 / 86400.0
             )
@@ -2255,20 +3338,25 @@ class PostgresService:
                 1.0
                 + (_recall_boost_cap - 1.0)
                 * recency_factor
-                * Memory.recall_count
-                / (Memory.recall_count + RECALL_BOOST_SCALE)
+                * boost_count
+                / (boost_count + RECALL_BOOST_SCALE)
             ).label("recall_boost")
         else:
             recall_boost_expr = literal_column("1.0").label("recall_boost")
 
-        base_score = (_similarity_blend * similarity + (1.0 - _similarity_blend) * Memory.weight).label(
+        base_score = (_similarity_blend * similarity + (1.0 - _similarity_blend) * ing.c.weight).label(
             "base_score"
         )
 
         if temporal_window is not None:
-            cutoff = func.now() - temporal_window
+            # "Last month" is a window ending at the reference clock. Under the
+            # default that is now() against created_at, unchanged; anchored to
+            # valid_at it is the question's as-of time against the row's event
+            # time, so a corpus ingested in one sitting still has a "last month".
+            cutoff = ref_ts - temporal_window
+            window_ts = anchor if anchor_to_valid_at else ing.c.created_at
             temporal_boost = case(
-                (Memory.created_at >= cutoff, 1.3),
+                (window_ts >= cutoff, 1.3),
                 else_=1.0,
             ).label("temporal_boost")
         else:
@@ -2282,13 +3370,11 @@ class PostgresService:
         if date_range_start and date_range_end:
             from datetime import date as date_type
 
-            from sqlalchemy import Date, cast, literal
-
             from core_storage_api.config import settings as _storage_settings
 
             temporal_anchor = func.coalesce(
-                cast(Memory.ts_valid_start, Date),
-                cast(Memory.created_at, Date),
+                cast(ing.c.ts_valid_start, Date),
+                cast(ing.c.created_at, Date),
             )
             _start_dt = date_type.fromisoformat(date_range_start)
             _end_dt = date_type.fromisoformat(date_range_end)
@@ -2322,7 +3408,8 @@ class PostgresService:
         # different entity". Empty/stopword-only queries degrade ts_query to the
         # empty tsquery (matches nothing here), so the gate is inert for
         # vector-only / entity-only callers and conflicted stays demoted.
-        _exact_lexical_match = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
+        # The gate reads the ``fts_match`` ingredient column — the same
+        # expression the admission guard projected, evaluated once.
         # A63 — ``history_query``: the caller detected a past-state /
         # change / duration question ("what was…", "did I switch…",
         # "how long have I been…"). Such queries NEED the superseded
@@ -2335,23 +3422,23 @@ class PostgresService:
             status_penalty = literal_column("1.0").label("status_penalty")
         else:
             status_penalty = case(
-                (Memory.status == "outdated", 0.5),
-                (and_(Memory.status == "conflicted", ~_exact_lexical_match), 0.5),
+                (ing.c.status == "outdated", 0.5),
+                (and_(ing.c.status == "conflicted", ~ing.c.fts_match), 0.5),
                 else_=1.0,
             ).label("status_penalty")
 
         # Soft currency factor: memories whose ts_valid_end is in the past
         # relative to valid_at are down-weighted instead of excluded.
         # Pairs with the removal of the `ts_valid_end >= valid_at` WHERE
-        # clause below — one bad enrichment date no longer blanks a memory.
-        if valid_at is not None:
+        # clause above — one bad enrichment date no longer blanks a memory.
+        if valid_at_ts is not None:
             from core_storage_api.config import settings as _storage_settings_cf
 
             currency_factor = case(
                 (
                     and_(
-                        Memory.ts_valid_end.is_not(None),
-                        Memory.ts_valid_end < valid_at,
+                        ing.c.ts_valid_end.is_not(None),
+                        ing.c.ts_valid_end < valid_at_ts,
                     ),
                     _storage_settings_cf.expired_currency_factor,
                 ),
@@ -2367,7 +3454,7 @@ class PostgresService:
             for mid, factor in memory_boost_factor.items():
                 boost_tiers.setdefault(factor, []).append(mid)
             whens = [
-                (Memory.id.in_(mids), factor) for factor, mids in sorted(boost_tiers.items(), reverse=True)
+                (ing.c.mem_id.in_(mids), factor) for factor, mids in sorted(boost_tiers.items(), reverse=True)
             ]
             entity_boost = case(*whens, else_=1.0).label("entity_boost")
         else:
@@ -2410,149 +3497,35 @@ class PostgresService:
                 * status_penalty
             ).label("score")
 
-        # -- Build scored CTE --
-        # CAURA-594: NULL-embedding rows are admitted only if they also
-        # match the FTS query — otherwise they'd rank on `Memory.weight *
-        # freshness * ...` alone and could fill top_k slots with rows
-        # that have no relationship to the query during a large backfill
-        # window. `search_vector @@ ts_query` is GIN-indexed, so the
-        # extra predicate is free for rows that already had to scan
-        # the tenant/fleet slice.
-        # Other paths (find_semantic_duplicate, find_similar_candidates,
-        # find_neighbors_by_embedding, compute_health_stats) keep their
-        # NULL guards — vector-pure operations where a NULL operand has
-        # no comparable semantics.
-        # `plainto_tsquery('english', '')` (and any whitespace-only or
-        # stop-word-only input it normalises down to empty) returns the
-        # empty `tsquery`, which `@@`-matches every non-NULL `tsvector`
-        # — that would silently re-admit every NULL-embedding row when
-        # callers pass `query=""` or `query="   "` (e.g. entity-only /
-        # vector-only search modes), bringing back the displacement-by-
-        # weight bug. Gate on the Python-side query string so the
-        # operator is only emitted when there's actual text to match.
-        _fts_guard = Memory.search_vector.op("@@")(ts_query) if query and query.strip() else false()
-        fts_match = _fts_guard.label("fts_match")
-        scored_stmt = (
-            select(
-                Memory.id.label("mem_id"),
-                score,
-                similarity,
-                vec_sim,
-                fts_match,
-                has_embedding,
-                status_penalty,
-            )
-            # Multi-tenant read predicate: when ``readable_tenant_ids``
-            # is provided (cross-tenant agent key), reads widen across
-            # the full set; otherwise we stay single-tenant for the
-            # common case. Result rows still carry ``Memory.tenant_id``
-            # so the caller can attribute each row to its source tenant.
-            .where(
-                Memory.tenant_id.in_(readable_tenant_ids)
-                if readable_tenant_ids
-                else Memory.tenant_id == tenant_id
-            )
-            .where(Memory.deleted_at.is_(None))
-            .where(
-                or_(
-                    Memory.embedding.is_not(None),
-                    _fts_guard,
-                )
-            )
+        # -- Branch layer: candidate selection over the scored ingredients --
+        # The select list is the same column contract the outer query and
+        # ``SearchDiagnostic.all_candidates`` have consumed since CAURA-722:
+        # every factor ``score`` is built from is named here, and naming one is
+        # now free — each is a CASE/arithmetic over ingredient columns, with
+        # the heavy primitives already paid exactly once in the CTE below the
+        # fence. (CAURA-722 originally priced the ``fts_score`` projection at
+        # one extra ``ts_rank_cd`` render; the two-layer split retired that
+        # cost, and the ratchet constants in test_fts_score_single_render
+        # moved down with it.)
+        #
+        # Both union branches derive from this statement, so they stay
+        # column-compatible. Dedup behaviour is unchanged too: the factors are
+        # deterministic per ``mem_id``, so rows that collapsed before still
+        # collapse.
+        scored_stmt = select(
+            ing.c.mem_id,
+            score,
+            similarity,
+            ing.c.vec_sim,
+            ing.c.fts_match,
+            ing.c.has_embedding,
+            status_penalty,
+            ing.c.fts_score,
+            freshness,
+            entity_boost,
+            recall_boost_expr,
+            temporal_boost,
         )
-
-        if fleet_ids:
-            scored_stmt = scored_stmt.where(
-                or_(
-                    Memory.fleet_id.in_(fleet_ids),
-                    Memory.fleet_id.is_(None),
-                    Memory.visibility == "scope_org",
-                )
-            )
-
-        if caller_agent_id:
-            visibility_filter = or_(
-                Memory.visibility == "scope_org",
-                Memory.visibility == "scope_team",
-                and_(
-                    Memory.visibility == "scope_agent",
-                    Memory.agent_id == caller_agent_id,
-                ),
-            )
-            scored_stmt = scored_stmt.where(visibility_filter)
-        else:
-            scored_stmt = scored_stmt.where(Memory.visibility != "scope_agent")
-
-        if filter_agent_id:
-            scored_stmt = scored_stmt.where(Memory.agent_id == filter_agent_id)
-        if memory_type_filter:
-            scored_stmt = scored_stmt.where(Memory.memory_type == memory_type_filter)
-        if status_filter:
-            scored_stmt = scored_stmt.where(Memory.status == status_filter)
-        elif history_query:
-            # A63 — a history question ("what was…", "did I switch…",
-            # "how long have I been…") needs the superseded value: the
-            # older side of an update is EXACTLY what the caller asked
-            # for, so neither the exclusion below nor the status_penalty
-            # applies. Ranking is pure relevance; present-state queries
-            # keep both protections.
-            pass
-        else:
-            # Exclude superseded memories from default search results. The
-            # contradiction detector marks the older row ``outdated`` (RDF
-            # path) or ``conflicted`` (semantic path) and points the newer
-            # one at it via ``supersedes_id``. Surfacing both would dilute
-            # ranking with stale claims agents shouldn't act on. Callers
-            # that need to inspect superseded rows pass an explicit
-            # ``status_filter`` to override.
-            #
-            # Carve-out: a ``conflicted`` row that is an EXACT lexical match
-            # for the query is kept. ``conflicted`` (unlike ``outdated``) means
-            # "a competing claim exists", not "definitively retracted" — and the
-            # semantic contradiction path mismarks near-duplicate-but-distinct
-            # entities (e.g. ``Wayne #0000`` vs ``Wayne #0704``), so a blanket
-            # exclusion silently drops the very row the caller named. The
-            # exact-match gate scopes the carve-out to rows the caller clearly
-            # asked for; status_penalty above keeps a surfaced exact-match
-            # conflicted row un-demoted, and load_and_serialize still injects its
-            # supersedes successor so both sides are visible. ``outdated`` stays
-            # fully excluded.
-            scored_stmt = scored_stmt.where(
-                or_(
-                    Memory.status.notin_(("outdated", "conflicted")),
-                    and_(Memory.status == "conflicted", _exact_lexical_match),
-                )
-            )
-        if valid_at:
-            from datetime import date as _date_type
-
-            from sqlalchemy import Date as _Date
-            from sqlalchemy import cast as _cast
-            from sqlalchemy import literal as _literal
-
-            # Hard filter on the START side, compared at DAY granularity.
-            # Future-dated memories can't answer past questions — but strict
-            # timestamp comparison also excludes same-day memories written a
-            # few hours after the query was asked, which is too aggressive
-            # for workflows where the question + its evidence share a day.
-            # We cast both sides to DATE so same-day-later memories pass.
-            _valid_at_date = (
-                valid_at.date() if hasattr(valid_at, "date") else _date_type.fromisoformat(str(valid_at)[:10])
-            )
-            scored_stmt = scored_stmt.where(
-                or_(
-                    Memory.ts_valid_start.is_(None),
-                    _cast(Memory.ts_valid_start, _Date) <= _cast(_literal(_valid_at_date), _Date),
-                ),
-            )
-            # NOTE: the END side (`ts_valid_end >= valid_at`) is NO LONGER
-            # a hard filter.  A past ts_valid_end now triggers the soft
-            # ``currency_factor`` above (default 0.5x) — so an over-eager
-            # enrichment date can't silently hide a semantically strong
-            # memory from historical-question queries.
-
-        # NOTE: date_range_start/end no longer produces a hard WHERE filter;
-        # the multiplier ``date_range_boost`` above handles it softly.
 
         if _candidate_pool_size > 0:
             # A49: select the candidate POOL by semantic relevance (``similarity``)
@@ -2562,7 +3535,7 @@ class PostgresService:
             # PostFilterResults trims to the caller's top_k — so with A49 alone this
             # only *widens/relevance-selects the pool*, it does not reorder the final
             # result; the reorder is A50. Off (0) by default → unchanged behaviour.
-            main_stmt = scored_stmt.order_by(similarity.desc(), Memory.created_at.desc()).limit(
+            main_stmt = scored_stmt.order_by(similarity.desc(), ing.c.created_at.desc()).limit(
                 _candidate_pool_size
             )
         else:
@@ -2577,7 +3550,7 @@ class PostgresService:
             # result set. Ignoring a nested one is also the skew-safe direction:
             # an older core-api that still sends it gets the wider window it
             # always meant to ask for.
-            main_stmt = scored_stmt.order_by(score.desc(), Memory.created_at.desc()).limit(top_k)
+            main_stmt = scored_stmt.order_by(score.desc(), ing.c.created_at.desc()).limit(top_k)
 
         # Reserve candidate slots for full-text matches.
         #
@@ -2588,12 +3561,16 @@ class PostgresService:
         #
         # The dedicated branch is separately capped and the outer ORDER BY keeps
         # every row at its true score, so this changes candidate admission rather
-        # than the ranking formula.
+        # than the ranking formula. Its filter reads the ``fts_match`` /
+        # ``has_embedding`` ingredient columns — over the materialised CTE, not
+        # a second GIN probe of ``memories``.
         if _FTS_RESERVED_CANDIDATES > 0 and query and query.strip():
-            reserve_filter = _fts_guard if _fts_weight > 0.0 else and_(Memory.embedding.is_(None), _fts_guard)
+            reserve_filter = (
+                ing.c.fts_match if _fts_weight > 0.0 else and_(~ing.c.has_embedding, ing.c.fts_match)
+            )
             reserved_stmt = (
                 scored_stmt.where(reserve_filter)
-                .order_by(fts_score.desc(), Memory.created_at.desc())
+                .order_by(ing.c.fts_score.desc(), ing.c.created_at.desc())
                 .limit(_FTS_RESERVED_CANDIDATES)
             )
             # Each operand is wrapped in its own subquery so its ORDER BY/LIMIT is
@@ -2604,6 +3581,10 @@ class PostgresService:
             scored_cte = main_stmt.cte("scored")
 
         # -- Outer query: JOIN Memory + LEFT JOIN entity links --
+        # ``pool_arms`` (D12 provenance) exists only in ann-mode; the default
+        # path selects a typed NULL so the row shape is identical either way
+        # and the route serialises one contract.
+        pool_arms_col = pool_cte.c.arms.label("pool_arms") if use_ann_pool else null().label("pool_arms")
         stmt = (
             select(
                 Memory,
@@ -2613,6 +3594,13 @@ class PostgresService:
                 scored_cte.c.fts_match,
                 scored_cte.c.has_embedding,
                 scored_cte.c.status_penalty,
+                # CAURA-722 — see the CTE select list above.
+                scored_cte.c.fts_score,
+                scored_cte.c.freshness,
+                scored_cte.c.entity_boost,
+                scored_cte.c.recall_boost,
+                scored_cte.c.temporal_boost,
+                pool_arms_col,
                 MemoryEntityLink.entity_id,
                 MemoryEntityLink.role,
                 Agent.display_name.label("agent_display_name"),
@@ -2622,6 +3610,8 @@ class PostgresService:
             .outerjoin(Agent, _AGENT_DISPLAY_JOIN)
             .order_by(scored_cte.c.score.desc(), Memory.created_at.desc())
         )
+        if use_ann_pool:
+            stmt = stmt.outerjoin(pool_cte, Memory.id == pool_cte.c.id)
 
         # db_ms captures only pool wait + SQL round-trip; materialise rows
         # inside the session (they hold lazy-load handles), then drop the
@@ -2629,6 +3619,43 @@ class PostgresService:
         # work doesn't inflate the DB timing signal.
         with db_measure():
             async with get_read_session() as session:
+                if use_ann_pool:
+                    # Pin the ANN arm's scan behaviour for THIS statement only.
+                    # ``set_config(..., is_local => true)`` is SET LOCAL —
+                    # scoped to the transaction the session's autobegin opened
+                    # with this first execute, and reset at commit/rollback on
+                    # session close, so nothing leaks to the next checkout of
+                    # the pooled connection.
+                    #
+                    # This RELIES on the reader engine being transactional:
+                    # ``_build_engine`` sets no ``isolation_level``, so the
+                    # session autobegins one transaction spanning all three
+                    # executes. Were the reader engine ever flipped to
+                    # AUTOCOMMIT (per-statement transactions), SET LOCAL would
+                    # evaporate before the main statement and the pool would
+                    # silently lose its scan guarantees — two tests pin this:
+                    # test_ann_pool_behavior::test_read_session_preserves_set_local_across_executes
+                    # (the session property itself) and
+                    # ::test_real_search_path_has_gucs_live_at_statement_time
+                    # (this very code path, observed mid-flight).
+                    #
+                    # ``ef_search`` must be >= the arm's LIMIT for a one-pass
+                    # scan (pgvector clamps the GUC to [1, 1000]);
+                    # ``iterative_scan=relaxed_order`` keeps the scan walking
+                    # past ef_search until the LIMIT is satisfied when the
+                    # row_filters discard candidates — the multi-tenant case,
+                    # where a small tenant's rows are sparse in a shared
+                    # index. Bounded by pgvector's hnsw.max_scan_tuples
+                    # (default 20k), so a pathological filter degrades to an
+                    # under-filled pool, never an unbounded crawl.
+                    #
+                    # Set via set_config() rather than SET LOCAL because
+                    # utility statements can't take bind parameters.
+                    _ef_search = min(max(_ann_pool_size, _ANN_EF_SEARCH_FLOOR), 1000)
+                    await session.execute(select(func.set_config("hnsw.ef_search", str(_ef_search), True)))
+                    await session.execute(
+                        select(func.set_config("hnsw.iterative_scan", "relaxed_order", True))
+                    )
                 result = await session.execute(stmt)
                 rows = result.all()
 
@@ -2645,10 +3672,28 @@ class PostgresService:
                     fts_match=row.fts_match,
                     has_embedding=row.has_embedding,
                     status_penalty=row.status_penalty,
+                    # CAURA-722 — see the CTE select list above.
+                    fts_score=row.fts_score,
+                    freshness=row.freshness,
+                    entity_boost=row.entity_boost,
+                    recall_boost=row.recall_boost,
+                    temporal_boost=row.temporal_boost,
+                    pool_arms=row.pool_arms,
                     entity_links=[],
                 )
             if row.entity_id is not None:
                 grouped[mid].entity_links.append({"entity_id": row.entity_id, "role": row.role})
+        if use_ann_pool and len(grouped) < top_k:
+            # The pool admitted fewer distinct rows than the caller asked for —
+            # either the tenant slice is simply small (benign) or the arms are
+            # under-sized for this workload. Ops greps this against the shadow
+            # compare lines to tell which.
+            logger.info(
+                "ann_pool: pooled search under-filled (%d rows < top_k=%d, tenant=%s)",
+                len(grouped),
+                top_k,
+                tenant_id,
+            )
         return list(grouped.values())
 
     # ------------------------------------------------------------------
@@ -2667,6 +3712,7 @@ class PostgresService:
         status_filter: str | None = None,
         valid_at: datetime | None = None,
         readable_tenant_ids: list[str] | None = None,
+        strict_fleet_scoping: bool = False,
     ) -> list[Memory]:
         """Load memories by ID with visibility/fleet/agent filters applied.
 
@@ -2707,13 +3753,7 @@ class PostgresService:
                 )
             )
             if fleet_ids:
-                stmt = stmt.where(
-                    or_(
-                        Memory.fleet_id.in_(fleet_ids),
-                        Memory.fleet_id.is_(None),
-                        Memory.visibility == "scope_org",
-                    )
-                )
+                stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
             if caller_agent_id:
                 stmt = stmt.where(
                     or_(
@@ -2841,6 +3881,7 @@ class PostgresService:
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         valid_at: datetime | None = None,
+        strict_fleet_scoping: bool = False,
     ) -> list[Memory]:
         """Find active/confirmed memories that supersede the given memory IDs."""
         async with get_session() as session:
@@ -2855,13 +3896,7 @@ class PostgresService:
                 )
             )
             if fleet_ids:
-                stmt = stmt.where(
-                    or_(
-                        Memory.fleet_id.in_(fleet_ids),
-                        Memory.fleet_id.is_(None),
-                        Memory.visibility == "scope_org",
-                    )
-                )
+                stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
             if caller_agent_id:
                 stmt = stmt.where(
                     or_(
@@ -3020,8 +4055,23 @@ class PostgresService:
                 Memory.deleted_at.is_(None),
                 Memory.status.in_(("active", "confirmed", "pending")),
                 Memory.subject_entity_id == subject_entity_id,
-                func.lower(Memory.predicate) == predicate.lower(),
-                Memory.object_value != object_value,
+                # A36 — match every spelling of the SAME attribute, not just
+                # the one this write happened to use. ``status`` and
+                # ``current_status`` are two members of
+                # ``SINGLE_VALUE_PREDICATES`` naming one attribute, and exact
+                # equality meant a subject holding one of each was never
+                # compared: no conflict raised, both rows live, both
+                # unpenalised. Expanded here rather than at write time so
+                # ALREADY-STORED rows are covered and the predicate a caller
+                # reads back is still the one its writer chose. A predicate in
+                # no cluster yields a single-member IN — the same query as the
+                # equality it replaces.
+                func.lower(Memory.predicate).in_(sorted(predicate_cluster(predicate))),
+                # A35 — compare NORMALISED forms. Raw inequality made
+                # "7,500 rpm" and "7500 RPM" look like competing values for the
+                # same attribute and flagged a contradiction that was only a
+                # formatting difference.
+                _normalized_object_sql(Memory.object_value) != _normalized_object_sql(literal(object_value)),
                 Memory.id != memory_id,
             )
             if fleet_id:
@@ -3102,6 +4152,23 @@ class PostgresService:
         fleet_id: str | None = None,
         batch_size: int = 500,
     ) -> int:
+        """Archive rows whose validity has run out, on the next lifecycle tick.
+
+        TWO columns end a row's life and they are not the same thing.
+        ``ts_valid_end`` closes a temporal-validity interval — the fact stopped
+        being true. ``expires_at`` is a caller-supplied retention hint — keep
+        this until then. Both land a row in ``outdated``.
+
+        ``expires_at`` was accepted, stored and returned for the whole life of
+        the product and enforced by nothing: this sweep existed and filtered
+        the OTHER column, which is why the gap read as "never enforced" rather
+        than "enforced late" (caura#1637).
+
+        This is archival on the next tick, NOT a hard retention control. A row
+        stays visible for up to one tick past its ``expires_at``, and callers
+        needing a tighter guarantee are asking for a read-time filter, which
+        this deliberately is not.
+        """
         async with get_session() as session:
             params: dict = {"tenant_id": tenant_id, "batch_size": batch_size}
             fleet_clause = ""
@@ -3116,7 +4183,7 @@ class PostgresService:
                     SELECT id FROM memories
                     WHERE tenant_id = :tenant_id
                       {fleet_clause}
-                      AND ts_valid_end < NOW()
+                      AND (ts_valid_end < NOW() OR expires_at < NOW())
                       AND status = 'active'
                       AND deleted_at IS NULL
                     LIMIT :batch_size
@@ -3420,6 +4487,8 @@ class PostgresService:
         tenant_id: str,
         fleet_id: str | None = None,
         status: str | None = None,
+        exclude_scope_agent: bool = False,
+        caller_agent_id: str | None = None,
     ) -> int:
         """Count live (non-deleted) memories for a tenant, optionally a fleet.
 
@@ -3428,6 +4497,19 @@ class PostgresService:
         used to test ``status == "active"`` literally, which silently returned
         0 for tenants whose rows enrichment had promoted to ``confirmed`` /
         ``pending``. Pass an explicit ``status`` to count exactly that one.
+
+        ``exclude_scope_agent`` turns on visibility scoping and
+        ``caller_agent_id`` is the identity applied within it — together,
+        ``_visibility_scope_clause``, the same predicate the list route builds.
+
+        TWO parameters rather than one, because this counter has three states
+        where the list route has two: unscoped is real here (the
+        auto-crystallize spend gate counts the whole corpus, private rows
+        included). A lone ``caller_agent_id: str | None`` cannot carry three,
+        and not just in Python — this is reached over HTTP via
+        ``/count-active``, where an absent optional query param and an explicit
+        null are the same value, so "don't scope" and "scope with no identity"
+        would collapse into each other on the wire.
         """
         status_filter = (
             Memory.status == status if status is not None else Memory.status.in_(LIVE_MEMORY_STATUSES)
@@ -3444,6 +4526,8 @@ class PostgresService:
             )
             if fleet_id:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
+            if exclude_scope_agent:
+                stmt = stmt.where(_visibility_scope_clause(caller_agent_id))
             result = await session.execute(stmt)
             return result.scalar() or 0
 
@@ -3816,60 +4900,107 @@ class PostgresService:
                 int(total_remaining),
             )
 
-    async def memory_find_near_duplicate_candidates(
+    async def memory_find_near_duplicate_pairs(
         self,
         tenant_id: str,
         fleet_id: str | None,
         batch_size: int,
         offset: int = 0,
+        threshold: float = 0.95,
+        neighbor_limit: int = 5,
     ) -> list[tuple]:
-        async with get_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id)
-            result = await session.execute(
-                text(f"""
-                SELECT m.id, m.embedding
-                FROM memories m
-                WHERE {scope}
-                  AND m.embedding IS NOT NULL
-                  AND m.deleted_at IS NULL
-                  AND m.last_dedup_checked_at IS NULL
-                ORDER BY m.created_at DESC
-                LIMIT :batch_size OFFSET :batch_offset
-            """),
-                {**params, "batch_size": batch_size, "batch_offset": offset},
-            )
-            return result.all()  # type: ignore[return-value]
+        """One batch of the crystallizer's dedup sweep: candidates AND their
+        near neighbours, resolved in a single statement.
 
-    async def memory_find_neighbors_by_embedding(
-        self,
-        tenant_id: str,
-        fleet_id: str | None,
-        query_embedding: Any,
-        exclude_id: UUID,
-        threshold: float,
-        limit: int,
-    ) -> list[tuple]:
+        Returns ``(candidate_id, neighbour_id, similarity)`` ordered
+        candidate-by-candidate, each candidate's neighbours nearest-first.
+        The join is a LEFT one, so a candidate with no neighbour above
+        ``threshold`` still yields one row with NULLs — that is how the caller
+        recovers the full swept set to stamp ``last_dedup_checked_at`` on, which
+        is not the same set as "rows that turned out to have a duplicate".
+
+        Audit oss-0814-m-37. This was two queries behind two endpoints, and
+        core-api drove them in a serial N+1: fetch a page of ``(id, embedding)``
+        candidates, then issue one neighbour POST **per candidate**, each body
+        carrying that candidate's embedding straight back up. At the shipped
+        ``CRYSTALLIZER_DEDUP_BATCH_SIZE`` of 500 that is 501 HTTP round-trips
+        and ~22 MB of vector JSON per batch (a 1024-dim pgvector serialises to
+        ~22 KB, down once as the candidate and up again as the query), for a
+        similarity that pgvector was computing server-side the whole time — the
+        vector was never read by core-api, only relayed. The correlated
+        ``LATERAL`` expresses the same per-candidate top-K the loop did, so the
+        ANN index is still probed once per candidate; what goes away is the
+        round-trip and the relay, not the work.
+
+        M-61 lives here now, in both halves. LIVE rows only on BOTH sides of the
+        join, which is what closes the reported loop: a crystallized fact stays
+        >=0.95 similar to the sources it was merged from — that is what made
+        them a cluster — and those sources are ARCHIVED by the run that created
+        it. Offering them again re-formed the cluster {F, S1, S2} on the next
+        sweep, re-sent it to the LLM, and then archived F, because the archive
+        step takes every cluster member and does not care that one of them is
+        the crystal produced an hour earlier. Filtering one side would not have
+        been enough: a pair is (candidate, neighbour), so a row excluded from
+        one end still reaches a cluster through the other.
+
+        Deliberately ``LIVE_MEMORY_STATUSES`` rather than ``!= 'archived'``:
+        ``outdated`` and ``conflicted`` are no better as merge inputs, and naming
+        the live set means a status added later is excluded by default rather
+        than silently admitted.
+
+        ``deleted_at IS NULL`` alone was never the filter that mattered:
+        soft-deletion is not the state crystallization puts its sources into.
+
+        The trailing ``c.id`` / ``nb.id`` sort keys make an order Postgres never
+        promised deterministic rather than changing one it did. Candidates tie
+        on ``created_at`` and neighbours tie on distance; under a tie the old
+        loop's visit order — and therefore which pairs survive
+        ``CRYSTALLIZER_MAX_DEDUP_PAIRS`` — was whatever the executor happened to
+        emit. Similarity is symmetric, so a tie never changed a pair's recorded
+        score, only which pairs made the cap.
+        """
         async with get_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id, table="n")
+            cand_scope, params = _scope_sql(tenant_id, fleet_id)
+            nb_scope, _ = _scope_sql(tenant_id, fleet_id, table="n")
             result = await session.execute(
                 text(f"""
-                SELECT n.id,
-                       1 - (n.embedding <=> :query_emb) AS similarity
-                FROM memories n
-                WHERE {scope}
-                  AND n.embedding IS NOT NULL
-                  AND n.deleted_at IS NULL
-                  AND n.id != :self_id
-                  AND 1 - (n.embedding <=> :query_emb) >= :threshold
-                ORDER BY n.embedding <=> :query_emb
-                LIMIT :k
+                WITH candidates AS (
+                    SELECT m.id, m.embedding, m.created_at
+                    FROM memories m
+                    WHERE {cand_scope}
+                      AND m.embedding IS NOT NULL
+                      AND m.deleted_at IS NULL
+                      AND m.status = ANY(:live_statuses)
+                      AND m.last_dedup_checked_at IS NULL
+                    ORDER BY m.created_at DESC
+                    LIMIT :batch_size OFFSET :batch_offset
+                )
+                SELECT c.id AS candidate_id,
+                       nb.id AS neighbor_id,
+                       nb.similarity AS similarity
+                FROM candidates c
+                LEFT JOIN LATERAL (
+                    SELECT n.id AS id,
+                           1 - (n.embedding <=> c.embedding) AS similarity
+                    FROM memories n
+                    WHERE {nb_scope}
+                      AND n.embedding IS NOT NULL
+                      AND n.deleted_at IS NULL
+                      AND n.status = ANY(:live_statuses)
+                      AND n.id != c.id
+                      AND 1 - (n.embedding <=> c.embedding) >= :threshold
+                    ORDER BY n.embedding <=> c.embedding
+                    LIMIT :k
+                ) nb ON TRUE
+                ORDER BY c.created_at DESC, c.id, nb.similarity DESC NULLS LAST, nb.id
             """),
                 {
                     **params,
-                    "query_emb": str(query_embedding),
-                    "self_id": exclude_id,
+                    "batch_size": batch_size,
+                    "batch_offset": offset,
                     "threshold": threshold,
-                    "k": limit,
+                    "k": neighbor_limit,
+                    "live_statuses": list(LIVE_MEMORY_STATUSES),
                 },
             )
             return result.all()  # type: ignore[return-value]
@@ -4070,56 +5201,6 @@ class PostgresService:
                 "contradiction_count": contradiction_count,
                 "pii_count": pii_count,
                 "avg_recall_count": avg_recall,
-            }
-
-    async def memory_compute_usage_stats(
-        self,
-        tenant_id: str,
-        fleet_id: str | None,
-    ) -> dict:
-        async with get_read_session() as session:
-            scope, params = _scope_sql(tenant_id, fleet_id)
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.id, m.title, m.recall_count
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL
-                ORDER BY m.recall_count DESC
-                LIMIT 10
-            """),
-                params,
-            )
-            most_recalled = [{"id": str(row[0]), "title": row[1], "recall_count": row[2]} for row in r.all()]
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.id, m.title, m.recall_count
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL AND m.status = 'active'
-                ORDER BY m.recall_count ASC
-                LIMIT 10
-            """),
-                params,
-            )
-            least_recalled = [{"id": str(row[0]), "title": row[1], "recall_count": row[2]} for row in r.all()]
-
-            r = await session.execute(
-                text(f"""
-                SELECT m.fleet_id, COUNT(*) AS cnt
-                FROM memories m
-                WHERE {scope} AND m.deleted_at IS NULL
-                GROUP BY m.fleet_id
-                ORDER BY cnt DESC
-            """),
-                params,
-            )
-            fleet_activity = [{"fleet_id": row[0], "memory_count": row[1]} for row in r.all()]
-
-            return {
-                "most_recalled": most_recalled,
-                "least_recalled": least_recalled,
-                "fleet_activity": fleet_activity,
             }
 
     async def memory_list_recent(
@@ -4431,19 +5512,36 @@ class PostgresService:
         the same way and a fix to one cannot miss the others.
         """
         # Bulk-insert with ``ON CONFLICT (memory_id, entity_id) DO NOTHING``
-        # so two concurrent writes targeting the same ``(memory_id,
-        # entity_id)`` pair don't serialise on ``Lock/transactionid``
-        # (CAURA-686). Each ``link`` dict carries ``entity_id`` (UUID) and
-        # ``role`` (str).
+        # so a pair another writer already committed is skipped instead of
+        # raising a unique violation (CAURA-686). Each ``link`` dict carries
+        # ``entity_id`` (UUID) and ``role`` (str).
+        #
+        # It does NOT keep concurrent writers off ``Lock/transactionid``, which
+        # is what an earlier version of this comment claimed and why nothing
+        # here was ordered; ``_ordered_link_rows`` carries the correction and
+        # the measurement.
         if not links:
             # Nothing is written, so there is nothing to scope. Reported as
             # success rather than checked-then-succeeded: the answer is the
             # same for every tenant, so it discloses nothing either way.
             return True
         entity_ids = {link["entity_id"] for link in links}
-        rows = [
-            {"memory_id": memory_id, "entity_id": link["entity_id"], "role": link["role"]} for link in links
-        ]
+        # Ordered + deduped so two concurrent statements over an overlapping
+        # set cannot form a lock cycle.
+        # ``source=caller``: this is ``PATCH /memories/{id}``'s ``entity_links``,
+        # which is a caller-owned additive API. The edit-time graph reset spares
+        # these — see ``_delete_entity_artifacts``.
+        rows = _ordered_link_rows(
+            [
+                {
+                    "memory_id": memory_id,
+                    "entity_id": link["entity_id"],
+                    "role": link["role"],
+                    "source": LINK_SOURCE_CALLER,
+                }
+                for link in links
+            ]
+        )
         async with get_session() as session:
             owned_memories, owned_entities = await self._owned_link_endpoints(
                 session, tenant_id, {memory_id}, entity_ids
@@ -4601,8 +5699,27 @@ class PostgresService:
 
             link_rows = (
                 await session.execute(
+                    # M-64, and not part of that finding's text — the same
+                    # disclosure through a second door. The MEMORY is
+                    # tenant-checked above, the link row has no tenant column of
+                    # its own, and the entity was joined on id alone: a
+                    # straddling link (this tenant's memory, another tenant's
+                    # entity) handed back that entity's ``canonical_name`` and
+                    # ``attributes`` below. The write path has refused to create
+                    # those since #1085/#1124, which is exactly why the ones that
+                    # remain are historical and unreachable by any later guard.
+                    #
+                    # Stays an OUTER join, so the entry keeps its ``entity_id``
+                    # and ``role`` and simply loses the fields it should never
+                    # have carried — the None branch below already handles it.
                     select(MemoryEntityLink, Entity)
-                    .outerjoin(Entity, MemoryEntityLink.entity_id == Entity.id)
+                    .outerjoin(
+                        Entity,
+                        and_(
+                            MemoryEntityLink.entity_id == Entity.id,
+                            Entity.tenant_id == tenant_id,
+                        ),
+                    )
                     .where(MemoryEntityLink.memory_id == memory_id)
                 )
             ).all()
@@ -4793,7 +5910,9 @@ class PostgresService:
     ) -> dict:
         """Bulk-reassign memories to ``target_agent_id`` in ONE transaction.
 
-        Locks the matching live rows ``FOR UPDATE``, loops computing
+        Locks the matching live rows ``FOR UPDATE`` in ``id`` order (see
+        ``_ordered_memory_lock_select`` — unordered, this cycles against a
+        concurrent entity-link insert), loops computing
         moved/promoted/skipped/from_agents, sets ``agent_id`` and auto-promotes
         ``scope_agent`` → ``scope_team`` to prevent data loss, and computes
         ``not_found`` for ids that didn't match (deleted, wrong tenant, or
@@ -4802,19 +5921,7 @@ class PostgresService:
         """
         async with get_session() as session:
             memories = (
-                (
-                    await session.execute(
-                        select(Memory)
-                        .where(
-                            Memory.id.in_(memory_ids),
-                            Memory.tenant_id == tenant_id,
-                            Memory.deleted_at.is_(None),
-                        )
-                        .with_for_update()
-                    )
-                )
-                .scalars()
-                .all()
+                (await session.execute(_ordered_memory_lock_select(memory_ids, tenant_id))).scalars().all()
             )
 
             found_ids = {mem.id for mem in memories}
@@ -4990,6 +6097,7 @@ class PostgresService:
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
         readable_tenant_ids: list[str] | None = None,
+        visibility: str | None = None,
     ) -> list[Memory]:
         """Filter, sort, paginate memories WITH visibility scoping.
 
@@ -5029,7 +6137,34 @@ class PostgresService:
             stmt = stmt.where(Memory.visibility != "scope_agent")
 
         if fleet_id:
-            stmt = stmt.where(Memory.fleet_id == fleet_id)
+            # Same predicate as the bare ``Memory.fleet_id == fleet_id`` this
+            # replaces (``fleet_id IN (:f)``), routed through the helper so D4
+            # lives in one place and "strict" cannot mean different things in
+            # different queries -- the copy-drift A54 was filed for.
+            #
+            # THE ARGUMENTS ARE LOAD-BEARING. Do not "simplify" them toward the
+            # defaults the multi-fleet reads use. ``resolve_read_fleet_gate`` case
+            # (a) PINS ``fleet_id`` here for a trust < 2 caller asking
+            # ``scope='fleet'`` -- a security decision, stated as one in its own
+            # docstring -- and this predicate is that confinement. Dropping
+            # ``strict`` would re-admit null-fleet rows; dropping
+            # ``include_org_visibility=False`` is worse, because
+            # ``visibility = 'scope_org'`` carries NO fleet term at all, so a
+            # caller pinned precisely to stop it fanning out would see every
+            # scope_org row in every other fleet of the tenant. Either turns the
+            # trust ladder into a no-op, silently, on an endpoint in the frozen
+            # broker subset that oasdiff cannot flag (semantic change, no schema
+            # movement).
+            #
+            # The distinction to hold onto: the plural ``fleet_ids`` reads take an
+            # AUTHORIZATION SCOPE and correctly apply D4; this singular
+            # ``fleet_id`` is a caller-supplied FILTER that core-api sometimes
+            # overloads as a pin, and storage cannot tell the two apart from the
+            # value alone. Closing that gap properly means passing provenance, not
+            # widening the predicate (ax-0917-m-19).
+            stmt = stmt.where(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if written_by:
             stmt = stmt.where(Memory.agent_id == written_by)
         if memory_type:
@@ -5040,6 +6175,14 @@ class PostgresService:
             stmt = stmt.where(Memory.status == status)
         if run_id is not None:
             stmt = stmt.where(Memory.run_id == run_id)
+        if visibility:
+            # OSS 09/02 M-27 — a caller-supplied NARROWING filter, and only
+            # that. It is ANDed onto a statement the scoping predicate above
+            # has already restricted, so it can hide rows the caller may see
+            # and can never surface one it may not: asking for
+            # ``visibility=scope_org`` does not grant scope_org reach, it just
+            # drops everything else from the page.
+            stmt = stmt.where(Memory.visibility == visibility)
         if weight_min is not None:
             stmt = stmt.where(Memory.weight >= weight_min)
         if weight_max is not None:
@@ -5131,7 +6274,13 @@ class PostgresService:
             # that omits tenant scope gets empty stats, never cross-tenant rows.
             scope_filters.append(Memory.tenant_id == tenant_id)
         if fleet_id:
-            scope_filters.append(Memory.fleet_id == fleet_id)
+            # Strict and org-blind on purpose, exactly as in
+            # ``memory_list_by_filters`` -- see the comment there before changing
+            # these arguments; this predicate is a security confinement, not a
+            # convenience filter (ax-0917-m-19).
+            scope_filters.append(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
             scope_filters.append(
@@ -5392,7 +6541,13 @@ class PostgresService:
         else:
             scope_filters.append(Memory.tenant_id == tenant_id)
         if fleet_id:
-            scope_filters.append(Memory.fleet_id == fleet_id)
+            # Strict and org-blind on purpose, exactly as in
+            # ``memory_list_by_filters`` -- see the comment there before changing
+            # these arguments; this predicate is a security confinement, not a
+            # convenience filter (ax-0917-m-19).
+            scope_filters.append(
+                _fleet_scope_clause(Memory, [fleet_id], strict=True, include_org_visibility=False)
+            )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
             scope_filters.append(
@@ -5468,6 +6623,47 @@ class PostgresService:
             return await session.scalar(
                 select(Entity).where(Entity.id == entity_id, Entity.tenant_id == tenant_id)
             )
+
+    async def entity_get_by_ids(
+        self,
+        entity_ids: list[UUID],
+        tenant_id: str,
+    ) -> dict[UUID, Entity]:
+        """Batch form of ``entity_get_by_id``: many ids, one query.
+
+        Exists because the contradiction detector hydrated every entity link
+        with its own ``entity_get_by_id`` round-trip — one HTTP call per link
+        per candidate, so a Path C run with 40 candidates at ~3 links each
+        made ~120 calls where one ``IN`` does. The per-id route stays: it is
+        the single-row read and this is not a replacement for it.
+
+        Same tenant predicate as ``entity_get_by_id``, for the same reason
+        (GHSA-wgvw-28pq-jc36) — knowing a UUID is not entitlement to the row
+        behind it, and a batch read is the *sharper* version of that primitive
+        because one request can name many ids.
+
+        FILTER, not reject, on a partial match: an id outside ``tenant_id`` is
+        simply absent from the returned mapping, which is already how a
+        non-existent id answers. That is the same choice #1162 made for the
+        entity-link batch read, and it is the only coherent one here — a list
+        request cannot 404 "one of these" without telling the caller *which*
+        of the ids exist elsewhere, i.e. becoming the existence oracle the
+        per-id 404 deliberately is not.
+
+        Returns a mapping so the caller can look up by id without scanning;
+        callers must treat a missing key as "no such entity for me", never as
+        an error.
+        """
+        if not entity_ids:
+            return {}
+        async with get_session() as session:
+            result = await session.execute(
+                select(Entity).where(
+                    Entity.id.in_(entity_ids),
+                    Entity.tenant_id == tenant_id,
+                )
+            )
+            return {entity.id: entity for entity in result.scalars().all()}
 
     async def entity_find_exact(
         self,
@@ -5929,7 +7125,26 @@ class PostgresService:
         offset: int = 0,
     ) -> list[Entity]:
         async with get_session() as session:
-            stmt = select(Entity).where(Entity.tenant_id == tenant_id).offset(offset).limit(limit)
+            # ORDER BY is what makes OFFSET/LIMIT mean anything. Postgres
+            # guarantees no row order without it, so it is free to return the
+            # same physical rows in a different sequence for page 2 than it did
+            # for page 1 — a caller walking the pages then sees some entities
+            # twice and never sees others, with nothing in the response to show
+            # it happened. Plan changes (a fresh ANALYZE, a seq-scan becoming an
+            # index scan as the table grows) are enough to shift it.
+            #
+            # ``id`` and not ``canonical_name``: the primary key is the only
+            # column here that is unique, and uniqueness is the property a
+            # stable sort needs. It is also already indexed, so this adds no
+            # sort node. A human-friendlier display order is a presentation
+            # decision and would still need ``id`` appended to be stable.
+            stmt = (
+                select(Entity)
+                .where(Entity.tenant_id == tenant_id)
+                .order_by(Entity.id)
+                .offset(offset)
+                .limit(limit)
+            )
             if fleet_id:
                 stmt = stmt.where(Entity.fleet_id == fleet_id)
             if entity_type:
@@ -5942,40 +7157,79 @@ class PostgresService:
     async def entity_add(self, data: dict) -> Entity:
         """Create new entity — handle race with concurrent extraction tasks.
 
-        The uq_entities_tenant_type_name_fleet unique index rejects
-        duplicates at INSERT time; on conflict we re-SELECT and merge.
-        """
-        from sqlalchemy.exc import IntegrityError
+        ``INSERT ... ON CONFLICT DO NOTHING RETURNING`` against
+        ``uq_entities_tenant_type_name_fleet``, paired with a same-session
+        re-SELECT for the conflicted case — the shape ``agent_add`` and
+        ``memory_add_all`` already use.
 
+        NOT ``flush() → IntegrityError → rollback() → re-SELECT``, which is
+        what this did and which could not work: ``get_session`` yields inside
+        ``session.begin()``, so the mid-block ``rollback()`` closed the
+        transaction the context manager still owned and the re-SELECT died on
+        "Can't operate on closed transaction inside context manager". The
+        recovery path was unreachable — every dedup race 500'd, and the
+        ``winner is None`` guard below it had never run. ``agent_add``'s
+        docstring already warned this pattern was brittle; it was simply never
+        applied here.
+        """
         async with get_session() as session:
-            entity = Entity(**data)
-            session.add(entity)
-            try:
-                await session.flush()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    "Entity dedup race: '%s' already exists, re-selecting",
-                    data.get("canonical_name"),
+            # Mirrors migration 001's CREATE INDEX expression-for-expression.
+            # ``text()`` for the two computed elements for the reason spelled
+            # out on ``memory_add_all``: conflict inference matches on the
+            # rendered expression, and an unmatched target silently degrades to
+            # "no inferred constraint" — here that would resurrect the 500.
+            stmt = (
+                pg_insert(Entity)
+                .values(**data)
+                .on_conflict_do_nothing(
+                    index_elements=[
+                        Entity.tenant_id,
+                        Entity.entity_type,
+                        text("lower(canonical_name)"),
+                        text("COALESCE(fleet_id, '')"),
+                    ]
                 )
-                # Re-SELECT the entity that won the race
-                result = await session.execute(
-                    select(Entity).where(
-                        Entity.tenant_id == data["tenant_id"],
-                        Entity.entity_type == data["entity_type"],
-                        func.lower(Entity.canonical_name) == data["canonical_name"].lower(),
-                        Entity.fleet_id == data.get("fleet_id")
-                        if data.get("fleet_id")
-                        else Entity.fleet_id.is_(None),
-                    )
-                )
-                winner = result.scalar_one_or_none()
-                if winner is None:
+                .returning(Entity.id)
+            )
+            inserted_id = (await session.execute(stmt)).scalar_one_or_none()
+
+            if inserted_id is not None:
+                entity = await session.scalar(select(Entity).where(Entity.id == inserted_id))
+                if entity is None:
                     raise ValueError(
-                        f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
+                        f"Entity row {inserted_id} vanished after INSERT — concurrent delete during entity_add"
                     )
-                entity = winner
-            return entity
+                return entity
+
+            logger.info(
+                "Entity dedup race: '%s' already exists, re-selecting",
+                data.get("canonical_name"),
+            )
+            # ``_fleet_scope`` rather than a NULL branch: the index groups
+            # ``COALESCE(fleet_id, '')``, so the row that just won the conflict
+            # may be stored NULL while the caller passed ``""`` (or the
+            # reverse). Branching on NULL-ness would miss it and raise the
+            # ValueError below for a row that is plainly there.
+            #
+            # ``.with_for_update()`` serialises against a concurrent
+            # ``entity_delete`` — we either see the live row or wait for that
+            # delete to commit, closing the window where the row was visible to
+            # ON CONFLICT and gone by the time we read it.
+            winner = await session.scalar(
+                select(Entity)
+                .where(
+                    Entity.tenant_id == data["tenant_id"],
+                    Entity.entity_type == data["entity_type"],
+                    func.lower(Entity.canonical_name) == data["canonical_name"].lower(),
+                    _fleet_scope(Entity.fleet_id, data.get("fleet_id")),
+                )
+                .with_for_update()
+            )
+            if winner is None:
+                raise ValueError(
+                    f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
+                )
+            return winner
 
     async def entity_update(self, entity_id: UUID, tenant_id: str, data: dict) -> Entity | None:
         """Update an existing entity by ID, scoped to its home tenant.
@@ -6009,6 +7263,7 @@ class PostgresService:
         tokens: list[str],
         tenant_id: str,
         fleet_ids: list[str] | None = None,
+        strict_fleet_scoping: bool = False,
     ) -> list[UUID]:
         """Full-text search against the entity tsvector index.
 
@@ -6040,7 +7295,11 @@ class PostgresService:
                 or_(*per_token),
             )
             if fleet_ids:
-                stmt = stmt.where(or_(Entity.fleet_id.in_(fleet_ids), Entity.fleet_id.is_(None)))
+                stmt = stmt.where(
+                    _fleet_scope_clause(
+                        Entity, fleet_ids, strict=strict_fleet_scoping, include_org_visibility=False
+                    )
+                )
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]
 
@@ -6074,8 +7333,40 @@ class PostgresService:
         the response to clients should treat the returned fleet_id as
         authoritative. The row id is preserved across upserts so
         callers reading by id still find the relation.
+
+        M-64. Both entity ends must belong to ``data["tenant_id"]``, and this is
+        the only place that can enforce it. The FKs require the rows to exist in
+        SOME tenant, not this one; ``Relation.tenant_id`` describes the edge, not
+        its endpoints; and upstream ``core-api`` (``entity_service.upsert_relation``)
+        only calls ``enforce_tenant`` on the body before forwarding the raw ids.
+
+        Unenforced, a write key for tenant T could point an edge at a victim
+        entity UUID in tenant U and then read U's ``canonical_name`` and
+        ``attributes`` straight back out of ``relation_get_outgoing``. Refusing
+        the write is the half that stops new ones being created; the tenant
+        predicate added to that reader is what closes the rows already there.
+
+        Raises ``ValueError`` — which the router maps to 409 — with the same
+        message whichever end is at fault, and the same message a nonexistent id
+        gets. See ``_RELATION_REJECTED``.
         """
         async with get_session() as session:
+            from_id, to_id = data["from_entity_id"], data["to_entity_id"]
+            if not isinstance(from_id, UUID):
+                from_id = UUID(str(from_id))
+            if not isinstance(to_id, UUID):
+                to_id = UUID(str(to_id))
+            owned = await self._owned_entities(session, data["tenant_id"], {from_id, to_id})
+            if from_id not in owned or to_id not in owned:
+                # The distinct log line is what keeps the real cause available to
+                # an operator while the wire answer stays uniform.
+                logger.info(
+                    "Relation rejected for %s → %s: an endpoint is not in tenant %s",
+                    from_id,
+                    to_id,
+                    data["tenant_id"],
+                )
+                raise ValueError(_RELATION_REJECTED)
             insert_stmt = pg_insert(Relation).values(**data)
             upsert_stmt = insert_stmt.on_conflict_do_update(
                 constraint="uq_relations_natural_key",
@@ -6115,33 +7406,32 @@ class PostgresService:
             result = await session.execute(select_stmt)
             return result.scalar_one()
 
-    async def relation_list(
-        self,
-        tenant_id: str,
-        *,
-        fleet_id: str | None = None,
-        include_null_fleet: bool = False,
-    ) -> list[Relation]:
-        async with get_session() as session:
-            stmt = select(Relation).where(Relation.tenant_id == tenant_id)
-            if fleet_id:
-                if include_null_fleet:
-                    stmt = stmt.where(or_(Relation.fleet_id == fleet_id, Relation.fleet_id.is_(None)))
-                else:
-                    stmt = stmt.where(Relation.fleet_id == fleet_id)
-            result = await session.execute(stmt)
-            return list(result.scalars().all())
-
     async def relation_get_outgoing(
         self,
         entity_id: UUID,
         tenant_id: str,
     ) -> list[tuple[Relation, Entity]]:
-        """Return outgoing relations with their target entities."""
+        """Return outgoing relations with their target entities.
+
+        M-64. The join carries ``Entity.tenant_id`` as well, not just
+        ``Relation.tenant_id``. The edge belonging to this tenant says nothing
+        about where its TARGET lives: an edge written before the write-side
+        guard (or by any caller reaching storage directly) can name an entity in
+        another tenant, and this method hands the row's ``canonical_name`` and
+        ``attributes`` back to whoever asked.
+
+        An INNER join, so such an edge disappears from this endpoint entirely
+        rather than returning with a hollow target. That is a visible change for
+        any tenant holding one — but every row it hides is an edge into somebody
+        else's data, and there is no version of showing it that is safe.
+        """
         async with get_session() as session:
             stmt = (
                 select(Relation, Entity)
-                .join(Entity, Entity.id == Relation.to_entity_id)
+                .join(
+                    Entity,
+                    and_(Entity.id == Relation.to_entity_id, Entity.tenant_id == tenant_id),
+                )
                 .where(
                     Relation.from_entity_id == entity_id,
                     Relation.tenant_id == tenant_id,
@@ -6332,10 +7622,339 @@ class PostgresService:
                 .where(
                     MemoryEntityLink.entity_id.in_(entity_ids),
                     _link_within_tenant(tenant_id),
+                    # Soft-deleted memories are excluded HERE rather than in
+                    # ``_link_within_tenant``, which answers a different
+                    # question: that predicate is about TENANCY (may this
+                    # caller see this link at all), and liveness is a separate
+                    # axis — folding one into the other would silently change
+                    # its two other callers.
+                    #
+                    # The count is rendered beside ``entity_get_linked_memories``,
+                    # which filters ``Memory.deleted_at IS NULL`` and says so in
+                    # its own docstring. Without this the two endpoints disagree
+                    # about the same entity: the list reports a memory_count of
+                    # 5 while /with-memories returns 3, and the gap is exactly
+                    # the memories the caller deleted.
+                    select(Memory.id)
+                    .where(
+                        Memory.id == MemoryEntityLink.memory_id,
+                        Memory.deleted_at.is_(None),
+                    )
+                    .exists(),
                 )
                 .group_by(MemoryEntityLink.entity_id)
             )
             return dict(result.all())  # type: ignore[arg-type]
+
+    async def _delete_entity_artifacts(
+        self,
+        tenant_id: str,
+        memory_id: UUID,
+        *,
+        eligibility: ColumnElement[bool],
+        link_scope: ColumnElement[bool] | None = None,
+    ) -> dict:
+        """The delete sequence itself. Two predicates decide what it reaches.
+
+        ``eligibility`` says WHICH MEMORIES qualify; ``link_scope`` narrows
+        WHICH OF THAT MEMORY'S LINKS go. They are separate because the two
+        public callers differ on both axes and not in the same way: the purge
+        takes every link (the memory is dropped, so nothing mined from it has
+        any justification left), while the reset takes only extraction's (a
+        caller-curated link is an assertion about the memory, not about the text
+        that changed). Everything else below is identical for both, and sharing
+        it is what stops a fix to the orphan-entity anti-joins landing in one and
+        not the other — the argument ``_fleet_scope_clause`` makes for the fleet
+        predicate, on a path where the cost of drift is deleted rows.
+
+        Predicates, not booleans: a flag would read as an option, and each public
+        name exists precisely to fix its own answer to "which rows may I
+        destroy". The caller passes clauses and cannot pass ``True``.
+
+        Narrowing the links narrows the ORPHAN CANDIDATES with them, which is
+        the behaviour you want and worth saying out loud: an entity whose only
+        remaining link is a caller's is never a candidate, so it cannot be
+        swept. That falls out of taking candidates from the rows actually
+        deleted rather than from the memory's links as a whole.
+
+        Ordering and scoping are documented on ``memory_purge_entity_artifacts``.
+        """
+        async with get_session() as session:
+            # One guard, checked before anything is deleted, rather than a
+            # predicate threaded through each statement. It answers the only
+            # question that authorises this call at all: is there a row with
+            # this id, in this tenant, in the state the caller's name promises?
+            #
+            # An early return rather than narrowing each delete, because the
+            # relation delete never took the ownership subquery: it keys on
+            # ``evidence_memory_id`` and the tenant alone, so guarding only the
+            # link path would leave a memory losing its RELATIONS while its
+            # links and entities survived — partial destruction, which is worse
+            # to diagnose than either outcome.
+            eligible = (
+                await session.execute(
+                    select(Memory.id).where(
+                        Memory.id == memory_id,
+                        Memory.tenant_id == tenant_id,
+                        eligibility,
+                    )
+                )
+            ).scalar_one_or_none()
+            if eligible is None:
+                return {"links": 0, "relations": 0, "entities": 0}
+
+            # ``RETURNING`` rather than a SELECT before the DELETE: the rows
+            # this removes ARE the candidate set, so asking for them twice was
+            # a round trip that could only ever agree with itself.
+            link_where = [MemoryEntityLink.memory_id == memory_id]
+            if link_scope is not None:
+                link_where.append(link_scope)
+            candidates = list(
+                (
+                    await session.execute(
+                        delete(MemoryEntityLink).where(*link_where).returning(MemoryEntityLink.entity_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            relation_rows = await session.execute(
+                delete(Relation).where(
+                    Relation.tenant_id == tenant_id,
+                    Relation.evidence_memory_id == memory_id,
+                )
+            )
+
+            entity_count = 0
+            if candidates:
+                # "Is this entity still referenced by anything?" — asked only
+                # about the candidates, which is what keeps these cheap. Left
+                # unbounded, each anti-join selects every referencing id in the
+                # tenant and PostgreSQL materialises it as a hashed SubPlan, so
+                # a four-link memory scanned the tenant's whole link and
+                # relation tables three times. Bounding them changes no row —
+                # the outer DELETE is already restricted to ``candidates`` — and
+                # turns each into an index lookup on a handful of ids. That
+                # matters more since the reset path put this on every
+                # content-changing PATCH rather than only on governance drops.
+                #
+                # Narrowed by the ENTITY's tenant, never by the referencing
+                # row's own tenant_id — and the difference is not stylistic.
+                # Scoping relations on ``Relation.tenant_id`` would drop a
+                # historical straddling row (a relation in another tenant
+                # pointing at an entity here) out of the anti-join, and this
+                # entity would then be deleted while something still referenced
+                # it. Keying on the entity's tenant narrows the scan just as
+                # much and cannot lose a reference: every row that could name a
+                # candidate names an entity in THIS tenant, because that is
+                # what a candidate is.
+                #
+                # Erring wide here is free — an extra reference only keeps an
+                # entity alive, and under-deleting is recoverable where
+                # over-deleting is not.
+                still_linked = (
+                    select(MemoryEntityLink.entity_id)
+                    .join(Entity, Entity.id == MemoryEntityLink.entity_id)
+                    .where(
+                        Entity.tenant_id == tenant_id,
+                        MemoryEntityLink.entity_id.in_(candidates),
+                    )
+                )
+                rel_from = (
+                    select(Relation.from_entity_id)
+                    .join(Entity, Entity.id == Relation.from_entity_id)
+                    .where(
+                        Entity.tenant_id == tenant_id,
+                        Relation.from_entity_id.in_(candidates),
+                    )
+                )
+                rel_to = (
+                    select(Relation.to_entity_id)
+                    .join(Entity, Entity.id == Relation.to_entity_id)
+                    .where(
+                        Entity.tenant_id == tenant_id,
+                        Relation.to_entity_id.in_(candidates),
+                    )
+                )
+                # The fourth reference, and the one a link-and-relation-only
+                # sweep misses: ``memories.subject_entity_id`` is the RDF
+                # subject pointer, and it is a FK with ``ON DELETE SET NULL``.
+                # An entity that is some other live memory's subject but holds
+                # no links and no relations satisfied the three anti-joins
+                # above, so it was deleted and that memory's subject silently
+                # became NULL — a row losing a field nobody asked to change,
+                # recorded nowhere. Rare while this only ran on governance
+                # drops; routine once the reset path runs it on ordinary edits.
+                #
+                # Bounding this one is load-bearing rather than merely cheap:
+                # ``subject_entity_id`` is nullable and almost always NULL, and
+                # a bare ``NOT IN`` over a set containing NULL matches nothing
+                # at all — which would have turned entity deletion off entirely.
+                subject_of = select(Memory.subject_entity_id).where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.subject_entity_id.in_(candidates),
+                )
+                entity_rows = await session.execute(
+                    delete(Entity).where(
+                        # Tenant-scoped like everything else here. Not about id
+                        # collisions — about never letting one tenant's
+                        # remediation reach another tenant's rows.
+                        Entity.tenant_id == tenant_id,
+                        Entity.id.in_(candidates),
+                        Entity.id.not_in(still_linked),
+                        Entity.id.not_in(rel_from),
+                        Entity.id.not_in(rel_to),
+                        Entity.id.not_in(subject_of),
+                    )
+                )
+                entity_count = entity_rows.rowcount or 0  # type: ignore[attr-defined]
+
+            # ``rowcount`` is untyped on ``Result`` — same ignore as
+            # ``memory_soft_delete_by_ids`` above, for the same reason.
+            return {
+                "links": len(candidates),
+                "relations": relation_rows.rowcount or 0,  # type: ignore[attr-defined]
+                "entities": entity_count,
+            }
+
+    async def memory_reset_entity_artifacts(self, tenant_id: str, memory_id: UUID) -> dict:
+        """Clear the graph rows mined out of a LIVE memory whose content changed.
+
+        The twin of ``memory_purge_entity_artifacts`` below, and deliberately a
+        separate method rather than a flag on it. That one refuses anything not
+        soft-deleted, and its docstring gives the reason: the guard should not
+        be an invariant living in the callers' heads. A boolean parameter would
+        put it straight back there — the call site would decide which rows it
+        may destroy, which is precisely what the name of the method should
+        decide. So there are two names, each carrying its own guard, over one
+        shared implementation.
+
+        WHY A LIVE ROW NEEDS THIS AT ALL. Editing a memory's content re-runs
+        entity extraction, and extraction only ever ADDS: ``memory_add_entity_links``
+        upserts with ``ON CONFLICT DO NOTHING`` and nothing removes. So a row
+        edited from "Alice joined Acme" to "Bob joined Globex" kept Alice and
+        Acme — linked, related, and still ranking the row in recall for names
+        its content no longer contains. The links are not merely stale; they are
+        assertions about text that is gone.
+
+        REFUSES TO RUN unless the memory is present, in this tenant, and LIVE —
+        the exact complement of the purge's guard. A soft-deleted row belongs to
+        the purge path, which additionally has governance's audit trail behind
+        it; reaching it through here would clear the graph of a dropped memory
+        under a name that says nothing about drops.
+
+        EXTRACTION'S LINKS ONLY. ``entity_links`` on ``PATCH /memories/{id}`` is
+        a caller-owned additive API — a way to tag a memory with a project or a
+        person its text never literally names — and extraction, which mines
+        text, will never recreate such a link. Clearing those too would destroy
+        them permanently on the next content edit, with no signal to the caller,
+        who need not have mentioned ``entity_links`` at all.
+        ``tests/test_entity_links_are_additive.py`` already ruled on this shape:
+        a shipped endpoint must not silently DELETE links a caller did not name,
+        and reaching that outcome through a different code path is the same
+        change. The purge below has no such carve-out, correctly — a dropped
+        memory leaves nothing behind, curated or mined.
+
+        Relations are NOT narrowed the same way, because they have no caller
+        path: ``evidence_memory_id`` is written by extraction alone, so every
+        relation this removes was mined from the content that changed.
+
+        Returns the same per-table counts, and the caller is expected to
+        re-extract: this leaves the memory with no extraction-derived graph
+        rows, which is correct only because the ones it removes describe content
+        the row no longer holds. Absent beats wrong here — a missing link makes
+        the row under-recalled until extraction lands, where a stale one makes
+        it recalled for the wrong thing, and no later pass ever revisits it.
+
+        One cost this shares with the purge and does not avoid: an entity left
+        fully orphaned is deleted, so a re-extraction that mines the same name
+        again mints a NEW id and starts its ``attributes`` and embeddings over.
+        That is bounded to entities nothing else references — invisible to every
+        graph query by definition — but a caller holding such an id sees it
+        stop resolving.
+        """
+        return await self._delete_entity_artifacts(
+            tenant_id,
+            memory_id,
+            eligibility=Memory.deleted_at.is_(None),
+            link_scope=MemoryEntityLink.source == LINK_SOURCE_EXTRACTION,
+        )
+
+    async def memory_purge_entity_artifacts(self, tenant_id: str, memory_id: UUID) -> dict:
+        """Remove the graph rows mined out of one DROPPED memory. Per-table counts.
+
+        H-02. The schema already says these rows must not outlive the memory:
+        ``memory_entity_links.memory_id`` is ``ON DELETE CASCADE`` and
+        ``relations.evidence_memory_id`` is ``ON DELETE SET NULL``. Both fire on
+        a HARD delete. Governance does a SOFT delete — it sets ``deleted_at`` —
+        so neither ever fires, and the entity names mined from dropped content
+        (person names, under a PII policy) stay listable tenant-wide through
+        ``/entities`` and ``/graph``.
+
+        The entity row itself has no FK to the memory at all, so nothing would
+        remove it even on a hard delete. That is why this is three statements
+        and not one.
+
+        Every statement is confined to ``tenant_id``. The link rows need that
+        said out loud because ``memory_entity_links`` carries no ``tenant_id``
+        column, so ``memory_id`` alone is an identifier and not an
+        authorisation — see the comment on the guard in
+        ``_delete_entity_artifacts``.
+
+        REFUSES TO RUN unless the memory is present, in this tenant, and already
+        soft-deleted; otherwise it is a no-op returning zero counts. Both callers
+        check that themselves, so this changes nothing today — it is here because
+        the method deletes across three tables and cannot be undone, and "only
+        purge what governance actually dropped" should not be an invariant that
+        lives only in the callers' heads.
+
+        That guard is about PROVENANCE, not safety: clearing a live row's graph
+        is a supported operation and has its own name, ``memory_reset_entity_artifacts``
+        above. What this one refuses is doing it under a name that reads as
+        governance — which would put a content edit and a policy drop in the
+        same audit line. (Before the reset path existed this paragraph read as a
+        safety property, warning that a caller reaching this method by mistake
+        "would wipe the entity graph of a live, fully visible memory". That is
+        no longer a mistake, only the wrong door.)
+
+        Order matters and is not arbitrary:
+
+        0. note which entities THIS memory linked to, before the links go,
+        1. delete those links,
+        2. delete relations whose evidence IS this memory — one row carries one
+           evidence id, so a relation attributed to dropped content has no
+           other justification,
+        3. delete, FROM THE NOTED SET ONLY, entities now left with no links, no
+           relations, and no memory naming them as its subject.
+
+        Step 0 is what keeps step 3 honest. Deleting every entity in the tenant
+        that happens to have no links would be a far larger blast radius than
+        this function's job: it would sweep entities orphaned for unrelated
+        reasons, and race an entity that a concurrent write has created but not
+        yet linked. The candidate set is bounded to what this memory touched,
+        so an unrelated orphan is left alone. Under-deleting is recoverable;
+        over-deleting another caller's rows is not.
+
+        An entity still referenced by another live memory is likewise kept — the
+        name is not this memory's to remove once something else asserts it.
+
+        One transaction: a partial purge would leave the graph half-cleaned with
+        nothing recording which half.
+
+        The tenant half of the guard is deliberately the memory end only, NOT
+        ``_link_within_tenant`` (which the readers above use). That helper
+        requires BOTH ends in the tenant because a read returning a straddling
+        row hands back the other tenant's UUID. The question here is different
+        and is purely about authority to delete: this row references a memory we
+        own and are dropping, so a foreign entity on the far end is a reason to
+        keep the ENTITY (the tenant-scoped delete already does) — never a reason
+        to keep a link pointing at dropped content. Requiring both ends would
+        leave exactly those historical straddling links behind, which is the
+        leak this function exists to close.
+        """
+        return await self._delete_entity_artifacts(
+            tenant_id, memory_id, eligibility=Memory.deleted_at.isnot(None)
+        )
 
     async def entity_get_linked_memories(
         self,
@@ -6409,14 +8028,28 @@ class PostgresService:
                 )
             ).all()
         )
-        owned_entities = set(
+        return owned_memories, await self._owned_entities(session, tenant_id, entity_ids)
+
+    async def _owned_entities(
+        self,
+        session: AsyncSession,
+        tenant_id: str,
+        entity_ids: set[UUID],
+    ) -> set[UUID]:
+        """Which of these entity ids belong to ``tenant_id``.
+
+        Split out of :meth:`_owned_link_endpoints` so "an entity this tenant
+        owns" has ONE definition. M-64 needed the same test for relation
+        endpoints, where there is no memory side to check, and a second inline
+        copy is how the two drift apart.
+        """
+        return set(
             (
                 await session.scalars(
                     select(Entity.id).where(Entity.id.in_(entity_ids), Entity.tenant_id == tenant_id)
                 )
             ).all()
         )
-        return owned_memories, owned_entities
 
     async def entity_add_entity_link(self, tenant_id: str, data: dict) -> MemoryEntityLink:
         """Create one memory→entity link, both ends scoped to ``tenant_id``.
@@ -6448,7 +8081,10 @@ class PostgresService:
                 # causes are one answer on the wire. The distinct log line above
                 # is what keeps the real cause available to an operator.
                 raise ValueError(_LINK_REJECTED)
-            link = MemoryEntityLink(**data)
+            # Explicit rather than left to the column default: this is a
+            # caller-facing endpoint, and which provenance it writes decides
+            # whether a content edit may delete the row.
+            link = MemoryEntityLink(**{**data, "source": LINK_SOURCE_CALLER})
             session.add(link)
             try:
                 await session.flush()
@@ -6567,12 +8203,25 @@ class PostgresService:
             # mypy will not infer a variable whose type is partly ``Any``.
             ins_stmt: ReturningInsert[tuple[UUID, UUID, str, Any]] = (
                 pg_insert(MemoryEntityLink)
-                .values(memory_id=mid, entity_id=eid, role=it["role"])
+                .values(
+                    memory_id=mid,
+                    entity_id=eid,
+                    role=it["role"],
+                    source=LINK_SOURCE_EXTRACTION,
+                )
                 .on_conflict_do_update(
                     index_elements=[
                         MemoryEntityLink.memory_id,
                         MemoryEntityLink.entity_id,
                     ],
+                    # ``source`` is deliberately NOT in the SET, so an existing
+                    # row keeps the provenance it has. Extraction re-mining an
+                    # entity a caller curated does not take the row over: the
+                    # caller asked for that link to be there, and a later edit
+                    # dropping the mention must not delete it. The cost is that
+                    # a row which predates the column keeps its conservative
+                    # ``caller`` default forever — under-deleting, which is the
+                    # recoverable direction.
                     set_={"role": MemoryEntityLink.role},
                 )
                 .returning(
@@ -7005,57 +8654,77 @@ class PostgresService:
         ``{links_created}``.
 
         D4 keeps the single multi-VALUES ``pg_insert(...).values(rows)`` form
-        (CAURA-686) — NOT ``execute(stmt, rows)`` (executemany kills RETURNING)."""
+        (CAURA-686) — NOT ``execute(stmt, rows)`` (executemany kills RETURNING).
+
+        The four steps are timed SEPARATELY because this is the call that times
+        out. caura#1616 has a tenant whose request Cloud Run severs at 120s, and
+        a 504 names only the endpoint: it cannot distinguish a candidate query
+        that aggregates every memory in the tenant from a LATERAL that runs one
+        ANN scan per candidate, and those two want opposite fixes. ``PhaseTimer``
+        reports the step still in flight when the request dies, so ONE failure
+        settles it rather than one guess.
+        """
         # ── 1. Find candidate memories ──────────────────────────────
         fleet_clause = "AND m.fleet_id = :fleet_id" if fleet_id else ""
 
-        async with get_session() as session:
-            if target_memory_ids:
-                # Targeted mode: specific memories (e.g. after entity extraction)
-                candidates = (
-                    await session.execute(
-                        text(f"""
-                            SELECT m.id, m.content, m.embedding
-                            FROM memories m
-                            WHERE m.id = ANY(CAST(:memory_ids AS uuid[]))
-                              AND m.tenant_id = :tenant_id
-                              AND m.deleted_at IS NULL
-                              AND m.status = 'active'
-                              AND m.embedding IS NOT NULL
-                              {fleet_clause}
-                        """),
-                        {
-                            "tenant_id": tenant_id,
-                            "memory_ids": [str(mid) for mid in target_memory_ids],
-                            **({"fleet_id": fleet_id} if fleet_id else {}),
-                        },
-                    )
-                ).all()
-            else:
-                # Batch mode: under-connected memories (lifecycle / scheduled)
-                candidates = (
-                    await session.execute(
-                        text(f"""
-                            SELECT m.id, m.content, m.embedding
-                            FROM memories m
-                            LEFT JOIN memory_entity_links mel ON mel.memory_id = m.id
-                            WHERE m.tenant_id = :tenant_id
-                              AND m.deleted_at IS NULL
-                              AND m.status = 'active'
-                              AND m.embedding IS NOT NULL
-                              {fleet_clause}
-                            GROUP BY m.id
-                            HAVING COUNT(mel.entity_id) < 3
-                            ORDER BY m.created_at DESC
-                            LIMIT :batch_size
-                        """),
-                        {
-                            "tenant_id": tenant_id,
-                            **({"fleet_id": fleet_id} if fleet_id else {}),
-                            "batch_size": batch_size,
-                        },
-                    )
-                ).all()
+        # Built before the session is opened, and both modes reduced to one
+        # execute below, so that "candidates" times the query and not the
+        # branch that chose it.
+        candidate_params: dict[str, Any]
+        if target_memory_ids:
+            # Targeted mode: specific memories (e.g. after entity extraction)
+            candidate_query = text(f"""
+                SELECT m.id, m.content, m.embedding
+                FROM memories m
+                WHERE m.id = ANY(CAST(:memory_ids AS uuid[]))
+                  AND m.tenant_id = :tenant_id
+                  AND m.deleted_at IS NULL
+                  AND m.status = 'active'
+                  AND m.embedding IS NOT NULL
+                  {fleet_clause}
+            """)
+            candidate_params = {
+                "tenant_id": tenant_id,
+                "memory_ids": [str(mid) for mid in target_memory_ids],
+                **({"fleet_id": fleet_id} if fleet_id else {}),
+            }
+        else:
+            # Batch mode: under-connected memories (lifecycle / scheduled)
+            candidate_query = text(f"""
+                SELECT m.id, m.content, m.embedding
+                FROM memories m
+                LEFT JOIN memory_entity_links mel ON mel.memory_id = m.id
+                WHERE m.tenant_id = :tenant_id
+                  AND m.deleted_at IS NULL
+                  AND m.status = 'active'
+                  AND m.embedding IS NOT NULL
+                  {fleet_clause}
+                GROUP BY m.id
+                HAVING COUNT(mel.entity_id) < 3
+                ORDER BY m.created_at DESC
+                LIMIT :batch_size
+            """)
+            candidate_params = {
+                "tenant_id": tenant_id,
+                **({"fleet_id": fleet_id} if fleet_id else {}),
+                "batch_size": batch_size,
+            }
+
+        # ``PhaseTimer`` outermost on purpose: it then also covers connection
+        # acquisition and the COMMIT that ``get_session`` does on the way out,
+        # neither of which is inside a named phase. Both land in ``other`` —
+        # see the summary log below, which has to sit outside this block for
+        # the COMMIT half of that to be true.
+        async with (
+            PhaseTimer(
+                "entity_discover_cross_links",
+                tenant_id=tenant_id,
+                mode="targeted" if target_memory_ids else "batch",
+            ) as phases,
+            get_session() as session,
+        ):
+            with phases.phase("candidates"):
+                candidates = (await session.execute(candidate_query, candidate_params)).all()
 
             if not candidates:
                 # ``skipped`` so the step can reproduce the source's
@@ -7090,58 +8759,74 @@ class PostgresService:
                 ORDER BY m.id, e.sim DESC
             """)
 
-            lateral_rows = (
-                await session.execute(
-                    lateral_query,
-                    {
-                        "tenant_id": tenant_id,
-                        "memory_ids": memory_id_strs,
-                        "threshold": threshold,
-                        **({"fleet_id": fleet_id} if fleet_id else {}),
-                    },
-                )
-            ).all()
+            with phases.phase("lateral"):
+                lateral_rows = (
+                    await session.execute(
+                        lateral_query,
+                        {
+                            "tenant_id": tenant_id,
+                            "memory_ids": memory_id_strs,
+                            "threshold": threshold,
+                            **({"fleet_id": fleet_id} if fleet_id else {}),
+                        },
+                    )
+                ).all()
 
             # Filter candidates in Python, then bulk-insert
             to_insert: list[dict] = []
-            for memory_id, entity_id, canonical_name, attributes, _sim in lateral_rows:
-                if text_verify:
-                    content = content_map.get(memory_id, "")
-                    names_to_check = [canonical_name]
-                    if attributes and isinstance(attributes, dict):
-                        names_to_check.extend(attributes.get("_aliases", []))
-                    content_lower = content.lower() if content else ""
-                    if not any(n.lower() in content_lower for n in names_to_check):
-                        continue
-                to_insert.append({"memory_id": memory_id, "entity_id": entity_id})
+            with phases.phase("text_verify"):
+                for memory_id, entity_id, canonical_name, attributes, _sim in lateral_rows:
+                    if text_verify:
+                        content = content_map.get(memory_id, "")
+                        names_to_check = [canonical_name]
+                        if attributes and isinstance(attributes, dict):
+                            names_to_check.extend(attributes.get("_aliases", []))
+                        content_lower = content.lower() if content else ""
+                        if not any(n.lower() in content_lower for n in names_to_check):
+                            continue
+                    to_insert.append({"memory_id": memory_id, "entity_id": entity_id})
 
             links_created = 0
-            if to_insert:
-                # Single multi-VALUES statement via ``pg_insert(...).values(rows)``
-                # (the CAURA-686 pattern) — NOT ``execute(stmt, rows)``, which
-                # takes SQLAlchemy's executemany path where RETURNING rows are
-                # unavailable and ``result.all()`` raises ResourceClosedError.
-                # memory_entity_links has a composite PK (memory_id, entity_id)
-                # and no surrogate ``id`` column, so RETURNING must reference
-                # real columns; with ON CONFLICT DO NOTHING only actually-
-                # inserted rows return, keeping the count accurate.
-                rows = [{**row, "role": "mentioned"} for row in to_insert]
-                insert_link_returning = (
-                    pg_insert(MemoryEntityLink)
-                    .values(rows)
-                    .on_conflict_do_nothing(index_elements=["memory_id", "entity_id"])
-                    .returning(MemoryEntityLink.memory_id, MemoryEntityLink.entity_id)
-                )
-                result = await session.execute(insert_link_returning)
-                links_created = len(result.all())
+            with phases.phase("insert"):
+                if to_insert:
+                    # Single multi-VALUES statement via ``pg_insert(...).values(rows)``
+                    # (the CAURA-686 pattern) — NOT ``execute(stmt, rows)``, which
+                    # takes SQLAlchemy's executemany path where RETURNING rows are
+                    # unavailable and ``result.all()`` raises ResourceClosedError.
+                    # memory_entity_links has a composite PK (memory_id, entity_id)
+                    # and no surrogate ``id`` column, so RETURNING must reference
+                    # real columns; with ON CONFLICT DO NOTHING only actually-
+                    # inserted rows return, keeping the count accurate.
+                    # Ordered for the same reason as ``memory_add_entity_links``:
+                    # this statement carries many pairs, and ``to_insert`` is built
+                    # by iterating candidates, so without this its order is
+                    # whatever the scan returned.
+                    rows = _ordered_link_rows([{**row, "role": "mentioned"} for row in to_insert])
+                    insert_link_returning = (
+                        pg_insert(MemoryEntityLink)
+                        .values(rows)
+                        .on_conflict_do_nothing(index_elements=["memory_id", "entity_id"])
+                        .returning(MemoryEntityLink.memory_id, MemoryEntityLink.entity_id)
+                    )
+                    result = await session.execute(insert_link_returning)
+                    links_created = len(result.all())
 
-            logger.info(
-                "Created %d cross-links for %d candidate memories (tenant %s)",
-                links_created,
-                len(candidates),
-                tenant_id,
-            )
-            return {"links_created": links_created}
+            candidate_count = len(candidates)
+
+        # OUTSIDE the block on purpose. ``get_session`` yields from inside
+        # ``session.begin()``, so COMMIT runs in its ``__aexit__`` — a summary
+        # logged one indent level in is logged BEFORE the commit it is meant to
+        # account for, and ``other`` would silently exclude it. That matters
+        # because a large ``other`` is exactly how a slow commit or a starved
+        # connection pool is supposed to announce itself here.
+        logger.info(
+            "Created %d cross-links for %d candidate memories (tenant %s) [%s]",
+            links_created,
+            candidate_count,
+            tenant_id,
+            phases.breakdown(),
+        )
+        return {"links_created": links_created}
 
     async def entity_infer_relations(
         self,
@@ -7641,6 +9326,7 @@ class PostgresService:
         doc_id: str,
         data: dict,
         fleet_id: str | None = None,
+        agent_id: str | None = None,
         system: bool = False,
         force: bool = False,
     ) -> Document:
@@ -7673,12 +9359,18 @@ class PostgresService:
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    agent_id=agent_id,
                 )
                 .on_conflict_do_update(
                     constraint="uq_documents_tenant_collection_doc",
                     set_={
                         "data": data,
                         "fleet_id": fleet_id,
+                        # ax-0917-m-14 — the upsert replaces the document, so
+                        # the author recorded is whoever wrote THIS version.
+                        # Keeping the original author would attribute someone
+                        # else's edit to the first writer.
+                        "agent_id": agent_id,
                         "updated_at": datetime.now(UTC),
                     },
                 )
@@ -7732,6 +9424,7 @@ class PostgresService:
         doc_id: str,
         data: dict,
         fleet_id: str | None = None,
+        agent_id: str | None = None,
         embedding: list[float] | None = None,
         system: bool = False,
         force: bool = False,
@@ -7765,6 +9458,7 @@ class PostgresService:
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    agent_id=agent_id,
                     embedding=embedding,
                 )
                 .on_conflict_do_update(
@@ -7772,6 +9466,7 @@ class PostgresService:
                     set_={
                         "data": data,
                         "fleet_id": fleet_id,
+                        "agent_id": agent_id,
                         "embedding": embedding,
                         "updated_at": text("now()"),
                     },
@@ -7930,6 +9625,75 @@ class PostgresService:
             )
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
+
+    async def document_get_by_pk(
+        self,
+        *,
+        tenant_id: str,
+        doc_pk: UUID,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> Document | None:
+        """Fetch one document by its PRIMARY KEY.
+
+        ax-0917-h-07. ``POST /documents`` returns BOTH ``id`` (this primary
+        key) and ``doc_id`` (the caller's own key), and an agent that stores
+        the returned ``id`` — the conventional thing to keep — could not read
+        its own document back: the only lookup was by (tenant, collection,
+        doc_id), so the UUID 404'd.
+
+        Tenant scoping is identical to ``document_get_by_doc_id``: a primary
+        key is globally unique, so WITHOUT the predicate this would be a
+        cross-tenant read for anyone who learned an id. ``collection`` is not
+        part of the lookup because the pk already identifies the row — the
+        caller still passes one, and the route checks it matches rather than
+        silently returning a document from a different collection.
+        """
+        tenant_pred: ColumnElement[bool]
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        async with get_session() as session:
+            stmt = select(Document).where(tenant_pred, Document.id == doc_pk)
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def document_count_unindexed(
+        self,
+        *,
+        tenant_id: str,
+        collection: str | None = None,
+        fleet_id: str | None = None,
+        readable_tenant_ids: list[str] | None = None,
+    ) -> int:
+        """Documents in scope that vector search CANNOT see.
+
+        ax-0917-h-08. ``document_search`` filters ``embedding IS NOT NULL``,
+        and a document only gets an embedding when its write resolved an
+        embed source (``data["summary"]``, or ``description`` for skills).
+        Everything else is stored UNINDEXED and is permanently invisible to
+        search — which is correct by design but indistinguishable, from the
+        caller's side, from "your query matched nothing".
+
+        This counts the difference so the two can be told apart. Same scope
+        predicates as the search itself, so the number answers the question
+        the caller actually asked.
+        """
+        tenant_pred: ColumnElement[bool]
+        if readable_tenant_ids:
+            tenant_pred = Document.tenant_id.in_(readable_tenant_ids)
+        else:
+            tenant_pred = Document.tenant_id == tenant_id
+        stmt = select(func.count(Document.id)).where(
+            tenant_pred,
+            Document.embedding.is_(None),
+        )
+        if collection is not None:
+            stmt = stmt.where(Document.collection == collection)
+        if fleet_id:
+            stmt = stmt.where(Document.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            return int((await session.execute(stmt)).scalar_one() or 0)
 
     async def document_query(
         self,
@@ -8358,16 +10122,21 @@ class PostgresService:
         ANY(:contradicted_statuses)`` + a window on the status-transition
         time).
 
-        DEVIATION (Fix 2 Ph5a): the source SQL windowed on
-        ``COALESCE(m.updated_at, m.created_at)``, but the OSS ``memories``
-        table has NO ``updated_at`` column (verified against
-        ``001_initial_schema`` + the ``Memory`` model — only ``agents`` /
-        ``documents`` carry one). That reference was a latent bug against the
-        OSS schema (the extractor was only ever unit-tested with a mocked
-        ``db``, never executed against a real OSS DB). We window on
-        ``created_at`` instead — the faithful OSS-correct approximation of the
-        same intent. When a ``status_changed_at`` / ``updated_at`` column lands
-        (the CAURA-future the source docstring anticipates), swap it back in.
+        09/02 M-55: the ``status_changed_at`` column the previous note called
+        for has landed (migration 045), so the window is on the status
+        TRANSITION time — the event this signal is actually about.
+
+        Before it, this windowed on ``created_at``, which meant a memory
+        written weeks ago and contradicted TODAY fell outside the current scan
+        window and its failure evidence was dropped. Silently: "no rows" and
+        "no contradictions" are the same answer to the caller, so the signal
+        under-reported without ever erroring.
+
+        ``COALESCE(m.status_changed_at, m.created_at)`` because the column is
+        NULL on every row written before 045 and is deliberately NOT
+        backfilled — there is no source of truth for when a historical row's
+        status changed, and inventing one would fabricate evidence. The
+        fallback reproduces the old behaviour exactly for those rows.
         """
         sql = """
             SELECT
@@ -8375,12 +10144,12 @@ class PostgresService:
                 m.run_id      AS run_id,
                 m.agent_id    AS agent_id,
                 m.status      AS status,
-                m.created_at  AS observed_at
+                COALESCE(m.status_changed_at, m.created_at) AS observed_at
             FROM memories AS m
             WHERE m.tenant_id = :tenant_id
               AND m.status = ANY(CAST(:contradicted_statuses AS text[]))
-              AND m.created_at >= :w_start
-              AND m.created_at <  :w_end
+              AND COALESCE(m.status_changed_at, m.created_at) >= :w_start
+              AND COALESCE(m.status_changed_at, m.created_at) <  :w_end
               AND (CAST(:fleet_id AS text) IS NULL OR m.fleet_id = :fleet_id OR m.fleet_id IS NULL)
               AND (CAST(:run_id AS text) IS NULL OR m.run_id   = :run_id)
               AND (CAST(:agent_id AS text) IS NULL OR m.agent_id = :agent_id)
@@ -9172,6 +10941,47 @@ class PostgresService:
             "latest_insight": latest_insight.isoformat() if latest_insight else None,
         }
 
+    async def crystallizer_activity_gate(self, *, tenant_id: str, fleet_id: str | None) -> dict:
+        """Cheap two-query activity gate for the crystallizer sweep (A72).
+
+        The sweep fires on a daily cron at 02:00, which a heavy writing day
+        outruns entirely — everything written after the tick waits ~24h for the
+        janitor. Raising the cadence is the fix, but a bare cadence increase
+        multiplies cost across every idle tenant, most of which wrote nothing.
+        This is the gate that makes a frequent tick cheap: a tenant with no
+        writes since its last COMPLETED sweep is answered in two indexed
+        aggregates and never reaches the LLM.
+
+        ``last_sweep_at`` deliberately reads only ``status="completed"`` rows,
+        the same reasoning as ``_type_ii_watermark``: a run reserves its report
+        with ``status="running"`` before it works, so "the latest report" is
+        frequently the caller itself, and a crashed run leaves a ``running`` row
+        behind forever. Either would advance the watermark past work that never
+        happened, and the memories written before it would never be swept.
+
+        Returns ``{latest_memory_at, last_sweep_at}`` as ISO strings or null and
+        leaves the comparison to the caller — mirroring
+        ``insights_activity_gate``, which likewise returns two timestamps rather
+        than a verdict so the decision stays readable in core-api.
+        """
+        mem_filter = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        report_filter = [
+            CrystallizationReport.tenant_id == tenant_id,
+            CrystallizationReport.status == "completed",
+        ]
+        if fleet_id:
+            mem_filter.append(Memory.fleet_id == fleet_id)
+            report_filter.append(CrystallizationReport.fleet_id == fleet_id)
+        async with get_read_session() as session:
+            latest_memory = await session.scalar(select(func.max(Memory.created_at)).where(*mem_filter))
+            last_sweep = await session.scalar(
+                select(func.max(CrystallizationReport.completed_at)).where(*report_filter)
+            )
+        return {
+            "latest_memory_at": latest_memory.isoformat() if latest_memory else None,
+            "last_sweep_at": last_sweep.isoformat() if last_sweep else None,
+        }
+
     # ══════════════════════════════════════════════════════════════════════
     #  EVOLVE — scope-filter read + atomic weight-adjust/backfill write
     #  (Fix 2 Ph5b, PR2)
@@ -9240,6 +11050,7 @@ class PostgresService:
         cap: float,
         rule_id: str | None = None,
         outcome_id: str | None = None,
+        mark_used: bool = False,
     ) -> dict:
         """Clamp-and-adjust weights for ``ids`` and (atomically) backfill the
         rule→outcome link, in ONE transaction.
@@ -9256,6 +11067,19 @@ class PostgresService:
         endpoint keeps the weight clamp + the backfill in a single storage
         transaction so evolve's documented split-commit isn't widened into two
         HTTP calls.
+
+        Stmt 3 (A41) runs ONLY when ``mark_used`` is true: one UPDATE bumping
+        each id's confirmed-use counter — ``metadata._system.recall_used_count``
+        (+1) and ``recall_used_at`` (now()) — the platform-key namespace whose
+        deep-merge guard in ``memory_update`` protects it from PATCH clobbering
+        (B7 x C25). An outcome report naming a memory in ``related_ids`` is the
+        explicit "an agent acted on this memory" signal, so it rides the same
+        transaction that adjusts those rows' weights. This counter is what
+        ``recall_boost`` reads under ``recall_boost_source=1``; under the
+        default 0 it is pure measurement (the returned-vs-used counterfactual).
+        The JSONB column lives in ``metadata``, NOT a new column — no schema
+        migration; the ``metadata::jsonb`` cast covers the CAURA-595 legacy
+        ``json``-typed installs like the sibling statements.
 
         Every statement is scoped by ``tenant_id``. Returns
         ``{adjustments:[{id, old_weight, new_weight}], backfilled: bool}`` —
@@ -9325,6 +11149,38 @@ class PostgresService:
                 # actually written. ``rowcount`` is reliable for an UPDATE on the
                 # asyncpg dialect (parsed from the ``UPDATE N`` command tag).
                 backfilled = (br.rowcount or 0) > 0  # type: ignore[attr-defined]
+            if mark_used:
+                # A41 — confirmed-use counter bump, same transaction. The
+                # ``_system`` sub-object is merged with ``||`` (sibling platform
+                # keys survive) and the whole ``'{_system}'`` path is written
+                # with ``jsonb_set`` at the TOP level, where the target always
+                # exists — ``jsonb_set`` only creates the LAST path element, so
+                # a two-level ``'{_system,recall_used_count}'`` path would be a
+                # silent no-op on rows that have never carried ``_system``.
+                # ``to_jsonb(now())`` serialises as an ISO-8601 timestamptz
+                # string, castable back with ``::timestamptz`` on the read side.
+                await session.execute(
+                    text(
+                        """
+                        UPDATE memories
+                           SET metadata = jsonb_set(
+                               COALESCE(metadata::jsonb, '{}'::jsonb),
+                               '{_system}',
+                               COALESCE(metadata::jsonb -> '_system', '{}'::jsonb)
+                                 || jsonb_build_object(
+                                      'recall_used_count',
+                                      COALESCE((metadata::jsonb #>> '{_system,recall_used_count}')::int, 0) + 1,
+                                      'recall_used_at',
+                                      to_jsonb(now())
+                                    )
+                           )
+                         WHERE id = ANY(CAST(:ids AS uuid[]))
+                           AND tenant_id = :tid
+                           AND deleted_at IS NULL
+                        """
+                    ),
+                    {"ids": list(ids), "tid": tenant_id},
+                )
         return {"adjustments": adjustments, "backfilled": backfilled}
 
     # ══════════════════════════════════════════════════════════════════════
@@ -9550,7 +11406,19 @@ class PostgresService:
         *,
         tenant_id: str,
         node_name: str,
-    ) -> UUID:
+    ) -> UUID | None:
+        """The node's id, or ``None`` when this tenant has no such node.
+
+        ``scalar_one_or_none`` rather than ``scalar_one``: an unknown name is
+        an ordinary answer to a lookup, not a server fault. Under
+        ``scalar_one`` it raised ``NoResultFound`` straight out of all four
+        callers in ``routers/fleet.py``, so every by-name endpoint answered a
+        typo with a 500 — and the ``if node is None: 404`` two lines below two
+        of those calls could never run, because nothing returned to compare.
+        ``GET /commands`` had already been written against the None-returning
+        contract this now actually provides (``if node_id is None and
+        node_name``).
+        """
         async with get_session() as session:
             result = await session.execute(
                 select(FleetNode.id).where(
@@ -9558,7 +11426,7 @@ class PostgresService:
                     FleetNode.node_name == node_name,
                 )
             )
-            return result.scalar_one()
+            return result.scalar_one_or_none()
 
     async def fleet_get_node_by_id(
         self,
@@ -9612,20 +11480,66 @@ class PostgresService:
             )
             return result.scalar() or 0
 
-    async def fleet_get_node_ids_for_fleet(
+    async def fleet_nodes_summary(
         self,
         *,
         tenant_id: str,
-        fleet_id: str,
-    ) -> list[UUID]:
-        async with get_session() as session:
-            result = await session.execute(
-                select(FleetNode.id).where(
+        since: datetime,
+    ) -> tuple[int, list[str]]:
+        """Count of this tenant's nodes seen since ``since`` and their distinct
+        ``plugin_version`` values (raw strings, sorted, at most 50).
+
+        Read-only; the anonymous heartbeat calls it once a day per tenant.
+        """
+        async with get_read_session() as session:
+            count = await session.scalar(
+                select(func.count(FleetNode.id)).where(
                     FleetNode.tenant_id == tenant_id,
-                    FleetNode.fleet_id == fleet_id,
+                    FleetNode.last_heartbeat >= since,
                 )
             )
-            return list(result.scalars().all())
+            rows = await session.execute(
+                select(FleetNode.plugin_version)
+                .where(
+                    FleetNode.tenant_id == tenant_id,
+                    FleetNode.last_heartbeat >= since,
+                    FleetNode.plugin_version.is_not(None),
+                )
+                .distinct()
+                .order_by(FleetNode.plugin_version)
+                .limit(50)
+            )
+            versions = [row[0] for row in rows.all() if row[0]]
+            return int(count or 0), versions
+
+    async def fleet_delete_node(
+        self,
+        *,
+        tenant_id: str,
+        node_id: UUID,
+    ) -> bool:
+        """Delete one node and its commands. True when the node existed.
+
+        Commands first: ``fleet_commands.node_id`` carries an FK to
+        ``fleet_nodes.id``, so the reverse order fails on the constraint.
+        Same ordering ``fleet_delete`` uses for the whole-fleet case, and one
+        session so a crash between the two cannot leave commands orphaned
+        against a node that is gone.
+        """
+        async with get_session() as session:
+            await session.execute(_table(FleetCommand).delete().where(FleetCommand.node_id == node_id))
+            result = await session.execute(
+                _table(FleetNode)
+                .delete()
+                .where(
+                    FleetNode.tenant_id == tenant_id,
+                    FleetNode.id == node_id,
+                )
+            )
+            # rowcount lives on CursorResult; the async execute is typed
+            # as returning the base Result. Same ignore as the other
+            # delete/update paths in this file.
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     # -- Commands --
 
@@ -10032,19 +11946,54 @@ class PostgresService:
             head.last_hash = prev_hash
             head.updated_at = now
 
-    async def audit_verify_chain(self, tenant_id: str, *, limit: int = 100_000) -> dict:
+    async def audit_verify_chain(self, tenant_id: str, *, limit: int = 100_000, start_seq: int = 1) -> dict:
         """Walk a tenant's hash chain in ``seq`` order and verify integrity.
 
         Recomputes each ``event_hash`` and checks ``prev_hash`` linkage +
         genesis; stops at and reports the first broken link (everything
         after it is untrustworthy). A final tail-check against
         ``audit_chain_head`` catches rows deleted off the END of the chain
-        (a forward walk alone can't see a missing tail). ``limit`` bounds
-        the walk — when hit, the tail-check is skipped and ``truncated`` is
-        set so the caller knows to paginate.
+        (a forward walk alone can't see a missing tail).
+
+        ``limit`` bounds one window and ``start_seq`` resumes the next: when a
+        result comes back ``truncated``, its ``next_seq`` is the ``start_seq``
+        for the following call. This used to say ``truncated`` was set "so the
+        caller knows to paginate" while offering nothing to paginate WITH —
+        there was no cursor parameter, so a chain longer than the route's 500k
+        cap could never have its tail verified at all.
+
+        A walk of every contiguous window is NOT equivalent to one full pass,
+        and the difference is worth stating precisely because it is easy to
+        assume otherwise.
+
+        What DOES carry across windows is the linkage. A window above genesis
+        seeds ``expected_prev`` from row ``start_seq - 1``'s stored
+        ``event_hash`` rather than recomputing it, but the previous window
+        recomputed that row's hash, so the chain holds transitively — and the
+        terminal (empty) window anchors its tail check to that same seed, so a
+        deleted tail is still caught no matter how the chain length divides by
+        ``limit``.
+
+        What does NOT carry is atomicity. One pass reads every row in a single
+        REPEATABLE READ snapshot (below); a walk is N transactions across N
+        snapshots, and under ``read_database_url`` possibly N replicas at
+        differing lag. So a walk proves each window was intact WHEN IT WAS
+        READ, not that the chain was intact at any single instant. An attacker
+        with write access can therefore tamper with a region the cursor has
+        already passed and have every window come back valid. That is a
+        detection DELAY, not permanent evasion — the next verification that
+        covers the region catches it — but a walk is the weaker statement and
+        should not be reported as "chain verified" the way a full pass can be.
+
+        Contiguity is also entirely the caller's obligation and is not
+        enforced here: ``start_seq`` is a plain integer, not an opaque cursor
+        bound to the previous window's ``next_seq``, and nothing records that a
+        caller ever started from genesis. Verifying one window in isolation
+        proves only that it is internally consistent and correctly attached to
+        a row it did not itself check.
         """
         async with get_read_session() as session:
-            # Pin one snapshot across BOTH reads (rows + head). Under READ
+            # Pin one snapshot across ALL THREE reads (rows + seed + head). Under READ
             # COMMITTED each statement gets its own snapshot, so a concurrent
             # same-tenant insert committing between the two reads makes the head
             # look one seq ahead of the fetched rows and fires a FALSE
@@ -10056,7 +12005,11 @@ class PostgresService:
                 (
                     await session.execute(
                         select(AuditLog)
-                        .where(AuditLog.tenant_id == tenant_id, AuditLog.seq.isnot(None))
+                        .where(
+                            AuditLog.tenant_id == tenant_id,
+                            AuditLog.seq.isnot(None),
+                            AuditLog.seq >= start_seq,
+                        )
                         .order_by(AuditLog.seq.asc())
                         .limit(limit)
                     )
@@ -10064,6 +12017,23 @@ class PostgresService:
                 .scalars()
                 .all()
             )
+            # The link this window attaches to. Read inside the same pinned
+            # snapshot as the rows, so a concurrent write cannot make the seed
+            # and the window disagree. A missing row here means the caller
+            # asked to resume from a seq whose predecessor does not exist —
+            # left as ``None`` and reported below rather than silently
+            # verifying against genesis, which would accept a chain whose head
+            # had been cut off exactly at ``start_seq``.
+            seed_prev: bytes | None = GENESIS_PREV_HASH
+            if start_seq > 1:
+                seed_prev = (
+                    await session.execute(
+                        select(AuditLog.event_hash).where(
+                            AuditLog.tenant_id == tenant_id,
+                            AuditLog.seq == start_seq - 1,
+                        )
+                    )
+                ).scalar_one_or_none()
             head = (
                 await session.execute(select(AuditChainHead).where(AuditChainHead.tenant_id == tenant_id))
             ).scalar_one_or_none()
@@ -10072,24 +12042,50 @@ class PostgresService:
         # cover up to `limit` (≤ 500k) rows — offload it so it doesn't block the
         # event loop and starve concurrent requests. The rows/head are already
         # fully loaded, so the thread only touches in-memory attributes.
-        return await asyncio.to_thread(_verify_audit_chain_rows, tenant_id, rows, head, limit)
+        return await asyncio.to_thread(
+            _verify_audit_chain_rows, tenant_id, rows, head, limit, start_seq, seed_prev
+        )
 
     async def audit_list_by_tenant(
         self,
         tenant_id: str,
         *,
         limit: int = 50,
+        offset: int = 0,
+        action: str | None = None,
+        resource_type: str | None = None,
         since: datetime | None = None,
     ) -> list[AuditLog]:
+        """One page of a tenant's audit log, newest first.
+
+        Every filter is applied in SQL, and that is the whole point of the
+        signature. ``action`` / ``resource_type`` / ``offset`` used to be
+        applied by the route, in Python, to the rows this method had ALREADY
+        truncated with ``LIMIT`` — so a filter could only ever match within the
+        newest ``limit`` rows, and returned ``[]`` when the matches were older
+        than that however many existed. ``offset`` was worse: slicing a list
+        that was itself capped at ``limit`` made page 2 (``offset=limit``)
+        empty for every tenant, always, so the endpoint could not paginate at
+        all.
+
+        ``(created_at DESC, id)`` rather than ``created_at`` alone: the column
+        is not unique, and a stable tiebreak is what makes OFFSET paging
+        coherent — without it two rows sharing a timestamp can swap between
+        pages and be served twice or skipped.
+        """
         async with get_session() as session:
-            q = (
-                select(AuditLog)
-                .where(AuditLog.tenant_id == tenant_id)
-                .order_by(AuditLog.created_at.desc())
-                .limit(limit)
-            )
+            # Filters first, then order/offset/limit. SQLAlchemy builds the same
+            # statement either way — WHERE always precedes LIMIT in the emitted
+            # SQL — but written in this order the code reads the way it runs,
+            # which is the whole point of the change above it.
+            q = select(AuditLog).where(AuditLog.tenant_id == tenant_id)
             if since:
                 q = q.where(AuditLog.created_at > since)
+            if action:
+                q = q.where(AuditLog.action == action)
+            if resource_type:
+                q = q.where(AuditLog.resource_type == resource_type)
+            q = q.order_by(AuditLog.created_at.desc(), AuditLog.id).offset(offset).limit(limit)
             result = await session.execute(q)
             return list(result.scalars().all())
 
@@ -10210,6 +12206,79 @@ class PostgresService:
             "actions": {action: actions[action] for action in sorted(actions)},
         }
 
+    async def lifecycle_audit_list_stranded(
+        self,
+        *,
+        org_id: str | Unscoped,
+        triggered_by: str,
+        older_than_minutes: int,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Rows still at ``pending`` long after their fanout dispatched.
+
+        ``pending`` is written by the fanout BEFORE the per-org Pub/Sub
+        message goes out, so a row sits here whenever that publish never
+        happened -- most often because the fanout request was cancelled
+        part-way through its ``gather`` and the rows it had already
+        written were never reached. Such a row is not merely unreported:
+        the work behind it never ran, and nothing retries it.
+
+        Deliberately excludes ``in_progress``. That state means a
+        consumer already holds the message, so republishing would
+        duplicate live work. A consumer that dies mid-run gets its
+        redelivery from Pub/Sub -- which is exactly the mechanism that
+        does not exist for a message that was never published at all.
+
+        ``org_id`` is a binding scope, not a convenience filter: the
+        sweep's own caller passes ``UNSCOPED`` because a fanout drop is
+        not confined to one tenant, but the parameter is explicit so a
+        cross-tenant read is a stated choice at the call site rather
+        than the default. Same shape as ``lifecycle_audit_summary``.
+
+        ``triggered_by`` is required rather than optional because the
+        two producers are not equally republishable. Fanout rows carry
+        no state beyond this table -- ``fleet_id`` is always None and
+        the publisher kwargs come from the per-org settings resolver --
+        so they reproduce exactly. Manual rows may have carried a
+        ``fleet_id`` or an operator's one-off ``retention_days``, and
+        neither is persisted here, so republishing one would silently
+        run a DIFFERENT job than the row records. Making the caller
+        name the producer keeps that choice deliberate.
+
+        Oldest first, so a backlog larger than ``limit`` drains in
+        arrival order over successive sweeps instead of starving the
+        earliest rows.
+        """
+        stmt = (
+            select(
+                LifecycleAudit.id,
+                LifecycleAudit.org_id,
+                LifecycleAudit.action,
+                LifecycleAudit.triggered_by,
+                LifecycleAudit.started_at,
+            )
+            .where(LifecycleAudit.status == "pending")
+            .where(LifecycleAudit.triggered_by == triggered_by)
+            .where(LifecycleAudit.started_at < func.now() - timedelta(minutes=older_than_minutes))
+            .order_by(LifecycleAudit.started_at)
+            .limit(limit)
+        )
+        if not isinstance(org_id, Unscoped):
+            stmt = stmt.where(LifecycleAudit.org_id == org_id)
+
+        async with get_read_session() as session:
+            rows = (await session.execute(stmt)).all()
+        return [
+            {
+                "audit_id": int(row.id),
+                "org_id": row.org_id,
+                "action": row.action,
+                "triggered_by": row.triggered_by,
+                "started_at": row.started_at.isoformat(),
+            }
+            for row in rows
+        ]
+
     async def lifecycle_audit_finalize(
         self,
         audit_id: int,
@@ -10218,18 +12287,31 @@ class PostgresService:
         status: str,
         stats: dict | None = None,
         error_message: str | None = None,
-    ) -> bool | None:
+        claim_token: str | None = None,
+    ) -> str:
         """Set terminal-or-progress state on the row.
 
-        Tri-state return distinguishes the two ``rowcount==0`` cases:
-        * ``True``  — row updated.
-        * ``None``  — row exists but is already at ``status='success'``
-          (the sticky-success gate skipped the UPDATE). A no-op, NOT
-          an error — typically a Pub/Sub redelivery of an already-
-          acked successful message.
-        * ``False`` — no row matches both ``audit_id`` and ``org_id``
-          (pruned, belongs to another org, or a buggy publisher
-          invented an id).
+        Returns which of four things happened, because the three
+        ``rowcount==0`` causes need different handling by the caller:
+        * ``"updated"``       — row updated.
+        * ``"noop_success"``  — row exists but is already at
+          ``status='success'`` (the sticky-success gate skipped the
+          UPDATE). A no-op, NOT an error — typically a Pub/Sub
+          redelivery of an already-acked successful message.
+        * ``"claim_conflict"`` — an ``in_progress`` request lost the
+          claim: another consumer holds this row and its claim has not
+          gone stale. The caller must NOT run the primitive. A caller
+          re-presenting its own ``claim_token`` never gets this, so an
+          HTTP-level retry of a claim that already succeeded is not
+          mistaken for a competitor.
+        * ``"claim_lost"``    — a terminal write from a consumer whose
+          claim was taken over while it was still running. The row is
+          NOT written: the holder's own result stands. Nothing can undo
+          the duplicate run, so the caller should record it loudly
+          rather than retry.
+        * ``"missing"``       — no row matches both ``audit_id`` and
+          ``org_id`` (pruned, belongs to another org, or a buggy
+          publisher invented an id).
 
         ``finished_at`` is only stamped on terminal status values so the
         ``in_progress`` transition leaves the row addressable for a
@@ -10249,6 +12331,10 @@ class PostgresService:
             # and any query using ``finished_at IS NOT NULL`` to find
             # completed rows would misclassify the retrying row.
             values["finished_at"] = None
+            # Stamping the claim is what makes this transition
+            # single-winner; the guard below reads it back.
+            values["claimed_at"] = func.now()
+            values["claim_token"] = claim_token
         if stats is not None:
             values["stats"] = stats
         if error_message is not None:
@@ -10277,21 +12363,106 @@ class PostgresService:
                 .where(LifecycleAudit.status != "success")
                 .values(**values)
             )
+            if status == "in_progress":
+                # Compare-and-swap. Only one delivery may move a row out of
+                # ``pending``: without this, an original message that was
+                # merely slow and the reconcile sweep's republish of it both
+                # pass this transition and run the primitive at once. The
+                # staleness arm keeps the older behaviour where it was load
+                # bearing -- a consumer that died mid-run leaves a claim that
+                # nobody will ever clear, so after the lease another delivery
+                # may take the row. ``failure -> in_progress`` is unaffected;
+                # only a live ``in_progress`` claim blocks.
+                arms = [
+                    LifecycleAudit.status != "in_progress",
+                    # Migration 047 stamps every row that was mid-flight when it ran,
+                    # so this arm is not what carries pre-existing work. It covers the
+                    # narrower case of a row moved to ``in_progress`` by a pre-047
+                    # revision still serving during a rolling deploy, which writes no
+                    # claim. Without the arm such a row is unclaimable forever --
+                    # ``NULL < now() - lease`` is NULL, not true -- and the reconcile
+                    # sweep will not rescue it either, because that only looks at
+                    # ``pending``. Keeping it trades a bounded theft window during one
+                    # deploy for rows that can never be recovered at all.
+                    LifecycleAudit.claimed_at.is_(None),
+                    LifecycleAudit.claimed_at < func.now() - timedelta(minutes=LIFECYCLE_CLAIM_LEASE_MINUTES),
+                ]
+                if claim_token is not None:
+                    # Same claimant re-presenting its own claim. The storage
+                    # client retries a PATCH on ReadTimeout and 5xx, so a claim
+                    # that succeeded server-side but lost its response is
+                    # re-sent verbatim; without this arm the CAS reads that
+                    # retry as a competing consumer and the handler nacks a
+                    # delivery it had already won. A genuine second delivery is
+                    # a different invocation with a different token, so it
+                    # still loses the race.
+                    arms.append(LifecycleAudit.claim_token == claim_token)
+                stmt = stmt.where(or_(*arms))
+            elif status in ("success", "failure") and claim_token is not None:
+                # Only the holder of the live claim may finalize it. Winning the
+                # claim is not the same as still holding it: the staleness arm
+                # above exists so an abandoned claim can be taken over, and it
+                # cannot tell an abandoned consumer from a slow one, so a
+                # primitive that outruns the lease is preempted while alive.
+                # Both then finalize, and without this the loser's write lands
+                # silently -- the duplicate run leaves no trace anywhere.
+                #
+                # ``claim_token IS NULL`` is admitted so this never blocks a
+                # caller that does not participate in the protocol at all (the
+                # embed-backfill consumer claims without a token); those keep
+                # their previous behaviour rather than becoming unfinalizable.
+                stmt = stmt.where(
+                    or_(
+                        LifecycleAudit.claim_token.is_(None),
+                        LifecycleAudit.claim_token == claim_token,
+                    )
+                )
             result = await session.execute(stmt)
             if result.rowcount > 0:  # type: ignore[attr-defined]
-                return True
-            # rowcount==0 has two causes — disambiguate so the router
-            # can return 200 for the no-op (already-success) path
-            # instead of a misleading 404 that would surface as a
-            # spurious "audit row not found" warning on every Pub/Sub
-            # redelivery of an acked-but-late-acked successful message.
-            exists = await session.scalar(
-                select(LifecycleAudit.id).where(
-                    LifecycleAudit.id == audit_id,
-                    LifecycleAudit.org_id == org_id,
+                return "updated"
+            # rowcount==0 has three causes — disambiguate so the router can
+            # return 200 for the no-op (already-success) path instead of a
+            # misleading 404 that would surface as a spurious "audit row not
+            # found" warning on every redelivery of an acked-but-late-acked
+            # successful message, and so a lost claim is distinguishable from
+            # both: the caller has to skip the primitive for one and may run
+            # it for the other.
+            row = (
+                await session.execute(
+                    select(LifecycleAudit.status, LifecycleAudit.claim_token).where(
+                        LifecycleAudit.id == audit_id,
+                        LifecycleAudit.org_id == org_id,
+                    )
                 )
-            )
-            return None if exists else False
+            ).first()
+            if row is None:
+                return "missing"
+            if (
+                status in ("success", "failure")
+                and claim_token is not None
+                and row[1] is not None
+                and row[1] != claim_token
+            ):
+                # A terminal write from a consumer that no longer holds the
+                # claim. The work already ran twice; that cannot be undone here,
+                # but it must not also be invisible.
+                #
+                # This is tested BEFORE the sticky-success no-op below, and the
+                # order is the whole point. A preempted consumer loses its claim
+                # to a winner that usually goes on to SUCCEED, so the row it
+                # finds is almost always at ``success`` -- checking the status
+                # first would classify the overwhelmingly common case as an
+                # ordinary redelivery and report nothing. The rarer failure case
+                # would be the only one this ever caught.
+                #
+                # A caller that still holds the claim reaches the no-op below
+                # normally: its own token matches, so this arm is false and its
+                # HTTP retry of a successful write is not mistaken for a
+                # competitor.
+                return "claim_lost"
+            if row[0] == "success":
+                return "noop_success"
+            return "claim_conflict"
 
     async def lifecycle_audit_has_recent_success(
         self,
@@ -10359,13 +12530,67 @@ class PostgresService:
         keys / leaf types / governance enums / cron before calling.
         """
         async with get_session() as session:
-            result = await session.execute(
-                select(OrganizationSettings.settings)
-                .where(OrganizationSettings.org_id == org_id)
-                .with_for_update()
-            )
-            current_row = result.scalar_one_or_none()
-            current: dict = current_row if isinstance(current_row, dict) else {}
+
+            async def _locked_overrides() -> dict | None:
+                """The row's overrides under ``FOR UPDATE``; ``None`` if absent."""
+                row = (
+                    await session.execute(
+                        select(OrganizationSettings.settings)
+                        .where(OrganizationSettings.org_id == org_id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                return row if isinstance(row, dict) else ({} if row is not None else None)
+
+            async def _write_audit(diff: dict) -> None:
+                await session.execute(
+                    pg_insert(OrganizationSettingsAudit).values(
+                        org_id=org_id, changed_by=changed_by, diff=diff
+                    )
+                )
+
+            current = await _locked_overrides()
+
+            if current is None:
+                # No row yet, so the FOR UPDATE above locked NOTHING — that gap
+                # is the entire first-time race, and it used to be papered over
+                # with ``ON CONFLICT DO UPDATE SET settings = settings ||
+                # EXCLUDED.settings``. JSONB ``||`` is SHALLOW, so that was only
+                # safe under the claim that top-level keys are independent — true
+                # of two writers touching DIFFERENT namespaces, and false of the
+                # case that actually happens: two first-time writers under the
+                # SAME namespace, where ``||`` replaces the whole nested object
+                # and drops the loser's sub-keys. It also disagreed with
+                # ``deep_merge`` directly above it, so the row's contents
+                # depended on whether the write took the insert or the conflict
+                # path. Both writers were then told ``changed: True`` and handed
+                # back their own ``merged`` — a success response quoting a value
+                # that was never stored, plus an audit row for a diff that did
+                # not survive.
+                #
+                # So: claim the row instead of merging in SQL. One writer wins
+                # the INSERT; every other writer falls through to a lock that now
+                # has a row to hold and redoes the read-merge-write against what
+                # is actually stored, through the same ``deep_merge`` as every
+                # other path.
+                seed_diff = diff_settings({}, new_settings)
+                if not seed_diff:
+                    return {"settings": {}, "changed": False}
+                seeded = deep_merge({}, new_settings)
+                claimed = (
+                    await session.execute(
+                        pg_insert(OrganizationSettings)
+                        .values(org_id=org_id, settings=seeded)
+                        .on_conflict_do_nothing(index_elements=["org_id"])
+                        .returning(OrganizationSettings.org_id)
+                    )
+                ).scalar_one_or_none()
+                if claimed is not None:
+                    await _write_audit(seed_diff)
+                    return {"settings": seeded, "changed": True}
+                # Lost the claim. The winner's row exists and is committed (our
+                # INSERT blocked on their uncommitted one), so this lock holds.
+                current = await _locked_overrides() or {}
 
             diff = diff_settings(current, new_settings)
             if not diff:
@@ -10373,25 +12598,12 @@ class PostgresService:
                 return {"settings": current, "changed": False}
 
             merged = deep_merge(current, new_settings)
-
-            # FOR UPDATE serialises writes once the row exists. Concurrent
-            # first-time inserts (no row yet) use JSONB || to merge at the DB
-            # level so two racing inserts don't silently overwrite each other;
-            # the shallow || is safe because top-level schema keys (enrichment,
-            # recall, …) are independent.
-            upsert = pg_insert(OrganizationSettings).values(org_id=org_id, settings=merged)
             await session.execute(
-                upsert.on_conflict_do_update(
-                    index_elements=["org_id"],
-                    set_={
-                        "settings": text("organization_settings.settings || EXCLUDED.settings"),
-                        "updated_at": func.now(),
-                    },
-                )
+                sql_update(OrganizationSettings)
+                .where(OrganizationSettings.org_id == org_id)
+                .values(settings=merged, updated_at=func.now())
             )
-            await session.execute(
-                pg_insert(OrganizationSettingsAudit).values(org_id=org_id, changed_by=changed_by, diff=diff)
-            )
+            await _write_audit(diff)
             return {"settings": merged, "changed": True}
 
     # ══════════════════════════════════════════════════════════════════════
@@ -10623,14 +12835,43 @@ class PostgresService:
     async def report_get_latest_completed(
         self,
         tenant_id: str,
+        fleet_id: str | None = None,
     ) -> CrystallizationReport | None:
+        """The most recently STARTED completed report, optionally one fleet's.
+
+        ``fleet_id`` was accepted by ``GET /reports/latest`` and dropped on the
+        floor, which made this the wrong clock for the only caller that passes
+        it. ``_type_ii_watermark`` uses the returned ``completed_at`` to skip
+        subjects with nothing new since the last sweep; handed a *different*
+        fleet's more recent run, a fleet whose own sweep is older skips
+        subjects that did change. Its own docstring calls that the
+        unrecoverable direction.
+
+        Absent ``fleet_id`` means ANY fleet, deliberately unlike the sibling
+        ``report_find_running``, where absent means ``fleet_id IS NULL``. The
+        two answer different questions: that one asks "is a run in flight for
+        exactly this scope", where the tenant-wide run is its own scope and
+        must not be blocked by a fleet's. This one backs
+        ``GET /crystallize/latest``, a user-facing "show me my most recent
+        report" that has no fleet concept in its API at all — filtering to
+        ``IS NULL`` here would 404 every tenant that only ever runs
+        fleet-scoped crystallization.
+
+        That leaves one gap this cannot close from the server side: a
+        tenant-wide run (``fleet_id=None``) still reads across fleets.
+        ``_type_ii_watermark`` closes it by discarding a report whose scope is
+        not its own — see there.
+        """
+        report_filter = [
+            CrystallizationReport.tenant_id == tenant_id,
+            CrystallizationReport.status == "completed",
+        ]
+        if fleet_id is not None:
+            report_filter.append(CrystallizationReport.fleet_id == fleet_id)
         async with get_session() as session:
             result = await session.execute(
                 select(CrystallizationReport)
-                .where(
-                    CrystallizationReport.tenant_id == tenant_id,
-                    CrystallizationReport.status == "completed",
-                )
+                .where(*report_filter)
                 .order_by(CrystallizationReport.started_at.desc())
                 .limit(1)
             )
@@ -10766,14 +13007,24 @@ class PostgresService:
         tenant_id: str,
         error_message: str,
         error_traceback: str,
+        status: str = "failed",
     ) -> None:
+        """Record one background-task outcome.
+
+        ``status`` exists on the model with a ``(tenant_id, status)`` index and
+        was hardcoded to ``"failed"`` by this, its only writer — so the column
+        and the index the schema built for querying had exactly one value in
+        them. ``"cancelled"`` (OSS 09/02 M-56) is the second: work that a
+        shutdown stopped, which is not a failure and must not be read as one,
+        but is also not a success and needs to be findable.
+        """
         async with get_session() as session:
             session.add(
                 BackgroundTaskLog(
                     task_name=task_name,
                     memory_id=memory_id,
                     tenant_id=tenant_id,
-                    status="failed",
+                    status=status,
                     error_message=error_message[:1000],
                     error_traceback=error_traceback,
                     completed_at=datetime.now(UTC),

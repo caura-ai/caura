@@ -83,6 +83,33 @@ class PreflightReport:
         return dataclasses.asdict(self)
 
 
+def _tls_connect_args(dsn: str) -> dict[str, object]:
+    """The service's TLS policy, or the same policy read from the environment.
+
+    ``--dsn`` is documented as the way to run this against a database without
+    valid service config in the invoking shell, and ``_resolve_dsn`` already
+    tolerates ``core_storage_api.config`` failing to import for exactly that
+    reason: constructing ``Settings`` can raise on a partially-set ``ALLOYDB_*``
+    combo or an unmounted ``CORE_STORAGE_SHARED_SECRET_FILE``. Importing the
+    configured helper unconditionally would make that tolerance unreachable and
+    break ``--dsn`` for the operator it was written for.
+
+    The fallback re-reads ``POSTGRES_REQUIRE_SSL`` rather than returning ``{}``:
+    answering "your config did not load" by quietly dropping TLS would be the
+    same class of silent downgrade this whole change exists to remove. It is
+    the one mode difference — an unvalidated read of one variable — and it
+    applies the identical policy to it.
+    """
+    try:
+        from core_storage_api.config import db_connect_args
+
+        return db_connect_args(dsn)
+    except Exception:
+        from core_storage_api.db_tls import tls_connect_args, tls_required_from_env
+
+        return tls_connect_args(dsn, require=tls_required_from_env())
+
+
 async def _gather(dsn: str, rows_per_sec: int) -> PreflightReport:
     """Run the read-only queries against ``dsn`` and assemble a report.
 
@@ -93,7 +120,12 @@ async def _gather(dsn: str, rows_per_sec: int) -> PreflightReport:
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    engine = create_async_engine(dsn, echo=False)
+    # Honours the same setting as the service. This one takes an arbitrary
+    # ``dsn`` and is documented as safe to point at a production primary, so
+    # it is exactly the connection an operator would least expect to be in
+    # cleartext. Passing ``dsn`` in is what keeps a URL that already asks for
+    # ``verify-full`` from being downgraded — see ``db_tls.tls_connect_args``.
+    engine = create_async_engine(dsn, echo=False, connect_args=_tls_connect_args(dsn))
     try:
         async with engine.connect() as conn:
             # Alembic head, if the alembic_version table exists. On a

@@ -171,3 +171,59 @@ async def test_agent_isolation(client):
     agent_ids = {a["agent_id"] for a in agents}
     assert agent_a in agent_ids
     assert agent_b in agent_ids
+
+
+async def test_tune_reset_returns_the_cleared_agent(client):
+    """``?reset=true`` cleared the profile and then answered 500.
+
+    Storage answers the reset with ``{"ok": true}``, not the agent row, and the
+    route validated that ack as an ``AgentOut`` — five missing fields. The side
+    effect landed and the caller was told the call had failed, so "reset
+    worked" and "reset failed" were indistinguishable from outside.
+
+    How that survived on a happy path: the flag had exactly one caller in the
+    repo, ``scripts/hyperagent_test.py``, which resets between profiles in its
+    sweep and assigns nothing from the response — so the 500 was swallowed. The
+    clear itself worked, so the sweep's results were never wrong; the error was
+    invisible rather than harmless. No test and no plugin call reached it,
+    which is why this file had no tune coverage to catch it.
+    """
+    tenant_id, headers = get_test_auth()
+    tag = _uid()
+    agent = f"agent-tune-reset-{tag}"
+    # The ``[{tag}]`` suffix is not decoration — every sibling here carries one.
+    # These tests share one accumulating tenant, and semantic dedup answers 409
+    # on a near-duplicate, so fixed content passes alone and fails in the suite.
+    await _write_memory(
+        client,
+        tenant_id,
+        headers,
+        f"A fact for the tune-reset test [{tag}]",
+        agent_id=agent,
+    )
+
+    tuned = await client.patch(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant_id}",
+        json={"top_k": 7},
+        headers=headers,
+    )
+    assert tuned.status_code == 200, tuned.text
+    assert tuned.json()["search_profile"]["top_k"] == 7, tuned.text
+
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant_id}&reset=true",
+        json={},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    # The response has to describe the agent, not the storage ack.
+    assert resp.json()["agent_id"] == agent, resp.text
+    assert not (resp.json().get("search_profile") or {}), resp.text
+
+    # And it has to agree with what a subsequent read reports — a response
+    # synthesized correctly but never persisted would pass the checks above.
+    after = await client.get(
+        f"/api/v1/agents/{agent}/tune?tenant_id={tenant_id}", headers=headers
+    )
+    assert after.status_code == 200, after.text
+    assert not (after.json().get("search_profile") or {}), after.text
