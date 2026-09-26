@@ -167,27 +167,33 @@ async def _enforce_author_trust(
 def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple[str, bool]:
     """Return ``(caller_agent_id, verified)`` for the request.
 
-    ``verified=True`` is INTENDED to mean the gateway cryptographically
-    established the caller's agent identity (an agent-scoped credential whose
-    ``kind=agent_key`` populated ``auth.agent_id``), and ``verified=False``
-    that the identity is asserted via the ``X-Agent-ID`` header alone — which
-    is what happens when a non-agent-scoped (admin / tenant) key is in use.
-    Unverified identities are still accepted but with stricter trust
-    gating downstream — see ``_effective_min_for_caller``.
+    ``verified=True`` means the gateway established the caller's agent
+    identity (an agent-scoped credential whose ``kind=agent_key`` had
+    ``X-Agent-ID`` injected behind the gateway perimeter). ``verified=False``
+    means the identity is asserted by the caller — which is what happens when
+    a non-agent-scoped (admin / tenant / shared) key is in use. Unverified
+    identities are still accepted but with stricter trust gating downstream —
+    see ``_effective_min_for_caller``.
 
-    WHAT IT ACTUALLY MEASURES, and the gap is load-bearing: this reads the
-    PRESENCE of ``auth.agent_id``, not its provenance, and ``auth.py`` builds
-    that attribute from the raw ``X-Agent-ID`` header on more than one path.
-    On the shared-``CAURA_API_KEY`` path (``auth.py`` Path 2, :584) the header
-    is honoured with no gateway-secret check, so ``auth.agent_id`` IS the
-    unverified header and this helper reports ``verified=True`` for it — the
-    floor bump below is skipped for a credential the admin key would have been
-    refused on. Measured both ways in
-    ``core-api/scripts/repro_path2_keystone_verified.py``; the decision on
-    whether to close it is open in
-    ``docs/plans/rest-mcp-agent-identity-asymmetry.md`` (row ``oss-0922-m-03``).
-    Paths 1 and 3 discard the header, and Path 4 gates it on
-    ``X-Gateway-Secret``, so the promise above holds everywhere but Path 2.
+    PROVENANCE, NOT PRESENCE, and the distinction is the whole gate
+    (oss-0922-m-03). This used to read ``auth.agent_id`` alone, which answers
+    "did the caller name an agent" — but ``auth.py`` builds that attribute
+    from the raw ``X-Agent-ID`` header on the shared-``CAURA_API_KEY`` path
+    (Path 2) exactly as it does on the gateway path (Path 4), so a shared-key
+    holder's own assertion read as proof and the floor bump below was skipped
+    for it. Measured end-to-end: the admin key was refused at floor 2 on a
+    trust-1 victim while the shared key wrote the rule in that victim's name —
+    the WEAKER credential facing the LOOSER gate, and a plant the bump exists
+    to stop. ``AuthContext.agent_id_verified`` is set only where the identity
+    was established, so this asks the right question. See
+    ``docs/plans/rest-mcp-agent-identity-asymmetry.md``.
+
+    The defect was reachable only through the real route with a real
+    credential — the helpers agree with each other in isolation — so the
+    regression guard is an end-to-end test
+    (``tests/test_keystone_identity_provenance.py``), not a unit call on this
+    function. A trust-floor change is semantic with no schema movement, so
+    oasdiff cannot catch this class at all.
 
     Mismatch rejection: when both signals are present and disagree,
     the caller is treated as a spoofing attempt and rejected outright
@@ -208,7 +214,14 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
     the gateway — and this path needs stricter anti-spoof handling (X-Agent-ID
     mismatch rejection + the verified-floor bump) than that resolver provides.
     """
-    verified_id = getattr(auth, "agent_id", None)
+    # ``agent_id_verified`` gates the READ of ``agent_id`` rather than being
+    # ANDed into the returned flag, so an asserted identity keeps flowing to
+    # the ``x_agent_id`` branch below and still resolves to a caller — it just
+    # resolves as unverified. Collapsing both to ``(None, False)`` would drop
+    # the caller to the ``rest-admin`` sentinel and turn every Path-2 keystone
+    # write into an unregistered-agent 403, which is a different (and much
+    # larger) behaviour change than the floor bump this fix is.
+    verified_id = getattr(auth, "agent_id", None) if getattr(auth, "agent_id_verified", False) else None
     # The self plane, asked of a header rather than a body or query parameter:
     # ``AuthContext.enforce_self_agent`` owns that question for the whole REST
     # surface. ``or None`` keeps an empty ``X-Agent-ID:`` an omission here — the

@@ -1,14 +1,25 @@
-"""Measure the Path-2 keystone privilege inversion described in
-``docs/plans/rest-mcp-agent-identity-asymmetry.md`` section 2.
+"""Show the two credentials agreeing on the keystone trust floor — the
+oss-0922-m-03 inversion, and its fix.
 
 Two byte-identical requests, differing only in which credential they carry,
 are resolved through the real ``_resolve_auth_context`` and then through the
 real ``keystones._resolve_caller_identity`` / ``_effective_min_for_caller``.
 
-The shared ``CAURA_API_KEY`` holder comes out at trust floor 1; the admin-key
-holder, making the same claim about the same victim, comes out at 2. The floor
-bump exists to stop exactly this claim, and it fires only for the *stronger*
-credential.
+**Pre-fix** the shared ``CAURA_API_KEY`` holder came out at trust floor 1 while
+the admin-key holder, making the same claim about the same victim, came out at
+2 — the floor bump firing only for the *stronger* credential, because
+``_resolve_caller_identity`` read the PRESENCE of ``auth.agent_id`` and Path 2
+builds that attribute from the caller's own ``X-Agent-ID``.
+
+**Now** both print 2. ``AuthContext.agent_id_verified`` records provenance, and
+only the gateway path (Path 4) sets it, so a self-asserted header no longer
+buys the verified tier.
+
+This script is the diagnostic, not the guard. It cannot see the defect on its
+own — it hands the helper a context it built itself, which is exactly the step
+that hid the problem in the first place. The regression test drives the real
+route with the real credential:
+``tests/test_keystone_identity_provenance.py``.
 
 Run:
 
@@ -48,12 +59,18 @@ class _Req:
         self.state = types.SimpleNamespace()
 
 
-async def _measure(key: str) -> tuple[object, str, bool, int]:
+async def _measure(key: str) -> tuple[object, bool, str, bool, int]:
     req = _Req({"x-tenant-id": "t1", "x-agent-id": VICTIM})
     ctx = await _resolve_auth_context(req, key)
     caller_agent_id, verified = _resolve_caller_identity(ctx, VICTIM)
     # 1 is the self-author floor: ``scope=agent`` naming the caller itself.
-    return ctx.agent_id, caller_agent_id, verified, _effective_min_for_caller(1, verified)
+    return (
+        ctx.agent_id,
+        ctx.agent_id_verified,
+        caller_agent_id,
+        verified,
+        _effective_min_for_caller(1, verified),
+    )
 
 
 async def main() -> None:
@@ -68,13 +85,20 @@ async def main() -> None:
         patch.object(auth_mod, "get_admin_key", lambda: ADMIN_KEY),
         patch.object(auth_mod, "set_current_tenant", lambda *_: None),
     ):
+        floors = []
         for label, key in (("Path 2 — shared CAURA_API_KEY", SHARED_KEY), ("Path 1 — admin key", ADMIN_KEY)):
-            auth_agent, caller, verified, floor = await _measure(key)
+            auth_agent, provenance, caller, verified, floor = await _measure(key)
+            floors.append(floor)
             print(f"{label}:")
-            print(f"    AuthContext.agent_id   = {auth_agent!r}")
-            print(f"    caller_agent_id        = {caller!r}")
-            print(f"    caller_verified        = {verified}")
-            print(f"    effective trust floor  = {floor}")
+            print(f"    AuthContext.agent_id          = {auth_agent!r}")
+            print(f"    AuthContext.agent_id_verified = {provenance}")
+            print(f"    caller_agent_id               = {caller!r}")
+            print(f"    caller_verified               = {verified}")
+            print(f"    effective trust floor         = {floor}")
+        # The finding was the GAP, so the check is the equality, not a
+        # constant: a retuned shared floor stays fine, a reopened gap does not.
+        verdict = "agree" if len(set(floors)) == 1 else "DISAGREE — inversion is back"
+        print(f"\nThe two credentials {verdict} (floors: {floors}).")
 
 
 if __name__ == "__main__":

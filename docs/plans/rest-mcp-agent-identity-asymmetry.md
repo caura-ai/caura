@@ -1,9 +1,14 @@
 # REST Path 2 vs the MCP plane: who may assert `X-Agent-ID`
 
-Status: **open decision**. This document is evidence, not a change. Nothing in
-the authorization behaviour of either plane moves with this commit.
+Status: **Option 5 shipped; the rest remains an open decision.** The keystone
+privilege inversion in section 2 is fixed. The broader question this row was
+filed to ask — whether REST Path 2 should keep honouring a self-asserted
+`X-Agent-ID` at all — is deliberately still open, and section 5 says why
+closing it is not obviously an improvement.
 
-Tracking row: `oss-0922-m-03` (filed 2026-09-22, sibling of `ax-0917-m-16`).
+Tracking row: `oss-0922-m-03` (filed 2026-09-22, sibling of `ax-0917-m-16`);
+upgraded to HIGH once the keystone plant below was measured, and its original
+"not a new capability" reasoning recorded as refuted — see section 2.
 
 ## The reported asymmetry
 
@@ -189,9 +194,16 @@ no automated gate that catches this class of change; only a test would.
 | 4 | Make MCP permissive to match REST | one-line deletion of the MCP refusal | one consistent rule, chosen in the *other* direction | discards a defence whose comment is correct; on a shared-key deployment every agent holds the key, so scope checks and the delete trust gate become caller-elective on MCP too |
 | 5 | **Narrow fix: make `verified` mean verified.** Record on `AuthContext` whether `agent_id` arrived on a gateway-proven path (Path 4 with the secret presented) and have `keystones._resolve_caller_identity` read that instead of mere presence | one flag on `AuthContext`, one predicate in keystones, one test | closes the only place Door A outreaches Door B; leaves reads, writes and every other route untouched | a Path-2 operator self-authoring a `scope=agent` keystone at trust 1 now needs trust 2 |
 
-### Recommendation
+### Recommendation — Option 5, taken
 
-**Option 5, then Option 1 for the remainder.**
+**Option 5, then Option 1 for the remainder.** Option 5 is now implemented;
+what follows is the reasoning that selected it, kept as the record.
+
+Note that Option 2 — the remedy the row itself proposed — would have been
+actively worse than doing nothing on two gates, since `enforce_delete` and
+`enforce_not_agent_credential` fire only when `auth.agent_id` is set. That is
+the strongest single argument for keeping the fix inside `keystones` rather
+than changing what `auth.py` plumbs.
 
 The reported asymmetry and the real defect are not the same thing. For reads
 and writes the row is right: Door A is a second spelling of Door B, closing it
@@ -227,10 +239,33 @@ and MCP's refusal is the correct reading rather than the anomaly.
    each agent a distinct `CAURA_API_KEY` — then the header would carry real
    information and Option 4 becomes defensible.
 
-## Delivered with this document
+## What shipped
 
-- `core-api/scripts/repro_path2_keystone_verified.py` — the measurement in
-  section 2, runnable.
-- A correction to the `_resolve_caller_identity` docstring, which currently
-  asserts an invariant that Path 2 breaks. Documentation only; no behaviour
-  change.
+- `AuthContext.agent_id_verified` — provenance of `agent_id`, set only on
+  Path 4 where the gateway established the identity behind its perimeter
+  check. Paths 1, 2 and 3 leave it False. Nothing else about what `auth.py`
+  plumbs changed, so `enforce_delete` and `enforce_not_agent_credential` keep
+  firing exactly as before.
+- `keystones._resolve_caller_identity` reads that flag instead of mere
+  presence. It gates the READ of `agent_id` rather than ANDing provenance into
+  the returned flag, so a Path-2 caller still resolves to the agent it named
+  and is judged on that agent's trust — dropping it to the `rest-admin`
+  sentinel would have turned every Path-2 keystone write into an
+  unregistered-agent 403, a far larger change.
+- `tests/test_keystone_identity_provenance.py` — the regression guard, driving
+  the real route with the real credential. Verified to FAIL on the unfixed
+  code (3 of 4, including `shared key 200 vs admin key 403`) and pass after.
+  The trust-2 boundary case passes both before and after, which is the point:
+  it pins pre-existing behaviour, not the fix.
+- `core-api/scripts/repro_path2_keystone_verified.py` — the diagnostic, now
+  showing both credentials agreeing at floor 2. It is explicitly not the
+  guard: it hands the helper a context it built itself, which is the very step
+  that hid the defect.
+
+### Behaviour change
+
+A Path-2 (shared-`CAURA_API_KEY`) operator self-authoring a `scope=agent`
+keystone for a **trust-1** agent now needs that agent at **trust 2**. This is
+the intended effect — it is the same bar the admin key has always faced — but
+it is a real change. Trust-2-and-above targets are unaffected; they were
+reachable by both credentials before and still are.

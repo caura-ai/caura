@@ -52,6 +52,7 @@ class AuthContext:
         org_id: str | None = None,
         org_role: str | None = None,
         agent_id: AgentIdentity | None = None,
+        agent_id_verified: bool = False,
         is_read_only: bool = False,
         is_install_credential: bool = False,
         install_uuid: str | None = None,
@@ -67,6 +68,30 @@ class AuthContext:
         self.org_id = org_id
         self.org_role = org_role  # "admin" | "member" | None
         self.agent_id = agent_id  # enterprise: set from X-Agent-ID header
+        # PROVENANCE of ``agent_id``, not its presence: True only where the
+        # identity was ESTABLISHED for the request rather than asserted by the
+        # caller. Today exactly one path can say yes — Path 4, where the
+        # gateway resolved the credential and injected ``X-Agent-ID`` behind
+        # the ``X-Gateway-Secret`` perimeter check.
+        #
+        # WHY IT IS A SEPARATE FIELD and not something a reader can infer from
+        # ``agent_id``. ``auth.py`` builds that attribute from the same raw
+        # header on Path 2 as on Path 4, so its truthiness answers "did the
+        # caller name an agent", which is a different question from "is that
+        # name trustworthy". Every gate that only needs the first question
+        # keeps reading ``agent_id`` and is unaffected; a gate whose decision
+        # turns on the second must read THIS. ``routes/keystones`` is the one
+        # such gate today (oss-0922-m-03) — its trust floor was skipping the
+        # anti-spoof bump for a shared-key holder because presence read as
+        # proof. See ``docs/plans/rest-mcp-agent-identity-asymmetry.md``.
+        #
+        # Deliberately NOT "did the caller send a gateway secret": on a
+        # deployment that configures none, Path 4 already trusts the identity
+        # headers by design, and making this field disagree with that posture
+        # would restrict OSS without closing a privilege boundary that exists.
+        # That is a separate decision, recorded as the strict variant in the
+        # doc above.
+        self.agent_id_verified = agent_id_verified
         # Set by the enterprise gateway when the org has exceeded plan limits
         # after a subscription cancellation. Blocks creates/updates but allows
         # deletes (so users can reduce usage) and reads.
@@ -582,6 +607,16 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         return AuthContext(tenant_id=None, is_admin=True)
 
     # ── Path 2: CAURA_API_KEY gate (optional, for network-exposed OSS) ──
+    #
+    # Every ``AuthContext`` below leaves ``agent_id_verified`` at its default
+    # of False, and that is the substance of this path rather than an
+    # omission: the shared key proves the caller may REACH this deployment,
+    # not which agent it is — it is tenant-wide and binds no agent identity.
+    # ``agent_id`` is still plumbed, because the caller naming itself is
+    # useful and several gates (``enforce_delete``,
+    # ``enforce_not_agent_credential``) only FIRE when it is set, so clearing
+    # it here would loosen them. The MCP plane states the same conclusion at
+    # ``mcp_server.py:448`` and keeps ``via_gateway`` False for it.
     mclaw_key = settings.memclaw_api_key  # legacy-name-ok: live compatibility field
     if mclaw_key:
         if key and hmac.compare_digest(key, mclaw_key):
@@ -710,6 +745,12 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
             tenant_id=tenant_id,
             org_role=org_role,
             agent_id=agent_id,
+            # The only path that may claim it: the gateway resolved the
+            # credential and injected ``X-Agent-ID`` itself, behind the
+            # perimeter check above (and it overwrites any client-supplied
+            # value via proxy_set_header, the same reason X-Org-Role is read
+            # on this branch alone).
+            agent_id_verified=True,
             is_read_only=is_read_only,
             is_install_credential=is_install_credential,
             install_uuid=install_uuid,
