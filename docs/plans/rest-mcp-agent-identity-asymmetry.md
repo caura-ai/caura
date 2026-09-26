@@ -95,6 +95,39 @@ Both requests are byte-identical apart from the credential
 
 Reproduction: `core-api/scripts/repro_path2_keystone_verified.py`.
 
+### Measured end-to-end, through the real route
+
+The helper-level measurement above understates it. Driving the actual
+`POST /api/v1/keystones` handler against a seeded **trust-1** victim agent,
+with the two credentials and an otherwise byte-identical request
+(`scope=agent`, `agent_id=<victim>`, `X-Agent-ID: <victim>`):
+
+```
+ADMIN KEY  -> 403 {"error":{"code":"AGENT_TRUST_TOO_LOW",
+                   "message":"Agent 'victim-…' (trust_level=1) < required 2."}}
+PATH 2 KEY -> 200 {"collection":"_keystones","doc_id":"ks-p2-…",
+                   "data":{"scope":"agent","title":"Defer", …}}
+```
+
+The shared-key request does not merely pass a gate — **the keystone is
+written**, scoped to the victim agent, under the victim's name.
+
+Two details make this worse than the helper comparison suggests:
+
+* The trust level checked by `_enforce_author_trust` is the **named agent's**,
+  not the caller's (`keystones.py:147` passes `caller_agent_id`, which on this
+  path is the victim). The attacker needs no trust level of its own — only the
+  shared key.
+* With **no** `X-Agent-ID` at all, `_resolve_caller_identity` falls back to the
+  never-registered `"rest-admin"` sentinel and `_enforce_author_trust` 403s. So
+  on this route the header is not a second spelling of a reachable capability —
+  it is the **only** door, and it takes the caller from "cannot write keystones
+  at all" to "can write one in any registered trust-1 agent's name".
+
+The exposure delta versus the admin key is therefore precisely: **agents at
+`trust_level == 1` are plantable by the shared key and protected from the admin
+key.** Victims at trust ≥ 2 were always reachable by either.
+
 This is a privilege **inversion**: on a Path-2 deployment the shared tenant key
 holds more authority on this route than the admin key does. It is also the one
 place where the MCP comment's reasoning — "would hand it any agent's scope" —
@@ -118,7 +151,7 @@ exists to separate.
 | A self-hosted OSS operator scripting against a shared key | possible, by hand | yes | the only population affected |
 
 A repo-wide grep finds **no** production sender of `X-Agent-ID` in
-caura-memclaw — only tests, which construct it deliberately.
+`caura-ai/caura` — only tests, which construct it deliberately.
 
 Closing Door B is a different and much larger story: `?agent_id=` and
 `filter_agent_id` are documented, SDK-exercised parameters on the read routes.

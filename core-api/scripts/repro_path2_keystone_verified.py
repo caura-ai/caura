@@ -55,7 +55,9 @@ async def main() -> None:
         return None
 
     with (
-        patch.object(auth_mod.settings, "memclaw_api_key", SHARED_KEY),
+        patch.object(
+            auth_mod.settings, "memclaw_api_key", SHARED_KEY
+        ),  # legacy-name-floor: the settings attribute literally bears this name
         patch.object(auth_mod.settings, "is_standalone", False),
         patch.object(auth_mod, "_block_if_suppressed", new=_noop),
         patch.object(auth_mod, "_block_if_any_readable_suppressed", new=_noop),
