@@ -1,5 +1,5 @@
 # Dockerfile for Core Worker service
-# Async-embed event consumer — subscribes to memclaw.memory.embed-requested
+# Async-embed event consumer — subscribes to caura.memory.embed-requested
 # and PATCHes the resulting embedding back to core-storage-api.
 
 # Optional Datadog serverless-init source (CAURA-0000 observability POC).
@@ -9,7 +9,7 @@
 # lands in the image. Runtime activation is further gated by
 # docker-entrypoint.sh on DD_API_KEY.
 ARG DD_APM_ENABLED=false
-FROM datadog/serverless-init:1@sha256:2f498f4b1165ac3551c34129b4f0c0c7bd99d82c55c4e95cf494b55dad8d05d0 AS dd-bin
+FROM datadog/serverless-init:1@sha256:f4943347f155505156ba5f594317ea64b59678b3a6522e8c0993581af20956ff AS dd-bin
 FROM python:3.12-slim AS dd-apm-true
 COPY --from=dd-bin /datadog-init /dd/datadog-init
 FROM python:3.12-slim AS dd-apm-false

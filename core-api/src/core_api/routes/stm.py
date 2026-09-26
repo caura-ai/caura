@@ -4,14 +4,37 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field
 
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.config import settings
+from core_api.constants import (
+    MAX_CONTENT_LENGTH,
+    MEMORY_VISIBILITIES_PATTERN,
+    STM_DISABLED_DETAIL,
+    STM_WRITE_ROUTE_NOTE,
+    MemoryType,
+)
+from core_api.errors import (
+    AUTH_AGENT_CREDENTIAL_FORBIDDEN,
+    AUTH_AGENT_TRUST_TOO_LOW,
+    AUTH_TENANT_MISMATCH,
+    AUTH_UNAUTHENTICATED,
+    coded_detail,
+)
+from core_api.middleware.per_tenant_concurrency import per_tenant_slot
+from core_api.middleware.rate_limit import write_limit
 from core_api.schemas import STRICT_WRITE_BODY
-from core_api.services.agent_service import enforce_fleet_write, resolve_write_agent
+from core_api.services.agent_service import (
+    enforce_broker_agent_ownership,
+    enforce_delete,
+    enforce_fleet_write,
+    enforce_registered_fleet_read,
+    resolve_write_agent,
+)
 from core_api.services.usage_service import check_and_increment
 
 logger = logging.getLogger(__name__)
@@ -23,10 +46,19 @@ router = APIRouter(tags=["stm"])
 # STM is advertised here and reachable nowhere. Three facts, all verified
 # against a running stack:
 #
-#   1. There is no REST WRITE route. POST /stm/notes and POST /stm/bulletin
-#      do not exist, so a caller who reads these docs and tries to put
-#      anything into short-term memory gets a bare 405 with no explanation.
-#      Writing is plugin-only.
+#   1. There is no dedicated REST WRITE route. POST /stm/notes and POST
+#      /stm/bulletin do not exist, so a caller who reads these docs and tries
+#      to put anything into short-term memory THERE gets a bare 405 with no
+#      explanation.
+#
+#      What the original wording went on to claim — that nothing can be put
+#      into STM over REST at all — was not true, and the published text said
+#      so for as long as it stood. POST /memories with write_mode='stm' runs
+#      the STM write pipeline and stores the entry; it is gated on the same
+#      USE_STM setting, so the claim held for the hosted deployment (where the
+#      gate is off) and was false for exactly the self-hosted readers the last
+#      sentence was addressed to. A doc that is accidentally right about the
+#      configuration nobody reading it is running is the harder kind to catch.
 #   2. Every read, delete and promote below is gated on ``USE_STM``, which is
 #      off by default and is not tenant-toggleable — the setting appears
 #      nowhere in the hosted deployment, so a hosted customer cannot turn it
@@ -45,10 +77,8 @@ _PLUGIN_ONLY = (
     "served by the OpenClaw plugin, not by this API. This operation is gated "
     "on the server-side `USE_STM` setting, which is off in the hosted "
     "deployment and cannot be enabled per tenant; it returns 422 there. "
-    "There is also no REST write route for STM (`POST /stm/notes` and "
-    "`POST /stm/bulletin` return 405), so nothing can be put into short-term "
-    "memory over REST even where reads are enabled. Self-hosted operators who "
-    "set `USE_STM=true` get the read, clear and promote operations only."
+    f"{STM_WRITE_ROUTE_NOTE} Self-hosted operators who set `USE_STM=true` get "
+    "these read, clear and promote operations as well."
 )
 
 
@@ -91,6 +121,41 @@ def _reject_reserved_memory_type(memory_type: str | None) -> None:
     )
 
 
+def _require_cleared(cleared: bool) -> None:
+    """Refuse to answer ``{"ok": true}`` for a delete that never reached the
+    backend.
+
+    The same rule the STM WRITE path owes, on the verb where breaking it is
+    more alarming: a caller told its notes are gone, whose notes are still
+    there on the next read, has no reason to try again. 503 rather than 500 —
+    the request was fine and retrying is the right move.
+    """
+    if not cleared:
+        raise HTTPException(
+            status_code=503,
+            detail=("Short-term memory is temporarily unavailable and nothing was cleared. Retry shortly."),
+        )
+
+
+async def _enforce_note_owner(auth: AuthContext, tenant_id: str, agent_id: str) -> None:
+    """Protect per-agent private notes on both the read and delete paths."""
+    auth.enforce_self_agent(agent_id)
+    if auth.is_install_credential:
+        await enforce_broker_agent_ownership(tenant_id, agent_id, auth.install_uuid)
+
+
+def _reject_install_bulletin_access(auth: AuthContext) -> None:
+    """An install credential has no verified agent/fleet trust identity."""
+    if auth.is_install_credential:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_CREDENTIAL_FORBIDDEN,
+                "Install credentials cannot access fleet bulletins without an agent-scoped credential.",
+            ),
+        )
+
+
 def _check_stm_enabled() -> None:
     """Reject with a message the reader can actually act on.
 
@@ -103,17 +168,7 @@ def _check_stm_enabled() -> None:
     no way to reach.
     """
     if not settings.use_stm:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Short-term memory is not available on this deployment. STM is "
-                "plugin-only: it is served by the OpenClaw plugin, and the hosted "
-                "REST API cannot enable it (USE_STM is a server setting, not a "
-                "per-tenant one). Self-hosted operators can set USE_STM=true; "
-                "hosted callers should use the durable memory endpoints "
-                "(/memories, /search) instead."
-            ),
-        )
+        raise HTTPException(status_code=422, detail=STM_DISABLED_DETAIL)
 
 
 def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) -> str:
@@ -159,7 +214,10 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
             # ``TENANT_MISMATCH`` prefix, not on the prose.
             raise HTTPException(
                 status_code=403,
-                detail="TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
+                detail=coded_detail(
+                    AUTH_TENANT_MISMATCH,
+                    "TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
+                ),
             )
         return auth.tenant_id
     if getattr(auth, "is_admin", False):
@@ -171,7 +229,7 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
         )
     raise HTTPException(
         status_code=401,
-        detail="UNAUTHENTICATED — auth context has no tenant_id",
+        detail=coded_detail(AUTH_UNAUTHENTICATED, "UNAUTHENTICATED — auth context has no tenant_id"),
     )
 
 
@@ -194,18 +252,16 @@ async def get_notes(
 ):
     _check_stm_enabled()
     tenant_id = _require_tenant(auth, tenant_id)
-    # Authenticated agent identity (gateway X-Agent-ID) takes precedence over the
-    # caller-supplied query param. Notes are per-agent PRIVATE (see the section
-    # header), so an agent credential must not read a peer's by naming it.
+    # The caller-supplied query param must MATCH the authenticated agent identity
+    # (gateway X-Agent-ID) — this refuses a mismatch rather than overriding it.
+    # Notes are per-agent PRIVATE (see the section header), so an agent credential
+    # must not read a peer's by naming it.
     #
     # The DELETE twin directly below has enforced this since the 2026-06-11
     # audit, which left the pair lopsided: a peer's notes could not be cleared,
     # only read. Disclosure was the half still open.
-    if auth.agent_id and agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
-        )
+    await _enforce_note_owner(auth, tenant_id, agent_id)
+    agent_id = canonical_service_agent_id(agent_id)
     from core_api.services.stm_service import read_notes
 
     notes = await read_notes(tenant_id, agent_id, limit=limit)
@@ -227,16 +283,13 @@ async def clear_notes(
     _check_stm_enabled()
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
-    # Authenticated agent identity (gateway X-Agent-ID) takes precedence —
-    # an agent credential must not clear a peer agent's notes by naming it.
-    if auth.agent_id and agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"agent_id '{agent_id}' does not match the authenticated agent identity.",
-        )
+    # The query param must MATCH the authenticated agent identity — an agent
+    # credential must not clear a peer agent's notes by naming it.
+    await _enforce_note_owner(auth, tenant_id, agent_id)
+    agent_id = canonical_service_agent_id(agent_id)
     from core_api.services.stm_service import clear_notes
 
-    await clear_notes(tenant_id, agent_id)
+    _require_cleared(await clear_notes(tenant_id, agent_id))
     return {"ok": True, "tenant_id": tenant_id, "agent_id": agent_id}
 
 
@@ -257,6 +310,11 @@ async def get_bulletin(
 ):
     _check_stm_enabled()
     tenant_id = _require_tenant(auth, tenant_id)
+    _reject_install_bulletin_access(auth)
+    # A bare tenant credential has tenant-admin authority by convention; only
+    # agent credentials enter the fleet trust ladder.
+    if auth.agent_id:
+        await enforce_registered_fleet_read(tenant_id, auth.agent_id, fleet_id)
     from core_api.services.stm_service import read_bulletin
 
     entries = await read_bulletin(tenant_id, fleet_id, limit=limit)
@@ -278,9 +336,14 @@ async def clear_bulletin(
     _check_stm_enabled()
     auth.enforce_read_only()
     tenant_id = _require_tenant(auth, tenant_id)
+    _reject_install_bulletin_access(auth)
+    # Tenant-admin credentials retain tenant-wide clear access, matching the
+    # authorization convention used by the other private REST surfaces.
+    if auth.agent_id:
+        await enforce_delete(tenant_id, auth.agent_id)
     from core_api.services.stm_service import clear_bulletin
 
-    await clear_bulletin(tenant_id, fleet_id)
+    _require_cleared(await clear_bulletin(tenant_id, fleet_id))
     return {"ok": True, "tenant_id": tenant_id, "fleet_id": fleet_id}
 
 
@@ -290,18 +353,51 @@ async def clear_bulletin(
 
 
 class PromoteRequest(BaseModel):
+    """The promote body, declaring the constraints it always had.
+
+    Every field below is handed to ``MemoryCreate`` by ``stm_service.promote``,
+    and MemoryCreate has enforced these three rules all along — it just
+    enforced them INSIDE the handler, where a ``ValidationError`` is an
+    unhandled exception rather than a request-parsing failure. So a bad
+    ``memory_type``, a bad ``visibility``, or over-long content answered 500:
+    the server reporting its own fault for what was squarely a malformed
+    request, and (being a 5xx) inviting the client to retry something that can
+    never succeed.
+
+    Declaring them here moves the refusal to where FastAPI can make it — a 422
+    with the offending field named — and, because this is a published schema,
+    puts the same rules in the OpenAPI document where a caller can read them
+    before sending.
+
+    The VALUES are shared — the constants here are the ones MemoryCreate
+    itself uses, so the two cannot come to disagree about what the limit is.
+    Coverage is a separate question and is not automatic: these constraints are
+    restated per model, which is this repo's idiom (BulkMemoryItem's comment in
+    schemas.py makes deliberate divergence between the write models explicit
+    policy), so a constraint MemoryCreate gains later on a shared field does
+    not arrive here on its own.
+    """
+
     model_config = STRICT_WRITE_BODY
 
-    agent_id: str
-    content: str
+    agent_id: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     fleet_id: str | None = None
-    memory_type: str | None = None
-    visibility: str | None = None
+    memory_type: MemoryType | None = None
+    visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
 
 
 @router.post("/stm/promote", description=_PLUGIN_ONLY)
+@write_limit
 async def promote_stm(
+    request: Request,
     body: PromoteRequest,
+    # ``request``/``response`` are what ``@write_limit`` needs: slowapi reads
+    # both by parameter NAME (``kwargs["request"]`` / ``kwargs["response"]``)
+    # and injects X-RateLimit-* into ``response`` on the success path. Without
+    # ``response`` every call 500s, not just throttled ones — see D14 and
+    # ``tests/test_d14_rate_limited_response_param.py``.
+    response: Response,
     auth: AuthContext = Depends(get_auth_context),
     # Tenant selector for admin credentials — see get_notes / WT-4.
     # A query param rather than a ``PromoteRequest`` field on purpose:
@@ -320,14 +416,9 @@ async def promote_stm(
     # It reached LTM having paid only the two above, which meant the STM door
     # into long-term memory was cheaper than the front door.
     _reject_reserved_memory_type(body.memory_type)
-    # Bind the promoted memory to the authenticated agent identity when the
-    # credential carries one — a caller must not promote into LTM on behalf
-    # of an arbitrary peer agent.
-    if auth.agent_id and body.agent_id != auth.agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=f"agent_id '{body.agent_id}' does not match the authenticated agent identity.",
-        )
+    # Refuse a promote on behalf of a peer agent. This only REFUSES: the binding
+    # to the caller's own identity happens below, in ``resolve_write_agent``.
+    auth.enforce_self_agent(body.agent_id)
 
     from core_api.services.organization_settings import resolve_config
 
@@ -350,7 +441,10 @@ async def promote_stm(
     if agent.get("trust_level", 0) == 0:
         raise HTTPException(
             status_code=403,
-            detail=f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            ),
         )
     # Resolve fleet from the agent's home fleet, as the write path does, so the
     # fleet-write policy below is evaluated against the fleet the memory will
@@ -372,12 +466,19 @@ async def promote_stm(
 
     from core_api.services.stm_service import promote
 
-    result = await promote(
-        content=body.content,
-        tenant_id=tenant_id,
-        agent_id=body.agent_id,
-        fleet_id=body.fleet_id,
-        memory_type=body.memory_type,
-        visibility=body.visibility,
-    )
-    return result
+    # The last two POST /memories gates this route was missing (2026-08-14
+    # audit H-17 residual / 2026-09-02 M-35): ``@write_limit`` above is the
+    # per-key write rate limit, and this slot is the per-tenant in-flight
+    # write cap. Both fail fast with 429 rather than queueing into the worker
+    # layer. The slot wraps only the write itself, after every authz gate has
+    # passed, exactly as ``write_memory`` does — a request refused for policy
+    # reasons must not consume a slot.
+    async with per_tenant_slot("write", tenant_id):
+        return await promote(
+            content=body.content,
+            tenant_id=tenant_id,
+            agent_id=body.agent_id,
+            fleet_id=body.fleet_id,
+            memory_type=body.memory_type,
+            visibility=body.visibility,
+        )

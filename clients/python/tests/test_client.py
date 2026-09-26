@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -13,7 +16,9 @@ from caura_client import (
     CauraAPIError,
     Memory,
     NotFoundError,
+    RateLimitError,
     RecallResult,
+    __version__,
 )
 
 
@@ -26,6 +31,25 @@ def make_client(handler, **kwargs):
         transport=transport,
         **kwargs,
     )
+
+
+def test_every_request_names_the_sdk_in_user_agent():
+    seen = {}
+
+    def handler(request):
+        seen["ua"] = request.headers["User-Agent"]
+        return httpx.Response(200, json={"status": "ok"})
+
+    make_client(handler).health()
+    py = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert seen["ua"] == f"caura-client-python/{__version__} (python/{py})"
+    assert re.fullmatch(r"caura-client-python/\d+\.\d+\.\d+ \(python/\d+\.\d+\)", seen["ua"])
+
+
+def test_version_matches_pyproject():
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    match = re.search(r'^version = "([^"]+)"', pyproject.read_text(), re.MULTILINE)
+    assert match and match.group(1) == __version__
 
 
 def test_write_returns_memory():
@@ -57,7 +81,9 @@ def test_search_returns_list():
         body = json.loads(request.content)
         assert body["query"] == "q"
         assert body["top_k"] == 3
-        return httpx.Response(200, json={"items": [{"id": "m1", "content": "a"}, {"id": "m2", "content": "b"}]})
+        return httpx.Response(
+            200, json={"items": [{"id": "m1", "content": "a"}, {"id": "m2", "content": "b"}]}
+        )
 
     results = make_client(handler).search("q", top_k=3)
     assert [m.id for m in results] == ["m1", "m2"]
@@ -125,9 +151,7 @@ def test_recall_accepts_the_items_alias_alone():
     """Older/other server shapes may send only ``items``; both name the same list."""
 
     def handler(request):
-        return httpx.Response(
-            200, json={"summary": "S", "items": [{"id": "m2", "content": "b"}]}
-        )
+        return httpx.Response(200, json={"summary": "S", "items": [{"id": "m2", "content": "b"}]})
 
     result = make_client(handler).recall("q")
     assert [m.id for m in result.supporting_memories] == ["m2"]
@@ -147,12 +171,30 @@ def test_recall_ignores_the_key_the_server_never_sends():
     yield no memories, so nobody "fixes" this by reinstating it."""
 
     def handler(request):
-        return httpx.Response(
-            200, json={"summary": "S", "supporting_memories": [{"id": "ghost"}]}
-        )
+        return httpx.Response(200, json={"summary": "S", "supporting_memories": [{"id": "ghost"}]})
 
     result = make_client(handler).recall("q")
     assert result.supporting_memories == []
+
+
+def test_recall_raises_on_non_dict_body():
+    def handler(request):
+        return httpx.Response(200, json=["not", "a", "dict"])
+
+    with pytest.raises(CauraAPIError) as exc:
+        make_client(handler).recall("q")
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] recall response must be a JSON object"
+
+
+def test_recall_raises_on_non_object_body():
+    def handler(request):
+        return httpx.Response(200, json="a plain string, not an object")
+
+    with pytest.raises(CauraAPIError) as exc:
+        make_client(handler).recall("q")
+    assert exc.value.status_code == 200
+    assert str(exc.value) == "[200] recall response must be a JSON object"
 
 
 def test_health():
@@ -198,6 +240,24 @@ def test_not_found_error():
 
     with pytest.raises(NotFoundError):
         make_client(handler).search("q")
+
+
+def test_rate_limit_error_parses_retry_after():
+    def handler(request):
+        return httpx.Response(429, headers={"Retry-After": "2.5"}, json={"detail": "slow down"})
+
+    with pytest.raises(RateLimitError) as exc:
+        make_client(handler).search("q")
+    assert exc.value.retry_after == 2.5
+
+
+def test_rate_limit_error_without_retry_after():
+    def handler(request):
+        return httpx.Response(429, json={"detail": "slow down"})
+
+    with pytest.raises(RateLimitError) as exc:
+        make_client(handler).search("q")
+    assert exc.value.retry_after is None
 
 
 def test_generic_api_error():

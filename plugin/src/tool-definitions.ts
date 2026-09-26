@@ -93,6 +93,13 @@ interface EnrichOptions {
    * a silent behaviour change dressed up as a bug fix.
    */
   resolveIdentity?: boolean;
+
+  /**
+   * Do not turn the configured agent default into a recall identity. Search
+   * treats ``caller_agent_id`` as an authorization principal and may narrow a
+   * standard-trust caller to its home fleet, so recall must opt in explicitly.
+   */
+  skipAgentDefault?: boolean;
 }
 
 async function enrichBody(
@@ -108,7 +115,7 @@ async function enrichBody(
   // loud variant is for the per-turn paths, where a fall-through is a real bug.
   if (!body.agent_id) {
     if (opts.resolveIdentity) body.agent_id = resolveAgentIdQuiet(params);
-    else if (CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
+    else if (!opts.skipAgentDefault && CAURA_AGENT_ID) body.agent_id = CAURA_AGENT_ID;
   }
   // The configured fleet below is a DEFAULT, for callers that did not say
   // which fleet they meant — so it must not override a caller that asked to
@@ -138,15 +145,44 @@ export const MEMORY_TYPES = [
   "intention", "plan", "commitment", "action", "outcome", "cancellation", "rule", "insight",
 ] as const;
 
+// Keep in sync with core-api/src/core_api/constants.py::MEMORY_TYPES_WRITE.
+// The full MEMORY_TYPES vocabulary remains valid for read filters because
+// historical rows can still carry reserved or deprecated types.
+export const WRITABLE_MEMORY_TYPES = [
+  "fact", "episode", "decision", "preference", "task", "plan", "action",
+] as const;
+
 export const STATUSES = [
   "active", "pending", "confirmed", "cancelled",
   "outdated", "conflicted", "archived", "deleted",
 ] as const;
 
-const MEMORY_TYPE_SCHEMA = {
+// The ops each op-dispatched tool OFFERS on this surface. Hoisted for the
+// same reason as the two lists above: the schema a caller is validated
+// against and the refusal naming the alternatives now read one identifier,
+// so they cannot drift. Deliberately NOT `tools.json`'s `ops[]`, which is
+// what the MCP handler ACCEPTS and legitimately differs — see MCP_ONLY_OPS
+// in tool-definitions.test.ts.
+const MANAGE_OPS = ["read", "update", "transition", "delete"] as const;
+const DOC_OPS = [
+  "write", "read", "query", "delete", "search", "list_collections",
+] as const;
+
+// Derived, so the dispatcher below is checked against the same tuple the
+// inputSchema publishes rather than against a second hand-written list.
+type ManageOp = (typeof MANAGE_OPS)[number];
+type DocOp = (typeof DOC_OPS)[number];
+
+const MEMORY_TYPE_FILTER_SCHEMA = {
   type: "string",
   enum: [...MEMORY_TYPES],
-  description: "Optional — auto-classified if omitted",
+  description: "Filter by any stored memory type, including historical types",
+};
+
+const WRITABLE_MEMORY_TYPE_SCHEMA = {
+  type: "string",
+  enum: [...WRITABLE_MEMORY_TYPES],
+  description: "Agent-writable type; auto-classified if omitted",
 };
 
 const STATUS_SCHEMA = {
@@ -165,11 +201,11 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       query: { type: "string", description: "Natural-language query (hybrid semantic+keyword)" },
       agent_id: { type: "string", description: "Caller agent ID for visibility scoping" },
       filter_agent_id: { type: "string", description: "Restrict to memories by this author" },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: MEMORY_TYPE_FILTER_SCHEMA,
       status: STATUS_SCHEMA,
       fleet_ids: { type: "array", items: { type: "string" }, description: "Restrict to fleets" },
       include_brief: { type: "boolean", description: "Append LLM-synthesized summary paragraph" },
-      top_k: { type: "integer", description: "Max results (1-20)" },
+      top_k: { type: "integer", description: "Max results (1-200)" },
     },
   },
 
@@ -186,7 +222,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
           type: "object", required: ["content"],
           properties: {
             content: { type: "string" },
-            memory_type: MEMORY_TYPE_SCHEMA,
+            memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
             weight: { type: "number" },
             source_uri: { type: "string" },
             run_id: { type: "string" },
@@ -197,7 +233,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       },
       fleet_id: { type: "string", description: "Fleet scope" },
       visibility: { type: "string", enum: ["scope_agent", "scope_team", "scope_org"] },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
       weight: { type: "number", description: "Importance 0-1 (single-write only)" },
       source_uri: { type: "string", description: "Provenance URI (single-write only)" },
       run_id: { type: "string", description: "Run/session identifier (single-write only)" },
@@ -211,11 +247,11 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: ["op", "memory_id"],
     properties: {
-      op: { type: "string", enum: ["read", "update", "transition", "delete"] },
+      op: { type: "string", enum: [...MANAGE_OPS] },
       memory_id: { type: "string", description: "UUID of memory to act on" },
       status: { type: "string", enum: [...STATUSES], description: "Required for op=transition" },
       content: { type: "string", description: "For op=update" },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: WRITABLE_MEMORY_TYPE_SCHEMA,
       weight: { type: "number", description: "For op=update (0-1)" },
       title: { type: "string", description: "For op=update" },
       metadata: { type: "object", description: "For op=update (replaces dict)" },
@@ -228,10 +264,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: ["op"],
     properties: {
-      op: {
-        type: "string",
-        enum: ["write", "read", "query", "delete", "search", "list_collections"],
-      },
+      op: { type: "string", enum: [...DOC_OPS] },
       collection: {
         type: "string",
         description:
@@ -284,7 +317,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       scope: { type: "string", enum: ["agent", "fleet", "all"], description: "Optional. Omitted: filtered by agent_id if one is set, with no trust gate — not the same request as 'agent'. 'agent' = your memories only (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
       fleet_id: { type: "string", description: "Restrict to a fleet" },
       written_by: { type: "string", description: "Filter by author agent_id. With scope='agent' it must be omitted or match your own agent_id — a different author is rejected, not ignored." },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: MEMORY_TYPE_FILTER_SCHEMA,
       status: STATUS_SCHEMA,
       weight_min: { type: "number" },
       weight_max: { type: "number" },
@@ -310,7 +343,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     required: [],
     properties: {
-      top_k: { type: "integer", description: "Max results per search (1-20)" },
+      top_k: { type: "integer", description: "Max results per search (1-200)" },
       min_similarity: { type: "number", description: "Min similarity threshold (0.1-0.9)" },
       fts_weight: { type: "number", description: "Keyword vs semantic blend (0=semantic, 1=keyword)" },
       freshness_floor: { type: "number" },
@@ -362,7 +395,7 @@ const PARAM_SCHEMAS: Record<string, Record<string, unknown>> = {
       scope: { type: "string", enum: ["agent", "fleet", "all"], description: "Optional. Omitted: aggregated over agent_id if one is set, with no trust gate — not the same request as 'agent'. 'agent' = only memories visible to you (trust ≥ 1). 'fleet'/'all' = cross-agent (trust ≥ 2)." },
       agent_id: { type: "string", description: "Caller agent ID" },
       fleet_id: { type: "string", description: "Restrict aggregate to a fleet" },
-      memory_type: MEMORY_TYPE_SCHEMA,
+      memory_type: MEMORY_TYPE_FILTER_SCHEMA,
       status: STATUS_SCHEMA,
     },
   },
@@ -388,6 +421,14 @@ type ExecuteFn = (
 // Translate friendly MCP-tool param names to existing REST query/body fields.
 function searchBody(params: Record<string, unknown>): Record<string, unknown> {
   const body: Record<string, unknown> = { ...params };
+  if (body.caller_agent_id === undefined && body.agent_id !== undefined) {
+    body.caller_agent_id = body.agent_id;
+  }
+  delete body.agent_id;
+  if (body.fleet_ids === undefined && body.fleet_id !== undefined) {
+    body.fleet_ids = [body.fleet_id];
+  }
+  delete body.fleet_id;
   if (body.memory_type !== undefined) {
     body.memory_type_filter = body.memory_type;
     delete body.memory_type;
@@ -417,9 +458,39 @@ const SINGLE_WRITE_ONLY_FIELDS = [
   "write_mode",
 ] as const;
 
+/**
+ * Terminal guard for an op-dispatched tool: every op it serves returns from
+ * its own branch, so reaching the end means the op was not one of them.
+ *
+ * Not a no-op. Until this existed the last branch doubled as the else, and an
+ * unrecognised op became a write — see `tool-op-dispatch.test.ts`, which
+ * records what that cost and pins it.
+ *
+ * `op` is typed `never` so that adding an op to MANAGE_OPS/DOC_OPS without a
+ * branch fails `tsc` here rather than reaching this line at runtime — the
+ * callers cast `op` to the derived union, so an exhausted chain narrows it to
+ * `never` and a leftover member does not.
+ *
+ * The throw is still load-bearing, and deleting it as unreachable would
+ * restore the original defect: that cast is a runtime lie. Nothing in this
+ * package validates `op` — the enum in `PARAM_SCHEMAS` is enforced by the
+ * host, so any string can arrive here.
+ */
+function unsupportedOp(tool: string, op: never, offered: readonly string[]): never {
+  throw new Error(
+    `[caura] ${tool}: unsupported op ${JSON.stringify(op)}. ` +
+      `Expected one of: ${offered.join(", ")}`,
+  );
+}
+
 const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_recall: async (params, signal) => {
-    const body = await enrichBody(searchBody(params));
+    // Enrich first so the configured fleet default passes through the same
+    // adapter as explicit tool arguments. Do not add the configured agent
+    // default: SearchRequest treats caller_agent_id as an authorization
+    // principal and may narrow standard-trust reads to that agent's fleet.
+    // An explicitly supplied agent_id remains present and is translated.
+    const body = searchBody(await enrichBody(params, { skipAgentDefault: true }));
     const includeBrief = Boolean(params.include_brief);
     const results = await apiCall("POST", "/search", body, undefined, signal);
     if (!includeBrief) return { results };
@@ -467,7 +538,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
   caura_manage: async (params, signal) => {
     // op=update sends ``agent_id`` as a query param; the other ops ignore it.
     const enriched = await enrichBody(params, { resolveIdentity: true });
-    const op = enriched.op as string;
+    const op = enriched.op as ManageOp;
     const memory_id = enriched.memory_id as string;
     assertSafePathSegment(memory_id, "memory_id");
     const tenant_id = enriched.tenant_id as string;
@@ -487,26 +558,28 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
     if (op === "delete") {
       return apiCall("DELETE", `/memories/${id}`, undefined, { tenant_id }, signal);
     }
-    // op === "update"
-    const agent_id = enriched.agent_id as string;
-    const updateFields: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(enriched)) {
-      if (v === undefined) continue;
-      if (k === "op" || k === "memory_id" || k === "tenant_id" || k === "agent_id" || k === "fleet_id") continue;
-      updateFields[k] = v;
+    if (op === "update") {
+      const agent_id = enriched.agent_id as string;
+      const updateFields: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(enriched)) {
+        if (v === undefined) continue;
+        if (k === "op" || k === "memory_id" || k === "tenant_id" || k === "agent_id" || k === "fleet_id") continue;
+        updateFields[k] = v;
+      }
+      return apiCall(
+        "PATCH",
+        `/memories/${id}`,
+        updateFields,
+        { tenant_id, agent_id },
+        signal,
+      );
     }
-    return apiCall(
-      "PATCH",
-      `/memories/${id}`,
-      updateFields,
-      { tenant_id, agent_id },
-      signal,
-    );
+    unsupportedOp("caura_manage", op, MANAGE_OPS);
   },
 
   caura_doc: async (params, signal) => {
     const enriched = await enrichBody(params);
-    const op = enriched.op as string;
+    const op = enriched.op as DocOp;
     const collection = enriched.collection as string | undefined;
     const tenant_id = enriched.tenant_id as string;
     if (op === "write") {
@@ -559,14 +632,16 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       if (enriched.fleet_id) query.fleet_id = String(enriched.fleet_id);
       return apiCall("GET", "/documents/collections", undefined, query, signal);
     }
-    // op === "delete"
-    return apiCall(
-      "DELETE",
-      `/documents/${encodeURIComponent(enriched.doc_id as string)}`,
-      undefined,
-      { tenant_id, collection: collection as string },
-      signal,
-    );
+    if (op === "delete") {
+      return apiCall(
+        "DELETE",
+        `/documents/${encodeURIComponent(enriched.doc_id as string)}`,
+        undefined,
+        { tenant_id, collection: collection as string },
+        signal,
+      );
+    }
+    unsupportedOp("caura_doc", op, DOC_OPS);
   },
 
   caura_list: async (params, signal) => {

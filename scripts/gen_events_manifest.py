@@ -7,7 +7,7 @@ subscribes to in **PubSub / SaaS deployment mode** — i.e. the topics for which
 (see caura-enterprise ``terraform/.../pubsub``). It is the contract that
 lets the enterprise repo's ``check_pubsub_provisioning.py`` fail CI when OSS adds
 a consumed topic without the matching Terraform subscription — the gap that took
-staging down when ``memclaw.lifecycle.insights-requested`` shipped unprovisioned.
+staging down when an insights-requested lifecycle topic shipped unprovisioned.
 
 Lifecycle topics are captured **dynamically** by invoking the real registration
 helpers against a recording bus, so a new ``bus.subscribe`` added to a helper is
@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from common.events import lifecycle_handlers
+from common.events import lifecycle_handlers, suppression_handlers
 from common.events.topics import Topics, renamed
 
 MANIFEST_PATH = (
@@ -61,18 +61,31 @@ _DIRECT_SUBSCRIBES: dict[str, list[str]] = {
     ],
 }
 
-# Which lifecycle registration helpers each service invokes in PubSub/SaaS mode.
+# Which shared registration helpers each service invokes in PubSub/SaaS mode.
 # core-api registers the LLM pipeline ops; core-worker registers the SQL archive
-# ops. (In OSS-standalone/InProcess mode core-api also registers the archive ops,
-# but that path provisions no Pub/Sub subscriptions, so it is out of scope here.)
+# ops and the org-suppression mirror. (In OSS-standalone/InProcess mode core-api
+# also registers the archive ops, but that path provisions no Pub/Sub
+# subscriptions, so it is out of scope here.)
+#
+# Not only ``lifecycle_handlers``: this used to be, and
+# ``suppression_handlers.register_suppression_consumer`` fell through every
+# mechanism as a result. It is not a direct ``bus.subscribe`` in a consumer
+# file, so ``test_direct_subscribes_match_consumer_files`` could not see it
+# either, and ``caura.org.suppression-changed`` was consumed by core-worker
+# while absent from the manifest the enterprise provisioning check reads.
+# ``test_every_subscribing_helper_module_is_registered_here`` now fails when a
+# new module starts subscribing without being listed.
 # ``Callable[[Any], None]``, not ``Callable[[object], None]``: each helper takes
 # its own concrete adapter type, and Callable is CONTRAVARIANT in its argument,
 # so a ``Callable[[PipelineStorageAdapter], None]`` is not a subtype of one
 # taking ``object``. Any is the accurate description of a deliberately
 # heterogeneous registry, rather than a claim every helper accepts anything.
-_LIFECYCLE_HELPERS: dict[str, list[Callable[[Any], None]]] = {
+_SHARED_REGISTRARS: dict[str, list[Callable[[Any], None]]] = {
     "core-api": [lifecycle_handlers.register_pipeline_consumers],
-    "core-worker": [lifecycle_handlers.register_archive_consumers],
+    "core-worker": [
+        lifecycle_handlers.register_archive_consumers,
+        suppression_handlers.register_suppression_consumer,
+    ],
 }
 
 
@@ -88,9 +101,14 @@ class _RecordingBus:
 
 def _capture_helper_topics(register: Callable[[object], None]) -> list[str]:
     bus = _RecordingBus()
-    # The helpers resolve the bus via module-level get_event_bus(); patch the
-    # name where it is bound (it is imported at the top of lifecycle_handlers).
-    with mock.patch.object(lifecycle_handlers, "get_event_bus", return_value=bus):
+    # Each helper resolves the bus via a module-level ``get_event_bus()``, so
+    # patch the name where THAT helper binds it. Resolved from the function's
+    # own module rather than hardcoded: pinning it to ``lifecycle_handlers`` is
+    # what made this mechanism silently unavailable to every other helper
+    # module — the patch would have applied to the wrong module and the real
+    # bus would have been called.
+    module = sys.modules[register.__module__]
+    with mock.patch.object(module, "get_event_bus", return_value=bus):
         register(
             object()
         )  # helpers only capture the adapter in a partial; never call it
@@ -101,9 +119,9 @@ def build_manifest() -> dict:
     services: dict[str, list[str]] = {}
     # Union both keysets so each dict is independently authoritative — a service
     # added to one but not the other must not be silently dropped.
-    for service in sorted(set(_LIFECYCLE_HELPERS) | set(_DIRECT_SUBSCRIBES)):
+    for service in sorted(set(_SHARED_REGISTRARS) | set(_DIRECT_SUBSCRIBES)):
         topics: set[str] = set(_DIRECT_SUBSCRIBES.get(service, []))
-        for register in _LIFECYCLE_HELPERS.get(service, []):
+        for register in _SHARED_REGISTRARS.get(service, []):
             topics.update(_capture_helper_topics(register))
         # Brand rename: list the renamed twin of every consumed topic, whether
         # or not dual-subscribe is switched on anywhere yet.

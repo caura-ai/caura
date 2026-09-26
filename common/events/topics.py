@@ -25,12 +25,20 @@ class Memory(enum.StrEnum):
 
 
 class Audit(enum.StrEnum):
-    EVENT_RECORDED = "memclaw.audit.event-recorded"
-
-
-class Pipeline(enum.StrEnum):
-    ENTITY_EXTRACT_REQUESTED = "memclaw.pipeline.entity-extract-requested"
-    ENTITY_EXTRACTED = "memclaw.pipeline.entity-extracted"
+    # CONTRACTED 2026-09-10, in the same change as its flip and NOT as a matter
+    # of taste. Flipping without contracting leaves ``publish_name`` returning
+    # the twin while ``subscribe_names(dual=False)`` -- the DEFAULT -- still
+    # returns the outgoing name, so ``unbound_publish_topics`` reports the
+    # family and every default-constructed ``PubSubEventBus`` raises FLEET-WIDE,
+    # not just in the service that moved. ``memory`` sat in that state for four
+    # days and ``org`` for hours; both were found by reading the module rather
+    # than by a failing test, which is why
+    # ``test_every_flipped_family_is_contracted_so_the_default_bus_is_legal``
+    # now exists and why these two steps ship together.
+    #
+    # This was the LAST declared topic carrying the outgoing prefix. This module
+    # now declares none.
+    EVENT_RECORDED = "caura.audit.event-recorded"
 
 
 class Org(enum.StrEnum):
@@ -41,14 +49,14 @@ class Org(enum.StrEnum):
     # so the OSS boundary guard (core-api) can reject reads/writes for
     # affected tenants synchronously, even while the durable mirror
     # eventually catches up.
-    SUPPRESSION_CHANGED = "memclaw.org.suppression-changed"
+    SUPPRESSION_CHANGED = "caura.org.suppression-changed"
     # CAURA-571: core-api publishes this after an org's settings are written so
     # every process drops its per-process settings cache promptly — without it,
     # a tightened governance control keeps applying its looser prior value on
     # sibling workers for up to the cache TTL (5 min). Subscribe with
     # ``broadcast=True`` (every process must receive it), not the work-queue
     # default.
-    SETTINGS_CHANGED = "memclaw.org.settings-changed"
+    SETTINGS_CHANGED = "caura.org.settings-changed"
 
 
 class Lifecycle(enum.StrEnum):
@@ -94,7 +102,6 @@ class Topics:
 
     Memory = Memory
     Audit = Audit
-    Pipeline = Pipeline
     Lifecycle = Lifecycle
     Org = Org
 
@@ -144,7 +151,7 @@ def renamed(topic: str) -> str:
 def family(topic: str) -> str:
     """The topic family — the segment between the brand and the event name.
 
-    ``<brand>.pipeline.entity-extracted`` -> ``pipeline``. Publishers flip one
+    ``<brand>.memory.embedded`` -> ``memory``. Publishers flip one
     family at a time, so this is the unit that decision is made in. Returns ""
     for a name that has no family segment.
     """
@@ -170,10 +177,9 @@ def family(topic: str) -> str:
 # ``memory``, the other remaining shared family, on provisioning completeness
 # rather than size: every one of the 9 topics this family declares is live in
 # both environments, whereas ``memory`` then declared one topic (``.created``)
-# that existed in neither. That is the same defect that disqualifies
-# ``pipeline``, and a flip is not the step at which to rely on a topic being
-# harmless because nothing publishes it. That declaration has since been
-# removed — see the ``memory`` note below. Evidence, measured against the
+# that existed in neither. A flip is not the step at which to rely on an absent
+# topic being harmless because nothing publishes it. That declaration has
+# since been removed — see the ``memory`` note below. Evidence, measured against the
 # running world rather than the source tree:
 #
 #   * 12/12 pubsub-backed deployables reported EVENT_BUS_DUAL_SUBSCRIBE on at
@@ -213,14 +219,77 @@ def family(topic: str) -> str:
 # a no-op once ``renamed`` is the identity — and comes out with the final sweep,
 # after the legacy topics are deleted.
 #
-# ``pipeline`` must NOT enter this set while it has zero live topics in either
-# environment: publishing to a topic that does not exist is silent loss, so
-# flipping it would move nothing and report success. ``org`` is shared AND its
-# staging ephemeral pool was under investigation as a suspected subscription
-# leak. ``audit`` LAST, unconditionally — those rows are hash-chained, and a
-# lost or reordered audit event is the one failure here that replay cannot
-# repair.
-FLIPPED_FAMILIES: frozenset[str] = frozenset({"lifecycle", "memory"})
+# ``org`` flipped 2026-09-08 — the fifth programme family and third SHARED one,
+# mirrored into caura-enterprise in the same cycle. Live remeasurement
+# immediately before the edit: 17/17 running Pub/Sub deployables dual-on, and
+# every prod twin topic and durable subscription present (32/32 stable prod
+# durables matched, zero unmatched).
+#
+# The check this family needed that the others did not: ``org.settings-changed``
+# is the only BROADCAST topic here, so each process creates its own ephemeral
+# subscription at runtime and there is no durable twin for a gate to compare. A
+# twin topic is a distinct resource with its own empty IAM policy, so what had to
+# be confirmed by hand is the per-topic attach binding ON THE TWIN — verified
+# present: ``prod--caura.org.settings-changed`` grants the custom
+# ``coreApiPubsubTopicAttacher`` role to the publishing core-api SA, matching the
+# legacy topic. Without it the flip is silent: publishing succeeds and every
+# subscriber fails to attach.
+#
+# The suspected staging ephemeral leak that held this family back did not
+# reproduce as a leak. ``expirationPolicy.ttl`` is 86,400s on every ephemeral
+# sampled across both brands and environments, and the pool size tracks one
+# TTL-window of instance churn rather than growing — 26 distinct instance hashes
+# behind the 47 subscriptions on the legacy prod topic, two per instance.
+# Bounded and reaping. Recorded as measured, not as an investigation
+# closed: that pool is still the reason the OLD topic cannot be deleted here.
+#
+# ``org`` CONTRACTED 2026-09-08, the same day it flipped, and the short gap was
+# not tidiness. Contraction is what repairs ``dual_subscribe=False``, which is
+# the DEFAULT: between the flip and this edit ``unbound_publish_topics(dual=False)``
+# reported both org topics, so every standalone and on-prem process constructing
+# a ``PubSubEventBus`` at the default RAISED on construction. ``memory`` sat in
+# that same state for four days (2026-09-01 to 2026-09-05, contracted by #1307);
+# this family did not have to. The guard is fleet-wide by design, so the blast
+# radius of a flip-without-contract is every deployable that never runs the
+# Terraform the flag is gated on -- not merely the family that moved.
+#
+# Contracting BEFORE the legacy topics are drained is safe and is the documented
+# order: publishers already emit only the twin (confirmed by delivery, not by
+# configuration -- first post-promote prod publish landed on
+# ``prod--caura.org.suppression-changed`` at 06:23:13Z), so nothing new arrives
+# on the legacy name. What contraction changes is that subscribers stop BINDING
+# it, which is the precondition for draining it, not a substitute for having
+# drained it. The legacy topics stay until the drain gate passes.
+#
+# ``audit`` FLIPPED 2026-09-10 — last, as planned, but NOT for the reason this
+# comment used to give. It said these rows are hash-chained and that a lost or
+# reordered audit event is the one failure here replay cannot repair. That
+# conflated two unrelated paths. The hash-chained audit log is a SEPARATE
+# transport: an install batches locally-chained entries over HTTP and the
+# receiver verifies the links and refuses a discontinuity. It never travels
+# this topic. What rides here is an append-only notification whose consumer
+# tolerates duplicate delivery by design — no ordering requirement, and no
+# chain to break.
+#
+# The real hazard on this family is the opposite shape, and it is worth naming
+# because it is invisible: the audit publisher is fire-and-forget and swallows
+# every exception, deliberately, so that a bus outage cannot take down the
+# request path that produced the event. Flipping onto a name that did not exist
+# would therefore lose every audit event with NO error anywhere, into an
+# append-only store with no replay. What made this flip safe is evidence that
+# the twin exists and is attached, not chain ceremony: on 2026-09-10 both
+# environments carried ``<env>--caura.audit.event-recorded`` and its ``-dlq``
+# with an ACTIVE subscription each, the readiness gate read 17/17 with nothing
+# unbound, and the pre-flip week showed 20 production publishes on the legacy
+# name and zero on the twin.
+#
+# Nothing in THIS repo publishes or subscribes the audit topic — the member is
+# declared here and consumed downstream. Listing the family keeps the two
+# copies' flip state aligned, and means a publisher added here later inherits
+# the current name rather than the outgoing one.
+FLIPPED_FAMILIES: frozenset[str] = frozenset(
+    {"audit", "lifecycle", "memory", "org"}
+)
 
 
 def all_topics() -> tuple[str, ...]:

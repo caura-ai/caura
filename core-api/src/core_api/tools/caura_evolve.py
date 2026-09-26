@@ -15,7 +15,7 @@ from ._registry import register
 from ._types import ToolSpec
 
 _DESCRIPTION = (
-    "Report what happened after acting on memories. outcome_type: success|failure|partial. "
+    "Report what happened after acting on memories. "
     "related_ids = the memory UUIDs that influenced the action (use IDs from your most recent "
     "caura_recall). scope: agent (default, trust ≥ 1)|fleet|all (trust ≥ 2; fleet_id required "
     "when scope='fleet'). Weight adjustments and rule generation are scoped — agents can only "
@@ -29,6 +29,13 @@ _SPEC = ToolSpec(
     plugin_exposed=True,
     trust_required=1,
     impl_status="live",
+    error_codes=(
+        "FORBIDDEN",
+        "INTERNAL_ERROR",
+        "INVALID_ARGUMENTS",
+        "MISSING_AGENT_ID",
+        "UNAUTHORIZED",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

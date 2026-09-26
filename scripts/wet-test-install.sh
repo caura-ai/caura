@@ -23,7 +23,7 @@ set -euo pipefail
 # ── Defaults ──
 BRANCH="main"
 REPO="git@github.com:caura-ai/caura.git"
-PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"
+PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"  # legacy-name-floor: standard install path; changing it creates a second copy instead of updating existing installs
 CAURA_API_URL=""
 CAURA_API_KEY=""
 CAURA_FLEET_ID=""
@@ -152,10 +152,10 @@ if [[ -f "$OPENCLAW_CONFIG" ]]; then
     // Ensure plugins section
     if (!config.plugins) config.plugins = {};
     if (!Array.isArray(config.plugins.allow)) config.plugins.allow = [];
-    if (!config.plugins.allow.includes('memclaw')) config.plugins.allow.push('memclaw');
+    if (!config.plugins.allow.includes('memclaw')) config.plugins.allow.push('memclaw'); // legacy-name-ok: frozen plugin id; restrictive allowlists require it
 
     if (!config.plugins.entries) config.plugins.entries = {};
-    config.plugins.entries.memclaw = { enabled: true };
+    config.plugins.entries.memclaw = { enabled: true }; // legacy-name-ok: frozen plugin id; this entry enables the manifest-id plugin
 
     if (!config.plugins.load) config.plugins.load = {};
     if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];

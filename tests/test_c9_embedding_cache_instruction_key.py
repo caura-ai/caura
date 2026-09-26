@@ -13,7 +13,8 @@ This test file proves the new key shape is honored:
 - Same query + different instruction → different cache key (no stale
   hit).
 - Same query + same instruction → cache hit (steady-state unchanged).
-- The cache prefix is bumped (``qemb4:``) so post-deploy Redis stats
+- The cache prefix is bumped (``qemb5:``; was ``qemb4:`` before the
+  resolved provider joined the hash — OSS 09/02 L-40) so post-deploy Redis stats
   show a clean cold-start boundary.
 """
 
@@ -41,9 +42,9 @@ def _clear_inflight():
     memory_service._inflight_embeddings.clear()
 
 
-async def test_cache_key_uses_qemb4_prefix(monkeypatch):
+async def test_cache_key_uses_qemb5_prefix(monkeypatch):
     """Sanity check on the prefix bump — proves the migration boundary
-    so operators can grep ``qemb4:*`` in Redis stats post-deploy."""
+    so operators can grep ``qemb5:*`` in Redis stats post-deploy."""
     seen_keys: list[str] = []
 
     async def _capture_get(key):
@@ -65,8 +66,8 @@ async def test_cache_key_uses_qemb4_prefix(monkeypatch):
         await memory_service._get_or_cache_embedding("q", "tenant-A", None)
 
     assert seen_keys, "cache_get was never called"
-    assert seen_keys[0].startswith("qemb4:"), (
-        f"expected qemb4: prefix, got {seen_keys[0]!r}"
+    assert seen_keys[0].startswith("qemb5:"), (
+        f"expected qemb5: prefix, got {seen_keys[0]!r}"
     )
 
 

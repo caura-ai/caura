@@ -13,6 +13,7 @@ from core_api.constants import (
 )
 from core_api.providers._retry import call_with_fallback
 from core_api.services.memory_service import search_memories
+from core_api.services.system_metadata import strip_platform_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,11 @@ Answer (step by step):"""
 # the second closes the over-abstention the v1 wording caused on
 # knowledge-update questions (answerable questions turned into "not enough
 # information"). Change only with a fresh control pair on the 67-q regression
-# sample (see benchmark/a57-recall-experiments-findings.md).
+# sample. The procedure and the A64 numbers are in
+# ``<multi-repo-workspace-root>/benchmark/a57-recall-experiments-findings.md``
+# -- WORKSPACE ROOT, one level above this repo, not in this repo on any ref.
+# See ``.claude/skills/regression-bench`` for how to run the pair: it needs
+# only the LOCAL docker stack and ``dev-admin-key``, no hosted credentials.
 PREMISE_GUARD_BLOCK = """\
 Before answering, check whether the question rests on an assumption about the \
 user's current situation that the memories contradict or no longer support \
@@ -131,7 +136,62 @@ def _format_memories_for_prompt(memories: list) -> str:
             content = f"[{date_str}] {content}" if content else f"[{date_str}]"
         item["content"] = content or None
         items.append(item)
-    return _json.dumps(items, indent=2, ensure_ascii=False)
+    # ax-0917-m-11: compact separators. This block is read by an LLM, and
+    # ``indent=2`` spends tokens on whitespace that carries no meaning to it —
+    # 19% of a 10-item recall payload, measured in cl100k tokens.
+    # ``ensure_ascii=False`` was already right here for the same reason.
+    return _json.dumps(items, separators=(",", ":"), ensure_ascii=False)
+
+
+def _dump_rows(memories: list) -> list[dict]:
+    """Serialise result rows for the recall envelope — one metadata location.
+
+    ax-0917-h-04. Each row used to carry the write-time telemetry block THREE
+    times: ``metadata.<key>`` (C25's legacy dual-write), ``metadata._system``
+    (the namespace it is mirrored into) and ``system_metadata`` (the derived
+    read view). Measured on a five-row brief that is 659 B + 630 B + 630 B =
+    1,919 B per row, against 60-82 B of actual content.
+
+    The recall envelope keeps ``system_metadata`` — the documented C25 read
+    surface, and the merged view that is also correct for pre-C25 rows — and
+    drops the two copies inside ``metadata``. This is a READ projection only:
+    the stored JSONB is untouched, the same values are in the same response
+    under ``system_metadata``, and ``GET /memories/{id}`` still returns the raw
+    bag. C25 declared the ``metadata`` mirror a one-release measure (#967,
+    2026-08-25) and ``MemoryOut.metadata`` already documents reading platform
+    keys from it as deprecated; fifteen minor releases later, the recall read
+    path stops paying for it.
+
+    Deliberately scoped to the recall envelope rather than to
+    ``_memory_to_out``: the WRITE response is where a caller polls
+    ``metadata.embedding_pending`` (``plugin/tools.json``, ``docs/self-hosting.md``
+    both document that read), and nothing about this finding justifies touching
+    it.
+    """
+    return [
+        {**dumped, "metadata": strip_platform_metadata(dumped.get("metadata"))}
+        for dumped in (m.model_dump(mode="json") for m in memories)
+    ]
+
+
+def _row_keys(rows: list[dict], *, items_alias: bool) -> dict:
+    """The result-list keys of a recall envelope, with or without the C4 alias.
+
+    ax-0917-h-03. ``items`` aliases ``memories`` so consumers that pattern-match
+    on /search's shape don't silently get zero results when hitting /recall
+    (C4, #262). The Python list is shared in memory, but JSON serialises it
+    TWICE — measured at 49.6% of a five-row brief and 49.9% of a twenty-row one,
+    i.e. half of every recall payload buys a key that no first-party consumer
+    reads first (both SDKs read ``memories`` and fall back to ``items``).
+
+    So it becomes a choice instead of a tax. ``items_alias`` defaults to True
+    because ``RecallResponse.items`` is in the published OpenAPI schema and
+    ``docs/public-api-stability.md`` makes REST response shapes part of the
+    SemVer contract — flipping that default is a MAJOR-version change, not a
+    perf patch. Callers that know they read ``memories`` (the MCP brief, and any
+    REST caller sending ``items_alias: false``) stop paying for it today.
+    """
+    return {"memories": rows, "items": rows} if items_alias else {"memories": rows}
 
 
 async def summarize_memories(
@@ -144,6 +204,7 @@ async def summarize_memories(
     diagnostic_ctx: dict | None = None,
     top_k: int = DEFAULT_SEARCH_TOP_K,
     t0: float | None = None,
+    items_alias: bool = True,
 ) -> dict:
     """LLM-only summarization step. No DB access.
 
@@ -158,6 +219,10 @@ async def summarize_memories(
     surrounding handler — passing it preserves the original "recall_ms
     measures end-to-end from auth-pass" semantics. Omitted callers get
     a fresh checkpoint that only times the summary itself.
+
+    ``items_alias`` controls the C4 ``items`` key; see ``_row_keys``. It
+    defaults to True so the REST response shape is unchanged, and the rows
+    themselves always carry one metadata location (see ``_dump_rows``).
     """
     if t0 is None:
         t0 = time.perf_counter()
@@ -168,12 +233,10 @@ async def summarize_memories(
             "query": query,
             "summary": "No relevant context found.",
             "memory_count": 0,
-            # C4 — ``items`` aliases ``memories`` so consumers that
-            # pattern-match on /search's shape don't silently get zero
-            # results when hitting /recall instead. Both keys point at
-            # the same list (here trivially empty).
-            "memories": [],
-            "items": [],
+            # C4 / ax-0917-h-03 — see ``_row_keys``. Nothing to duplicate on
+            # this branch, but the shape has to agree with the other two or a
+            # consumer's key check flips on an empty result set.
+            **_row_keys([], items_alias=items_alias),
             "recall_ms": int((time.perf_counter() - t0) * 1000),
         }
         if diagnostic:
@@ -185,6 +248,14 @@ async def summarize_memories(
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
                 "top_k_used": top_k,
                 "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
+                # CAURA-722 — this block already reports
+                # ``retrieval_strategy``, which is the field that reads as
+                # "entity retrieval did nothing" whenever the ENTITY_LOOKUP
+                # short-circuit did not fire. Surfacing these two beside it is
+                # what makes that reading falsifiable. Documented on
+                # ``SearchDiagnostic``; same ``diagnostic_ctx`` keys.
+                "entity_matches": diagnostic_ctx.get("entity_matches"),
+                "entity_match_declined": diagnostic_ctx.get("entity_match_declined", False),
                 "search_params": {
                     k: (float(v) if isinstance(v, (int, float)) else v)
                     for k, v in diagnostic_ctx.get("search_params", {}).items()
@@ -206,16 +277,12 @@ async def summarize_memories(
     provider = config.recall_provider
 
     if not config.recall_enabled:
-        # C4 — materialise once; alias under both ``memories`` and
-        # ``items`` keys so consumers built against /search's shape see
-        # the same list.
-        _memories_dumps = [m.model_dump(mode="json") for m in memories]
+        _memories_dumps = _dump_rows(memories)
         resp = {
             "query": query,
             "summary": "Recall summarization is disabled.",
             "memory_count": len(memories),
-            "memories": _memories_dumps,
-            "items": _memories_dumps,
+            **_row_keys(_memories_dumps, items_alias=items_alias),
             "recall_ms": int((time.perf_counter() - t0) * 1000),
         }
         if diagnostic:
@@ -227,6 +294,14 @@ async def summarize_memories(
                 "all_candidates": diagnostic_ctx.get("all_candidates", []),
                 "top_k_used": top_k,
                 "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
+                # CAURA-722 — this block already reports
+                # ``retrieval_strategy``, which is the field that reads as
+                # "entity retrieval did nothing" whenever the ENTITY_LOOKUP
+                # short-circuit did not fire. Surfacing these two beside it is
+                # what makes that reading falsifiable. Documented on
+                # ``SearchDiagnostic``; same ``diagnostic_ctx`` keys.
+                "entity_matches": diagnostic_ctx.get("entity_matches"),
+                "entity_match_declined": diagnostic_ctx.get("entity_match_declined", False),
                 "search_params": {
                     k: (float(v) if isinstance(v, (int, float)) else v)
                     for k, v in diagnostic_ctx.get("search_params", {}).items()
@@ -300,14 +375,12 @@ async def summarize_memories(
 
     recall_ms = int((time.perf_counter() - t0) * 1000)
 
-    # C4 — materialise once; alias under both ``memories`` and ``items``.
-    _memories_dumps = [m.model_dump(mode="json") for m in memories]
+    _memories_dumps = _dump_rows(memories)
     result = {
         "query": query,
         "summary": summary,
         "memory_count": len(memories),
-        "memories": _memories_dumps,
-        "items": _memories_dumps,
+        **_row_keys(_memories_dumps, items_alias=items_alias),
         "recall_ms": recall_ms,
     }
 
@@ -322,6 +395,9 @@ async def summarize_memories(
             "all_candidates": diagnostic_ctx.get("all_candidates", []),
             "top_k_used": top_k,
             "retrieval_strategy": diagnostic_ctx.get("retrieval_strategy"),
+            # CAURA-722 — see SearchDiagnostic for what the pair means.
+            "entity_matches": diagnostic_ctx.get("entity_matches"),
+            "entity_match_declined": diagnostic_ctx.get("entity_match_declined", False),
             "search_params": {
                 k: (float(v) if isinstance(v, (int, float)) else v)
                 for k, v in diagnostic_ctx.get("search_params", {}).items()
@@ -344,6 +420,7 @@ async def recall(
     diagnostic: bool = False,
     readable_tenant_ids: list[str] | None = None,
     min_similarity: float | None = None,
+    items_alias: bool = True,
 ) -> dict:
     """Search memories and synthesize a context summary.
 
@@ -352,7 +429,9 @@ async def recall(
     ``memories`` and ``items`` both reference the same list — the ``items``
     alias was added by C4 so consumers built against ``/search``'s
     response shape (which keys on ``items``) don't silently get zero
-    results when hitting ``/recall``.
+    results when hitting ``/recall``. Pass ``items_alias=False`` to drop it;
+    that halves the payload (ax-0917-h-03) and is safe for any consumer that
+    reads ``memories``, which both first-party SDKs do.
 
     Thin wrapper over ``search_memories`` + ``summarize_memories``. MCP
     tool callers that already hold the search results and tenant config
@@ -395,4 +474,5 @@ async def recall(
         diagnostic_ctx=diagnostic_ctx,
         top_k=top_k,
         t0=t0,
+        items_alias=items_alias,
     )

@@ -35,9 +35,15 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.errors import (
+    AUTH_CROSS_TENANT_REQUIRED,
+    coded_detail,
+)
 from core_api.services.agent_digest import run_agent_digest
+from core_api.services.agent_service import lookup_agent
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
 from core_api.services.report_corpus import (
@@ -238,7 +244,9 @@ async def get_report(
     if org_mode and not (auth.is_admin or auth.is_cross_tenant_read):
         raise HTTPException(
             status_code=403,
-            detail="scope='org' requires a cross-tenant read credential.",
+            detail=coded_detail(
+                AUTH_CROSS_TENANT_REQUIRED, "scope='org' requires a cross-tenant read credential."
+            ),
         )
     # The internal admin credential (the enterprise org-report proxy) may pass an
     # explicit tenant set — the proxy has already org-admin-gated the caller and
@@ -259,7 +267,7 @@ async def get_report(
     # breakdown's own visibility scoping excludes ``scope_agent`` when no agent
     # is set). This avoids 403-ing a logged-in human on the unregistered default
     # agent id.
-    asserted_agent = auth.agent_id or agent_id
+    asserted_agent = auth.effective_agent_id(agent_id)
     caller_agent_id: str | None = None
     if asserted_agent:
         caller_agent_id = await resolve_caller_and_gate(
@@ -272,7 +280,7 @@ async def get_report(
 
     # Caller's agent row → fleet (data scope) + belonging (audience target).
     sc = get_storage_client()
-    caller = (await sc.get_agent(caller_agent_id, tenant_id) or {}) if caller_agent_id else {}
+    caller = (await lookup_agent(tenant_id, caller_agent_id) or {}) if caller_agent_id else {}
     caller_fleet = caller.get("fleet_id")
     belonging_type = caller.get("belonging_type") or "service"
     owner_ref = caller.get("owner_ref")
@@ -683,6 +691,8 @@ async def get_agent_activity_digest(
     ``meta.generated_at: null`` when no run exists yet, not a 404.
     """
     auth.enforce_cross_tenant_read()
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     if period not in _PERIOD_DAYS:
         raise HTTPException(status_code=422, detail=f"Invalid period '{period}'. Use 'day' or 'week'.")
     if scope not in ("own", "org"):

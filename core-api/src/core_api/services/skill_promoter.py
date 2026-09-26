@@ -263,6 +263,11 @@ async def promote_pending_candidates(
     # ``ORDER BY (data->>'created_at') ASC`` ordering; fleet scoping uses
     # the top-level ``fleet_id`` column (what storage writes + indexes
     # under), applied storage-side only when ``fleet_id`` is non-None.
+    # 09/02 L-33: read=False — the PRIMARY. The forge cron mines candidates and
+    # then calls this in the SAME tick, so the rows being queried were written
+    # moments ago. On the replica they may not have arrived yet, and the query
+    # returns a short list rather than an error — so promotion is quietly
+    # deferred to the next tick with nothing logged to say why.
     rows = await sc.query_documents(
         {
             "tenant_id": tenant_id,
@@ -272,7 +277,8 @@ async def promote_pending_candidates(
             "order_by": "created_at",
             "order": "asc",
             "limit": limit,
-        }
+        },
+        read=False,
     )
 
     attempts: list[PromotionAttempt] = []

@@ -133,6 +133,51 @@ async def upsert_entity(
     )
 
 
+async def find_entity_by_exact_name(
+    *,
+    tenant_id: str,
+    canonical_name: str,
+    fleet_id: str | None = None,
+    entity_type: str | None = None,
+) -> UUID | None:
+    """Resolve a name to an EXISTING entity, or None. Never creates.
+
+    The lookup-only counterpart to ``upsert_entity``'s Phase 1, split out
+    because one caller needs the resolution WITHOUT the fallback create:
+    ``EmitMemoryTriple``'s proper-noun subject path. For an identifier-shaped
+    subject ("TOKEN-XYZ") creating the row on a miss is safe, because the
+    string itself is the canonical name and entity extraction would later
+    emit the same one. For a proper noun ("Alice", "Atlas") it is not — the
+    name alone does not determine ``entity_type``, so a create here would
+    race the extraction worker's higher-precision row and fragment the
+    entity. Resolving against what already exists keeps the precision of
+    that worker while still filling the subject column on repeat mentions.
+
+    Returns the id rather than an ``EntityOut``: the only caller needs the
+    foreign key, and returning less keeps this from drifting into a second
+    read path for entity content.
+    """
+    sc = get_storage_client()
+    row = await sc.find_exact_entity(
+        tenant_id=tenant_id,
+        name=canonical_name,
+        fleet_id=fleet_id,
+        entity_type=entity_type,
+    )
+    if not row:
+        return None
+    raw = row.get("id")
+    if not raw:
+        return None
+    try:
+        return UUID(str(raw))
+    except (ValueError, AttributeError, TypeError):
+        # A malformed id from storage must not break the write pipeline;
+        # the caller treats None as "unresolved" and skips the triple.
+        logger.warning("find_entity_by_exact_name: unparseable entity id %r", raw)
+        return None
+
+
 async def filter_relations_by_evidence_visibility(
     relations: list[dict],
     *,

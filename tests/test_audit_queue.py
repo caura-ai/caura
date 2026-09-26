@@ -324,6 +324,7 @@ async def test_chunk_failure_does_not_drop_other_chunks() -> None:
     )
     assert q.flushed_count == 4, f"chunks 1+3 flushed = 4 events; got {q.flushed_count}"
     assert q.failed_count == 2, f"chunk 2 failed = 2 events; got {q.failed_count}"
+    assert q.interrupted_count == 0, "an ordinary failure is not an interruption"
 
 
 @pytest.mark.asyncio
@@ -485,3 +486,34 @@ async def test_log_action_critical_sync_failure_does_not_propagate() -> None:
             critical=True,
         )
     fake_storage.create_audit_log.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_chunk_is_not_credited_as_flushed() -> None:
+    """Cancellation says nothing about whether storage committed the chunk.
+
+    OSS 08/14 L-11: it used to be recorded as a full flush. The handler
+    defaulted the failed count to 0 and then credited ``len(chunk) - failed``
+    to ``_flushed_count``, so an interrupted drain of the AUDIT path reported
+    itself as a clean one. Avoiding a spurious failure-spike was right; doing
+    it by crediting the success bucket was not.
+    """
+
+    async def flush(events: list[dict]) -> None:
+        raise asyncio.CancelledError()
+
+    q = AuditEventQueue(
+        max_queue_size=100,
+        flush_threshold=100,
+        flush_interval_seconds=10.0,
+        flush_callable=flush,
+    )
+    for i in range(3):
+        q.enqueue({"action": f"act-{i}", "tenant_id": "t-1"})
+
+    with pytest.raises(asyncio.CancelledError):
+        await q._drain_and_flush()
+
+    assert q.flushed_count == 0, "a cancelled chunk must not be credited as flushed"
+    assert q.failed_count == 0, "nor spiked as a failure — nothing raised from storage"
+    assert q.interrupted_count == 3, "its disposition is unknown, and recorded as such"

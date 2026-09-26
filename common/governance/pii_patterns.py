@@ -184,11 +184,48 @@ _RULES: tuple[_Rule, ...] = (
         validator=_iban_mod97_ok,
     ),
     # ── National IDs (HIGH) ──
-    # US SSN (seed from Sentinel) — excludes the known-invalid ranges.
+    # US SSN — split into two rules (09/02 M-03). The single rule this replaces
+    # was ``\d{3}[- ]?\d{2}[- ]?\d{4}``, whose two separators were OPTIONAL and
+    # INDEPENDENT. That made it match three things an SSN is not:
+    #
+    #   * a bare nine-digit number — every invoice no., order id and pid
+    #     ("Invoice 100234567", "pid 123456789");
+    #   * ZIP+4 — "12345-6789" passes because the first separator is absent and
+    #     the second present, a shape no SSN has;
+    #   * any nine digits split 5/4 by a dash anywhere in running text.
+    #
+    # That is not a cosmetic over-match. The drop policy 422s a legitimate write
+    # and the mask policy REWRITES STORED CONTENT, so a false positive here
+    # silently corrupts a memory that merely mentioned an order number.
+    #
+    # There is no checksum for an SSN (unlike Luhn for cards or mod-97 for
+    # IBAN), so format and context are the only signals available.
+    #
+    # 1. Separated form — distinctive enough to stand alone. The backreference
+    #    ``\1`` requires the SAME separator in both positions, which is what
+    #    kills ZIP+4 and 5/4 splits; a real SSN is written "123-45-6789" or
+    #    "123 45 6789", never "12345-6789".
     _Rule(
         PIICategory.NATIONAL_ID,
         Severity.HIGH,
-        _c(r"\b(?!000|666|9\d\d)\d{3}[- ]?(?!00)\d{2}[- ]?(?!0000)\d{4}\b"),
+        _c(r"\b(?!000|666|9\d\d)\d{3}([- ])(?!00)\d{2}\1(?!0000)\d{4}\b"),
+    ),
+    # 2. Bare nine-digit form — matched ONLY next to a cue that says what the
+    #    number is. Nine bare digits are genuinely ambiguous to a reader too,
+    #    so requiring the cue is not a weakened rule, it is the only honest one.
+    #    ``group=1`` redacts just the digits and leaves the cue word intact, so
+    #    a masked memory still reads "SSN <redacted>" rather than losing the
+    #    sentence — the same reason the ``key=<value>`` rules use it.
+    _Rule(
+        PIICategory.NATIONAL_ID,
+        Severity.HIGH,
+        _c(
+            r"\b(?:ssn|s\.s\.n\.|social[\s-]?security(?:\s+(?:number|no\.?|#))?"
+            r"|soc\.?\s?sec\.?)\b[^0-9\n]{0,16}"
+            r"((?!000|666|9\d\d)\d{3}(?!00)\d{2}(?!0000)\d{4})\b",
+            re.IGNORECASE,
+        ),
+        group=1,
     ),
     # UK National Insurance number
     _Rule(

@@ -38,6 +38,7 @@ from typing import Literal
 from fastapi import HTTPException
 
 from core_api.config import settings
+from core_api.request_phase import phase
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +120,8 @@ async def per_tenant_slot(
     sem = _get_semaphore(scope, tenant_id)
     try:
         async with asyncio.timeout(settings.per_tenant_acquire_timeout_seconds):
-            await sem.acquire()
+            with phase(f"slot_acquire.{scope}"):
+                await sem.acquire()
     except TimeoutError:
         logger.info(
             "per-tenant concurrency cap reached",
@@ -177,7 +179,12 @@ async def per_tenant_storage_slot(
             "per-tenant storage slot saturated; queuing",
             extra={"scope": scope, "tenant_id": tenant_id, "cap": _cap_for(scope)},
         )
-    await sem.acquire()
+    # DEBUG is off in prod, so the log above is not evidence there. This
+    # queue is unbounded by design and explicitly relies on the request
+    # budget as its only cap — which makes it a prime candidate for eating
+    # that budget, and the one hop that had no signal at all when it did.
+    with phase(f"slot_acquire.{scope}"):
+        await sem.acquire()
     try:
         yield
     finally:

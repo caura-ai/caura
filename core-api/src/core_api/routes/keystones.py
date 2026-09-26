@@ -50,13 +50,20 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from core_api import openapi_responses as _oar
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.config import settings as app_settings
-from core_api.schemas import STRICT_WRITE_BODY
+from core_api.constants import KEYSTONES_EMPTY_HINT
+from core_api.errors import (
+    AUTH_AGENT_NOT_REGISTERED,
+    AUTH_AGENT_TRUST_TOO_LOW,
+    coded_detail,
+)
+from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.audit_service import log_action
 from core_api.services.trust_service import parse_trust_error
 from core_api.services.trust_service import require_trust as _require_trust
@@ -74,14 +81,13 @@ router = APIRouter(prefix="/keystones", tags=["Keystones"])
 # ── Schemas ──
 
 
-class KeystoneSetRequest(BaseModel):
+class KeystoneSetRequest(TenantScopedBody):
     """Payload shape mirrors the storage-api validator one-for-one so we
     don't need to re-do the scope/weight/fleet shape checks here — the
     storage 422 propagates through."""
 
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     agent_id: str | None = None
     # Slug shape mirrors ``caura_doc`` collection=skills (filesystem-safe
@@ -143,15 +149,19 @@ async def _enforce_author_trust(
     if not_found:
         raise HTTPException(
             status_code=403,
-            detail=(
+            detail=coded_detail(
+                AUTH_AGENT_NOT_REGISTERED,
                 f"Agent '{agent_id}' has no registered agent row, so its keystone-author "
                 "trust can't be verified. Register it (write one memory as that agent, then "
                 "promote its trust), or call with X-Agent-ID / an agent-scoped credential for "
-                "an agent at trust ≥ 2."
+                "an agent at trust ≥ 2.",
             ),
         )
     if terr:
-        raise HTTPException(status_code=403, detail=parse_trust_error(terr) + hint)
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr) + hint),
+        )
 
 
 def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple[str, bool]:
@@ -186,18 +196,23 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
     mismatch rejection + the verified-floor bump) than that resolver provides.
     """
     verified_id = getattr(auth, "agent_id", None)
-    if verified_id and x_agent_id and verified_id != x_agent_id:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "X-Agent-ID header does not match authenticated identity. "
-                "Refusing to act on behalf of a different agent."
-            ),
-        )
+    # The self plane, asked of a header rather than a body or query parameter:
+    # ``AuthContext.enforce_self_agent`` owns that question for the whole REST
+    # surface. ``or None`` keeps an empty ``X-Agent-ID:`` an omission here — the
+    # helper refuses an explicit ``""`` and this site has always let it fall
+    # through to the unverified-identity path below.
+    auth.enforce_self_agent(
+        x_agent_id or None,
+        field="X-Agent-ID",
+        message=(
+            "X-Agent-ID header does not match authenticated identity. "
+            "Refusing to act on behalf of a different agent."
+        ),
+    )
     if verified_id:
-        return verified_id, True
+        return canonical_service_agent_id(verified_id), True
     if x_agent_id:
-        return x_agent_id, False
+        return canonical_service_agent_id(x_agent_id), False
     return "rest-admin", False
 
 
@@ -281,6 +296,8 @@ async def list_keystones(
     tenant for scope clarity.
     """
     auth.enforce_readable_tenant(tenant_id)
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     sc = get_storage_client()
     # Drop ``agent_id`` when there's no ``fleet_id`` — agent-scope rows
     # are keyed on the (fleet_id, agent_id) pair, so an agent-only filter
@@ -300,7 +317,15 @@ async def list_keystones(
     # array remains the default response shape — existing consumers (plugin
     # session-start fetch included) see zero change unless they ask.
     if envelope:
-        return {"count": len(rows), "items": rows}
+        body: dict = {"count": len(rows), "items": rows}
+        if not rows:
+            # F9 — parity with the MCP surface, which is where agents actually
+            # read this. ENVELOPE ONLY: the bare array is still the default
+            # response shape, and adding a key to it would change the wire
+            # contract for every existing consumer — the precise thing C30/D1
+            # opted out of.
+            body["hint"] = KEYSTONES_EMPTY_HINT
+        return body
     return rows
 
 
@@ -321,6 +346,8 @@ async def upsert_keystone(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     caller_agent_id, caller_verified = _resolve_caller_identity(auth, x_agent_id)
+    if body.agent_id is not None:
+        body.agent_id = canonical_service_agent_id(body.agent_id)
     standalone_admin = _is_standalone_admin(auth, x_agent_id)
 
     # Early registration check — anti-probing parity with delete. Without
@@ -474,15 +501,19 @@ async def delete_keystone(
         if not_found:
             raise HTTPException(
                 status_code=403,
-                detail=(
+                detail=coded_detail(
+                    AUTH_AGENT_NOT_REGISTERED,
                     f"Agent '{caller_agent_id}' has no registered agent row, so its "
                     "keystone-author trust can't be verified. Register it (write one memory "
                     "as that agent, then promote its trust), or call with X-Agent-ID / an "
-                    "agent-scoped credential for an agent at trust ≥ 2."
+                    "agent-scoped credential for an agent at trust ≥ 2.",
                 ),
             )
         if terr:
-            raise HTTPException(status_code=403, detail=parse_trust_error(terr))
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(AUTH_AGENT_TRUST_TOO_LOW, parse_trust_error(terr)),
+            )
 
     sc = get_storage_client()
     # Look up the rule before computing the scope-derived floor — the
@@ -505,7 +536,10 @@ async def delete_keystone(
         if trust < min_level:
             raise HTTPException(
                 status_code=403,
-                detail=(f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}."),
+                detail=coded_detail(
+                    AUTH_AGENT_TRUST_TOO_LOW,
+                    f"Agent '{caller_agent_id}' (trust_level={trust}) < required {min_level}.",
+                ),
             )
 
     # TOCTOU narrowing: re-fetch the stored row immediately before the

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import INSIGHTS_FOCUS_MODES, VALID_SCOPES
-from core_api.schemas import STRICT_WRITE_BODY
+from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.audit_service import log_action
 from core_api.services.caller_identity import resolve_caller_and_gate
 from core_api.services.usage_service import check_and_increment_by_tenant as check_and_increment
@@ -19,10 +19,9 @@ router = APIRouter(tags=["Insights"])
 # ── Schemas ──
 
 
-class InsightsRequest(BaseModel):
+class InsightsRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     focus: str = Field(
         description=(
             "Analysis focus: 'contradictions', 'failures', 'stale', 'divergence', 'patterns', or 'discover'."

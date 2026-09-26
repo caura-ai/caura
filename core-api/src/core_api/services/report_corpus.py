@@ -21,7 +21,7 @@ PERIOD_DAYS: dict[str, int] = {"day": 1, "week": 7}
 NON_DURABLE_TYPES = ("episode",)
 # Reserved / automated write-path identities that are never a real agent: the
 # legacy unattributed ``main`` firehose, and ``__health_check__`` (a monitoring
-# probe that writes ~200 ``memclaw-smoke-*`` facts/day). These must appear in a
+# probe that writes roughly 200 smoke-test facts per day). These must appear in a
 # report neither as a ROW nor as a rollup PARENT (see :func:`resolve_parent`) —
 # otherwise a real agent's work gets mislabeled under a reserved id. Note
 # ``routes/reports.py`` also passes this tuple to storage as a server-side
@@ -45,7 +45,7 @@ NON_COHESIVE_TITLE_REGEX = (
     r"(heartbeat|health[- ]?check|healthz|healthy|watchdog|gpu.?health|no.?change|"
     r"auth error|zero auth|0 auth|encrypted|unreadable|no readable|no actionable|"
     r"no usable|no_reply|polled|quickcheck|app-fleet|discovery script|"
-    r"gateway (active|reachable)|cache refresh|memclaw-smoke)"  # legacy-name-floor: floor
+    r"gateway (active|reachable)|cache refresh|(memclaw|caura)-smoke)"  # legacy-name-floor: floor
 )
 _NON_COHESIVE_TITLE_RE = re.compile(NON_COHESIVE_TITLE_REGEX, re.IGNORECASE)
 

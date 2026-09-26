@@ -116,7 +116,7 @@ async def _reserve_report(sc, tenant_id: str, fleet_id: str | None, trigger: str
     Returns ``(report_id, is_new)``. ``is_new=False`` means a run is already in
     flight and this call must not start a second one.
     """
-    running = await sc.find_running_report(tenant_id, fleet_id, report_type="crystallization")
+    running = await sc.find_running_report(tenant_id, fleet_id)
     if running:
         return running.get("id"), False
     report = await sc.create_report(
@@ -125,7 +125,6 @@ async def _reserve_report(sc, tenant_id: str, fleet_id: str | None, trigger: str
             "fleet_id": fleet_id,
             "trigger": trigger,
             "status": "running",
-            "report_type": "crystallization",
         }
     )
     return report.get("id"), True
@@ -209,6 +208,15 @@ async def start_crystallization(
                 {
                     "status": "failed",
                     "completed_at": datetime.now(UTC).isoformat(),
+                    # 09/02 M-38. Storage reads this one with a bare subscript
+                    # (``duration_ms=body["duration_ms"]`` in the PATCH handler)
+                    # while its neighbours use ``.get`` with defaults, so
+                    # omitting it raised KeyError INSIDE the handler that exists
+                    # to un-wedge the report — leaving the row 'running'
+                    # forever, which is the exact failure this block was written
+                    # to prevent. Zero is the honest value: the publish never
+                    # landed, so no run occurred to time.
+                    "duration_ms": 0,
                     "summary": {"error": "could not queue the crystallization run"},
                 },
                 tenant_id=tenant_id,
@@ -291,6 +299,64 @@ async def run_crystallization(
         return report_id
     await _execute_crystallization(sc, report_id, tenant_id, fleet_id, auto_crystallize)
     return report_id
+
+
+async def _type_ii_watermark(sc, tenant_id: str, fleet_id: str | None, report_id) -> str | None:
+    """The previous crystallization run's completion time, or None.
+
+    ``run_shadow`` takes a ``since`` watermark and ``select_candidates`` uses it
+    to skip any subject with nothing new since the last sweep. Nobody passed it,
+    so every nightly run re-asked the LLM about every subject with >=2 live
+    memories — re-paying, in full, for answers about subjects that had not
+    changed since the previous night.
+
+    The watermark has to come from the LAST COMPLETED run, which is why this
+    cannot just read ``get_latest_report``: the current run has ALREADY reserved
+    its own row with ``status="running"`` (see ``_reserve_report``), so the
+    "latest" report is frequently this run itself. Using that would stamp the
+    watermark at now and skip every subject — turning an overspend into a sweep
+    that silently does nothing, which is the worse failure.
+
+    Guards, in order: it must belong to THIS run's fleet; it must not be this
+    run's row; it must be terminal (``completed_at`` set — a crashed 'running'
+    row from a previous attempt has none); and it must be a non-empty string,
+    because ``select_candidates`` compares it to ``created_at`` with ``>`` and a
+    non-string would raise inside the sweep.
+
+    The fleet guard is belt-and-braces with storage, not a substitute for it.
+    ``GET /reports/latest`` filters when it is given a ``fleet_id``, and that is
+    what makes the watermark USEFUL — without it a fleet whose sibling ran more
+    recently would fall through to None and re-scan everything. What it cannot
+    cover is the tenant-wide run, which passes no ``fleet_id`` and so is
+    answered across all fleets on purpose (that route also backs a user-facing
+    "my latest report" with no fleet concept). So the scope check happens here,
+    where the run knows its own scope, in the same safe direction as every
+    other guard.
+
+    Returns None on ANY doubt, and None means "scan everything" — the behaviour
+    this fix exists to reduce. That asymmetry is deliberate: paying twice is a
+    cost bug, skipping a changed subject is a correctness bug, and only one of
+    those is recoverable on the next run.
+    """
+    try:
+        latest = await sc.get_latest_report(tenant_id, fleet_id)
+    except Exception:
+        logger.warning(
+            "type_ii watermark lookup failed for tenant %s; scanning all subjects",
+            tenant_id,
+            exc_info=True,
+        )
+        return None
+    if not isinstance(latest, dict):
+        return None
+    if latest.get("fleet_id") != fleet_id:
+        return None
+    if str(latest.get("id", "")) == str(report_id):
+        return None
+    completed = latest.get("completed_at")
+    if not isinstance(completed, str) or not completed:
+        return None
+    return completed
 
 
 async def _execute_crystallization(
@@ -417,6 +483,7 @@ async def _execute_crystallization(
                     subject_rows,
                     tenant_id,
                     await resolve_config(tenant_id),
+                    since=await _type_ii_watermark(sc, tenant_id, fleet_id, report_id),
                 )
             except Exception:
                 logger.warning("type_ii shadow phase failed for %s", tenant_id, exc_info=True)
@@ -548,7 +615,18 @@ async def _run_crystallization(
 
     # Build clusters from overlapping pairs
     clusters = _build_clusters(dup_pairs)
-    clusters = [c for c in clusters if len(c) >= CRYSTALLIZER_MIN_CLUSTER_SIZE]
+    # A72 — per-tenant, defaulting to the constant. At the default (3) the most
+    # common overlap, a PAIR, is skipped entirely, so two rows saying the same
+    # thing survive every sweep. A tenant that lowers it to 2 closes that and
+    # accepts the cost: admitting pairs multiplies the cluster count, and each
+    # cluster is an LLM re-extraction.
+    # ``getattr`` with the constant as the floor, matching
+    # ``getattr(tenant_config, "merge_near_duplicates", False)`` in
+    # DetectNearDuplicate: a config object that predates this knob — an older
+    # deploy's, or a test double — resolves to today's behaviour instead of
+    # raising.
+    min_cluster = getattr(config, "crystallizer_min_cluster_size", CRYSTALLIZER_MIN_CLUSTER_SIZE)
+    clusters = [c for c in clusters if len(c) >= min_cluster]
     result["clusters_found"] = len(clusters)
 
     if not clusters:
@@ -598,7 +676,9 @@ async def _run_crystallization(
             for mid in cluster_ids
             if mid in memories_by_id and memories_by_id[mid].get("status") in LIVE_MEMORY_STATUSES
         ]
-        if len(cluster_memories) < CRYSTALLIZER_MIN_CLUSTER_SIZE:
+        # Same floor as the filter above — re-checked because the live-status
+        # filter directly above can shrink a cluster below it.
+        if len(cluster_memories) < min_cluster:
             continue
 
         # Call LLM to crystallize
@@ -638,6 +718,12 @@ async def _run_crystallization(
                         status="confirmed",
                         metadata={"crystallized_from": [str(m.get("id")) for m in cluster_memories]},
                     ),
+                    # A62 — a crystallized fact is materialised by the system: an
+                    # LLM re-extraction that merges a cluster into a claim nobody
+                    # stated in those words. ``resolution.resolve`` uses this to
+                    # refuse letting it destructively overturn a fact a user did
+                    # state. Server-set; the flag is not on the wire.
+                    is_inferred=True,
                 )
                 new_ids.append(str(mem_out.id))
             except HTTPException as exc:
@@ -691,12 +777,41 @@ async def _run_crystallization(
         # sweep — same isolation the per-row loop gave us, just at
         # cluster granularity (K HTTPs instead of K x M).
         archived_ids: list[str] = []
-        cluster_ids_to_archive = [
-            {"memory_id": str(mem.get("id")), "status": "archived"} for mem in cluster_memories
-        ]
+        # Archive ONLY if this cluster actually produced a replacement.
+        #
+        # The archive used to be unconditional, which quietly destroyed
+        # knowledge in the exact case the loop above treats as routine. A
+        # crystallized fact is a near-verbatim merge of cluster members that are
+        # >=0.95 similar and STILL ACTIVE at this point, so ``create_memory``'s
+        # dedup gate 409s against a cluster member — the very row the next block
+        # was about to archive. An all-409 cluster therefore ended with every
+        # source archived and nothing crystallized to stand in their place: the
+        # facts left the live corpus and no replacement entered it.
+        #
+        # ``new_ids`` is the right condition, not ``duplicate_facts == 0``: what
+        # licenses the archive is that a replacement EXISTS, not that nothing was
+        # rejected. A cluster that created one fact and skipped two duplicates is
+        # still safe to archive; a cluster that created none never is.
+        if not new_ids:
+            logger.info(
+                "Crystallizer kept %d source(s) live: cluster produced no new memory "
+                "(duplicates=%d failed=%d)",
+                len(cluster_memories),
+                duplicate_facts,
+                failed_facts,
+            )
+            cluster_ids_to_archive = []
+        else:
+            cluster_ids_to_archive = [
+                {"memory_id": str(mem.get("id")), "status": "archived"} for mem in cluster_memories
+            ]
         try:
-            batch_result = await sc.batch_update_status(
-                {"updates": cluster_ids_to_archive}, tenant_id=tenant_id
+            batch_result = (
+                await sc.batch_update_status({"updates": cluster_ids_to_archive}, tenant_id=tenant_id)
+                # No replacement was created, so there is nothing to retire and
+                # no reason to spend a storage round-trip saying so.
+                if cluster_ids_to_archive
+                else {}
             )
             skipped_set = set(batch_result.get("skipped") or [])
             for item in cluster_ids_to_archive:
@@ -853,7 +968,7 @@ async def _check_orphaned_entities(
 ) -> dict:
     """Entities with zero memory_entity_links."""
     sc = get_storage_client()
-    rows = await sc.find_orphaned_entities(tenant_id)
+    rows = await sc.find_orphaned_entities(tenant_id, fleet_id)
     ids = [str(r.get("id")) for r in rows]
     return {
         "count": len(rows),
@@ -865,13 +980,44 @@ async def _check_orphaned_entities(
 async def _check_near_duplicates(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    threshold: float | None = None,
 ) -> dict:
-    """Find near-duplicate memory pairs via batch ANN neighbor queries."""
+    """Find near-duplicate memory pairs via batch ANN neighbor queries.
+
+    Audit oss-0814-m-37 — this loop was the N+1. It fetched a page of
+    candidates as ``(id, embedding)`` and then issued one
+    ``find_neighbors_by_embedding`` POST **per candidate**, awaited in-loop,
+    with that candidate's embedding copied back up in the request body. At
+    ``CRYSTALLIZER_DEDUP_BATCH_SIZE`` = 500 that is 501 serial HTTP round-trips
+    per batch and ~22 MB of vector JSON on the wire (a 1024-dim pgvector is
+    ~22 KB of JSON floats; it travelled down as the candidate and up again as
+    the query). Nothing here ever read ``embedding`` — it was relayed
+    unexamined, because the similarity is pgvector's ``<=>`` on the storage
+    side. Both halves now happen in one statement behind one POST.
+
+    Deliberately unchanged, because the perf half of the finding ships ahead of
+    the parked crystallizer retune (reg-a72): the thresholds, the neighbour
+    fan-out, the pair cap, the pair-key normalisation, the first-write-wins on
+    similarity, and the order pairs are discovered in. Storage returns pairs in
+    the same order the loop visited them — candidate by candidate,
+    nearest-neighbour first — so the cap still bites on exactly the same pairs.
+    """
     sc = get_storage_client()
 
     pairs: dict[tuple[str, str], float] = {}  # (id1, id2) -> similarity
     checked_ids: list[str] = []
     offset = 0
+
+    if threshold is None:
+        # Resolved here rather than passed down, because the hygiene checks are
+        # dispatched through a uniform ``fn(tenant_id, fleet_id)`` loop and
+        # special-casing one of them there would put this knob somewhere nobody
+        # looks for it. The parameter stays for tests.
+        from core_api.services.organization_settings import resolve_config
+
+        cfg = await resolve_config(tenant_id)
+        threshold = getattr(cfg, "crystallizer_dedup_threshold", CRYSTALLIZER_DEDUP_THRESHOLD)
 
     while len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
         batch = await sc.check_near_duplicates(
@@ -880,33 +1026,34 @@ async def _check_near_duplicates(
                 "fleet_id": fleet_id,
                 "batch_size": CRYSTALLIZER_DEDUP_BATCH_SIZE,
                 "offset": offset,
+                # Sent rather than left to the storage defaults so the sweep's
+                # tuning stays in core-api's constants, where reg-a72 will look
+                # for it, instead of being split across two services.
+                # A72 — per-tenant, defaulting to the constant. At 0.95 the
+                # sweep only catches near-verbatim copies, while the composites
+                # that actually crowd recall sit around 0.75-0.90 and pass
+                # underneath it. Lowering the floor is what makes this a
+                # crowding janitor rather than a copy detector — and it is
+                # opt-in because every extra pair the band admits is another
+                # LLM mergeability judgement.
+                "threshold": threshold,
+                "neighbor_limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
             }
         )
-        candidates = batch.get("candidates", [])
-        if not candidates:
+        # Every swept row, not just the ones that turned out to have a
+        # duplicate — this is the stamp set, and the old loop appended here
+        # before it knew whether the candidate had neighbours.
+        candidate_ids = batch.get("candidate_ids", [])
+        if not candidate_ids:
             break
 
-        for cand in candidates:
-            mem_id = cand["id"]
-            embedding = cand["embedding"]
-            checked_ids.append(mem_id)
+        checked_ids.extend(candidate_ids)
 
-            neighbors = await sc.find_neighbors_by_embedding(
-                {
-                    "tenant_id": tenant_id,
-                    "fleet_id": fleet_id,
-                    "query_embedding": embedding,
-                    "exclude_id": mem_id,
-                    "threshold": CRYSTALLIZER_DEDUP_THRESHOLD,
-                    "limit": CRYSTALLIZER_DEDUP_NEIGHBORS,
-                }
-            )
-
-            for nb in neighbors:
-                id1, id2 = sorted([mem_id, nb["id"]])
-                pair_key = (id1, id2)
-                if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
-                    pairs[pair_key] = nb["similarity"]
+        for pair in batch.get("pairs", []):
+            id1, id2 = sorted([pair["id"], pair["neighbor_id"]])
+            pair_key = (id1, id2)
+            if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
+                pairs[pair_key] = pair["similarity"]
 
         offset += CRYSTALLIZER_DEDUP_BATCH_SIZE
 
@@ -956,7 +1103,7 @@ async def _check_expired_still_active(
     had something to report, and nothing at all when it didn't.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id)
+    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
     expired = candidates.get("expired_still_active", [])
     return {"count": len(expired), "affected_ids": [str(r) for r in expired][:MAX_AFFECTED_IDS]}
 
@@ -972,7 +1119,7 @@ async def _check_stale_memories(
     Values are bare UUID strings — see ``_check_expired_still_active``.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id)
+    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
     stale = candidates.get("stale_low_weight", [])
     return {"count": len(stale), "affected_ids": [str(r) for r in stale][:MAX_AFFECTED_IDS]}
 
@@ -989,7 +1136,7 @@ async def _check_short_content(
     ``_check_expired_still_active``.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id)
+    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
     short = candidates.get("short_content", [])
     return {"count": len(short), "affected_ids": [str(r) for r in short][:MAX_AFFECTED_IDS]}
 
@@ -1000,7 +1147,7 @@ async def _check_broken_entity_links(
 ) -> dict:
     """Entity links pointing to soft-deleted memories."""
     sc = get_storage_client()
-    rows = await sc.find_broken_entity_links(tenant_id)
+    rows = await sc.find_broken_entity_links(tenant_id, fleet_id)
     ids = [str(r.get("id")) for r in rows]
     return {"count": len(rows), "affected_ids": list(set(ids))[:MAX_AFFECTED_IDS]}
 

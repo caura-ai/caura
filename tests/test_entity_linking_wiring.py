@@ -14,6 +14,7 @@ import pytest
 from core_api.services.entity_extraction_worker import (
     process_entity_extraction,
 )
+from tests.conftest import close_scheduled_coro
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ async def test_extraction_triggers_cross_links_when_enabled(
 
     memory_id = uuid.uuid4()
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=memory_id,
             tenant_id="test-tenant",
@@ -179,7 +180,7 @@ async def test_extraction_skips_cross_links_when_disabled(
 
     memory_id = uuid.uuid4()
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=memory_id,
             tenant_id="test-tenant",
@@ -260,7 +261,7 @@ async def test_extraction_cross_link_failure_is_nonfatal(
 
     memory_id = uuid.uuid4()
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         # Should NOT raise — cross-link failure is non-fatal
         await process_entity_extraction(
             memory_id=memory_id,
@@ -362,7 +363,7 @@ async def test_a_memory_dropped_during_extraction_gets_no_entities(
     sc = _graph_sc(deleted_at="2026-09-05T00:00:00Z")
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -402,7 +403,7 @@ async def test_the_liveness_check_reads_the_writer(
     sc = _graph_sc(deleted_at=None)
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -451,7 +452,7 @@ async def test_a_drop_landing_during_the_writes_purges_what_was_just_written(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -493,7 +494,7 @@ async def test_a_row_still_live_after_the_writes_is_not_purged(
     sc = _graph_sc(deleted_at=None)
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -556,7 +557,7 @@ async def test_a_detected_drop_stops_the_writes_that_come_after_the_purge(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -609,7 +610,7 @@ async def test_a_live_row_still_gets_its_relations_written(
     sc = _graph_sc(deleted_at=None)
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -676,7 +677,7 @@ async def test_a_drop_landing_after_the_relation_write_is_still_purged(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -744,7 +745,7 @@ async def test_a_transient_liveness_read_failure_does_not_discard_the_audit_work
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -812,11 +813,24 @@ async def test_a_crash_after_the_writes_still_purges_a_dropped_row(
         ]
     )
     mock_sc_factory.return_value = sc
-    # Raised after the links are committed and before the audit call, so the
-    # function leaves with graph rows written and no normal-path check run.
-    mock_upsert_relation.side_effect = RuntimeError("storage went away mid-write")
+    # The raiser is the AUDIT CALL, not the relation upsert.
+    #
+    # This test used a failing ``upsert_relation`` as its vehicle for "leaves by
+    # raising". That stopped being one: relation upserts are now guarded per
+    # relation, because an unguarded failure there also skipped the predicate
+    # write-back and the ``Trigger.ENTITY`` fire — silently removing the memory
+    # from the deterministic contradiction path for good.
+    #
+    # The H-02 guarantee this test exists for is UNCHANGED, and so is its
+    # subject: anything between the link upsert and the final check that raises
+    # must still re-check and purge. ``log_action`` is such a thing — the
+    # docstring above already names it — so the test now uses it and keeps
+    # asserting the same property. A relation failure takes the FINISHING path
+    # instead, whose own check is covered by
+    # ``test_a_guarded_relation_failure_still_reaches_the_final_purge_check``.
+    mock_log.side_effect = RuntimeError("storage went away mid-write")
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         # Extraction is fire-and-forget; swallowing is the established contract
         # and not what this test is about.
         await process_entity_extraction(
@@ -829,11 +843,76 @@ async def test_a_crash_after_the_writes_still_purges_a_dropped_row(
         )
 
     # It really did leave by raising — otherwise this passes for the wrong reason.
-    mock_log.assert_not_awaited()
+    mock_log.assert_awaited()
     assert sc.get_memory.await_count == 3, (
         "the except path never asked whether the memory survived"
     )
     sc.purge_entity_artifacts.assert_awaited_once()
+
+
+@patch(
+    "core_api.services.entity_extraction_worker._discover_cross_links_for_memory",
+    new_callable=AsyncMock,
+)
+@patch(
+    "core_api.services.entity_extraction_worker.upsert_relation", new_callable=AsyncMock
+)
+@patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
+@patch(
+    "core_api.services.entity_extraction_worker.get_embedding", new_callable=AsyncMock
+)
+@patch("core_api.services.entity_extraction_worker.get_storage_client")
+@patch(
+    "core_api.services.entity_extraction_worker.extract_entities_from_content",
+    new_callable=AsyncMock,
+)
+@patch("core_api.services.organization_settings.resolve_config", new_callable=AsyncMock)
+async def test_a_guarded_relation_failure_still_reaches_the_final_purge_check(
+    mock_resolve,
+    mock_extract,
+    mock_sc_factory,
+    mock_embed,
+    mock_log,
+    mock_upsert_relation,
+    mock_discover,
+):
+    """The other half of the H-02 guarantee, after the relation guard.
+
+    A failing relation no longer leaves by raising, so it no longer reaches the
+    ``except`` path's check. It must therefore reach the FINISHING path's check
+    instead — otherwise guarding the upsert would have quietly opened the leak
+    the sibling test above exists to close.
+    """
+    mock_resolve.return_value = _fake_config()
+    mock_extract.return_value = _graph_with_relation()
+    mock_embed.return_value = None
+    sc = _graph_sc(deleted_at=None)
+    sc.get_memory = AsyncMock(
+        side_effect=[
+            {"id": "m", "deleted_at": None},  # pre-write check: live
+            {"id": "m", "deleted_at": None},  # post-link check: still live
+            {"id": "m", "deleted_at": "2026-09-06T00:00:00Z"},  # final check: dropped
+        ]
+    )
+    mock_sc_factory.return_value = sc
+    mock_upsert_relation.side_effect = RuntimeError("storage 500 on one relation")
+
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
+        await process_entity_extraction(
+            memory_id=uuid.uuid4(),
+            tenant_id="test-tenant",
+            fleet_id=None,
+            agent_id="test-agent",
+            content="Alice loves coffee",
+            memory_type="episodic",
+        )
+
+    # It did NOT leave by raising: the audit call was reached.
+    mock_log.assert_awaited()
+    assert sc.get_memory.await_count == 3, (
+        "the finishing path never asked whether the memory survived"
+    )
+    sc.purge_entity_artifacts.assert_awaited()
 
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)
@@ -867,7 +946,7 @@ async def test_a_crash_before_any_write_costs_no_extra_liveness_read(
     sc.bulk_resolve_entities = AsyncMock(side_effect=RuntimeError("resolve failed"))
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -904,7 +983,7 @@ async def test_a_crash_before_the_storage_client_exists_does_not_raise(
     mock_resolve.return_value = _fake_config()
     mock_extract.side_effect = RuntimeError("extraction provider is down")
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -958,7 +1037,7 @@ async def test_an_entity_upsert_that_raises_is_still_treated_as_maybe_written(
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -1018,7 +1097,7 @@ async def test_cross_link_discovery_alone_still_owes_the_memory_a_liveness_check
     )
     mock_sc_factory.return_value = sc
 
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -1091,7 +1170,7 @@ async def test_an_unreadable_purge_response_does_not_escape_the_except_handler(
     mock_upsert_relation.side_effect = RuntimeError("storage went away mid-write")
 
     # The assertion IS that this returns rather than raising.
-    with patch("core_api.tasks.track_task"):
+    with patch("core_api.tasks.track_task", side_effect=close_scheduled_coro):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",
@@ -1152,7 +1231,10 @@ async def test_entities_committed_without_their_links_are_named_in_the_log(
     )
     mock_sc_factory.return_value = sc
 
-    with caplog.at_level("ERROR"), patch("core_api.tasks.track_task"):
+    with (
+        caplog.at_level("ERROR"),
+        patch("core_api.tasks.track_task", side_effect=close_scheduled_coro),
+    ):
         await process_entity_extraction(
             memory_id=uuid.uuid4(),
             tenant_id="test-tenant",

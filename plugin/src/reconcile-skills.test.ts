@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 // Set env BEFORE importing reconcile-skills.js — module reads from
 // process.env at import time via env.ts.
@@ -57,7 +57,7 @@ let mockCatalog: MockCatalogEntry[];
  * spurious update on every tick).
  */
 function withSynthFrontmatter(name: string, description: string, body: string): string {
-  return `---\nname: ${name}\ndescription: "${description}"\n---\n\n${body}`;
+  return `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\n---\n\n${body}`;
 }
 
 function installMockFetch(): void {
@@ -164,7 +164,7 @@ describe("reconcileSkills", () => {
     ]);
     // Frontmatter synthesised from data.{name, description}; body preserved.
     const written = readSkill("git-rebase-safety");
-    assert.match(written, /^---\nname: git-rebase-safety\ndescription: "rebase steps"\n---\n\n# rebase safely\n$/);
+    assert.match(written, /^---\nname: "git-rebase-safety"\ndescription: "rebase steps"\n---\n\n# rebase safely\n$/);
   });
 
   test("invariant 3: convergence — adds B, removes C, in one tick", async () => {
@@ -222,6 +222,91 @@ describe("reconcileSkills", () => {
     assert.ok(!existsSync(join(tmpHome, "etc", "passwd")));
   });
 
+  test("namespaced forge and agent catalog ids install under their safe slug", async () => {
+    plantOnDisk(FROZEN_PLUGIN_ID);
+    mockCatalog = [
+      {
+        doc_id: "forge/generated-skill",
+        data: { name: "Generated skill", description: "forged", content: "# forged\n" },
+      },
+      {
+        doc_id: "agent/direct-skill",
+        data: { name: "Direct skill", description: "agent-authored", content: "# direct\n" },
+      },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.deepEqual(listSkillDirs(), ["direct-skill", "generated-skill", FROZEN_PLUGIN_ID]);
+    assert.deepEqual(summary.added, ["direct-skill", "generated-skill"]);
+    assert.deepEqual(summary.skipped, []);
+  });
+
+  test("catalog ids that resolve to the same filesystem slug all fail closed", async () => {
+    plantOnDisk(FROZEN_PLUGIN_ID);
+    mockCatalog = [
+      {
+        doc_id: "forge/shared",
+        data: { name: "Forged", description: "forged", content: "# forged\n" },
+      },
+      {
+        doc_id: "agent/shared",
+        data: { name: "Direct", description: "agent-authored", content: "# direct\n" },
+      },
+      {
+        doc_id: "shared",
+        data: { name: "Legacy", description: "legacy", content: "# legacy\n" },
+      },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID]);
+    assert.deepEqual(summary.added, []);
+    assert.deepEqual(summary.skipped, ["agent/shared", "forge/shared", "shared"]);
+  });
+
+  test("duplicate catalog rows with identical materialized content remain idempotent", async () => {
+    plantOnDisk(FROZEN_PLUGIN_ID);
+    const duplicate = {
+      doc_id: "forge/generated-skill",
+      data: { name: "Generated skill", description: "forged", content: "# forged\n" },
+    };
+    mockCatalog = [
+      duplicate,
+      {
+        ...duplicate,
+        data: { ...duplicate.data, name: " Generated skill ", description: " forged " },
+      },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.deepEqual(listSkillDirs(), ["generated-skill", FROZEN_PLUGIN_ID]);
+    assert.deepEqual(summary.added, ["generated-skill"]);
+    assert.deepEqual(summary.skipped, []);
+  });
+
+  test("duplicate catalog ids with different materialized content fail closed", async () => {
+    plantOnDisk(FROZEN_PLUGIN_ID);
+    mockCatalog = [
+      {
+        doc_id: "forge/generated-skill",
+        data: { name: "Generated skill", description: "forged", content: "# first\n" },
+      },
+      {
+        doc_id: "forge/generated-skill",
+        data: { name: "Generated skill", description: "forged", content: "# second\n" },
+      },
+    ];
+
+    const summary = await reconcileSkills();
+
+    assert.deepEqual(listSkillDirs(), [FROZEN_PLUGIN_ID]);
+    assert.deepEqual(summary.added, []);
+    assert.deepEqual(summary.skipped, ["forge/generated-skill"]);
+  });
+
   test("catalog returns missing content/description → row skipped, others applied", async () => {
     plantOnDisk(FROZEN_PLUGIN_ID);
     mockCatalog = [
@@ -256,10 +341,28 @@ describe("reconcileSkills", () => {
     // YAML frontmatter present; description double-quoted with escapes intact.
     assert.match(
       written,
-      /^---\nname: git-rebase-safety\ndescription: "Safely rebase a feature branch — quotes \\"and\\" backslashes \\\\ get escaped"\n---\n\n/,
+      /^---\nname: "git-rebase-safety"\ndescription: "Safely rebase a feature branch — quotes \\"and\\" backslashes \\\\ get escaped"\n---\n\n/,
     );
     // Original body preserved after the fence
     assert.ok(written.endsWith("# Body\n\nStep 1.\n"));
+  });
+
+  test("frontmatter synthesis YAML-quotes special characters in the skill name", async () => {
+    plantOnDisk(FROZEN_PLUGIN_ID);
+    const name = "Ops: #1 \"critical\"\nnext line";
+    mockCatalog = [
+      {
+        doc_id: "special-name",
+        data: { name, description: "safe description", content: "# Body\n" },
+      },
+    ];
+
+    await reconcileSkills();
+
+    assert.equal(
+      readSkill("special-name"),
+      `---\nname: ${JSON.stringify(name)}\ndescription: "safe description"\n---\n\n# Body\n`,
+    );
   });
 
   test("frontmatter passthrough: skill content that already starts with --- is left untouched", async () => {

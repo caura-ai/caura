@@ -94,6 +94,26 @@ async def test_caura_evolve_blocked_for_read_only(mcp_env, monkeypatch):
     assert payload["error"]["code"] == "FORBIDDEN"
 
 
+async def test_caura_insights_blocked_for_read_only(mcp_env, monkeypatch):
+    """``caura_insights`` persists ``insight`` memories, so it is a write tool.
+
+    The tool reads as a query and was ungated to match; its REST twin settles
+    the classification, calling ``auth.enforce_read_only()`` for the same work.
+    Measured: with the gate removed, this answers a read-only credential with a
+    success payload rather than an error of any kind.
+
+    ``scope-limited to read`` is the discriminator, not the FORBIDDEN code —
+    ``_require_trust`` also answers FORBIDDEN here, and that text occurs only in
+    ``_READ_ONLY_ERROR``.
+    """
+    _force_read_only(monkeypatch)
+    out = await mcp_server.caura_insights(focus="patterns")
+    assert is_error_envelope(out)
+    payload = parse_envelope(out)
+    assert payload["error"]["code"] == "FORBIDDEN"
+    assert "scope-limited to read" in payload["error"]["message"]
+
+
 async def test_caura_tune_blocked_for_read_only(mcp_env, monkeypatch):
     _force_read_only(monkeypatch)
     out = await mcp_server.caura_tune(top_k=10)

@@ -8,12 +8,15 @@ Real FastAPI app + in-process storage (see conftest). Validates:
 
 import json
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from core_api.app import app
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.routes import reports as reports_route
 from tests.conftest import get_test_auth
 
 pytestmark = pytest.mark.asyncio
@@ -891,6 +894,35 @@ async def test_agent_activity_cross_tenant_empty_until_generated(client):
         assert body["meta"]["tenants"] == 2, body["meta"]
     finally:
         app.dependency_overrides.pop(get_auth_context, None)
+
+
+async def test_agent_activity_normalizes_retired_filter(client, monkeypatch):
+    tag = _uid()
+    tenant_id = f"rep-dig-alias-{tag}"
+    ctx = AuthContext(
+        tenant_id=tenant_id,
+        readable_tenant_ids=[tenant_id, f"other-{tag}"],
+    )
+    storage = SimpleNamespace(get_agent_activity_digest=AsyncMock(return_value=[]))
+    monkeypatch.setattr(reports_route, "get_storage_client", lambda: storage)
+    app.dependency_overrides[get_auth_context] = lambda: ctx
+    try:
+        resp = await client.get(
+            "/api/v1/reports/agent-activity",
+            params={
+                "tenant_id": tenant_id,
+                "period": "day",
+                "agent_id": "memclaw-insighter",  # legacy-name-ok: supported client input alias
+            },
+        )
+        assert resp.status_code == 200, resp.text
+    finally:
+        app.dependency_overrides.pop(get_auth_context, None)
+
+    assert (
+        storage.get_agent_activity_digest.await_args.kwargs["agent_id"]
+        == "caura-insighter"
+    )
 
 
 async def test_agent_activity_admin_allowed(client):

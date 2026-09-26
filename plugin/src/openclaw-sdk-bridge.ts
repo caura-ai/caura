@@ -26,8 +26,9 @@
  * ``process.argv[1]`` (the launcher script, e.g. ``/usr/bin/openclaw``
  * which is a symlink to ``/usr/lib/.../openclaw.mjs``), walking up until
  * we find a ``package.json`` with ``name: "openclaw"``, then importing
- * ``{pkgRoot}/dist/plugin-sdk/index.js`` via absolute path. The absolute
- * path import bypasses the alias-map dependency entirely.
+ * ``{pkgRoot}/dist/plugin-sdk/index.js`` via a file URL derived from its
+ * absolute path. This bypasses the alias-map dependency and remains valid
+ * for Windows drive-letter paths.
  *
  * Verified to work across global npm install. The same shape (launcher
  * → symlink → real script inside the package) is used by brew, nvm,
@@ -59,6 +60,7 @@
 
 import { realpath, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 /**
  * Structural shape of the bits of ``openclaw/plugin-sdk`` we use.
@@ -158,7 +160,9 @@ export function _resetSdkBridgeCache(): void {
  * call in a NEW promise, defeating the cache.
  */
 export function getOpenClawSdk(): Promise<OpenClawSdkResolution> {
-  if (!sdkPromise) sdkPromise = _resolveSdk();
+  if (!sdkPromise) {
+    sdkPromise = resolveSdkFromLauncher(process.argv?.[1]);
+  }
   return sdkPromise;
 }
 
@@ -194,7 +198,10 @@ function _resolveSdkSubpath(pkg: Record<string, unknown>): string | null {
   return null;
 }
 
-async function _resolveSdk(): Promise<OpenClawSdkResolution> {
+/** @internal Exported to exercise platform-sensitive imports in tests. */
+export async function resolveSdkFromLauncher(
+  launcher: string | undefined,
+): Promise<OpenClawSdkResolution> {
   // Stop walking after this many parent directories. Eight is plenty
   // for ``/usr/lib/node_modules/openclaw`` (5 levels above ``dist/``)
   // and short enough that a misconfigured environment fails quickly.
@@ -209,7 +216,6 @@ async function _resolveSdk(): Promise<OpenClawSdkResolution> {
   let pkgRoot: string | null = null;
   let pkg: Record<string, unknown> | null = null;
   try {
-    const launcher = process.argv?.[1];
     if (!launcher || typeof launcher !== "string") {
       return { sdk: null, pkgRoot: null };
     }
@@ -281,7 +287,7 @@ async function _resolveSdk(): Promise<OpenClawSdkResolution> {
     // clear error if the file is missing or unreadable. A separate
     // ``access`` would add a TOCTOU window and another await for no
     // signal beyond what the import already provides.
-    mod = (await import(sdkPath)) as Record<string, any>;
+    mod = (await import(pathToFileURL(sdkPath).href)) as Record<string, any>;
   } catch {
     return { sdk: null, pkgRoot };
   }

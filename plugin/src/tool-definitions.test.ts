@@ -11,11 +11,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { CAURA_TOOLS } from "./tools.js";
-import { createToolFromSpec } from "./tool-definitions.js";
+import {
+  createToolFromSpec,
+  MEMORY_TYPES,
+  WRITABLE_MEMORY_TYPES,
+} from "./tool-definitions.js";
 import { TOOL_SPECS, TOOL_SPECS_BY_NAME, getSpec } from "./tool-specs.js";
 import { buildToolsMd } from "./educate.js";
 import { cauraPromptSectionText } from "./prompt-section.js";
-import { FROZEN_PLUGIN_ID } from "./legacy-contracts.test.js";
+import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 describe("tool-specs loader", () => {
   test("loads a non-empty ordered spec list from tools.json", () => {
@@ -143,12 +147,85 @@ describe("createToolFromSpec factory", () => {
     ]);
   });
 
+  // Ops the MCP handler accepts — and tools.json therefore declares — that
+  // this plugin does not dispatch. It reaches core-api over REST and has no
+  // endpoint for these, so its PARAM_SCHEMAS enum deliberately omits them.
+  // Listing them keeps the divergence a recorded decision instead of a drift.
+  const MCP_ONLY_OPS: Record<string, readonly string[]> = {
+    caura_manage: ["bulk_delete", "lineage"],
+  };
+
+  test("every declared op is offered, or recorded as MCP-only", () => {
+    let checked = 0;
+    for (const spec of TOOL_SPECS) {
+      if (!spec.plugin_exposed || spec.ops.length === 0) continue;
+      const schema = createToolFromSpec(spec.name).parameters as any;
+      // PARAM_SCHEMAS, not ENDPOINT_DISPATCH: the enum is what a caller may
+      // select from, and it is the only thing that keeps an op out of the
+      // dispatcher's terminal else-branch.
+      const offered: string[] = schema?.properties?.op?.enum ?? [];
+      const declared = spec.ops.map((o) => o.name as string);
+      const mcpOnly = MCP_ONLY_OPS[spec.name] ?? [];
+
+      assert.deepEqual(
+        declared.filter((op) => !offered.includes(op) && !mcpOnly.includes(op)),
+        [],
+        `${spec.name}: tools.json declares op(s) this plugin neither offers ` +
+          `nor records as MCP-only. Add a dispatch branch and a PARAM_SCHEMAS ` +
+          `enum entry, or list the op in MCP_ONLY_OPS.`,
+      );
+      // Split from the above because the two mean opposite things: an offered
+      // op means the divergence CLOSED and the entry is unnecessary; an
+      // undeclared one means the op went away upstream and it is stale.
+      assert.deepEqual(
+        mcpOnly.filter((op) => offered.includes(op)),
+        [],
+        `${spec.name}: MCP_ONLY_OPS names an op this plugin now offers. The ` +
+          `divergence closed — delete the entry.`,
+      );
+      assert.deepEqual(
+        mcpOnly.filter((op) => !declared.includes(op)),
+        [],
+        `${spec.name}: MCP_ONLY_OPS names an op tools.json no longer ` +
+          `declares. Delete the stale entry.`,
+      );
+      checked += 1;
+    }
+    // Both skips above could empty the loop — a renamed `ops` field in the
+    // export would do it — leaving every assertion a silent no-op.
+    assert.ok(checked > 0, "no op-dispatched plugin tool was checked");
+  });
+
   test("caura_write requires only agent_id (content/items are mutually exclusive)", () => {
     const write = createToolFromSpec("caura_write").parameters as any;
     assert.deepEqual(write.required, ["agent_id"]);
     assert.ok(write.properties.content);
     assert.ok(write.properties.items);
     assert.equal(write.properties.items.maxItems, 100);
+  });
+
+  test("write schemas exclude reserved and deprecated memory types", () => {
+    assert.deepEqual([...WRITABLE_MEMORY_TYPES], [
+      "fact", "episode", "decision", "preference", "task", "plan", "action",
+    ]);
+
+    const write = createToolFromSpec("caura_write").parameters as any;
+    const manage = createToolFromSpec("caura_manage").parameters as any;
+    assert.deepEqual(write.properties.memory_type.enum, [...WRITABLE_MEMORY_TYPES]);
+    assert.deepEqual(
+      write.properties.items.items.properties.memory_type.enum,
+      [...WRITABLE_MEMORY_TYPES],
+    );
+    assert.deepEqual(manage.properties.memory_type.enum, [...WRITABLE_MEMORY_TYPES]);
+
+    for (const name of ["caura_recall", "caura_list", "caura_stats"]) {
+      const schema = createToolFromSpec(name).parameters as any;
+      assert.deepEqual(
+        schema.properties.memory_type.enum,
+        [...MEMORY_TYPES],
+        `${name}: historical types must remain filterable`,
+      );
+    }
   });
 
   test("caura_list has no required params (trust gate handled server-side)", () => {

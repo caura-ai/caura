@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from core_storage_api.schemas import DOCUMENT_FIELDS, orm_to_dict
@@ -21,6 +23,8 @@ async def upsert_document(request: Request) -> dict:
             doc_id=body["doc_id"],
             data=body["data"],
             fleet_id=body.get("fleet_id"),
+            # ax-0917-m-14 — who wrote this version.
+            agent_id=body.get("agent_id"),
             # C34 — explicit opt-out of the catastrophic-shrink guard.
             force=bool(body.get("force")),
         )
@@ -45,6 +49,8 @@ async def upsert_document_xmax(request: Request) -> dict:
             doc_id=body["doc_id"],
             data=body["data"],
             fleet_id=body.get("fleet_id"),
+            # ax-0917-m-14 — who wrote this version.
+            agent_id=body.get("agent_id"),
             # C34 — explicit opt-out of the catastrophic-shrink guard.
             force=bool(body.get("force")),
             embedding=body.get("embedding"),
@@ -80,6 +86,24 @@ async def search_documents(request: Request) -> list[dict]:
         row["similarity"] = sim
         results.append(row)
     return results
+
+
+@router.post("/count-unindexed")
+async def count_unindexed(request: Request) -> dict:
+    """Documents in scope that vector search cannot see (ax-0917-h-08).
+
+    Lets the caller distinguish "your query matched nothing" from "nothing in
+    this scope was searchable" — ``/search`` filters ``embedding IS NOT NULL``
+    and a document is only embedded when its write resolved an embed source.
+    """
+    body: dict = await request.json()
+    count = await _svc.document_count_unindexed(
+        tenant_id=body["tenant_id"],
+        collection=body.get("collection"),
+        fleet_id=body.get("fleet_id"),
+        readable_tenant_ids=body.get("readable_tenant_ids"),
+    )
+    return {"count": count}
 
 
 @router.post("/update-status")
@@ -189,6 +213,32 @@ async def get_document(
         doc_id=doc_id,
         readable_tenant_ids=readable_tenant_ids,
     )
+    # ax-0917-h-07: fall back to the PRIMARY KEY. ``POST /documents`` returns
+    # both ``id`` (the pk) and ``doc_id`` (the caller's key); an agent that
+    # kept the returned ``id`` — the conventional thing to keep — got a 404
+    # reading back the document it had just written.
+    #
+    # ORDER MATTERS: the natural key is tried FIRST, so a caller whose own
+    # ``doc_id`` happens to be UUID-shaped still resolves to their document
+    # rather than to whatever row shares that primary key. The fallback only
+    # runs on a miss.
+    if doc is None:
+        try:
+            doc_pk = UUID(doc_id)
+        except (ValueError, AttributeError, TypeError):
+            doc_pk = None
+        if doc_pk is not None:
+            doc = await _svc.document_get_by_pk(
+                tenant_id=tenant_id,
+                doc_pk=doc_pk,
+                readable_tenant_ids=readable_tenant_ids,
+            )
+            # The pk identifies the row on its own, so ``collection`` is not
+            # part of that lookup — but silently returning a document from a
+            # DIFFERENT collection than the caller named would make the
+            # parameter a lie. A mismatch is a miss.
+            if doc is not None and doc.collection != collection:
+                doc = None
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return orm_to_dict(doc, DOCUMENT_FIELDS)

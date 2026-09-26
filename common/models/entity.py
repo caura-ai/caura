@@ -1,7 +1,7 @@
 import uuid
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Float, ForeignKey, Index, Text, text
+from sqlalchemy import Float, ForeignKey, Index, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,6 +22,31 @@ class Entity(Base):
     attributes: Mapped[dict | None] = mapped_column(JSONB)
     name_embedding = mapped_column(Vector(VECTOR_DIM))
     search_vector = mapped_column(TSVECTOR)
+
+    __table_args__ = (
+        # The dedup constraint ``entity_add`` relies on. Created in migration
+        # 001 and, until now, declared NOWHERE ELSE — so a schema built from
+        # this metadata instead of the migration chain (``tests/conftest.py``
+        # uses ``Base.metadata.create_all``) had no unique index on entities at
+        # all, and ``entity_add`` silently inserted duplicates there rather than
+        # deduping. Declared here for the same reasons
+        # ``uq_memories_live_content_hash`` is: reflection/autogen round-trip
+        # against the live schema, and the create_all suites exercise the
+        # constraint the write path advertises.
+        #
+        # ``COALESCE(fleet_id, '')`` because PostgreSQL treats NULLs as
+        # distinct: without it two fleetless entities of the same name would
+        # both insert. ``lower(canonical_name)`` because the dedup contract is
+        # case-insensitive.
+        Index(
+            "uq_entities_tenant_type_name_fleet",
+            "tenant_id",
+            "entity_type",
+            func.lower(text("canonical_name")),
+            func.coalesce(text("fleet_id"), ""),
+            unique=True,
+        ),
+    )
 
 
 class Relation(Base):
@@ -45,6 +70,35 @@ class Relation(Base):
     )
 
     __table_args__ = (
+        # The natural key ``relation_add`` upserts on. Created in migration 001
+        # (``op.create_unique_constraint``) and, like
+        # ``uq_entities_tenant_type_name_fleet`` above, declared nowhere else —
+        # so a schema built from this metadata rather than the migration chain
+        # (``tests/conftest.py`` uses ``Base.metadata.create_all``) had no such
+        # constraint, and the upsert's ``ON CONFLICT ON CONSTRAINT
+        # uq_relations_natural_key`` — which names it — could not resolve there
+        # at all. Not a silent divergence like the entities one: Postgres
+        # rejects the statement outright, which is why every relation-upsert
+        # test had to live in ``core-storage-api/tests/`` against the
+        # migration-owned schema.
+        #
+        # A ``UniqueConstraint`` and not an ``Index(unique=True)``: ``ON
+        # CONFLICT ON CONSTRAINT`` resolves names in ``pg_constraint``, and a
+        # bare unique index is not there. ``Entity`` can use an index because
+        # its key is over expressions (``lower()``/``COALESCE()``), which a
+        # constraint cannot express; these four columns are plain.
+        #
+        # ``fleet_id`` is deliberately absent — the key is tenant-wide, which is
+        # what lets a fleet-scoped ``infer_relations`` run reinforce an edge a
+        # full run created, and what makes ``relation_add``'s fleet_id
+        # first-writer-wins.
+        UniqueConstraint(
+            "tenant_id",
+            "from_entity_id",
+            "relation_type",
+            "to_entity_id",
+            name="uq_relations_natural_key",
+        ),
         Index("ix_relations_from", "from_entity_id"),
         Index("ix_relations_to", "to_entity_id"),
         # For DELETEs on ``memories``, not reads here — the referencing side of
@@ -58,6 +112,14 @@ class Relation(Base):
     )
 
 
+# Who created a ``memory_entity_links`` row. Not a free-form string: one
+# predicate deletes by it (``_delete_entity_artifacts`` on the reset path) and
+# three service methods write it, so a typo at any writer would silently make
+# that writer's links undeletable — or deletable — with nothing failing.
+LINK_SOURCE_CALLER = "caller"
+LINK_SOURCE_EXTRACTION = "extraction"
+
+
 class MemoryEntityLink(Base):
     __tablename__ = "memory_entity_links"
 
@@ -68,6 +130,16 @@ class MemoryEntityLink(Base):
         ForeignKey("entities.id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(Text, nullable=False)
+    # Provenance, and the reason a content edit can clear the graph without
+    # destroying links a caller curated. ``entity_links`` on
+    # ``PATCH /memories/{id}`` is a caller-owned additive API — a way to tag a
+    # memory with a project or person its text never names — and extraction,
+    # which mines text, will never recreate such a link. So the edit-time reset
+    # deletes only ``extraction`` rows; see migration 048 for why the default is
+    # the conservative ``caller`` rather than the more accurate ``extraction``.
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text(f"'{LINK_SOURCE_CALLER}'")
+    )
 
     __table_args__ = (
         # The PK ``(memory_id, entity_id)`` covers the memories-side FK on its
@@ -75,4 +147,11 @@ class MemoryEntityLink(Base):
         # so deleting an entity scanned this whole table, across every tenant.
         # See migration 035.
         Index("ix_memory_entity_links_entity_id", "entity_id"),
+        # The reset's delete predicate. Partial because that is the only query
+        # that reads ``source``. See migration 048.
+        Index(
+            "ix_memory_entity_links_extraction",
+            "memory_id",
+            postgresql_where=text(f"source = '{LINK_SOURCE_EXTRACTION}'"),
+        ),
     )

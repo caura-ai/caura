@@ -10,7 +10,7 @@ Please include:
 
 - A description of the issue and its impact
 - Steps to reproduce, or a proof-of-concept
-- The affected Caura (formerly MemClaw) version (call `GET /api/v1/version`, or `git rev-parse HEAD` if running from source) <!-- legacy-name-ok: taught as legacy alias -->
+- The affected Caura (formerly MemClaw) version (call `GET /api/v1/version`, or `git rev-parse HEAD` if running from source) <!-- legacy-name-floor: taught as legacy alias -->
 
 If you cannot use GitHub Security Advisories, email **security@caura.ai** as a fallback. Mark the subject `[SECURITY]` and expect a slower acknowledgement than the form.
 

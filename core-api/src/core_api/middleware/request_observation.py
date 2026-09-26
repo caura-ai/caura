@@ -71,6 +71,7 @@ from typing import Any
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
+from core_api import request_phase
 from core_api.constants import PROBE_ROUTES
 from core_api.services.capability_usage import record_usage
 
@@ -211,11 +212,13 @@ class RequestObservationMiddleware:
         # ``http.response.start`` we still emit an event, and a crash that
         # never produced a status line is most accurately reported as 5xx.
         status_code = 500
+        response_started = False
 
         async def _send(message: MutableMapping[str, Any]) -> None:
-            nonlocal status_code
+            nonlocal status_code, response_started
             if message["type"] == "http.response.start":
                 status_code = message["status"]
+                response_started = True
             await send(message)
 
         # Captured BEFORE the downstream call: a Starlette ``Mount`` appends
@@ -229,6 +232,19 @@ class RequestObservationMiddleware:
         start = time.monotonic()
         try:
             await self.app(scope, receive, _send)
+        except BaseException:
+            # This middleware sits INSIDE RequestTimeoutMiddleware, so a
+            # request the budget kills unwinds through here with no
+            # ``http.response.start`` ever sent — and the 500 default above
+            # then filed every 45s timeout in this metric as a crash. That is
+            # the first dashboard an incident reaches for, and on 2026-09-17
+            # it said the wrong thing: /search and /recall read as 500s while
+            # the callers were holding 504s. The docstring's claim that
+            # "504s/429s aren't observed" was true of the intent and false of
+            # the output.
+            if not response_started and request_phase.past_deadline():
+                status_code = 504
+            raise
         finally:
             duration_ms = (time.monotonic() - start) * 1000.0
             # ``scope["route"]`` is set by the router during the call above;

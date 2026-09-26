@@ -77,6 +77,7 @@ class AuditEventQueue:
         self._dropped_count = 0
         self._flushed_count = 0
         self._failed_count = 0
+        self._interrupted_count = 0
         self._wake_event = asyncio.Event()  # set when threshold reached
 
     @property
@@ -96,6 +97,23 @@ class AuditEventQueue:
         so an operator can distinguish "writers outpacing the flusher"
         from "storage-api failing the write" in dashboards."""
         return self._failed_count
+
+    @property
+    def interrupted_count(self) -> int:
+        """Events whose disposition is genuinely UNKNOWN (OSS 08/14 L-11).
+
+        A ``CancelledError`` delivered at the ``_flush_callable`` suspension
+        point tells us nothing about whether storage committed the chunk. That
+        is not success and not failure, and it used to be credited to
+        ``flushed_count`` — the one bucket that overstates success — because
+        the alternative considered was a spurious failure-spike. On the AUDIT
+        path that reported silent loss as a clean drain.
+
+        Its own counter instead: a shutdown that interrupts a flush now shows
+        up as interrupted, leaving ``flushed_count`` meaning only what its
+        docstring says.
+        """
+        return self._interrupted_count
 
     @property
     def queue_size(self) -> int:
@@ -294,19 +312,25 @@ class AuditEventQueue:
                     # ``await self._flush_callable(chunk)`` suspension point
                     # has no ``failed_event_count`` attribute — the per-
                     # tenant flusher's raises always do, but a cancellation
-                    # delivered before the flusher returns doesn't. Default
-                    # to 0 instead of ``len(chunk)`` so a clean shutdown
-                    # doesn't produce a spurious failure-spike on the
-                    # dashboard. The events themselves stay in the queue
-                    # (or are silently lost depending on shutdown ordering),
-                    # but their disposition is "unknown", not "failed".
-                    failed = getattr(exc, "failed_event_count", 0)
-                self._failed_count += failed
-                self._flushed_count += len(chunk) - failed
-                # Same sentinel correction as the success path: dropped
-                # sentinel events were neither flushed nor failed, so back
-                # them out of the surviving-events credit.
-                self._flushed_count -= getattr(self._flush_callable, "_sentinel_count", 0)
+                    # delivered before the flusher returns doesn't. ``None``
+                    # therefore means "nobody told us what happened", which
+                    # the branch below routes to ``_interrupted_count``. The
+                    # events themselves stay in the queue (or are silently
+                    # lost depending on shutdown ordering), but their
+                    # disposition is "unknown" — neither "failed" nor, as it
+                    # was recorded until OSS 08/14 L-11, "flushed".
+                    failed = getattr(exc, "failed_event_count", None)
+                if failed is None:
+                    # OSS 08/14 L-11 — credit NEITHER bucket; see
+                    # ``interrupted_count``.
+                    self._interrupted_count += len(chunk)
+                else:
+                    self._failed_count += failed
+                    self._flushed_count += len(chunk) - failed
+                    # Same sentinel correction as the success path: dropped
+                    # sentinel events were neither flushed nor failed, so back
+                    # them out of the surviving-events credit.
+                    self._flushed_count -= getattr(self._flush_callable, "_sentinel_count", 0)
                 if isinstance(exc, Exception):
                     # Per-chunk failure logged here (in addition to the
                     # closure's rich-detail log) so a partial drain of N

@@ -2,8 +2,8 @@
 
 <h3 align="center">Fleet memory for AI agents &mdash; governed, shared, self-improving.</h3>
 
-<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-ok: taught as legacy alias -->
-Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env vars and URLs keep working unchanged. The <code>memclaw-client</code>/<code>@caura/memclaw-client</code> package names and the <code>MemClaw</code> class alias inside <code>caura-client</code> were all retired.</p> <!-- legacy-name-ok: taught as legacy alias -->
+<p align="center"><strong>MemClaw is now Caura</strong> &mdash; same product, one name.<br /> <!-- legacy-name-floor: taught as legacy alias -->
+Existing <code>memclaw_*</code> tool calls and supported <code>MEMCLAW_*</code> environment aliases continue to work; use <code>caura_*</code> names and current Caura URLs for new configuration. The PyPI name <code>memclaw-client</code> is kept only as a redirect shell (0.5.1) that installs <code>caura-client</code>; it provides no <code>memclaw_client</code> import and no <code>MemClaw</code> class. The npm package <code>@caura/memclaw-client</code> was never published.</p> <!-- legacy-name-floor: migration guidance and package evidence -->
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License" /></a>
@@ -26,9 +26,9 @@ Tools are <code>caura_*</code>; the old <code>memclaw_*</code> tool names, env v
 
 ---
 
-## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets <!-- legacy-name-ok: taught as legacy alias -->
+## Caura (formerly MemClaw) — the shared governed memory layer for AI agent fleets <!-- legacy-name-floor: taught as legacy alias -->
 
-Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes. <!-- legacy-name-ok: taught as legacy alias -->
+Caura — formerly MemClaw — is open-source memory for **multi-tenant, multi-agent** AI fleets. Your agents store what they learn, find what the fleet knows, and get smarter with every interaction — learning from each other instead of repeating mistakes. <!-- legacy-name-floor: taught as legacy alias -->
 
 Agents write plain text. Caura turns it into searchable, governed, self-improving memory.
 
@@ -118,13 +118,14 @@ Ready for semantic recall, multi-tenant, a managed host, or an OpenClaw fleet? P
 
 ---
 
-Three paths — pick the one that matches your setup:
+Four paths — pick the one that matches your setup:
 
 | Path | When | Time to first memory |
 |---|---|---|
 | **Managed platform** | Quickest. We host the DB + scaling. | ~2 min |
 | **Self-hosted (Docker)** | Privacy / on-prem / air-gapped. | ~5 min |
 | **OpenClaw plugin** | You already run an OpenClaw fleet — install Caura as a plugin against any of the above. | ~3 min |
+| **Rail SDK** | You write the agent yourself, in Python or TypeScript, and want it to recall rules and facts before every turn and store what it learned after. Works against any of the above. | ~2 min |
 
 ### Managed Platform
 
@@ -181,7 +182,14 @@ The plugin claims OpenClaw's `memory` slot and exposes the same agent-facing
 memory tools. Use the
 [agent installer's one-line setup](AGENT-INSTALL.md#connect-via-openclaw-plugin-alternative-to-mcp),
 then see the [OpenClaw integration guide](static/docs/integration-guide.md) for
-agent prompts and trust levels.
+agent prompts and trust levels. Already have nodes running? Keeping them current
+— auto-upgrade and the manual re-install — is covered in
+[`docs/plugin-upgrade.md`](docs/plugin-upgrade.md).
+
+The plugin talks only to the Caura server you configure (`CAURA_API_URL`) and
+identifies itself on every request with
+`User-Agent: openclaw-plugin/<version> (node/<major>)`, which the server's
+self-hosted heartbeat uses to count connected plugin installs.
 
 ### Python client
 
@@ -203,6 +211,51 @@ npm install @caura/client
 
 See the [TypeScript client guide](clients/typescript/) for installation and
 package-name compatibility details.
+
+### Rail SDK
+
+Give an agent memory around every turn. Rail fetches the governance rules and
+the facts relevant to the current message before your agent runs, hands you
+prompt-ready context, then extracts and stores what the turn taught. Python
+and TypeScript share the same semantics; both work against managed and
+self-hosted Caura.
+
+```bash
+pip install caura-rail        # Python 3.10+
+npm install @caura/rail       # Node.js 22+
+```
+
+Point it at any Caura with `CAURA_URL` and `CAURA_API_KEY` (for the standalone
+Docker server above: `http://localhost:8000` and `standalone`), then wrap each
+agent turn:
+
+```python
+from caura_rail import MemoryScope, Rail, RestMemoryStore
+
+with RestMemoryStore.from_env() as store:
+    rail = Rail(store, MemoryScope(agent_id="support-1", fleet_id="support"))
+    with rail.turn("Remember: We deploy in eu-west-1.") as turn:
+        # Call your model here; turn.context.text holds rules first, then facts.
+        turn.reply = "Noted. " + turn.context.text
+    print([w.status for w in turn.writes])   # ['written'], or ['deduplicated'] on a rerun
+```
+
+```js
+import { MemoryScope, Rail, RestMemoryStore } from "@caura/rail";
+
+const rail = new Rail({
+  store: RestMemoryStore.fromEnv(process.env),
+  scope: new MemoryScope({ agentId: "support-1", fleetId: "support" }),
+});
+const turn = await rail.turn("Remember: We deploy in eu-west-1.", (_, ctx) => "Noted. " + ctx.text);
+console.log(turn.writes.map(w => w.status));   // ['written'], or ['deduplicated'] on a rerun
+```
+
+Each turn recalls, runs your code, extracts, and writes; a turn whose code
+raises writes nothing, and writes that fail on a temporary error wait in an
+outbox you replay. Use the clients above when you only need to call the API;
+use Rail when an agent should remember and follow rules. Guide, API reference,
+and reliability semantics live in the [Rail repository](https://github.com/caura-ai/caura-rail).
 
 ---
 
@@ -278,8 +331,8 @@ Benchmarked against the two most-cited public agent-memory benchmarks. Full resu
 
 |  | LoCoMo | LongMemEval | Search latency |
 |---|---|---|---|
-| Accuracy (LLM-judge) | **77.6%** | **72.5%** | — |
-| Token savings vs full context | **96.6%** | **98.2%** | — |
+| Accuracy (LLM-judge) | **77.6%** | **92.2%** | — |
+| Token savings vs full context | **96.6%** | **79.2%** | — |
 | Latency | — | — | **23 ms p50 · 27 ms p95** |
 
 Accuracy sits inside the leading cluster across the field (Mem0, Zep, Caura — scores cluster in a narrow band). The axes we push hardest are latency and token efficiency, because those are the ones that compound as agent count grows — a few hundred ms of search latency disappears behind one LLM call, but bills millions of times a day across a fleet.
@@ -433,7 +486,7 @@ wiring, and the protocol are in the
 
 ### The Caura Broker
 
-The **Caura Broker** is a local daemon (`caura-daemon`, formerly `memclawd`, <!-- legacy-name-ok: taught as legacy alias -->
+The **Caura Broker** is a local daemon (`caura-daemon`, formerly `memclawd`, <!-- legacy-name-floor: taught as legacy alias -->
 driven by the `caura` CLI) that runs on a developer's machine and connects coding agents — Claude
 Code, Codex, Cursor, Gemini — to Caura. Its job is to be the trust boundary
 on the developer side: it enforces policy, applies redaction, and keeps a
@@ -494,16 +547,16 @@ bash /tmp/install-caura-skill.sh
 
 | Query param | Effect |
 |---|---|
-| (none) | Install the **memclaw** skill for both Claude Code and Codex (default) |
+| (none) | Install the default Caura tool-reference skill for both Claude Code and Codex |
 | `?agent=claude-code` | Only Claude Code → `~/.claude/skills/<skill>/SKILL.md` |
 | `?agent=codex` | Only Codex → `~/.agents/skills/<skill>/SKILL.md` |
-| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of memclaw (see below; combine with `?agent=`) |
+| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of the default skill (see below; combine with `?agent=`) |
 
 #### Verify
 
 ```bash
-ls -la ~/.claude/skills/memclaw/SKILL.md       # Claude Code
-ls -la ~/.agents/skills/memclaw/SKILL.md       # Codex
+ls -la ~/.claude/skills/memclaw/SKILL.md       # Claude Code; legacy-name-floor: installed default-skill path
+ls -la ~/.agents/skills/memclaw/SKILL.md       # Codex; legacy-name-floor: installed default-skill path
 ```
 
 Restart your agent after installing — skills are loaded at startup.
@@ -514,10 +567,10 @@ installs; skip this step.
 
 #### Optional: the Company Brain skill
 
-`memclaw` teaches the agent the tools. **`company-brain`** is a thin,
+The default skill teaches the agent the tools. **`company-brain`** is a thin,
 concept-first *posture* skill that layers on top: it frames the agent as one
 mind in a shared **Company Brain** and defers all tool mechanics back to the
-`memclaw` skill. Install it alongside `memclaw` when you want that framing:
+tool-reference skill. Install the two together when you want that framing:
 
 ```bash
 curl -s "https://caura.ai/api/v1/install-skill?skill=company-brain" | bash
@@ -526,7 +579,7 @@ curl -s "https://caura.ai/api/v1/install-skill?skill=company-brain" | bash
 It installs to `~/.claude/skills/company-brain/SKILL.md` (Claude Code) and/or
 `~/.agents/skills/company-brain/SKILL.md` (Codex), and obeys the same
 `?agent=` filter. The default install (no `?skill=`) is unchanged — it
-installs `memclaw` only.
+installs the default tool-reference skill only.
 
 ---
 
@@ -539,8 +592,8 @@ The recommended way to run Caura is via Docker Compose (see [Quick Start](#quick
 Each release publishes multi-arch (linux/amd64, linux/arm64) images to [GitHub Container Registry](https://github.com/orgs/caura-ai/packages):
 
 ```
-ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0
-ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0
+ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0 # legacy-name-floor: published GHCR repository name
+ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0 # legacy-name-floor: published GHCR repository name
 ```
 
 Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:latest` for the latest stable release. Pull them in your own compose file or Kubernetes manifests instead of building from source.
@@ -636,14 +689,40 @@ auth modes, and contributor requirements live in the
 
 ## Telemetry
 
-The self-hosted OSS runtime supports optional [Sentry](https://sentry.io)
-integration for error tracking and performance monitoring:
+*Updated 2026-09-19.* A self-hosted server sends **one anonymous heartbeat a
+day per container**, whatever its worker count, to `telemetry.caura.ai`: its version, Python/OS/arch, deploy kind
+(docker or source), uptime bucket, provider *kinds* (never model names or
+keys), whether Redis and Sentry are configured (never the values), bucketed
+counts of memories, agents, tenants and recently-seen plugin nodes, and
+bucketed counts of which SDK families called it. Every number is a bucket
+(`0`, `1`, `2-5`, `6-20`, ...), the id is a random UUID stored in your own
+database, and nothing about hostnames, IPs, names, content or configuration
+values is ever sent. The exact payload, its JSON schema, the retention policy
+and the change log are in [docs/telemetry.md](docs/telemetry.md).
 
-- **Opt-in only** — set the `SENTRY_DSN` environment variable to enable. No errors are reported unless you explicitly configure a DSN.
-- **No built-in usage analytics** — a self-hosted deployment does not collect usage statistics, feature flags, or behavioral data.
-- **No phone-home** — the self-hosted application makes zero outbound calls unless you configure a Sentry DSN or an LLM/embedding provider.
+Every way to turn it off, each permanent for that install:
 
-The managed platform's usage analytics are a hosted-service feature; they are
+- `CAURA_TELEMETRY=off` in `core-api`'s environment (`.env`, or the commented
+  line under `core-api` in `docker-compose.yml`).
+- `DO_NOT_TRACK=1` (the [Console Do Not Track](https://consoledonottrack.com/) convention).
+- `CI` set to a non-empty value: pipelines are never counted.
+- Block `telemetry.caura.ai:443` at the firewall: one attempt a day, 5 s timeout, no retry.
+- Running behind the enterprise gateway or with platform providers switches it off automatically.
+
+Inspect what your server would send, when it last tried and whether that
+worked with `GET /api/v1/telemetry`; start over with a fresh id via
+`POST /api/v1/telemetry/rotate`. The boot log prints the ON/OFF decision, the
+reason and the disable hint on every start; a mistyped `CAURA_TELEMETRY_URL`
+(plain `http://` to anything but localhost) turns the heartbeat off with a
+warning rather than sending in clear text.
+
+Error tracking stays opt-in: set `SENTRY_DSN` to enable optional
+[Sentry](https://sentry.io) integration for error tracking and performance
+monitoring. No errors are reported unless you explicitly configure a DSN.
+
+Apart from the heartbeat, a self-hosted deployment makes no other outbound
+calls unless you configure a Sentry DSN or an LLM/embedding provider. The
+managed platform's usage analytics are a hosted-service feature; they are
 not part of the self-hosted runtime.
 
 ---
@@ -656,7 +735,7 @@ API key where one is present and by remote IP otherwise. It is applied per route
 
 | Route | Default | Setting |
 |---|---|---|
-| `POST /memories`, `POST /documents`, `POST /ingest/commit` | 10/second | `RATE_LIMIT_WRITE` |
+| `POST /memories`, `POST /documents`, `POST /ingest/commit`, `POST /stm/promote` | 10/second | `RATE_LIMIT_WRITE` |
 | `POST /memories/bulk` | 2/second | `RATE_LIMIT_WRITE_BULK` |
 | `POST /search`, `POST /recall` | 30/second | `RATE_LIMIT_SEARCH` |
 
@@ -665,6 +744,11 @@ Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLim
 `REDIS_URL` is set — which is what makes the limit hold across replicas — and in process memory
 otherwise, so a multi-instance deployment without Redis limits each instance separately. A Redis
 outage fails open: requests pass through un-throttled rather than erroring.
+
+`X-RateLimit-*` is the per-second throttle and nothing else. A deployment with a usage meter wired
+reports the separate per-period plan quota as `X-Usage-Limit` / `X-Usage-Remaining` on
+`POST /memories`, `POST /memories/bulk` and `POST /search`; OSS standalone has no quota, so those
+headers are absent there.
 
 Add limiting at your reverse proxy (nginx, Caddy, Cloudflare) as well if you need per-IP DDoS
 floors or limits the application layer can't see.

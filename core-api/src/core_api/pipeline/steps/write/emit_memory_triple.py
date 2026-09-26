@@ -8,7 +8,9 @@ Contract:
   the reason logged at DEBUG. The downstream LLM contradiction path
   remains unchanged and continues to handle anything we skip.
 - This step never overwrites caller-supplied triple fields.
-- This step issues no LLM calls and no DB writes; it mutates only
+- This step issues no LLM calls. It reaches storage only to resolve the
+  subject entity (an upsert for identifier-shaped subjects, a read-only
+  lookup for proper nouns), and otherwise mutates only
   ``ctx.data["input"]`` (the in-memory MemoryCreate) so that
   ``WriteMemoryRow`` (line 60-62) persists the populated columns.
 """
@@ -25,7 +27,7 @@ from common.constants import SINGLE_VALUE_PREDICATES
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.schemas import EntityUpsert
-from core_api.services.entity_service import upsert_entity
+from core_api.services.entity_service import find_entity_by_exact_name, upsert_entity
 
 logger = logging.getLogger(__name__)
 
@@ -237,10 +239,12 @@ _LEADING_ARTICLES = re.compile(r"^(the|a|an)\s+", re.IGNORECASE)
 #     are deliberately excluded — they conflict with common metric
 #     literals ("confidence 0.9", "rating 4.5") and would otherwise
 #     create spurious ``v_score_is`` Entity rows.
-# Proper-noun subjects ("Alice", "Atlas") are explicitly NOT matched —
-# they fall through to ``no_subject`` and stay the domain of the
-# background entity-extraction worker (which can later overwrite our
-# inferred row with the correct ``entity_type``). Picking
+# Proper-noun subjects ("Alice", "Atlas") are explicitly NOT matched
+# here. They are handled by ``_infer_proper_noun_subject`` instead,
+# which may only RESOLVE them against existing entities and never
+# create one — so a name this table has not seen still falls through
+# to the background entity-extraction worker (which can later
+# overwrite our inferred row with the correct ``entity_type``). Picking
 # ``entity_type="identifier"`` on the upsert below matches what entity
 # extraction would emit for these shapes if it ran (per
 # ``entity_extraction.py:20``) so the two routes converge on the same
@@ -312,16 +316,124 @@ _SUBJECT_STOPWORDS = frozenset(
 )
 
 
-def _infer_subject_token(content: str, match: re.Match[str]) -> str | None:
-    """Pick an identifier-shaped subject anchored at ``match.start()``.
+# A trailing run of 1-4 capitalised words: "Alice", "Project Brightwood",
+# "Acme Corp". Deliberately NOT anchored on being mid-sentence — a subject at
+# the start of the content is capitalised for two indistinguishable reasons
+# (it is a name, or it merely opens the sentence) and no regex can separate
+# them. That ambiguity is resolved downstream instead, by requiring the name
+# to already exist as an entity; see ``_infer_proper_noun_subject``.
+#
+# The 4-word ceiling is not cosmetic: without it a capitalised clause
+# ("Before The Next Review Cycle Atlas") would be swallowed whole and looked
+# up as one canonical name, which can only ever miss.
+_PROPER_NOUN_PHRASE = re.compile(r"((?:[A-Z][\w'\u2019&.]*)(?:\s+[A-Z][\w'\u2019&.]*){0,3})\s*$")
 
-    Returns the trailing identifier token in ``content[:match.start()]``
-    (after stripping leading article + sentence-boundary backtrack),
-    or ``None`` if no identifier-shaped token is present. Skip-on-doubt:
-    proper-noun subjects ("Alice", "Atlas") deliberately return None
-    rather than risk creating a fragmented entity row that would
-    collide with the background entity-extraction worker's later
-    higher-precision output.
+
+# Function words that are capitalised only because they OPEN a sentence, plus
+# possessives and determiners. A name is capitalised for a reason; these are
+# capitalised for a position, and a regex looking at a trailing capitalised run
+# cannot tell the two apart.
+#
+# Kept SEPARATE from ``_SUBJECT_STOPWORDS`` on purpose. That set also gates the
+# identifier path, where these words can never appear anyway (the identifier
+# regex would not match them), so folding them in would widen a shared gate for
+# one path's benefit and make the other harder to reason about.
+#
+# Why this matters beyond tidiness: every false candidate is recorded as a
+# ``no_subject_match``, and that reason exists to SIZE the population a subject
+# backfill would convert. A candidate no backfill could ever satisfy — "If",
+# "My" — does not just miss, it inflates the number the decision rests on. Worth
+# noting the miss itself is harmless: this path only ever RESOLVES against
+# existing entities, so a bad candidate creates nothing.
+_NON_NAME_OPENERS = frozenset(
+    {
+        # subordinators / conjunctions that commonly open a clause
+        "if",
+        "when",
+        "while",
+        "after",
+        "before",
+        "since",
+        "because",
+        "although",
+        "though",
+        "unless",
+        "until",
+        "whereas",
+        "whether",
+        "however",
+        "therefore",
+        "meanwhile",
+        "otherwise",
+        "instead",
+        "and",
+        "but",
+        "or",
+        "so",
+        "yet",
+        "then",
+        "also",
+        "plus",
+        # possessives and determiners
+        "my",
+        "our",
+        "your",
+        "his",
+        "her",
+        "its",
+        "their",
+        "whose",
+        "each",
+        "every",
+        "any",
+        "all",
+        "both",
+        "some",
+        "no",
+        "none",
+        "which",
+        "what",
+        "who",
+        "whom",
+        "why",
+        "how",
+        "where",
+        # copulas / auxiliaries that can lead a fronted clause
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "do",
+        "does",
+        "did",
+        "has",
+        "have",
+        "had",
+        "can",
+        "could",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "must",
+        "per",
+        "via",
+        "not",
+    }
+)
+
+
+def _subject_head(content: str, match: re.Match[str]) -> str | None:
+    """The text a subject may be drawn from: ``content`` up to the predicate.
+
+    Shared by both subject paths so the identifier and proper-noun readings
+    can never disagree about where the subject ends — a divergence here would
+    show up as one path silently seeing a different string than the other.
     """
     # Strip trailing whitespace AND sentence-internal punctuation. The
     # latter avoids silent skips on content like
@@ -338,6 +450,60 @@ def _infer_subject_token(content: str, match: re.Match[str]) -> str | None:
     head = re.split(r"[.!?]\s+", head)[-1].strip()
     head = _LEADING_ARTICLES.sub("", head).strip()
     if not head or head.lower() in _SUBJECT_STOPWORDS:
+        return None
+    return head
+
+
+def _infer_proper_noun_subject(content: str, match: re.Match[str]) -> str | None:
+    """Pick a proper-noun subject CANDIDATE — a name to look up, not to create.
+
+    ``_infer_subject_token`` handles identifier-shaped subjects and returns
+    None for names, because creating an entity row from a bare name would
+    race the extraction worker and fragment the entity (A5, and the reason
+    that skip-on-doubt was written). This function does not lift that rule:
+    it only proposes a string, and the caller resolves it against entities
+    that ALREADY exist. A name nobody has seen before still skips.
+
+    That split is what makes the path safe and also what bounds its value —
+    it fills the subject column on repeat mentions of a known name, which is
+    precisely the shape A59's Type-II materializer needs (it requires two or
+    more live memories on one subject before it will even consider it).
+    """
+    head = _subject_head(content, match)
+    if head is None:
+        return None
+    m = _PROPER_NOUN_PHRASE.search(head)
+    if m is None:
+        return None
+    name = m.group(1).strip().rstrip(".,;:-").strip()
+    if not name or len(name) > 80:
+        return None
+    # Reject when ANY word is a stopword or a non-name opener. A phrase like
+    # "This Atlas" or "Today Atlas" is a connective plus a name, and looking
+    # the pair up as one canonical name can only miss; the single-word check
+    # ``_subject_head`` already did does not cover the multi-word case, and
+    # does not cover these openers at all.
+    words = [w.lower() for w in name.split()]
+    if any(w in _SUBJECT_STOPWORDS or w in _NON_NAME_OPENERS for w in words):
+        return None
+    return name
+
+
+def _infer_subject_token(content: str, match: re.Match[str]) -> str | None:
+    """Pick an identifier-shaped subject anchored at ``match.start()``.
+
+    Returns the trailing identifier token in ``content[:match.start()]``
+    (after stripping leading article + sentence-boundary backtrack),
+    or ``None`` if no identifier-shaped token is present. Skip-on-doubt:
+    proper-noun subjects ("Alice", "Atlas") deliberately return None
+    rather than risk creating a fragmented entity row that would
+    collide with the background entity-extraction worker's later
+    higher-precision output. The caller then tries
+    ``_infer_proper_noun_subject``, which keeps that guarantee by
+    resolving names only against entities that already exist.
+    """
+    head = _subject_head(content, match)
+    if head is None:
         return None
     m = _IDENTIFIER_TOKEN.search(head)
     if m is None:
@@ -441,9 +607,14 @@ class EmitMemoryTriple:
             #       — high-trust, no DB hit, used by SDK / MCP callers.
             #   (b) identifier-token heuristic on ``content[:match.start()]``
             #       — closes the loadtest's bare-POST shape. Only fires
-            #       for identifier-shaped tokens (gap A5); proper-noun
-            #       subjects skip and stay the entity-extraction
-            #       worker's responsibility.
+            #       for identifier-shaped tokens (gap A5), and CREATES
+            #       the entity on a miss.
+            #   (c) proper-noun name resolved by LOOKUP ONLY (A59) —
+            #       fills the subject on a repeat mention of a name the
+            #       entity table already holds, and creates nothing. A
+            #       first mention still skips and stays the extraction
+            #       worker's responsibility, so (c) adds coverage
+            #       without taking any of that worker's precision.
             subject_links = [
                 link for link in (data.entity_links or []) if (link.role or "").lower() == "subject"
             ]
@@ -461,13 +632,19 @@ class EmitMemoryTriple:
             # skips the emission.
             subject_entity_id: UUID | None
             inferred: str | None = None
+            proper_noun: str | None = None
             if len(subject_links) == 1:
                 subject_entity_id = subject_links[0].entity_id
             else:
                 inferred = _infer_subject_token(content, head_match)
                 if inferred is None:
-                    return StepResult(outcome=StepOutcome.SKIPPED, detail={"reason": "no_subject"})
-                subject_entity_id = None  # filled by the deferred upsert below.
+                    # (c) proper-noun subject, resolved by LOOKUP ONLY in
+                    # Phase B. Tried second so identifier-shaped subjects keep
+                    # their existing create-on-miss behaviour untouched.
+                    proper_noun = _infer_proper_noun_subject(content, head_match)
+                    if proper_noun is None:
+                        return StepResult(outcome=StepOutcome.SKIPPED, detail={"reason": "no_subject"})
+                subject_entity_id = None  # filled by the deferred resolve below.
 
             # Bound the object to the current sentence — without this,
             # a follow-up clause like "Ran lives in NYC. He also …"
@@ -489,6 +666,34 @@ class EmitMemoryTriple:
             # If the upsert raises (transient storage failure, etc.),
             # SKIP with ``subject_upsert_failed`` — never break the
             # write pipeline.
+            if proper_noun is not None and subject_entity_id is None:
+                # Lookup-only: a name we have never seen stays the extraction
+                # worker's to create. ``no_subject_match`` is deliberately a
+                # DISTINCT reason from ``no_subject`` — the two have opposite
+                # remedies. ``no_subject`` means the text carried nothing
+                # subject-shaped and no amount of corpus history would help;
+                # ``no_subject_match`` means we read a name the entity table
+                # does not know yet, which is exactly the population a subject
+                # backfill would convert. Collapsing them would erase the one
+                # signal that says how much headroom that backfill has.
+                try:
+                    subject_entity_id = await find_entity_by_exact_name(
+                        tenant_id=data.tenant_id,
+                        fleet_id=data.fleet_id,
+                        canonical_name=proper_noun,
+                    )
+                except Exception as exc:
+                    logger.warning("Proper-noun subject lookup failed for %r: %s", proper_noun, exc)
+                    return StepResult(
+                        outcome=StepOutcome.SKIPPED,
+                        detail={"reason": "subject_lookup_failed"},
+                    )
+                if subject_entity_id is None:
+                    return StepResult(
+                        outcome=StepOutcome.SKIPPED,
+                        detail={"reason": "no_subject_match", "subject_candidate": proper_noun},
+                    )
+
             if inferred is not None and subject_entity_id is None:
                 try:
                     entity = await upsert_entity(

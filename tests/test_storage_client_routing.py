@@ -501,3 +501,136 @@ async def test_403_response_keeps_cached_id_token() -> None:
     refreshes of a token that was authoritatively authed — the real
     fix is IAM-side (grant the caller's SA the right role)."""
     await _run_auth_status_test(403, expect_evicted=False)
+
+
+# ── oss-0902-l-52 follow-up: agent re-fetches that follow a write ──────────
+
+
+async def test_get_agent_defaults_to_the_reader() -> None:
+    """Non-regression. Most ``get_agent`` callers are plain lookups — trust
+    gates, fleet resolution, 404 checks — and the point of the opt-out is to
+    leave those on the reader rather than give up the split for four sites."""
+    client, writer, reader = await _fresh_client(
+        writer_url="http://writer:8002", reader_url="http://reader:8002"
+    )
+    await client.get_agent("agent-1", "t1")
+    assert len(reader.requests) == 1
+    assert len(writer.requests) == 0
+
+
+async def test_get_agent_read_false_goes_to_the_writer() -> None:
+    """``read=False`` forces the primary, as it does for ``get_document``.
+
+    Before this existed, ``get_agent`` took no ``read`` argument at all, so a
+    re-fetch issued immediately after a write was served from the replica. Under
+    lag it returns the row as it was BEFORE the update it exists to report.
+    """
+    client, writer, reader = await _fresh_client(
+        writer_url="http://writer:8002", reader_url="http://reader:8002"
+    )
+    await client.get_agent("agent-1", "t1", read=False)
+    assert len(writer.requests) == 1
+    assert len(reader.requests) == 0
+    assert writer.requests[0].url.host == "writer"
+
+
+async def test_the_trust_level_refetch_asks_for_the_primary() -> None:
+    """Pins the CALL SITE, not just the capability.
+
+    Adding ``read=`` to the client fixes nothing on its own — the bug was that
+    the re-fetch did not ask for the primary. ``update_trust_level``'s own
+    docstring calls ``agents.trust_level`` the single source of truth that every
+    gate reads live; answering with the previous value reports a promotion that
+    has already been applied as not having happened.
+    """
+    from unittest.mock import AsyncMock
+    from unittest.mock import patch as _patch
+
+    from core_api.services import agent_service
+
+    sc = AsyncMock()
+    sc.update_trust_level = AsyncMock(return_value=None)
+    sc.get_agent = AsyncMock(return_value={"agent_id": "a1", "trust_level": 2})
+
+    with (
+        _patch.object(agent_service, "get_storage_client", return_value=sc),
+        _patch.object(
+            agent_service, "lookup_agent", AsyncMock(return_value={"agent_id": "a1"})
+        ),
+    ):
+        await agent_service.update_trust_level("t1", "a1", 2)
+
+    sc.get_agent.assert_awaited_once()
+    assert sc.get_agent.await_args.kwargs.get("read") is False, (
+        "the re-fetch after update_trust_level must come from the primary"
+    )
+
+
+# ── get_or_create_agent: the miss is the dangerous answer ──────────────────
+
+
+def _goca_client(reader_returns, primary_returns=None):
+    """Storage client stub that answers reads by which pool they asked for."""
+    from unittest.mock import AsyncMock
+
+    sc = AsyncMock()
+    calls: list[bool] = []
+
+    async def _get_agent(agent_id, tenant_id, *, read=True):
+        calls.append(read)
+        return reader_returns if read else primary_returns
+
+    sc.get_agent = _get_agent
+    sc.create_or_update_agent = AsyncMock(return_value={"id": "new", "agent_id": "a1"})
+    return sc, calls
+
+
+async def test_a_reader_miss_is_confirmed_against_the_primary() -> None:
+    """A lagged miss must not become a re-registration.
+
+    ``agent_add``'s conflict branch overwrites ``trust_level`` — it protects
+    ``install_id`` and ``owner_install_uuid`` and deliberately does not protect
+    trust. So creating over a live agent silently demotes one that had earned
+    trust, or promotes one sitting at 0 awaiting approval.
+    """
+    from unittest.mock import patch as _patch
+
+    from core_api.services import agent_service
+
+    live = {"id": "x", "agent_id": "a1", "trust_level": 3, "fleet_id": None}
+    sc, calls = _goca_client(reader_returns=None, primary_returns=live)
+
+    with (
+        _patch.object(agent_service, "get_storage_client", return_value=sc),
+        _patch.object(agent_service, "log_action", new_callable=lambda: _AsyncNoop()),
+    ):
+        got = await agent_service.get_or_create_agent("t1", "a1")
+
+    assert calls == [True, False], "a miss must be re-checked against the primary"
+    assert got["trust_level"] == 3, "the live agent must be returned, not re-created"
+    sc.create_or_update_agent.assert_not_awaited()
+
+
+async def test_a_reader_hit_does_not_pay_for_the_primary() -> None:
+    """The trade that makes the fix above affordable.
+
+    This runs on every MCP call and every memory write. Confirming a HIT as
+    well would move that whole population off the replica to fix a case that
+    already ends in a write.
+    """
+    from unittest.mock import patch as _patch
+
+    from core_api.services import agent_service
+
+    live = {"id": "x", "agent_id": "a1", "trust_level": 3, "fleet_id": None}
+    sc, calls = _goca_client(reader_returns=live)
+
+    with _patch.object(agent_service, "get_storage_client", return_value=sc):
+        await agent_service.get_or_create_agent("t1", "a1")
+
+    assert calls == [True], f"hit path asked the primary too: {calls}"
+
+
+class _AsyncNoop:
+    async def __call__(self, *a, **k):
+        return None

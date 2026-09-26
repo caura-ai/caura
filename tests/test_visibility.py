@@ -522,6 +522,105 @@ class TestVisibilityFiltering:
         assert "Admin test tenant memory visible" in contents
         assert "Admin test private memory hidden" not in contents
 
+    # ----------------------------------------------------------------
+    # The same rule on the COUNT path (oss-0902-m-28).
+    #
+    # The tests above pin it for search. A count is a summary of a list, so
+    # it has to admit exactly the rows the list admits — and it did not:
+    # /memories/count counted every scope_agent row in the tenant, handing
+    # back as a NUMBER what the list withholds. These go through
+    # ``sc.count_active``, i.e. the whole stack (core-api client -> HTTP ->
+    # storage router -> service -> SQL), so they cover the identity actually
+    # surviving the hop as well as the predicate acting on it.
+    # ----------------------------------------------------------------
+
+    async def _seed_visibility_mix(self, sc, tenant_id, fleet_id):
+        """One private row for each of two agents, plus a shared one."""
+        await self._insert_memory(
+            sc,
+            tenant_id,
+            fleet_id,
+            "agent-A",
+            "Count: A private",
+            visibility="scope_agent",
+        )
+        await self._insert_memory(
+            sc,
+            tenant_id,
+            fleet_id,
+            "agent-B",
+            "Count: B private",
+            visibility="scope_agent",
+        )
+        await self._insert_memory(
+            sc, tenant_id, fleet_id, "agent-B", "Count: shared", visibility="scope_team"
+        )
+
+    async def test_count_unscoped_still_sees_the_whole_corpus(
+        self, sc, tenant_id, fleet_id
+    ):
+        """Default off. The auto-crystallize spend gate counts rows to decide
+        whether a corpus is worth processing, and a private row is still a row
+        to process."""
+        await self._seed_visibility_mix(sc, tenant_id, fleet_id)
+
+        assert await sc.count_active(tenant_id, fleet_id) == 3
+
+    async def test_count_with_no_identity_hides_every_private_row(
+        self, sc, tenant_id, fleet_id
+    ):
+        """A tenant/user credential authenticates no agent, so it is entitled
+        to none of them — the rule the list route applies with no agent named."""
+        await self._seed_visibility_mix(sc, tenant_id, fleet_id)
+
+        count = await sc.count_active(tenant_id, fleet_id, exclude_scope_agent=True)
+
+        assert count == 1, "expected only the scope_team row"
+
+    async def test_count_admits_the_callers_own_private_rows_only(
+        self, sc, tenant_id, fleet_id
+    ):
+        """The finding, both directions at once.
+
+        2 = the caller's own scope_agent row + the scope_team row. 3 would mean
+        the peer's private row leaked into the number; 1 would mean the caller
+        cannot count what it can list.
+        """
+        await self._seed_visibility_mix(sc, tenant_id, fleet_id)
+
+        count = await sc.count_active(
+            tenant_id, fleet_id, exclude_scope_agent=True, caller_agent_id="agent-A"
+        )
+
+        assert count == 2, "an agent must count its own private rows, and only its own"
+
+    async def test_count_excludes_an_unrecognised_visibility(
+        self, sc, tenant_id, fleet_id
+    ):
+        """``visibility`` is plain Text with no CHECK constraint.
+
+        The readers admit scope_org/scope_team/own-scope_agent BY NAME, so a
+        value outside those three appears in no listing. The shorter
+        ``!= 'scope_agent' OR agent_id == caller`` spelling of
+        ``_visibility_scope_clause`` would have counted it, putting the count
+        above the list it summarises.
+        """
+        await self._seed_visibility_mix(sc, tenant_id, fleet_id)
+        await self._insert_memory(
+            sc,
+            tenant_id,
+            fleet_id,
+            "agent-A",
+            "Count: odd",
+            visibility="scope_nonsense",
+        )
+
+        count = await sc.count_active(
+            tenant_id, fleet_id, exclude_scope_agent=True, caller_agent_id="agent-A"
+        )
+
+        assert count == 2, "an unrecognised visibility must not be counted"
+
 
 @pytest.mark.integration
 class TestBackwardCompatibility:

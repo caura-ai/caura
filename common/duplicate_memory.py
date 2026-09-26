@@ -23,6 +23,8 @@ Pure data: no framework imports, so both services and their tests can use it.
 
 from __future__ import annotations
 
+import re
+
 DUPLICATE_MEMORY_CODE = "DUPLICATE_MEMORY"
 
 # Why the write was refused. Distinguishing these is most of the point: an
@@ -86,3 +88,44 @@ def core_api_detail(message: str, **fields: object) -> dict:
         "message": message,
         "details": dict(fields),
     }
+
+
+# The mid-deploy fallback: a storage that predates the structured body still
+# answers with the sentence and nothing else. Anchored to the one message form
+# ``exact_message`` produces, so it cannot start matching something else if the
+# wording moves.
+_DETAIL_RE = re.compile(r"^Duplicate memory exists:\s*(?P<id>[0-9a-fA-F-]{36})\s*$")
+
+
+def parse_detail(detail: object) -> dict | None:
+    """What a 409 detail says about the row that already holds this content.
+
+    The inverse of :func:`core_api_detail`, and it lives here for the reason the
+    rest of this module does: the shape has one owner, so reading it should not
+    be re-derived per caller. It was, once — the MCP server and evolve's outcome
+    persistence each had their own, and the second one omitted both the code
+    check (so ANY 409 carrying an ``existing_id`` was absorbed as a duplicate it
+    understood) and the prose fallback below (so against an older storage it
+    gave up where the MCP path recovered).
+
+    Returns ``None`` when the detail is not a duplicate answer at all — callers
+    use that to tell "the duplicate we know how to handle" from "a 409 we should
+    not pretend to understand". Structured first: that is the whole point of
+    C29, and it is the only path that can report ``existing_status`` or tell an
+    exact hit from a semantic one. The regex can only ever recover the id.
+
+    Takes the detail object rather than an exception, so this module keeps its
+    no-framework-imports property; the caller checks the status code.
+    """
+    if isinstance(detail, dict) and detail.get("code") == DUPLICATE_MEMORY_CODE:
+        fields = detail.get("details")
+        return dict(fields) if isinstance(fields, dict) else {}
+    message = (
+        detail["message"]
+        if isinstance(detail, dict) and isinstance(detail.get("message"), str)
+        else str(detail)
+    )
+    m = _DETAIL_RE.match(message)
+    if m:
+        return {"existing_id": m.group("id"), "reason": REASON_EXACT}
+    return None

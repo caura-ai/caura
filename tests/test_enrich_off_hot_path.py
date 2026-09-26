@@ -260,6 +260,42 @@ async def test_fast_mode_uses_schedule_enrich_helper() -> None:
     helper_spy.assert_called_once()
 
 
+async def test_fast_mode_passes_the_callers_owned_metadata_keys() -> None:
+    """C25 — the key set has to be computed HERE, at the write.
+
+    ``_schedule_enrich_or_inline`` and everything below it were covered, but
+    nothing pinned the origin: both call sites in ``ScheduleBackgroundTasks``
+    could drop ``caller_owned_metadata_keys`` and the whole feature would be
+    unwired on the single-write hot path — the path the clobber actually lives
+    on — with every other test still green.
+
+    Only ``summary`` is expected out of a metadata dict that also carries a
+    non-ownable key and an arbitrary one: the narrowing is what keeps a caller
+    from naming a platform key as their own.
+    """
+    ctx = _ctx(
+        memory_id=uuid.uuid4(),
+        write_mode="fast",
+        data=_input(metadata={"summary": "MINE", "contains_pii": True, "project": "x"}),
+    )
+
+    helper_spy = AsyncMock(return_value=None)
+    with (
+        patch(
+            "core_api.services.memory_service._schedule_enrich_or_inline",
+            new=helper_spy,
+        ),
+        patch(
+            "core_api.services.memory_service._schedule_embed_or_reembed",
+            new=AsyncMock(),
+        ),
+    ):
+        await ScheduleBackgroundTasks().execute(ctx)
+
+    helper_spy.assert_called_once()
+    assert helper_spy.call_args.kwargs["caller_owned_metadata_keys"] == ["summary"]
+
+
 # ---------------------------------------------------------------------------
 # _schedule_enrich_or_inline shim
 # ---------------------------------------------------------------------------

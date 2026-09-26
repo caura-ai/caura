@@ -93,6 +93,56 @@ async def summarize_lifecycle_audits(request: Request) -> dict:
     )
 
 
+@router.post("/stranded")
+async def list_stranded_lifecycle_audits(request: Request) -> dict:
+    """Rows the fanout wrote but never published a message for.
+
+    POST rather than GET, and ``org_id`` required in the body rather
+    than an optional query parameter, for the same reason ``/summary``
+    is shaped that way: a cross-tenant read has to be spelled out by the
+    caller. ``null`` means admin-wide and must be written, not omitted.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+    if "org_id" not in body:
+        raise HTTPException(
+            status_code=422,
+            detail="'org_id' is required; send null for the admin-wide sweep",
+        )
+    raw_org_id = body["org_id"]
+    if raw_org_id is not None and not isinstance(raw_org_id, str):
+        raise HTTPException(status_code=422, detail="'org_id' must be a string or null")
+    triggered_by = body.get("triggered_by")
+    if not isinstance(triggered_by, str) or not triggered_by:
+        raise HTTPException(status_code=422, detail="'triggered_by' must be a non-empty string")
+    older_than_minutes = body.get("older_than_minutes", 30)
+    if type(older_than_minutes) is not int or not (1 <= older_than_minutes <= 10080):
+        raise HTTPException(
+            status_code=422,
+            detail="'older_than_minutes' must be in [1, 10080] (minutes)",
+        )
+    limit = body.get("limit", 200)
+    if type(limit) is not int or not (1 <= limit <= 1000):
+        raise HTTPException(status_code=422, detail="'limit' must be in [1, 1000]")
+    rows = await _svc.lifecycle_audit_list_stranded(
+        org_id=UNSCOPED if raw_org_id is None else raw_org_id,
+        triggered_by=triggered_by,
+        older_than_minutes=older_than_minutes,
+        limit=limit,
+    )
+    return {
+        "org_id": raw_org_id,
+        "triggered_by": triggered_by,
+        "older_than_minutes": older_than_minutes,
+        "limit": limit,
+        "rows": rows,
+    }
+
+
 @router.get("/{audit_id}")
 async def get_lifecycle_audit(audit_id: int, org_id: str) -> dict:
     """Return one audit row so a caller can follow its exact message."""
@@ -123,18 +173,37 @@ async def update_lifecycle_audit(audit_id: int, request: Request) -> dict:
             status_code=422,
             detail=f"status must be one of {sorted(_VALID_STATUSES)}, got {status!r}",
         )
+    claim_token = body.get("claim_token")
+    if claim_token is not None and not isinstance(claim_token, str):
+        raise HTTPException(status_code=422, detail="'claim_token' must be a string when provided")
     result = await _svc.lifecycle_audit_finalize(
         audit_id,
         org_id=org_id,
         status=status,
         stats=body.get("stats"),
         error_message=body.get("error_message"),
+        claim_token=claim_token,
     )
-    if result is False:
+    if result == "missing":
         raise HTTPException(status_code=404, detail=f"lifecycle_audit {audit_id} not found")
-    # ``True`` (updated) and ``None`` (no-op against an already-success
-    # row — a Pub/Sub redelivery of an acked message) both return 200.
-    # The no-op path used to share the 404 branch, which produced
-    # spurious "not found" warnings in the consumer's logs on every
-    # redelivery of a successful message.
-    return {"ok": True, "noop": result is None}
+    # ``updated``, ``noop_success`` (a redelivery of an acked message) and
+    # ``claim_conflict`` all return 200. The no-op path used to share the 404
+    # branch, which produced spurious "not found" warnings on every redelivery
+    # of a successful message. ``claim_conflict`` is a 200 rather than a 409
+    # because the consumer wraps this call in a broad ``except`` that logs and
+    # CONTINUES — an exception here would be swallowed into "continuing" and
+    # the duplicate would run the primitive anyway, which is the whole failure
+    # this signal exists to prevent. A field it must read cannot be ignored by
+    # an error handler that was written for a different case.
+    return {
+        "ok": True,
+        "noop": result == "noop_success",
+        "claim_conflict": result == "claim_conflict",
+        # Reported for the same reason ``claim_conflict`` is: the consumer
+        # wraps its terminal write in a broad ``except`` that logs and
+        # continues, so a raised error here would be swallowed and the
+        # duplicate run would leave no trace. This one is not actionable by
+        # the caller -- the work has already happened twice -- so it exists to
+        # be recorded, not to change control flow.
+        "claim_lost": result == "claim_lost",
+    }

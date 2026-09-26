@@ -726,3 +726,59 @@ class TestPlatformEmbeddingSelfHosted:
         monkeypatch.setenv("PLATFORM_EMBEDDING_TRUNCATE_TO_DIM", "not-an-int")
 
         _init_and_assert_rejected()
+
+
+# ---------------------------------------------------------------------------
+# Group 6: EMBEDDING_PROVIDER default unification
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultProviderNameUnification:
+    """The env fallback must match core-api's ``Settings`` default.
+
+    Regression for the split default: ``Settings.embedding_provider`` said
+    ``"openai"`` while ``_resolve_provider_name`` fell back to ``"fake"``,
+    so tenant-config-less callers (doc/skill writes, MCP doc ops, entity
+    embeddings, the storage backfill CLI) silently persisted fake vectors
+    in processes whose env lacked ``EMBEDDING_PROVIDER`` while memory
+    paths in the same process embedded for real. Both now read
+    ``common.provider_names.DEFAULT_EMBEDDING_PROVIDER``.
+    """
+
+    def test_env_unset_falls_back_to_shared_default(self, monkeypatch):
+        from common.embedding._service import _resolve_provider_name
+        from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
+
+        monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
+        assert _resolve_provider_name(None) == DEFAULT_EMBEDDING_PROVIDER
+        # The default is the REAL provider: with no keys configured the
+        # registry still degrades to fake, but through a path that warns.
+        assert DEFAULT_EMBEDDING_PROVIDER == "openai"
+
+    def test_env_wins_over_default(self, monkeypatch):
+        from common.embedding._service import _resolve_provider_name
+
+        monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+        assert _resolve_provider_name(None) == "fake"
+
+    def test_tenant_config_wins_over_env(self, monkeypatch):
+        from common.embedding._service import _resolve_provider_name
+
+        monkeypatch.setenv("EMBEDDING_PROVIDER", "fake")
+
+        class _Cfg:
+            embedding_provider = "openai"
+
+        assert _resolve_provider_name(_Cfg()) == "openai"
+
+    def test_settings_field_default_is_the_shared_constant(self):
+        # Introspect the FIELD default rather than constructing Settings():
+        # construction reads .env / process env and would test the machine,
+        # not the code.
+        from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
+        from core_api.config import Settings
+
+        assert (
+            Settings.model_fields["embedding_provider"].default
+            == DEFAULT_EMBEDDING_PROVIDER
+        )

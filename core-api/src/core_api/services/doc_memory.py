@@ -36,9 +36,10 @@ would follow.
 
 Contract for callers
 --------------------
-Use ``safe_sync_doc_memory``. It never raises: the document is the source of
-truth and must never fail to persist because a derived memory could not be
-written.
+Use ``safe_sync_doc_memory`` to mint and ``safe_unmint_doc_memory`` to remove.
+Neither raises: the document is the source of truth and must never fail to
+persist — or to be deleted — because a derived memory could not be written or
+removed.
 
 Latency: this runs INLINE, deliberately
 ---------------------------------------
@@ -79,9 +80,9 @@ import logging
 
 from fastapi import HTTPException
 
-from core_api.agent_ids import DOC_INDEXER_AGENT_ID
+from core_api.agent_ids import DOC_INDEXER_AGENT_ID, canonical_service_agent_id
 from core_api.constants import CHUNKING_THRESHOLD_CHARS
-from core_api.services.doc_indexing import DocMemorySpec
+from core_api.services.doc_indexing import DocMemorySpec, doc_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ async def resolve_doc_memory_agent(
     """
     from core_api.services.agent_service import get_or_create_agent
 
-    agent_id = caller_agent_id or DOC_INDEXER_AGENT_ID
+    agent_id = canonical_service_agent_id(caller_agent_id or DOC_INDEXER_AGENT_ID)
     await get_or_create_agent(
         tenant_id,
         agent_id,
@@ -262,3 +263,50 @@ async def safe_sync_doc_memory(
     except Exception:
         logger.exception("doc_memory: mint failed for %s", spec.source_uri)
         return None
+
+
+async def safe_unmint_doc_memory(
+    collection: str,
+    doc_id: str,
+    *,
+    tenant_id: str,
+) -> int:
+    """Soft-delete the memories minted from one document. Never raises.
+
+    The inverse of ``safe_sync_doc_memory``, and it lives beside it for the
+    reason the mint does: there are two delete entry points (the REST route and
+    MCP ``caura_doc op=delete``) and only one of them had this, so a document
+    deleted through the other left its minted copy recallable forever — with
+    nothing in the product able to reach it, since the document it was
+    provenance for no longer exists to be deleted again.
+
+    Matched on the provenance metadata the mint writes (``doc_provenance``),
+    through the same bulk soft-delete the /memories route exposes, so this adds
+    no storage surface. The pair is exact: the mint writes both keys on every
+    minted row and nothing else writes them.
+
+    Soft delete, like every other memory delete: the row leaves recall and stays
+    auditable, which is what a retention question needs.
+
+    Returns the number of rows removed — callers record it — and swallows
+    failures, mirroring the mint's own policy in reverse. The document IS
+    deleted by the time this runs and that is what the caller asked for; turning
+    a successful delete into a 5xx because the derived row survived would invite
+    a retry that 404s on the document and never revisits the memory.
+    """
+    from core_api.clients.storage_client import get_storage_client
+
+    try:
+        return await get_storage_client().soft_delete_by_filter(
+            {
+                "tenant_id": tenant_id,
+                "metadata_filter": doc_provenance(collection, doc_id),
+            }
+        )
+    except Exception:
+        logger.exception(
+            "doc_memory: un-mint failed for %s/%s — document deleted, derived memory may remain",
+            collection,
+            doc_id,
+        )
+        return 0

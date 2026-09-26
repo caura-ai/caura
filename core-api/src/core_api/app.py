@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
@@ -35,7 +36,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from common import permanent_failure
 from common.events.factory import get_event_bus
 from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
-from core_api.constants import VERSION, is_mcp_path
+from core_api.constants import STM_WRITE_ROUTE_NOTE, VERSION, is_mcp_path
 from core_api.consumer import register_consumers
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
 from core_api.middleware.ingest_body_size import IngestBodySizeMiddleware
@@ -48,6 +49,7 @@ from core_api.middleware.request_timeout import (
 )
 from core_api.routes.agents import router as agents_router
 from core_api.routes.audit import router as audit_router
+from core_api.routes.conflicts import router as conflicts_router
 from core_api.routes.crystallizer import router as crystallizer_router
 from core_api.routes.documents import router as documents_router
 from core_api.routes.entities import router as entities_router
@@ -64,10 +66,12 @@ from core_api.routes.org_deletion import router as org_deletion_router
 from core_api.routes.plugin import plugin_bootstrap_router
 from core_api.routes.plugin import router as plugin_router
 from core_api.routes.reports import router as reports_router
+from core_api.routes.scheduler_lease import router as scheduler_lease_router
 from core_api.routes.settings import router as settings_router
 from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
 from core_api.routes.stm import router as stm_router
+from core_api.routes.telemetry import router as telemetry_router
 
 # CAURA-631: sentinel bucket for audit events that arrive without a
 # ``tenant_id`` field. Routed through the per-tenant flusher's
@@ -245,7 +249,7 @@ async def lifespan(app):
     # imported AFTER that call (slowapi / mcp_server below, uvicorn by the
     # server) — so the import-time pass no-ops for them (it logs a "rerouting
     # was a no-op" warning) and their records never reach the JSON/GCP handler.
-    # Most consequentially, FastMCP's "Error executing tool ..." tool-error
+    # Most consequentially, the MCP SDK's "Error executing tool ..." tool-error
     # lines were invisible in prod logs. The re-route is idempotent, so this
     # post-import re-run from the ASGI lifespan startup safely routes them.
     reroute_third_party_loggers()
@@ -326,6 +330,14 @@ async def lifespan(app):
         usage_meter = UsageMeter()
         usage_meter.start()
         configure_hooks(ServiceHooks(audit_log=log_action, usage_meter=usage_meter.record))
+
+        # Anonymous daily heartbeat (docs/telemetry.md). ``install`` evaluates
+        # the policy, prints the ON/OFF boot line and starts the tracked loop
+        # only when the policy says on — off means no task, no HTTP client,
+        # no counter. Cancelled with the other tracked tasks on shutdown.
+        from core_api.heartbeat import install as install_heartbeat
+
+        install_heartbeat(app_settings)
 
         # CAURA-628: bind + start the audit batch flusher. ``log_action``
         # checks for an active queue and falls back to a synchronous
@@ -576,6 +588,21 @@ async def lifespan(app):
         # and cannot be starved by them. event_bus.stop() still calls it; this
         # is an idempotent hoist, not a move.
         shutdown_steps: list = [event_bus.release_broadcast_subscriptions()]
+        # Background tasks drain BEFORE the queues that collect what they
+        # produce. They are producers: ``process_entity_extraction`` calls
+        # ``log_action`` (entity_extraction_worker.py) which enqueues onto the
+        # audit queue, and metered work calls ``usage_meter.record``. Draining
+        # them after those flushes meant a task that finished handed its audit
+        # event to a flusher that ``stop()`` had already set to None, and its
+        # counters to a buffer nothing would flush again — saving the work and
+        # dropping its trail.
+        #
+        # This also puts the drain where there is budget left to spend. The
+        # three 5s flushes below already over-run Cloud Run's 10s window on any
+        # shutdown with queued work, so as the last-but-one step this was
+        # reached with nothing remaining on exactly the shutdowns that motivated
+        # giving it a grace at all.
+        shutdown_steps.append(cancel_all_tasks())
         if audit_queue is not None:
             shutdown_steps.append(audit_queue.stop(timeout=5.0))
         if capability_usage_agg is not None:
@@ -590,7 +617,6 @@ async def lifespan(app):
         shutdown_steps.extend(
             [
                 event_bus.stop(),
-                cancel_all_tasks(),
                 get_storage_client().close(),
             ]
         )
@@ -605,9 +631,11 @@ async def lifespan(app):
 # CAP-01 / F6. Tag-level labelling for capabilities whose REST surface is not
 # what its presence in this spec implies. Only STM qualifies today: it is
 # advertised here, gated on a server setting hosted tenants cannot reach, and
-# has no REST write route at all. The per-operation text lives in
+# has no DEDICATED REST write route. The per-operation text lives in
 # ``routes/stm.py``; this is what a reader sees in the docs sidebar before
-# they open an operation.
+# they open an operation — which is why the sentence about the write path is
+# shared with that module rather than restated here. It used to be restated,
+# and said something untrue for longer than the copy that got corrected.
 OPENAPI_TAGS = [
     {
         "name": "stm",
@@ -615,8 +643,8 @@ OPENAPI_TAGS = [
             "**Plugin-only — not available over hosted REST.** Short-term "
             "memory is served by the OpenClaw plugin. These operations are "
             "gated on the server-side `USE_STM` setting, which is off in the "
-            "hosted deployment and is not per-tenant, and there is no REST "
-            "write route for STM at all. Use `/memories` and `/search` for "
+            "hosted deployment and is not per-tenant. "
+            f"{STM_WRITE_ROUTE_NOTE} Use `/memories` and `/search` for "
             "durable memory."
         ),
     },
@@ -835,6 +863,52 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 
 
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Give the router's own 404 the envelope every other error already has.
+
+    The handler above covers ``fastapi.HTTPException`` — everything a route
+    raises. It does not cover the 404 Starlette's router raises for a path that
+    matched no route at all, which is a different class and so arrived at the
+    caller as a bare ``{"detail": "Not Found"}``: no code, and a shape nothing
+    else on this surface uses. A client branching on ``error.code`` got nothing
+    from the one response it is most likely to meet while finding its way
+    around (ax-0917-m-13 hit it guessing ``/documents/{collection}/{doc_id}``).
+
+    A 404 here also means something specific — "no such route", not "no such
+    row" — so it carries ``NO_SUCH_ROUTE`` rather than ``NOT_FOUND``. A caller
+    that cannot tell those apart retries against a path that will never exist,
+    or concludes its data is gone when only its URL was wrong.
+
+    And since the server knows every route it serves, the response names the
+    nearest ones. The guess is the question; an unadorned 404 answers only
+    "not that" and leaves the caller to guess again.
+    """
+    from core_api.errors import make_error_payload
+    from core_api.route_suggestions import route_table, suggest_routes
+
+    if exc.status_code != 404 or request.scope.get("route") is not None:
+        # Anything the router raised that is not an unmatched path keeps the
+        # generic mapping; only the unmatched case has a route to suggest.
+        return await http_exception_handler(request, exc)  # type: ignore[arg-type]
+
+    path = request.scope.get("path", "")
+    details: dict = {"path": path, "method": request.method}
+    suggestions = suggest_routes(path, route_table(app))
+    if suggestions:
+        details["did_you_mean"] = suggestions
+
+    message = f"No route matches {request.method} {path}."
+    if suggestions:
+        message += " Closest registered routes are in details.did_you_mean."
+
+    body = {
+        "detail": exc.detail,  # back-compat: the old bare shape is preserved
+        **make_error_payload("NO_SUCH_ROUTE", message, details),
+    }
+    return JSONResponse(body, status_code=404, headers=getattr(exc, "headers", None))
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Replace FastAPI's default 422 body with our envelope.
@@ -911,14 +985,15 @@ if app_settings.is_standalone:
 
     app.add_middleware(StandaloneTenantMiddleware)
 
+# PR #9: reject oversized ingest requests before FastAPI parses the body.
+# Registered before RequestTimeout so Starlette places it INSIDE the request
+# budget: a slow chunked upload cannot hold the body-counting loop forever.
+# Both sit inside SecurityHeaders/CORS so 413/504 responses carry those headers.
+app.add_middleware(IngestBodySizeMiddleware)
 app.add_middleware(
     RequestTimeoutMiddleware,
     timeout_seconds=app_settings.request_timeout_seconds,
 )
-# PR #9: reject oversized ingest requests at Content-Length, before
-# FastAPI parses the body. Sits inside SecurityHeaders/CORS so the 413
-# still carries those headers.
-app.add_middleware(IngestBodySizeMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -1038,10 +1113,10 @@ app.include_router(reports_router, prefix="/api/v1")
 # change until they explicitly enable the feature.
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
-# PERMANENT legacy alias (rebrand, 2026-08-14): the keystones REST surface
-# shipped as /api/v1/memclaw/keystones and customer scripts call it. The
+# Rename compatibility (2026-08-14): the keystones REST surface
+# shipped under the old brand prefix and customer scripts call it. The
 # canonical path is now the brand-neutral /api/v1/keystones (matching every
-# other route); the old prefix keeps serving forever, hidden from the schema.
+# other route); the old prefix remains accepted, hidden from the schema.
 app.include_router(
     keystones_router,
     prefix="/api/v1/memclaw",  # legacy-name-floor: floor
@@ -1052,11 +1127,14 @@ app.include_router(plugin_router, prefix="/api/v1")
 # Bootstrap aliases — see plugin.py:plugin_bootstrap_router for rationale.
 app.include_router(plugin_bootstrap_router, prefix="/api")
 app.include_router(stats_router, prefix="/api/v1")
+app.include_router(telemetry_router, prefix="/api/v1")
 app.include_router(stm_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(interview_router, prefix="/api/v1")
 app.include_router(evolve_router, prefix="/api/v1")
+app.include_router(conflicts_router, prefix="/api/v1")
 app.include_router(lifecycle_router, prefix="/api/v1")
+app.include_router(scheduler_lease_router, prefix="/api/v1")
 app.include_router(org_deletion_router, prefix="/api/v1")
 
 # Test-only endpoints (time-warp, etc.) — only registered when TESTING=1
@@ -1065,7 +1143,7 @@ if _os.getenv("TESTING") == "1":
 
     app.include_router(testing_router, prefix="/api/v1")
 
-# Mount at /mcp; FastMCP's internal Route("/") handles the canonical /mcp/.
+# Mount at /mcp; the SDK app's internal Route("/") handles the canonical /mcp/.
 # Bare /mcp (no trailing slash) doesn't match Mount's regex, so the parent
 # router would issue a 307 — streaming MCP clients (e.g. Anthropic's
 # remote-MCP integration) hang on the initialize handshake when a redirect

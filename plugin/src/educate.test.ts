@@ -1,7 +1,7 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, win32 } from "path";
 import { fileURLToPath } from "url";
 import { tmpdir } from "os";
 import { educateAgents, writeEducationFiles } from "./index.js";
@@ -10,13 +10,14 @@ import {
   buildAgentsMd,
   discoverAgentWorkspaces,
   cleanupStaleHeartbeatEducation,
+  resolveWorkspacePath,
 } from "./educate.js";
 import { CAURA_TOOLS } from "./tools.js";
 import { MEMORY_TYPES, STATUSES } from "./tool-definitions.js";
 import {
   FROZEN_PLUGIN_ID,
   LEGACY_DISPLAY_NAME,
-} from "./legacy-contracts.test.js";
+} from "./legacy-contracts.fixture.js";
 
 const BACKUP_SUFFIX = `.${FROZEN_PLUGIN_ID}-bak`;
 
@@ -155,6 +156,25 @@ describe("discoverAgentWorkspaces", () => {
       try { rmSync(d, { recursive: true, force: true }); } catch {}
     }
     dirs.length = 0;
+  });
+
+  test("keeps absolute Windows workspace paths absolute", () => {
+    assert.equal(
+      resolveWorkspacePath(
+        "C:\\Users\\agent\\.openclaw",
+        "C:\\Users\\agent\\workspace-custom",
+        win32,
+      ),
+      "C:\\Users\\agent\\workspace-custom",
+    );
+    assert.equal(
+      resolveWorkspacePath(
+        "C:\\Users\\agent\\.openclaw",
+        "workspace-relative",
+        win32,
+      ),
+      "C:\\Users\\agent\\.openclaw\\workspace-relative",
+    );
   });
 
   test("finds the default <baseDir>/workspace as id=main", () => {
@@ -716,7 +736,7 @@ describe("writeEducationFiles", () => {
 
       assert.equal(result.toolsUpdated, 1, "a pre-rename tool listing must be recognized as our block");
       const tools = readFile(join(wsDir, "TOOLS.md"));
-      assert.ok(!tools.includes("memclaw_write_bulk"), "stale pre-rename body must be replaced"); // legacy-name-ok: asserts the old body is gone
+      assert.ok(!tools.includes("memclaw_write_bulk"), "stale pre-rename body must be replaced"); // legacy-name-absent: asserts the old body is gone
       assert.match(tools, /<!-- memclaw:tools v=[a-f0-9]{8} -->/); // legacy-name-floor: the fence tag is a pinned on-disk contract
       assert.ok(tools.startsWith(userBefore), "user content above the legacy block must be preserved");
       assert.ok(tools.includes("## Other"), "user content below the legacy block must be preserved");

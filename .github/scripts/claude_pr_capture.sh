@@ -30,8 +30,7 @@
 #   GH_TOKEN          token with issues:read and pull-requests:read
 # Optional env:
 #   CAURA_AGENTS_KEY     internal-agents tenant key (empty => dark no-op)
-#   CAURA_API_URL        default https://caura.ai
-# Both also accept their pre-rename MEMCLAW_* spelling.  # legacy-name-ok: rule 3 dual-read alias
+#   CAURA_API_URL        default https://caura.ai; also accepts its pre-rename spelling  # legacy-name-ok: rule 3 dual-read alias
 #   CODE_REVIEW_FLEET_ID default code-review
 #   MODEL                default claude-sonnet-5
 #   MAX_BUDGET_USD       per-invocation ceiling (default 2.00)
@@ -47,12 +46,10 @@ MAX_THREAD_CHARS=60000
 # from here would be the only one no per-reviewer filter could account for.
 REVIEWER="claude"
 
-# Either spelling: the workflow passes CAURA_AGENTS_KEY (itself resolved from
-# whichever secret exists), but a manual run may still export the old name.
-# ``:-`` treats blank as unset, so this is first NON-EMPTY, not first defined —
-# an unfilled CAURA_AGENTS_KEY= must not shadow a working old one and take the
-# capture dark without saying so.
-AGENTS_KEY="${CAURA_AGENTS_KEY:-${MEMCLAW_AGENTS_KEY:-}}"  # legacy-name-ok: rule 3 dual-read alias
+# One spelling. The workflow passes CAURA_AGENTS_KEY from the repo-level secret of that
+# name; the pre-rename fallback went when that secret was provisioned, because a fallback
+# that can never fire is indistinguishable from one that always does.
+AGENTS_KEY="${CAURA_AGENTS_KEY:-}"
 
 if [ -z "$AGENTS_KEY" ]; then
   echo "::notice::Declined-finding capture is dark (no CAURA_AGENTS_KEY) — skipping"

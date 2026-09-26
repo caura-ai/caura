@@ -2,9 +2,14 @@
 
 Three facts, each verified against a running stack before this was written:
 
-* ``POST /stm/notes`` and ``POST /stm/bulletin`` do not exist. There is no REST
-  write route for short-term memory at all, so a caller who follows the docs
-  gets a bare 405.
+* ``POST /stm/notes`` and ``POST /stm/bulletin`` do not exist, so a caller who
+  follows the docs to THOSE gets a bare 405. There is no DEDICATED REST write
+  route — which is not the same as no write path, and this docstring said the
+  stronger thing until #1552's successor corrected it. ``POST /memories`` with
+  ``write_mode='stm'`` writes short-term memory over REST, behind the same
+  ``USE_STM`` gate. The sentence now lives once, in
+  ``core_api.constants.STM_WRITE_ROUTE_NOTE``, because it was published in
+  three places and two of them were wrong.
 * Every read, delete and promote is gated on ``USE_STM``, which is off in the
   hosted deployment and is a server setting rather than a per-tenant one — so
   a hosted customer cannot enable it at any price.
@@ -12,8 +17,9 @@ Three facts, each verified against a running stack before this was written:
   memory": instructions the reader it reaches cannot follow.
 
 STM stays dead by standing decision. These tests pin the LABELLING, and one of
-them pins the other half — that nobody quietly adds the missing write routes
-and turns a documentation fix into a feature. A25 is not reopened by any of
+them pins the other half — that nobody quietly adds DEDICATED write routes
+and turns a documentation fix into a feature. (The ``/memories`` write path is
+not that: it predates these tests and is the supported way in.) A25 is not reopened by any of
 this.
 """
 

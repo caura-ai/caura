@@ -46,8 +46,10 @@ jobs:
             exit 1
           fi
           echo "OIDC token-request context is present"
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       # A tag that disagrees with pyproject.toml does not fail — it publishes
@@ -64,6 +66,19 @@ jobs:
             exit 1
           fi
           echo "publishing $(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['name'])")==${PKG_VERSION}"
+        working-directory: clients/python
+      # The README source carries legacy-name lint markers as HTML comments so
+      # the rename ratchet can account for each mention of the former name. They
+      # are not for readers: PyPI's JSON API serves the long description raw, so
+      # they would leak into every page an AI answer engine reads. Strip them
+      # before building, and refuse to publish if any HTML comment survives.
+      - name: Strip lint markers from the README
+        run: |
+          sed -E -i 's/ *<!-- legacy-name-[a-z]+:[^>]*-->//g' README.md
+          if grep -q '<!--' README.md; then
+            echo "::error::README.md still contains an HTML comment; it would be published verbatim"
+            exit 1
+          fi
         working-directory: clients/python
       - name: Build
         run: |

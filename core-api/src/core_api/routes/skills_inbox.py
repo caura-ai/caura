@@ -35,8 +35,16 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
+from core_api.errors import (
+    AUTH_SKILLS_FACTORY_DISABLED,
+    AUTH_SKILLS_INBOX_FORBIDDEN,
+    AUTH_TENANT_MISMATCH,
+    AUTH_UNAUTHENTICATED,
+    coded_detail,
+)
 from core_api.schemas import STRICT_WRITE_BODY
 from core_api.services.audit_service import log_action
 from core_api.services.forge.poison import write_rejected_fingerprint
@@ -78,7 +86,10 @@ async def _require_skills_factory_enabled(tenant_id: str) -> dict:
     if not enabled:
         raise HTTPException(
             status_code=403,
-            detail="SKILLS_FACTORY_DISABLED — set org_settings.skills_factory.enabled=true to use the inbox",
+            detail=coded_detail(
+                AUTH_SKILLS_FACTORY_DISABLED,
+                "SKILLS_FACTORY_DISABLED — set org_settings.skills_factory.enabled=true to use the inbox",
+            ),
         )
     return await get_settings_for_display(tenant_id)
 
@@ -114,7 +125,10 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
             # on the ``TENANT_MISMATCH`` prefix, not on the prose.
             raise HTTPException(
                 status_code=403,
-                detail="TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
+                detail=coded_detail(
+                    AUTH_TENANT_MISMATCH,
+                    "TENANT_MISMATCH — this credential is not scoped to the requested tenant.",
+                ),
             )
         return auth.tenant_id
     if getattr(auth, "is_admin", False):
@@ -126,7 +140,7 @@ def _require_tenant(auth: AuthContext, explicit_tenant_id: str | None = None) ->
         )
     raise HTTPException(
         status_code=401,
-        detail="UNAUTHENTICATED — auth context has no tenant_id",
+        detail=coded_detail(AUTH_UNAUTHENTICATED, "UNAUTHENTICATED — auth context has no tenant_id"),
     )
 
 
@@ -168,15 +182,19 @@ def _require_inbox_admin(auth: AuthContext) -> None:
     unauthenticated bootstrap routes, which take no ``auth`` and write
     nothing tenant-scoped.
     """
-    # Mirror documents.py:215-216 — admin status may come from either
-    # the legacy ``is_admin`` flag OR ``org_role == "admin"``. Keeping
-    # both surfaces in lockstep means an operator authorized to write
-    # admin-gated skills via ``caura_doc`` can also act on the inbox.
-    is_admin = bool(getattr(auth, "is_admin", False)) or (getattr(auth, "org_role", None) == "admin")
-    if not is_admin:
+    # ``AuthContext.is_org_admin`` is the shared spelling of "admin status
+    # may come from either the legacy ``is_admin`` flag OR
+    # ``org_role == 'admin'``". Keeping this surface and ``documents`` on the
+    # same property means an operator authorized to write admin-gated skills
+    # via ``caura_doc`` can also act on the inbox, and stays that way — when
+    # the two were written out by hand in three places, nothing held them
+    # together but the habit of copying.
+    if not auth.is_org_admin:
         raise HTTPException(
             status_code=403,
-            detail="SKILLS_INBOX_FORBIDDEN — inbox actions require admin privileges",
+            detail=coded_detail(
+                AUTH_SKILLS_INBOX_FORBIDDEN, "SKILLS_INBOX_FORBIDDEN — inbox actions require admin privileges"
+            ),
         )
 
 
@@ -441,12 +459,47 @@ def _card_from_doc(doc: dict) -> InboxCard:
     )
 
 
+def _binding_target_slug(data: dict) -> str | None:
+    """Which live skill a ``kind='update'`` candidate binds against.
+
+    ``data["slug"]``, and named here so it can be tested without standing up
+    the whole edit route. It read ``data["target"]["slug"]`` before: ``target``
+    carries ``target_content_hash`` and nothing else — the validator requires
+    that one key and no writer has ever set a ``slug`` beside it — so the
+    lookup always came back None and the binding gate refused every edit with
+    "no live skill exists", naming a skill that does.
+
+    ``validate_and_normalize_skill_write``'s own gate resolves the live skill
+    by ``doc["slug"]``; reading the same key is what makes the pre-fetch and
+    the check agree about which document is being bound.
+    """
+    if data.get("kind") != "update":
+        return None
+    slug = data.get("slug")
+    return slug if isinstance(slug, str) and slug else None
+
+
 async def _load_doc_or_404(*, tenant_id: str, slug: str) -> dict:
+    """Load one inbox doc, from the WRITER.
+
+    Every caller here is a read-modify-write: approve, edit, defer and reject
+    all load the doc, change part of it, and upsert the whole thing back. A
+    replica read makes that a lost update — approve reloads the version from
+    before a just-saved edit and writes it back, silently reverting the edit,
+    and the TOCTOU re-checks that exist to catch concurrent modification
+    re-read the same stale copy and agree with themselves.
+
+    ``get_document``'s own docstring already names this case: "read=False
+    forces the primary — use it for read-after-write re-fetches ... so
+    replication lag can't yield None." The inbox is where that matters most and
+    was the one place not passing it.
+    """
     sc = get_storage_client()
     doc = await sc.get_document(
         tenant_id=tenant_id,
         collection=SKILLS_COLLECTION,
         doc_id=slug,
+        read=False,
     )
     if doc is None:
         raise HTTPException(status_code=404, detail=f"skill {slug!r} not found")
@@ -889,7 +942,7 @@ async def reject(
             tenant_id=tenant_id,
             fleet_id=doc.get("fleet_id"),
             cluster_fingerprint=fingerprint,
-            rejected_by_agent=auth.agent_id or "unknown",
+            rejected_by_agent=(canonical_service_agent_id(auth.agent_id) if auth.agent_id else "unknown"),
             reason=body.reason,
             cooloff_days=cooloff,
         )
@@ -1162,14 +1215,13 @@ async def edit(
 
     # Re-run the validator — it recomputes content_hash + scan + size
     # caps; same code path as the original write so we get the same
-    # guarantees on the EDITABLE fields. ``is_admin`` mirrors
-    # ``_require_inbox_admin``'s two-part check (is_admin flag OR
-    # org_role='admin') so the validator's admin-only branches
-    # (e.g. setting ``source='forge'`` for re-installs) stay
-    # consistent with what the surrounding endpoint allows.
+    # guarantees on the EDITABLE fields. ``is_admin`` reads the same
+    # ``is_org_admin`` property ``_require_inbox_admin`` gates on, so the
+    # validator's admin-only branches (e.g. setting ``source='forge'`` for
+    # re-installs) stay consistent with what the surrounding endpoint allows.
     ctx = SkillWriteContext(
-        caller_agent_id=auth.agent_id,
-        is_admin=bool(getattr(auth, "is_admin", False)) or (getattr(auth, "org_role", None) == "admin"),
+        caller_agent_id=(canonical_service_agent_id(auth.agent_id) if auth.agent_id else None),
+        is_admin=auth.is_org_admin,
         is_internal_forge=False,
         description_max_bytes=desc_max,
         body_max_bytes=body_max,
@@ -1183,22 +1235,28 @@ async def edit(
         is_inbox_edit=True,
     )
     # For ``kind='update'`` candidates, hash-binding must validate
-    # against the live TARGET skill (a separate doc identified by
-    # ``data.target.slug``), NOT the candidate itself. Passing the
+    # against the live TARGET skill (the document at ``data.slug``),
+    # NOT the candidate itself. Passing the
     # candidate as its own ``live_skill_doc`` would let
     # ``target.target_content_hash`` self-match and silently bypass
     # the binding. For ``kind='create'`` the validator ignores
     # ``live_skill_doc``, so ``None`` is the safe default.
     live_for_binding: dict | None = None
-    if data.get("kind") == "update":
-        target_slug = (data.get("target") or {}).get("slug")
-        if target_slug:
-            sc_binding = get_storage_client()
-            live_for_binding = await sc_binding.get_document(
-                tenant_id=tenant_id,
-                collection=SKILLS_COLLECTION,
-                doc_id=target_slug,
-            )
+    # Which key names the target, and why, is ``_binding_target_slug``'s own
+    # docstring — including the ``kind`` check, which is why there is no second
+    # one here.
+    target_slug = _binding_target_slug(data)
+    if target_slug:
+        sc_binding = get_storage_client()
+        live_for_binding = await sc_binding.get_document(
+            tenant_id=tenant_id,
+            collection=SKILLS_COLLECTION,
+            doc_id=target_slug,
+            # The edit is a read-modify-write against this document and the
+            # binding compares its content hash; a replica read can bind
+            # against a version that is already gone.
+            read=False,
+        )
     normalized, scan = await validate_and_normalize_skill_write(
         data, ctx=ctx, live_skill_doc=live_for_binding
     )

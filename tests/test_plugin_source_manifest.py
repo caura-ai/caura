@@ -26,12 +26,23 @@ PLUGIN_SRC = REPO_ROOT / "plugin" / "src"
 def _expected_source_files() -> set[str]:
     """Every .ts file the install script needs to list.
 
-    Excludes only test files. `version.ts` is present on disk, served by
-    /api/plugin-source, AND listed in the bash loop (the install script
-    then overwrites it inline from the request's ``version`` parameter,
-    but the fetch still happens for parity with the manifest).
+    Excludes test files and `*.fixture.ts`, which is test-support source:
+    constants shared BETWEEN suites, imported by no runtime module, so an
+    install that never downloads the suites has nothing to resolve them for.
+    The suffix is the whole signal — a runtime module must not use it, or it
+    silently stops shipping and installs break with TS2307, which is the
+    failure this file was written for.
+
+    `version.ts` is present on disk, served by /api/plugin-source, AND listed
+    in the bash loop (the install script then overwrites it inline from the
+    request's ``version`` parameter, but the fetch still happens for parity
+    with the manifest).
     """
-    return {p.name for p in PLUGIN_SRC.glob("*.ts") if not p.name.endswith(".test.ts")}
+    return {
+        p.name
+        for p in PLUGIN_SRC.glob("*.ts")
+        if not (p.name.endswith(".test.ts") or p.name.endswith(".fixture.ts"))
+    }
 
 
 def test_python_allow_list_matches_plugin_src():
@@ -58,6 +69,45 @@ def _bash_fallback_src_files(src: str) -> set[str]:
     return set(match.group(1).split())
 
 
+def _heartbeat_fallback_src_files(src: str) -> set[str]:
+    """Extract the TypeScript old-backend fallback without comment literals."""
+    match = re.search(r"const FALLBACK_SRC_FILES = \[(.*?)\];", src, re.DOTALL)
+    assert match, "Could not find heartbeat.ts FALLBACK_SRC_FILES"
+    uncommented = re.sub(r"//.*", "", match.group(1))
+    return set(re.findall(r'"([^"\n]+\.ts)"', uncommented))
+
+
+def test_no_shipped_module_imports_a_test_fixture():
+    """The condition that makes excluding `*.fixture.ts` safe.
+
+    `_expected_source_files` leaves fixtures out of both install lists, so a
+    fresh install never downloads them. That is correct while only suites
+    import them and silently fatal the moment a shipped module does: the
+    install would fetch every file it lists and still fail to build, with the
+    same TS2307 this file's docstring records from 2026-04-16.
+
+    Checked by import, not by naming discipline, because the naming is the
+    thing being relied on.
+    """
+    shipped = _expected_source_files()
+    offenders = {}
+    for name in sorted(shipped):
+        text = (PLUGIN_SRC / name).read_text()
+        hits = [
+            line.strip()
+            for line in text.splitlines()
+            if ".fixture.js" in line or ".fixture.ts" in line
+        ]
+        if hits:
+            offenders[name] = hits
+
+    assert not offenders, (
+        "a module that ships to fresh installs imports a test fixture, which "
+        f"is excluded from both install lists: {offenders}. Move the shared "
+        "constants into a real module, or stop excluding fixtures."
+    )
+
+
 def test_install_script_srcfile_fallback_matches_plugin_src():
     """The bash ``SRC_FILES=`` fallback in the install script template must match plugin/src."""
     src = Path(plugin_mod.__file__).read_text(encoding="utf-8")
@@ -82,6 +132,17 @@ def test_python_and_bash_lists_agree():
         f"_plugin_files and install-script SRC_FILES fallback disagree — "
         f"only-in-python={sorted(python_files - fallback)}, "
         f"only-in-bash={sorted(fallback - python_files)}."
+    )
+
+
+def test_heartbeat_fallback_matches_served_plugin_sources():
+    """Old-backend deploys must fetch every module the current plugin ships."""
+    heartbeat = (PLUGIN_SRC / "heartbeat.ts").read_text(encoding="utf-8")
+    fallback = _heartbeat_fallback_src_files(heartbeat)
+    expected = set(plugin_mod._plugin_files)
+    assert fallback == expected, (
+        "heartbeat FALLBACK_SRC_FILES drift — "
+        f"missing={sorted(expected - fallback)}, extra={sorted(fallback - expected)}"
     )
 
 

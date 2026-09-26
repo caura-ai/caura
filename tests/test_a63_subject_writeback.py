@@ -24,6 +24,7 @@ from uuid import uuid4
 import pytest
 
 from core_api.services.entity_extraction_worker import process_entity_extraction
+from tests.conftest import close_scheduled_coro
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -95,7 +96,7 @@ async def _run(mock_extract_graph, sc, memory_id=None):
             new=AsyncMock(return_value=[0.1] * 8),
         ),
         patch("core_api.services.entity_extraction_worker.log_action", new=AsyncMock()),
-        patch("core_api.tasks.track_task"),
+        patch("core_api.tasks.track_task", side_effect=close_scheduled_coro),
     ):
         await process_entity_extraction(
             memory_id=memory_id or uuid4(),

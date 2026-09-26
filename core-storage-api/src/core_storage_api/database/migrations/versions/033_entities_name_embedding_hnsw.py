@@ -37,6 +37,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
+from core_storage_api.database.migration_helpers import drop_invalid_indexes
+
 revision: str = "033"
 down_revision: str | None = "032"
 branch_labels: str | Sequence[str] | None = None
@@ -45,6 +47,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     with op.get_context().autocommit_block():
+        drop_invalid_indexes("ix_entities_name_embedding_hnsw")
         # Keep ``CREATE INDEX CONCURRENTLY ... ix_... ON entities`` on one source
         # line so the ``test_no_plain_create_index_on_large_tables`` guard (which
         # regex-scans the source) actually validates the CONCURRENTLY clause on
