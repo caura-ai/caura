@@ -54,3 +54,52 @@ test("a persistence failure retains the freshly provisioned key in memory", asyn
     console.warn = originalWarn;
   }
 });
+
+test("a non-404 provisioning failure is retried on the next cold resolution", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches++;
+    return new Response("unavailable", { status: 503 });
+  }) as typeof fetch;
+  console.warn = () => {};
+
+  try {
+    assert.equal(await resolveAgentKey("transient-agent"), null);
+    assert.equal(await resolveAgentKey("transient-agent"), null);
+    assert.equal(fetches, 2, "a transient failure must not disable provisioning");
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
+// Must stay last: a 404 disables provisioning for the rest of the process.
+test("a 404 from the provision route stops further provisioning attempts", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  const originalInfo = console.info;
+  const warnings: string[] = [];
+  const infos: string[] = [];
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches++;
+    return new Response("Not Found", { status: 404 });
+  }) as typeof fetch;
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+  console.info = (...args: unknown[]) => infos.push(args.map(String).join(" "));
+
+  try {
+    assert.equal(await resolveAgentKey("no-route-agent"), null);
+    assert.equal(await resolveAgentKey("no-route-agent"), null);
+    assert.equal(await resolveAgentKey("another-agent"), null);
+    assert.equal(fetches, 1, "the route is missing server-wide, so it is asked once");
+    assert.equal(infos.length, 1, "the fallback is reported once");
+    assert.equal(warnings.length, 0, "a missing route is not a warning");
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+    console.info = originalInfo;
+  }
+});
