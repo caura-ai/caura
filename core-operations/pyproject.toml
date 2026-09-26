@@ -1,6 +1,6 @@
 [project]
 name = "core-operations"
-version = "3.19.0"
+version = "3.19.2"
 description = "Caura core-operations — host for cron/scheduled background jobs (lifecycle, retention, etc.)"
 license = "Apache-2.0"
 requires-python = ">=3.12"
