@@ -6,6 +6,7 @@ Exposes Caura tools over Streamable HTTP so any MCP client
 Mounted onto the main FastAPI app at /mcp.
 """
 
+import asyncio
 import contextlib
 import contextvars
 import hmac as _hmac
@@ -52,7 +53,12 @@ from core_api.constants import (
     VALID_SCOPES,
     VERSION,
 )
-from core_api.errors import AUTH_ORG_SUSPENDED, AUTH_PLAN_LIMIT, code_for_status
+from core_api.errors import (
+    AUTH_ORG_SUSPENDED,
+    AUTH_PLAN_LIMIT,
+    REQUEST_BUDGET_EXCEEDED,
+    code_for_status,
+)
 from core_api.heartbeat.clients import record_mcp as _record_mcp_client
 from core_api.pagination import cursor_sortable, decode_cursor, encode_cursor
 from core_api.schemas import (
@@ -958,6 +964,11 @@ class _InstrumentedMCPServer(MCPServer):
     """
 
     async def call_tool(self, name, arguments, context=None):  # type: ignore[override]
+        # Imported in-function like the other ``settings`` reads in this
+        # module, which keep the config import out of the import cycle the
+        # tool registrations sit in.
+        from core_api.config import settings
+
         # Rename compatibility (2026-08-14): tools are listed as caura_*,
         # while memclaw_* calls remain accepted for existing saved prompts,  # legacy-name-floor: documents the supported dispatch alias
         # keystone rules, and published tutorials. Translate
@@ -967,40 +978,133 @@ class _InstrumentedMCPServer(MCPServer):
             name = "caura_" + name.removeprefix("memclaw_")  # legacy-name-floor: floor
         t0 = time.perf_counter()
         status = "ok"
-        # ax-0917-h-01/h-02 follow-up. This mount is skipped by
-        # ``RequestTimeoutMiddleware`` (``is_mcp_path``), so until now nothing
-        # armed the phase recorder on the surface agents actually use — and
-        # ``phase()`` is a no-op with no recorder bound, which means every hop
-        # the REST path names was anonymous here. ``call_tool`` is the single
-        # dispatch point for ``tools/call`` and already owns a try/finally, so
-        # it is where the recorder goes.
+        tool_name = name if isinstance(name, str) else str(name)
+        # Read at call time, not captured at class definition, so an operator
+        # can move it by env without a redeploy — and so a test can lower it.
+        budget = settings.mcp_request_timeout_seconds
+        # ax-0917-h-01/h-02 follow-up (#1715), then oss-0924-h-02.
         #
-        # Armed with NO budget, deliberately: this transport has no deadline
-        # of its own (see ``_mcp_no_deadline_note`` below), so there is no
-        # clock to sort phases against and nothing here cancels anything. What
-        # the recorder buys is the failure path — a storage read that finally
-        # gives up at the httpx pool timeout, or a client that disconnects and
-        # cancels the call — which used to arrive as an exception with no
-        # indication of which hop it came from.
-        with request_phase.own_deadline(None) as phases:
+        # #1715 armed the phase recorder here: this mount is skipped by
+        # ``RequestTimeoutMiddleware`` (``is_mcp_path``), so ``phase()`` was a
+        # no-op on the surface agents actually use and every hop the REST path
+        # names was anonymous. ``call_tool`` is the single dispatch point for
+        # ``tools/call`` and already owned a try/finally, so it is where the
+        # recorder went — and it was armed with NO budget, because there was
+        # none to arm it with.
+        #
+        # There is one now, and it is the same ``asyncio.timeout``. The reason
+        # is not that a deadline is generally nice to have: it is that
+        # ``per_tenant_storage_slot`` justifies an UNBOUNDED acquire queue with
+        # "the outer request budget already caps total wall time", and
+        # ``caura_recall`` reaches that semaphore through ``search_memories``.
+        # On REST that justification holds; here it did not, so the code
+        # asserted a cap that did not exist on the transport most able to hit
+        # it. This restores the invariant rather than inventing a policy —
+        # which is also why the bulkhead queue itself is left unbounded:
+        # bounding it SHEDS load, turning a slow tenant into a failing one,
+        # and the attribution #1715 added is what will show whether the queue
+        # or the backend is where the time goes.
+        #
+        # Scoped to ONE dispatch, NOT to the mount. The middleware skips
+        # ``/mcp`` because the mount serves long-lived streaming responses and
+        # a blanket cancel would cut them; a per-``tools/call`` deadline leaves
+        # the session stream alone, so that reason does not carry over.
+        with request_phase.own_deadline(budget) as phases:
             try:
-                return await super().call_tool(name, arguments, context)
+                try:
+                    async with asyncio.timeout(budget):
+                        return await super().call_tool(name, arguments, context)
+                except TimeoutError:
+                    # Hops below run their own ``wait_for`` (the embedding gate
+                    # at 10s, the storage bulk cap at 25s) and raise this same
+                    # class from well inside this budget. Today they cannot
+                    # arrive here wearing it: the SDK's ``Tool.run`` catches
+                    # ``Exception`` and re-raises as ``UnexpectedToolError``,
+                    # and ``TimeoutError`` is an ``Exception``. So this guard
+                    # is currently belt-and-braces — and it stays, because the
+                    # alternative is a ``REQUEST_BUDGET_EXCEEDED`` whose
+                    # correctness rests on an exception-wrapping detail of a
+                    # vendored dependency. That is the exact shape of the
+                    # defect this change exists to fix, one layer over. Ask the
+                    # recorder whose clock expired (``past_deadline``) and let
+                    # anything else fall through to the failure path below,
+                    # which still names its hop.
+                    if not phases.past_deadline():
+                        raise
+                    status = "error"
+                    elapsed = round(time.perf_counter() - t0, 3)
+                    attribution = phases.snapshot()
+                    logger.warning(
+                        "MCP tool call exceeded its request budget",
+                        extra={
+                            "tool": tool_name,
+                            "budget_seconds": budget,
+                            "elapsed_seconds": elapsed,
+                            # Flat and top-level, the same field names the
+                            # middleware and the opted-out routes use, so a
+                            # timed-out MCP call groups with a timed-out REST
+                            # one in the log backend instead of needing its own
+                            # query.
+                            "phase": attribution["phase"],
+                            "phases_cancelled": attribution["phases_cancelled"],
+                            "phases_completed": attribution["phases_completed"],
+                        },
+                    )
+                    # An MCP client gets an error ENVELOPE, not a raised
+                    # exception: the SDK turns a raise into an
+                    # ``UnexpectedToolError`` whose text is the repr of
+                    # whatever escaped, which is how the auth refusals lost
+                    # their codes before B2. ``isError=True`` with the same
+                    # ``{"error": {...}}`` body the REST 504 carries is what a
+                    # caller can actually branch on.
+                    return _as_error_result(
+                        _error_response(
+                            REQUEST_BUDGET_EXCEEDED,
+                            f"Tool call exceeded the {budget}s server budget and was "
+                            f"cancelled"
+                            + (f" while running {attribution['phase']}" if attribution["phase"] else "")
+                            + ". No upstream reported a failure — this deadline is "
+                            "ours. Retry; if it recurs on the same tool, the handler "
+                            "is the slow part.",
+                            tool=tool_name,
+                            budget_seconds=budget,
+                            elapsed_seconds=elapsed,
+                            **attribution,
+                        )
+                    )
             except BaseException as exc:
                 # ``BaseException``: a client disconnect cancels this call, and
                 # "the agent's MCP call hung until it gave up" is precisely the
                 # h-01 shape on this transport. ``CancelledError`` is not an
                 # ``Exception``, so the narrower clause below would miss it.
+                #
+                # Our own deadline does NOT arrive here, and the nesting is
+                # what guarantees it: ``asyncio.timeout`` converts its cancel
+                # into ``TimeoutError`` at the ``async with`` boundary, the
+                # inner clause handles it and RETURNS, so this handler never
+                # sees it. Were the two clauses siblings on one ``try``,
+                # ordering alone would decide it — and an external cancel that
+                # ``asyncio.timeout`` correctly re-raises as ``CancelledError``
+                # (it uncancels only its own) still lands here, filed as the
+                # disconnect it is.
                 status = "error"
-                attribution = phases.snapshot()
+                # ``attribute_failed``: with a budget armed, a hop that unwound
+                # BEFORE the deadline is filed under ``phases_failed`` and
+                # stays out of ``phase`` — correct for a timeout report, and
+                # silence for this one, which is not a timeout at all. #1715
+                # got the hop named here only because the recorder had no
+                # clock; gaining one must not cost the attribution.
+                attribution = phases.snapshot(attribute_failed=True)
                 logger.warning(
                     "MCP tool call failed",
                     extra={
-                        "tool": name if isinstance(name, str) else str(name),
+                        "tool": tool_name,
                         "error_type": type(exc).__name__,
                         "elapsed_seconds": round(time.perf_counter() - t0, 3),
                         "phase": attribution["phase"],
                         "phases_cancelled": attribution["phases_cancelled"],
                         "phases_completed": attribution["phases_completed"],
+                        "phases_failed": attribution.get("phases_failed", []),
                     },
                 )
                 raise
@@ -1017,26 +1121,34 @@ class _InstrumentedMCPServer(MCPServer):
                 )
 
 
-# ── Why this transport has no deadline to attribute ──
+# ── Why this transport carries its own deadline (oss-0924-h-02) ──
 #
-# Recorded because its absence is load-bearing in ``call_tool`` above, and is
-# a finding in its own right.
+# Recorded because the budget in ``call_tool`` above is load-bearing for a
+# claim made in a different file, and that coupling is invisible from either
+# side alone.
 #
 # ``RequestTimeoutMiddleware`` skips ``/mcp`` on purpose — the mount serves
 # long-lived streaming responses and a blanket cancel would cut them. The
-# consequence is that a ``tools/call`` has NO server-side budget: the only
-# things that can end a stalled one are the storage client's own httpx
-# timeouts and the client hanging up.
+# consequence, until this change, was that a ``tools/call`` had NO
+# server-side budget: the only things that could end a stalled one were the
+# storage client's own httpx timeouts and the client hanging up.
 #
-# That matters most at ``per_tenant_storage_slot``, whose docstring justifies
-# an UNBOUNDED acquire queue with "the outer request budget already caps total
-# wall time". On REST that is true (45s, or the bulk route's 90s). On this
-# transport there is no outer request budget, so the stated cap does not
-# exist and the acquire can wait with nothing to stop it — ``caura_recall``
-# reaches that exact semaphore through ``search_memories``. Bounding it is a
-# load-shedding decision, not an attribution one, so it is deliberately NOT
-# made here; the recorder above at least makes the wait nameable when the hop
-# does eventually fail.
+# That mattered most at ``per_tenant_storage_slot``, whose docstring
+# justifies an UNBOUNDED acquire queue with "the outer request budget already
+# caps total wall time". On REST that is true (45s, or the bulk route's 90s).
+# On this transport there was no outer request budget, so the stated cap did
+# not exist and the acquire could wait with nothing to stop it —
+# ``caura_recall`` reaches that exact semaphore through ``search_memories``.
+#
+# ``call_tool`` now applies ``mcp_request_timeout_seconds`` per dispatch,
+# which makes that justification true on both transports. The middleware's
+# reason for skipping the mount is untouched: the budget wraps one tool call,
+# not the streaming response carrying the session.
+#
+# What is still deliberately NOT done: bounding the bulkhead queue itself.
+# That sheds load — it converts a slow tenant into a failing one — and there
+# is no evidence yet that queue DEPTH rather than backend latency is where
+# the time goes. The phase attribution added in #1715 is what collects it.
 
 
 mcp = _InstrumentedMCPServer(

@@ -39,6 +39,11 @@ skipped entirely — all four were left with the exact failure this module
 exists to fix. They arm via :func:`own_deadline`, which documents why arming
 below the ``BaseHTTPMiddleware`` split is sound for a caller that catches its
 own deadline.
+
+MCP arrived here with no deadline to attribute at all, and now has one
+(``mcp_request_timeout_seconds``, oss-0924-h-02) — so on that transport this
+module reports a budget the same way it does on REST, rather than only
+naming the hop an exception escaped from.
 """
 
 from __future__ import annotations
@@ -112,9 +117,11 @@ class RequestPhases:
             bucket = self._completed
         elif self._deadline is None or self.past_deadline():
             # No deadline means the caller has no clock to sort failures
-            # against (the MCP transport arms the recorder with none), so every
-            # unwind is reported as the in-flight stack — which is exactly what
-            # it is for a caller reporting an exception rather than a timeout.
+            # against, so every unwind is reported as the in-flight stack —
+            # which is exactly what it is for a caller reporting an exception
+            # rather than a timeout. A caller that HAS a deadline and still
+            # wants that reading on its exception path asks ``snapshot`` for
+            # it (``attribute_failed``) rather than giving up its clock.
             bucket = self._cancelled
         else:
             bucket = self._failed
@@ -123,7 +130,7 @@ class RequestPhases:
             return
         bucket.append(record)
 
-    def snapshot(self) -> dict:
+    def snapshot(self, *, attribute_failed: bool = False) -> dict:
         """What the budget-exceeded response and log line report.
 
         ``phase`` is the single-field answer to "which layer": the innermost
@@ -133,6 +140,17 @@ class RequestPhases:
         block below it — the stack is in the unwind record, not in ``_open``.
         ``_open`` is still consulted for the case where a phase is held by a
         task the cancellation has not reached yet.
+
+        ``attribute_failed`` lets ``phase`` fall back to the pre-deadline
+        unwind record when nothing was cancelled and nothing is open. ONLY a
+        caller reporting an ordinary exception may ask for it, never one
+        reporting a deadline: for a deadline, a hop that failed early and was
+        swallowed is precisely the confidently-wrong attribution ``_failed``
+        was split out to prevent. For an exception there is no other
+        candidate — the unwind that put the hop in ``_failed`` IS the failure
+        being reported — and without it a caller that arms a budget (the MCP
+        transport now does) would report nothing where a caller that armed
+        none reported the hop.
         """
         in_flight = [
             {"phase": name, "seconds": round(time.monotonic() - at, 3)}
@@ -144,6 +162,8 @@ class RequestPhases:
             deepest = cancelled[0]["phase"]
         elif in_flight:
             deepest = in_flight[0]["phase"]
+        elif attribute_failed and self._failed:
+            deepest = self._failed[0][0]
         out: dict = {
             "phase": deepest,
             "phases_cancelled": cancelled,
@@ -219,10 +239,13 @@ def own_deadline(budget_seconds: float | None) -> Iterator[RequestPhases]:
     recorded BELOW it; a route has no split between the two, so the ordinary
     ContextVar rules are enough.
 
-    ``None`` arms a recorder with no deadline, for a caller that has none —
-    the MCP transport, which is skipped by the middleware and enforces no
-    budget of its own. Nothing will be cancelled by a clock there, so the
-    recorder's value is naming the hop an exception came out of.
+    ``None`` arms a recorder with no deadline, for a caller that has none:
+    nothing will be cancelled by a clock, so the recorder's only value is
+    naming the hop an exception came out of. The MCP transport used to be
+    that caller — it is now budgeted (``mcp_request_timeout_seconds``,
+    oss-0924-h-02) and passes a real number, so no production caller passes
+    ``None`` today. The mode stays because the alternative is forcing a
+    caller with no clock to invent one.
 
     Nested use is not the intended shape but is harmless: an opted-out route
     is never under the middleware (that is what opting out means), so the

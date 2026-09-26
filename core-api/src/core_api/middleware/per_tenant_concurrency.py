@@ -15,9 +15,11 @@ Two caps compose:
 
 2. **Storage-call slot** (``"storage_write"`` / ``"storage_search"``,
    CAURA-602 follow-up). Held only across the storage roundtrip itself.
-   Acquire is unbounded — the outer request budget already caps how
-   long the wait can run, and queueing here is the *intended* shape
-   (a tenant in the embed phase doesn't hold a storage connection).
+   Acquire is unbounded — the caller's request budget already caps how
+   long the wait can run (every caller has one; the roster is in
+   :func:`per_tenant_storage_slot`), and queueing here is the
+   *intended* shape (a tenant in the embed phase doesn't hold a
+   storage connection).
    Bounds storage-pool occupancy per tenant — keeps a hot tenant from
    parking every storage-writer connection on a 20-item bulk while
    tenant B waits to write a single row.
@@ -152,10 +154,37 @@ async def per_tenant_storage_slot(
     Caller wraps a single ``sc.<call>`` invocation; the slot is held
     only while the storage call is in flight, freeing as soon as the
     response (or its cancellation) returns. Acquisition queues
-    unboundedly — the outer request budget (``RequestTimeoutMiddleware``
-    or the bulk route's ``asyncio.wait_for``) already caps total wall
-    time, and the request slot was already approved at route entry, so
-    a second fast-fail here would surface as a confusing 429-after-200.
+    unboundedly — an outer request budget already caps total wall time,
+    and the request slot was already approved at route entry, so a
+    second fast-fail here would surface as a confusing 429-after-200.
+
+    That justification is a claim about the CALLERS, so it is only worth
+    as much as the roster of them — and it was false on the transport
+    agents use most until oss-0924-h-02, with nothing here to show it.
+    Every path that can reach this acquire, and what caps it:
+
+    * REST, blanket — ``RequestTimeoutMiddleware``
+      (``request_timeout_seconds``, 45s).
+    * REST, opted out of the blanket middleware — the route's own
+      ``asyncio.wait_for``: ``/memories/bulk``
+      (``bulk_request_timeout_seconds``, 90s) and ``/interview/submit``
+      (``interview_request_timeout_seconds``, 90s).
+    * MCP ``tools/call`` — ``_InstrumentedMCPServer.call_tool``'s
+      ``asyncio.timeout`` (``mcp_request_timeout_seconds``, 90s). This
+      is the one that did not exist: the mount is skipped by the
+      middleware, ``caura_recall`` reaches this semaphore through
+      ``search_memories``, and the wait here was capped by nothing but
+      the client hanging up.
+    * ``/admin/org/purge-data`` — opted out and enforces NO deadline of
+      its own, bounded instead by the storage client's httpx timeouts
+      (``STORAGE_READ_TIMEOUT_SECONDS``). A terminal admin batch driven
+      by the daily sweep, not a caller waiting on a queue; noted so the
+      list above is exhaustive rather than convenient.
+
+    A new entry point that reaches a ``per_tenant_storage_slot`` caller
+    without a budget of its own puts this docstring back into the state
+    that made it a defect. Add the budget, or add the caller here and
+    say what bounds it.
 
     Tenant-A storm scenario: A's writes occupy ``cap`` storage slots;
     A's request 5+ queues on ``sem.acquire()``. Tenant B's write enters
