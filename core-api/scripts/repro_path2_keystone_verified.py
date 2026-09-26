@@ -29,6 +29,12 @@ from core_api import auth as auth_mod
 from core_api.auth import _resolve_auth_context
 from core_api.routes.keystones import _effective_min_for_caller, _resolve_caller_identity
 
+# The settings attribute still carries the pre-rename name, so patch.object
+# needs it spelled exactly. Hoisted to a constant because ruff format wraps
+# the call and carries a trailing marker onto the closing paren, which the
+# legacy-name ratchet then reads as the marker being deleted.
+_SHARED_KEY_SETTING = "memclaw_api_key"  # legacy-name-floor: real settings attribute name
+
 SHARED_KEY = "shared-caura-key"
 ADMIN_KEY = "admin-key"
 VICTIM = "victim-agent"
@@ -55,9 +61,7 @@ async def main() -> None:
         return None
 
     with (
-        patch.object(
-            auth_mod.settings, "memclaw_api_key", SHARED_KEY
-        ),  # legacy-name-floor: the settings attribute literally bears this name
+        patch.object(auth_mod.settings, _SHARED_KEY_SETTING, SHARED_KEY),
         patch.object(auth_mod.settings, "is_standalone", False),
         patch.object(auth_mod, "_block_if_suppressed", new=_noop),
         patch.object(auth_mod, "_block_if_any_readable_suppressed", new=_noop),
