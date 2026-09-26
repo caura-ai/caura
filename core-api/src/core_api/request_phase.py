@@ -30,8 +30,15 @@ never re-sets the var.
 
 Cost: one ``perf_counter`` and one list append per phase, on a path that
 already times every pipeline step. ``phase()`` is a no-op when no recorder is
-bound (MCP transport, opt-out routes, background tasks), so instrumented code
-is safe to call from anywhere.
+bound (background tasks, anything outside a request), so instrumented code is
+safe to call from anywhere.
+
+The middleware is not the only thing that arms a recorder. Three routes opt
+out of it and enforce their own ``asyncio.wait_for``, and the MCP mount is
+skipped entirely — all four were left with the exact failure this module
+exists to fix. They arm via :func:`own_deadline`, which documents why arming
+below the ``BaseHTTPMiddleware`` split is sound for a caller that catches its
+own deadline.
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ class RequestPhases:
         "_completed",
         "_deadline",
         "_dropped",
+        "_failed",
         "_next_id",
         "_open",
         "_started_at",
@@ -70,10 +78,20 @@ class RequestPhases:
         # boost in separate tasks, so exits are not LIFO.
         self._open: dict[int, tuple[str, float]] = {}
         self._completed: list[tuple[str, float]] = []
-        # Phases that unwound on an exception — under the budget timeout that
-        # is the cancellation, so this list IS the stack that was in flight,
-        # innermost first (the deepest ``finally`` runs first).
+        # Phases that unwound on an exception AT OR PAST the deadline — i.e.
+        # the cancellation. This list IS the stack that was in flight when the
+        # budget blew, innermost first (the deepest ``finally`` runs first).
         self._cancelled: list[tuple[str, float]] = []
+        # Phases that unwound on an exception BEFORE the deadline, which is a
+        # different event and must not be mistaken for it. A hop whose failure
+        # the caller SWALLOWS and continues past is the case that matters: bulk
+        # embed does exactly that on a deferred deployment (it logs and falls
+        # through to the backfill). Filed as a cancellation it would land at
+        # ``_cancelled[0]`` — ahead of the real culprit, since it unwound
+        # first — and ``phase`` would name a hop that finished a minute before
+        # the deadline. That is a confidently wrong attribution, which is worse
+        # than the none this module was written to replace.
+        self._failed: list[tuple[str, float]] = []
         self._dropped = 0
         self._next_id = 0
 
@@ -90,7 +108,16 @@ class RequestPhases:
             return
         name, entered_at = entry
         record = (name, round(time.monotonic() - entered_at, 3))
-        bucket = self._cancelled if failed else self._completed
+        if not failed:
+            bucket = self._completed
+        elif self._deadline is None or self.past_deadline():
+            # No deadline means the caller has no clock to sort failures
+            # against (the MCP transport arms the recorder with none), so every
+            # unwind is reported as the in-flight stack — which is exactly what
+            # it is for a caller reporting an exception rather than a timeout.
+            bucket = self._cancelled
+        else:
+            bucket = self._failed
         if len(bucket) >= _MAX_COMPLETED:
             self._dropped += 1
             return
@@ -124,6 +151,13 @@ class RequestPhases:
         }
         if in_flight:
             out["phases_open"] = in_flight
+        if self._failed:
+            # Reported, not dropped: a hop that failed early and was swallowed
+            # is often WHY the request then ran long (a failed inline embed
+            # sends the row down the backfill path). It just is not the layer
+            # holding the budget at the deadline, so it stays out of
+            # ``phases_cancelled`` and out of ``phase``.
+            out["phases_failed"] = [{"phase": n, "seconds": s} for n, s in self._failed]
         if self._dropped:
             out["phases_dropped"] = self._dropped
         return out
@@ -164,6 +198,43 @@ def end(token: Token) -> None:
 
 def current() -> RequestPhases | None:
     return _phases.get()
+
+
+@contextmanager
+def own_deadline(budget_seconds: float | None) -> Iterator[RequestPhases]:
+    """Arm a recorder for a deadline this caller enforces ITSELF.
+
+    ``RequestTimeoutMiddleware`` is the blanket budget, and three routes opt
+    out of it (``/memories/bulk``, ``/admin/org/purge-data``,
+    ``/interview/submit``) plus the whole MCP mount. The two that replace it
+    with an ``asyncio.wait_for`` of their own were left with the pre-#1707
+    failure: a 504 that says the deadline passed and nothing about which layer
+    passed it. This is how they get the same answer.
+
+    Arming HERE — inside SlowAPI's ``BaseHTTPMiddleware`` split, which the
+    module docstring says is fatal for the middleware — is sound for a reason
+    that does not generalise: the caller that arms the recorder is the same
+    frame that catches its own ``TimeoutError`` and reads the snapshot. The
+    middleware's problem is that it arms ABOVE the split and the phases are
+    recorded BELOW it; a route has no split between the two, so the ordinary
+    ContextVar rules are enough.
+
+    ``None`` arms a recorder with no deadline, for a caller that has none —
+    the MCP transport, which is skipped by the middleware and enforces no
+    budget of its own. Nothing will be cancelled by a clock there, so the
+    recorder's value is naming the hop an exception came out of.
+
+    Nested use is not the intended shape but is harmless: an opted-out route
+    is never under the middleware (that is what opting out means), so the
+    only way to nest is a caller inside a caller, and the inner recorder then
+    shadows the outer for the duration — the inner deadline is the one that
+    will fire, so it is also the one whose phases matter.
+    """
+    recorder, token = begin(budget_seconds)
+    try:
+        yield recorder
+    finally:
+        end(token)
 
 
 def past_deadline() -> bool:

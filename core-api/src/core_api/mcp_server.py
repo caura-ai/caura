@@ -27,6 +27,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from common import duplicate_memory
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
+from core_api import request_phase
 from core_api.agent_ids import (
     DEFAULT_AGENT_ID,
     AgentIdentity,
@@ -966,22 +967,76 @@ class _InstrumentedMCPServer(MCPServer):
             name = "caura_" + name.removeprefix("memclaw_")  # legacy-name-floor: floor
         t0 = time.perf_counter()
         status = "ok"
-        try:
-            return await super().call_tool(name, arguments, context)
-        except Exception:
-            status = "error"
-            raise
-        finally:
-            op = arguments.get("op") if isinstance(arguments, dict) else None
-            capability = name.removeprefix("caura_") if isinstance(name, str) else str(name)
-            record_usage(
-                capability=capability,
-                op=op if isinstance(op, str) else None,
-                transport="mcp",
-                tenant_id=_get_tenant(),
-                status=status,
-                duration_ms=(time.perf_counter() - t0) * 1000.0,
-            )
+        # ax-0917-h-01/h-02 follow-up. This mount is skipped by
+        # ``RequestTimeoutMiddleware`` (``is_mcp_path``), so until now nothing
+        # armed the phase recorder on the surface agents actually use — and
+        # ``phase()`` is a no-op with no recorder bound, which means every hop
+        # the REST path names was anonymous here. ``call_tool`` is the single
+        # dispatch point for ``tools/call`` and already owns a try/finally, so
+        # it is where the recorder goes.
+        #
+        # Armed with NO budget, deliberately: this transport has no deadline
+        # of its own (see ``_mcp_no_deadline_note`` below), so there is no
+        # clock to sort phases against and nothing here cancels anything. What
+        # the recorder buys is the failure path — a storage read that finally
+        # gives up at the httpx pool timeout, or a client that disconnects and
+        # cancels the call — which used to arrive as an exception with no
+        # indication of which hop it came from.
+        with request_phase.own_deadline(None) as phases:
+            try:
+                return await super().call_tool(name, arguments, context)
+            except BaseException as exc:
+                # ``BaseException``: a client disconnect cancels this call, and
+                # "the agent's MCP call hung until it gave up" is precisely the
+                # h-01 shape on this transport. ``CancelledError`` is not an
+                # ``Exception``, so the narrower clause below would miss it.
+                status = "error"
+                attribution = phases.snapshot()
+                logger.warning(
+                    "MCP tool call failed",
+                    extra={
+                        "tool": name if isinstance(name, str) else str(name),
+                        "error_type": type(exc).__name__,
+                        "elapsed_seconds": round(time.perf_counter() - t0, 3),
+                        "phase": attribution["phase"],
+                        "phases_cancelled": attribution["phases_cancelled"],
+                        "phases_completed": attribution["phases_completed"],
+                    },
+                )
+                raise
+            finally:
+                op = arguments.get("op") if isinstance(arguments, dict) else None
+                capability = name.removeprefix("caura_") if isinstance(name, str) else str(name)
+                record_usage(
+                    capability=capability,
+                    op=op if isinstance(op, str) else None,
+                    transport="mcp",
+                    tenant_id=_get_tenant(),
+                    status=status,
+                    duration_ms=(time.perf_counter() - t0) * 1000.0,
+                )
+
+
+# ── Why this transport has no deadline to attribute ──
+#
+# Recorded because its absence is load-bearing in ``call_tool`` above, and is
+# a finding in its own right.
+#
+# ``RequestTimeoutMiddleware`` skips ``/mcp`` on purpose — the mount serves
+# long-lived streaming responses and a blanket cancel would cut them. The
+# consequence is that a ``tools/call`` has NO server-side budget: the only
+# things that can end a stalled one are the storage client's own httpx
+# timeouts and the client hanging up.
+#
+# That matters most at ``per_tenant_storage_slot``, whose docstring justifies
+# an UNBOUNDED acquire queue with "the outer request budget already caps total
+# wall time". On REST that is true (45s, or the bulk route's 90s). On this
+# transport there is no outer request budget, so the stated cap does not
+# exist and the acquire can wait with nothing to stop it — ``caura_recall``
+# reaches that exact semaphore through ``search_memories``. Bounding it is a
+# load-shedding decision, not an attribution one, so it is deliberately NOT
+# made here; the recorder above at least makes the wait nameable when the hop
+# does eventually fail.
 
 
 mcp = _InstrumentedMCPServer(

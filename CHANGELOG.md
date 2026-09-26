@@ -10,6 +10,46 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.19.2](https://github.com/caura-ai/caura/compare/backend-v3.19.1...backend-v3.19.2) (2026-09-25)
+
+
+### Dependencies
+
+* cap SQLAlchemy below 2.1, whose typing change broke CI ([#1719](https://github.com/caura-ai/caura/issues/1719)) ([429824f](https://github.com/caura-ai/caura/commit/429824f604caadb318444fa9195f2f56502a968b))
+
+## [3.19.1](https://github.com/caura-ai/caura/compare/backend-v3.19.0...backend-v3.19.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **observability:** carry timeout attribution to the opt-out routes and MCP ([#1715](https://github.com/caura-ai/caura/issues/1715)) ([ebe8881](https://github.com/caura-ai/caura/commit/ebe8881cd9fb719cbefc2db249fd726bf6b38763))
+
+
+### Documentation
+
+* **c-03:** qualify the +2.4pp claim, which shipped unqualified on a public repo ([#1716](https://github.com/caura-ai/caura/issues/1716)) ([97fa519](https://github.com/caura-ai/caura/commit/97fa51918079df9be3f009646d095888c9be6963))
+* **search:** the pm-0918-c-01 search-path bisect (09/18 c-01) ([#1712](https://github.com/caura-ai/caura/issues/1712)) ([a4b4314](https://github.com/caura-ai/caura/commit/a4b431403f17926f6a04f45f579f3a9c23a5cce0))
+
+## [3.19.0](https://github.com/caura-ai/caura/compare/backend-v3.18.1...backend-v3.19.0) (2026-09-24)
+
+
+### Features
+
+* **search:** let a caller or a tenant exclude fan-out children (09/18 c-03) ([#1708](https://github.com/caura-ai/caura/issues/1708)) ([1c98ce1](https://github.com/caura-ai/caura/commit/1c98ce188ce2bf2e5835e16906f0fdbc077456b3))
+
+
+### Bug Fixes
+
+* **api:** make the 504 name the layer that ate the request budget (ax-0917-h-01/h-02) ([#1707](https://github.com/caura-ai/caura/issues/1707)) ([68d49fa](https://github.com/caura-ai/caura/commit/68d49fa9ce9d1a008c99806c032f745c92dce85b))
+* **installer:** verify TLS unless asked to trust on first use ([#1711](https://github.com/caura-ai/caura/issues/1711)) ([cab9eed](https://github.com/caura-ai/caura/commit/cab9eed7334863dd3e6f0c3fa2285de2eb5209b1))
+
+
+### Documentation
+
+* **c-01:** measure what a deferred title does to FTS rank and ordering ([#1704](https://github.com/caura-ai/caura/issues/1704)) ([2e7937a](https://github.com/caura-ai/caura/commit/2e7937a9e28808acaeacba6a9b901edafd7ec54e))
+* **comments:** give the a57 findings doc a findable path ([#1709](https://github.com/caura-ai/caura/issues/1709)) ([ea4d066](https://github.com/caura-ai/caura/commit/ea4d06687064d28b948f286d65e217158861e582))
+* **search:** measure the include_derived blast radius (09/18 c-03) ([#1703](https://github.com/caura-ai/caura/issues/1703)) ([ee482a9](https://github.com/caura-ai/caura/commit/ee482a9f6bc4172dd298c430450dd17d48b91986))
+
 ## [3.18.1](https://github.com/caura-ai/caura/compare/backend-v3.18.0...backend-v3.18.1) (2026-09-23)
 
 

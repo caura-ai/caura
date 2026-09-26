@@ -26,6 +26,7 @@ class ProviderName(StrEnum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     OPENROUTER = "openrouter"
+    ATLASCLOUD = "atlascloud"
     GEMINI = "gemini"
 
     # Platform-tier only (not valid as a tenant-facing provider name)
