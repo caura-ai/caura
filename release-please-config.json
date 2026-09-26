@@ -47,6 +47,16 @@
           "type": "toml",
           "path": "core-storage-api/uv.lock",
           "jsonpath": "$.package[?(@.name.value=='core-storage-api')].version"
+        },
+        {
+          "type": "toml",
+          "path": "core-operations/pyproject.toml",
+          "jsonpath": "$.project.version"
+        },
+        {
+          "type": "toml",
+          "path": "core-operations/uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='core-operations')].version"
         }
       ]
     },
