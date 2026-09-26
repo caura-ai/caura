@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.19.2](https://github.com/caura-ai/caura/compare/backend-v3.19.1...backend-v3.19.2) (2026-09-25)
+
+
+### Dependencies
+
+* cap SQLAlchemy below 2.1, whose typing change broke CI ([#1719](https://github.com/caura-ai/caura/issues/1719)) ([429824f](https://github.com/caura-ai/caura/commit/429824f604caadb318444fa9195f2f56502a968b))
+
 ## [3.19.1](https://github.com/caura-ai/caura/compare/backend-v3.19.0...backend-v3.19.1) (2026-09-24)
 
 
