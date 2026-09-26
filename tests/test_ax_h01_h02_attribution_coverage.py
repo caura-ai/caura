@@ -11,6 +11,11 @@ recorded what it did NOT cover, and that is what these tests are for:
 * the MCP mount is skipped entirely (``is_mcp_path``), and MCP is the surface
   agents actually use.
 
+The MCP half here covers ATTRIBUTION only. The deadline that transport was
+missing outright is oss-0924-h-02, and its tests are in
+``test_oss_0924_h02_mcp_request_budget``; these two keep the failure path
+reading the same now that a budget is armed alongside it.
+
 Same method as ``test_ax_h01_h02_timeout_attribution``: the real route, the
 real pipeline, the real middleware order, one hop stalled at a time, with only
 the deadline lowered. No provider calls and no LLM calls — every stalled hop is
@@ -366,9 +371,14 @@ async def test_an_mcp_tool_call_records_the_hop_its_failure_came_out_of(
     path names. Three defects have now been fixed on REST and never carried
     to MCP; attribution is not becoming the fourth.
 
-    There is no deadline here to blow (see ``mcp_server``'s note), so the
-    thing that has to carry the phase is the failure path: a storage read that
-    gives up, or a client that disconnects and cancels the call.
+    When this was written there was no deadline here to blow, so the thing
+    that had to carry the phase was the failure path: a storage read that
+    gives up, or a client that disconnects and cancels the call. There is a
+    deadline now (``mcp_request_timeout_seconds``, oss-0924-h-02), and this
+    test is what pins that gaining one did not cost the failure path — with a
+    budget armed, a pre-deadline unwind is filed under ``phases_failed``
+    unless the reporter asks otherwise. The budget's own coverage is in
+    ``test_oss_0924_h02_mcp_request_budget``.
     """
     from core_api import mcp_server
 
@@ -403,8 +413,9 @@ async def test_a_cancelled_mcp_tool_call_still_names_its_hop(
     which cancels the dispatch. ``CancelledError`` is not an ``Exception``, so
     an ``except Exception`` here would let the one failure shaped exactly like
     h-01 pass through unattributed — and an unbounded ``slot_acquire`` wait is
-    the h-01 shape this transport is MOST able to produce, since it has no
-    request budget to cap it."""
+    the h-01 shape this transport is MOST able to produce, because it had no
+    request budget to cap it (oss-0924-h-02 gave it one; a client can still
+    give up first)."""
     from core_api import mcp_server
 
     _wire_recall(monkeypatch)

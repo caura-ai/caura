@@ -242,6 +242,37 @@ class Settings(BaseSettings):
     # raise the platform timeout BEFORE raising this budget (the
     # startup validator enforces the ceiling).
     interview_request_timeout_seconds: float = 90.0
+    # Per-``tools/call`` budget on the MCP transport (oss-0924-h-02).
+    #
+    # ``RequestTimeoutMiddleware`` skips ``/mcp`` on purpose — the mount
+    # serves long-lived streaming responses and a blanket cancel would
+    # cut them — so until this existed a ``tools/call`` had NO
+    # server-side deadline at all. That is not merely a missing feature:
+    # ``per_tenant_storage_slot`` justifies its UNBOUNDED acquire queue
+    # with "the outer request budget already caps total wall time", and
+    # ``caura_recall`` reaches that exact semaphore through
+    # ``search_memories``. The invariant the code asserts was true on
+    # REST and false on the surface agents actually use. This budget is
+    # what makes it true on both, which is why it is a restoration
+    # rather than a new policy.
+    #
+    # Scoped to ONE tool dispatch, not to the mount: the SSE/streamable
+    # response that carries the session is untouched, so the reason the
+    # middleware skips ``/mcp`` does not apply here.
+    #
+    # 90s, matching ``bulk_request_timeout_seconds`` rather than the 45s
+    # hot-path ``request_timeout_seconds``, because the MCP surface
+    # serves the union of both shapes: ``caura_write`` with a batch calls
+    # ``create_memories_bulk`` directly (mcp_server.py), with none of the
+    # bulk ROUTE's own ``asyncio.wait_for`` around it, and ``caura_doc``
+    # ingest is comparable. At 45s this budget would cancel MCP work that
+    # REST grants 90s — shedding load in the name of restoring a cap,
+    # which is the one thing this change is not for. 90s also keeps
+    # bulk's and interview's 30s headroom under the 120s platform ceiling
+    # (``PLATFORM_REQUEST_CEILING_SECONDS``), above which a budget is
+    # dead config: nginx / Cloud Run sever the connection first. The
+    # startup validator enforces that ceiling.
+    mcp_request_timeout_seconds: float = 90.0
     # Async interview submit (#665). When True (default), the submit route
     # persists the masked window as a durable ``interview_jobs`` doc,
     # advances the watermark, and returns 200 ``accepted`` immediately;
@@ -625,6 +656,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"interview_request_timeout_seconds "
                 f"({self.interview_request_timeout_seconds}s) must be <= "
+                f"PLATFORM_REQUEST_CEILING_SECONDS "
+                f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
+                "timeout (nginx proxy_read_timeout / Cloud Run) and update "
+                "the constant before raising this budget."
+            )
+        if self.mcp_request_timeout_seconds > PLATFORM_REQUEST_CEILING_SECONDS:
+            # Same rule as interview's, for the same reason: past the
+            # platform ceiling the budget can never fire, because the
+            # gateway severs the connection while the tool keeps running.
+            # Worth enforcing here specifically — this budget exists to make
+            # a cap that the code already CLAIMS actually exist, so a value
+            # that cannot fire would restore the claim in config and leave
+            # ``per_tenant_storage_slot``'s docstring lying exactly as before.
+            raise ValueError(
+                f"mcp_request_timeout_seconds "
+                f"({self.mcp_request_timeout_seconds}s) must be <= "
                 f"PLATFORM_REQUEST_CEILING_SECONDS "
                 f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
                 "timeout (nginx proxy_read_timeout / Cloud Run) and update "
