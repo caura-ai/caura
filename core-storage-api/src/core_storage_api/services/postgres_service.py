@@ -2042,14 +2042,20 @@ class PostgresService:
                 caller in tenant B can never flip the status of tenant A's
                 memory by id (cross-tenant write guard).
             supersedes_id: If provided, set ``supersedes_id`` to this UUID.
-                Ignored when ``unset_supersedes`` is True.
+                Ignored when ``unset_supersedes`` is True. UNCONDITIONAL:
+                this overwrites a pointer the row already carries, orphaning
+                whatever it used to reference. There is no implicit
+                ``WHERE supersedes_id IS NULL`` here — for "first writer owns
+                the chain" semantics call ``memory_set_supersedes_if_null``.
             unset_supersedes: If True, clear ``supersedes_id`` to NULL.
                 Takes precedence over ``supersedes_id``.
             expected_supersedes_id: Optional CAS gate — only update if the
                 row's current ``supersedes_id`` matches this value. Used by
                 the contradiction-retraction path so a concurrent writer
                 that already cleared / changed the pointer doesn't get
-                clobbered.
+                clobbered. It cannot express "expect NULL": ``None`` means
+                "no gate", so a caller whose precondition is an empty
+                pointer needs ``memory_set_supersedes_if_null`` instead.
 
         Returns:
             True if the row was updated, False if the ``expected_supersedes_id``
@@ -2093,6 +2099,53 @@ class PostgresService:
                 stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
             stmt = stmt.values(**values)
             result = await session.execute(stmt)
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+
+    async def memory_set_supersedes_if_null(
+        self,
+        memory_id: UUID,
+        supersedes_id: UUID,
+        *,
+        tenant_id: str,
+    ) -> bool:
+        """Set ``supersedes_id`` only if the row does not already carry one.
+
+        The "first detection to land owns the chain" compare-and-set. It is a
+        NAMED method rather than a clause inlined at each call site because it
+        previously existed only inline in ``PATCH /memories/{id}/status``,
+        while ``POST /memories/batch-update-status`` — the route the
+        contradiction detector actually uses — set the pointer
+        unconditionally through ``memory_update_status``. Six comments in
+        ``core_api.services.contradiction_detector`` cited a storage CAS
+        ``WHERE supersedes_id IS NULL`` as the backstop for guards they
+        therefore omitted; on the batch path that backstop was not there
+        (09/22 M-01). One method both routes call is what keeps the two from
+        drifting apart again.
+
+        Distinct from ``memory_update_status``'s ``expected_supersedes_id``
+        gate, which cannot express this: ``None`` there means "no gate at
+        all", not "expect NULL".
+
+        The pointer is written on its own so a losing CAS costs only the
+        chain edge, never the status flip the same caller asked for — the
+        semantics ``PATCH /memories/{id}/status`` has always had.
+
+        Returns True when the pointer was written; False when the row is
+        absent, soft-deleted, foreign-tenant, or already points somewhere.
+        A False is not an error: it means another writer got there first and
+        owns the edge, which is exactly what the CAS is for.
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(Memory)
+                .where(
+                    Memory.id == memory_id,
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.supersedes_id.is_(None),
+                )
+                .values(supersedes_id=supersedes_id)
+            )
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def memory_update_embedding(

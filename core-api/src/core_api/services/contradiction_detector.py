@@ -207,6 +207,47 @@ def _merge_status_update(acc: dict[str, dict], row: dict) -> None:
         acc[mid] = dict(row)
 
 
+def _log_batch_status_result(result: dict | None, *, path: str, memory_id) -> None:
+    """Log the two ways ``batch_update_status`` can decline part of a flush.
+
+    ``skipped`` carries rows whose STATUS write the storage side dropped: an
+    ``expected_supersedes_id`` mismatch, or a row already deleted. Pre-batch,
+    the single-row PATCH route surfaced 404 as a hard error; the batch route
+    returns the list instead so one gone row doesn't abort the whole detection
+    cycle. No forward path passes ``expected_supersedes_id``, so a non-empty
+    list here means the target row was soft-deleted between detect-and-flush.
+
+    ``edge_skipped`` (09/22 M-01) is a different event: the status landed, but
+    the ``expect_supersedes_null`` CAS lost to a concurrent writer who wired
+    that edge first. Not an error — it is the guard doing its job — but worth
+    a line, because until M-01 that race silently re-pointed the row and
+    orphaned its previous target, and the storage CAS the comments around here
+    named as the backstop did not exist on this route.
+
+    One helper for all three flush sites: the three used to carry three copies
+    of the same explanation, and a claim maintained in triplicate is how the
+    phantom CAS survived this long.
+    """
+    result = result or {}
+    if result.get("skipped"):
+        logger.warning(
+            "batch_update_status (%s) skipped %d row(s) (trigger memory %s): %s",
+            path,
+            len(result["skipped"]),
+            memory_id,
+            result["skipped"],
+        )
+    if result.get("edge_skipped"):
+        logger.warning(
+            "batch_update_status (%s) lost the chain-edge CAS on %d row(s) "
+            "(trigger memory %s) — another writer owns those edges: %s",
+            path,
+            len(result["edge_skipped"]),
+            memory_id,
+            result["edge_skipped"],
+        )
+
+
 # ---------------------------------------------------------------------------
 # A19 — process-wide admission gate for detection passes.
 # ---------------------------------------------------------------------------
@@ -306,10 +347,22 @@ async def _acquire_detection_slot() -> tuple[asyncio.Semaphore, int]:
 # semantic judge is gated on ``if not contradictions``, so a deterministic
 # verdict SUPPRESSES an LLM call rather than adding one.
 #
-# Re-running is safe by construction. ``memory_find_rdf_conflicts`` selects only
-# ``active``/``confirmed``/``pending`` rows, so anything an earlier pass already
-# retired is out of scope, and the storage CAS (``WHERE supersedes_id IS NULL``)
-# is the backstop on the chain edge.
+# Re-running is safe by construction, and it is worth being exact about WHY,
+# because the reason given here was wrong until 09/22 M-01. Two things carry it:
+#
+#   1. ``memory_find_rdf_conflicts`` selects only ``active``/``confirmed``/
+#      ``pending`` rows, so anything an earlier pass already retired is out of
+#      scope. This half was always true and does the bulk of the work.
+#   2. The chain edge is written under a CAS against NULL, so a second pass
+#      cannot re-point a row the first pass already wired.
+#
+# (2) is only true as of M-01. This comment previously cited "the storage CAS
+# (``WHERE supersedes_id IS NULL``)" as an ambient property of storage. It was
+# not: that clause lived in ``PATCH /memories/{id}/status``, and every forward
+# path below writes through ``POST /memories/batch-update-status``, which set
+# the pointer unconditionally. The batch route now takes
+# ``expect_supersedes_null``, and the edge writes below pass it — so the
+# backstop this paragraph names is one the calls actually request.
 class _RdfPassResult(NamedTuple):
     contradictions: list[ContradictionInfo]
     record_pairs: list[tuple[dict, str, float | None]]
@@ -398,9 +451,16 @@ async def _rdf_conflict_pass(
             if newer is new_memory:
                 # Canonical case (candidate is older). Track via local
                 # ``supersedes_id`` so multiple conflict candidates in
-                # this run don't each issue a write; storage's CAS
-                # ``WHERE supersedes_id IS NULL`` would only honour the
-                # first anyway.
+                # this run don't each issue a write.
+                #
+                # 09/22 M-01 — the in-run collapse rests on THIS flag and
+                # nothing else. It used to be justified by "storage's CAS
+                # ``WHERE supersedes_id IS NULL`` would only honour the first
+                # anyway", which was not true of the batch route these writes
+                # go to. The flag is load-bearing on its own: it is seeded
+                # from ``new_memory["supersedes_id"]`` by every caller (see
+                # ``_detect`` and the Path C pass), so it also stops a SECOND
+                # detection run from re-pointing an edge an earlier one wired.
                 if not supersedes_id:
                     supersedes_id = older_id
                     # Separate the status-reversion guard from the
@@ -422,6 +482,7 @@ async def _rdf_conflict_pass(
                             "memory_id": str(memory_id),
                             "status": target_status,
                             "supersedes_id": str(older_id),
+                            "expect_supersedes_null": True,
                         },
                     )
             else:
@@ -431,11 +492,28 @@ async def _rdf_conflict_pass(
                 # back at new_memory.
                 new_memory_is_outdated = True
                 # Application-level guard against overwriting an
-                # existing supersedes_id on the candidate. Storage CAS
-                # (``WHERE supersedes_id IS NULL``) is the
-                # last-line-of-defence; this guard logs an explicit
-                # warning so the orphaning attempt is visible in logs
-                # rather than silently no-op'd at the DB.
+                # existing supersedes_id on the candidate. It logs an
+                # explicit warning so the orphaning attempt is visible in
+                # logs rather than silently no-op'd at the DB.
+                #
+                # 09/22 M-01 — this guard reads a SNAPSHOT. ``newer`` came
+                # back from ``memory_find_rdf_conflicts`` (or, on the
+                # semantic and Path C loops that mirror this branch, from a
+                # candidate fetch followed by an LLM judge taking seconds),
+                # and nothing holds the row still in between. A concurrent
+                # detection that wires an edge onto the same candidate inside
+                # that window leaves this guard reading a stale NULL, and the
+                # write below then re-points the row and orphans whatever it
+                # had just been made to supersede — a row left
+                # conflicted/outdated with nothing pointing at it, the exact
+                # failure #1690 fixed from the other direction.
+                #
+                # The comment here used to name a storage CAS
+                # (``WHERE supersedes_id IS NULL``) as the last line of
+                # defence behind the snapshot. On the batch route these
+                # writes take, there was none — so the snapshot was the ONLY
+                # guard. ``expect_supersedes_null`` below is that backstop,
+                # now actually requested.
                 if newer.get("supersedes_id"):
                     logger.warning(
                         "Flipped contradiction skipped supersedes_id overwrite "
@@ -450,6 +528,7 @@ async def _rdf_conflict_pass(
                             "memory_id": str(newer_id),
                             "status": newer.get("status", "active"),
                             "supersedes_id": str(older_id),
+                            "expect_supersedes_null": True,
                         },
                     )
 
@@ -488,23 +567,7 @@ async def _rdf_conflict_pass(
             rdf_result = await sc.batch_update_status(
                 {"updates": list(rdf_updates.values())}, tenant_id=tenant_id
             )
-            if rdf_result.get("skipped"):
-                # ``skipped`` carries rows the storage-side dropped — CAS
-                # gate fail (caller-supplied ``expected_supersedes_id``
-                # mismatch) or row already deleted. Pre-batch, the single-
-                # row PATCH route surfaced 404 as a hard error; the batch
-                # route returns the list instead so we don't abort the
-                # whole detection cycle. Log so the dropped writes are
-                # visible in tracing — the contradiction detector itself
-                # doesn't use ``expected_supersedes_id`` today, so a
-                # non-empty list usually means the target row was
-                # soft-deleted between detect-and-flush.
-                logger.warning(
-                    "batch_update_status (RDF path) skipped %d row(s) (trigger memory %s): %s",
-                    len(rdf_result["skipped"]),
-                    memory_id,
-                    rdf_result["skipped"],
-                )
+            _log_batch_status_result(rdf_result, path="RDF path", memory_id=memory_id)
 
     return _RdfPassResult(contradictions, _record_pairs, supersedes_id, ran)
 
@@ -568,8 +631,19 @@ async def detect_contradictions_async(
         # the same memory; whichever arrives first owns the lock and
         # runs detection, the other skips. Fail-open: if Redis is
         # unavailable, ``_acquire_content_lock`` returns True and we
-        # fall back to the prior double-detection behaviour (storage
-        # CAS still keeps writes idempotent).
+        # fall back to the prior double-detection behaviour.
+        #
+        # 09/22 M-01 — what that fallback costs, stated honestly. It used to
+        # read "storage CAS still keeps writes idempotent", naming a guard
+        # the batch route did not have. It has one now
+        # (``expect_supersedes_null``), and it bounds the damage rather than
+        # erasing it: two concurrent passes can still both mark a row
+        # ``conflicted``/``outdated``, but only one can wire the chain edge,
+        # so the loser cannot re-point a row the winner already resolved.
+        # The RDF pass is deterministic and would agree anyway; the semantic
+        # judge is stochastic and two passes CAN pick different candidates —
+        # that is precisely the case the edge CAS now settles by first-writer
+        # rather than by last-write-wins.
         # H-06: keyed on the CONTENT as well as the memory, so an edit
         # re-fired by ``update_memory`` is not deduped against the run that
         # checked the previous text.
@@ -854,6 +928,7 @@ async def _detect(
                                     "memory_id": str(memory_id),
                                     "status": target_status,
                                     "supersedes_id": str(older_id),
+                                    "expect_supersedes_null": True,
                                 },
                             )
                     else:
@@ -874,6 +949,7 @@ async def _detect(
                                     "memory_id": str(newer_id),
                                     "status": newer.get("status", "active"),
                                     "supersedes_id": str(older_id),
+                                    "expect_supersedes_null": True,
                                 },
                             )
 
@@ -901,14 +977,7 @@ async def _detect(
                 sem_result = await sc.batch_update_status(
                     {"updates": list(updates.values())}, tenant_id=tenant_id
                 )
-                if sem_result.get("skipped"):
-                    # See RDF path above for the ``skipped`` semantics.
-                    logger.warning(
-                        "batch_update_status (semantic path) skipped %d row(s) (trigger memory %s): %s",
-                        len(sem_result["skipped"]),
-                        memory_id,
-                        sem_result["skipped"],
-                    )
+                _log_batch_status_result(sem_result, path="semantic path", memory_id=memory_id)
 
     # A55 1d — additionally persist a memory_conflicts classification record for
     # each confirmed conflict. Flag-gated (default off); never touches the
@@ -2418,6 +2487,14 @@ async def _attempt_entity_retraction(
     # The edge must still point where we think it does; otherwise the pair we
     # resolved is not the pair the chain describes. The storage CAS below is the
     # real guard, but failing here avoids an LLM call we would only discard.
+    #
+    # 09/22 M-01 — checked, and this one is accurate. "The storage CAS below"
+    # is the retraction CAS, not the phantom ``WHERE supersedes_id IS NULL``
+    # the forward paths used to cite: the ``unset_supersedes`` call at the end
+    # of this function passes ``expected_supersedes_id``, and the storage route
+    # gates the clear on ``supersedes_id == expected OR IS NULL``, answering
+    # 409 on anything else. That gate is opt-in and this path opts in, which
+    # is exactly what the forward paths did not do.
     if str(edge_owner.get("supersedes_id") or "") != str(candidate.get("id")):
         return False
 
@@ -3115,9 +3192,18 @@ async def detect_contradictions_by_entities_async(
         #
         # Seeded from the row's current edge, as the semantic loop is: a
         # verdict this run's retraction phase did NOT clear is still owned
-        # by whoever wrote it, and ``memory_update_status`` has no
-        # ``supersedes_id IS NULL`` guard, so an unseeded write would
-        # silently re-point the row and orphan its previous target.
+        # by whoever wrote it, so an unseeded write would re-point the row
+        # and orphan its previous target.
+        #
+        # ``memory_update_status`` still has no implicit
+        # ``supersedes_id IS NULL`` guard — that observation, made here by
+        # #1690, is what 09/22 M-01 then traced through the rest of the
+        # module. The edge writes below now request one explicitly
+        # (``expect_supersedes_null``), which closes the concurrent-writer
+        # half of the race. This seeding remains necessary for the other
+        # half: the CAS only refuses to overwrite a NON-NULL pointer, so a
+        # run that has already cleared and must not re-wire still depends on
+        # starting from the row's own value.
         chain_supersedes_id = new_memory.get("supersedes_id")
         # CAURA-125 — state-corruption guard; mirrors the RDF and
         # semantic paths in ``_detect()``.
@@ -3182,6 +3268,7 @@ async def detect_contradictions_by_entities_async(
                                 "memory_id": str(memory_id),
                                 "status": target_status,
                                 "supersedes_id": str(older_id),
+                                "expect_supersedes_null": True,
                             },
                         )
                 else:
@@ -3202,6 +3289,7 @@ async def detect_contradictions_by_entities_async(
                                 "memory_id": str(newer_id),
                                 "status": newer.get("status", "active"),
                                 "supersedes_id": str(older_id),
+                                "expect_supersedes_null": True,
                             },
                         )
                 n_conflicts += 1
@@ -3216,14 +3304,7 @@ async def detect_contradictions_by_entities_async(
             entity_result = await sc.batch_update_status(
                 {"updates": list(updates.values())}, tenant_id=tenant_id
             )
-            if entity_result.get("skipped"):
-                # See RDF path in ``_detect`` for the ``skipped`` semantics.
-                logger.warning(
-                    "batch_update_status (Path C entity-overlap) skipped %d row(s) (trigger memory %s): %s",
-                    len(entity_result["skipped"]),
-                    memory_id,
-                    entity_result["skipped"],
-                )
+            _log_batch_status_result(entity_result, path="Path C entity-overlap", memory_id=memory_id)
         concluded = True
 
         # A58 — Path D (basis invalidation) SHADOW. Fires HERE, not in Path A:
@@ -3257,7 +3338,12 @@ async def detect_contradictions_by_entities_async(
         # ``concluded`` is set at each legitimate exit rather than once early,
         # so a throw ANYWHERE in the judging loop still releases: a failure
         # half way through must not block the retry for the rest of the TTL.
-        # The storage writes are CAS-guarded, so re-running is safe.
+        # Re-running is safe: the candidate query selects only live rows, so
+        # anything an earlier pass retired is out of scope, and the chain-edge
+        # writes go out under ``expect_supersedes_null`` so a retry cannot
+        # re-point an edge the abandoned run already wired. (09/22 M-01 — the
+        # second clause said "the storage writes are CAS-guarded" while the
+        # batch route these writes use had no such guard.)
         if lock_held and not concluded and lock_key is not None:
             await _release_lock(lock_key, lock_token)
         elapsed_ms = round((time.monotonic() - t_start) * 1000)
