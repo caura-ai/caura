@@ -31,6 +31,14 @@ import pytest
 from core_api.config import settings
 from tests.conftest import get_test_auth, uid
 
+# Mirrors core-api/scripts/repro_path2_keystone_verified.py: the settings
+# attribute still carries the pre-rename name, so monkeypatch.setattr needs
+# it spelled exactly. Hoisted to a constant so ruff format cannot carry the
+# marker onto a wrapped line, which the ratchet reads as the marker deleted.
+_SHARED_KEY_SETTING = (
+    "memclaw_api_key"  # legacy-name-floor: real settings attribute name
+)
+
 SHARED_KEY = "shared-caura-key-for-path2"
 
 
@@ -44,7 +52,7 @@ def path2_headers(monkeypatch):
     so patching the live settings object puts the real path under the real
     request.
     """
-    monkeypatch.setattr(settings, "memclaw_api_key", SHARED_KEY, raising=False)
+    monkeypatch.setattr(settings, _SHARED_KEY_SETTING, SHARED_KEY, raising=False)
     monkeypatch.setattr(settings, "is_standalone", False, raising=False)
     return {"X-API-Key": SHARED_KEY}
 
