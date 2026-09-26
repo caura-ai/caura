@@ -102,6 +102,15 @@ class ClassifyQuery:
         # smuggle expanded hops past its own ``graph_expand`` gate.
         graph_expand: bool = ctx.data.get("graph_expand", True)
 
+        # C27 — resolved once here and handed to BOTH entity-FTS and the memory
+        # load below. It used to be read inline at the ``_collect_memories``
+        # call only, which is how ``_entity_fts`` came to be the one entity-FTS
+        # caller in the tree that never sent it (oss-0922-m-02): the sibling in
+        # ``parallel_embed_entity_boost`` forwards it, the storage route
+        # defaults it False when absent, so strict tenants silently got
+        # permissive entity matching HERE and strict matching everywhere else.
+        strict_fleet_scoping: bool = bool(ctx.data.get("strict_fleet_scoping"))
+
         tokens = extract_entity_tokens(query) if entity_retrieval else []
 
         if not entity_retrieval:
@@ -110,7 +119,13 @@ class ClassifyQuery:
         if tokens:
             try:
                 sc = get_storage_client()
-                matched_ids = await self._entity_fts(sc, tokens, tenant_id, fleet_ids)
+                matched_ids = await self._entity_fts(
+                    sc,
+                    tokens,
+                    tenant_id,
+                    fleet_ids,
+                    strict_fleet_scoping=strict_fleet_scoping,
+                )
 
                 # CAURA-722 — record the count HERE, before the over-broad
                 # branch below empties ``matched_ids``. Reading it later would
@@ -211,7 +226,7 @@ class ClassifyQuery:
                         status_filter=status_filter,
                         valid_at=valid_at,
                         readable_tenant_ids=readable_tenant_ids,
-                        strict_fleet_scoping=bool(ctx.data.get("strict_fleet_scoping")),
+                        strict_fleet_scoping=strict_fleet_scoping,
                         pool_report=ctx.data,
                     )
 
@@ -470,14 +485,26 @@ class ClassifyQuery:
         tokens: list[str],
         tenant_id: str,
         fleet_ids: list[str] | None,
+        *,
+        strict_fleet_scoping: bool = False,
     ) -> list[UUID]:
-        """Full-text search against the entity index via storage client."""
+        """Full-text search against the entity index via storage client.
+
+        ``strict_fleet_scoping`` rides with ``fleet_ids`` and only inside that
+        branch, because it narrows the fleet predicate rather than adding one:
+        ``entity_fts_search`` applies ``_fleet_scope_clause`` only when fleets
+        were named, so sending the flag without them would be inert on the
+        wire and misleading in a request log. Same shape as the sibling caller
+        in ``parallel_embed_entity_boost``.
+        """
         data = {
             "tokens": tokens,
             "tenant_id": tenant_id,
         }
         if fleet_ids:
             data["fleet_ids"] = fleet_ids
+            if strict_fleet_scoping:
+                data["strict_fleet_scoping"] = True
         result = await sc.fts_search_entities(data)
         return [UUID(eid) for eid in result]
 
