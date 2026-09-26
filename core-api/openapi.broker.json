@@ -107,6 +107,8 @@
             "type": "array"
           },
           "tenant_id": {
+            "default": "",
+            "description": "Tenant to operate on. Omit it and the tenant is resolved from the credential, which is what a tenant- or agent-scoped key already identifies — no prior /whoami call is needed. Supply it to act on a different tenant your credential may read (and for an admin key, which belongs to no single tenant, it is required).",
             "title": "Tenant Id",
             "type": "string"
           },
@@ -124,7 +126,6 @@
           }
         },
         "required": [
-          "tenant_id",
           "items"
         ],
         "title": "BulkMemoryCreate",
@@ -156,6 +157,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional retention hint. Once this time passes, the row is archived on the next lifecycle tick and stops being returned by reads. Not a hard cutoff: the row remains readable until that tick runs. Distinct from ts_valid_end, which closes a temporal-validity interval rather than expressing retention.",
             "title": "Expires At"
           },
           "memory_type": {
@@ -909,6 +911,11 @@
             "title": "Id",
             "type": "string"
           },
+          "injected": {
+            "default": false,
+            "title": "Injected",
+            "type": "boolean"
+          },
           "is_inferred": {
             "default": false,
             "title": "Is Inferred",
@@ -1227,6 +1234,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional retention hint. Once this time passes, the row is archived on the next lifecycle tick and stops being returned by reads. Not a hard cutoff: the row remains readable until that tick runs. Distinct from ts_valid_end, which closes a temporal-validity interval rather than expressing retention.",
             "title": "Expires At"
           },
           "memory_type": {
@@ -1250,6 +1258,7 @@
                 "type": "null"
               }
             ],
+            "description": "Free-form metadata stored with the memory. Keys you send are yours: enrichment never overwrites a `summary` or `tags` you supply here, on this write or on any later one — the platform's own versions go to `system_metadata` instead. Platform-reserved keys (timings, governance verdicts, provenance) are stripped from this dict; send them and they are dropped, not stored.",
             "title": "Metadata"
           },
           "metadata_mode": {
@@ -1514,6 +1523,24 @@
             "title": "Candidates Considered",
             "type": "integer"
           },
+          "entity_match_declined": {
+            "default": false,
+            "description": "True when the entity match was refused as over-broad (> ENTITY_LOOKUP_MAX_MATCHES). This is the only decline that also suppresses the per-row entity boost; an under-filled pool falls through with the boost still applied and reports False here.",
+            "title": "Entity Match Declined",
+            "type": "boolean"
+          },
+          "entity_matches": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Entities the query's tokens matched in entity FTS, counted before the over-broad decline empties the set. None means the lookup never ran (entity retrieval off, no entity-shaped tokens, or a swallowed failure) — distinct from 0, which means it ran and matched nothing.",
+            "title": "Entity Matches"
+          },
           "excluded_below_min_similarity": {
             "default": 0,
             "title": "Excluded Below Min Similarity",
@@ -1573,6 +1600,7 @@
         "type": "object"
       },
       "SearchRequest": {
+        "additionalProperties": true,
         "properties": {
           "caller_agent_id": {
             "anyOf": [
@@ -1615,6 +1643,18 @@
               }
             ],
             "title": "Fleet Ids"
+          },
+          "include_derived": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether to return atomic-fact fan-out children — short single-claim rows the platform derives from a memory you wrote, which stay retrievable alongside it. Omit to inherit the tenant's search.include_derived setting, which in turn falls back to the global default (currently true). Precedence: this field beats the tenant setting beats the global default. Excluded rows are dropped BEFORE the top_k trim, so top_k still returns top_k rows. Does not affect auto-chunk children, which are the only sub-document vectors a long document has. REST only: the MCP tools do not expose this per request — an MCP caller sets the tenant's search.include_derived instead, and an unknown argument sent to an MCP tool is dropped silently rather than reported (oss-0923-h-01).",
+            "title": "Include Derived"
           },
           "memory_type_filter": {
             "anyOf": [
@@ -1661,13 +1701,15 @@
             "title": "Status Filter"
           },
           "tenant_id": {
+            "default": "",
+            "description": "Tenant to operate on. Omit it and the tenant is resolved from the credential, which is what a tenant- or agent-scoped key already identifies — no prior /whoami call is needed. Supply it to act on a different tenant your credential may read (and for an admin key, which belongs to no single tenant, it is required).",
             "title": "Tenant Id",
             "type": "string"
           },
           "top_k": {
             "default": 5,
-            "description": "Maximum results to return (1-20, default 5).",
-            "maximum": 20.0,
+            "description": "Maximum results the query returns (1-200, default 5). Not the response ceiling: each returned outdated/conflicted row also carries its newest correction, injected beyond this budget and marked injected: true (with score: null), so a response holds at most 2*top_k items. Also accepted as 'limit': sent on its own it is absorbed silently and no warning is raised. Sent together with 'top_k', top_k wins and the response carries a 'superseded_parameter_alias' warning naming 'limit' as superseded by 'top_k' — not an 'unrecognized_parameters' one, because the endpoint does read 'limit'; it was simply outranked.",
+            "maximum": 200.0,
             "minimum": 1.0,
             "title": "Top K",
             "type": "integer"
@@ -1682,11 +1724,11 @@
                 "type": "null"
               }
             ],
+            "description": "As-of time for the question (ISO 8601). Rows whose ts_valid_start is after this date are excluded and rows whose ts_valid_end is before it are down-weighted; relative dates in the query ('last month') are resolved against it. When the tenant's search.default_profile sets freshness_reference=1, freshness and the temporal window are ALSO measured from this time against each row's event time (ts_valid_start, else created_at) instead of from now() — the setting for backfilled corpora where ingest time carries no signal. Naive values are read as UTC.",
             "title": "Valid At"
           }
         },
         "required": [
-          "tenant_id",
           "query"
         ],
         "title": "SearchRequest",
@@ -1969,7 +2011,7 @@
             }
           },
           {
-            "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter.",
+            "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter. Unrelated to the `visibility` parameter despite the shared word: this selects how wide to look at read time, `visibility=scope_*` filters on the tier a writer stamped on the row. Keystone routes spell their own scope with a different enum again ('tenant' where this says 'all').",
             "in": "query",
             "name": "scope",
             "required": false,
@@ -1983,7 +2025,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter.",
+              "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter. Unrelated to the `visibility` parameter despite the shared word: this selects how wide to look at read time, `visibility=scope_*` filters on the tier a writer stamped on the row. Keystone routes spell their own scope with a different enum again ('tenant' where this says 'all').",
               "title": "Scope"
             }
           },
@@ -2091,6 +2133,7 @@
             }
           },
           {
+            "description": "Filter on the write-time visibility tier stamped on the row (`scope_agent`, `scope_team`, `scope_org`). Not the `scope` parameter above, which chooses read breadth — the two words look alike and control different things.",
             "in": "query",
             "name": "visibility",
             "required": false,
@@ -2103,6 +2146,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Filter on the write-time visibility tier stamped on the row (`scope_agent`, `scope_team`, `scope_org`). Not the `scope` parameter above, which chooses read breadth — the two words look alike and control different things.",
               "title": "Visibility"
             }
           },

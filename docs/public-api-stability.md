@@ -38,20 +38,20 @@ All paths are prefixed with `/api/v1` unless noted. Request and response shapes 
 | Memory | `GET/POST /memories`, `PATCH /memories/{id}`, `DELETE /memories/{id}`, `PATCH /memories/{id}/status`, `POST /memories/bulk`, `POST /memories/bulk-delete`, `GET /memories/stats`, `GET /memories/{id}`, `GET /memories/{id}/contradictions`, `POST /search`, `POST /recall`, `POST /ingest/preview`, `POST /ingest/commit` |
 | Knowledge graph | `GET /entities`, `GET /entities/{id}`, `POST /entities/upsert`, `GET /graph`, `POST /relations/upsert` |
 | Documents | `POST /documents`, `GET /documents`, `GET /documents/{id}`, `POST /documents/query`, `DELETE /documents/{id}` |
-| Keystones | `GET /keystones`, `POST /keystones`, `DELETE /keystones/{doc_id}` (permanent legacy alias: `/memclaw/keystones`) | <!-- legacy-name-ok: taught as legacy alias -->
+| Keystones | `GET /keystones`, `POST /keystones`, `DELETE /keystones/{doc_id}` (supported legacy route: `/memclaw/keystones`) | <!-- legacy-name-floor: documents the compatibility route -->
 | Fleet | `POST /fleet/heartbeat`, `GET /fleet/nodes`, `POST /fleet/commands`, `GET /fleet/commands` |
 | Agents | `GET /agents`, `GET /agents/{id}`, `PATCH /agents/{id}/trust`, `POST /admin/agent-keys/provision` (atomic key + row + trust + fleet), `GET /whoami` (identity probe) |
 | Insights | `POST /insights/generate` |
 | Evolve | `POST /evolve/report` |
 | Crystallizer | `POST /crystallize`, `POST /crystallize/all`, `GET /crystallize/reports`, `GET /crystallize/latest` |
 | Settings | `GET/PUT /settings` |
-| System | `GET /health`, `GET /version`, `GET /tool-descriptions`, `GET /audit-log` |
+| System | `GET /health`, `GET /version`, `GET /tool-descriptions`, `GET /audit-log`, `GET /telemetry`, `POST /telemetry/rotate` (see [telemetry.md](telemetry.md)) |
 | MCP | `POST /mcp` (Streamable HTTP transport, mounted at app root) |
 | Bootstrap (plugin) | `GET /plugin-source`, `GET /plugin-source-hash`, `GET /plugin-manifest`, `GET/POST /install-plugin`, `GET /install-skill[?skill=memclaw\|company-brain]`, `GET /skill/{memclaw\|company-brain}`. `/plugin-source`, `/plugin-manifest`, and `GET/POST /install-plugin` are also aliased under `/api` (no `/v1`) for the generated installer. | <!-- legacy-name-floor: published skill query parameter and route -->
 
 ### Plugin environment variables
 
-Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these variables are the public contract; the plugin's TypeScript module structure is internal.
+Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these variables are the public contract; the plugin's TypeScript module structure is internal. <!-- legacy-name-floor: documents the frozen published plugin id -->
 
 | Var | Purpose |
 |---|---|
@@ -62,7 +62,7 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 | `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |
 | `CAURA_AUTO_WRITE_TURNS` | Auto-write turn summaries (default `true`). |
 
-**Legacy spellings.** Every `CAURA_*` variable in this document — the table above, the `CAURA_API_KEY` server gate, and `CAURA_VERSION` in compose — also answers to its pre-rename `MEMCLAW_*` name and will keep doing so: swap the prefix, and the rest of the name is unchanged (`CAURA_API_URL` ⇄ `MEMCLAW_API_URL`). Where both are set the first **non-empty** value wins — deliberately, rather than the first one *defined* — so an unfilled `CAURA_FOO=` in a deploy template cannot blank out a working `MEMCLAW_FOO`. <!-- legacy-name-ok: rule 3 dual-read alias — the one surviving alias table -->
+**Legacy spellings.** Every `CAURA_*` variable in this document — the table above, the `CAURA_API_KEY` server gate, and `CAURA_VERSION` in compose — currently also answers to its pre-rename `MEMCLAW_*` name. Use `CAURA_*` for new configuration. Where both are set the first **non-empty** value wins — deliberately, rather than the first one *defined* — so an unfilled `CAURA_FOO=` in a deploy template cannot blank out a working `MEMCLAW_FOO`. <!-- legacy-name-floor: documents the current dual-read behavior -->
 
 New installs are written with the `CAURA_*` names. Variables without the prefix
 (`ADMIN_API_KEY`, `POSTGRES_*`, `IS_STANDALONE`, …) never had a branded spelling.

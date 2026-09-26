@@ -44,14 +44,14 @@ async def read_bulletin(tenant_id: str, fleet_id: str, limit: int = 100) -> list
     return await stm.get_bulletin(tenant_id, fleet_id, limit=limit)
 
 
-async def clear_notes(tenant_id: str, agent_id: str) -> None:
+async def clear_notes(tenant_id: str, agent_id: str) -> bool:
     stm = get_stm_backend_instance()
-    await stm.clear_notes(tenant_id, agent_id)
+    return await stm.clear_notes(tenant_id, agent_id)
 
 
-async def clear_bulletin(tenant_id: str, fleet_id: str) -> None:
+async def clear_bulletin(tenant_id: str, fleet_id: str) -> bool:
     stm = get_stm_backend_instance()
-    await stm.clear_bulletin(tenant_id, fleet_id)
+    return await stm.clear_bulletin(tenant_id, fleet_id)
 
 
 async def promote(

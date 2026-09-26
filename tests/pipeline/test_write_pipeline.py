@@ -15,6 +15,7 @@ from sqlalchemy import select
 from common.models.memory import Memory
 from core_api.constants import VECTOR_DIM
 from core_api.schemas import MemoryCreate, MemoryOut
+from tests.conftest import close_scheduled_coro
 
 TENANT_ID = f"test-pipeline-{uuid.uuid4().hex[:8]}"
 FLEET_ID = "test-fleet"
@@ -670,6 +671,11 @@ async def test_schedule_background_tasks_fast_mode_fires_full_fan_out():
         (),
         {
             "enrichment_enabled": True,
+            # The fast branch now also reads ``enrichment_provider`` (OSS 09/02
+            # M-18). A real ``ResolvedConfig`` always exposes it — it is a
+            # property, and the strong branch has always read it — so a stub
+            # without it was only ever complete enough for the old gate.
+            "enrichment_provider": "openai",
             "entity_extraction_enabled": True,
         },
     )()
@@ -685,7 +691,8 @@ async def test_schedule_background_tasks_fast_mode_fires_full_fan_out():
     )
 
     with patch(
-        "core_api.pipeline.steps.write.schedule_background_tasks.track_task"
+        "core_api.pipeline.steps.write.schedule_background_tasks.track_task",
+        side_effect=close_scheduled_coro,
     ) as mock_track:
         step = ScheduleBackgroundTasks()
         await step.execute(ctx)
@@ -725,7 +732,8 @@ async def test_schedule_background_tasks_strong_mode_fires_entity_and_contradict
     )
 
     with patch(
-        "core_api.pipeline.steps.write.schedule_background_tasks.track_task"
+        "core_api.pipeline.steps.write.schedule_background_tasks.track_task",
+        side_effect=close_scheduled_coro,
     ) as mock_track:
         step = ScheduleBackgroundTasks()
         await step.execute(ctx)
@@ -988,7 +996,11 @@ async def test_a_bad_id_is_classified_permanent_not_transient(caplog):
         "a nonexistent entity_id is the caller's input, not a storage outage — "
         "misclassifying it sends on-call after the wrong system"
     )
-    assert dropped[0].status_code == 409
+    # Was ``status_code == 409``: with one bulk call per chunk there is no
+    # per-link HTTP status to read — storage reports each item's verdict in the
+    # response body instead. Same fact, pinned where it now lives; ``permanent``
+    # above remains the property that actually matters.
+    assert dropped[0].error_type == "fk_violation"
 
 
 @pytest.mark.asyncio
@@ -1012,12 +1024,17 @@ async def test_a_storage_outage_is_classified_transient_and_summarised(caplog):
     links = [EntityLinkIn(entity_id=uuid.uuid4(), role="subject") for _ in range(7)]
     outage = httpx.HTTPStatusError(
         "storage down",
-        request=httpx.Request("POST", "http://storage/entities/links"),
+        request=httpx.Request("POST", "http://storage/entities/links/bulk"),
         response=httpx.Response(503),
     )
 
     with (
-        patch.object(sc, "create_entity_link", new=AsyncMock(side_effect=outage)),
+        # ``bulk_upsert_entity_links`` since OSS 08/14 L-34 — links go out in one
+        # chunked bulk call rather than one request per link. The outage is
+        # injected at whatever call the step actually makes; what this test pins
+        # is the classification and the log cap, neither of which is about the
+        # number of round-trips.
+        patch.object(sc, "bulk_upsert_entity_links", new=AsyncMock(side_effect=outage)),
         caplog.at_level(
             logging.ERROR, logger="core_api.pipeline.steps.write.write_memory_row"
         ),

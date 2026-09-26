@@ -27,6 +27,11 @@ _EXPECTED_JOBS = {
     "agent-digest",
     "agent-digest-weekly",
     "interviewer-schedule",
+    # Republishes audit rows a fanout wrote but never published a message for.
+    # Hourly at half past, offset off the fanout hours it repairs so the sweep's
+    # own storage reads do not land in the same instant as the burst it cleans
+    # up after.
+    "lifecycle-reconcile",
     # Read-only hourly sample of how many live memories are still unembedded.
     # Registered unconditionally, unlike ``embed-backfill``: the count matters
     # most when the sweep is OFF, since nothing is draining the backlog then.
@@ -53,18 +58,50 @@ def test_all_lifecycle_jobs_registered_and_wall_clock_aligned(monkeypatch):
 
 def test_run_at_hour_override_is_threaded_through(monkeypatch):
     # An operator override on the pipeline hour should change when
-    # crystallize/entity-link fire.
+    # crystallize fires. Entity-link NO LONGER follows this knob — it has
+    # its own, and the test below is the one that pins that.
     monkeypatch.setattr(app.settings, "lifecycle_pipeline_run_at_hour", 5)
     fresh = Scheduler()
     monkeypatch.setattr(app, "scheduler", fresh)
 
     app._register_scheduled_tasks()
 
-    for name in ("lifecycle-crystallize", "lifecycle-entity-link"):
-        task = next(t for t in fresh._tasks if t.name == name)
-        now = datetime.now(UTC)
-        # delay_provider uses its own now(); compare within a small window.
-        assert abs(task.delay_provider() - seconds_until_next_utc_hour(5, now=now)) < 5
+    task = next(t for t in fresh._tasks if t.name == "lifecycle-crystallize")
+    now = datetime.now(UTC)
+    # delay_provider uses its own now(); compare within a small window.
+    assert abs(task.delay_provider() - seconds_until_next_utc_hour(5, now=now)) < 5
+
+
+def test_entity_link_has_its_own_hour_and_does_not_follow_the_pipeline_knob(monkeypatch):
+    """The two heaviest sweeps must be separable.
+
+    Crystallize and entity-link shared ``lifecycle_pipeline_run_at_hour``, so
+    no operator could move one off the other's slot. On 2026-09-18 that pairing
+    put one staging tenant's cross-link discovery past its 120s storage budget
+    and the message dead-lettered after ten 120s attempts.
+
+    Both directions are asserted: moving the entity-link knob must move ONLY
+    entity-link, and moving the pipeline knob must not drag it along — a
+    default that merely tracked the other setting would pass the first check
+    and fail the second.
+    """
+    monkeypatch.setattr(app.settings, "lifecycle_pipeline_run_at_hour", 2)
+    monkeypatch.setattr(app.settings, "lifecycle_entity_link_run_at_hour", 6)
+    fresh = Scheduler()
+    monkeypatch.setattr(app, "scheduler", fresh)
+
+    app._register_scheduled_tasks()
+
+    now = datetime.now(UTC)
+    entity_link = next(t for t in fresh._tasks if t.name == "lifecycle-entity-link")
+    crystallize = next(t for t in fresh._tasks if t.name == "lifecycle-crystallize")
+
+    assert abs(entity_link.delay_provider() - seconds_until_next_utc_hour(6, now=now)) < 5, (
+        "entity-link did not follow its own hour"
+    )
+    assert abs(crystallize.delay_provider() - seconds_until_next_utc_hour(2, now=now)) < 5, (
+        "moving entity-link must not move crystallize"
+    )
 
 
 @pytest.mark.parametrize(
@@ -73,6 +110,7 @@ def test_run_at_hour_override_is_threaded_through(monkeypatch):
         "lifecycle_archive_run_at_hour",
         "lifecycle_purge_run_at_hour",
         "lifecycle_pipeline_run_at_hour",
+        "lifecycle_entity_link_run_at_hour",
         "lifecycle_insights_run_at_hour",
     ],
 )

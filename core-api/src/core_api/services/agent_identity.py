@@ -6,11 +6,12 @@ identity (the eToro "firehose"). This module reserves it on the write path so
 new writes can't keep refilling that bucket, and returns an actionable message
 telling the agent how to set a real identity.
 
-Enforced at the ``memory_service.create_memory`` / ``create_memories_bulk``
-service boundary — the single funnel for REST, MCP, and STM writes — so no
-entry point can bypass it. By the time those run, ``data.agent_id`` is the
-resolved *effective* identity, so a write that supplies a unique ``agent_id``
-(the escape hatch) always passes; only the reserved default is refused.
+The final effective identity is enforced at the ``memory_service.create_memory``
+/ ``create_memories_bulk`` boundary shared by REST, MCP, and STM writes. When
+REST identity binding is enabled, REST also preflights a *verified reserved
+credential* before idempotency: allow/warn retain the unique-body migration
+escape hatch, while reject refuses that credential even when its body supplies
+a unique id.
 
 Reserved-id set lives in ``core_api.agent_ids`` (shared with the MCP gateway
 guard). ``"mcp-agent"`` is deliberately NOT unconditionally reserved here —
@@ -41,10 +42,10 @@ RESERVED_WRITE_ID_MESSAGE = (
     'agent_id "{agent_id}" is reserved and no longer accepts writes — it is the '
     "unset plugin default and collides across every install. Retry with a "
     "unique, STABLE agent_id for THIS install: (1) set CAURA_AGENT_ID in "
-    '~/.openclaw/plugins/memclaw/.env to a stable name (e.g. "webclaw") and '
+    '~/.openclaw/plugins/memclaw/.env to a stable name (e.g. "webclaw") and '  # legacy-name-floor: existing installed path; migrate before changing recovery guidance
     "restart the plugin; (2) or pass a unique agent_id argument on each write "
     'call now; (3) if you have no name, use "main-<install_id>" with '
-    "<install_id> from ~/.openclaw/plugins/memclaw/install.json. The id must "
+    "<install_id> from ~/.openclaw/plugins/memclaw/install.json. The id must "  # legacy-name-floor: existing installed path; migrate before changing recovery guidance
     "not be reserved and must be identical on every run. Recall and existing "
     "memories are unaffected."
 )

@@ -106,6 +106,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     register_lifecycle_consumers(make_lifecycle_adapter())
 
     _event_bus = get_event_bus()
+    # Name the bus the factory RESOLVED, not the one anyone configured — the
+    # two can differ silently, for the reason recorded in ``config.py``.
+    logger.info(
+        "core-worker event bus ready",
+        extra={"event_bus": type(_event_bus).__name__},
+    )
     await _event_bus.start()
 
     yield

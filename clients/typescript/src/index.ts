@@ -6,9 +6,33 @@
  * (`http://localhost:8000`) deployment.
  */
 
+import { VERSION } from "./version.js";
+
+export { VERSION };
+
 export const DEFAULT_BASE_URL = "https://caura.ai";
 
+/**
+ * Sent on every request so a server can tell SDK families apart. Names the
+ * package, its version and, under Node, the Node major; nothing else. In a
+ * browser `fetch` ignores a caller-supplied User-Agent, which is fine.
+ */
+export const USER_AGENT = `caura-client-node/${VERSION}${runtimeTag()}`;
+
+function runtimeTag(): string {
+  const node = (globalThis as { process?: { versions?: { node?: string } } }).process?.versions?.node;
+  return node ? ` (node/${node.split(".")[0]})` : "";
+}
+
 export class CauraError extends Error {}
+
+/** Raised on network failures or timeouts, retaining the original error as cause. */
+export class TransportError extends CauraError {
+  constructor(cause: unknown) {
+    super(`Request failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = "TransportError";
+  }
+}
 
 export class CauraApiError extends CauraError {
   readonly statusCode: number;
@@ -26,6 +50,15 @@ export class AuthError extends CauraApiError {}
 
 /** Raised on 404. */
 export class NotFoundError extends CauraApiError {}
+
+/** Raised on 429, with the optional retry delay in seconds. */
+export class RateLimitError extends CauraApiError {
+  readonly retryAfter: number | null;
+  constructor(statusCode: number, message: string, details?: unknown, retryAfter: number | null = null) {
+    super(statusCode, message, details);
+    this.retryAfter = retryAfter;
+  }
+}
 
 export interface Memory {
   id: string | null;
@@ -71,6 +104,16 @@ export interface SearchOptions {
   [extra: string]: unknown;
 }
 
+export interface RecallOptions {
+  topK?: number;
+  [extra: string]: unknown;
+}
+
+export interface GetDocumentOptions {
+  collection: string;
+  tenantId?: string;
+}
+
 function toMemory(d: Record<string, any>): Memory {
   return {
     id: d.id ?? null,
@@ -101,7 +144,11 @@ export class Caura {
     this.agentId = options.agentId;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
     this.timeoutMs = options.timeoutMs ?? 30000;
-    this.headers = { "X-API-Key": apiKey, "Content-Type": "application/json" };
+    this.headers = {
+      "X-API-Key": apiKey,
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT,
+    };
     const f = options.fetch ?? globalThis.fetch;
     if (!f) throw new Error("global fetch is unavailable; pass options.fetch or use Node 18+");
     this.fetchImpl = f;
@@ -142,9 +189,14 @@ export class Caura {
   }
 
   /** Search + LLM-synthesized context brief. POST /api/v1/recall */
-  async recall(query: string, options: { topK?: number } = {}): Promise<RecallResult> {
-    const body = { tenant_id: this.tenantId, query, top_k: options.topK ?? 5 };
+  async recall(query: string, options: RecallOptions = {}): Promise<RecallResult> {
+    const { topK = 5, ...extra } = options;
+    const body: Record<string, unknown> = { tenant_id: this.tenantId, query, top_k: topK };
+    Object.assign(body, extra);
     const data = await this.request("POST", "/api/v1/recall", body);
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new CauraApiError(200, "recall response must be a JSON object");
+    }
     // Wire key is `memories`; the server aliases the identical list under
     // `items` too, for consumers written against /search's shape.
     //
@@ -154,14 +206,26 @@ export class Caura {
     // test below mocked the invented shape so CI stayed green. The RESULT FIELD
     // keeps its name (`supportingMemories`) since that is published API; only
     // the wire key was wrong.
-    const supporting: unknown = data?.memories ?? data?.items;
+    const payload = data as Record<string, unknown>;
+    const supporting: unknown = payload.memories ?? payload.items;
     return {
-      summary: data?.summary ?? null,
+      summary: typeof payload.summary === "string" ? payload.summary : null,
       supportingMemories: Array.isArray(supporting)
         ? supporting.map((m) => toMemory(m as Record<string, any>))
         : [],
       raw: data,
     };
+  }
+
+  /** Fetch one structured document. GET /api/v1/documents/{docId} */
+  async getDocument(docId: string, options: GetDocumentOptions): Promise<Record<string, unknown>> {
+    const encoded = encodeURIComponent(docId);
+    const tenant = options.tenantId || this.tenantId;
+    const params = new URLSearchParams({
+      tenant_id: tenant,
+      collection: options.collection,
+    });
+    return this.request("GET", `/api/v1/documents/${encoded}?${params.toString()}`);
   }
 
   /** Liveness probe. GET /api/v1/health */
@@ -170,21 +234,35 @@ export class Caura {
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<any> {
+    const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let res: Response;
     try {
-      res = await this.fetchImpl(this.baseUrl + path, {
-        method,
-        headers: this.headers,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
+      let res: Response;
+      try {
+        res = await this.fetchImpl(this.baseUrl + path, {
+          method,
+          headers: this.headers,
+          body: serializedBody,
+          signal: controller.signal,
+        });
+      } catch (cause) {
+        throw new TransportError(cause);
+      }
+      await raiseForStatus(res);
+      return await readResponseJson(res);
     } finally {
       clearTimeout(timer);
     }
-    await raiseForStatus(res);
-    return res.json();
+  }
+}
+
+async function readResponseJson(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch (cause) {
+    if (cause instanceof SyntaxError) throw cause;
+    throw new TransportError(cause);
   }
 }
 
@@ -192,8 +270,9 @@ async function raiseForStatus(res: Response): Promise<void> {
   if (res.ok) return;
   let payload: any = {};
   try {
-    payload = await res.json();
-  } catch {
+    payload = await readResponseJson(res);
+  } catch (cause) {
+    if (!(cause instanceof SyntaxError)) throw cause;
     payload = {};
   }
   let message = "";
@@ -212,15 +291,25 @@ async function raiseForStatus(res: Response): Promise<void> {
   if (res.status === 404) {
     throw new NotFoundError(res.status, message || "not found", details);
   }
+  if (res.status === 429) {
+    const retryAfter = res.headers.get("retry-after");
+    const parsed = retryAfter === null ? Number.NaN : Number(retryAfter);
+    throw new RateLimitError(
+      res.status,
+      message || "rate limit exceeded",
+      details,
+      Number.isFinite(parsed) ? parsed : null,
+    );
+  }
   throw new CauraApiError(res.status, message || "request failed", details);
 }
 
-// Permanent legacy aliases (2026-08 rename) — same classes/types, so
+// Rename compatibility aliases (2026-08) — same classes/types, so
 // instanceof and catch clauses agree across old and new spellings.
-export const MemClaw = Caura; // legacy-name-ok: rule 3 permanent class alias
-export type MemClaw = Caura; // legacy-name-ok: rule 3 permanent class alias
-export const MemClawError = CauraError; // legacy-name-ok: rule 3 permanent exception alias
-export type MemClawError = CauraError; // legacy-name-ok: rule 3 permanent exception alias
-export const MemClawApiError = CauraApiError; // legacy-name-ok: rule 3 permanent exception alias
-export type MemClawApiError = CauraApiError; // legacy-name-ok: rule 3 permanent exception alias
-export type MemClawOptions = CauraOptions; // legacy-name-ok: rule 3 permanent options-type alias
+export const MemClaw = Caura; // legacy-name-ok: published class alias
+export type MemClaw = Caura; // legacy-name-ok: published class alias
+export const MemClawError = CauraError; // legacy-name-ok: published exception alias
+export type MemClawError = CauraError; // legacy-name-ok: published exception alias
+export const MemClawApiError = CauraApiError; // legacy-name-ok: published exception alias
+export type MemClawApiError = CauraApiError; // legacy-name-ok: published exception alias
+export type MemClawOptions = CauraOptions; // legacy-name-ok: published options-type alias

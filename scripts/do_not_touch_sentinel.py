@@ -122,7 +122,9 @@ SENTINELS: tuple[Sentinel, ...] = (
         min_level="warning",
         breaks="gcp_alerts.tf:40 stops detecting TEI 429 — the only aggregate-demand signal",
     ),
-    # -- The smoke probe: an emitter and a matcher that must move together. ----
+    # -- The smoke probe: an emitter and a matcher. The matcher accepts BOTH
+    # -- spellings, so it leads and the emitter follows; until the emitter has
+    # -- moved, dropping either alternative floods every per-agent report. -----
     Sentinel(
         path="plugin/src/context-engine.ts",
         text="memclaw-smoke-",  # legacy-name-floor: floor
@@ -131,7 +133,7 @@ SENTINELS: tuple[Sentinel, ...] = (
     ),
     Sentinel(
         path="core-api/src/core_api/services/report_corpus.py",
-        text="cache refresh|memclaw-smoke)",  # legacy-name-floor: floor
+        text="cache refresh|(memclaw|caura)-smoke)",  # legacy-name-floor: floor
         kind=LITERAL,
         breaks="~200 probe facts/day stop being filtered and flood every per-agent report",
     ),
@@ -155,16 +157,22 @@ SENTINELS: tuple[Sentinel, ...] = (
         breaks="every issued API key stops validating; the prefix is in customers' configs",
     ),
     Sentinel(
-        path="core-api/src/core_api/agent_ids.py",
+        path="core-api/src/core_api/service_agent_ids.py",
         text="memclaw-insighter",  # legacy-name-floor: floor
         kind=LITERAL,
-        breaks="the insighter's existing rows orphan — migration 030 seeded this id",
+        breaks=(
+            "clients using the supported retired input lose canonical reads, and "
+            "writes can recreate the retired insighter identity"
+        ),
     ),
     Sentinel(
-        path="core-api/src/core_api/agent_ids.py",
+        path="core-api/src/core_api/service_agent_ids.py",
         text="memclaw-doc-indexer",  # legacy-name-floor: floor
         kind=LITERAL,
-        breaks="the doc indexer's existing rows orphan; nothing else references the literal",
+        breaks=(
+            "clients using the supported retired input lose canonical reads, and "
+            "writes can recreate the retired doc-indexer identity"
+        ),
     ),
     Sentinel(
         path="plugin/openclaw.plugin.json",

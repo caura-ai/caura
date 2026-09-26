@@ -22,6 +22,12 @@ _SPEC = ToolSpec(
     handler=mcp_server.caura_recall,
     plugin_exposed=True,
     trust_required=0,
+    error_codes=(
+        "FORBIDDEN",
+        "INVALID_ARGUMENTS",
+        "MISSING_AGENT_ID",
+        "UNAUTHORIZED",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

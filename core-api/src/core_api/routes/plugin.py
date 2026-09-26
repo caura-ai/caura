@@ -5,6 +5,7 @@ import json
 import logging
 import shlex
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -52,13 +53,14 @@ _plugin_files = [
     "openclaw-sdk-bridge.ts",
     "interview-buffer.ts",
     "task-trail.ts",
+    "user-agent.ts",
 ]
 
 
 # Plugin-root-relative files served alongside the src/*.ts files.
 # - tools.json: tool SoT, loaded by tool-specs.ts.
-# - skills/memclaw/SKILL.md, skills/caura/SKILL.md: shared plugin skill.  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
-#   Both are served during the rebrand transition (dual-path: "memclaw"  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+# - skills/memclaw/SKILL.md, skills/caura/SKILL.md: shared plugin skill.  # legacy-name-floor: documents the dual-path transition tracked in docs/plans/skills-dual-path-transition.md
+#   Both are served during the rebrand transition (dual-path: "memclaw"  # legacy-name-floor: documents the dual-path transition tracked in docs/plans/skills-dual-path-transition.md
 #   is the historical bundled skill already on disk on every existing
 #   install; "caura" is the new one). Discovered by OpenClaw via
 #   openclaw.plugin.json:skills (one copy per node). Removing either
@@ -75,7 +77,7 @@ _plugin_files = [
 #   ``plugin/openclaw.plugin.json`` so the installer never falls behind.
 _plugin_root_files = {
     "tools.json",
-    "skills/memclaw/SKILL.md",
+    "skills/memclaw/SKILL.md",  # legacy-name-ok: existing installs fetch this frozen skill slug during the dual-path transition
     "skills/caura/SKILL.md",
     "openclaw.plugin.json",
 }
@@ -86,7 +88,11 @@ _plugin_root_files = {
 # MCP. Resolved from app.py's position: core-api/src/core_api/routes/ →
 # five ``.parent``s up land on the repo root.
 _skill_md_path = (
-    Path(__file__).resolve().parent.parent.parent.parent.parent / "static" / "skills" / "memclaw" / "SKILL.md"
+    Path(__file__).resolve().parent.parent.parent.parent.parent
+    / "static"
+    / "skills"
+    / "memclaw"  # legacy-name-ok: default installer serves the established skill path
+    / "SKILL.md"
 )
 
 
@@ -155,8 +161,8 @@ async def plugin_manifest():
     """Single source of truth for what a plugin should fetch on update.
 
     Returns the canonical version string, the list of source files
-    (``plugin/src/*.ts``) and root files (``tools.json``,
-    ``skills/memclaw/SKILL.md``, ``openclaw.plugin.json``) the plugin
+    (``plugin/src/*.ts``) and root files (the tool manifest, bundled skills,
+    and plugin manifest) the plugin
     must download to materialise a fresh install or upgrade, plus the
     combined content hash so callers can short-circuit when they're
     already current.
@@ -227,8 +233,8 @@ async def plugin_source_hash():
 
     Covers both ``_plugin_files`` (``plugin/src/*.ts``) and
     ``_plugin_root_files`` (``plugin/tools.json``, ``plugin/skills/...``)
-    so content changes in plugin-root artifacts (e.g. the shared
-    ``skills/memclaw/SKILL.md``) are reflected in the hash and picked up
+    so content changes in plugin-root artifacts (e.g. a shared skill file)
+    are reflected in the hash and picked up
     by clients polling for updates.
 
     Root files are iterated in sorted order to keep the hash stable
@@ -253,8 +259,25 @@ def _resolve_tenant_id() -> str:
     return ""
 
 
+TlsBootstrap = Literal["verify", "tofu"]
+
+_TLS_BOOTSTRAP_DESCRIPTION = (
+    "How the generated script trusts the server while it downloads the plugin. "
+    "``verify`` (default) checks the TLS certificate like any HTTPS client. "
+    "``tofu`` skips that check for this one script and trusts the server's "
+    "certificate on first use — only for an on-prem server with a self-signed "
+    "certificate the installing machine does not trust yet."
+)
+
+
 def _generate_install_script(
-    *, api_url: str, api_key: str, fleet_id: str, tenant_id: str, node_name: str
+    *,
+    api_url: str,
+    api_key: str,
+    fleet_id: str,
+    tenant_id: str,
+    node_name: str,
+    tls_bootstrap: TlsBootstrap,
 ) -> str:
     """Generate a bash install script with shell-safe variable assignments."""
     # Shell-quote all user inputs and assign to bash variables at the top
@@ -264,6 +287,7 @@ def _generate_install_script(
     safe_tenant_id = shlex.quote(tenant_id)
     safe_node_name = shlex.quote(node_name) if node_name else ""
     safe_version = shlex.quote(_plugin_version())
+    safe_tls_bootstrap = shlex.quote(tls_bootstrap)
     api_key_preview = api_key[:6] + "..." if len(api_key) > 6 else "(not set)"
 
     return f"""#!/usr/bin/env bash
@@ -276,6 +300,7 @@ CAURA_FLEET_ID={safe_fleet_id}
 CAURA_TENANT_ID={safe_tenant_id}
 CAURA_NODE_NAME={safe_node_name or '"$(hostname -s)"'}
 CAURA_PLUGIN_VERSION={safe_version}
+TLS_BOOTSTRAP={safe_tls_bootstrap}
 
 echo "=== Caura Plugin Installer ==="
 echo ""
@@ -328,16 +353,43 @@ echo ""
 PLUGIN_DIR="$HOME/.openclaw/plugins/memclaw"  # legacy-name-floor: floor
 CONFIG_PATH="$HOME/.openclaw/openclaw.json"
 
-# When the on-prem uses self-signed TLS, the bootstrap fetches below
-# (plugin-source, tools.json, SKILL.md) hit certificate verification
-# errors before step 8 has a chance to install the trust anchor.
-# Switch to TOFU mode for the bootstrap curls when CAURA_API_URL is
-# HTTPS — same reasoning as `docker login` against a self-signed
-# registry. After install, NODE_EXTRA_CA_CERTS handles long-term
-# trust at runtime, so no -k anywhere outside this script.
+# TLS for this script's own downloads: the manifest (sent with the API
+# key), the plugin source it then builds and runs, and step 8's
+# certificate. Verified by default, like any HTTPS client. Skipping the
+# check against a server whose certificate is valid gains nothing and hands
+# anyone able to intercept the connection the key and the code.
+#
+# TLS_BOOTSTRAP=tofu (requested with ?tls_bootstrap=tofu) is the one
+# exception: an on-prem server with a self-signed certificate this machine
+# does not trust yet. The downloads then skip verification — trust on first
+# use, the same model as `docker login` to a self-signed registry — and
+# step 8 saves that certificate for the plugin's runtime
+# (NODE_EXTRA_CA_CERTS), so no -k anywhere outside this script.
+CURL_INSECURE=""
 case "$CAURA_API_URL" in
-  https://*) CURL_INSECURE="-k" ;;
-  *)         CURL_INSECURE="" ;;
+  https://*)
+    if [ "$TLS_BOOTSTRAP" = "tofu" ]; then
+      CURL_INSECURE="-k"
+      echo "WARNING: TLS certificates are NOT verified while this script downloads"
+      echo "         the plugin (tls_bootstrap=tofu). Use it only for a server"
+      echo "         whose self-signed certificate you trust."
+      echo ""
+    else
+      # Fail early and plainly on an untrusted certificate. Otherwise its
+      # first sign is a bare "could not fetch" a few steps later. 60 is a
+      # failed verification; curl before 7.62 used 51 for a name mismatch.
+      _tls_rc=0
+      curl -sI --max-time 10 -o /dev/null "$CAURA_API_URL" || _tls_rc=$?
+      case "$_tls_rc" in
+        51|60)
+          echo "ERROR: $CAURA_API_URL presented a TLS certificate this machine does not trust."
+          echo "       For an on-prem server with a self-signed certificate, fetch this"
+          echo "       installer again with ?tls_bootstrap=tofu to trust it on first use."
+          exit 1
+          ;;
+      esac
+    fi
+    ;;
 esac
 
 # 1. Create directory structure
@@ -415,8 +467,8 @@ fi
 
 if [ -z "$SRC_FILES" ] || [ -z "$ROOT_FILES" ]; then
   echo "WARNING: Could not fetch/parse /api/v1/plugin-manifest (python3 missing or endpoint unreachable). Falling back to hardcoded file list."
-  SRC_FILES="index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts context-engine.internal.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts keystones.ts openclaw-sdk-bridge.ts interview-buffer.ts task-trail.ts"
-  ROOT_FILES="openclaw.plugin.json tools.json skills/memclaw/SKILL.md"
+  SRC_FILES="index.ts prompt-section.ts tools.ts tool-specs.ts version.ts env.ts transport.ts validation.ts config.ts paths.ts logger.ts resolve-agent.ts tool-definitions.ts deploy.ts heartbeat.ts educate.ts context-engine.ts context-engine.internal.ts agent-auth.ts health.ts install-id.ts identity.ts reconcile-skills.ts keystones.ts openclaw-sdk-bridge.ts interview-buffer.ts task-trail.ts user-agent.ts"
+  ROOT_FILES="openclaw.plugin.json tools.json skills/memclaw/SKILL.md"  # legacy-name-ok: fallback preserves the shipped dual-path skill manifest
 fi
 
 # SECURITY: validate every manifest-supplied filename BEFORE any disk
@@ -452,8 +504,8 @@ for srcfile in $SRC_FILES; do
     exit 1
   }}
 done
-# Root files (``openclaw.plugin.json``, ``tools.json``, nested skill paths
-# like ``skills/memclaw/SKILL.md``) — mkdir -p their parent so nested
+# Root files (``openclaw.plugin.json``, ``tools.json``, and nested skill paths)
+# need their parent created so nested
 # paths from the manifest don't trip over a missing directory.
 for rootfile in $ROOT_FILES; do
   _parent_dir=$(dirname "$PLUGIN_DIR/$rootfile")
@@ -504,10 +556,10 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
 if (!config.plugins) config.plugins = {{}};
 if (!Array.isArray(config.plugins.allow)) config.plugins.allow = [];
-if (!config.plugins.allow.includes('memclaw')) config.plugins.allow.push('memclaw');
+if (!config.plugins.allow.includes('memclaw')) config.plugins.allow.push('memclaw'); // legacy-name-ok: frozen plugin id; changing it makes restrictive allowlists refuse to load the plugin
 
 if (!config.plugins.entries) config.plugins.entries = {{}};
-config.plugins.entries.memclaw = {{ enabled: true, config: {{}} }};
+config.plugins.entries.memclaw = {{ enabled: true, config: {{}} }}; // legacy-name-ok: frozen plugin id; changing it leaves the manifest-id plugin disabled
 
 // Disable memory-core — OpenClaw only loads one kind:"memory" plugin at a time.
 // Without this, the memory slot stays with memory-core and register() is never called.
@@ -519,13 +571,13 @@ if (config.plugins.entries['memory-core']) {{
 // registerMemoryRuntime delivery) AND the contextEngine slot (controls
 // ContextEngine.assemble() — the path that injects the <keystone_rules>
 // block into the system prompt on every turn). Without contextEngine set
-// to 'memclaw', OpenClaw falls back to the default "legacy" engine and
+// to the plugin id, OpenClaw falls back to the default "legacy" engine and
 // our assemble() never runs, so keystones never appear in the prompt
 // even though the tool surface is registered. Confirmed against
 // OpenClaw 2026.5.4 dist/registry-DFFgCbcm.js:241 resolveContextEngine.
 if (!config.plugins.slots) config.plugins.slots = {{}};
-config.plugins.slots.memory = 'memclaw';
-config.plugins.slots.contextEngine = 'memclaw';
+config.plugins.slots.memory = 'memclaw'; // legacy-name-ok: frozen plugin id; changing it loses the memory slot
+config.plugins.slots.contextEngine = 'memclaw'; // legacy-name-ok: frozen plugin id; changing it stops keystone injection
 
 if (!config.plugins.load) config.plugins.load = {{}};
 if (!Array.isArray(config.plugins.load.paths)) config.plugins.load.paths = [];
@@ -549,15 +601,18 @@ fi
 
 # 8. TLS trust bootstrap — only when CAURA_API_URL is HTTPS.
 # OSS / dev installs (http://localhost:8000) skip this entirely.
-# For an enterprise on-prem with a self-signed cert, the gateway exposes
-# the cert at /onprem-ca.pem; we curl it once with -k (TOFU — same trust
-# pattern as `docker login` to a self-signed registry), save it next to
-# the plugin, and write a systemd drop-in that exports
-# NODE_EXTRA_CA_CERTS so Node trusts it across openclaw-gateway restarts.
+# An enterprise on-prem gateway that terminates TLS with its own cert
+# (self-signed, or issued by a corporate CA that Node's bundled store
+# lacks) exposes it at /onprem-ca.pem. We fetch it under the same TLS mode
+# as the downloads above — verified, or under tls_bootstrap=tofu trusted
+# on first use — save it next to the plugin, and write a systemd drop-in
+# that exports NODE_EXTRA_CA_CERTS so Node trusts it across
+# openclaw-gateway restarts. Never fetched with -k by default: whatever
+# comes back is trusted for every Node process the user starts.
 case "$CAURA_API_URL" in
   https://*)
     echo "[8/8] Bootstrapping TLS trust for $CAURA_API_URL"
-    if curl -ksSL "$CAURA_API_URL/onprem-ca.pem" -o "$PLUGIN_DIR/onprem-ca.pem" \
+    if curl $CURL_INSECURE -sSL "$CAURA_API_URL/onprem-ca.pem" -o "$PLUGIN_DIR/onprem-ca.pem" \
         && [ -s "$PLUGIN_DIR/onprem-ca.pem" ] \
         && head -1 "$PLUGIN_DIR/onprem-ca.pem" | grep -q '^-----BEGIN CERTIFICATE-----$'; then
       chmod 0644 "$PLUGIN_DIR/onprem-ca.pem"
@@ -566,7 +621,7 @@ case "$CAURA_API_URL" in
       # One release only: remove the pre-rename drop-in so re-running
       # install-plugin doesn't leave both files behind, each declaring the
       # same Environment= line redundantly.
-      rm -f "$_SD_DIR/memclaw-tls.conf"  # legacy-name-ok: removes the pre-rename drop-in for exactly one caura-client release, then drop this line (docs/plans/rebrand-alias-retirement-policy.md)
+      rm -f "$_SD_DIR/memclaw-tls.conf"  # legacy-name-ok: removes the pre-rename drop-in for exactly one caura-client release, then drop this line (docs/plans/rebrand-alias-migration-notes.md)
       cat > "$_SD_DIR/caura-tls.conf" << SDEOF
 [Service]
 Environment="NODE_EXTRA_CA_CERTS=$PLUGIN_DIR/onprem-ca.pem"
@@ -662,6 +717,7 @@ async def install_plugin_script(
         ),
     ),
     node_name: str = Query(default=""),
+    tls_bootstrap: TlsBootstrap = Query(default="verify", description=_TLS_BOOTSTRAP_DESCRIPTION),
 ):
     """Generate a bash install script for first-time plugin setup on an OpenClaw gateway."""
     api_key = request.headers.get("X-API-Key", "")
@@ -673,6 +729,7 @@ async def install_plugin_script(
         fleet_id=fleet_id,
         tenant_id=tenant_id,
         node_name=node_name,
+        tls_bootstrap=tls_bootstrap,
     )
     return PlainTextResponse(script, media_type="text/plain")
 
@@ -681,6 +738,10 @@ async def install_plugin_script(
 async def install_plugin_script_post(
     request: Request,
     body: InstallPluginRequest,
+    # A query parameter, not a body field: the body model forbids unknown
+    # fields, so a caller sending it there would be refused by every server
+    # that predates it. As a query parameter, older servers ignore it.
+    tls_bootstrap: TlsBootstrap = Query(default="verify", description=_TLS_BOOTSTRAP_DESCRIPTION),
 ):
     """Generate a bash install script via POST (preferred — no secrets in URL)."""
     api_key = body.api_key or request.headers.get("X-API-Key", "")
@@ -692,6 +753,7 @@ async def install_plugin_script_post(
         fleet_id=body.fleet_id,
         tenant_id=tenant_id,
         node_name=body.node_name,
+        tls_bootstrap=tls_bootstrap,
     )
     return PlainTextResponse(script, media_type="text/plain")
 
@@ -701,7 +763,7 @@ _VALID_SKILL_AGENTS = {"claude-code", "codex", "both"}
 # Skills installable via ``/install-skill?skill=…`` and served at
 # ``/skill/{skill}``. Strictly allowlisted — the value is interpolated into a
 # filesystem path and the generated script, so an arbitrary value must never
-# reach either. ``memclaw`` is the default (the operational manual, still  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
+# reach either. ``memclaw`` is the default (the operational manual, still  # legacy-name-floor: documents the dual-path transition tracked in docs/plans/skills-dual-path-transition.md
 # the default during the rebrand transition — see
 # docs/plans/skills-dual-path-transition.md); ``caura`` is the same
 # operational manual under its new name, served independently so both
@@ -737,15 +799,19 @@ def _derive_api_url_from_request(request: Request) -> str:
 
 
 def _generate_skill_install_script(
-    *, api_url: str, agent: str, api_key: str = "", skill: str = "memclaw"
+    *,
+    api_url: str,
+    agent: str,
+    api_key: str = "",
+    skill: str = "memclaw",  # legacy-name-ok: clients rely on the historical default skill slug
 ) -> str:
     """Bash installer for a direct-MCP skill (Claude Code / Codex).
 
     Fetches ``static/skills/<skill>/SKILL.md`` (served by the
     ``/skill/<skill>`` endpoint) and writes it to the user-scope skills
     dir(s) for the selected agent runtime(s). ``skill`` is one of
-    {@link _VALID_SKILLS} (validated by the caller); ``memclaw`` is the
-    default and renders the original installer byte-for-byte.
+    {@link _VALID_SKILLS} (validated by the caller); the default renders the
+    original installer byte-for-byte.
 
     ``api_key`` — when non-empty, embedded into the script and forwarded
     as ``-H "X-API-Key: ..."`` on the internal curl calls. Required for
@@ -770,7 +836,7 @@ def _generate_skill_install_script(
     # Otherwise the header becomes an empty string and curl rejects.
     key_header = ' -H "X-API-Key: $CAURA_API_KEY"' if api_key else ""
     # ``skill`` is allowlisted by the caller, so interpolating it into the
-    # path and URL is safe. For skill="memclaw" every line below is identical
+    # path and URL is safe. For the default skill every line below is identical
     # to the original installer.
     label = _SKILL_LABELS[skill]
     skill_url = f'"$CAURA_API_URL/api/v1/skill/{skill}"'
@@ -838,7 +904,7 @@ async def install_skill_script(
     request: Request,
     agent: str = Query(default="both", description="claude-code | codex | both"),
     skill: str = Query(
-        default="memclaw",
+        default="memclaw",  # legacy-name-ok: published query default retained for existing installer callers
         description="Which skill to install: memclaw (default) | caura | company-brain",  # legacy-name-ok: dual-path skills transition, tracked for eventual retirement in docs/plans/skills-dual-path-transition.md
     ),
     api_url: str | None = Query(
@@ -853,7 +919,7 @@ async def install_skill_script(
     """Bash installer for the direct-MCP Caura skill.
 
     Serves a shell script that fetches the SKILL.md adapter for the requested
-    skill (default: memclaw) and writes it to the user-scope skills directory
+    default skill and writes it to the user-scope skills directory
     for the selected agent runtime(s). Designed for ``curl -s ... | bash`` use
     by teammates who have already connected via ``claude mcp add`` or the
     equivalent Codex MCP registration.
@@ -882,15 +948,17 @@ async def install_skill_script(
     return PlainTextResponse(script, media_type="text/plain")
 
 
-@router.get("/skill/memclaw", response_class=PlainTextResponse)
-async def skill_memclaw():
+@router.get(
+    "/skill/memclaw",  # legacy-name-ok: published compatibility route for existing installers
+    response_class=PlainTextResponse,
+)
+async def skill_memclaw():  # legacy-name-ok: keep the generated operation id aligned with the compatibility route
     """Serve the direct-MCP SKILL.md adapter.
 
     Public, auth-free — it's generic usage guidance for Claude Code / Codex
-    users with no tenant data in it. Content lives at
-    ``static/skills/memclaw/SKILL.md`` (not under ``plugin/`` — it's not an
-    OpenClaw artifact). The OpenClaw plugin's own shared skill lives at
-    ``plugin/skills/memclaw/SKILL.md`` and is served via ``/plugin-source``.
+    users with no tenant data in it. Content lives in the static skill tree
+    (not under ``plugin/`` — it's not an OpenClaw artifact). The OpenClaw
+    plugin's own shared skill is served separately via ``/plugin-source``.
     """
     if not _skill_md_path.is_file():
         return PlainTextResponse("skill not found", status_code=404)
@@ -902,8 +970,8 @@ async def skill_by_name(skill: str):
     """Serve a direct-MCP SKILL.md adapter by name (allowlisted).
 
     Pairs with ``/install-skill?skill=…``. Public, auth-free — generic usage
-    guidance with no tenant data. ``memclaw`` is also served by the explicit
-    ``/skill/memclaw`` route above (registered first, so it wins for that
+    guidance with no tenant data. The default skill is also served by the
+    explicit compatibility route above (registered first, so it wins for that
     name and keeps the default path unchanged); this handles the rest of the
     allowlist, including ``caura`` (served from ``static/skills/caura/``,
     independent of and identical in structure to the sibling copy served

@@ -16,6 +16,26 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 
+def cursor_sortable(sort: str | None, order: str | None) -> bool:
+    """Whether keyset pagination is defined for this sort/order pair.
+
+    The cursor encodes ``(created_at, id)``, so it can only resolve a position
+    in a query ordered by exactly that. Widening it to other sorts means a
+    different cursor payload, not a looser check here.
+
+    Lives beside ``encode_cursor``/``decode_cursor`` because it belongs to the
+    cursor FORMAT, not to any one endpoint, and because both halves of the
+    contract have to agree: the gate that REFUSES an incoming cursor and the
+    mint that hands one out. They were written as three pairs of independent
+    expressions across two modules and drifted (OSS 09/02 L-23) — every gate
+    was conditional on ``created_at``/``desc`` while every mint was
+    unconditional, so any other sort returned a ``next_cursor`` that the very
+    next request rejected with a 400. Following the documented pagination
+    contract was itself the way to trigger the error.
+    """
+    return sort == "created_at" and order == "desc"
+
+
 def decode_cursor(cursor: str) -> tuple[datetime, UUID]:
     """Decode a base64 cursor into ``(created_at, id)``.
 
@@ -34,25 +54,3 @@ def encode_cursor(created_at: datetime, memory_id: UUID) -> str:
     """Encode ``(created_at, id)`` into a base64 cursor string."""
     raw = f"{created_at.isoformat()}:{memory_id}"
     return base64.b64encode(raw.encode()).decode()
-
-
-def paginated_order_by(primary, id_col, order: str) -> tuple:
-    """Return the ORDER BY clause for cursor-stable pagination.
-
-    Pairs the primary sort column with ``id`` as a same-direction
-    tiebreaker so rows that share the primary value (a single bulk-
-    write tranche collides on ``created_at`` to ms precision; low-
-    cardinality columns like ``status`` collide trivially) keep a
-    deterministic order across paginated requests. Without it
-    Postgres returns same-key rows in implementation-defined order
-    and consecutive pages yield duplicates and skips — the load-test
-    ``pagination-duplicates`` finding.
-
-    Both pagination call sites — the repository's ``list_by_filters``
-    and the admin route's inline query — must call this helper so the
-    tiebreaker stays in sync with the ``tuple_(created_at, id)``
-    cursor predicate.
-    """
-    if order == "desc":
-        return (primary.desc(), id_col.desc())
-    return (primary.asc(), id_col.asc())

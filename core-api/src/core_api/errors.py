@@ -89,17 +89,58 @@ AUTH_READ_ONLY_KEY = "READ_ONLY_CREDENTIAL"
 AUTH_DEMO_SANDBOX = "DEMO_SANDBOX_READ_ONLY"
 AUTH_PLAN_LIMIT = "PLAN_LIMIT_READ_ONLY"
 AUTH_ADMIN_REQUIRED = "ADMIN_REQUIRED"
-AUTH_ORG_ADMIN_REQUIRED = "ORG_ADMIN_REQUIRED"
 AUTH_MISSING_API_KEY = "MISSING_API_KEY"
 AUTH_INVALID_API_KEY = "INVALID_API_KEY"
 AUTH_MISSING_TENANT_CONTEXT = "MISSING_TENANT_CONTEXT"
 AUTH_GATEWAY_ONLY = "GATEWAY_ONLY"
 AUTH_AGENT_CREDENTIAL_FORBIDDEN = "AGENT_CREDENTIAL_FORBIDDEN"
+AUTH_AGENT_IDENTITY_MISMATCH = "AGENT_IDENTITY_MISMATCH"
 AUTH_TENANT_REQUIRED = "TENANT_REQUIRED"
 AUTH_TENANT_MISMATCH = "TENANT_MISMATCH"
 AUTH_TENANT_NOT_READABLE = "TENANT_NOT_READABLE"
 AUTH_CROSS_TENANT_REQUIRED = "CROSS_TENANT_READ_REQUIRED"
 AUTH_ORG_SUSPENDED = "ORGANIZATION_SUSPENDED"
+
+# C32 — the reasons the remaining 33 refusal sites actually give. Added rather
+# than folded into the codes above because each one leaves the caller a
+# DIFFERENT next move, which is the whole test for whether a code earns its
+# place: "register this agent" and "raise this agent's trust_level" are both
+# FORBIDDEN and are not the same instruction.
+AUTH_AGENT_NOT_REGISTERED = "AGENT_NOT_REGISTERED"
+AUTH_AGENT_TRUST_TOO_LOW = "AGENT_TRUST_TOO_LOW"
+AUTH_TARGET_AGENT_RESTRICTED = "TARGET_AGENT_RESTRICTED"
+AUTH_FLEET_SCOPE_FORBIDDEN = "FLEET_SCOPE_FORBIDDEN"
+AUTH_FEATURE_DISABLED = "FEATURE_DISABLED"
+
+# Three codes whose VALUES are inherited, not chosen. ``skills_inbox`` and
+# ``stm`` already shipped a machine-readable token welded to the front of the
+# prose — ``"TENANT_MISMATCH — this credential is not scoped…"`` — with a
+# comment at the site stating that clients branch on the prefix and not on the
+# message. That is a live contract, so moving it into ``error.code`` must keep
+# the string byte-for-byte; a "tidier" spelling here would be a silent breaking
+# change for every caller already parsing it. ``TENANT_MISMATCH`` needed no new
+# constant — ``AUTH_TENANT_MISMATCH`` above already carries that exact value.
+AUTH_UNAUTHENTICATED = "UNAUTHENTICATED"
+AUTH_SKILLS_FACTORY_DISABLED = "SKILLS_FACTORY_DISABLED"
+AUTH_SKILLS_INBOX_FORBIDDEN = "SKILLS_INBOX_FORBIDDEN"
+
+
+# ── Code for the request-budget deadline (ax-0917-h-01/h-02) ──────────────
+#
+# ``code_for_status`` maps 504 to ``UPSTREAM_TIMEOUT``, which is a claim about
+# a backend. The one 504 this service emits itself is the opposite: the
+# RequestTimeoutMiddleware budget expired and WE cancelled the handler, with no
+# upstream having reported anything. Telling a caller "upstream timed out" when
+# nothing upstream said so sends them to the wrong system.
+#
+# That distinction is the whole reason this code exists. The 45s 504s on
+# ``/recall`` and ``/search`` (2026-09-17, three attempts, CRUD healthy
+# throughout) arrived as ``{"detail":"request timeout"}`` — no code, no budget,
+# no way to tell "we gave up at 45s" from "a backend returned 504 to us", and
+# the probe had nothing to report but the wall-clock number. Same failure the
+# auth codes above were minted for: one status carrying several reasons leaves
+# the caller guessing.
+REQUEST_BUDGET_EXCEEDED = "REQUEST_BUDGET_EXCEEDED"
 
 
 def coded_detail(code: str, message: str, **details: object) -> dict:

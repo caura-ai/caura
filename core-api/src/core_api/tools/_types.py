@@ -57,9 +57,18 @@ class ToolSpec:
     name: str
     description: str
     handler: HandlerFn | None = None
-    """Handler is None during Phase 1 of the v1.0 refactor (handlers still
-    live in `mcp_server.py`'s `@mcp.tool` decorators). Phase 2 wires real
-    handlers in and `mcp_register` becomes the registration path."""
+    """The tool's implementation, in `mcp_server.py`.
+
+    Every registered spec sets one, and `test_tools_registry` asserts so, which
+    is why `mcp_register`'s `handler is None` guard is unreachable in practice.
+    The `None` remains only because it is the dataclass default; removing it and
+    the guard is a separate change.
+
+    An earlier version of this note described a "Phase 1" in which handlers were
+    still `None` and lived on `@mcp.tool` decorators, with `mcp_register` yet to
+    become the registration path. All three were true once and none is now:
+    `mcp_server.py` carries no `@mcp.` decorator at all, and each `caura_*` spec
+    module calls `mcp_register` itself at import."""
     trust_required: int = 0
     """Baseline trust to invoke. 0 = no MCP-level gate (existing behavior for
     tools that enforce trust deeper in the service layer)."""

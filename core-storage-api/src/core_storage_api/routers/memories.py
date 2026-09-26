@@ -20,7 +20,7 @@ from common.events.lifecycle_purge_request import (
     MEMORY_RETENTION_MIN_DAYS,
 )
 from core_storage_api.observability import bind_timer, log_request
-from core_storage_api.routers._validation import _require, _require_dict
+from core_storage_api.routers._validation import _require, _require_dict, _require_uuid
 from core_storage_api.schemas import MEMORY_FIELDS, MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import (
     MISSING_PROVENANCE_PREDICATE_SQL,
@@ -211,6 +211,7 @@ async def scored_search(request: Request) -> list[dict]:
                 search_params=search_params,
                 temporal_window=temporal_window,
                 recall_boost_enabled=body.get("recall_boost_enabled", True),
+                strict_fleet_scoping=body.get("strict_fleet_scoping", False),
                 top_k=body.get("top_k", 10),
                 date_range_start=date_range_start,
                 date_range_end=date_range_end,
@@ -221,7 +222,20 @@ async def scored_search(request: Request) -> list[dict]:
                 history_query=bool(body.get("history_query", False)),
             )
         for r in results:
-            row = orm_to_dict(r.Memory, MEMORY_FIELDS)
+            # MEMORY_LIST_FIELDS, not MEMORY_FIELDS (audit oss-0814-m-39): this
+            # is the hottest read path — every recall crosses it, overfetched to
+            # ``top_k * 2`` rows — and neither of the two large columns survives
+            # the trip. ``orm_to_dict`` would ``tolist()`` the 1024-dim pgvector
+            # into ~20 KB of JSON floats per row (plus the tsvector text) for
+            # core-api to parse and drop: both consumers — ExecuteScoredSearch's
+            # row mapping and the legacy ``_dict_to_memory_out`` — read every
+            # field EXCEPT these two, and both read tolerantly, so the old shape
+            # cost CPU and wire on every search while its removal was silent.
+            # ``has_embedding`` below stays the authoritative presence signal;
+            # a caller that needs a row's actual vector fetches it by id
+            # (GET /memories/{id} keeps MEMORY_FIELDS — consumer.py's
+            # contradiction deferral reads the vector there, never from here).
+            row = orm_to_dict(r.Memory, MEMORY_LIST_FIELDS)
             row["score"] = float(r.score) if r.score is not None else 0.0
             row["similarity"] = float(r.similarity) if r.similarity is not None else 0.0
             row["vec_sim"] = float(r.vec_sim) if r.vec_sim is not None else 0.0
@@ -236,6 +250,24 @@ async def scored_search(request: Request) -> list[dict]:
             row["status_penalty"] = (
                 float(r.status_penalty) if getattr(r, "status_penalty", None) is not None else 1.0
             )
+            # CAURA-722 — the score's ingredients, for
+            # ``SearchDiagnostic.all_candidates``, which declared all five per
+            # row and reported None for every one of them.
+            #
+            # Left as ``None`` when absent rather than defaulted to the
+            # identity (1.0): the query above always produces a value, so a
+            # missing attribute means something upstream changed shape, and
+            # saying "no boost applied" on that basis is the precise failure
+            # this change exists to end. A null now means "not reported",
+            # which is the truth, and the diagnostic documents it as such.
+            for _factor in ("fts_score", "freshness", "entity_boost", "recall_boost", "temporal_boost"):
+                _v = getattr(r, _factor, None)
+                row[_factor] = float(_v) if _v is not None else None
+            # D12 arm provenance (ann-pool mode): which pool arms admitted the
+            # row ("ann+fts", "boosted", ...). NULL on the default path and on
+            # pre-provenance storage rows — "not reported", not "no arms".
+            _arms = getattr(r, "pool_arms", None)
+            row["pool_arms"] = str(_arms) if _arms is not None else None
             row["entity_links"] = r.entity_links or []
             out.append(row)
     except Exception:
@@ -314,6 +346,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 status_filter=body.get("status_filter"),
                 valid_at=valid_at,
                 readable_tenant_ids=body.get("readable_tenant_ids") or None,
+                strict_fleet_scoping=body.get("strict_fleet_scoping", False),
             )
         out = [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
     except Exception:
@@ -403,6 +436,23 @@ async def find_children_by_parent_id(tenant_id: str, parent_id: str) -> list[dic
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 
 
+@router.post("/reset-entity-artifacts")
+async def reset_entity_artifacts(request: Request) -> dict:
+    """Clear the graph rows of a LIVE memory whose content changed.
+
+    Same body, same per-table counts and the same POST-not-DELETE reasoning as
+    ``purge-entity-artifacts`` below; the difference is which rows the service
+    will act on, and that lives in the service method's guard rather than here.
+    Two routes for the two guards, so a caller cannot reach the wrong one by
+    passing a flag.
+    """
+    body: dict = await request.json()
+    return await _svc.memory_reset_entity_artifacts(
+        tenant_id=_require(body, "tenant_id"),
+        memory_id=_require_uuid(body, "memory_id"),
+    )
+
+
 @router.post("/purge-entity-artifacts")
 async def purge_entity_artifacts(request: Request) -> dict:
     """H-02 — drop the graph rows mined out of a governance-dropped memory.
@@ -411,22 +461,10 @@ async def purge_entity_artifacts(request: Request) -> dict:
     counts the caller audits. Body carries ``tenant_id`` and ``memory_id``.
     """
     body: dict = await request.json()
-    tenant_id = body.get("tenant_id")
-    memory_id = body.get("memory_id")
-    if not tenant_id or not memory_id:
-        # 4xx at the edge, same convention as the bulk route above: a missing
-        # scope here would be a delete with no tenant, which must never be a
-        # thing this endpoint attempts.
-        raise HTTPException(status_code=422, detail="tenant_id and memory_id are both required")
-    try:
-        parsed = UUID(str(memory_id))
-    except (ValueError, TypeError) as exc:
-        # Same shape as every sibling route that parses a UUID out of the body.
-        # Unguarded this surfaced as a 500, which reads as "the purge broke" when
-        # the truth is the caller sent something that was never an id — and the
-        # caller in question lets failures propagate out of a remediation.
-        raise HTTPException(status_code=422, detail="memory_id must be a UUID") from exc
-    return await _svc.memory_purge_entity_artifacts(tenant_id=tenant_id, memory_id=parsed)
+    return await _svc.memory_purge_entity_artifacts(
+        tenant_id=_require(body, "tenant_id"),
+        memory_id=_require_uuid(body, "memory_id"),
+    )
 
 
 @router.post("/find-successors")
@@ -445,6 +483,7 @@ async def find_successors(request: Request) -> list[dict]:
         filter_agent_id=body.get("filter_agent_id"),
         memory_type_filter=body.get("memory_type_filter"),
         valid_at=valid_at,
+        strict_fleet_scoping=body.get("strict_fleet_scoping", False),
     )
     return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
 
@@ -500,11 +539,34 @@ async def find_duplicate_hash(
     tenant_id: str,
     content_hash: str,
     exclude_id: str | None = None,
+    fleet_id: str | None = None,
+    agent_id: str | None = None,
 ) -> dict | None:
+    """The update path's exact-dedup lookup.
+
+    ``fleet_id`` and ``agent_id`` are both forwarded so the lookup matches
+    ``uq_memories_live_content_hash``, which keys on
+    ``(tenant, COALESCE(fleet,''), agent, content_hash)``. Each omission fails
+    in its own direction and they are easy to confuse:
+
+    * no ``fleet_id`` is not "any fleet" — the service's default is the
+      NULL/empty group, so the lookup could never match a fleet-scoped memory
+      and the gate above it was dead for every tenant that uses fleets;
+    * no ``agent_id`` IS "any agent", which is wider than the constraint, so
+      the gate refuses an edit the index would have admitted. Two agents
+      recording identical content are two independent observations — the same
+      scope ``bulk_find_by_content_hashes`` and ``memory_find_by_content_hash``
+      already dedup on.
+
+    Both stay optional here because the parameter set is the caller's to choose;
+    what is not optional is that a caller pinning one leg pins the other.
+    """
     dup_id = await _svc.memory_find_duplicate_hash(
         tenant_id,
         content_hash,
         exclude_id=UUID(exclude_id) if exclude_id else None,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
     )
     if dup_id is None:
         return None
@@ -601,6 +663,25 @@ async def set_subject_entity_if_null(memory_id: UUID, request: Request) -> dict:
     return {"updated": updated}
 
 
+@router.post("/{memory_id}/predicate")
+async def set_predicate_if_null(memory_id: UUID, request: Request) -> dict:
+    """A65 — conditional write-back of the extraction-derived predicate/object.
+
+    Sibling of ``/subject-entity`` (A63). Sets ``predicate`` and
+    ``object_value`` ONLY when ``predicate`` is currently NULL — the write-time
+    triple path's value always wins. Returns ``{"updated": bool}``; ``false``
+    covers absent / deleted / foreign-tenant / already-set rows alike.
+    """
+    body: dict = await request.json()
+    updated = await _svc.memory_set_predicate_if_null(
+        memory_id=memory_id,
+        tenant_id=body["tenant_id"],
+        predicate=body["predicate"],
+        object_value=body["object_value"],
+    )
+    return {"updated": updated}
+
+
 @router.get("/rdf-conflicts")
 async def find_rdf_conflicts(
     tenant_id: str,
@@ -637,28 +718,47 @@ async def find_rdf_conflicts(
 
 @router.post("/near-duplicates")
 async def check_near_duplicates(request: Request) -> dict:
+    """One batch of the crystallizer dedup sweep: swept ids + the pairs found.
+
+    Audit oss-0814-m-37. This used to return ``{"candidates": [{"id",
+    "embedding"}]}`` and leave the neighbour search to the caller, which ran it
+    one POST per candidate with the embedding echoed back up in each body —
+    501 round-trips and ~22 MB of vector JSON per 500-row batch, for a cosine
+    distance pgvector was already computing here. The scan is now resolved in
+    one statement and no vector crosses the wire in either direction; the
+    companion ``/neighbors-by-embedding`` route existed only to serve that loop
+    and went with it.
+
+    ``candidate_ids`` is every row the batch swept, including rows with no
+    near-duplicate — the caller stamps ``last_dedup_checked_at`` on all of
+    them, so it is deliberately not derivable from ``pairs``. The LEFT JOIN
+    emits a NULL-neighbour row for exactly those, which is what makes the two
+    lists separable here.
+    """
     body: dict = await request.json()
-    candidates = await _svc.memory_find_near_duplicate_candidates(
+    rows = await _svc.memory_find_near_duplicate_pairs(
         tenant_id=body["tenant_id"],
         fleet_id=body.get("fleet_id"),
         batch_size=body.get("batch_size", 100),
         offset=body.get("offset", 0),
-    )
-    return {"candidates": [{"id": str(r[0]), "embedding": r[1]} for r in candidates]}
-
-
-@router.post("/neighbors-by-embedding")
-async def find_neighbors_by_embedding(request: Request) -> list[dict]:
-    body: dict = await request.json()
-    rows = await _svc.memory_find_neighbors_by_embedding(
-        tenant_id=body["tenant_id"],
-        fleet_id=body.get("fleet_id"),
-        query_embedding=body["query_embedding"],
-        exclude_id=UUID(body["exclude_id"]),
         threshold=body.get("threshold", 0.95),
-        limit=body.get("limit", 5),
+        neighbor_limit=body.get("neighbor_limit", 5),
     )
-    return [{"id": str(r[0]), "similarity": float(r[1])} for r in rows]
+
+    candidate_ids: list[str] = []
+    seen: set[str] = set()
+    pairs: list[dict] = []
+    for candidate_id, neighbor_id, similarity in rows:
+        cid = str(candidate_id)
+        # A candidate repeats once per neighbour; the swept set is the distinct
+        # left side. Order is preserved (the query orders by candidate) because
+        # the caller's pair cap is positional.
+        if cid not in seen:
+            seen.add(cid)
+            candidate_ids.append(cid)
+        if neighbor_id is not None:
+            pairs.append({"id": cid, "neighbor_id": str(neighbor_id), "similarity": float(similarity)})
+    return {"candidate_ids": candidate_ids, "pairs": pairs}
 
 
 @router.post("/mark-dedup-checked")
@@ -986,7 +1086,7 @@ async def get_recent_memories(
 
 
 @router.get("/lifecycle-candidates")
-async def get_lifecycle_candidates(tenant_id: str) -> dict:
+async def get_lifecycle_candidates(tenant_id: str, fleet_id: str | None = None) -> dict:
     """Id lists for the crystallizer's lifecycle hygiene checks.
 
     Every list is bare stringified ids, not row dicts — callers index them
@@ -994,9 +1094,12 @@ async def get_lifecycle_candidates(tenant_id: str) -> dict:
     but was never exposed, so ``_check_short_content`` read a key that was
     never returned and reported zero for every tenant.
     """
-    expired = await _svc.memory_find_expired_still_active(tenant_id, None)
-    stale = await _svc.memory_find_stale_count(tenant_id, None, stale_days=90, max_weight=0.3)
-    short = await _svc.memory_find_short_content(tenant_id, None, CRYSTALLIZER_SHORT_CONTENT_CHARS)
+    # All three service calls have always taken a fleet argument; the route
+    # passed None positionally, so every fleet-scoped lifecycle count was
+    # actually tenant-wide.
+    expired = await _svc.memory_find_expired_still_active(tenant_id, fleet_id)
+    stale = await _svc.memory_find_stale_count(tenant_id, fleet_id, stale_days=90, max_weight=0.3)
+    short = await _svc.memory_find_short_content(tenant_id, fleet_id, CRYSTALLIZER_SHORT_CONTENT_CHARS)
     return {
         "expired_still_active": [str(r[0]) for r in expired],
         "stale_low_weight": [str(r[0]) for r in stale],
@@ -1035,12 +1138,26 @@ async def count_active_memories(
     tenant_id: str,
     fleet_id: str | None = None,
     status: str | None = None,
+    exclude_scope_agent: bool = False,
+    caller_agent_id: str | None = None,
 ) -> dict:
     """Count live memories (``LIVE_MEMORY_STATUSES``), not just literal ``active``.
 
     Pass ``status=active`` for the old narrow behaviour.
+
+    ``exclude_scope_agent`` applies the list route's visibility scoping;
+    ``caller_agent_id`` is the identity applied within it, so the caller's own
+    private rows stay counted while its peers' do not. Defaults keep every
+    existing caller's numbers identical — core-api's ``GET /memories/count``
+    passes both, whole-corpus system callers pass neither.
     """
-    count = await _svc.memory_count_active(tenant_id, fleet_id, status=status)
+    count = await _svc.memory_count_active(
+        tenant_id,
+        fleet_id,
+        status=status,
+        exclude_scope_agent=exclude_scope_agent,
+        caller_agent_id=caller_agent_id,
+    )
     return {"count": count}
 
 
@@ -1169,6 +1286,12 @@ _MEMORY_CONFLICT_FIELDS = [
     "created_by",
     "created_at",
     "metadata_",
+    # D11 — human review state.
+    "review_status",
+    "resolution_action",
+    "resolution_note",
+    "resolved_by",
+    "resolved_at",
 ]
 
 
@@ -1206,6 +1329,72 @@ async def record_memory_conflict(request: Request) -> dict:
         row = await _svc.memory_conflict_record(body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
+
+
+@router.get("/memory-conflicts")
+async def list_memory_conflicts(
+    tenant_id: str,
+    review_status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict]:
+    """D11 — the review queue. Tenant-scoped; see the service docstring for why
+    that is a boundary rather than a filter."""
+    try:
+        rows = await _svc.memory_conflicts_list(
+            tenant_id=tenant_id, review_status=review_status, limit=limit, offset=offset
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return [orm_to_dict(r, _MEMORY_CONFLICT_FIELDS) for r in rows]
+
+
+@router.get("/memory-conflicts/{conflict_id}")
+async def get_memory_conflict(conflict_id: str, tenant_id: str) -> dict:
+    try:
+        row = await _svc.memory_conflict_get(UUID(conflict_id), tenant_id)
+    except (ValueError, TypeError):
+        row = None
+    if row is None:
+        # Same 404 for "no such conflict" and "not your conflict" — the route
+        # must not answer "does this id exist?" for another tenant.
+        raise HTTPException(status_code=404, detail="Conflict not found")
+    return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
+
+
+@router.patch("/memory-conflicts/{conflict_id}/resolve")
+async def resolve_memory_conflict(conflict_id: str, request: Request) -> dict:
+    """D11 — record a reviewer's decision.
+
+    409 when the row is no longer pending. Two reviewers working the same queue
+    is the ordinary case, and the CAS in the service is what stops the second
+    write silently overwriting the first's decision.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    try:
+        moved = await _svc.memory_conflict_resolve(
+            conflict_id=UUID(str(conflict_id)),
+            tenant_id=tenant_id,
+            review_status=_require(body, "review_status"),
+            resolution_action=body.get("resolution_action"),
+            resolution_note=body.get("resolution_note"),
+            resolved_by=body.get("resolved_by"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not moved:
+        # Distinguish "gone/not yours" from "already reviewed" so the caller can
+        # tell a stale queue entry from a permissions problem.
+        existing = await _svc.memory_conflict_get(UUID(str(conflict_id)), tenant_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Conflict not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Conflict already reviewed (review_status={existing.review_status})",
+        )
+    row = await _svc.memory_conflict_get(UUID(str(conflict_id)), tenant_id)
     return orm_to_dict(row, _MEMORY_CONFLICT_FIELDS)
 
 
@@ -1344,7 +1533,7 @@ async def list_by_filters(request: Request) -> list[dict]:
     Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
     status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
     include_deleted, sort, order, limit, offset, cursor_ts?, cursor_id?,
-    readable_tenant_ids?}``. ``limit`` is the caller's desired page size; this
+    readable_tenant_ids?, visibility?}``. ``limit`` is the caller's desired page size; this
     endpoint over-fetches ``limit+1`` rows internally for has_more detection and
     the caller slices to ``limit`` / builds the next cursor. Distinct from
     ``/admin-list`` which has NO visibility scoping.
@@ -1408,6 +1597,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         cursor_ts=cursor_ts,
         cursor_id=cursor_id,
         readable_tenant_ids=body.get("readable_tenant_ids"),
+        visibility=body.get("visibility"),
     )
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
@@ -1875,7 +2065,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         # Status + pointer update must be atomic — a partial update
         # (status advances but pointer clear is rejected) would leave
         # the row in an invalid state. Caught wet-testing 2026-05-19.
-        from sqlalchemy import or_
+        from sqlalchemy import or_, select
         from sqlalchemy import update as sql_update
 
         from common.models import Memory
@@ -1888,6 +2078,10 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 .where(
                     Memory.id == memory_id,
                     Memory.tenant_id == tenant_id,
+                    # Same liveness rule the status path below relies on: a
+                    # retraction must not rewrite the pointer of a row that has
+                    # been soft-deleted out from under the caller.
+                    Memory.deleted_at.is_(None),
                     or_(
                         Memory.supersedes_id == expected_uuid,
                         Memory.supersedes_id.is_(None),
@@ -1896,6 +2090,42 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 .values(supersedes_id=None, status=status)
             )
             if result.rowcount == 0:  # type: ignore[attr-defined]
+                # Three different situations reach zero rows, and answering
+                # ``stale_retraction`` for all of them would be a lie for two:
+                # the row may not exist, may be deleted, or may genuinely have
+                # been taken by another writer. Only the last is a conflict the
+                # caller can resolve by re-reading, so classify before
+                # answering. One extra SELECT, on the failure path only.
+                #
+                # This is a second statement, and ``get_session`` runs under
+                # READ COMMITTED, so it takes a NEW snapshot: a commit landing
+                # between the UPDATE and this SELECT is visible here and the
+                # classification can disagree with the reason the UPDATE
+                # matched nothing. Accepted rather than locked, because the
+                # answer stays correct ABOUT THE ROW AS IT NOW STANDS and every
+                # interleaving is self-correcting on the caller's retry:
+                #
+                #   stale pointer, then deleted -> 404, and the row IS deleted;
+                #   deleted, then pointer moved  -> 404, still deleted;
+                #   stale pointer, then restored -> 409, and a re-read now
+                #                                   shows the expected pointer,
+                #                                   so the retry succeeds.
+                #
+                # The one answer that would be plainly wrong — live row, pointer
+                # never moved, yet the UPDATE matched nothing — cannot arise:
+                # that is the case the UPDATE succeeds in. Closing the window
+                # properly means taking a row lock before the UPDATE, which
+                # costs a lock on every retraction to sharpen a status code on
+                # a rare one.
+                live = await session.scalar(
+                    select(Memory.id).where(
+                        Memory.id == memory_id,
+                        Memory.tenant_id == tenant_id,
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+                if live is None:
+                    raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
                 raise HTTPException(
                     status_code=409,
                     detail={
@@ -1931,6 +2161,11 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                 .where(
                     Memory.id == memory_id,
                     Memory.tenant_id == tenant_id,
+                    # Unreachable today — ``memory_update_status`` above now
+                    # 404s on a deleted row before we get here — but this
+                    # statement should not depend on the liveness of a check
+                    # someone could reorder or make conditional later.
+                    Memory.deleted_at.is_(None),
                     Memory.supersedes_id.is_(None),
                 )
                 .values(supersedes_id=UUID(supersedes_id))

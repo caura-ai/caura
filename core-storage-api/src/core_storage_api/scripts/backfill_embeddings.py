@@ -38,6 +38,11 @@ each row's tenant config (DB lookup or proxy call) inside the embed
 loop, which conflicts with the "standalone, no service deps" design
 goal of this CLI.
 
+A startup preflight refuses live (non ``--dry-run``) runs whose
+process-level provider resolves to the FAKE provider — fake "repairs"
+permanently poison NULL-embedding rows. Override for dev/test
+databases with ``--allow-fake-provider``.
+
 If your deployment uses per-tenant embedding overrides, **stop and
 use the event-driven backfill task in core-worker instead**:
 
@@ -684,6 +689,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Limit to a single table (memories or entities). Default: both.",
     )
     p.add_argument(
+        "--allow-fake-provider",
+        action="store_true",
+        help=(
+            "Permit a live run against the FAKE embedding provider (dev/test "
+            "databases only). Without this flag the preflight refuses to run "
+            "when the process-level provider resolves to fake — a fake "
+            "'repair' writes hash-based vectors into rows that then stop "
+            "being NULL, so no later real backfill will ever revisit them."
+        ),
+    )
+    p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -698,13 +714,50 @@ async def _amain(argv: list[str]) -> int:
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
 
-    # Sanity: does an embedding provider key resolve to anything?
-    if not os.environ.get("OPENAI_API_KEY") and (os.environ.get("EMBEDDING_PROVIDER", "fake") in ("openai",)):
-        logger.error(
-            "EMBEDDING_PROVIDER=openai but OPENAI_API_KEY is unset. "
-            "Set the key or change the provider before running backfill."
-        )
-        return 1
+    # Preflight: refuse a live run whose rows would be "repaired" with fake
+    # vectors. Two roads lead there — ``EMBEDDING_PROVIDER=fake`` set
+    # explicitly, and provider ``openai`` with no key resolving anywhere
+    # (the registry then degrades to ``FakeEmbeddingProvider``, logging a
+    # warning per call but never failing). Either way the poisoned rows
+    # stop being NULL, so the selector never revisits them: permanent
+    # damage, hence a hard refusal rather than a warning. Overridable with
+    # ``--allow-fake-provider`` for dev/test databases.
+    #
+    # Replaces the older openai-without-OPENAI_API_KEY check, which had
+    # both a false negative (unset EMBEDDING_PROVIDER used to fall back to
+    # "fake" and sail through) and a false positive (platform-tier
+    # ``PLATFORM_EMBEDDING_*`` credentials satisfy the openai path without
+    # ``OPENAI_API_KEY``). Constructing the provider once and inspecting
+    # what actually resolved answers the real question. ``local`` is
+    # exempted from construction — it never silently degrades to fake, and
+    # building it here could eagerly load the sentence-transformers model.
+    # Dry runs skip the preflight: they make no provider calls.
+    if not args.dry_run:
+        from common.embedding import get_embedding_provider
+        from common.provider_names import DEFAULT_EMBEDDING_PROVIDER, ProviderName
+
+        provider_name = os.environ.get("EMBEDDING_PROVIDER", DEFAULT_EMBEDDING_PROVIDER)
+        resolved_fake = provider_name == ProviderName.FAKE
+        if provider_name not in (ProviderName.FAKE, ProviderName.LOCAL):
+            try:
+                provider = get_embedding_provider(provider_name)
+            except ValueError:
+                logger.exception(
+                    "Embedding provider misconfigured (EMBEDDING_PROVIDER=%r); "
+                    "fix the environment before running backfill.",
+                    provider_name,
+                )
+                return 1
+            resolved_fake = provider.provider_name == ProviderName.FAKE
+        if resolved_fake and not args.allow_fake_provider:
+            logger.error(
+                "Embedding provider resolved to FAKE (EMBEDDING_PROVIDER=%r). "
+                "A live backfill would permanently poison NULL-embedding rows "
+                "with hash-based vectors. Configure a real provider (or its "
+                "API key), or pass --allow-fake-provider for a dev/test DB.",
+                provider_name,
+            )
+            return 1
 
     # --rewrite-hint-prefixed is intentionally non-idempotent: the
     # selector keys on metadata.retrieval_hint, which the rewrite

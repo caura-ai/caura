@@ -41,6 +41,7 @@ from core_api.constants import (
     MAX_CONTENT_LENGTH,
     NODE_OFFLINE_SECONDS,
 )
+from core_api.request_phase import phase
 from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, BulkMemoryResponse
 from core_api.services.memory_service import create_memories_bulk
 from core_api.services.organization_settings import get_settings_for_display, resolve_config
@@ -277,14 +278,21 @@ async def _interview_chunk(prompt: str, config, events: list[dict]) -> dict:
     async def _do_interview(llm) -> dict:
         return await llm.complete_json(prompt, temperature=INTERVIEW_TEMPERATURE)
 
-    return await call_with_fallback(
-        primary_provider_name=config.enrichment_provider,
-        call_fn=_do_interview,
-        fake_fn=lambda: _fake_report(events),
-        tenant_config=config,
-        service_label="interview",
-        model_override=config.enrichment_model,
-    )
+    # Named for the 504: ``/interview/submit`` enforces its own 90s budget and
+    # spends it on this chain of map-phase LLM calls and then on the bulk
+    # write. Without a name here a 504 could not say which, and the two have
+    # different owners. Not indexed by chunk — the name is a log-line
+    # dimension, and ``phases_completed`` already carries one entry per chunk
+    # that finished, which is the "stalled on chunk 7 of 12" answer.
+    with phase("interview.chunk"):
+        return await call_with_fallback(
+            primary_provider_name=config.enrichment_provider,
+            call_fn=_do_interview,
+            fake_fn=lambda: _fake_report(events),
+            tenant_config=config,
+            service_label="interview",
+            model_override=config.enrichment_model,
+        )
 
 
 # ── Reduce ──
@@ -1265,12 +1273,27 @@ async def run_interview_schedule() -> dict:
         "skipped_not_due": 0,
     }
     for tenant_id in tenants:
-        settings = await get_settings_for_display(tenant_id)
-        cfg = settings.get("interviewer") or {}
-        period_hours = int(cfg.get("period_hours") or 12)
-        template_id = cfg.get("template_id") or "default-v1"
-
+        # 09/02 M-15. The settings read and its parsing used to sit OUTSIDE
+        # this guard, so a single tenant whose settings could not be read — or
+        # whose ``period_hours`` was non-numeric, which ``int()`` raises on —
+        # propagated out of the loop and out of this function.
+        #
+        # That aborted scheduling for every REMAINING tenant, and worse, it
+        # skipped the persisted-jobs sweep below entirely. That sweep (#665) is
+        # the DURABLE RETRY PATH for jobs whose fire-and-forget processing died
+        # at submit time — the one thing that must not be taken out by a
+        # failure, since failure is what it exists to recover from.
+        #
+        # The isolation was already the documented intent: the per-node handler
+        # says "one node's storage failure must not abort scheduling for the
+        # tenant's remaining nodes (or later tenants)", and ``tenants_failed``
+        # was already here to count exactly this. Only the settings read was
+        # outside the try.
         try:
+            settings = await get_settings_for_display(tenant_id)
+            cfg = settings.get("interviewer") or {}
+            period_hours = int(cfg.get("period_hours") or 12)
+            template_id = cfg.get("template_id") or "default-v1"
             nodes = await sc.list_nodes(tenant_id)
             # High limit so the pending-dedup set is complete for any
             # realistic fleet size — a truncated set would re-queue nodes

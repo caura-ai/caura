@@ -26,7 +26,7 @@ Two consequences are pinned here rather than just the constant:
 
 from __future__ import annotations
 
-import httpx
+import httpx2 as httpx
 import openai
 import pytest
 

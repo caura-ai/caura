@@ -67,7 +67,6 @@ pytest tests/ -v
 `core-storage-api` has a second suite that needs a **separate database**:
 
 ```bash
-createdb memclaw_storage && psql -d memclaw_storage -c 'CREATE EXTENSION IF NOT EXISTS vector'  # legacy-name-floor: the database ci.yml already provisions; a pasteable command naming anything else is wrong
 pytest core-storage-api/tests/ -v
 ```
 
@@ -80,7 +79,16 @@ and any migration-only table (one with no ORM model, e.g. `tenant_suppression`)
 is missing from a database whose stamp claims it is current. Run them the other
 way round and the migrated schema is the one that gets polluted.
 
-Each suite defaults to its own database, so no environment variable is needed;
+Each suite defaults to its own database — `caura_test` for `tests/` and
+`caura_storage` for `core-storage-api/tests/` — so no environment variable is
+needed, and neither suite touches the `caura` database the local stack runs
+against. Create them once:
+
+```bash
+createdb caura_test    && psql -d caura_test    -c 'CREATE EXTENSION IF NOT EXISTS vector'
+createdb caura_storage && psql -d caura_storage -c 'CREATE EXTENSION IF NOT EXISTS vector'
+```
+
 `DATABASE_URL` (storage suite) and `TEST_DATABASE_URL` (root suite) override
 them. CI provisions and passes both explicitly.
 
@@ -238,7 +246,7 @@ It has to be the whole token — `legacy-name-okay` in a sentence does not exemp
 anything — but the casing is up to you, and the reason is asked for rather than
 enforced.
 
-### Two markers: which claim are you making?
+### Three markers: which claim are you making?
 
 `legacy-name-ok` is for something new that **bears** the old name — the alias,
 the redirect, the pinned wire format above.
@@ -251,16 +259,29 @@ pastes, a path on disk, a mirror URL. Use `legacy-name-floor` instead:
 | macOS | `~/Library/Application Support/...` | <!-- legacy-name-floor: the app dir name -->
 ```
 
-Both exempt the line identically — nothing about pass or fail changes, and
+Sometimes the line names the old spelling only to prove it is **not** there — a
+test asserting the rename landed, where the literal exists to be searched for
+and not found. Neither marker above is true of that: both claim something still
+answers to the name. Use `legacy-name-absent`:
+
+```python
+assert "memclaw_write_bulk" not in tools  # legacy-name-absent: the old tool is gone
+```
+
+All three exempt the line identically — nothing about pass or fail changes, and
 picking the wrong one cannot turn a build red or green. They are counted apart
 so the aliases stay readable: a documentation sweep can easily add ten mentions
 around one alias, and under a single marker that alias is the eleventh line
 nobody reads.
 
-**When both are true of one line, use `legacy-name-ok`.** Some lines name a
+**When alias and floor are both true of one line, use `legacy-name-ok`.** Some lines name a
 frozen thing and declare a dual-read at once — an image tag whose repository
 name is permanent while its version is read from either spelling. One line takes
 one marker, and the alias is the claim rule 3 wants eyes on, so it wins.
+
+`legacy-name-absent` never combines with either: it says nothing on the line
+bears the name, and they say something does. A line that seems to want both is
+one where the alias or floor claim is the real one.
 
 There is a third case, and it takes no marker at all. Ask what breaks if the old
 spelling is not on that line. If the answer is nothing — it is prose that happens

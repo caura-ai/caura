@@ -13,7 +13,9 @@ coarse fallback.
 Exported decorators are applied surgically to the hot-path routes that
 the loadtest showed as unprotected:
 
-- ``write_limit`` — POST /memories, POST /documents, POST /ingest/commit
+- ``write_limit`` — POST /memories, POST /documents, POST /ingest/commit,
+  POST /stm/promote (an LTM write through the STM door; it pays the same
+  limit as the front door)
 - ``write_bulk_limit`` — POST /memories/bulk (stricter — 100x fanout)
 - ``search_limit`` — POST /search, POST /recall
 

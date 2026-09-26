@@ -6,13 +6,15 @@ item. Same tenant, same N memories, different bill — and the counters it misse
 are the ones over-plan mode is computed from, so a batch-heavy tenant could
 never trip its plan limit.
 
-Gated behind ``settings.meter_mcp_bulk_writes``, default OFF, mirroring the D13
-``meter_recall_as_recall`` precedent: this starts charging for writes that have
-been free, which is a billing decision rather than a deploy side effect.
+Gated behind ``settings.meter_mcp_bulk_writes``, which is ON since
+caura-ai/caura#1638 — the decision there was to close the measurement gaps
+before deciding whether to enforce ``enforce_mcp_plan_limits``, and an unbilled
+batch path was the larger of the two gaps.
 
-Both states are pinned below. The off case is not a placeholder — while it is
-the default it IS the shipped behaviour, and a silent flip would bill live
-tenants without anyone choosing to.
+Both states are still pinned below. The off case stopped being the shipped
+behaviour but stayed a test, because the flag's whole purpose is that it can be
+turned back off by env without a redeploy — an off switch nothing exercises is
+an off switch nobody should trust in an incident.
 """
 
 from __future__ import annotations
@@ -107,6 +109,11 @@ async def test_the_single_write_path_is_untouched(mcp_env, bulk_meter, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_the_flag_defaults_off():
-    """A rebuilt image with no env change must bill exactly as before."""
-    assert settings.meter_mcp_bulk_writes is False
+async def test_the_flag_defaults_on():
+    """The decision from caura-ai/caura#1638, pinned where it can be checked.
+
+    This asserted ``is False`` from #1220 until #1638, and it is the reason the
+    flip could not happen by accident — which is exactly what a default like
+    this is for. Flipping it back is a decision too, and should fail here.
+    """
+    assert settings.meter_mcp_bulk_writes is True

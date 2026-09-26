@@ -11,6 +11,7 @@ from common import duplicate_memory
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
+from core_api.schemas import EntityLinkIn
 from core_api.services.hooks import get_hooks
 from core_api.services.system_metadata import set_system_value
 
@@ -20,6 +21,53 @@ logger = logging.getLogger(__name__)
 #: summary below. ``entity_links`` has no schema bound, so this is what keeps
 #: log volume from tracking caller input.
 _MAX_LINK_ERROR_LOGS = 5
+#: Router-enforced cap on ``POST /entities/links/bulk`` (see
+#: ``bulk_upsert_memory_entity_links``). Kept equal to it, not lower: a smaller
+#: value only adds round-trips, and a larger one turns an oversized write into a
+#: 422 that loses every link in the chunk.
+_LINK_BULK_CHUNK = 500
+
+
+def _record_link_failure(
+    link_failures: list[dict],
+    link: EntityLinkIn,
+    permanent: bool,
+    memory_id: object,
+    tenant_id: str,
+    *,
+    exc: Exception | None = None,
+    error: str | None = None,
+) -> None:
+    """Record one dropped entity link, logging the first few individually.
+
+    Split out when the per-link loop became a bulk call (OSS 08/14 L-34) so the
+    two ways a link can now fail — the chunk's call raising, and the item coming
+    back with an ``error`` — record and log identically. They are the same event
+    to an operator: the memory exists and is not reachable through that entity.
+
+    ERROR, not warning, for the reason the original carried: unlike the audit
+    hook, a dropped link is user-visible data loss, and a link that was never
+    created leaves no row for ``GET /entities/broken-links`` to find later. The
+    row itself is fine, so the write stands.
+    """
+    link_failures.append({"entity_id": str(link.entity_id), "role": link.role, "permanent": permanent})
+    if len(link_failures) > _MAX_LINK_ERROR_LOGS:
+        return
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    logger.error(
+        "entity link failed; memory kept without it",
+        exc_info=exc is not None,
+        extra={
+            "memory_id": memory_id,
+            "tenant_id": tenant_id,
+            "entity_id": str(link.entity_id),
+            "role": link.role,
+            "error_type": type(exc).__name__ if exc is not None else error,
+            "status_code": status,
+            # False → chase storage, not the caller.
+            "permanent": permanent,
+        },
+    )
 
 
 class WriteMemoryRow:
@@ -84,6 +132,18 @@ class WriteMemoryRow:
             "ts_valid_end": str(fields["ts_valid_end"]) if fields.get("ts_valid_end") else None,
             "status": fields["status"],
             "visibility": data.visibility or "scope_team",
+            # A62 — migration 036 added this column and nothing ever wrote it, so
+            # every row read ``False`` = "directly stated". That silently disabled
+            # the invariant at ``resolution.py``: ``if is_inferred and action in
+            # _DESTRUCTIVE`` exists so a memory the SYSTEM materialised cannot
+            # destructively overturn one a user actually stated — and with the
+            # column always False it has never once fired.
+            #
+            # Server-set only. It is absent from ``MemoryCreate`` (it lives on
+            # ``MemoryOut``), so a caller cannot claim to be inferred, nor claim
+            # not to be; the value comes from ``create_memory``'s internal
+            # keyword, which only platform writers pass.
+            "is_inferred": bool(ctx.data.get("is_inferred", False)),
         }
         storage_t0 = time.perf_counter()
         try:
@@ -122,63 +182,80 @@ class WriteMemoryRow:
         links_t0 = time.perf_counter()
         linked: list = []
         link_failures: list[dict] = []
-        for link in data.entity_links:
+        # OSS 08/14 L-34 — one bulk round-trip per 500 links, not one per link.
+        # A write naming 40 entities used to make 40 sequential HTTP calls to
+        # core-storage-api on the inline write path, with the caller blocked on
+        # all of them.
+        #
+        # The per-link loop this replaces was deliberate, and its reason (the
+        # H-05 incident: "a single bad id must not discard the valid links
+        # beside it") is preserved rather than traded away — because
+        # ``entity_bulk_upsert_links`` was built with the same requirement. It
+        # runs each item in its OWN session precisely so an FK violation on item
+        # N cannot roll back items 0..N-1, and reports the failure per item as
+        # ``error="fk_violation"`` aligned by ``input_idx``. Batching the links
+        # is therefore not the trade the fan-out's per-fact CREATE would be,
+        # where the bulk helper is all-or-nothing.
+        #
+        # Chunked at the router's documented 500-item cap because
+        # ``entity_links`` is unbounded: a 501-link write would otherwise come
+        # back 422 for the whole request and lose every link, which is exactly
+        # the failure mode this loop exists to prevent.
+        for chunk_start in range(0, len(data.entity_links), _LINK_BULK_CHUNK):
+            chunk = data.entity_links[chunk_start : chunk_start + _LINK_BULK_CHUNK]
+            items = [
+                {
+                    "input_idx": idx,
+                    "memory_id": memory["id"],
+                    # Stringify the UUID for JSON transport — mirrors line 60's
+                    # handling of ``subject_entity_id``. SQLAlchemy auto-coerces
+                    # on receive, so the persisted value is identical.
+                    "entity_id": str(link.entity_id),
+                    "role": link.role,
+                }
+                for idx, link in enumerate(chunk)
+            ]
             try:
-                await sc.create_entity_link(
-                    data.tenant_id,
-                    {
-                        "memory_id": memory["id"],
-                        # Stringify the UUID for JSON transport — mirrors
-                        # line 60's handling of ``subject_entity_id`` and
-                        # the bulk write path. SQLAlchemy auto-coerces on
-                        # receive, so the persisted value is identical.
-                        "entity_id": str(link.entity_id),
-                        "role": link.role,
-                    },
-                )
+                results = await sc.bulk_upsert_entity_links(data.tenant_id, items)
             except Exception as exc:
                 # Still degrade in EVERY case — the row is committed, and letting
-                # anything propagate here is exactly the H-05 bug. But the two
-                # causes need different operator responses, so they are not
-                # logged identically:
-                #
-                #   * 4xx — the caller named a memory/entity that does not exist,
-                #     or a pair already linked. Permanent, their input, one link.
-                #   * anything else (5xx, connect, timeout) — storage's problem,
-                #     ours to chase. If it hits every link in the request it is an
-                #     outage, not N independent data-loss events, and an outage
-                #     with zero failed requests is the worst kind to diagnose.
-                #
-                # This distinction only became possible once the links route
-                # started returning 409 for a bad id; before that an FK violation
-                # and an unreachable storage service were both a bare 500.
+                # anything propagate here is exactly the H-05 bug. The whole
+                # chunk is lost rather than one link, which is the one place the
+                # batching does change behaviour; the classification below is
+                # what keeps that readable. A transport failure that takes out a
+                # chunk is an outage, and the old comment already said an outage
+                # is not N independent data-loss events.
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 permanent = status is not None and 400 <= status < 500
-                link_failures.append(
-                    {"entity_id": str(link.entity_id), "role": link.role, "permanent": permanent}
-                )
-                if len(link_failures) <= _MAX_LINK_ERROR_LOGS:
-                    # ERROR, not warning: unlike the audit hook, a dropped link is
-                    # user-visible data loss — the memory exists but is not
-                    # reachable through that entity, and a link that was never
-                    # created leaves no row for ``GET /entities/broken-links`` to
-                    # find later. The row itself is fine, so the write stands.
-                    logger.error(
-                        "entity link failed; memory kept without it",
-                        exc_info=True,
-                        extra={
-                            "memory_id": memory["id"],
-                            "tenant_id": data.tenant_id,
-                            "entity_id": str(link.entity_id),
-                            "role": link.role,
-                            "error_type": type(exc).__name__,
-                            "status_code": status,
-                            # False → chase storage, not the caller.
-                            "permanent": permanent,
-                        },
+                for link in chunk:
+                    _record_link_failure(
+                        link_failures, link, permanent, memory["id"], data.tenant_id, exc=exc
                     )
                 continue
-            linked.append(link)
+
+            # Aligned by ``input_idx`` rather than by position: the response is
+            # documented as aligned to input, but the id is what makes that a
+            # checked property instead of an assumption.
+            by_idx = {r.get("input_idx"): r for r in results}
+            for idx, link in enumerate(chunk):
+                res = by_idx.get(idx)
+                if res is None or res.get("error"):
+                    # ``fk_violation`` is the caller naming a memory or entity
+                    # that does not exist or is not theirs — permanent, their
+                    # input, one link, same verdict the 4xx branch gave it
+                    # before. A missing slot is storage not answering for an
+                    # item it was asked about; treated the same way, since the
+                    # link is equally not there.
+                    _record_link_failure(
+                        link_failures,
+                        link,
+                        True,
+                        memory["id"],
+                        data.tenant_id,
+                        error=(res or {}).get("error", "missing_result"),
+                    )
+                    continue
+                linked.append(link)
         timings["entity_links_ms"] = round((time.perf_counter() - links_t0) * 1000)
         # Read by ``_memory_out_with_created_links``, which echoes these rather
         # than the request so the caller is told what actually persisted.

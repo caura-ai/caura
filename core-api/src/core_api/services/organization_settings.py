@@ -41,6 +41,10 @@ from common.organization_settings_merge import deep_merge as _deep_merge
 from common.provider_names import ProviderName
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as global_settings
+from core_api.constants import (
+    CRYSTALLIZER_DEDUP_THRESHOLD,
+    CRYSTALLIZER_MIN_CLUSTER_SIZE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,13 @@ DEFAULT_SETTINGS: dict = {
         "provider": None,
         "model": None,
         "enabled": None,
+        # pm-0918-c-04. MUST be listed here, not only as a ResolvedConfig
+        # property: ``_check_keys`` validates a settings write against this
+        # schema, so a knob absent from it is READ-ONLY — the resolver returns
+        # its default and every attempt to set it raises "Unknown settings
+        # key(s)". A switch nobody can switch is worse than no switch, because
+        # it reads as shipped.
+        "atomic_fact_fanout_enabled": None,
     },
     "recall": {
         "provider": None,
@@ -62,7 +73,9 @@ DEFAULT_SETTINGS: dict = {
         # instead of going along with it. Off (None/False) keeps the recall
         # prompt byte-identical to pre-A64. Evidence: STALE T2 31%->71%
         # overall with the guard; true-premise control +1.9pp overall
-        # (benchmark/a57-recall-experiments-findings.md).
+        # (findings: ``<multi-repo-workspace-root>/benchmark/
+        # a57-recall-experiments-findings.md`` -- WORKSPACE ROOT, one level
+        # above this repo; not in this repo on any ref).
         "premise_guard": None,
     },
     "embedding": {
@@ -99,6 +112,16 @@ DEFAULT_SETTINGS: dict = {
         "retention_days": 90,
     },
     "search": {
+        # C27 — opt-in STRICT fleet scoping. Wire contract D4 (RATIFIED) defines
+        # a NULL ``fleet_id`` as tenant-shared BY DESIGN, so a fleet-scoped read
+        # returns null-fleet rows too. That is deliberate and stays the default;
+        # ``True`` drops the null-fleet disjunct for a tenant that wants hard
+        # fleet isolation. Off by default for the same reason as
+        # ``recall_for_asserted_identity`` below: turning it on HIDES rows that
+        # are visible today, so it is a decision a tenant makes, never one
+        # inherited. ``scope_org`` rows stay visible in both modes — that is an
+        # explicit visibility tier, not an accident of a missing fleet.
+        "strict_fleet_scoping": None,
         "recall_boost": None,
         # Whether a caller-ASSERTED identity (SearchRequest.caller_agent_id from
         # a tenant-scoped key) may move recall_count, and so ranking. Off by
@@ -124,6 +147,28 @@ DEFAULT_SETTINGS: dict = {
         # ``entity_linking.auto_entity_linking_enabled``) and relation inference
         # keep populating the graph, so flipping this back on needs no backfill.
         "entity_retrieval": None,
+        # pm-0918-c-03 — whether ``/search`` returns atomic-fact fan-out children
+        # (A70) alongside the rows the caller wrote. ``None`` resolves to the
+        # global default, which is TRUE: today's behaviour, unchanged for a
+        # tenant that never touches this.
+        #
+        # LISTED HERE, not only as a ``ResolvedConfig`` property, and the sibling
+        # row is why: ``_check_keys`` validates a settings write against this
+        # schema, so a knob missing from it is READ-ONLY — ``PUT /settings``
+        # answers 422 "Unknown settings key(s)" while the resolver cheerfully
+        # serves the default. pm-0918-c-04 shipped exactly that and it read as
+        # working. ``test_the_tenant_default_survives_a_real_settings_put``
+        # exercises the HTTP route rather than building a ``ResolvedConfig``,
+        # because constructing the config object directly is what hid it.
+        #
+        # A tenant crowded by fan-out children sets this to ``false`` and gets
+        # the behaviour of option (c) — exclude by default — for its own store,
+        # without a deploy and without imposing it on every other tenant. That is
+        # the same argument that justified A70's per-tenant write-side switch,
+        # ``enrichment.atomic_fact_fanout_enabled``, and the two are independent:
+        # this one hides existing children from reads, that one stops new ones
+        # being written.
+        "include_derived": None,
         # Tenant-wide default search profile (A47). Any search_profile knob set
         # here (min_similarity, top_k, freshness_floor, ...) becomes the fallback
         # for EVERY agent in the tenant, filling the gap between a per-agent tuned
@@ -134,9 +179,27 @@ DEFAULT_SETTINGS: dict = {
     },
     "crystallizer": {
         "auto_crystallize": None,
+        # A72 — the crowding retune. Both default to None, which resolves to
+        # today's constants, so an untouched tenant sweeps exactly as before
+        # and costs exactly as much.
+        "dedup_threshold": None,
+        "min_cluster_size": None,
     },
     "dedup": {
         "semantic_dedup_enabled": None,
+        # A71 — act on the near-duplicate band instead of only reporting it.
+        # ``DetectNearDuplicate`` already finds the nearest stored row on every
+        # fast write and stashes ``near_duplicate_of`` as advice nothing acts on,
+        # so a restated fact accumulates a sibling and both stay live. With this
+        # on, a hit that is provably the SAME CLAIM (same subject, same
+        # single-valued predicate, different object) supersedes its predecessor
+        # instead of appending beside it.
+        #
+        # Default OFF, like every switch that changes what a write PRODUCES
+        # rather than what it reports. Turning it on retires rows, and while the
+        # supersession is reversible through the existing lineage, a tenant
+        # should choose that rather than inherit it from a deploy.
+        "merge_near_duplicates": None,
     },
     "lifecycle": {
         "lifecycle_automation_enabled": None,
@@ -198,6 +261,25 @@ DEFAULT_SETTINGS: dict = {
         # instead of falling through to the LLM. ``None`` resolves to
         # the global default (true).
         "triple_emission_enabled": None,
+        # A73 — one contradiction pass per SUBJECT on a bulk write, instead of
+        # one per row. A coherent batch (seeding a biography, importing a
+        # document) writes dozens of rows about the same subject in seconds, and
+        # each row is currently judged against a store its own siblings are still
+        # landing in. Complementary facts come back ``conflicted`` — ~40% of a
+        # 55-fact biography in one observed store, before the first conversation
+        # — and a conflicted row carries a 0.5 ranking penalty, so the store
+        # starts every retrieval handicapped.
+        #
+        # With this on, the batch's LAST row per subject is judged and the rest
+        # are not. That still catches both kinds of real conflict: an earlier
+        # sibling is already committed and so is a candidate for the last row's
+        # pass, and the pre-existing store is too. What it removes is the
+        # N-way churn of a batch conflicting with itself.
+        #
+        # Default OFF like every switch that changes what a write produces. It
+        # also REDUCES LLM calls (N rows -> one per subject), so it is not
+        # blocked by the no-new-LLM-calls hold.
+        "bulk_subject_batching": None,
         # CAURA-130 (L3.8) — Path C retraction kill-switch. When true
         # (the default), Path C's ``_attempt_entity_retraction`` runs
         # the entity-aware judge and may revert a Path A verdict. When
@@ -281,6 +363,13 @@ DEFAULT_SETTINGS: dict = {
             "freshness_window_days": 14,
             "llm_tokens_per_run": 50_000,
             "max_writes_per_run": 20,
+            # Attempt ceiling: how many clusters one run may distill,
+            # written or not. 0 = derive from ``max_writes_per_run``
+            # (see ``ForgeConfig.effective_max_clusters_per_run``).
+            # This, not ``max_writes_per_run``, is what bounds a run's
+            # LLM spend — every attempted cluster pays for a distill
+            # call before we can know whether it will be written.
+            "max_clusters_per_run": 0,
         },
         # OpenClaw PROPOSAL.md bridge (Phase 5). Default OFF — turning
         # it on only matters once the OpenClaw workspace emitter ships.
@@ -548,6 +637,15 @@ def _validate_default_search_profile(payload: dict) -> None:
             )
         if value < lo or value > hi:
             raise ValueError(f"search.default_profile.{key} must be in [{lo}, {hi}], got {value}")
+    # Cross-key rule the per-key loop cannot see: the two pool selectors are
+    # mutually exclusive. Storage lets ``ann_pool_size`` win if both arrive
+    # (skew safety), but an org-wide setting write should fail loudly instead
+    # of persisting a config whose A49 half is silently dead.
+    if int(dp.get("ann_pool_size") or 0) > 0 and int(dp.get("candidate_pool_size") or 0) > 0:
+        raise ValueError(
+            "search.default_profile: ann_pool_size and candidate_pool_size are "
+            "mutually exclusive pool selectors — set at most one of them > 0"
+        )
 
 
 def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
@@ -572,6 +670,7 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
 # Expected Python types for leaf values that need validation beyond key presence.
 # Dotted paths match the nested structure in DEFAULT_SETTINGS.
 _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
+    "enrichment.atomic_fact_fanout_enabled": bool,
     "security_audit.schedule_enabled": bool,
     "security_audit.schedule_cron": str,
     "security_audit.alerts_enabled": bool,
@@ -579,12 +678,20 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "security_audit.alert_score_below": (int, float),
     "security_audit.alert_critical_findings_min": int,
     "security_audit.alert_score_drop_delta": (int, float),
+    "search.strict_fleet_scoping": bool,
     "search.recall_boost": bool,
     "search.recall_for_asserted_identity": bool,
     "search.graph_retrieval": bool,
     "search.entity_retrieval": bool,
+    # bool, NOT just "present": a string "false" is TRUTHY, so without this a
+    # tenant that set it off would resolve to ON while the dashboard rendered
+    # their "off" back to them. Same trap as the c-04 switch above.
+    "search.include_derived": bool,
     "crystallizer.auto_crystallize": bool,
+    "crystallizer.dedup_threshold": float,
+    "crystallizer.min_cluster_size": int,
     "dedup.semantic_dedup_enabled": bool,
+    "dedup.merge_near_duplicates": bool,
     "lifecycle.lifecycle_automation_enabled": bool,
     "lifecycle.memory_retention_days": int,
     "entity_linking.auto_entity_linking_enabled": bool,
@@ -597,6 +704,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "entity_blocklist": list,
     "memclaw.auto_upgrade_enabled": bool,  # legacy-name-floor: floor
     "write.triple_emission_enabled": bool,
+    "write.bulk_subject_batching": bool,
     "write.retraction_enabled": bool,
     # Skill Factory SF-006 — type validators for the skills_factory namespace.
     "skills_factory.enabled": bool,
@@ -612,6 +720,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.forge.freshness_window_days": int,
     "skills_factory.forge.llm_tokens_per_run": int,
     "skills_factory.forge.max_writes_per_run": int,
+    "skills_factory.forge.max_clusters_per_run": int,
     "skills_factory.openclaw_bridge.enabled": bool,
     # Interviewer Phase 1.
     "interviewer.enabled": bool,
@@ -665,6 +774,11 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
     # typo can't pin a DoS-shaped write through the validator.
     "skills_factory.body_max_bytes": (1, 10_000_000),
     "skills_factory.description_max_bytes": (1, 10_000),
+    # 0 is the "derive from max_writes_per_run" sentinel, so the floor is
+    # 0 rather than 1. Upper bound is a spend guard: every attempt buys a
+    # distill LLM call, and 1000 of them in one tick is already far past
+    # any sane window's cluster count.
+    "skills_factory.forge.max_clusters_per_run": (0, 1000),
 }
 
 
@@ -876,6 +990,7 @@ class ResolvedConfig:
             (ProviderName.ANTHROPIC.value, self.anthropic_api_key),
             (ProviderName.GEMINI.value, self.gemini_api_key),
             (ProviderName.OPENROUTER.value, self.openrouter_api_key),
+            (ProviderName.ATLASCLOUD.value, self.atlascloud_api_key),
         ]
         for prov, key in candidates:
             if prov != primary and key:
@@ -896,10 +1011,26 @@ class ResolvedConfig:
         return self._ts.get("api_keys", {}).get("openrouter_api_key") or global_settings.openrouter_api_key
 
     @property
+    def atlascloud_api_key(self) -> str | None:
+        return self._ts.get("api_keys", {}).get("atlascloud_api_key") or global_settings.atlascloud_api_key
+
+    @property
     def gemini_api_key(self) -> str | None:
         return self._ts.get("api_keys", {}).get("gemini_api_key") or global_settings.gemini_api_key
 
     # Search
+    @property
+    def strict_fleet_scoping(self) -> bool:
+        """Drop the null-fleet disjunct from fleet-scoped reads (default OFF).
+
+        Defaults FALSE like ``recall_for_asserted_identity``, and for a stronger
+        reason: every other search knob changes what RANKS, while this one
+        changes what is VISIBLE. Defaulting it on would retroactively hide rows
+        a tenant deliberately wrote fleet-less under contract D4.
+        """
+        val = self._ts.get("search", {}).get("strict_fleet_scoping")
+        return val if val is not None else False
+
     @property
     def recall_boost(self) -> bool:
         val = self._ts.get("search", {}).get("recall_boost")
@@ -932,6 +1063,26 @@ class ResolvedConfig:
         return val if val is not None else global_settings.entity_retrieval_enabled
 
     @property
+    def search_include_derived(self) -> bool | None:
+        """Whether ``/search`` returns atomic-fact fan-out children (pm-0918-c-03).
+
+        Returns ``None`` — NOT a resolved boolean — when the tenant has not set
+        it, and that is the whole point of the signature. This property is the
+        MIDDLE layer of a three-layer resolution (request flag > tenant setting >
+        ``INCLUDE_DERIVED_DEFAULT``), so it has to be able to say "not set" and
+        let ``resolve_include_derived`` fall through. Collapsing it to ``return
+        val if val is not None else True`` — the shape every neighbour here
+        uses — would make an unset tenant indistinguishable from one that
+        explicitly asked for derived rows, and the global default would then be
+        unreachable and untestable.
+
+        It is also why this is one of the few properties on this class that is
+        not typed ``bool``. Read it through ``resolve_include_derived``; reading
+        it directly and treating a falsy ``None`` as "off" inverts the default.
+        """
+        return self._ts.get("search", {}).get("include_derived")
+
+    @property
     def default_search_profile(self) -> dict:
         """Tenant-wide default search profile (A47).
 
@@ -948,11 +1099,98 @@ class ResolvedConfig:
         val = self._ts.get("crystallizer", {}).get("auto_crystallize")
         return val if val is not None else True
 
+    @property
+    def crystallizer_dedup_threshold(self) -> float:
+        """Cosine floor for the near-duplicate sweep (default 0.95).
+
+        A72. The sweep exists to be the janitor for overlapping memories, and at
+        0.95 it only catches near-verbatim copies — the composites that actually
+        crowd recall sit around 0.75-0.90, so the pathology it was built for
+        passes underneath it untouched.
+
+        Lowering this is the retune, and it is per-tenant and default-unset for
+        one reason: every extra pair the band admits is an extra LLM
+        mergeability judgement. A tenant that wants the janitor to reach the
+        crowding band opts in and pays for it; nobody inherits that bill from a
+        deploy. ~0.80 is the value the report proposes; it is deliberately not
+        the default.
+
+        Clamped to [0.5, 1.0]. Below 0.5 the sweep stops being a duplicate
+        check and becomes a topic clusterer, which would merge unrelated rows.
+        """
+        val = self._ts.get("crystallizer", {}).get("dedup_threshold")
+        if val is None:
+            return CRYSTALLIZER_DEDUP_THRESHOLD
+        return min(1.0, max(0.5, float(val)))
+
+    @property
+    def crystallizer_min_cluster_size(self) -> int:
+        """Smallest cluster the sweep will crystallize (default 3).
+
+        A72. At 3 the most common overlap — a pair — is skipped entirely, so
+        two rows saying the same thing survive every sweep. 2 is the value that
+        closes that, and again it is opt-in: admitting pairs multiplies the
+        cluster count, and each cluster is an LLM re-extraction.
+
+        Floored at 2. A cluster of 1 is not a cluster, and allowing it would
+        hand single memories to the re-extractor.
+        """
+        val = self._ts.get("crystallizer", {}).get("min_cluster_size")
+        if val is None:
+            return CRYSTALLIZER_MIN_CLUSTER_SIZE
+        return max(2, int(val))
+
+    @property
+    def atomic_fact_fanout_enabled(self) -> bool:
+        """Create a child memory per extracted atomic fact (default ON).
+
+        A70 shipped this on the strength of a measurement that it almost never
+        fires, taken on conversational content. pm-0918-c-04 asked whether it
+        should be gated off for document-shaped writes, on the theory that
+        2,000-character chunks are the shape it fires on.
+
+        That question is still OPEN. The attempt to settle it against the local
+        corpus failed for reasons worth knowing before anyone tries again: every
+        fan-out child in that database came from benchmark conversation data,
+        the non-benchmark slice produced none at all, and the corpus predates
+        A70 — so it contains no worker-path fan-out, and pre-A70 deferred writes
+        discarded their facts, which reads as "did not fan out". See
+        docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md.
+
+        So this is a switch and not a threshold, because there is no evidence
+        for where a threshold would go — not because the evidence rules one out.
+
+        A switch is worth having regardless of how that question lands: a tenant
+        whose results are crowded by fan-out children turns them off for its own
+        store, immediately, without a deploy and without inheriting a number
+        somebody guessed. Default ON is today's behaviour; changing every
+        tenant's store to address one store's regression would be the wrong
+        default whichever way the measurement eventually goes.
+
+        Off is cheaper but not free of consequence: it skips the children's
+        embeddings and writes, NOT the enrichment call that extracted the facts
+        — that has already happened by the time this is read.
+        """
+        val = self._ts.get("enrichment", {}).get("atomic_fact_fanout_enabled")
+        return val if val is not None else True
+
     # Dedup
     @property
     def semantic_dedup_enabled(self) -> bool:
         val = self._ts.get("dedup", {}).get("semantic_dedup_enabled")
         return val if val is not None else True
+
+    @property
+    def merge_near_duplicates(self) -> bool:
+        """Supersede a same-claim near-duplicate instead of appending (default OFF).
+
+        Gated OFF because it changes what a write produces, not what it reports:
+        an enabled tenant sees its older row move to ``outdated``. Reversible via
+        the same lineage a contradiction supersession uses, but still a tenant's
+        choice rather than something inherited from a deploy.
+        """
+        val = self._ts.get("dedup", {}).get("merge_near_duplicates")
+        return val if val is not None else False
 
     # Lifecycle
     @property
@@ -1037,6 +1275,17 @@ class ResolvedConfig:
         if val in ("fast", "strong"):
             return val
         return "fast"  # default to fast when unset
+
+    @property
+    def bulk_subject_batching(self) -> bool:
+        """One contradiction pass per subject on a bulk write (default OFF).
+
+        Off by default because it changes which rows get judged. Turning it on
+        both fixes the false-conflict storm on coherent batches AND reduces LLM
+        calls, so it is a tenant's choice rather than a cost trade.
+        """
+        val = self._ts.get("write", {}).get("bulk_subject_batching")
+        return val if val is not None else False
 
     @property
     def triple_emission_enabled(self) -> bool:
@@ -1199,6 +1448,25 @@ async def get_raw_settings(tenant_id: str) -> dict:
 
 
 async def _load_and_cache(tenant_id: str) -> dict:
+    # The WRITER, on every miss — and this is the whole fix, not half of it.
+    #
+    # A miss here is rarely cold. ``update_settings`` invalidates, then
+    # broadcasts, and EVERY process — the publisher included, since
+    # ``subscribe(broadcast=True)`` gives each its own subscription — drops its
+    # copy and reloads through this function. That reload is the race: served by
+    # a replica it can return the PRE-update settings and cache them for the
+    # full 5 minutes, so a write meant to tighten a governance control appears
+    # to land and does not take effect. Re-caching a stale value is strictly
+    # worse than not caching at all — the TTL then hides the mistake for exactly
+    # as long as the cache was meant to help.
+    #
+    # Priming the entry post-write instead was tried and is not equivalent: the
+    # publisher receives its own broadcast and evicts what it just primed, so
+    # the reload happens anyway and has to be correct on its own.
+    #
+    # The cost is bounded by the thing the cache already guarantees: at most one
+    # read per tenant per TTL per process. That is what makes taking it from the
+    # primary affordable here and not elsewhere.
     resolved = await get_storage_client().get_org_settings(tenant_id)
     _settings_cache[tenant_id] = resolved
     logger.info("organization_settings cache miss for %s; loaded via storage-api and cached", tenant_id)
@@ -1260,6 +1528,13 @@ async def update_settings(
     changed_by: str | None = None,
 ) -> dict:
     """Upsert tenant overrides + write an audit row with the flat diff.
+
+    Writes are a deep MERGE (``_deep_merge``), so an omitted key keeps its
+    current value. The reset shape is an explicit ``null``: ``_validate_leaf_types``
+    passes ``None`` through deliberately, every resolver property reads ``None``
+    as "no override", and a section set to ``None`` drops the whole group back to
+    defaults. ``{}`` for a section merges nothing and is a no-op — it looks like
+    a clear and is not one, which is the trap worth knowing about.
 
     Returns the merged display view (``DEFAULT_SETTINGS`` ⊕ tenant overrides)
     so callers can echo back the resulting state. No-ops when the submitted

@@ -1043,7 +1043,14 @@ async def _persist_findings(
 
     insight_ids: list[str | None] = []
     try:
-        response = await create_memories_bulk(bulk_data, bulk_attempt_id=bulk_attempt_id)
+        response = await create_memories_bulk(
+            bulk_data,
+            bulk_attempt_id=bulk_attempt_id,
+            # A62 — an insight is the system's own conclusion drawn ACROSS
+            # memories; nobody stated it. Marking the batch keeps it from
+            # destructively overturning a fact a user did state.
+            is_inferred=True,
+        )
     except Exception:
         logger.exception("Bulk persist of insight findings failed entirely")
         insight_ids = [None] * len(findings)

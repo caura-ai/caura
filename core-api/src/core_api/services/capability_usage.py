@@ -33,6 +33,12 @@ from core_api.clients.storage_client import get_storage_client
 logger = logging.getLogger(__name__)
 
 # Tenant values that are not real orgs — never attribute usage to them.
+#
+# The same three sentinels ``mcp_server._SENTINEL_TENANTS`` holds, plus ``""``.
+# Spelled as literals because importing them from ``mcp_server`` would be a
+# cycle (it imports ``record_usage`` from here). Named in this comment so a
+# search for ``_SENTINEL_TENANTS`` finds this copy too — a fourth sentinel has
+# to be added in both places.
 _NON_TENANT = frozenset({"", "__unauthenticated__", "__admin__", "__no_auth__"})
 
 # key = (tenant_id, capability, op_or_empty, transport, ts_bucket_iso)

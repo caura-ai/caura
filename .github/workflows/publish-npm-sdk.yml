@@ -45,8 +45,10 @@ jobs:
       run:
         working-directory: clients/npm-sdk
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
@@ -118,8 +120,19 @@ jobs:
         run: |
           PKG_NAME=$(node -p "require('./package.json').name")
           PKG_VERSION=$(node -p "require('./package.json').version")
-          for attempt in 1 2 3 4 5; do
-            SERVED=$(npm view "${PKG_NAME}@${PKG_VERSION}" version --json 2>/dev/null | node -e '
+          # Give the registry five minutes, not fifty seconds. The run for
+          # caura-client-ts-v1.0.2 (actions/runs/35459496398, 2026-09-19)
+          # published cleanly, polled 5 x 10 s, went red — and the registry was
+          # serving 1.0.2 a couple of minutes later. `--prefer-online` matters
+          # as much as the budget: the registry answers packuments with
+          # `cache-control: max-age=300`, so without it npm can satisfy every
+          # retry from the packument it cached on attempt 1, which predates
+          # the publish becoming visible.
+          ATTEMPTS=20
+          INTERVAL=15
+          START=$SECONDS
+          for attempt in $(seq 1 "$ATTEMPTS"); do
+            SERVED=$(npm view --prefer-online "${PKG_NAME}@${PKG_VERSION}" version --json 2>/dev/null | node -e '
               let s = "";
               process.stdin.on("data", d => s += d).on("end", () => {
                 try {
@@ -129,9 +142,9 @@ jobs:
                   console.log(typeof last === "string" ? last : "");
                 } catch { console.log(""); }
               });' || true)
-            [[ -n "$SERVED" ]] && { echo "registry serves ${PKG_NAME}@${SERVED}"; exit 0; }
-            echo "attempt ${attempt}: not served yet, waiting"
-            sleep 10
+            [[ -n "$SERVED" ]] && { echo "registry serves ${PKG_NAME}@${SERVED} after $((SECONDS - START))s"; exit 0; }
+            echo "attempt ${attempt}/${ATTEMPTS} ($((SECONDS - START))s elapsed): not served yet, waiting ${INTERVAL}s"
+            sleep "$INTERVAL"
           done
-          echo "::error::${PKG_NAME}@${PKG_VERSION} is not being served after publish."
+          echo "::error::${PKG_NAME}@${PKG_VERSION} is not being served $((SECONDS - START))s after publish."
           exit 1

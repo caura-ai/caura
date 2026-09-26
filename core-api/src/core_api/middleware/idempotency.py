@@ -110,12 +110,34 @@ class IdempotencyGuard:
         return self._cached["response_body"], self._cached["status_code"]
 
     async def record(self, response_body: Any, status_code: int = 200) -> None:
-        """Cache the response body under this key. Failures are logged,
-        not raised — the client already has the live response; losing the
-        cache only costs a chance at future dedup."""
+        """Cache the response body under this key.
+
+        Ordinary failures are logged, not raised — the client already has the
+        live response, and losing the cache only costs a chance at future
+        dedup.
+
+        CANCELLATION IS DIFFERENT, and ax-0917-h-09 is what it costs. A
+        document POST ran ~52s, the client lost the response, and the server
+        had already committed. The write being durable is not enough on its
+        own: the key has to be recorded too, or a retry is unprotected. It was
+        not — this ``await`` sat on the request task, a disconnect cancels that
+        task, and ``CancelledError`` is a ``BaseException``, so the ``except
+        Exception`` below never saw it.
+
+        What the probe then observed follows exactly: the retry got 409
+        "still in progress" from the unfinished claim, and a later replay with
+        the same key — by then the pending claim had aged out — was treated as
+        a fresh request and performed a SECOND upsert.
+
+        So the idempotency key failed in precisely the scenario it exists for:
+        a lost response. Shielding lets the record land even though the caller
+        has gone, matching ``storage_client._cancel_safe``; the caller still
+        observes ``CancelledError`` immediately, because the request really was
+        cancelled.
+        """
         expires_at = datetime.now(UTC) + timedelta(seconds=settings.idempotency_ttl_seconds)
-        try:
-            await get_storage_client().upsert_idempotency(
+        task = asyncio.create_task(
+            get_storage_client().upsert_idempotency(
                 tenant_id=self.tenant_id,
                 idempotency_key=self.key,
                 request_hash=self.request_hash,
@@ -123,8 +145,28 @@ class IdempotencyGuard:
                 status_code=status_code,
                 expires_at=expires_at.isoformat(),
             )
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The request is going away; the record is not. Leave the shielded
+            # task running and attach a callback so its outcome is still
+            # logged — an un-awaited task that raises is otherwise reported as
+            # "exception was never retrieved", attributed to nothing.
+            task.add_done_callback(_log_record_outcome)
+            raise
         except Exception:
             logger.warning("Idempotency record failed (non-critical)", exc_info=True)
+
+
+def _log_record_outcome(task: asyncio.Task) -> None:
+    """Report a shielded idempotency record that outlived its request."""
+    if task.cancelled():
+        logger.warning("Idempotency record cancelled after client disconnect")
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Idempotency record failed after client disconnect (non-critical): %r", exc)
 
 
 async def idempotency_for(

@@ -44,7 +44,7 @@ async def _fire_fanout(action: str) -> None:
             extra={"action": action},
         )
 
-    timeout = httpx.Timeout(settings.storage_http_timeout_s)
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.post(url, headers=headers)
@@ -64,12 +64,106 @@ async def _fire_fanout(action: str) -> None:
             },
         )
         return
-    body = resp.json()
+    try:
+        body = resp.json()
+    except ValueError:
+        # A 2xx whose body is not JSON — an intermediary's HTML success page,
+        # a truncated response. The fanout ALREADY FIRED; core-api dispatched
+        # the work before writing this body. Raising here would carry that out
+        # of ``_fire_fanout``, out of the tick, and be logged as a failed cron
+        # tick for work that succeeded — and the scheduler would fan out again
+        # on the next tick. This function's docstring says it does not raise;
+        # this is the one path that did.
+        logger.exception(
+            "lifecycle fanout returned a non-JSON 2xx; fanout fired but its result is unreadable",
+            extra={"action": action, "status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    # ``failed`` is the count of orgs whose ``audit_begin + publish`` pair
+    # raised; core-api logs each one and keeps going, so the fanout still
+    # returns 200. Logging only ``published`` made a partial sweep read as a
+    # clean one from the scheduler's side: on 2026-09-15 this line reported
+    # success for every action while 38 orgs were dropped. The count was
+    # already in the response and nothing looked at it.
+    failed = body.get("failed") or 0
+    if failed:
+        logger.error(
+            "lifecycle fanout dropped orgs",
+            extra={
+                "action": action,
+                "published": body.get("published"),
+                "failed": failed,
+            },
+        )
+        return
     logger.info(
         "lifecycle fanout fired",
         extra={
             "action": action,
             "published": body.get("published"),
+            "failed": 0,
+        },
+    )
+
+
+async def run_lifecycle_reconcile_tick() -> None:
+    """POST ``/admin/lifecycle/reconcile-stranded``.
+
+    Not routed through ``_fire_fanout``: different endpoint, and a
+    different response to read. The fanout reports what it dispatched;
+    this reports what an earlier fanout failed to dispatch and this
+    sweep has now republished.
+    """
+    url = f"{settings.core_api_url.rstrip('/')}/api/v1/admin/lifecycle/reconcile-stranded"
+    headers: dict[str, str] = {}
+    if settings.core_api_admin_api_key:
+        headers["X-API-Key"] = settings.core_api_admin_api_key
+    else:
+        logger.warning(
+            "core-operations: CORE_API_ADMIN_API_KEY unset; lifecycle reconcile will be unauthorised",
+        )
+
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.post(url, headers=headers)
+        except httpx.HTTPError:
+            logger.exception("lifecycle reconcile POST failed", extra={"url": url})
+            return
+    if resp.status_code >= 400:
+        logger.error(
+            "lifecycle reconcile returned non-2xx; will retry next tick",
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
+    body = resp.json()
+    stranded = body.get("stranded") or 0
+    if not stranded:
+        # The steady state. Debug, so an hourly no-op does not bury the
+        # sweeps that actually found something.
+        logger.debug("lifecycle reconcile: nothing stranded")
+        return
+    # A non-zero count means an earlier fanout dropped work on the floor.
+    # The sweep repairs it, so this is not an error -- but it is the only
+    # signal that the drop happened at all, since the rows it repairs were
+    # stranded without any log line of their own.
+    # ``ineffective`` counts rows this sweep republished that are already far
+    # past the point where they should have completed. Escalated above the
+    # ordinary sweep line because publishing is fire-and-forget: a permanently
+    # unroutable topic would otherwise produce a healthy-looking sweep every
+    # hour forever. On the very first run the backlog can trip this without
+    # any sweep having failed, which is still worth an operator's attention --
+    # the rows are genuinely not completing either way.
+    ineffective = body.get("ineffective") or 0
+    level = logger.error if ineffective else logger.warning
+    level(
+        "lifecycle reconcile swept stranded rows",
+        extra={
+            "stranded": stranded,
+            "republish_attempted": body.get("republish_attempted"),
+            "failed": body.get("failed"),
+            "unknown_action": body.get("unknown_action"),
+            "ineffective": ineffective,
         },
     )
 
@@ -203,7 +297,7 @@ async def run_embedding_coverage_tick() -> None:
             "core-operations: CORE_API_ADMIN_API_KEY unset; embedding-coverage sample will be unauthorised",
         )
 
-    timeout = httpx.Timeout(settings.storage_http_timeout_s)
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.get(url, headers=headers)
@@ -372,9 +466,11 @@ async def run_interviewer_schedule_tick() -> None:
             "core-operations: CORE_API_ADMIN_API_KEY unset; interviewer schedule run will be unauthorised",
         )
 
-    # Scheduling is queue-only (no LLM work inline) — the storage default
-    # timeout is plenty.
-    timeout = httpx.Timeout(settings.storage_http_timeout_s)
+    # Scheduling is queue-only (no LLM work inline), so this one never
+    # approaches the budget; it shares the setting because it is a core-api
+    # call and the ordering against core-api's own deadline has to hold for
+    # every one of them, not just the slow one.
+    timeout = httpx.Timeout(settings.core_api_http_timeout_s)
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             resp = await client.post(url, headers=headers)

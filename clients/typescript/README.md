@@ -46,10 +46,27 @@ const mc = new Caura("standalone", { tenantId: "default", baseUrl: "http://local
 | `write(content, opts?)` | `POST /api/v1/memories` | `Memory` |
 | `search(query, opts?)` | `POST /api/v1/search` | `Memory[]` |
 | `recall(query, opts?)` | `POST /api/v1/recall` | `RecallResult` |
+| `getDocument(docId, opts)` | `GET /api/v1/documents/{docId}` | `object` |
 | `health()` | `GET /api/v1/health` | `object` |
 
 Failures throw `AuthError` (401/403), `NotFoundError` (404), or
-`CauraApiError`. Every result also exposes the full API payload on `.raw`.
+`CauraApiError` for HTTP errors. Network failures and timeouts while awaiting
+response headers or consuming the response body throw `TransportError`, with
+the original rejection in `cause`. All extend `CauraError`, so one catch can
+handle both HTTP and transport failures. Transport errors have no HTTP status
+code; requests are not retried. Every result also exposes the full API payload
+on `.raw`.
+
+### Fetching a document
+
+`getDocument()` returns the full `DocOut` envelope — the stored record is
+nested under the `"data"` key, not returned directly. `collection` is a
+required option, and a missing document raises `NotFoundError`:
+
+```ts
+const doc = await mc.getDocument("doc-123", { collection: "interviews" });
+const record = doc.data; // the stored record lives under "data"
+```
 
 ### Unknown fields on writes are rejected
 
@@ -74,6 +91,15 @@ fields, deliberately. See
 For credentials, scopes, and the full API surface, see the
 [Caura docs](https://caura.ai/docs). Production fleets should use
 [per-agent keys](https://caura.ai/docs/integrations/per-agent-keys).
+
+## Request headers
+
+Every request carries `X-API-Key` (your key), `Content-Type: application/json`
+and a `User-Agent` of the form `caura-client-node/<version> (node/<major>)`.
+The `User-Agent` lets a Caura server count which SDK families talk to it; it
+names only the package, its version and the Node major (browsers drop the
+header, which is fine). The client sends nothing to any host other than the
+`baseUrl` you configure. The version is also exported as `VERSION`.
 
 ## Not `npm install caura`
 

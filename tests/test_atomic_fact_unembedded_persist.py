@@ -16,6 +16,7 @@ import pytest
 
 from core_api.services import memory_service
 from core_api.services.memory_enrichment import AtomicFact
+from tests.conftest import close_scheduled_coro
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -65,10 +66,27 @@ def _row():
 
 
 async def _run_fanout(embed_stub):
-    """Drive the fan-out with a stubbed ``get_embedding``.
+    """Drive the fan-out with a stubbed embedder.
+
+    ``embed_stub`` is still written per fact — ``(content, tenant_config=None,
+    **kwargs)`` — because that is the shape each failure mode is naturally
+    expressed in. The fan-out now issues ONE batch call for the whole surviving
+    set instead of one call per fact (OSS 08/14 L-38), so the stub is adapted to
+    that boundary here rather than every test being rewritten around it. The
+    injected behaviour is identical either way:
+
+      - a stub returning ``None`` yields a batch of ``None`` — the degrade
+        ``get_embedding`` documents;
+      - a stub that RAISES propagates out of the batch call, where
+        ``_embed_children_or_degrade`` catches it and returns all ``None`` —
+        the same state the old per-fact ``except`` arm produced.
 
     Returns ``(child_writes, scheduled_reembeds)``.
     """
+
+    async def _batch_stub(texts, tenant_config=None, **kwargs):
+        return [await embed_stub(t, tenant_config) for t in texts]
+
     sc = AsyncMock(name="storage_client")
     sc.get_memory = AsyncMock(return_value=_row())
     sc.update_memory = AsyncMock(return_value=None)
@@ -96,12 +114,14 @@ async def _run_fanout(embed_stub):
 
     with (
         patch.object(memory_service, "get_storage_client", lambda: sc),
-        patch.object(memory_service, "track_task", MagicMock()),
+        patch.object(
+            memory_service, "track_task", MagicMock(side_effect=close_scheduled_coro)
+        ),
         patch.object(memory_service, "tracked_task", new=_stub_tracked_task),
         patch.object(
             memory_service, "_schedule_embed_or_reembed", new=_capture_schedule
         ),
-        patch.object(memory_service, "get_embedding", new=embed_stub),
+        patch.object(memory_service, "get_embeddings_batch", new=_batch_stub),
         patch(
             "core_api.services.memory_enrichment.enrich_memory",
             new=AsyncMock(return_value=_enrichment()),
@@ -227,7 +247,9 @@ async def test_missing_child_id_is_reported_not_counted_as_scheduled() -> None:
 
     with (
         patch.object(memory_service, "get_storage_client", lambda: sc),
-        patch.object(memory_service, "track_task", MagicMock()),
+        patch.object(
+            memory_service, "track_task", MagicMock(side_effect=close_scheduled_coro)
+        ),
         patch.object(memory_service, "tracked_task", new=MagicMock()),
         patch.object(
             memory_service,

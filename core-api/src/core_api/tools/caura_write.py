@@ -26,7 +26,15 @@ _SPEC = ToolSpec(
     handler=mcp_server.caura_write,
     plugin_exposed=True,
     trust_required=0,
-    error_codes=("INVALID_ARGUMENTS", "BATCH_TOO_LARGE", "INVALID_BATCH_ITEM"),
+    error_codes=(
+        "AGENT_NOT_APPROVED",
+        "BATCH_TOO_LARGE",
+        "FORBIDDEN",
+        "INVALID_ARGUMENTS",
+        "INVALID_BATCH_ITEM",
+        "MISSING_AGENT_ID",
+        "UNAUTHORIZED",
+    ),
 )
 register(_SPEC)
 mcp_register(mcp_server.mcp, _SPEC)

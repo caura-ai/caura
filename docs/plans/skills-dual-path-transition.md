@@ -8,7 +8,7 @@
 ## What this covers
 
 Both skill populations are served under two slugs during this transition:
-the historical slug (`memclaw`, already on disk on every existing <!-- legacy-name-ok: dual-path skills transition -->
+the historical slug (`memclaw`, already on disk on every existing <!-- legacy-name-floor: dual-path skills transition -->
 install) and the new one (`caura`, shipped alongside it starting this
 change). Neither directory's content differs except in the handful of
 lines that self-reference their own install path — see the PR that
@@ -23,10 +23,10 @@ is safer than a single synchronized flip.
 
 ## Why the historical slug isn't dropped yet
 
-`plugin/skills/memclaw/` is protected from deletion by <!-- legacy-name-ok: dual-path skills transition -->
+`plugin/skills/memclaw/` is protected from deletion by <!-- legacy-name-floor: dual-path skills transition -->
 `reconcile-skills.ts`'s `PROTECTED_SKILLS` set. That reconciler runs every
 60 seconds and deletes any on-disk skill slug that is neither in the
-server's dynamic catalog nor in `PROTECTED_SKILLS` — so removing the <!-- legacy-name-ok: dual-path skills transition -->
+server's dynamic catalog nor in `PROTECTED_SKILLS` — so removing the
 historical slug from that set deletes the directory, and whatever an
 agent's already-generated `TOOLS.md`/`AGENTS.md` text still points at,
 from every existing install within one heartbeat of the next deploy. That
@@ -36,7 +36,7 @@ universal — some tenants opt out, and some installs are version-pinned;
 see `core-api/src/core_api/routes/fleet.py`'s
 `KNOWN_BROKEN_DEPLOY_VERSIONS` and `_auto_upgrade_enabled_for_tenant`).
 
-The standalone `static/skills/memclaw/` has no equivalent deletion risk — <!-- legacy-name-ok: dual-path skills transition -->
+The standalone `static/skills/memclaw/` has no equivalent deletion risk — <!-- legacy-name-floor: dual-path skills transition -->
 nothing reconciles it — but has no update channel either: an existing
 curl-install sits untouched until the operator re-runs the installer, so
 there's equally no reason to remove server-side support for it while any
@@ -70,9 +70,7 @@ date on a calendar.
 - The scoping analysis this transition was built from: shared with Eldad
   directly (coupling sites, ordering constraints, blast radius, what
   could and couldn't be established from this repo alone).
-- `docs/plans/rebrand-alias-retirement-policy.md` — a separate,
-  superseded, cross-repo policy for production machine-route aliases.
-  Not used here: that document's table is shaped for host/route
-  retirement across multiple repositories, not a single repo's
-  bundled-skill directory slug, and updating it is out of this change's
-  scope.
+- `docs/plans/rebrand-alias-migration-notes.md` retains the source-level
+  one-release cleanup instructions. Cross-repository policy lives in the
+  `caura-enterprise` compatibility register and is not used for this bundled-skill
+  directory gate.

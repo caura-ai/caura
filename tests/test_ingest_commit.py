@@ -207,6 +207,12 @@ def captured(monkeypatch):
     # ``upsert_document`` is called by ``_write_parent_ingest_document``
     # after the bulk write. Capture the payload + give callers access
     # via ``state.parent_doc_writes`` so they can assert on it.
+    #
+    # 09/02 M-45: BOTH endpoints are stubbed, because the parent write now
+    # picks between them — a payload carrying an ``embedding`` must go to
+    # ``upsert-xmax``, the only one whose handler accepts a vector. Stubbing
+    # only the plain one would let a regression that silently drops the vector
+    # pass as green.
     state.parent_doc_writes = []  # list[dict]
 
     async def fake_upsert_document(payload):
@@ -223,6 +229,7 @@ def captured(monkeypatch):
     mock_sc = MagicMock()
     mock_sc.bulk_find_by_content_hashes = AsyncMock(side_effect=fake_bulk_find)
     mock_sc.upsert_document = AsyncMock(side_effect=fake_upsert_document)
+    mock_sc.upsert_document_xmax = AsyncMock(side_effect=fake_upsert_document)
     monkeypatch.setattr(ingest_service, "get_storage_client", lambda: mock_sc)
     return state
 

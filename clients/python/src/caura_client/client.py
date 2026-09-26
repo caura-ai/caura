@@ -6,15 +6,27 @@ A thin wrapper over the Caura REST API. Point it at a managed
 
 from __future__ import annotations
 
+import sys
 import urllib.parse
 from typing import Any
 
 import httpx
 
-from .exceptions import AuthError, CauraAPIError, NotFoundError
+from ._version import __version__
+from .exceptions import AuthError, CauraAPIError, NotFoundError, RateLimitError, TransportError
 from .models import Memory, RecallResult
 
 DEFAULT_BASE_URL = "https://caura.ai"
+
+USER_AGENT = (
+    f"caura-client-python/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"
+)
+"""Sent on every request so a server can tell SDK families apart.
+
+It names the package, its version and the Python major.minor, nothing more;
+no other identifying information is added and the client never contacts
+anything but ``base_url``.
+"""
 
 
 class Caura:
@@ -48,7 +60,11 @@ class Caura:
         self.agent_id = agent_id
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
-            headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+            headers={
+                "X-API-Key": api_key,
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
             timeout=timeout,
             transport=transport,
         )
@@ -108,11 +124,14 @@ class Caura:
         """Search + LLM summary. Returns a ``RecallResult`` context brief (POST /api/v1/recall)."""
         body: dict[str, Any] = {"tenant_id": self.tenant_id, "query": query, "top_k": top_k}
         body.update(extra)
-        return RecallResult.from_dict(self._post("/api/v1/recall", body))
+        data = self._post("/api/v1/recall", body)
+        if not isinstance(data, dict):
+            raise CauraAPIError(200, "recall response must be a JSON object")
+        return RecallResult.from_dict(data)
 
     def health(self) -> dict[str, Any]:
         """Liveness probe (GET /api/v1/health)."""
-        response = self._http.get("/api/v1/health")
+        response = self._request("GET", "/api/v1/health")
         self._raise_for_status(response)
         return response.json()
 
@@ -132,7 +151,8 @@ class Caura:
         # paths, so a doc_id containing '/' would hit a different route and
         # '?' would inject query params.
         encoded = urllib.parse.quote(doc_id, safe="")
-        response = self._http.get(
+        response = self._request(
+            "GET",
             f"/api/v1/documents/{encoded}",
             params={"tenant_id": tenant_id or self.tenant_id, "collection": collection},
         )
@@ -172,7 +192,7 @@ class Caura:
             body["fleet_id"] = fleet_id
         if command_id:
             body["command_id"] = command_id
-        response = self._http.post("/api/v1/interview/submit", json=body, timeout=timeout)
+        response = self._request("POST", "/api/v1/interview/submit", json=body, timeout=timeout)
         self._raise_for_status(response)
         result = response.json()
         if isinstance(result, dict):
@@ -181,9 +201,15 @@ class Caura:
 
     # ------------------------------------------------------------- internals
     def _post(self, path: str, body: dict[str, Any]) -> Any:
-        response = self._http.post(path, json=body)
+        response = self._request("POST", path, json=body)
         self._raise_for_status(response)
         return response.json()
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        try:
+            return self._http.request(method, path, **kwargs)
+        except httpx.TransportError as exc:
+            raise TransportError(f"Request failed: {exc}") from exc
 
     @staticmethod
     def _raise_for_status(response: httpx.Response) -> None:
@@ -207,13 +233,24 @@ class Caura:
             raise AuthError(response.status_code, message or "authentication failed", details=details)
         if response.status_code == 404:
             raise NotFoundError(response.status_code, message or "not found", details=details)
+        if response.status_code == 429:
+            try:
+                retry_after = float(response.headers["Retry-After"])
+            except (KeyError, ValueError):
+                retry_after = None
+            raise RateLimitError(
+                response.status_code,
+                message or "rate limit exceeded",
+                details=details,
+                retry_after=retry_after,
+            )
         raise CauraAPIError(response.status_code, message or "request failed", details=details)
 
     # ------------------------------------------------------------- lifecycle
     def close(self) -> None:
         self._http.close()
 
-    def __enter__(self) -> Caura:
+    def __enter__(self) -> Caura:  # noqa: PYI034 - Self is unavailable on supported Python 3.9.
         return self
 
     def __exit__(self, *exc: object) -> None:

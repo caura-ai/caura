@@ -11,7 +11,7 @@
 ARG DD_APM_ENABLED=false
 # Pinned by digest (tag :1 floats) so the embedded binary is reproducible.
 # datadog/serverless-init:1 as of 2026-06-30; bump deliberately.
-FROM datadog/serverless-init:1@sha256:2f498f4b1165ac3551c34129b4f0c0c7bd99d82c55c4e95cf494b55dad8d05d0 AS dd-bin
+FROM datadog/serverless-init:1@sha256:f4943347f155505156ba5f594317ea64b59678b3a6522e8c0993581af20956ff AS dd-bin
 FROM python:3.12-slim AS dd-apm-true
 COPY --from=dd-bin /datadog-init /dd/datadog-init
 FROM python:3.12-slim AS dd-apm-false
@@ -66,7 +66,7 @@ RUN if [ "$WITH_RERANK_LOCAL" = "1" ]; then \
 
 # Stamp the service version into a file the app reads at runtime. Source of
 # truth is pyproject.toml; an optional CAURA_VERSION build-arg (e.g. the
-# release tag) overrides it (MEMCLAW_VERSION keeps working — legacy-name-ok: rule 3 dual-read alias).
+# release tag) overrides it (MEMCLAW_VERSION keeps working — legacy-name-floor: documents the live dual-read alias).
 # Deterministic and independent of installed-
 # package metadata — deps install via ``--no-emit-project`` so core-api is
 # never installed as a package, leaving importlib.metadata with no version

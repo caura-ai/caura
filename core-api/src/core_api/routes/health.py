@@ -23,6 +23,7 @@ from core_api.providers._platform import (
     get_platform_llm,
 )
 from core_api.routes.plugin import _plugin_version
+from core_api.service_agent_ids import canonical_service_agent_id
 from core_api.services.agent_service import lookup_agent
 from core_api.tools import REGISTRY  # SoT registry — populated at import time
 from core_api.version_compat import MIN_RECOMMENDED_PLUGIN_VERSION
@@ -165,6 +166,11 @@ async def whoami(request: Request) -> dict:
         # a write on this same connection would resolve to.
         tenant_id = None
     if tenant_id:
+        # The gateway may carry a retired service identity supplied by an
+        # older client. Report and look up the same canonical identity that
+        # every authenticated API path uses.
+        if agent_id is not None:
+            agent_id = canonical_service_agent_id(agent_id)
         # Surface the cross-tenant scope the gateway plumbed so callers
         # can verify what their credential authorizes WITHOUT having to
         # probe each readable tenant one at a time. Single-tenant

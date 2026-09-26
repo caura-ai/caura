@@ -167,7 +167,7 @@ try {
       const { homedir } = await import("os");
       sidecar = JSON.parse(
         readFileSync(
-          join(homedir(), ".openclaw", "plugins", "memclaw", "interview-task-sync.json"),
+          join(homedir(), ".openclaw", "plugins", "memclaw", "interview-task-sync.json"), // legacy-name-ok: the published plugin id fixes the installed sidecar path
           "utf-8",
         ),
       );

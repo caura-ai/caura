@@ -123,6 +123,52 @@ updates:
       npm-majors:
         update-types: ["major"]
 
+  # --- Python: published client packages (PyPI) ---
+  # These ship inside other people's projects, so they need advisory PRs as much as the
+  # services do. One multi-directory entry, as with uv. No lockfiles here — see the header
+  # on why that rules out `versioning-strategy`.
+  - package-ecosystem: "pip"
+    directories:
+      - "/clients/python"
+      - "/clients/caura-meta"
+      - "/clients/caura-sdk-meta"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps(clients)"
+    groups:
+      clients-pip-minor-patch:
+        update-types: ["minor", "patch"]
+      clients-pip-majors:
+        update-types: ["major"]
+
+  # --- npm: published client packages ---
+  - package-ecosystem: "npm"
+    directories:
+      - "/clients/typescript"
+      - "/clients/npm-caura-client"
+      - "/clients/npm-caura-sdk"
+      - "/clients/npm-sdk"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "kind/chore"
+      - "area/infra"
+    commit-message:
+      prefix: "deps(clients)"
+    groups:
+      clients-npm-minor-patch:
+        update-types: ["minor", "patch"]
+      clients-npm-majors:
+        update-types: ["major"]
+
   # --- GitHub Actions ---
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -146,8 +192,16 @@ updates:
         update-types: ["major"]
 
   # --- Docker ---
+  # The docker ecosystem only scans the directory it is pointed at: `/` covers the compose
+  # files, and the four service Dockerfiles (the images publish-docker.yml ships) each need
+  # their own directory. One multi-directory entry, as with uv, so it stays one grouped PR.
   - package-ecosystem: "docker"
-    directory: "/"
+    directories:
+      - "/"
+      - "/core-api"
+      - "/core-storage-api"
+      - "/core-worker"
+      - "/core-operations"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 3
@@ -155,6 +209,10 @@ updates:
       - "dependencies"
       - "kind/chore"
       - "area/infra"
+      - "area/core-api"
+      - "area/core-storage-api"
+      - "area/core-worker"
+      - "area/core-operations"
     commit-message:
       prefix: "deps(docker)"
     groups:

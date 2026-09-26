@@ -137,7 +137,14 @@ def test_op_dispatched_tools_have_expected_op_sets():
 
     manage_ops = {op.name for op in REGISTRY["caura_manage"].ops}
     doc_ops = {op.name for op in REGISTRY["caura_doc"].ops}
-    assert manage_ops == {"read", "update", "transition", "delete"}
+    assert manage_ops == {
+        "read",
+        "update",
+        "transition",
+        "delete",
+        "bulk_delete",
+        "lineage",
+    }
     assert doc_ops == {"write", "read", "query", "delete", "list_collections", "search"}
 
 

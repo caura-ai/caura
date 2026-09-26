@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Text,
     text,
@@ -33,7 +34,7 @@ class RecallEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
-    tenant_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
     ts: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
     )
@@ -53,21 +54,36 @@ class RecallEvent(Base):
     top_score: Mapped[float | None] = mapped_column(Float)
     latency_ms: Mapped[int | None] = mapped_column(Integer)
 
+    # Named to match migration 027, which is what actually exists. As
+    # ``index=True`` on ``tenant_id`` this was ``ix_recall_event_tenant_id`` —
+    # a single-column index the migration never created, while the composite
+    # below (which it did create, and which serves the same tenant-prefixed
+    # lookups) went undeclared. 09/02 L-14, both directions in one table.
+    __table_args__ = (Index("ix_recall_event_tenant_ts", "tenant_id", "ts"),)
+
 
 class RecallCandidate(Base):
     __tablename__ = "recall_candidate"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     recall_event_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("recall_event.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("recall_event.id", ondelete="CASCADE"), nullable=False
     )
     rank: Mapped[int] = mapped_column(Integer, nullable=False)
     # Pointer only — JOIN to ``memories`` for content. Not a FK so a later
     # memory purge can't delete the diagnostic record.
-    memory_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
+    memory_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     vec_sim: Mapped[float | None] = mapped_column(Float)
     final_score: Mapped[float | None] = mapped_column(Float)
     recall_boost: Mapped[float | None] = mapped_column(Float)
     returned: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
+    )
+
+    # Migration 027's names again — ``index=True`` produced
+    # ``ix_recall_candidate_recall_event_id`` / ``ix_recall_candidate_memory_id``,
+    # neither of which exists anywhere.
+    __table_args__ = (
+        Index("ix_recall_candidate_event", "recall_event_id"),
+        Index("ix_recall_candidate_memory", "memory_id"),
     )

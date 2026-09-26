@@ -83,6 +83,16 @@ def test_health_check_probe_dropped_as_noise():
         agent="someagent",
     )
     assert not passes_noise_filter(smoke_titled)
+    # The canonical prefix is filtered too. The matcher accepts both spellings
+    # so it can ship BEFORE the plugin's self-test writer moves; if it shipped
+    # after, every probe fact written in between would be counted as real agent
+    # work in customer reports, silently.
+    canonical_smoke = _m(
+        mtype="fact",
+        title="caura-smoke-123 identifier",
+        agent="someagent",
+    )
+    assert not passes_noise_filter(canonical_smoke)
 
 
 def test_reserved_id_never_becomes_a_rollup_parent():

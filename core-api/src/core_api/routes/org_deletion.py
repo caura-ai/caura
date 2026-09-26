@@ -44,6 +44,49 @@ _ACTION = "hard-delete-org"
 _MAX_TENANT_IDS = 100
 
 
+async def _parse_tenant_ids_body(request: Request) -> tuple[dict, list[str]]:
+    """Parse and validate the ``{tenant_ids, ...}`` body both org routes take.
+
+    One parser rather than two copies, because the copies are what failed: the
+    read-only ``preview-data`` grew the malformed-UTF-8 and non-object guards in
+    review on PR #246 and the destructive ``purge-data`` never did (OSS 08/14
+    L-10), leaving the endpoint that PERMANENTLY DELETES tenant data the laxer
+    of the pair about what it would accept. Fixing that by copying the guards
+    across would have restored parity and preserved the mechanism that lost it;
+    sharing the parser makes "purge accepts exactly what preview accepts"
+    structural instead of a claim a comment makes.
+
+    ``request.json()`` raises ``UnicodeDecodeError`` on a malformed-UTF-8 body
+    and succeeds for arrays / strings / numbers, on which ``.get`` would raise
+    ``AttributeError`` — both 500s for what is plainly caller error.
+    """
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="request body must be a JSON object")
+
+    tenant_ids = body.get("tenant_ids")
+    if (
+        not isinstance(tenant_ids, list)
+        or not tenant_ids
+        or not all(isinstance(t, str) and t for t in tenant_ids)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="'tenant_ids' must be a non-empty list of non-empty strings",
+        )
+    if len(tenant_ids) > _MAX_TENANT_IDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'tenant_ids' must contain at most {_MAX_TENANT_IDS} entries per call",
+        )
+    if len(tenant_ids) != len(set(tenant_ids)):
+        raise HTTPException(status_code=422, detail="'tenant_ids' must not contain duplicates")
+    return body, tenant_ids
+
+
 @router.post("/admin/org/purge-data")
 async def purge_org_data(
     request: Request,
@@ -63,28 +106,7 @@ async def purge_org_data(
     failure from the status code alone, without parsing the body.
     """
     auth.enforce_admin()
-    try:
-        body: dict = await request.json()
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
-
-    tenant_ids = body.get("tenant_ids")
-    if (
-        not isinstance(tenant_ids, list)
-        or not tenant_ids
-        or not all(isinstance(t, str) and t for t in tenant_ids)
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="'tenant_ids' must be a non-empty list of non-empty strings",
-        )
-    if len(tenant_ids) > _MAX_TENANT_IDS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"'tenant_ids' must contain at most {_MAX_TENANT_IDS} entries per call",
-        )
-    if len(tenant_ids) != len(set(tenant_ids)):
-        raise HTTPException(status_code=422, detail="'tenant_ids' must not contain duplicates")
+    body, tenant_ids = await _parse_tenant_ids_body(request)
     triggered_by = body.get("triggered_by") or "admin-key"
 
     storage = get_storage_client()
@@ -162,37 +184,8 @@ async def preview_org_data(
     written — a preview is a query, not a lifecycle event.
     """
     auth.enforce_admin()
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        # Match the hardened tenant-suppression / preview routers — a
-        # malformed UTF-8 body would otherwise surface as 500.
-        raise HTTPException(status_code=422, detail="request body must be valid JSON") from exc
-    # Reject non-object JSON bodies — ``request.json()`` succeeds for
-    # arrays / strings / numbers, and ``.get`` on those raises
-    # ``AttributeError`` → 500. The storage-layer preview router has
-    # the same defence; mirror it here so the public surface stays
-    # consistent. Bot review round 1 on PR #246.
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=422, detail="request body must be a JSON object")
-
-    tenant_ids = body.get("tenant_ids")
-    if (
-        not isinstance(tenant_ids, list)
-        or not tenant_ids
-        or not all(isinstance(t, str) and t for t in tenant_ids)
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="'tenant_ids' must be a non-empty list of non-empty strings",
-        )
-    if len(tenant_ids) > _MAX_TENANT_IDS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"'tenant_ids' must contain at most {_MAX_TENANT_IDS} entries per call",
-        )
-    if len(tenant_ids) != len(set(tenant_ids)):
-        raise HTTPException(status_code=422, detail="'tenant_ids' must not contain duplicates")
+    # ``body`` discarded: preview takes no options beyond ``tenant_ids``.
+    _body, tenant_ids = await _parse_tenant_ids_body(request)
 
     storage = get_storage_client()
     counts: dict[str, dict[str, int]] = {}

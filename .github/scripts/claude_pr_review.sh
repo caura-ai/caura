@@ -61,10 +61,13 @@ fi
 # findings a maintainer has already judged wrong — here and in the six repos on the org's shared
 # pipeline, which write into the same fleet.
 #
-# DARK AND SILENT without CAURA_AGENTS_KEY: returns immediately, and the review is
-# byte-for-byte what it would be without the feature. That matters more here than elsewhere —
-# this repo is PUBLIC, and the org secret is `private` visibility, so it cannot read it. Until a
-# repo-level secret exists this is a no-op by design, not a misconfiguration.
+# DARK, BUT NO LONGER SILENT, without CAURA_AGENTS_KEY: it returns immediately and the
+# review is byte-for-byte what it would be without the feature, but it says so in the run
+# (#1581). The distinction matters here more than elsewhere — this repo is PUBLIC and the
+# organization secret is `private` visibility, so it cannot read that one and depends on a
+# repo-level secret of the same name, provisioned 2026-09-17. Before that this was a no-op
+# by design rather than a misconfiguration, and telling those two apart from the outside is
+# exactly what the notice exists for.
 #
 # Inlined rather than sourced from a review_lib.sh: this copy is deliberately two standalone
 # files (see the workflow header for why it is local at all), and a library holding one function
@@ -72,11 +75,20 @@ fi
 recall_review_guidance() {
   local diff="$1"
   GUIDANCE_SECTION=""
-  # Either spelling, first NON-EMPTY (``:-`` treats blank as unset): the workflow
-  # passes CAURA_AGENTS_KEY, resolved from whichever secret exists, but a manual
-  # run may still export the pre-rename name.
-  local agents_key="${CAURA_AGENTS_KEY:-${MEMCLAW_AGENTS_KEY:-}}"  # legacy-name-ok: rule 3 dual-read alias
-  [ -n "$agents_key" ] || return 0
+  local agents_key="${CAURA_AGENTS_KEY:-}"
+  # Dark is still dark -- the review is byte-for-byte unchanged -- but it SAYS so now.
+  # Of the two scripts here, the capture one already printed that it was dark; this one,
+  # which runs on EVERY review rather than after a merge, returned in silence. So a key
+  # that stops resolving would degrade every review in this repository with nothing in
+  # any run to read. That is not hypothetical -- the shared pipeline had exactly this
+  # gap, and it is how recall stayed dead across the org until somebody read the code.
+  # A notice rather than a warning, matching the capture script's choice for the
+  # identical condition: an absent key is a supported state, and a yellow annotation on
+  # every review would teach people to ignore annotations.
+  if [ -z "$agents_key" ]; then
+    echo "::notice::Reviewing without learned guidance — no agents key, recall is dark"
+    return 0
+  fi
   local caura_url="${CAURA_API_URL:-${MEMCLAW_API_URL:-https://caura.ai}}"  # legacy-name-ok: rule 3 dual-read alias
   local fleet="${CODE_REVIEW_FLEET_ID:-code-review}"
   # Query built from the changed paths so recall is relevant to THIS diff. The sanitiser keeps

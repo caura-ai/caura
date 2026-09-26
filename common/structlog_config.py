@@ -36,18 +36,37 @@ import os
 import sys
 import threading
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
+
+if TYPE_CHECKING:
+    # Annotation-only. ``ddtrace.trace``, not ``ddtrace``: 4.x dropped the
+    # top-level ``Tracer`` re-export.
+    from ddtrace.trace import Tracer
 
 # ddtrace is an optional dependency — only the `datadog` extra (SaaS + APM
 # builds) installs it. Import it guarded so OSS / on-prem / local, which never
 # install it, keep importing this module. `_add_dd_trace_context` no-ops when
 # this is None. Top-level (not a deferred import) so the name is patchable in
 # tests and the dependency is visible at module scope.
+# Import the module and read the attribute, NOT ``from ddtrace import tracer
+# as _dd_tracer`` — that binds _dd_tracer as ``Tracer`` wherever ddtrace
+# resolves, making both ``None`` assignments (here, and the disable-on-fault
+# branch in ``_add_dd_trace_context``) type errors. Declaring the type instead
+# then collides with the import binding (no-redef) where it does not resolve.
+# This spelling is the one that checks clean in both vendored trees.
+_dd_tracer: Tracer | None
 try:
-    from ddtrace import tracer as _dd_tracer
-except ImportError:  # pragma: no cover - exercised only in non-datadog installs
+    import ddtrace
+
+    # AttributeError as well as ImportError: reading the attribute cannot
+    # signal a missing name the way ``from ddtrace import tracer`` did, and 4.x
+    # dropping the top-level ``Tracer`` is proof these re-exports do move. An
+    # uncaught one here would crash every service that imports this module,
+    # which is exactly what the optional-dependency guard exists to prevent.
+    _dd_tracer = ddtrace.tracer
+except (ImportError, AttributeError):  # pragma: no cover - non-datadog installs
     _dd_tracer = None
 
 # Flips true after the first ddtrace correlation failure so we warn once (to

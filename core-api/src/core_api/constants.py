@@ -14,6 +14,7 @@ from common.constants import (  # noqa: F401
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
     LIFECYCLE_STALE_ARCHIVE_WEIGHT,
+    MAX_SEARCH_TOP_K,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     SEMANTIC_DEDUP_CANDIDATE_LIMIT,
@@ -40,7 +41,7 @@ from common.enrichment.constants import (  # noqa: F401
     SERVER_RESERVED_MEMORY_TYPES,
     MemoryType,
 )
-from common.env_utils import read_float_env
+from common.env_utils import read_float_env, read_int_env
 
 # Re-export LLM provider constants from common.llm (CAURA-595).
 from common.llm.constants import (  # noqa: F401
@@ -139,11 +140,61 @@ MEMORY_TYPES_FILTER_DESCRIPTION = (
     "Filter results to a single memory type. Valid values: " + ", ".join(MEMORY_TYPES) + "."
 )
 
+# Shown on every WRITE field that accepts it. States the guarantee exactly,
+# because the guarantee is weaker than the field name suggests: the lifecycle
+# sweep archives the row, so it stays readable until the next tick. A caller
+# needing it to disappear AT the timestamp is asking for a read-time filter,
+# which this is not (caura#1637).
+EXPIRES_AT_DESCRIPTION = (
+    "Optional retention hint. Once this time passes, the row is archived on the "
+    "next lifecycle tick and stops being returned by reads. Not a hard cutoff: "
+    "the row remains readable until that tick runs. Distinct from ts_valid_end, "
+    "which closes a temporal-validity interval rather than expressing retention."
+)
+
+# oss-0814-l-08. The C25 caller/platform metadata boundary, stated on the surface
+# a caller actually reads.
+#
+# The rule itself is old — "LLM fills gaps; agent-provided values always win" has
+# sat in ``MergeEnrichmentFields`` since the first public release, and C25 made
+# the metadata half of it true. But it was only ever written in source comments:
+# this field carried no description at all, and ``caura_write``'s said "Metadata
+# (single only)." An agent deciding whether it is safe to send its own ``summary``
+# had nothing to read, and the safe assumption from the outside — that a field
+# the platform also writes will be overwritten — is the wrong one.
+#
+# Named keys rather than "some keys": ``summary`` and ``tags`` are the entire
+# ``CALLER_OWNABLE_KEYS`` set, and a caller cannot act on a rule whose scope is
+# left vague.
+CALLER_METADATA_DESCRIPTION = (
+    "Free-form metadata stored with the memory. Keys you send are yours: "
+    "enrichment never overwrites a `summary` or `tags` you supply here, on this "
+    "write or on any later one — the platform's own versions go to "
+    "`system_metadata` instead. Platform-reserved keys (timings, governance "
+    "verdicts, provenance) are stripped from this dict; send them and they are "
+    "dropped, not stored."
+)
+
 # ── Memory status lifecycle ──
 MEMORY_STATUSES_PATTERN = (
     r"^(active|pending|confirmed|cancelled"
     r"|outdated|conflicted|archived|deleted)$"
 )
+
+# The two statuses contradiction detection writes on a losing row — and the only
+# two any retraction path may revert FROM. Anything else on a contradicted row
+# means another writer has moved it since (a human confirmed it, the crystallizer
+# archived it, a different chain superseded it), so stamping "active" over that
+# would discard someone else's decision.
+#
+# One definition because four call sites read it and every one of them is a
+# destructive-write guard: ``contradiction_detector``'s Path-C retraction,
+# ``memory_service``'s edit-time revert, the supersedes-chain follow in
+# ``pipeline.steps.search.load_and_serialize``, and outcome inference's failure
+# evidence. It previously lived in ``outcome_inference.contradictions`` under a
+# comment telling readers to keep it in sync BY HAND with the detector's writes —
+# which is the strongest possible argument that it belongs in one place.
+CONTRADICTED_STATUSES: tuple[str, ...] = ("outdated", "conflicted")
 
 # ── Health / status probe timeouts ──
 # The storage pool's per-attempt connect ceiling (``storage_client._make_pool``
@@ -160,6 +211,24 @@ MEMORY_STATUSES_PATTERN = (
 # flapping below. Whether storage should follow is deliberately NOT settled here:
 # this value governs every storage call, not just the probe.
 STORAGE_CONNECT_TIMEOUT_SECONDS = 5.0
+
+# httpx read ceiling on every storage call (``StorageClient._make_pool``). See
+# that docstring for why it sits above the bulk route's own budget rather than
+# level with it.
+#
+# Named rather than inline because it is now a CONSTRAINT as well as a setting:
+# an application-level budget that means to cancel a slow storage call itself
+# has to fire before this, or httpx fires first and the caller gets an opaque
+# ``ReadTimeout('')`` instead of an error naming the tenant and the budget.
+# ``Settings._validate_timeout_ordering`` enforces that at startup.
+#
+# It is NOT ``PLATFORM_REQUEST_CEILING_SECONDS``. Both are 120.0 today and the
+# equality is a coincidence -- one is this process's client, the other is what
+# Cloud Run/nginx sever inbound. Raising either alone must not be read as
+# raising the other, which is why the validator checks against both.
+# Only ``read`` is named: ``write`` happens to share the value and has no
+# ordering contract to enforce.
+STORAGE_READ_TIMEOUT_SECONDS = 120.0
 
 # Upper bound on a single dependency probe (storage / redis / event_bus).
 # Shared between ``/health`` (binary 503 deploy gate) and ``/stats`` /
@@ -222,6 +291,50 @@ MEMORY_VISIBILITIES_PATTERN = (
     f"^({MEMORY_VISIBILITY_SCOPE_AGENT}|{MEMORY_VISIBILITY_SCOPE_TEAM}|{MEMORY_VISIBILITY_SCOPE_ORG})$"
 )
 
+# The refusal both STM doors give when ``use_stm`` is off — the read/clear/
+# promote routes (``routes.stm._check_stm_enabled``) and the write path
+# (``services.memory_service``, reached by POST /memories with
+# write_mode='stm').
+#
+# ONE constant because the two had drifted. The read door's text was rewritten
+# once already, on the grounds that "Set USE_STM=true" is advice the reader it
+# reaches cannot act on — USE_STM is a server setting and the caller hitting
+# this is a hosted one. The write door kept the old wording, so a single
+# capability had two doors telling the caller different things to do next.
+# Sharing the string is what stops that recurring; agreement enforced by
+# comparing two copies of the text can only ever notice the drift after it
+# happens.
+# How short-term memory is written over REST — one sentence, because it was
+# three, and two of them were wrong.
+#
+# "There is no REST write route for STM at all" was published in the OpenAPI
+# TAG (app.py, what a reader sees in the sidebar before opening an operation),
+# in the per-operation description (routes/stm.py) and in a test's own
+# docstring. It was true of the dedicated routes and false of the capability:
+# POST /memories with write_mode='stm' runs the STM write pipeline. It is gated
+# on the same USE_STM setting, so the claim held for the hosted deployment and
+# was false for exactly the self-hosted readers its last sentence addressed.
+#
+# app.py's SAFE-01 note already argues this case for its own text: "the same
+# fact written twenty-five times has twenty-five chances to go stale, and the
+# copy that gets forgotten is the one someone reads."
+STM_WRITE_ROUTE_NOTE = (
+    "There are no dedicated STM write routes (`POST /stm/notes` and "
+    "`POST /stm/bulletin` return 405). Short-term memory is written over REST "
+    "with `POST /memories` and `write_mode='stm'`, which returns an "
+    "`STMWriteResponse` rather than a `MemoryOut`, and is gated on the same "
+    "`USE_STM` setting as these operations."
+)
+
+STM_DISABLED_DETAIL = (
+    "Short-term memory is not available on this deployment. STM is "
+    "plugin-only: it is served by the OpenClaw plugin, and the hosted "
+    "REST API cannot enable it (USE_STM is a server setting, not a "
+    "per-tenant one). Self-hosted operators can set USE_STM=true; "
+    "hosted callers should use the durable memory endpoints "
+    "(/memories, /search) instead."
+)
+
 MAX_CONTENT_LENGTH = 10000
 CHUNKING_THRESHOLD_CHARS = 2000  # content above this triggers auto-chunking
 MAX_QUERY_LENGTH = 5000
@@ -269,6 +382,27 @@ assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
     f"({MAX_CONTENT_LENGTH}) — an over-cap spec would fail schema validation."
 )
 
+# ── Document search (``caura_doc op=search`` / ``POST /documents/search``) ──
+# Deliberately NOT ``MAX_SEARCH_TOP_K``, which bounds MEMORY search. A memory
+# row is an enriched, summarised row; a document row is the caller's own body,
+# returned whole and bounded only by ``MAX_CONTENT_LENGTH``, so a page of 50
+# can already be ~500 KB. The two ceilings have never been equal and coupling
+# them would import a limit chosen for a different payload — but each was a
+# bare literal repeated across its surfaces, which is the drift both constants
+# exist to remove. Raise this only alongside a projected result shape
+# (``summary`` + ``doc_id``); on the current shape a bigger page is a bigger
+# blob, not better retrieval.
+#
+# Both surfaces must agree on the number and enforce it DIFFERENTLY: REST
+# rejects an over-cap ``top_k`` (422, via ``DocSearchRequest``'s ``le=``) while
+# MCP clamps silently, because a tool signature is read by a model that never
+# sees the validation error. Same ceiling, two behaviours — so the ceiling has
+# to come from one place, and the MCP parameter description (published to
+# callers in ``plugin/tools.json``) is interpolated from it rather than typed
+# out beside it.
+DEFAULT_DOC_SEARCH_TOP_K = 5
+MAX_DOC_SEARCH_TOP_K = 50
+
 # ── Tool surface bookkeeping ──
 # Tool descriptions live inline in `core_api/tools/caura_*.py` spec
 # modules (the SoT). Nothing else should hold a copy.
@@ -276,7 +410,8 @@ assert DOC_MEMORY_MAX_CHARS <= MAX_CONTENT_LENGTH, (
 
 # ── Search / ranking ──
 DEFAULT_SEARCH_TOP_K = 5
-MAX_SEARCH_TOP_K = 20
+# MAX_SEARCH_TOP_K is imported from common.constants (single source of truth,
+# shared with the SEARCH_KNOBS bounds) and re-exported here for existing imports.
 MIN_SEARCH_SIMILARITY = 0.3
 # A49: cosine-dominant candidate selection. 0 = OFF (the first-stage candidate pool
 # is selected by the boost-distorted ``score`` — current behaviour). >0 = select the
@@ -296,6 +431,32 @@ CANDIDATE_POOL_SIZE = 0
 # tenant via default_search_profile.score_formula to A/B old vs new on the benchmark.
 # Rationale + offline calibration: docs/ranking/unified-ranking-formula.md.
 SCORE_FORMULA = 0
+# HNSW two-stage retrieval (PR2, docs/plans/hnsw-two-stage-retrieval.md).
+# 0 = OFF: storage keeps the full-scan candidate window (current behaviour).
+# >0 = storage admits candidates through index-served pool arms (ANN top-N by
+# cosine via the memories HNSW index, plus FTS / recency / date-window /
+# entity-boosted arms) and runs the scoring formula over that pool only —
+# O(log N + pool) instead of O(tenant rows) per search. Needs pgvector >= 0.8
+# at runtime; storage probes once and silently keeps the full scan below that.
+# Enable per-tenant via ``default_search_profile.ann_pool_size``; keep 0
+# globally until the offline harness validates result parity (see the plan
+# doc's crowding-regime analysis). Mutually exclusive with
+# ``candidate_pool_size`` — storage lets ann win if both arrive.
+ANN_POOL_SIZE = 0
+# Shadow-compare for the ANN pool: serve legacy, run pooled in the background,
+# log the comparison (see ExecuteScoredSearch). Enable per-tenant together with
+# ann_pool_size via default_search_profile; inert while ann_pool_size is 0.
+ANN_POOL_SHADOW = 0
+# Reference clock for freshness when the request carries ``valid_at`` (see
+# ``common.constants.SEARCH_KNOBS["freshness_reference"]`` for the full
+# contract). 0 = now(); 1 = the request's ``valid_at``, with the row anchored to
+# ``coalesce(ts_valid_start, created_at)``. Off by default; enable per tenant via
+# ``default_search_profile.freshness_reference`` for corpora whose
+# ``ts_valid_start`` is EVENT time — a backfilled history, a benchmark whose
+# questions ask "as of" a date. Without it a corpus ingested in one sitting has
+# every row the same age, so the time signal is uniform noise and "last month"
+# resolves against the ingest date rather than the question's.
+FRESHNESS_REFERENCE = 0
 FRESHNESS_DECAY_DAYS = 90
 FRESHNESS_FLOOR = 0.7
 ENTITY_BOOST_FACTOR = 1.3
@@ -670,6 +831,20 @@ FTS_BOOST_SPECIFICITY_RATIO = 0.4  # strict >; at N=2 this means >=1 specific to
 SIMILARITY_BLEND = 0.85  # base_score = SIMILARITY_BLEND * similarity + (1 - SIMILARITY_BLEND) * weight (raised from 0.75 — LoCoMo sweep showed +13pp recall)
 SEARCH_OVERFETCH_FACTOR = 2  # fetch top_k * N candidates from storage, trim to top_k after min_similarity filter — gives post-filter headroom
 FTS_RESERVED_RESULTS = 1  # result slots held for full-text matches; includes #687's transient rows whose embedding is still pending
+
+# pm-0918-c-03 — whether ``/search`` returns atomic-fact fan-out children
+# alongside the rows a caller wrote. TRUE is today's behaviour and is the GLOBAL
+# floor of a three-layer resolution: request flag beats ``search.include_derived``
+# beats this. See ``core_api.search_trim.resolve_include_derived``.
+#
+# Deliberately a named constant rather than a literal in the resolver, so the
+# test that pins it (``test_pm_c03_include_derived.py``) asserts against
+# something a refactor has to delete rather than something it can quietly edit.
+# The row that produced it recommended revisiting this default at the next
+# minor, on a second store's evidence; changing it here is a BREAKING change to
+# a frozen-contract endpoint that no CI gate catches — see
+# docs/atomic-fact-fanout/pm-c03-include-derived-blast-radius.md §4.
+INCLUDE_DERIVED_DEFAULT = True
 # ``SQL_SCORING_PARAM_KEYS`` — the set both search-path builders project through
 # before sending ``search_params`` — is re-exported from ``common.constants``
 # above, because storage reads the same set and the drift that matters is
@@ -677,13 +852,32 @@ FTS_RESERVED_RESULTS = 1  # result slots held for full-text matches; includes #6
 # A26: recall_count is bumped for every RETURNED row, used or not (see
 # TrackRecalls + memory_increment_recall), and feeds recall_boost back into the
 # rank score — a self-reinforcing "returned → boosted → returned" loop with no
-# usefulness signal. Until a confirmation-gated bump lands (the real fix, tied to
-# D5/D1), the cap is dialed down so the boost can no longer hijack rankings: at
-# cap=1.1 a popular-but-useless row can only overtake a more-relevant one whose
-# base score is <10% higher (was <50% at cap=1.5), and the shorter decay window
-# lets stale popularity fade in ~2 weeks instead of a quarter.
+# usefulness signal. The cap stays dialed down so the boost cannot hijack
+# rankings while the counter is return-fed: at cap=1.1 a popular-but-useless row
+# can only overtake a more-relevant one whose base score is <10% higher (was
+# <50% at cap=1.5), and the shorter decay window lets stale popularity fade in
+# ~2 weeks instead of a quarter.
+#
+# A41 — the confirmation-gated path the A26 interim pointed at now exists,
+# behind ``recall_boost_source`` (below / SEARCH_KNOBS): 1 feeds the boost from
+# ``metadata._system.recall_used_count`` — bumped only when an agent reports an
+# outcome naming the memory in ``related_ids`` (evolve, the platform's explicit
+# "I acted on these memories" signal) — instead of from recall_count. The
+# returned counter keeps accruing under either source (lifecycle/insights
+# consumers read it as "was returned", and it is the counterfactual for the
+# returned-vs-used measurement), so the flip is measured, not assumed, and
+# reversible. Held at 0 until that measurement validates it per tenant.
 RECALL_BOOST_CAP = 1.1  # max multiplier from frequent recall (A26: dialed down from 1.5)
 RECALL_DECAY_WINDOW_DAYS = 14  # only recalls within this window contribute to boost (A26: from 90)
+# A41: which counter feeds recall_boost. 0 = recall_count (bump-on-return —
+# current behaviour, byte-identical scoring SQL). 1 = the confirmed-use counter
+# (see the block above). Global default; flip per tenant via
+# ``search.default_profile.recall_boost_source``, or fleet-wide for an on-prem
+# install via the env var (defensive parse — a garbage value falls back to the
+# default with a stderr WARN instead of crashing import, #1441 pattern; any
+# value other than 1 keeps the return-fed source, mirroring storage's own
+# ``== 1`` read so a typo fails closed to today's behaviour).
+RECALL_BOOST_SOURCE = 1 if read_int_env("CAURA_RECALL_BOOST_SOURCE", 0, minimum=0) == 1 else 0
 
 # ── Recall summary ──
 MEMORY_RECALL_SUMMARY_TEMPERATURE = 0.3
@@ -938,7 +1132,18 @@ ENTITY_EMBEDDING_BACKFILL_BATCH_SIZE = 100
 ENTITY_RESOLUTION_BATCH_SIZE = 100
 CROSS_LINK_SIMILARITY_THRESHOLD = 0.75
 CROSS_LINK_TEXT_VERIFY = True
-CROSS_LINK_MEMORY_BATCH_SIZE = 200
+# Halved from 200 on 2026-09-18. ``LifecycleAudit.entity_link`` runs the
+# pipeline ONCE per org per tick with no batch loop, so this is the entire
+# per-run budget for the sweep, and 200 candidates x a per-candidate ANN
+# search over the tenant's entities outran the 120s storage budget on the
+# largest staging tenant. The other consumer
+# (``_discover_cross_links_for_memory``) passes a single
+# ``target_memory_ids``, so this cap never binds there.
+#
+# The cost is convergence, not coverage: a tenant with more than this many
+# under-linked memories now needs more nightly ticks to finish. Acceptable
+# for a daily janitor whose activity gate already no-ops idle tenants.
+CROSS_LINK_MEMORY_BATCH_SIZE = 100
 MIN_COOCCURRENCE_FOR_RELATION = 2
 RELATION_REINFORCE_DELTA = 0.1
 MAX_RELATION_WEIGHT = 1.0
@@ -954,3 +1159,28 @@ def _relation_weight(relation_type: str, row_weight: float) -> float:
     """
     type_w = RELATION_TYPE_WEIGHTS.get(relation_type.lower(), DEFAULT_RELATION_TYPE_WEIGHT)
     return type_w * row_weight
+
+
+# F9 — what an empty keystone set should say. Shared by the REST envelope and
+# the MCP tool so the two surfaces cannot drift into saying different things
+# about the same state.
+#
+# Agents are taught to call keystones at every session start and obey what comes
+# back. A tenant that never authored a rule pays that round-trip and receives
+# ``count: 0`` — which is indistinguishable, to the caller, from "this tenant
+# has no standing policy", from "authoring failed", and from "you asked the
+# wrong scope". The agent's reasonable inference is the first, so it stops
+# asking and carries standing constraints in recall instead, which is the exact
+# thing keystones exist to prevent.
+#
+# Emitted ONLY on the empty result, so tenants with rules pay nothing, and it is
+# a RESPONSE field rather than schema — it does not touch the ``tools/list``
+# token ceiling that ``_AGENT_ID_DESC`` had to respect
+# (tests/test_mcp_token_budget.py).
+KEYSTONES_EMPTY_HINT = (
+    "No keystone rules are authored for this scope. Authoring is a separate, "
+    "trust-gated step (caura_keystones_set, trust >= 1 for a self-authored "
+    "agent-scoped rule, >= 2 otherwise) — an empty result does not mean the "
+    "call failed. Until rules exist, standing constraints have to travel in "
+    "recall instead of being pinned here."
+)

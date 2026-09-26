@@ -21,12 +21,15 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 
 // Env is read into module constants at import time, so it must be set before
-// the dynamic imports below. No CAURA_AGENT_ID: that is the case under test.
+// the dynamic imports below. The configured identity must still default
+// identity-bearing writes without silently narrowing recall reads.
 process.env.CAURA_API_URL = "http://identity.test";
 process.env.CAURA_API_KEY = "test-key";
 process.env.CAURA_TENANT_ID = "t-identity";
-delete process.env.CAURA_AGENT_ID;
+process.env.CAURA_FLEET_ID = "fleet-default";
+process.env.CAURA_AGENT_ID = "configured-agent";
 delete process.env.MEMCLAW_AGENT_ID; // legacy-name-ok: the dual-read alias must be cleared too
+delete process.env.MEMCLAW_FLEET_ID; // legacy-name-ok: CAURA_FLEET_ID wins deterministically
 
 const { createToolFromSpec } = await import("./tool-definitions.js");
 const { resolveAgentIdQuiet } = await import("./resolve-agent.js");
@@ -79,8 +82,8 @@ async function run(tool: string, params: Record<string, unknown>): Promise<Captu
 }
 
 describe("agent identity is resolved, never invented", () => {
-  test("the resolved default is a real install-scoped id", () => {
-    assert.match(EXPECTED_AGENT_ID, /^main-.+/);
+  test("the configured default is a real identity, not a placeholder", () => {
+    assert.equal(EXPECTED_AGENT_ID, "configured-agent");
     assert.notEqual(EXPECTED_AGENT_ID, "unknown-agent");
   });
 
@@ -118,9 +121,32 @@ describe("agent identity is resolved, never invented", () => {
     assert.equal(req.url.pathname, "/api/v1/agents/explicit-agent/tune");
   });
 
-  test("reads still send no agent_id — identity resolution must not narrow scope", async () => {
+  test("reads do not inherit configured agent identity and narrow scope", async () => {
     const req = await run("caura_recall", { query: "anything" });
     assert.equal(req.body?.agent_id, undefined);
+    assert.equal(req.body?.caller_agent_id, undefined);
     assert.equal(req.url.searchParams.get("agent_id"), null);
+  });
+
+  test("caura_recall translates the caller identity to the REST field", async () => {
+    const req = await run("caura_recall", {
+      query: "anything",
+      agent_id: "explicit-agent",
+    });
+    assert.equal(req.body?.caller_agent_id, "explicit-agent");
+    assert.equal(req.body?.agent_id, undefined);
+  });
+
+  test("caura_recall turns the configured fleet default into fleet_ids", async () => {
+    const defaulted = await run("caura_recall", { query: "anything" });
+    assert.deepEqual(defaulted.body?.fleet_ids, ["fleet-default"]);
+    assert.equal(defaulted.body?.fleet_id, undefined);
+
+    const explicit = await run("caura_recall", {
+      query: "anything",
+      fleet_ids: ["fleet-explicit"],
+    });
+    assert.deepEqual(explicit.body?.fleet_ids, ["fleet-explicit"]);
+    assert.equal(explicit.body?.fleet_id, undefined);
   });
 });

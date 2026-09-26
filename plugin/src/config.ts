@@ -2,8 +2,8 @@
  * OpenClaw configuration helpers and auto-fix allowlist.
  */
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { join, resolve } from "path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { dirname, join, resolve } from "path";
 import { homedir } from "os";
 import { CAURA_TOOLS } from "./tools.js";
 import { getPluginDir, getOpenClawConfigPath } from "./paths.js";
@@ -127,16 +127,40 @@ export function autoFixAllowlist(options?: {
   error?: string;
 } {
   const configPath = getOpenClawConfigPath();
-  const config = readOpenClawConfig() as Record<string, any> | null;
-  if (!config) {
+  const configExists = existsSync(configPath);
+  const readConfig = readOpenClawConfig() as Record<string, any> | null;
+
+  // ``readOpenClawConfig`` returns null for two very different states, and
+  // conflating them is what made a fresh install inert: a MISSING file (the
+  // box has the plugin but OpenClaw has never written a config — the same
+  // case the install script gives up on with "you will need to configure
+  // allowlist manually") and an UNPARSEABLE one. Pre-fix both returned the
+  // "not found" error and auto-fix did nothing, so on the missing-file box
+  // nothing in the product ever put a tool name into ``tools.alsoAllow``:
+  // the install script skipped its step 7 and the plugin's own self-heal
+  // declined here on every subsequent boot. Tools registered, none of them
+  // survived an OpenClaw ``tools.profile``, and the only trace was a line in
+  // gateway.log naming a file the operator had to write by hand.
+  //
+  // So: create the file when it is genuinely absent, and keep refusing when
+  // it is present but unreadable — overwriting THAT would destroy a config
+  // we cannot see. Starting from ``{}`` lets steps 2-6 below build exactly
+  // what the install script writes, minus ``plugins.allow``, which stays
+  // uncreated by design (CAURA-000 — see step 1).
+  if (!readConfig && configExists) {
     return {
       changed: false,
       changes: [],
-      error: "openclaw.json not found at " + configPath,
+      error:
+        "openclaw.json at " +
+        configPath +
+        " could not be parsed — refusing to overwrite it",
     };
   }
+  const config: Record<string, any> = readConfig ?? {};
 
   const changes: string[] = [];
+  if (!configExists) changes.push("created " + configPath);
 
   // 1. Ensure the plugin is in `plugins.allow` IF — and only if — the
   //    user has an explicit, non-empty allowlist. CAURA-000: pre-fix
@@ -255,7 +279,7 @@ export function autoFixAllowlist(options?: {
   const staleRemoved: string[] = [];
   const currentToolSet = new Set<string>(CAURA_TOOLS);
   config.tools.alsoAllow = config.tools.alsoAllow.filter((entry: string) => {
-    if (entry.startsWith("memclaw_") && !currentToolSet.has(entry)) {
+    if (entry.startsWith("memclaw_") && !currentToolSet.has(entry)) { // legacy-name-ok: removes stale pre-v1 tool aliases from existing allowlists
       staleRemoved.push(entry);
       return false;
     }
@@ -268,6 +292,9 @@ export function autoFixAllowlist(options?: {
   if (changes.length === 0) return { changed: false, changes: [] };
 
   try {
+    // ``~/.openclaw`` normally exists (the plugin itself lives under it), but
+    // the create path must not depend on that to be true.
+    if (!configExists) mkdirSync(dirname(configPath), { recursive: true });
     writeFileSync(
       configPath,
       JSON.stringify(config, null, 2) + "\n",

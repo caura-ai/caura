@@ -34,7 +34,7 @@ def test_security_headers_absent_on_mcp():
     """``SecurityHeadersMiddleware`` skips MCP-path scopes by design
     (via ``is_mcp_path``) so streaming MCP responses don't get browser
     security headers injected. After CAURA-000-mcp-trailing-slash a
-    GET /mcp reaches the FastMCP handler in-process — which crashes
+    GET /mcp reaches the MCPServer handler in-process — which crashes
     without the session manager (no FastAPI lifespan in TestClient),
     so we can't exercise this via ``client.get`` anymore. Verify the
     middleware's skip condition directly instead.
@@ -57,7 +57,7 @@ def test_security_headers_absent_on_mcp():
 async def test_mcp_auth_middleware_bearer_extraction(client):
     """Bearer auth works on REST routes. (The legacy "MCP mount exists"
     half of this test was an HTTP-level GET /mcp; after the Stage 1
-    no-redirect fix it now reaches the FastMCP handler which crashes
+    no-redirect fix it now reaches the MCPServer handler which crashes
     without the session manager — covered structurally in
     ``test_mcp_mount_exists`` below.)
     """
@@ -93,7 +93,7 @@ async def test_mcp_bearer_returns_tools(client):
 def test_mcp_mount_exists():
     """MCP endpoint mount + exact-/mcp route are both registered on
     the app router. Structural check (post Stage-1 the HTTP-level
-    GET path goes through the FastMCP handler which needs a running
+    GET path goes through the MCPServer handler which needs a running
     session manager — unavailable in TestClient without lifespan).
     """
     from starlette.routing import Mount, Route

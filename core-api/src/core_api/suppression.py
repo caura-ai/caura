@@ -1,7 +1,7 @@
 """Boundary guard for soft-deleted org tenants (CAURA-694).
 
 When an enterprise org is soft-deleted, ``platform-admin-api`` publishes
-``memclaw.org.suppression-changed`` with the list of tenant_ids the
+``caura.org.suppression-changed`` with the list of tenant_ids the
 action covers. Core-worker mirrors that into
 ``public.tenant_suppression`` (CAURA-694 storage migration). This module
 is the synchronous read side: core-api's auth layer asks

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import MemoryOut
+from core_api.schemas import MemoryOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
@@ -87,12 +87,22 @@ class MemoryStatusPatchResponse(BaseModel):
 
 class RecallDiagnostic(BaseModel):
     recall_prompt: str | None
+    # WT-1 — ``summary`` carries only the extracted final answer; the raw
+    # completion stays inspectable here.
+    recall_raw: str | None = Field(
+        description="Unfiltered LLM completion (reasoning scaffold + answer marker) that summary "
+        "was extracted from; null when no LLM ran (no matches, or summarization disabled)."
+    )
     recall_model: str | None
     recall_provider: str | None
     all_candidates: list
     top_k_used: int | None
     retrieval_strategy: str | None
     search_params: dict
+    # CAURA-722 — documented on ``SearchDiagnostic``. ``None`` on the count
+    # means entity FTS never ran, which is a different answer from ``0``.
+    entity_matches: int | None = None
+    entity_match_declined: bool = False
 
 
 class RecallResponse(BaseModel):
@@ -100,12 +110,44 @@ class RecallResponse(BaseModel):
     summary: str
     memory_count: int
     memories: list[MemoryOut]
-    items: list[MemoryOut] = Field(
-        description="Alias of memories (canonical list key per the wire contract)."
+    # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
+    #
+    # ``POST /recall`` is a SemVer-stable REST surface (docs/public-api-stability.md,
+    # Memory row), so flipping this default is a breaking change owed a major. The
+    # MCP brief carries no such pin — that document fixes tool names and purposes,
+    # not response bodies — so it already defaults to omitting the alias. That
+    # split is a MIGRATION STATE, not a permanent design: marking the field
+    # deprecated here is what gives it an end, so the two surfaces converge at
+    # v4 rather than disagreeing indefinitely.
+    #
+    # Sunset follows the same deprecate-then-remove convention this PR leans on
+    # for h-04 (C25, #967). No first-party consumer reads it: both SDKs read
+    # ``memories`` first and only fall back (clients/python .../models.py,
+    # clients/typescript/src/index.ts), and the plugin's items reader is only
+    # ever fed /search.
+    items: list[MemoryOut] | None = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "DEPRECATED — scheduled for removal in v4.0.0; read `memories` instead. "
+            "Back-compat alias of memories, for consumers written against "
+            "/search's shape. Present unless the request set items_alias=false; "
+            "duplicating the result set is ~50% of this response. The MCP recall "
+            "brief already omits it by default."
+        ),
     )
     recall_ms: int
     diagnostic: RecallDiagnostic | None = Field(
         default=None, description="Only when the request sets diagnostic=true."
+    )
+    # ax-0917-h-05 — same shape as ``SearchResponse.warnings`` (A28). Absent
+    # when there is nothing to report, which is the ordinary case.
+    warnings: list[SearchWarning] | None = Field(
+        default=None,
+        description=(
+            "Non-fatal notices about this request — e.g. parameters the "
+            "endpoint does not read and therefore ignored."
+        ),
     )
 
 
@@ -132,6 +174,19 @@ class DocumentSearchResponse(BaseModel):
     count: int
     results: list[DocumentSearchItem] = Field(description="Deprecated alias of items (wire contract D1).")
     items: list[DocumentSearchItem]
+    unindexed_count: int | None = Field(
+        default=None,
+        description=(
+            "Present only on a zero-result search that had unsearchable documents in "
+            "scope. Documents are indexed only when their write supplies data.summary "
+            "(or data.description for skills); without one a document is stored and "
+            "readable by id but never returned by search."
+        ),
+    )
+    note: str | None = Field(
+        default=None,
+        description="Human-readable explanation accompanying unindexed_count.",
+    )
 
 
 class DocumentCollectionInfo(BaseModel):
@@ -532,3 +587,32 @@ class HealthResponse(BaseModel):
         default=None,
         description="Only on 503: names of failing dependencies.",
     )
+
+
+class ConflictOut(BaseModel):
+    """D11 — a detected conflict with its human-review state."""
+
+    id: str
+    tenant_id: str
+    new_memory_id: str
+    old_memory_id: str
+    relationship: str
+    diagnosis: str | None = None
+    action: str | None = Field(default=None, description="What the detector proposed.")
+    review_status: str = Field(description="pending | resolved | dismissed")
+    resolution_action: str | None = Field(default=None, description="What the reviewer chose.")
+    resolution_note: str | None = None
+    resolved_by: str | None = None
+    resolved_at: str | None = None
+    # --- fields present on the runtime conflict payload but previously absent here ---
+    fleet_id: str | None = None
+    relationship_confidence: float | None = None
+    diagnosis_confidence: float | None = None
+    evidence_strength: str | None = None
+    audit_reason: str | None = None
+    created_by: str | None = None
+    created_at: str | None = None
+
+
+class ConflictListResponse(BaseModel):
+    items: list[ConflictOut]

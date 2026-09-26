@@ -410,7 +410,7 @@ async def test_a_completed_run_keeps_its_lock():
     LLM judgement. Pinned so that reading cannot be reintroduced.
 
     It does not discriminate against pre-fix ``main`` — the module had no
-    ``cache_delete`` to patch there, so it errors rather than failing on
+    ``cache_delete_if`` to patch there, so it errors rather than failing on
     behaviour. The five tests above are the ones that demonstrate the bug.
     """
     from core_api.services.contradiction_detector import detect_contradictions_async

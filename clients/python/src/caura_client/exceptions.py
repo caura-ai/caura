@@ -9,6 +9,10 @@ class CauraError(Exception):
     """Base class for all Caura client errors."""
 
 
+class TransportError(CauraError):
+    """Raised on network failures or timeouts, with the original error as ``__cause__``."""
+
+
 class CauraAPIError(CauraError):
     """Raised when the Caura API returns a non-success status code.
 
@@ -28,3 +32,18 @@ class AuthError(CauraAPIError):
 
 class NotFoundError(CauraAPIError):
     """Raised on 404."""
+
+
+class RateLimitError(CauraAPIError):
+    """Raised on 429, with the optional retry delay in seconds."""
+
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        *,
+        details: Any = None,
+        retry_after: float | None = None,
+    ) -> None:
+        self.retry_after = retry_after
+        super().__init__(status_code, message, details=details)

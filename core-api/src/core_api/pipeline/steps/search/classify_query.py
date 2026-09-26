@@ -6,8 +6,12 @@ matches are found the step MAY short-circuit to an *entity_lookup* strategy
 search can be skipped — but only when the linked-memory pool can fill the
 caller's ``top_k``.  That route replaces scoring rather than re-ranking it, so
 an under-filled pool falls through instead and the entity hits are applied as a
-hop boost over real scores (H-03).  Otherwise the query is routed to keyword or
-semantic search based on the adaptive FTS weight.
+hop boost over real scores (H-03).  A query carrying a temporal hint
+(``temporal_window`` / ``date_range_filter``) declines the short-circuit the
+same way: the hard date filter and freshness handling live in the scored
+search this route skips, so honouring the hint requires falling through.
+Otherwise the query is routed to keyword or semantic search based on the
+adaptive FTS weight.
 """
 
 from __future__ import annotations
@@ -83,9 +87,20 @@ class ClassifyQuery:
         # below. ``ParallelEmbedAndEntityBoost`` reads the same flag and skips
         # hop-boosting, making this the single switch for query-time entity and
         # graph retrieval. Deliberately independent of ``graph_expand``
-        # (``search.graph_retrieval``), which only bounds expansion depth once
-        # an entity has already matched.
+        # (``search.graph_retrieval``), which only bounds expansion once an
+        # entity has already matched.
         entity_retrieval: bool = ctx.data.get("entity_retrieval", True)
+
+        # ``search.graph_retrieval`` org setting (default True). Entity lookup
+        # stays on — the settings contract is that only ``entity_retrieval``
+        # can switch that off — but with this flag off the matched entities
+        # must not be graph-expanded: no ``expand_graph`` roundtrip, hop-0
+        # seeds only, mirroring ``_entity_boost_via_storage``'s gate. Both
+        # ``_expand_per_fleet`` call sites below honour it via
+        # ``_hops_for_seeds``, which also keeps the ``_classified_entity_hops``
+        # stash hop-0 so the boost step's ``precomputed_hops`` path cannot
+        # smuggle expanded hops past its own ``graph_expand`` gate.
+        graph_expand: bool = ctx.data.get("graph_expand", True)
 
         tokens = extract_entity_tokens(query) if entity_retrieval else []
 
@@ -96,6 +111,19 @@ class ClassifyQuery:
             try:
                 sc = get_storage_client()
                 matched_ids = await self._entity_fts(sc, tokens, tenant_id, fleet_ids)
+
+                # CAURA-722 — record the count HERE, before the over-broad
+                # branch below empties ``matched_ids``. Reading it later would
+                # report 0 for the decline, which is the one value that must
+                # not be confused with "FTS matched nothing" — those two send
+                # the follow-up work to different teams (threshold tuning vs
+                # entity extraction/linking).
+                #
+                # Set unconditionally rather than under ``if diagnostic``: it
+                # is one ``len()``, and gating it would put a second
+                # diagnostic-only branch in a hot path for no measurable gain.
+                # Exposure stays gated at the route.
+                ctx.data["entity_matches"] = len(matched_ids)
 
                 # CAURA-698: over-broad match → not a "name a specific entity"
                 # query. The precision argument for entity_lookup breaks down
@@ -121,14 +149,53 @@ class ClassifyQuery:
                     ctx.data["entity_match_declined"] = True
                     matched_ids = []
 
-                if matched_ids:
-                    entity_hops = await self._expand_per_fleet(
+                # A temporal hint must not be silently dropped: the hard
+                # ``date_range_filter`` and the ``temporal_window`` freshness
+                # handling are applied only by ExecuteScoredSearch, and the
+                # entity_lookup short-circuit skips that step (and
+                # PostFilterResults) entirely — so a dated query ("what did
+                # Alice decide two weeks ago") would return linked memories
+                # from ANY date, with nothing recording that the constraint
+                # was discarded. Decline the short-circuit and fall through to
+                # the temporal / scored-search cascade, which applies both.
+                # Ordered AFTER the over-broad decline: an over-broad match on
+                # a dated query must still suppress hop-boosting (and must not
+                # pay for expanding a >threshold seed set here).
+                #
+                # Unlike over-broad, the entity match itself is good relevance
+                # signal — so ``entity_match_declined`` is NOT set; expand now
+                # and stash the hops so ParallelEmbedAndEntityBoost hop-boosts
+                # the scored results without re-deriving FTS + expansion.
+                if matched_ids and (
+                    ctx.data.get("temporal_window") is not None or ctx.data.get("date_range_filter")
+                ):
+                    entity_hops = await self._hops_for_seeds(
                         sc,
                         matched_ids,
                         tenant_id,
                         fleet_ids,
                         graph_max_hops,
-                        use_union=True,
+                        graph_expand=graph_expand,
+                    )
+                    ctx.data["_classified_entity_hops"] = entity_hops
+                    # Distinct wording from the other declines — same
+                    # greppability contract as the fallthrough messages below.
+                    logger.info(
+                        "classify_query: entity_lookup declined — temporal hint present "
+                        "(window=%s, date_range=%s), falling through with hop boost",
+                        ctx.data.get("temporal_window"),
+                        ctx.data.get("date_range_filter"),
+                    )
+                    matched_ids = []
+
+                if matched_ids:
+                    entity_hops = await self._hops_for_seeds(
+                        sc,
+                        matched_ids,
+                        tenant_id,
+                        fleet_ids,
+                        graph_max_hops,
+                        graph_expand=graph_expand,
                     )
 
                     filtered_rows = await self._collect_memories(
@@ -144,7 +211,8 @@ class ClassifyQuery:
                         status_filter=status_filter,
                         valid_at=valid_at,
                         readable_tenant_ids=readable_tenant_ids,
-                        slot_acquired_marker=ctx.data,
+                        strict_fleet_scoping=bool(ctx.data.get("strict_fleet_scoping")),
+                        pool_report=ctx.data,
                     )
 
                     # H-03: the short-circuit REPLACES scoring rather than
@@ -284,6 +352,45 @@ class ClassifyQuery:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _hops_for_seeds(
+        self,
+        sc: object,
+        seed_ids: list[UUID],
+        tenant_id: str,
+        fleet_ids: list[str] | None,
+        graph_max_hops: int,
+        *,
+        graph_expand: bool,
+    ) -> dict[UUID, tuple[int, float]]:
+        """Expand *seed_ids* per fleet, or return them as hop-0 when expansion is off.
+
+        Expansion failure degrades the same way: ``_expand_per_fleet`` falls
+        back to the hop-0 seed set when every fleet's call fails, so callers
+        are guaranteed a non-empty dict for a non-empty seed set either way.
+
+        The gate mirrors ``_entity_boost_via_storage`` exactly
+        (``graph_expand and graph_max_hops > 0`` → expand, else hop-0 seeds
+        with neutral weight), so ``search.graph_retrieval`` means the same
+        thing on the ENTITY_LOOKUP short-circuit as it does on the hop-boost
+        path — matched entities stay retrievable, their graph neighbourhood
+        does not. The hop-0 dict also flows into
+        ``ctx.data["_classified_entity_hops"]`` on the temporal-decline path,
+        which is what keeps the boost step's ``precomputed_hops`` input honest:
+        that input bypasses the boost step's own gate by design (it exists to
+        avoid re-deriving FTS + expansion), so the gating must happen here,
+        where the hops are produced.
+        """
+        if not (graph_expand and graph_max_hops > 0):
+            return dict.fromkeys(seed_ids, (0, 1.0))
+        return await self._expand_per_fleet(
+            sc,
+            seed_ids,
+            tenant_id,
+            fleet_ids,
+            graph_max_hops,
+            use_union=True,
+        )
+
     @staticmethod
     async def _expand_per_fleet(
         sc: object,
@@ -331,6 +438,30 @@ class ClassifyQuery:
                     or (hop == merged[eid][0] and weight > merged[eid][1])
                 ):
                     merged[eid] = (hop, weight)
+
+        # oss-0814-l-05: an empty merge for a non-empty seed set means NO call
+        # succeeded — a successful expand_graph response always contains the
+        # seeds themselves at hop 0 / weight 1.0 (entity_expand_graph seeds its
+        # result dict with them before traversing), and every per-fleet call is
+        # given the full seed list, so a single surviving fleet keeps them all
+        # (which is why partial failure needs no case of its own here).
+        # Returning ``{}`` discarded the already-resolved entity-FTS matches
+        # along with the expansion: ``_collect_memories`` had no entities to
+        # load links for (reported, misleadingly, as "entity matched but no
+        # linked memories"), and the ``_classified_entity_hops`` stash handed
+        # ParallelEmbedAndEntityBoost an empty dict — which its
+        # ``precomputed_hops is not None`` check treats as authoritative, so it
+        # did not re-derive FTS either and hop-boost contributed nothing.
+        # Degrade to the hop-0 seed set instead — the same shape as the
+        # ``graph_expand`` off gate in ``_hops_for_seeds`` — so the direct
+        # matches stay retrievable and only the (unavailable) graph
+        # neighbourhood is lost.
+        if seed_ids and not merged:
+            logger.warning(
+                "expand_graph failed for all fleets; degrading to %d hop-0 seed entities",
+                len(seed_ids),
+            )
+            return dict.fromkeys(seed_ids, (0, 1.0))
         return merged
 
     @staticmethod
@@ -365,7 +496,8 @@ class ClassifyQuery:
         status_filter: str | None = None,
         valid_at: datetime | None = None,
         readable_tenant_ids: list[str] | None = None,
-        slot_acquired_marker: dict | None = None,
+        pool_report: dict | None = None,
+        strict_fleet_scoping: bool = False,
     ) -> list[types.SimpleNamespace]:
         """Load memories linked to graph-expanded entities, scored by hop distance."""
         all_entity_ids = list(entity_hops.keys())
@@ -436,11 +568,10 @@ class ClassifyQuery:
         # produce more rows than ``memory_boost`` has entries — so an under-sized
         # pool cannot pass that gate whatever the load returns. Loading anyway
         # spent a per-tenant storage permit and pulled full rows (embedding and
-        # tsvector included) for a result the caller discards, and worse, left
-        # ``_storage_slot_acquired`` set so the scored search that does run
-        # skipped the bulkhead. Reporting the pool size lets the caller say why
-        # it declined, since ``[]`` alone cannot distinguish "under-filled" from
-        # "no linked memories at all" (the ``not memory_boost`` return above).
+        # tsvector included) for a result the caller discards. Reporting the
+        # pool size lets the caller say why it declined, since ``[]`` alone
+        # cannot distinguish "under-filled" from "no linked memories at all"
+        # (the ``not memory_boost`` return above).
         #
         # One-directional on purpose. The converse is NOT decidable here: the
         # load applies visibility filters (caller_agent_id / status / valid_at)
@@ -448,8 +579,8 @@ class ClassifyQuery:
         # looks adequate can still return short. That is why the caller re-checks
         # after the load rather than trusting this count.
         if len(memory_boost) < top_k:
-            if slot_acquired_marker is not None:
-                slot_acquired_marker["_entity_pool_size"] = len(memory_boost)
+            if pool_report is not None:
+                pool_report["_entity_pool_size"] = len(memory_boost)
             return []
 
         # CAURA-687: load memories by ID via the dedicated short-circuit
@@ -474,6 +605,10 @@ class ClassifyQuery:
             "filter_agent_id": filter_agent_id,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
+            # C27 — the ENTITY_LOOKUP short-circuit bypasses scored search
+            # entirely, so it needs the scope flag in its own right; inheriting
+            # it only on the scored path would leave this route permissive.
+            "strict_fleet_scoping": strict_fleet_scoping,
         }
         if valid_at is not None:
             search_data["valid_at"] = str(valid_at)
@@ -484,27 +619,28 @@ class ClassifyQuery:
         # it would degrade to home-tenant reads with no error or log.
         if readable_tenant_ids and readable_tenant_ids != [tenant_id]:
             search_data["readable_tenant_ids"] = readable_tenant_ids
-        # Per-tenant storage bulkhead (CAURA-602 follow-up). C10: when
-        # this entity-lookup short-circuit acquires + releases the slot
-        # here, we mark the pipeline context so a downstream
-        # ``execute_scored_search`` running on the rare fall-through
-        # path (entity-lookup matched but produced no filtered rows)
-        # doesn't re-acquire and charge the tenant twice for one
-        # logical search. Same key as scored-search, intentional —
-        # the bucket counts request-level storage pressure, not
-        # call-level.
         # Record that the load ran, and against what size of pool. Without this
         # the caller cannot tell "no links at all" from "links existed, the load
         # ran, and visibility filtering dropped every row" — both arrive as an
         # empty list, and reporting the second as the first would send on-call
         # looking for a graph problem when the cause is a permission filter.
-        if slot_acquired_marker is not None:
-            slot_acquired_marker["_entity_pool_size"] = len(memory_boost)
-            slot_acquired_marker["_entity_pool_loaded"] = True
+        if pool_report is not None:
+            pool_report["_entity_pool_size"] = len(memory_boost)
+            pool_report["_entity_pool_loaded"] = True
+        # Per-tenant storage bulkhead (CAURA-602 follow-up), same key as
+        # scored-search on purpose: both are storage-reader roundtrips
+        # drawing on the same per-tenant pool budget. The slot is held only
+        # across this roundtrip and released on exit, so when this path
+        # falls through, ``ExecuteScoredSearch`` takes its own slot around
+        # its own roundtrip — the two are sequential and one logical search
+        # never holds two slots at once. (C10 used to set
+        # ``_storage_slot_acquired`` on ctx here so the downstream scored
+        # search skipped its slot as a "don't charge twice" dedup; the slot
+        # is an in-flight cap, not a charge, and the skip exempted the
+        # fall-through's scored_search roundtrip from the cap entirely —
+        # retired by audit oss-0814-l-06.)
         async with per_tenant_storage_slot("storage_search", tenant_id):
             memories = await sc.load_memories_by_ids(search_data)
-        if slot_acquired_marker is not None:
-            slot_acquired_marker["_storage_slot_acquired"] = True
 
         # Build result rows with boost scores.
         memories_by_id = {m["id"]: m for m in memories}

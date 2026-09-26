@@ -7,8 +7,10 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model, m
 from common.constants import AGENT_TUNABLE_KEYS, SEARCH_KNOBS
 from core_api.constants import (
     BULK_MAX_ITEMS,
+    CALLER_METADATA_DESCRIPTION,
     DEFAULT_MEMORY_TYPE,
     DEFAULT_SEARCH_TOP_K,
+    EXPIRES_AT_DESCRIPTION,
     MAX_CONTENT_LENGTH,
     MAX_QUERY_LENGTH,
     MAX_SEARCH_TOP_K,
@@ -59,6 +61,84 @@ STRICT_WRITE_BODY = ConfigDict(extra="forbid")
 SERVER_OWNED_MEMORY_FIELDS = ("supersedes_id",)
 
 
+# --- tenant_id defaulting (ax-0917-m-12) ---
+
+
+class TenantScopedBody(BaseModel):
+    """Request body whose ``tenant_id`` falls back to the caller's credential.
+
+    ``tenant_id`` was required in every request body even though the
+    credential already resolves one, so the first call any agent could make
+    was never the one it came for: it had to ``GET /whoami``, read the tenant
+    back, and echo it into the body. Both independent probes of this API
+    (Hermes and Codex, 2026-09-17) paid that round-trip before they could
+    write or recall anything, and an agent that skips it gets a 422 naming a
+    field whose value it was never given — a dead end unless it already knows
+    the fix.
+
+    The credential is the authority on which tenant a caller belongs to, so
+    it is also the sensible default. An explicit ``tenant_id`` still wins:
+    a cross-tenant read names its source tenant, and the ``enforce_tenant`` /
+    ``enforce_readable_tenant`` gates in the routes are untouched and run
+    against whichever value resolved. Defaulting therefore grants no access
+    that naming the same tenant would not.
+
+    **Why a validator and not ``str | None``.** Making the field optional at
+    the type level is the obvious move and it is the wrong one here:
+    ``body.tenant_id`` flows from these bodies deep into services typed
+    ``str`` — 77 new mypy errors across governance, entity, contradiction and
+    memory services on the attempt. The value is never actually absent by the
+    time a route runs, so widening the type to describe a state that cannot
+    be observed costs a large edit everywhere and buys nothing.
+
+    **Why the contextvar is populated here.** FastAPI solves dependencies
+    before it validates the body, so ``get_auth_context`` — and its
+    ``set_current_tenant`` call — has already run by the time this validator
+    executes. ``tests/test_ax_m12_tenant_from_credential.py`` pins that
+    ordering, because it is a framework behaviour this depends on and not one
+    we control.
+    """
+
+    # Empty string, not ``None``: the field stays ``str`` for every consumer
+    # downstream. The validator below rejects a body that still has no tenant
+    # after defaulting, so the empty default is never observable from a route.
+    #
+    # The description carries its weight in the published contract, where the
+    # schema can only say ``"default": ""`` — which is true of the field and
+    # false about the behaviour. A reader needs to be told that omitting it
+    # resolves the caller's own tenant, or the contract reads as "send an
+    # empty string".
+    tenant_id: str = Field(
+        default="",
+        description=(
+            "Tenant to operate on. Omit it and the tenant is resolved from the "
+            "credential, which is what a tenant- or agent-scoped key already "
+            "identifies — no prior /whoami call is needed. Supply it to act on "
+            "a different tenant your credential may read (and for an admin key, "
+            "which belongs to no single tenant, it is required)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _default_tenant_from_credential(self):
+        if self.tenant_id:
+            return self
+        from core_api.tenant_context import get_current_tenant
+
+        resolved = get_current_tenant()
+        if not resolved:
+            # The admin-key case: ``AuthContext.tenant_id`` is None by design
+            # (admin bypasses RLS), so an admin caller genuinely has to say
+            # which tenant it means. Say that, rather than "field required".
+            raise ValueError(
+                "tenant_id is required for this credential. A tenant-scoped or "
+                "agent-scoped key supplies it automatically; an admin key does "
+                "not belong to one tenant, so name it in the request body."
+            )
+        object.__setattr__(self, "tenant_id", resolved)
+        return self
+
+
 # --- Memory ---
 
 
@@ -69,26 +149,27 @@ class EntityLinkIn(BaseModel):
     role: str
 
 
-class MemoryCreate(BaseModel):
+class MemoryCreate(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
-    # Optional like ``BulkMemoryCreate.agent_id``: omitting it is allowed only
-    # on the standalone single-tenant path, where ``write_memory`` fills the
-    # reserved ``"mcp-agent"`` identity. Tenant-scoped/gateway callers must
-    # still pass an explicit agent_id (enforced in the route) so writes are
-    # never silently attributed to one shared identity. min_length=1 rejects an
-    # empty string at the schema layer (None still means "unset").
+    # Optional like ``BulkMemoryCreate.agent_id``, and the route decides who may
+    # omit it: an AGENT-scoped credential supplies its own verified identity
+    # (ax-0917-m-16), and the standalone single-tenant path fills the reserved
+    # ``"mcp-agent"`` identity. A credential that authenticates no agent — a
+    # tenant key, the gateway's tenant path — must still pass an explicit
+    # agent_id (enforced in the route) so writes are never silently attributed
+    # to one shared identity. min_length=1 rejects an empty string at the schema
+    # layer (None still means "unset").
     agent_id: str | None = Field(default=None, min_length=1)
     memory_type: MemoryType | None = Field(default=None, description=MEMORY_TYPES_WRITE_DESCRIPTION)
     content: str = Field(min_length=1, max_length=MAX_CONTENT_LENGTH)
     weight: float | None = Field(default=None, ge=0.0, le=1.0)
     source_uri: str | None = None
     run_id: str | None = None
-    metadata: dict | None = None
+    metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     entity_links: list[EntityLinkIn] = []
-    expires_at: datetime | None = None
+    expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     # RDF triple
     subject_entity_id: UUID | None = None
     predicate: str | None = None
@@ -194,7 +275,7 @@ class BulkMemoryItem(BaseModel):
     run_id: str | None = None
     metadata: dict | None = None
     entity_links: list[EntityLinkIn] = []
-    expires_at: datetime | None = None
+    expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     subject_entity_id: UUID | None = None
     predicate: str | None = None
     object_value: str | None = None
@@ -228,20 +309,20 @@ class BulkMemoryItem(BaseModel):
     )
 
 
-class BulkMemoryCreate(BaseModel):
+class BulkMemoryCreate(TenantScopedBody):
     # Strict at the ENVELOPE level only: a typo among the five keys below is a
     # whole-request mistake, so 422-ing the request is the right answer. Per-item
     # unknown keys are handled inside ``BulkMemoryItem`` (see its note).
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     # Optional on the wire so caura-daemon broker calls (cloud-data-plane.md
     # §2.4) can omit it — the route handler defaults to
     # ``broker:<install_uuid>`` when the caller authenticates with an
-    # install credential. Non-broker callers (dashboard / SDK) still
-    # must populate it; the route's relaxation branch keys off the
-    # credential kind, not the body.
+    # install credential, and an agent-scoped credential likewise supplies its
+    # own verified identity (ax-0917-m-16). A caller whose credential
+    # authenticates no agent (dashboard / SDK tenant keys) still must populate
+    # it; both relaxation branches key off the credential, not the body.
     agent_id: str | None = None
     items: list[BulkMemoryItem] = Field(min_length=1, max_length=BULK_MAX_ITEMS)
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
@@ -320,7 +401,7 @@ class MemoryUpdate(BaseModel):
     title: str | None = None
     status: str | None = Field(default=None, pattern=MEMORY_STATUSES_PATTERN)
     visibility: str | None = Field(default=None, pattern=MEMORY_VISIBILITIES_PATTERN)
-    metadata: dict | None = None
+    metadata: dict | None = Field(default=None, description=CALLER_METADATA_DESCRIPTION)
     metadata_mode: str | None = Field(
         default=None,
         pattern="^(merge|replace)$",
@@ -337,7 +418,7 @@ class MemoryUpdate(BaseModel):
     object_value: str | None = None
     ts_valid_start: datetime | None = None
     ts_valid_end: datetime | None = None
-    expires_at: datetime | None = None
+    expires_at: datetime | None = Field(default=None, description=EXPIRES_AT_DESCRIPTION)
     entity_links: list[EntityLinkIn] | None = Field(
         default=None,
         description=(
@@ -441,8 +522,11 @@ class MemoryOut(BaseModel):
     # (OSS local default) never sets embedding_pending, even in fast mode.
     #
     # `BulkMemoryItem.write_mode` is narrower: there 'strong' governs the
-    # embedding only, enrichment defers either way, and the bulk path sets neither
-    # flag — so a bulk caller cannot read pendingness off its own write response.
+    # embedding only and enrichment defers either way. ax-0917-h-06: the bulk
+    # path now DOES set `embedding_pending` on items written without a vector,
+    # so a bulk caller can read pendingness off its own write response. It
+    # still sets no `enrichment_pending`, because bulk enrichment defers
+    # unconditionally — there is no inline case for that flag to distinguish.
     metadata: dict | None
     # C25 — platform-written telemetry/enrichment (llm_ms, write_latency_ms,
     # semantic_dedup_ms, summary, tags, pii flags, write-mode flags …) exposed
@@ -465,6 +549,16 @@ class MemoryOut(BaseModel):
     # successor-injected rows, which were never scored.
     score: float | None = None
     score_parts: ScoreParts | None = None
+    # D16 — true when the row was not matched by the query but injected as the
+    # newest successor of a returned outdated/conflicted row (hence its
+    # ``score``/``similarity`` are null — never scored). Injected rows arrive
+    # BEYOND the caller's ``top_k`` budget, at most one per stale row, ranked
+    # immediately above the row they supersede (A34). A successor the query
+    # recalled on its own merit is NOT marked — this flag says "you would not
+    # have gotten this row from ranking alone", not "this row supersedes
+    # something" (``supersedes_id`` already says that). Always false outside
+    # search responses.
+    injected: bool = False
     # RDF triple
     subject_entity_id: UUID | None = None
     predicate: str | None = None
@@ -616,7 +710,128 @@ class SearchDiagnostic(BaseModel):
     search_params: dict = {}
     # One entry per widened candidate: id/title/type/status + score + factors +
     # ``excluded`` (None | "below_min_similarity" | "trimmed_by_top_k").
+    #
+    #
+    # KNOWN GAP (CAURA-722, not fixed here): five of these factors —
+    # ``entity_boost``, ``freshness``, ``recall_boost``, ``temporal_boost``,
+    # ``fts_score`` — are ``None`` on every row of the scored-search path.
+    # Storage computes them in the scored CTE, uses them to build ``score``,
+    # and then omits them from the outer ``select()``, so the route never
+    # serializes them (``postgres_service.memory_scored_search``). Only
+    # ``score``, ``vec_sim``, ``fts_match`` and ``status_penalty`` are real
+    # today. Do not read a null factor as "this signal did not apply" — it
+    # applied to ``score`` and was simply not reported.
+    #
+    # This matters most for ``entity_boost``, because it is the ONLY place the
+    # entity *boost* is observable. ``retrieval_strategy`` reports only the
+    # ENTITY_LOOKUP *short-circuit*, which fires solely when the entity-linked
+    # pool fills ``top_k`` unaided — so a run that reads the strategy alone and
+    # concludes "entity retrieval contributed nothing" has measured the
+    # short-circuit, not the subsystem, and the field that would settle it is
+    # currently null.
     all_candidates: list[dict] = []
+    # CAURA-722 — the two facts that separate the reasons entity retrieval
+    # stayed out of a query. Before these, ``retrieval_strategy`` said only
+    # that it was not ENTITY_LOOKUP, and the three causes below were
+    # indistinguishable from outside the server; they belong to different
+    # owners, so the ambiguity blocked the follow-up.
+    #
+    #   entity_matches | declined | meaning
+    #   ---------------|----------|----------------------------------------
+    #   None           |  false   | entity FTS never ran — retrieval disabled
+    #                  |          | by org setting, no entity-shaped tokens in
+    #                  |          | the query, or the lookup raised and was
+    #                  |          | swallowed
+    #   0              |  false   | FTS ran and matched nothing → extraction /
+    #                  |          | linking question
+    #   > MAX_MATCHES  |  TRUE    | over-broad, declined by CAURA-698 → the
+    #                  |          | entity boost is SUPPRESSED for this query,
+    #                  |          | so entity really did contribute nothing
+    #   1..MAX_MATCHES |  false   | matched; if the strategy is not
+    #                  |          | ENTITY_LOOKUP the pool under-filled top_k
+    #                  |          | and the boost WAS still applied
+    #
+    # The last two rows are the pair worth the field: they have opposite
+    # answers to "did the entity signal affect this result?" and looked
+    # identical before.
+    #
+    # ``None`` vs ``0`` is load-bearing — "never asked" against "asked, got
+    # nothing" — so this is deliberately nullable rather than defaulting to 0.
+    entity_matches: int | None = Field(
+        default=None,
+        description=(
+            "Entities the query's tokens matched in entity FTS, counted "
+            "before the over-broad decline empties the set. None means the "
+            "lookup never ran (entity retrieval off, no entity-shaped tokens, "
+            "or a swallowed failure) — distinct from 0, which means it ran and "
+            "matched nothing."
+        ),
+    )
+    entity_match_declined: bool = Field(
+        default=False,
+        description=(
+            "True when the entity match was refused as over-broad "
+            "(> ENTITY_LOOKUP_MAX_MATCHES). This is the only decline that also "
+            "suppresses the per-row entity boost; an under-filled pool falls "
+            "through with the boost still applied and reports False here."
+        ),
+    )
+
+
+class ConflictOut(BaseModel):
+    """D11 — a detected conflict plus its human-review state.
+
+    The detector's own fields (``relationship`` / ``diagnosis`` / ``action``)
+    and the reviewer's (``resolution_action`` / ``resolution_note``) are kept
+    side by side on purpose: comparing them IS the precision measurement, and
+    collapsing them into one field would destroy the only record of the
+    detector being wrong.
+    """
+
+    id: UUID
+    tenant_id: str
+    fleet_id: str | None = None
+    new_memory_id: UUID
+    old_memory_id: UUID
+    relationship: str
+    relationship_confidence: float | None = None
+    diagnosis: str | None = None
+    diagnosis_confidence: float | None = None
+    evidence_strength: str | None = None
+    action: str | None = Field(default=None, description="What the DETECTOR proposed.")
+    audit_reason: str | None = None
+    created_by: str | None = None
+    created_at: datetime | None = None
+    review_status: str = Field(description="pending | resolved | dismissed")
+    resolution_action: str | None = Field(
+        default=None, description="What the REVIEWER chose, from the same vocabulary as `action`."
+    )
+    resolution_note: str | None = None
+    resolved_by: str | None = None
+    resolved_at: datetime | None = None
+
+
+class ConflictListResponse(BaseModel):
+    """Envelope for the review queue — ``items`` per the ratified wire contract."""
+
+    items: list[ConflictOut]
+
+
+class ConflictResolveRequest(TenantScopedBody):
+    model_config = STRICT_WRITE_BODY
+
+    review_status: Literal["resolved", "dismissed"] = Field(
+        description=(
+            "Terminal state only. 'pending' is rejected: this endpoint records a "
+            "decision, and re-opening a reviewed conflict would erase the audit trail "
+            "of who decided what."
+        )
+    )
+    resolution_action: str | None = Field(
+        default=None,
+        description="Optional; the action the reviewer chose. Validated against the shared vocabulary.",
+    )
+    resolution_note: str | None = Field(default=None, max_length=2000)
 
 
 class SearchWarning(BaseModel):
@@ -667,14 +882,29 @@ class SearchResponse(BaseModel):
     warnings: list[SearchWarning] | None = None
 
 
-class SearchRequest(BaseModel):
+class SearchRequest(TenantScopedBody):
     # DELIBERATELY PERMISSIVE — do not add ``STRICT_WRITE_BODY`` here. SAFE-01
     # made every WRITE body ``extra="forbid"`` and deliberately left the
     # search/filter/query bodies alone; see the note at the top of this file for
     # why the two sides differ. ``tests/test_unknown_field_rejection.py`` pins an
     # unknown field on /search returning 2xx precisely so a later pass that
     # "finishes the job" fails loudly instead of quietly breaking integrators.
-    tenant_id: str
+    #
+    # ax-0917-h-05 — ``extra="allow"``, not the inherited ``extra="ignore"``.
+    # Permissive still means 2xx (that product decision stands), but pydantic's
+    # ``ignore`` DISCARDS the unknown keys, so the route cannot tell that a
+    # caller sent ``limit: 2`` or ``bogus_param_xyz: 2`` and cannot say a word
+    # about it. ``allow`` keeps them in ``model_extra`` so the route can warn —
+    # accepting a key and never mentioning it again is what turned a reasonable
+    # guess into a silent 3.5x payload. Nothing dumps this model wholesale (the
+    # routes read fields individually), so carrying the extras costs nothing.
+    #
+    # ``tenant_id`` is NOT redeclared here: AX-M12 moved it to
+    # ``TenantScopedBody`` so an omitted tenant resolves from the credential.
+    # Restating it as a bare ``str`` would shadow that default and make the
+    # field required again, undoing the round-trip that change removes.
+    model_config = ConfigDict(extra="allow")
+
     fleet_ids: list[str] | None = None
     query: str = Field(min_length=1, max_length=MAX_QUERY_LENGTH)
     filter_agent_id: str | None = None
@@ -732,12 +962,61 @@ class SearchRequest(BaseModel):
             "superseded rows directly."
         ),
     )
-    valid_at: datetime | None = None
+    valid_at: datetime | None = Field(
+        default=None,
+        description=(
+            "As-of time for the question (ISO 8601). Rows whose ts_valid_start is "
+            "after this date are excluded and rows whose ts_valid_end is before it "
+            "are down-weighted; relative dates in the query ('last month') are "
+            "resolved against it. When the tenant's search.default_profile sets "
+            "freshness_reference=1, freshness and the temporal window are ALSO "
+            "measured from this time against each row's event time "
+            "(ts_valid_start, else created_at) instead of from now() — the "
+            "setting for backfilled corpora where ingest time carries no signal. "
+            "Naive values are read as UTC."
+        ),
+    )
     top_k: int = Field(
         default=DEFAULT_SEARCH_TOP_K,
         ge=1,
         le=MAX_SEARCH_TOP_K,
-        description=f"Maximum results to return (1-{MAX_SEARCH_TOP_K}, default {DEFAULT_SEARCH_TOP_K}).",
+        # ax-0917-h-05 — ``limit`` is the same trap C31/D2 fixed for
+        # ``memory_type``: a spelling agents reasonably guess, dropped in
+        # silence by the ``extra`` contract. ``GET /memories`` DOES take
+        # ``limit``, so an agent that has used the list endpoint sends
+        # ``limit: 2`` here and gets the default 5 rows back with nothing
+        # saying why (audit measurement on live traffic: top_k:2 -> 2 rows /
+        # 34 KB, limit:2 -> 5 rows / 120 KB, and bogus_param_xyz:2 identical to
+        # limit — which is what proved the mechanism was "unknown keys vanish"
+        # rather than anything about ``limit``). Absorbed as an alias rather
+        # than rejected, for the same
+        # reason ``memory_type`` was: rejecting unknown keys on this surface is
+        # a breaking change for integrators already sending junk, and this
+        # model's own note calls the permissiveness a compatibility promise.
+        # ``top_k`` stays first, so it wins when both spellings arrive.
+        #
+        # This does NOT make ``limit`` a synonym for the list endpoint's
+        # ``limit``: there it is a page size, here it is the recall budget that
+        # successor injection is allowed to exceed (see below).
+        validation_alias=AliasChoices("top_k", "limit"),
+        # D16 — top_k bounds what the query RECALLS, not the response length:
+        # successor injection is additive on purpose (suppressing a correction
+        # to honor a count would return stale claims as current), so the
+        # description states the real contract instead of promising a maximum
+        # the behavior never kept.
+        description=(
+            f"Maximum results the query returns (1-{MAX_SEARCH_TOP_K}, default "
+            f"{DEFAULT_SEARCH_TOP_K}). Not the response ceiling: each returned "
+            "outdated/conflicted row also carries its newest correction, "
+            "injected beyond this budget and marked injected: true (with "
+            "score: null), so a response holds at most 2*top_k items. "
+            "Also accepted as 'limit': sent on its own it is absorbed silently "
+            "and no warning is raised. Sent together with 'top_k', top_k wins "
+            "and the response carries a 'superseded_parameter_alias' warning "
+            "naming 'limit' as superseded by 'top_k' — not an "
+            "'unrecognized_parameters' one, because the endpoint does read "
+            "'limit'; it was simply outranked."
+        ),
     )
     # D12 — per-request cosine floor. Overrides the resolved profile/tenant
     # default for THIS call only (request beats profile beats tenant beats
@@ -757,15 +1036,74 @@ class SearchRequest(BaseModel):
     # (full candidate set, score factors, exclusion reasons, applied knobs).
     # Results are unchanged and no recall_count is bumped on a diagnostic call.
     diagnostic: bool = False
+    # pm-0918-c-03. Inherited by ``RecallRequest`` below, deliberately: /recall
+    # summarises these rows into a brief, so a short fragment restating its
+    # parent costs brief tokens on exactly the surface where they are scarcest.
+    include_derived: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to return atomic-fact fan-out children — short single-claim "
+            "rows the platform derives from a memory you wrote, which stay "
+            "retrievable alongside it. Omit to inherit the tenant's "
+            "search.include_derived setting, which in turn falls back to the "
+            "global default (currently true). Precedence: this field beats the "
+            "tenant setting beats the global default. Excluded rows are dropped "
+            "BEFORE the top_k trim, so top_k still returns top_k rows. Does not "
+            "affect auto-chunk children, which are the only sub-document vectors "
+            "a long document has. REST only: the MCP tools do not expose this "
+            "per request — an MCP caller sets the tenant's search.include_derived "
+            "instead, and an unknown argument sent to an MCP tool is dropped "
+            "silently rather than reported (oss-0923-h-01)."
+        ),
+    )
+    # ``bool | None``, not ``bool = True``. The tri-state is load-bearing: the
+    # tenant setting can turn derived rows off store-wide, and a caller that
+    # wants them back needs to be able to say ``true`` in a way that is
+    # distinguishable from not asking. A plain ``bool`` default would make every
+    # request an explicit vote and the tenant setting would never be consulted.
+    #
+    # NOTE for a caller on an older server: this model is ``extra="allow"``, so a
+    # server that predates this field does not reject the key — it lands in
+    # ``model_extra`` and comes back in ``SearchResponse.warnings`` as a name the
+    # endpoint does not read (ax-0917-h-05). A server older than THAT discards it
+    # silently. Check the warnings rather than assuming the filter applied.
+
+
+class RecallRequest(SearchRequest):
+    """``/recall``'s body: ``SearchRequest`` plus the envelope-shape knob.
+
+    A subclass rather than another field on ``SearchRequest`` because
+    ``items_alias`` means nothing on ``/search``, where ``items`` is the
+    canonical key rather than an alias — putting it there would publish a
+    no-op field on the busier surface.
+    """
+
+    # ax-0917-h-03 — /recall returns the identical result set under BOTH
+    # ``memories`` and ``items``. The Python list is shared, but JSON
+    # serialises it twice: measured 49.6% of a 5-row brief and 49.9% of a
+    # 20-row one. Set false when you read ``memories`` (both first-party SDKs
+    # do) and the response halves.
+    #
+    # Default True, not False. ``RecallResponse.items`` is in the published
+    # OpenAPI schema and ``docs/public-api-stability.md`` makes REST response
+    # shapes part of the SemVer contract, so flipping the default is a MAJOR
+    # release's change to make, not a perf patch's. The MCP brief — whose
+    # response shape that document does not pin — already opts out.
+    items_alias: bool = Field(
+        default=True,
+        description=(
+            "Emit the back-compat 'items' alias of 'memories' (C4). Set false "
+            "to halve the response; 'memories' is unaffected either way."
+        ),
+    )
 
 
 # --- Entity ---
 
 
-class EntityUpsert(BaseModel):
+class EntityUpsert(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     entity_type: str
     canonical_name: str
@@ -799,10 +1137,9 @@ class EntityOut(BaseModel):
 # --- Relation ---
 
 
-class RelationUpsert(BaseModel):
+class RelationUpsert(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     from_entity_id: UUID
     relation_type: str
@@ -814,10 +1151,9 @@ class RelationUpsert(BaseModel):
 # --- Ingest ---
 
 
-class IngestRequest(BaseModel):
+class IngestRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
     url: str | None = None
@@ -852,10 +1188,9 @@ class IngestFact(BaseModel):
     salience: float | None = None
 
 
-class IngestCommitRequest(BaseModel):
+class IngestCommitRequest(TenantScopedBody):
     model_config = STRICT_WRITE_BODY
 
-    tenant_id: str
     fleet_id: str | None = None
     agent_id: str = "ingest-agent"
     url: str | None = None

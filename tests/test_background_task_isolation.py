@@ -75,3 +75,65 @@ async def test_the_previous_tests_task_is_no_longer_running() -> None:
         "its log records, storage calls and failures will be attributed here: "
         f"{[repr(task) for task in still_running]}"
     )
+
+
+# What the drained task saw, handed from the test below to the one after it.
+_client_at_drain: dict[str, object] = {}
+
+
+async def test_schedule_a_task_that_records_the_client_it_is_drained_with() -> None:
+    """Sets up the ordering check; the assertion is in the next test.
+
+    ``_drain_background_tasks`` takes ``_patch_storage_client`` as a parameter
+    it never reads, purely so it is set up second and therefore torn down
+    FIRST. That is what keeps the in-process ASGI bridge installed while
+    leaked tasks are being drained. Remove the parameter and the order
+    inverts — measured: the client at drain time becomes ``None`` instead of
+    the bridge — and a drained task reaching for storage then memoises a REAL
+    client into the module singleton, aimed at a server no test runs.
+
+    Nothing about the fixture's own text would catch that, which is why this
+    watches behaviour instead: the task records what was installed at the
+    moment it was cancelled.
+    """
+    import core_api.clients.storage_client as sc_mod
+    from core_api.tasks import track_task
+
+    _client_at_drain.clear()
+    _client_at_drain["during_test"] = sc_mod._client
+
+    never_set = asyncio.Event()
+
+    async def _records_what_it_is_drained_with() -> None:
+        try:
+            await never_set.wait()
+        finally:
+            # Runs while the drain's ``gather`` awaits this cancellation, so
+            # it observes exactly what a real leaked task would.
+            _client_at_drain["during_drain"] = sc_mod._client
+
+    track_task(_records_what_it_is_drained_with())
+
+    assert _client_at_drain["during_test"] is not None, (
+        "the storage bridge was not installed during the test itself, so this "
+        "check cannot say anything about teardown order"
+    )
+
+
+async def test_the_drain_ran_before_the_storage_bridge_was_removed() -> None:
+    """The drain must see the bridge, not the restored original.
+
+    Fails if ``_drain_background_tasks`` loses its ``_patch_storage_client``
+    parameter: the fixtures then tear down in the other order and the value
+    recorded above is ``None``.
+    """
+    assert "during_drain" in _client_at_drain, (
+        "the task's finally never ran, so it was not drained at all — this "
+        "check proves nothing until that works"
+    )
+    assert _client_at_drain["during_drain"] is _client_at_drain["during_test"], (
+        "the drain ran AFTER _patch_storage_client restored the original "
+        "client, so a leaked task reaching for storage would memoise a real "
+        "client into the singleton: saw "
+        f"{_client_at_drain['during_drain']!r}"
+    )

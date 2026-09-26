@@ -1,12 +1,25 @@
-"""Request schemas and ORM-to-dict helpers for core-storage-api."""
+"""ORM-to-dict helpers and per-model field lists for core-storage-api.
+
+Seven pydantic request schemas used to live at the bottom of this file —
+``ScoredSearchRequest`` and friends. Every one was unreferenced, and every one
+that could be paired with a live endpoint was also WRONG about it: the
+handlers read their bodies as plain dicts, and the schemas had not followed
+them. ``MemoryEntityLinksRequest`` declared ``entity_ids`` where
+``/entity-links`` reads ``memory_ids``; ``ScoredSearchRequest`` was missing
+five fields ``/scored-search`` reads, ``readable_tenant_ids`` among them.
+
+They were deleted rather than corrected because a reader who found them and
+did the obvious thing — annotate the handler with the schema it looks written
+for — would have silently dropped those fields. pydantic ignores unknown keys
+by default, so cross-tenant read scoping would have gone quiet rather than
+loud. See ``tests/test_declarations_are_not_stale.py``.
+"""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from typing import Any
-
-from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
 # ORM → dict helper
@@ -97,11 +110,13 @@ MEMORY_FIELDS: list[str] = [
     "scope",
 ]
 
-# Same as MEMORY_FIELDS minus the two large columns (a 1536-dim ``embedding``
-# vector + the ``search_vector`` tsvector). Use for list/bundle endpoints whose
-# core-api consumers don't read the vector (admin list, contradiction rows):
-# serialising the full vector ships ~hundreds of KB per row over the internal
-# network only for ``_memory_to_out`` to discard it.
+# Same as MEMORY_FIELDS minus the two large columns (the 1024-dim ``embedding``
+# vector + the ``search_vector`` tsvector). Use for multi-row endpoints whose
+# core-api consumers don't read the vector (scored-search, admin list,
+# contradiction rows): serialising the full vector ships ~20 KB of JSON floats
+# per row over the internal network only for the consumer to discard it.
+# ``has_embedding`` (a projected boolean, where a route provides it) is the
+# presence signal; the vector itself is fetched by id when actually needed.
 MEMORY_LIST_FIELDS: list[str] = [f for f in MEMORY_FIELDS if f not in ("embedding", "search_vector")]
 
 ENTITY_FIELDS: list[str] = [
@@ -147,6 +162,9 @@ DOCUMENT_FIELDS: list[str] = [
     "collection",
     "doc_id",
     "data",
+    # ax-0917-m-14 — author attribution. Present but NULL on every row
+    # written before the column existed.
+    "agent_id",
     "created_at",
     "updated_at",
 ]
@@ -260,64 +278,3 @@ AGENT_DIGEST_FIELDS: list[str] = [
     "error_detail",
     "generated_at",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Pydantic request schemas for complex query endpoints
-# ---------------------------------------------------------------------------
-
-
-class ScoredSearchRequest(BaseModel):
-    tenant_id: str
-    embedding: list[float]
-    query: str
-    fleet_ids: list[str] | None = None
-    caller_agent_id: str | None = None
-    filter_agent_id: str | None = None
-    memory_type_filter: str | None = None
-    status_filter: str | None = None
-    valid_at: str | None = None
-    boosted_memory_ids: list[str] | None = None
-    memory_boost_factor: dict[str, float] | None = None
-    search_params: dict
-    temporal_window_seconds: float | None = None
-    recall_boost_enabled: bool = True
-    top_k: int = 10
-
-
-class SemanticDuplicateRequest(BaseModel):
-    tenant_id: str
-    embedding: list[float]
-    content_hash: str | None = None
-    fleet_id: str | None = None
-    threshold: float = 0.95
-
-
-class ContradictionCandidatesRequest(BaseModel):
-    tenant_id: str
-    embedding: list[float]
-    memory_type: str
-    fleet_id: str | None = None
-
-
-class GraphExpandRequest(BaseModel):
-    seed_ids: list[str]
-    tenant_id: str
-    fleet_id: str | None = None
-    max_hops: int = 2
-    use_union: bool = True
-
-
-class NearDuplicatesRequest(BaseModel):
-    tenant_id: str
-    fleet_id: str | None = None
-
-
-class MemoryEntityLinksRequest(BaseModel):
-    entity_ids: list[str]
-
-
-class EntityFTSRequest(BaseModel):
-    tokens: list[str]
-    tenant_id: str
-    fleet_ids: list[str] | None = None
