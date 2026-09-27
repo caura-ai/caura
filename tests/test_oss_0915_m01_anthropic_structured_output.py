@@ -123,3 +123,37 @@ async def test_fake_fallback_warning_names_consumer_and_provider(caplog):
     assert final[0].levelno == logging.WARNING
     assert "entity-extraction" in final[0].getMessage()
     assert "'anthropic'" in final[0].getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc_type", "expected_attempts", "expected_sleeps"),
+    [
+        # Deterministic: one attempt, no backoff, even with no opt-in.
+        (UnsupportedStructuredOutputError, 1, 0),
+        # Control — proves the patched sleep is the one the loop uses.
+        (RuntimeError, 3, 2),
+    ],
+)
+async def test_unsupported_structured_output_is_never_retried(
+    monkeypatch, exc_type, expected_attempts, expected_sleeps
+):
+    import common.llm.retry as retry_mod
+
+    sleeps: list[float] = []
+
+    async def _no_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(retry_mod.asyncio, "sleep", _no_sleep)
+    attempts = 0
+
+    async def _call():
+        nonlocal attempts
+        attempts += 1
+        raise exc_type("boom")
+
+    with pytest.raises(exc_type):
+        await retry_mod.call_with_retry(_call, label="t", max_attempts=3)
+    assert attempts == expected_attempts
+    assert len(sleeps) == expected_sleeps

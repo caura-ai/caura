@@ -36,6 +36,9 @@ from common.llm.constants import (
 )
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
+from common.llm.providers._unsupported import (
+    UnsupportedStructuredOutputError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +80,6 @@ ANTHROPIC_JSON_UNSUPPORTED = (
     "strict=true). Use openai, openrouter or gemini for "
     "ENTITY_EXTRACTION_PROVIDER / the tenant LLM provider."
 )
-
-
-class UnsupportedStructuredOutputError(RuntimeError):
-    """Raised by ``complete_json`` for a provider that cannot serve it."""
 
 
 def _usage_tokens(response) -> tuple[int, int, int]:
