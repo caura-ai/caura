@@ -2985,8 +2985,11 @@ class PostgresService:
             # CAURA-594: NULL-embedding rows are admitted only if they also
             # match the FTS query — otherwise they'd rank on `Memory.weight *
             # freshness * ...` alone and could fill top_k slots with rows
-            # that have no relationship to the query during a large backfill
-            # window. `search_vector @@ ts_query` is GIN-indexed, so the
+            # that have no relationship to the query. This is NOT only a
+            # backfill window: the embed backfill is gated off by default and
+            # has never run (oss-0924-m-05, measured 2026-09-26), so for an
+            # un-embedded row this guard is the only relevance test it ever
+            # faces. `search_vector @@ ts_query` is GIN-indexed, so the
             # extra predicate is free for rows that already had to scan
             # the tenant/fleet slice.
             # Other paths (find_semantic_duplicate, find_similar_candidates,

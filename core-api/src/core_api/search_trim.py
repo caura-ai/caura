@@ -80,7 +80,13 @@ def trim_reserving_fts_matches(
     plain head slice. Storage reserves matching candidates for the same reason;
     this final trim makes one of those candidates visible without changing the
     ordering of the remaining results. It also preserves #687's guarantee for a
-    matching row whose embedding backfill has not landed yet.
+    matching row that has no embedding.
+
+    That last case is NOT only a backfill window, and the comment used to say it
+    was. Measured 2026-09-26 (oss-0924-m-05, docs/unembedded-rows/): the embed
+    backfill is gated off by default and has never run, so for an un-embedded row
+    this reservation is not a grace period -- it is the only retrieval path that
+    row will ever have. Do not weaken it on the assumption a sweep is coming.
 
     The reservation is deliberately minimal: it promotes at most
     ``FTS_RESERVED_RESULTS`` rows, displacing the same number from the tail
