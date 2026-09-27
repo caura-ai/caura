@@ -175,7 +175,7 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `GATEWAY_SHARED_SECRET` | *(empty)* | Secret required in `X-Gateway-Secret` before gateway identity headers are trusted |
 | `JWT_SECRET` | `change-me-in-production` | JWT signing secret; must be changed in production |
 | `EMBEDDING_PROVIDER` | `openai` | `openai`, `local`, or `fake` |
-| `ENTITY_EXTRACTION_PROVIDER` | `openai` | `openai`, `gemini`, `anthropic`, `openrouter`, `fake`, or `none` |
+| `ENTITY_EXTRACTION_PROVIDER` | `openai` | `openai`, `gemini`, `openrouter`, `fake`, or `none` (`anthropic` is refused at startup — no structured-output support) |
 | `ENTITY_EXTRACTION_MODEL` | `gpt-5.4-nano` | LLM model for enrichment and entity extraction |
 | `OPENAI_API_KEY` | — | Required for OpenAI embeddings and enrichment |
 | `USE_LLM_FOR_MEMORY_CREATION` | `true` | LLM auto-classifies type, weight, title, summary on write |

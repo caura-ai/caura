@@ -135,7 +135,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     atlascloud_api_key: str | None = None
     gemini_api_key: str | None = None
-    entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
+    # none | fake | openai | openrouter | gemini — NOT anthropic, see
+    # ``_reject_anthropic_structured_output``.
+    entity_extraction_provider: str = "openai"
     entity_extraction_model: str = "gpt-5.4-nano"
     # E3 — reasoning-effort for the contradiction judge's LLM calls.
     # Valid values are MODEL-SPECIFIC (gpt-5.4 family, wet-tested:
@@ -874,6 +876,29 @@ class Settings(BaseSettings):
                     "OPENAI_API_KEY or configure PLATFORM_LLM_PROVIDER to restore "
                     "enrichment."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_anthropic_structured_output(self) -> "Settings":
+        """Refuse ``ENTITY_EXTRACTION_PROVIDER=anthropic`` at startup.
+
+        oss-0915-m-01. This provider drives enrichment, entity extraction and
+        the contradiction judge — all structured-output (``complete_json``)
+        calls — and Anthropic's OpenAI-compatible endpoint 400s on every one of
+        them (``ANTHROPIC_JSON_UNSUPPORTED`` in the OpenAI provider has the two
+        error shapes). At runtime that degraded to the fake provider while
+        writes reported success, so a crash here is the kinder failure.
+        String literal for the same circular-import reason as
+        ``_remap_deprecated_vertex``.
+        """
+        if self.entity_extraction_provider == "anthropic":
+            raise ValueError(
+                "ENTITY_EXTRACTION_PROVIDER=anthropic is not supported: "
+                "enrichment, entity extraction and contradiction detection use "
+                "structured JSON output, which Anthropic's OpenAI-compatible "
+                "endpoint rejects (HTTP 400 on every call). Set "
+                "ENTITY_EXTRACTION_PROVIDER to openai, openrouter or gemini."
+            )
         return self
 
     @property

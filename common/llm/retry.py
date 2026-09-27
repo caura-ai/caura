@@ -595,5 +595,12 @@ async def call_with_fallback(
         )
 
     # --- Step 3: Fake function as last resort ---
-    logger.warning("All LLM providers failed for %s, using fake fallback", label)
+    # Name the primary provider: ``label`` is usually the consumer, and without
+    # the provider this line could not tell a misconfigured provider apart from
+    # an outage (oss-0915-m-01 — every anthropic call degraded here).
+    logger.warning(
+        "All LLM providers failed for %s (primary provider '%s'), using fake fallback",
+        label,
+        primary_provider_name,
+    )
     return fake_fn()
