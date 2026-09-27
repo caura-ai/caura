@@ -10,6 +10,22 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.20.1](https://github.com/caura-ai/caura/compare/backend-v3.20.0...backend-v3.20.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **keystones:** derive the verified trust floor from identity provenance (oss-0922-m-03) ([#1723](https://github.com/caura-ai/caura/issues/1723)) ([6126c85](https://github.com/caura-ai/caura/commit/6126c8503ed4622879ae6f7c0fec66964fa0a751))
+* **mcp:** give tools/call the request budget its bulkhead already claims (oss-0924-h-02) ([#1726](https://github.com/caura-ai/caura/issues/1726)) ([e781140](https://github.com/caura-ai/caura/commit/e78114088597b78508c20f08070ed71f7b73f1ce))
+* **search:** forward strict_fleet_scoping from the classifier's entity FTS ([#1728](https://github.com/caura-ai/caura/issues/1728)) ([fe30557](https://github.com/caura-ai/caura/commit/fe30557e80cce62f1c90c446b55513a799790b14))
+* **settings:** drop skills_factory.forge.llm_tokens_per_run, a knob nothing read ([#1729](https://github.com/caura-ai/caura/issues/1729)) ([43ebec3](https://github.com/caura-ai/caura/commit/43ebec3f851193c6377d501a0dc845347cca3125))
+
+
+### Documentation
+
+* **guards:** the un-embedded reservation is not a backfill window ([#1731](https://github.com/caura-ai/caura/issues/1731)) ([2998c07](https://github.com/caura-ai/caura/commit/2998c07498a795074699b38433ea2e0631298b45))
+* **m-05:** split the 2,139 un-embedded rows by provenance before anyone sizes them ([#1725](https://github.com/caura-ai/caura/issues/1725)) ([6b5930c](https://github.com/caura-ai/caura/commit/6b5930c03cce966f2e05a85a305b2d0d845d231c))
+
 ## [3.20.0](https://github.com/caura-ai/caura/compare/backend-v3.19.2...backend-v3.20.0) (2026-09-26)
 
 
