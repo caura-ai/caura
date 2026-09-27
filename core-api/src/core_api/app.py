@@ -241,6 +241,52 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
         )
 
 
+async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
+    """Write one tenant's slice of an audit batch — the flusher's only
+    ``per_tenant_storage_slot`` caller.
+
+    The flusher is a background loop, so no request budget is armed over
+    this acquire, and the slot queues unboundedly by design. Without a
+    budget of its own a tenant whose ``storage_write`` slots are saturated
+    parks here, and because ``_flush_audit_batch`` gathers every tenant of
+    the chunk, the WHOLE flush cycle waits with it: nothing drains, and
+    once ``audit_queue_max_size`` fills every tenant's events are dropped
+    at enqueue (oss-0927-m-04). ``audit_flush_slot_timeout_seconds`` caps
+    the acquire only; once the slot is held the budget is disarmed and the
+    POST is bounded by the storage client's own timeouts, so a write that
+    is already in flight is never cancelled into a double-counted loss.
+
+    The caller separates the sentinel bucket out before scheduling this
+    over real tenants only, so ``tid`` is always a real tenant ID.
+    """
+    budget = app_settings.audit_flush_slot_timeout_seconds
+    try:
+        async with asyncio.timeout(budget) as acquire_budget:
+            async with per_tenant_storage_slot("storage_write", tid):
+                acquire_budget.reschedule(None)
+                await get_storage_client().create_audit_logs_bulk(tevs)
+    except TimeoutError:
+        # Only the acquire can raise this here: the budget is disarmed the
+        # moment the slot is held, and a storage-client timeout surfaces as
+        # an httpx error, not ``TimeoutError``.
+        logger.error(
+            "audit batch flush for tenant=%s (events=%d) could not acquire a "
+            "storage_write slot within %ss; events lost from this tenant's "
+            "slice so the other tenants' flush is not held behind it",
+            tid,
+            len(tevs),
+            budget,
+        )
+        raise
+    except Exception:
+        logger.exception(
+            "audit batch flush failed for tenant=%s (events=%d); events lost from this tenant's slice",
+            tid,
+            len(tevs),
+        )
+        raise
+
+
 @asynccontextmanager
 async def lifespan(app):
     # Re-route third-party loggers (uvicorn / fastmcp / mcp / slowapi) to the
@@ -349,22 +395,6 @@ async def lifespan(app):
                 AuditEventQueue,
                 set_audit_queue,
             )
-
-            async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
-                # Caller separates the sentinel bucket out before scheduling
-                # ``_flush_one_tenant`` over real tenants only, so ``tid`` is
-                # always a real tenant ID here — no sentinel branch needed.
-                try:
-                    async with per_tenant_storage_slot("storage_write", tid):
-                        await get_storage_client().create_audit_logs_bulk(tevs)
-                except Exception:
-                    logger.exception(
-                        "audit batch flush failed for tenant=%s (events=%d); "
-                        "events lost from this tenant's slice",
-                        tid,
-                        len(tevs),
-                    )
-                    raise
 
             async def _flush_audit_batch(events: list[dict]) -> None:
                 # Group by tenant + flush concurrently with per-tenant storage

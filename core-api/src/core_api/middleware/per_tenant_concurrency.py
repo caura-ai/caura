@@ -15,9 +15,10 @@ Two caps compose:
 
 2. **Storage-call slot** (``"storage_write"`` / ``"storage_search"``,
    CAURA-602 follow-up). Held only across the storage roundtrip itself.
-   Acquire is unbounded — the caller's request budget already caps how
-   long the wait can run (every caller has one; the roster is in
-   :func:`per_tenant_storage_slot`), and queueing here is the
+   Acquire is unbounded — the caller's own budget already caps how
+   long the wait can run (a request budget, or the audit flusher's
+   acquire timeout; the roster is in :func:`per_tenant_storage_slot`),
+   and queueing here is the
    *intended* shape (a tenant in the embed phase doesn't hold a
    storage connection).
    Bounds storage-pool occupancy per tenant — keeps a hot tenant from
@@ -184,11 +185,15 @@ async def per_tenant_storage_slot(
       by the daily sweep, not a caller waiting on a queue; noted so the
       list above is exhaustive rather than convenient.
     * The audit-queue flusher (``_flush_one_tenant``, ``app.py``) — a
-      background loop, not a request, so nothing arms a deadline over
-      it and this acquire is uncapped. What bounds the work is upstream:
-      the queue is capped at ``audit_queue_max_size`` and shutdown waits
-      only ``stop(timeout=5.0)`` before cancelling. Listed because the
-      roster above claims to be every path, and for months it was not.
+      background loop, not a request, so no request budget exists to
+      cap it. It arms its own: an ``asyncio.timeout`` over this acquire
+      (``audit_flush_slot_timeout_seconds``, 10s), disarmed once the
+      slot is held so the POST is left to the storage client's own
+      timeouts. Expiry drops that tenant's slice only. Before
+      oss-0927-m-04 this acquire was uncapped, and because the flusher
+      gathers every tenant of a chunk, one saturated tenant held the
+      whole flush cycle until the queue filled and dropped everyone's
+      events.
 
     A new entry point that reaches a ``per_tenant_storage_slot`` caller
     without a budget of its own puts this docstring back into the state
@@ -201,7 +206,8 @@ async def per_tenant_storage_slot(
     surface above through its real entry point, reads the recorder AT
     this acquire, and then saturates this semaphore to prove the
     deadline really cancels the wait rather than merely being bound
-    beside it. The roster in that file is the checked copy of this list;
+    beside it (the flusher, having no recorder, is driven against the
+    saturated semaphore alone). The roster in that file is the checked copy of this list;
     a surface added to one and not the other fails there by name.
 
     Tenant-A storm scenario: A's writes occupy ``cap`` storage slots;

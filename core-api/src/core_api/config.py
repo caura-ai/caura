@@ -339,6 +339,19 @@ class Settings(BaseSettings):
     audit_queue_max_size: int = 10000
     audit_queue_flush_threshold: int = 50
     audit_queue_flush_interval_seconds: float = 1.0
+    # Cap on the audit flusher's wait for one tenant's ``storage_write``
+    # slot (oss-0927-m-04). The flusher is a background loop, so no
+    # request budget sits over that acquire, and it gathers every tenant
+    # of a chunk: without this, one tenant with saturated storage slots
+    # holds the whole flush cycle, the queue stops draining, and at
+    # ``audit_queue_max_size`` every tenant's events drop at enqueue.
+    # On expiry only that tenant's slice is lost (logged, counted in
+    # ``failed_count``). Caps the acquire only — the storage POST that
+    # follows is bounded by the storage client's own timeouts. 10s is
+    # ten flush intervals: long enough to ride out a burst of that
+    # tenant's own writes holding the slot, short enough that the other
+    # tenants' events wait seconds rather than a whole request budget.
+    audit_flush_slot_timeout_seconds: float = 10.0
     # Capability-usage adoption counters (services/capability_usage.py).
     # In-process aggregation flushed to the ``capability_usage`` table on
     # this interval — the data behind the per-capability / per-transport /
@@ -387,8 +400,10 @@ class Settings(BaseSettings):
     # max_instances`` should sit comfortably below the storage-writer
     # pool size (10/instance x 11 = 110 fleet-wide today) so a single
     # tenant can't park more than ~20% of pool slots. Acquire is
-    # unbounded — a saturated tenant queues here while the route
-    # budget caps total wait time; see ``per_tenant_storage_slot``.
+    # unbounded — a saturated tenant queues here while the CALLER's
+    # budget caps total wait time: the request budget on request paths,
+    # ``audit_flush_slot_timeout_seconds`` on the background audit
+    # flusher. The full roster is on ``per_tenant_storage_slot``.
     per_tenant_storage_write_concurrency: int = 2
     per_tenant_storage_search_concurrency: int = 4
     # Fail-fast budget when the cap is exhausted. Long enough to absorb
@@ -662,6 +677,15 @@ class Settings(BaseSettings):
                 f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
                 "timeout (nginx proxy_read_timeout / Cloud Run) and update "
                 "the constant before raising this budget."
+            )
+        if self.audit_flush_slot_timeout_seconds <= 0:
+            # ``asyncio.timeout(0)`` expires before the first acquire can
+            # succeed, so every tenant's slice would be dropped on every
+            # flush — a budget that silently turns audit ingestion off.
+            raise ValueError(
+                f"audit_flush_slot_timeout_seconds "
+                f"({self.audit_flush_slot_timeout_seconds}s) must be > 0; "
+                "set audit_queue_max_size = 0 to bypass the queue instead."
             )
         if self.mcp_request_timeout_seconds > PLATFORM_REQUEST_CEILING_SECONDS:
             # Same rule as interview's, for the same reason: past the
