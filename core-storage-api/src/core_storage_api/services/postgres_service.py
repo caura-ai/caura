@@ -4696,7 +4696,13 @@ class PostgresService:
 
         Three distinct states, deliberately not collapsed:
 
-        * ``missing`` — no vector at all. The nightly sweep repairs these.
+        * ``missing`` — no vector at all. The NULL-embedding sweep is built
+          to repair these, but it is gated on ``embed_backfill_enabled``
+          (False by default, its Pub/Sub topic Terraform-provisioned) and has
+          never run (oss-0924-m-05, ``docs/unembedded-rows/``), so today
+          nothing drains this count on its own; the standalone
+          ``backfill_embeddings`` CLI is the only repair. Provision the topic
+          and flip the flag and "the nightly sweep repairs these" is true.
         * ``stale`` — a vector computed from DIFFERENT text than the row now
           holds (``embedded_content_hash`` disagrees with ``content_hash``).
           Non-NULL, so no NULL-based sweep can see it; recall silently ranks
