@@ -72,10 +72,26 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     # row rather than embedding inline, so the work paces through the normal
     # consumer path instead of competing with live writes at full rate.
     #
-    # PROVISION THE TOPIC BEFORE TRIGGERING THIS. The deployed topic is
-    # memclaw.lifecycle.embed-backfill-requested  # legacy-name-floor: live topic
-    # Terraform-provisioned. ``PubSubEventBus.publish`` deliberately does not
-    # block on the publish
+    # PROVISION THE TOPIC BEFORE TRIGGERING THIS, under the name
+    # ``caura.lifecycle.embed-backfill-requested`` and no other. This comment
+    # used to name the pre-rebrand spelling and carried a floor marker calling
+    # it the live topic; both were wrong, and wrong in the direction that costs
+    # the most. The ``lifecycle`` family flipped 2026-08-28 and CONTRACTED
+    # 2026-09-01, so ``publish_name`` and ``subscribe_names`` — at ``dual``
+    # either way — return this one name and the bus can neither publish nor
+    # subscribe the other. No legacy-prefixed Pub/Sub resource remains for this
+    # family (``docs/plans/rebrand-sunset-plan.md``), so there was no live topic
+    # to floor. What the marker did was stop the ratchet counting the line and
+    # start a provisioner TRUSTING it: this topic has never been created, so the
+    # name written here is the name someone will type into Terraform, and typing
+    # the other one buys a sweep that publishes, reports success and moves
+    # nothing. ``common/events/events_manifest.json`` is the machine-checkable
+    # form of the same requirement — caura-enterprise's
+    # ``check_pubsub_provisioning.py`` reads it — and it lists this name for
+    # core-worker. Treat the manifest as the contract and this comment as its
+    # explanation, never the reverse.
+    #
+    # ``PubSubEventBus.publish`` deliberately does not block on the publish
     # future, so a "topic not found" surfaces only in the SDK's background
     # thread. Triggering either route before infra lands therefore returns 200
     # with an ``audit_id`` whose row sits at ``pending`` forever, with no error

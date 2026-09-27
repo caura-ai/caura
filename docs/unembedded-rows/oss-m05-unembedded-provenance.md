@@ -182,10 +182,14 @@ memories that never got an embedding scheduled"*.
   reason and it is a good one: the Pub/Sub topic
   `caura.lifecycle.embed-backfill-requested` is Terraform-provisioned, so until
   infra lands a fire would publish into a topic nothing consumes. (The route's
-  own comment spells that topic with the pre-rebrand prefix, so the two sources
-  do not agree on its name — worth settling before anyone provisions it.)
+  own comment used to spell that topic with the pre-rebrand prefix. Settled as
+  oss-0926-m-01: this name is the only one the bus can publish or subscribe —
+  the `lifecycle` family is contracted — and it is the name
+  `common/events/events_manifest.json` states to the enterprise provisioning
+  check, so the route's comment was corrected to match and a guard now fails any
+  mention that disagrees.)
 - Firing it early fails **silently**, which is why "has it run?" is not
-  answerable from a log. `lifecycle.py:70-84` spells it out: `PubSubEventBus.
+  answerable from a log. `lifecycle.py:70-100` spells it out: `PubSubEventBus.
   publish` does not block on the publish future, so a missing topic surfaces
   only on a background thread, and the trigger returns **200 with an
   `audit_id` whose row sits at `pending` forever**.
