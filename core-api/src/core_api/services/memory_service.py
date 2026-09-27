@@ -3608,6 +3608,10 @@ async def fan_out_atomic_facts(
 #: operator wants one predicate for "permanently unenriched", not three.
 _ENRICH_STRANDED_TASK = "enrich_stranded"
 
+#: The derive phase's give-up: enrichment landed, the atomic-fact children did
+#: not. ``memory_id`` is the PARENT — the id to re-run the fan-out from.
+_FANOUT_STRANDED_TASK = "fanout_stranded"
+
 
 async def _record_enrich_stranded(
     memory_id: UUID,
@@ -4038,11 +4042,17 @@ async def _enrich_memory_background(
         # they fire ``detect_contradictions_async`` when their
         # respective worker PATCHes land.
         logger.info("Background enrichment succeeded for memory %s", memory_id)
-    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError) as exc:
         # Distinct from the enrichment handler above so the two phases are
         # tellable apart in logs: by this point the row is enriched AND
         # governed, and only the derived rows failed.
         logger.exception("Background enrichment fan-out error for memory %s", memory_id)
+        # oss-0927-m-03: the atomic-fact children were never written and nothing
+        # retries them — the parent is enriched, so no enrichment-side check will
+        # ever look at this row again. Its own task name, not ``enrich_stranded``:
+        # the parent is NOT unenriched, and folding the two would make that
+        # predicate lie about it.
+        await record_task_failure(_FANOUT_STRANDED_TASK, memory_id, tenant_id, exc)
 
     return governed_row
 

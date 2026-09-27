@@ -423,15 +423,22 @@ class Scenario:
     #: STILL swallowed, so whoever fixes it has to delete this and cannot
     #: forget to. The value says where it is tracked.
     known_open: str | None = None
+    #: A swallow that is deliberate and cannot honestly be recorded. The run
+    #: is still driven — the fault must be reached and the ERROR logged, since
+    #: that log line is what the reason promises an operator will see.
+    excluded: str | None = None
 
 
-_OPEN_PATH_A = (
-    "known-open oss-0927-m-03: detect_contradictions_async's outer `except "
-    "Exception: logger.exception(...)` — the memory silently loses detection"
-)
-_OPEN_PATH_C = (
-    "known-open oss-0927-m-03: detect_contradictions_by_entities_async's outer "
-    "`except Exception: logger.exception(...)`"
+#: Shared by the critical-overflow audit scenario; kept beside the roster so it
+#: is read with the rest of the exclusions.
+_AUDIT_LOST_REASON = (
+    "log_action's critical-overflow fallback runs only when the audit queue is "
+    "full AND the synchronous storage POST has just failed. A "
+    "background_task_log row is also a storage write, so it would fail the "
+    "same way and could only ever be recorded when it was not needed. No "
+    "non-storage durable signal exists to use instead: AuditQueue's "
+    "dropped/failed counters are in-process and have no reader. What an "
+    "operator sees is the ERROR line 'critical %r event LOST'."
 )
 
 #: Keyed by the callee as it is spelled at the ``tracked_task(...)`` call site.
@@ -455,11 +462,6 @@ ROSTER: dict[str, dict[str, Any]] = {
                 "enrich-fanout",
                 "enrich_or_publish",
                 _enrich_fanout,
-                known_open=(
-                    "known-open oss-0927-m-03: _enrich_memory_background's "
-                    "fan-out `except` logs and returns; the atomic-fact children "
-                    "are never written and nothing retries them"
-                ),
             ),
             Scenario("enrich-publish", "enrich_or_publish", _enrich_publish),
         ],
@@ -483,10 +485,7 @@ ROSTER: dict[str, dict[str, Any]] = {
                 "audit-critical-lost",
                 "audit_log",
                 _audit_critical,
-                known_open=(
-                    "known-open oss-0927-m-03: log_action's critical-overflow "
-                    "sync fallback logs 'event LOST' and returns"
-                ),
+                excluded=_AUDIT_LOST_REASON,
             )
         ],
     },
@@ -517,19 +516,16 @@ ROSTER: dict[str, dict[str, Any]] = {
                 "contradiction-path-a",
                 "contradiction_detection",
                 lambda s: _contradiction(s, engine=False, trigger_name="write"),
-                known_open=_OPEN_PATH_A,
             ),
             Scenario(
                 "contradiction-path-c",
                 "contradiction_detection",
                 lambda s: _contradiction(s, engine=False, trigger_name="entity"),
-                known_open=_OPEN_PATH_C,
             ),
             Scenario(
                 "contradiction-engine-path-a",
                 "contradiction_detection",
                 lambda s: _contradiction(s, engine=True, trigger_name="write"),
-                known_open=_OPEN_PATH_A,
             ),
         ],
     },
@@ -595,6 +591,13 @@ async def test_a_failure_leaves_a_record(key: str, scenario: Scenario) -> None:
         f"{scenario.id}: no ERROR was logged, so this run cannot tell a give-up "
         "from a survived degradation — pick a fault the code treats as failure"
     )
+
+    if scenario.excluded:
+        assert any("LOST" in m for m in obs.errors), (
+            f"{scenario.id}: excluded on the promise of an ERROR an operator "
+            f"can see, and none was logged ({scenario.excluded})"
+        )
+        return
 
     if scenario.known_open:
         assert obs.swallowed, (
