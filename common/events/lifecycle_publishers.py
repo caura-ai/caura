@@ -235,12 +235,21 @@ async def publish_forge_distill_request(
     dry_run: bool = False,
 ) -> None:
     """Skill Factory SF-007: trigger one Forge distillation run for an
-    org/fleet. Per-run override knobs default to ``None`` so the
-    consumer falls through to
-    ``org_settings.skills_factory.forge.*``. Phase 0 ships only the
-    publisher + a no-op handler; the real worker (cluster fingerprint,
-    LLM distill, gating, scan) arrives in Phase 1. See
-    :class:`~common.events.lifecycle_forge_request.LifecycleForgeDistillRequest`.
+    org/fleet. The consumer is live — #311 replaced the Phase 0 no-op
+    with the real tick (cluster fingerprint, LLM distill, gating, scan)
+    and same-tick promotion.
+
+    THE FIVE OVERRIDE KWARGS DO NOT OVERRIDE ANYTHING. The consumer
+    reads ``org_id``, ``fleet_id`` and ``run_label`` and nothing else,
+    so the four value knobs are inert and the run uses
+    ``org_settings.skills_factory.forge.*`` whatever is passed here.
+    ``dry_run=True`` is worse than inert and is rejected by the
+    consumer as a terminal failure rather than silently performing a
+    real run; for an actual dry run use ``scripts/forge_dry_run.py``.
+    They are kept on the signature because they are implementable and
+    because a naming pin depends on them — see
+    :class:`~common.events.lifecycle_forge_request.LifecycleForgeDistillRequest`,
+    which carries the full reasoning (oss-0926-m-02).
     """
     await _publish(
         Topics.Lifecycle.FORGE_DISTILL_REQUESTED,

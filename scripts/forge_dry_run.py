@@ -24,8 +24,18 @@ The script reads Caura connection params from the standard env
 
 This is NOT a production-grade scheduler. The real Forge run flows
 through the ``<brand>.lifecycle.forge-distill-requested`` event
-(SF-007); the scheduled-tick worker handler lands in Phase 1's
-final wiring step alongside the public lifecycle endpoint.
+(SF-007), and that path is WIRED: #311 landed the scheduled-tick
+handler (``core_api.services.forge.cron_handler``) alongside the
+public lifecycle endpoint. This paragraph claimed the wiring was
+still pending for three months after it shipped, and a reader who
+believed it concluded the event path was harmless (oss-0926-m-02).
+
+Note what the event path cannot do: the tick always runs
+``promote_pending_candidates`` after mining, so it has no dry-run
+mode, and its consumer refuses a ``dry_run=True`` event outright
+rather than running for real. The dry run is THIS script, and it is
+a dry run because it calls the Forge pipeline directly and never
+promotes — not because it passes a flag.
 """
 
 from __future__ import annotations
