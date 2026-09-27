@@ -127,7 +127,7 @@ from core_api.services.system_metadata import (
     sanitize_caller_metadata,
     set_system_value,
 )
-from core_api.services.task_tracker import tracked_task
+from core_api.services.task_tracker import record_task_failure, tracked_task
 
 logger = logging.getLogger(__name__)
 
@@ -2533,6 +2533,19 @@ async def create_memories_bulk(
 _REEMBED_MAX_RETRIES = 3
 _REEMBED_BACKOFF_BASE_S = 10
 
+#: ``background_task_log.task_name`` for a memory this process has given up on
+#: embedding. One name for both terminal exits in :func:`_reembed_memory`,
+#: because the consequence an operator queries for is identical — the row is
+#: ``embedding IS NULL``, it reports ``embedding_pending: true``, and nothing in
+#: this process will try again. Which of the two exits it took is in
+#: ``error_message``.
+#:
+#: Deliberately NOT one of the ``tracked_task`` names its callers pass
+#: (``embed_or_publish``, ``reembed``, ``reembed_bulk[N]``): every embed repair
+#: in the tree funnels through this one coroutine, and the operator wants one
+#: predicate for "permanently unembedded", not three.
+_REEMBED_STRANDED_TASK = "reembed_stranded"
+
 
 async def _schedule_embed_or_reembed(
     memory_id: UUID,
@@ -2773,6 +2786,65 @@ async def _schedule_enrich_or_inline(
         )
 
 
+async def _record_stranded(
+    memory_id: UUID,
+    tenant_id: str,
+    reason: str,
+    *,
+    from_except: bool = False,
+) -> None:
+    """Persist one ``background_task_log`` row for a memory left unembedded.
+
+    ``tracked_task`` writes a row only when the coroutine it wraps RAISES.
+    :func:`_reembed_memory` catches its own failures, logs, and returns
+    normally — so the wrapper saw a success, and the only table an operator
+    inspects stayed empty while the row stayed semantically unsearchable.
+    That is the shape :func:`record_task_failure` was split out for (09/02
+    M-40), and until now ``process_entity_extraction`` was its only adopter.
+
+    It matters more here than it did there, because of what does NOT catch
+    this afterwards. The daily sweep that would repair the row,
+    ``run_embed_backfill_tick``, is registered only when
+    ``embed_backfill_enabled`` is set, that setting defaults FALSE, and the
+    Pub/Sub topic it publishes into is Terraform-provisioned and has never
+    been created — so on every deployment that has not explicitly turned it on
+    (which is all of them, as far as this repository can tell) there is no
+    second chance. A deployment in exactly that state is how ~430 memories
+    were stranded in the 2026-07-27 incident this module carries a postmortem
+    for, and the reason it took an incident to notice is that this coroutine
+    reported success on its way out.
+
+    What the row buys, stated honestly and no further: ``background_task_log``
+    has one writer and no reader anywhere in the tree, so this does not repair
+    anything. It makes the loss COUNTABLE and hand-recoverable — the
+    ``(tenant_id, status)`` index is the shape such a query wants, and
+    ``memory_id`` is the id to re-embed. It is also the only thing that
+    distinguishes a row whose embed is still coming from one whose embed is
+    never coming: ``metadata.embedding_pending`` is ``True`` in both cases and
+    this change does not alter that. A reader holding only the row still
+    cannot tell the two apart.
+
+    ``reason`` is always what lands in ``error_message``, including at the
+    call site that has a real exception: the two exits differ in a way the
+    exception type alone does not say, and that difference is what decides
+    whether an operator chases the embedding provider or storage.
+
+    Never raises: :func:`record_task_failure` swallows its own storage
+    failures, and this adds nothing that can.
+    """
+    await record_task_failure(
+        _REEMBED_STRANDED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(reason),
+        # ``record_task_failure`` defaults to ``traceback.format_exc()``, which
+        # is only meaningful inside an ``except``. The exhaustion caller is not
+        # in one — nothing raised, the provider kept answering ``None`` — and
+        # would otherwise store the literal "NoneType: None" as its traceback.
+        tb=None if from_except else f"no traceback: {reason}",
+    )
+
+
 async def _reembed_memory(
     memory_id: UUID,
     content: str,
@@ -2790,6 +2862,12 @@ async def _reembed_memory(
     must pass ``is_failure_fallback=True`` to get the backoff, otherwise
     N serial retries land on the already-failing provider with zero
     delay — thundering herd.
+
+    Both ways this can end badly write a ``background_task_log`` row via
+    :func:`_record_stranded` — see there for why, and for what that row does
+    and does not buy. Returning normally is kept either way: this is
+    fire-and-forget, every caller wraps it in ``tracked_task``, and the row it
+    is repairing was committed and ACKed long ago.
     """
     from core_api.constants import EMBEDDING_REEMBED_DELAY_S
     from core_api.services.organization_settings import resolve_config
@@ -2826,6 +2904,12 @@ async def _reembed_memory(
             "Background re-embed exhausted all %d retries for memory %s",
             _REEMBED_MAX_RETRIES,
             memory_id,
+        )
+        await _record_stranded(
+            memory_id,
+            tenant_id,
+            f"embedding provider returned no vector after {_REEMBED_MAX_RETRIES} "
+            "re-embed attempts; the row stays embedding=NULL",
         )
         return
 
@@ -2874,8 +2958,20 @@ async def _reembed_memory(
             embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
         )
         logger.info("Background re-embed succeeded for memory %s", memory_id)
-    except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background re-embed error for memory %s", memory_id)
+        # The vector was produced and then lost: this branch is reached with a
+        # good ``embedding`` in hand that never reached the row. Unlike the
+        # batch path — where the same failure calls ``_fallback`` and tries
+        # again — there is no reschedule here, deliberately, because the retry
+        # would be this same coroutine and a storage fault that persists makes
+        # it a loop. So the row is stranded, and saying so is all that is left.
+        await _record_stranded(
+            memory_id,
+            tenant_id,
+            f"embedding computed but not persisted: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return
 
     # Contradiction coverage: the write path only fires contradiction
