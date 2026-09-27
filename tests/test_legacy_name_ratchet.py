@@ -238,6 +238,140 @@ def test_the_marker_exempts_only_its_own_line(repo: Path) -> None:
     assert "ALIAS" not in offenders
 
 
+# ── JSON, which has no comments ──────────────────────────────────────────────
+#
+# There a key's marker lives in a "$comment" member of the object the key opens.
+# Formatters put that member on the line below the key, release-please among
+# them, so the two lines have to read as one.
+
+_KEY = f'"{LEGACY.upper()}_AGENT_ID": {{'
+_COMMENT = '"$comment": "legacy-name-ok: supported configuration alias",'
+
+
+def _manifest(*property_lines: str) -> str:
+    body = "".join(f"    {line}\n" for line in property_lines)
+    return f'{{\n  "properties": {{\n{body}      "type": "string"\n    }}\n  }}\n}}\n'
+
+
+def test_a_json_comment_below_its_key_exempts_the_key(repo: Path) -> None:
+    _stage(repo, "manifest.json", _manifest(_KEY, f"  {_COMMENT}"))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_moving_the_comment_below_its_key_is_not_minting(repo: Path) -> None:
+    """What release-please does to every manifest it bumps."""
+    (repo / "manifest.json").write_text(_manifest(f"{_KEY} {_COMMENT}"))
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "marker on the key's line")
+    _stage(repo, "manifest.json", _manifest(_KEY, f"  {_COMMENT}"))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "exempt line(s) removed" not in result.stdout, result.stdout
+
+
+def test_a_json_comment_further_down_does_not_exempt_the_key(repo: Path) -> None:
+    _stage(repo, "manifest.json", _manifest(_KEY, '  "type": "string",', _COMMENT))
+
+    assert _run(repo).returncode == 1
+
+
+def test_a_json_comment_below_still_needs_a_marker(repo: Path) -> None:
+    _stage(repo, "manifest.json", _manifest(_KEY, '  "$comment": "an alias",'))
+
+    assert _run(repo).returncode == 1
+
+
+def test_only_json_reads_a_comment_below_its_key(repo: Path) -> None:
+    _stage(repo, "manifest.yaml", _manifest(_KEY, f"  {_COMMENT}"))
+
+    assert _run(repo).returncode == 1
+
+
+def test_a_json_comment_that_also_names_the_brand_is_read_once(repo: Path) -> None:
+    """git grep returns that comment line on its own as well as below its key."""
+    comment = f'"$comment": "legacy-name-ok: alias older {LEGACY} installs set",'
+    _stage(repo, "manifest.json", _manifest(_KEY, f"  {comment}"))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 exempt line(s) written by this change" in result.stdout, result.stdout
+
+
+def test_marking_an_existing_key_from_the_line_below_is_reported(repo: Path) -> None:
+    """git's diff calls only the comment line added, not the key it exempts."""
+    (repo / "manifest.json").write_text(_manifest(_KEY))
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "an unmarked key")
+    _stage(repo, "manifest.json", _manifest(_KEY, f"  {_COMMENT}"))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 exempt line(s) written by this change" in result.stdout, result.stdout
+
+
+def test_adding_an_unmarked_comment_below_a_key_mints_nothing(repo: Path) -> None:
+    """Only a marker joins a comment to its key. Any other is documentation."""
+    (repo / "manifest.json").write_text(_manifest(_KEY))
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "an unmarked key")
+    _stage(repo, "manifest.json", _manifest(_KEY, '  "$comment": "set by installs",'))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+
+
+def test_editing_an_unmarked_comment_below_a_key_mints_nothing(repo: Path) -> None:
+    (repo / "manifest.json").write_text(
+        _manifest(_KEY, '  "$comment": "set by installs",')
+    )
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "an unmarked key with a comment")
+    _stage(repo, "manifest.json", _manifest(_KEY, '  "$comment": "set by old installs",'))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+
+
+@pytest.mark.parametrize("below", [False, True], ids=["on-the-key", "below-the-key"])
+def test_a_reworded_reason_is_reported_in_either_layout(
+    repo: Path, below: bool
+) -> None:
+    """The reason is the marker's claim, so rewording it is named either way."""
+
+    def manifest(comment: str) -> str:
+        if below:
+            return _manifest(_KEY, f"  {comment}")
+        return _manifest(f"{_KEY} {comment}")
+
+    (repo / "manifest.json").write_text(manifest(_COMMENT))
+    _git(repo, "add", "manifest.json")
+    _git(repo, "commit", "-qm", "a marked key")
+    _stage(repo, "manifest.json", manifest(_COMMENT.replace("supported", "documented")))
+
+    result = _run(repo)
+
+    assert result.returncode == 0, result.stdout
+    assert "1 exempt line(s) written by this change" in result.stdout, result.stdout
+    assert "1 exempt line(s) removed by this change" in result.stdout, result.stdout
+
+
+def test_a_branded_comment_below_an_unbranded_key_still_counts(repo: Path) -> None:
+    """Only a key that is itself a match reads the comment below it."""
+    comment = f'"$comment": "was {LEGACY}_agent_id",'
+    _stage(repo, "manifest.json", _manifest('"agentId": {', f"  {comment}"))
+
+    assert _run(repo).returncode == 1
+
+
 # ── the floor marker: same exemption, a different claim ──────────────────────
 #
 # ``legacy-name-floor`` exempts a line exactly as ``legacy-name-ok`` does. The

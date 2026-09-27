@@ -35,6 +35,9 @@ these markers is not counted. The gate cannot tell them apart — the pass/fail
 decision never reads which one is there, and nothing that failed before passes
 now. They differ only in what a reviewer has to check, which is the only thing a
 marker was ever for. Put one on the line with a reason and it lands in the diff.
+JSON has no comments, so there the marker goes in a ``"$comment"`` member of the
+object the key opens, on the key's line or directly below it, where formatters
+put it. The two lines are then read as one.
 
 ``legacy-name-ok`` is rule 3's hatch: something new that BEARS the old name — a
 compat alias, a redirect, a test pinning the old wire format.
@@ -895,6 +898,47 @@ def _excluded_changelogs() -> tuple[str, ...]:
     return (":(exclude,glob,top,icase)**/CHANGELOG.md",)
 
 
+# JSON has no comments, so a key's marker can only live in a ``"$comment"``
+# member of the object the key opens. Kept on the key's own line, it does not
+# survive a formatter: release-please re-serialises every JSON file it bumps and
+# puts that member on the line below, which made a release PR read as minting the
+# key it had only re-indented. :func:`_grep` joins the two lines back with one
+# space, so both layouts read as exactly the same line. One line throughout: it
+# carries the key's number, and the comment is not counted again on its own when
+# it names the brand too. Only a comment carrying a marker is joined. Any other
+# ``"$comment"`` documents the key, and joining it would make every edit to that
+# documentation read as a new line.
+_JSON_KEY_OPENING_OBJECT = re.compile(r'\s*"[^"]*"\s*:\s*\{\s*')
+_JSON_COMMENT_MEMBER = re.compile(r'\s*"\$comment"\s*:')
+
+
+@functools.cache
+def _lines(tree: str | None, path: str) -> tuple[str, ...]:
+    """``path``'s lines in ``tree``, or in the working tree for ``None``."""
+    if tree is None:
+        text = (_repo_root() / path).read_text(encoding="utf-8", errors="replace")
+    else:
+        text = _git(["git", "show", f"{tree}:{path}"])
+    return tuple(text.split("\n"))
+
+
+def _json_comment_below(
+    tree: str | None, path: str, lineno: str, text: str
+) -> str | None:
+    """The ``"$comment"`` member on the line directly below ``text``, when
+    ``text`` is a JSON key alone on its line, opening an object, and the
+    comment carries a marker."""
+    if not path.endswith(".json") or not _JSON_KEY_OPENING_OBJECT.fullmatch(text):
+        return None
+    lines = _lines(tree, path)
+    below = int(lineno)  # line numbers count from 1, so this is the next line
+    if below >= len(lines) or not _JSON_COMMENT_MEMBER.match(lines[below]):
+        return None
+    if not (EXEMPT_RE.search(lines[below]) or DEFERRED_RE.search(lines[below])):
+        return None
+    return lines[below]
+
+
 def _grep(
     tree: str | None,
     pathspec: str | list[str] = ":/",
@@ -943,6 +987,9 @@ def _grep(
     prefix = f"{tree}:" if tree is not None else ""
 
     out: list[tuple[str, str, str, str | None, _Deferred | None]] = []
+    # Comment lines already read with the key above them. git grep returns one
+    # again on its own when it names the brand too.
+    read_with_key: set[tuple[str, str]] = set()
     # Records are newline-terminated (a matched line cannot contain one) and
     # their three fields are NUL-separated.
     for record in _git(args).split("\n"):
@@ -956,6 +1003,12 @@ def _grep(
             if not path.startswith(prefix):
                 continue
             path = path[len(prefix) :]
+        if (path, lineno) in read_with_key:
+            continue
+        comment = _json_comment_below(tree, path, lineno, text)
+        if comment is not None:
+            text = f"{text.rstrip()} {comment.strip()}"
+            read_with_key.add((path, str(int(lineno) + 1)))
         out.append((path, lineno, text, _kind(text), _deferred(text.strip())))
     return out
 
@@ -1034,6 +1087,15 @@ def _added_lines(base: str, path: str) -> set[int] | None:
         elif line.startswith("+") and not line.startswith("+++"):
             added.add(lineno)
             lineno += 1
+    if added and path.endswith(".json"):
+        # :func:`_grep` reads a key and the marked ``"$comment"`` below it as one
+        # line, numbered by the key, so a change to the comment is a change to
+        # the key. Otherwise a marker added below an existing key exempts it
+        # unannounced.
+        lines = _lines(None, path)
+        for n in sorted(added):
+            if n > 1 and _json_comment_below(None, path, str(n - 1), lines[n - 2]):
+                added.add(n - 1)
     return added
 
 
