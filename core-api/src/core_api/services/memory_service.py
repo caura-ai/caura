@@ -3568,6 +3568,75 @@ async def fan_out_atomic_facts(
     }
 
 
+#: ``background_task_log.task_name`` for a memory whose enrichment this process
+#: has given up on. One name across every terminal exit in
+#: :func:`_enrich_memory_background`, because the consequence an operator
+#: queries for is identical — the row keeps ``enrichment_pending: true`` and no
+#: title, summary or tags are coming. Which exit it took is in
+#: ``error_message``.
+#:
+#: Deliberately NOT one of the ``tracked_task`` names its callers pass
+#: (``background_enrichment``, ``enrich_or_publish``, ``enrichment``): every
+#: inline enrichment in the tree funnels through this one coroutine, and the
+#: operator wants one predicate for "permanently unenriched", not three.
+_ENRICH_STRANDED_TASK = "enrich_stranded"
+
+
+async def _record_enrich_stranded(
+    memory_id: UUID,
+    tenant_id: str,
+    reason: str,
+    *,
+    from_except: bool = False,
+) -> None:
+    """Persist one ``background_task_log`` row for a memory left unenriched.
+
+    ``tracked_task`` writes a row only when the coroutine it wraps RAISES.
+    :func:`_enrich_memory_background` catches its own failures, logs, and
+    returns ``None`` — so the wrapper saw a success, and the only table an
+    operator inspects stayed empty. That is the shape
+    :func:`record_task_failure` was split out for (09/02 M-40).
+
+    It matters more here than on the embed path, and the difference is the
+    whole reason this exists separately. A memory that loses its embedding at
+    least has a repair job in principle: ``run_embed_backfill_tick`` is real,
+    is gated off by default, and could be switched on once its topic is
+    provisioned. ``enrichment_pending`` has NO sweep at all — there is no job
+    to enable, nothing to provision, and no second chance even in principle.
+    ``tracked_task``'s own comment says as much: these rows "have no sweep at
+    all and stayed pending forever".
+
+    What the row buys, stated honestly and no further: ``background_task_log``
+    has one writer and no reader anywhere in the tree, so this repairs nothing.
+    It makes the loss COUNTABLE and hand-recoverable — the ``(tenant_id,
+    status)`` index is the shape such a query wants, and ``memory_id`` is the
+    id to re-enrich. It does NOT make the row self-describing:
+    ``metadata.enrichment_pending`` reads ``True`` whether enrichment is still
+    in flight or gone for good, its ABSENCE is documented as "that stage ran
+    inline", and this change alters neither. A reader holding only the row
+    still cannot tell the two apart.
+
+    ``reason`` is always what lands in ``error_message``, because the exits
+    differ in a way the exception type alone does not say — a config lookup
+    that failed before any LLM call and a PATCH that dropped a completed
+    enrichment send an operator to different places.
+
+    Never raises: :func:`record_task_failure` swallows its own storage
+    failures, and this adds nothing that can.
+    """
+    await record_task_failure(
+        _ENRICH_STRANDED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(reason),
+        # ``record_task_failure`` defaults to ``traceback.format_exc()``, which
+        # is only meaningful inside an ``except``. The contract-violation exit
+        # is not in one — nothing raised, ``enrich_memory`` simply answered
+        # ``None`` — and would otherwise store the literal "NoneType: None".
+        tb=None if from_except else f"no traceback: {reason}",
+    )
+
+
 async def _enrich_memory_background(
     memory_id: UUID,
     content: str,
@@ -3584,6 +3653,15 @@ async def _enrich_memory_background(
 
     After enrichment completes, applies the patch to the row and — when
     configured — runs governance remediation and the atomic-fact fan-out.
+
+    Every way this can end with the row still unenriched writes a
+    ``background_task_log`` row via :func:`_record_enrich_stranded` — see there
+    for why, and for what that row does and does not buy. The two exits that
+    are NOT failures are deliberately silent: a tenant with enrichment disabled
+    never wanted it, and a row that has been deleted underneath us has nothing
+    left to enrich. Returning rather than raising is kept throughout: this is
+    fire-and-forget, every caller wraps it in ``tracked_task``, and the memory
+    was committed and ACKed to its writer long ago.
 
     It does NOT schedule entity extraction or contradiction detection.
     ``ScheduleBackgroundTasks`` owns both: extraction unconditionally, and Path A
@@ -3643,8 +3721,17 @@ async def _enrich_memory_background(
 
     try:
         tenant_config = await resolve_config(tenant_id)
-    except Exception:
+    except Exception as exc:
         logger.exception("Background enrichment: failed to resolve config for memory %s", memory_id)
+        # The one exit below that fires in ordinary operation: no LLM call was
+        # attempted, so nothing was spent, but the row is as unenriched as if
+        # the provider had failed and nothing will revisit it.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"tenant config could not be resolved, so enrichment never ran: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return None
 
     if not tenant_config.enrichment_enabled:
@@ -3652,11 +3739,29 @@ async def _enrich_memory_background(
 
     try:
         enrichment = await enrich_memory(content, tenant_config)
-    except (ValueError, RuntimeError, OpenAIError, GoogleAPIError):
+    except (ValueError, RuntimeError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background enrichment LLM call failed for memory %s", memory_id)
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"enrichment provider raised: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return None
 
     if enrichment is None:
+        # Defensive, and recorded as such. ``enrich_memory`` is annotated
+        # ``-> EnrichmentResult`` and its docstring says "Never raises; always
+        # returns an EnrichmentResult" — it falls back through an alternative
+        # provider to a keyword heuristic that always succeeds. So reaching
+        # here means that contract broke, which is worth a row precisely
+        # because nothing else in the tree would notice.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            "enrich_memory returned None, violating its declared "
+            "EnrichmentResult contract; the row stays unenriched",
+        )
         return None
 
     # Returned even if the fan-out below then fails: an unrelated atomic-fact or
@@ -3789,8 +3894,19 @@ async def _enrich_memory_background(
             "metadata_": meta,
         }
 
-    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background enrichment error for memory %s", memory_id)
+        # The costly one: the LLM call above SUCCEEDED and this block is what
+        # writes the result to the row, so a failure here throws away work that
+        # was already paid for. ``governed_row`` is still ``None`` whenever the
+        # PATCH itself failed — it is assigned as the last statement of the
+        # ``try`` — so the caller cannot tell this from the cheap exits either.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"enrichment completed but was not persisted: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return governed_row
 
     # ── Govern, between enriching and deriving ────────────────────────────────
