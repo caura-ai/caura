@@ -55,8 +55,9 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 
 | Var | Purpose |
 |---|---|
-| `CAURA_API_URL` | Base URL of the core-api server. |
+| `CAURA_API_URL` | Base URL of the core-api server. Use `https://` for any non-loopback host — see `CAURA_ALLOW_INSECURE_HTTP`. |
 | `CAURA_API_KEY` | Tenant or admin API key sent in `X-API-Key`. |
+| `CAURA_ALLOW_INSECURE_HTTP` | `true` to send `CAURA_API_KEY` over plain `http://` to a non-loopback host (e.g. a trusted private network). Unset (default): the plugin refuses such calls with an error naming the host. Loopback (`localhost`, `127.0.0.0/8`, `::1`) never needs it. |
 | `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
 | `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
 | `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |

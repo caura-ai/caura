@@ -80,6 +80,12 @@ describe("apiCall — CAURA_API_PREFIX handling", () => {
     assert.equal(calls.length, 0, "should not reach fetch");
   });
 
+  test("sends X-API-Key over plain HTTP to loopback (no opt-in needed)", async () => {
+    await apiCall("GET", "/memories");
+    const headers = calls[0].init?.headers as Record<string, string>;
+    assert.equal(headers["X-API-Key"], "mc_test_key_for_transport_tests");
+  });
+
   test("normalizes missing leading slash", async () => {
     await apiCall("GET", "memories");
     assert.equal(calls.length, 1);

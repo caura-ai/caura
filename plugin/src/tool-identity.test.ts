@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 // Env is read into module constants at import time, so it must be set before
 // the dynamic imports below. The configured identity must still default
 // identity-bearing writes without silently narrowing recall reads.
-process.env.CAURA_API_URL = "http://identity.test";
+process.env.CAURA_API_URL = "https://identity.test";
 process.env.CAURA_API_KEY = "test-key";
 process.env.CAURA_TENANT_ID = "t-identity";
 process.env.CAURA_FLEET_ID = "fleet-default";

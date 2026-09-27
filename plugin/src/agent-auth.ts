@@ -17,7 +17,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, chmodSync } from "fs";
-import { CAURA_API_URL, CAURA_API_KEY, CAURA_API_PREFIX } from "./env.js";
+import { CAURA_API_URL, CAURA_API_KEY, CAURA_API_PREFIX, assertKeyTransportAllowed } from "./env.js";
 import { getSecretsPath } from "./paths.js";
 import { withUserAgent } from "./user-agent.js";
 import { logError } from "./logger.js";
@@ -77,6 +77,7 @@ async function provisionAgentKey(
 ): Promise<{ raw_key: string; key_prefix: string } | null> {
   if (provisioningUnavailable) return null;
   try {
+    assertKeyTransportAllowed();
     const url = new URL(`${CAURA_API_PREFIX}/admin/agent-keys/provision`, CAURA_API_URL);
     const res = await fetch(url.toString(), {
       method: "POST",

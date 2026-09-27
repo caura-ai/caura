@@ -189,7 +189,10 @@ agent prompts and trust levels. Already have nodes running? Keeping them current
 The plugin talks only to the Caura server you configure (`CAURA_API_URL`) and
 identifies itself on every request with
 `User-Agent: openclaw-plugin/<version> (node/<major>)`, which the server's
-self-hosted heartbeat uses to count connected plugin installs.
+self-hosted heartbeat uses to count connected plugin installs. It will not send
+`CAURA_API_KEY` over plain `http://` to anything but loopback: point
+`CAURA_API_URL` at `https://`, or set `CAURA_ALLOW_INSECURE_HTTP=true` in the
+plugin `.env` to accept cleartext on a trusted private network.
 
 ### Python client
 

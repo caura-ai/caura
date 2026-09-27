@@ -28,7 +28,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 
 // Read into module constants at import time, so it must precede the import.
-process.env.CAURA_API_URL = "http://op-dispatch.test";
+process.env.CAURA_API_URL = "https://op-dispatch.test";
 process.env.CAURA_API_KEY = "test-key";
 process.env.CAURA_TENANT_ID = "t-op-dispatch";
 
