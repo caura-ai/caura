@@ -3497,10 +3497,17 @@ async def fan_out_atomic_facts(
                 # its Pub/Sub topic is Terraform-provisioned, and it has
                 # never run (oss-0924-m-05, findings in
                 # ``docs/unembedded-rows/``). So the log names the one
-                # repair an operator can actually run: the standalone
+                # repairs an operator can actually run: the standalone
                 # ``backfill_embeddings`` CLI, which walks NULL
                 # embeddings with no event bus behind it — hence the
-                # tenant id, for ``--tenant-id``. Provision the topic and
+                # tenant id, for ``--tenant-id``. That CLI embeds with
+                # the PROCESS-level provider, so under per-tenant
+                # embedding overrides it would write wrong-model vectors,
+                # worse than NULL; the log names the override-safe path
+                # too, ``core_worker.cli backfill-embeddings``, which
+                # publishes to the live hot-path EMBED_REQUESTED topic
+                # (not the gated backfill one) and needs the pubsub bus.
+                # Provision the topic and
                 # flip ``embed_backfill_enabled`` and "the nightly sweep"
                 # becomes a true answer again.
                 # Log the response SHAPE, never the response. ``child``
@@ -3517,7 +3524,9 @@ async def fan_out_atomic_facts(
                     "recovery — the row stays out of vector search until "
                     "re-embedded: run `python -m "
                     "core_storage_api.scripts.backfill_embeddings "
-                    "--tenant-id <tenant>`",
+                    "--tenant-id <tenant>` (per-tenant embedding overrides: "
+                    "use `python -m core_worker.cli backfill-embeddings` "
+                    "instead — see the script's docstring)",
                     sorted(child) if isinstance(child, dict) else type(child).__name__,
                     memory_id,
                     tenant_id,
