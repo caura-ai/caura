@@ -361,14 +361,25 @@ DEFAULT_SETTINGS: dict = {
             "min_cluster_size": 3,
             "min_distinct_agents": 3,
             "freshness_window_days": 14,
-            "llm_tokens_per_run": 50_000,
             "max_writes_per_run": 20,
+            # THE ceiling on a run's LLM spend, and the only one — see
+            # ``test_forge_spend_is_bounded_by_attempts_not_tokens``.
             # Attempt ceiling: how many clusters one run may distill,
             # written or not. 0 = derive from ``max_writes_per_run``
             # (see ``ForgeConfig.effective_max_clusters_per_run``).
-            # This, not ``max_writes_per_run``, is what bounds a run's
-            # LLM spend — every attempted cluster pays for a distill
-            # call before we can know whether it will be written.
+            # This, not ``max_writes_per_run``, is what bounds spend —
+            # every attempted cluster pays for a distill call before we
+            # can know whether it will be written.
+            #
+            # It bounds ATTEMPTS, not tokens and not dollars. There is
+            # no per-tenant token or cost ceiling anywhere in Forge, and
+            # this is the honest statement of that rather than an
+            # omission: a ``llm_tokens_per_run`` key used to sit above
+            # and was read by nothing (oss-0922-l-05), so an operator
+            # setting a token ceiling believed spend was capped when it
+            # was not. What actually bounds a run is attempts times a
+            # prompt whose size is itself capped by
+            # ``memory_excerpt_char_cap`` and ``min_cluster_size``.
             "max_clusters_per_run": 0,
         },
         # OpenClaw PROPOSAL.md bridge (Phase 5). Default OFF — turning
@@ -718,7 +729,6 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.forge.min_cluster_size": int,
     "skills_factory.forge.min_distinct_agents": int,
     "skills_factory.forge.freshness_window_days": int,
-    "skills_factory.forge.llm_tokens_per_run": int,
     "skills_factory.forge.max_writes_per_run": int,
     "skills_factory.forge.max_clusters_per_run": int,
     "skills_factory.openclaw_bridge.enabled": bool,

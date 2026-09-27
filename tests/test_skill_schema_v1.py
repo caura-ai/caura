@@ -1395,37 +1395,13 @@ class TestForgeEventPayloadNaming:
             "parameter must be removed"
         )
 
-    def test_llm_tokens_field_name_matches_across_layers(self):
-        # Same drift-trap test for ``llm_tokens_per_run`` — the event
-        # payload, the publisher kwarg, and the org_settings key must
-        # all spell it identically. The legacy ``llm_tokens_budget``
-        # name was renamed for consistency with the
-        # ``*_per_run`` settings-layer convention.
-        import inspect
-
-        from common.events.lifecycle_forge_request import LifecycleForgeDistillRequest
-        from common.events.lifecycle_publishers import publish_forge_distill_request
-        from core_api.services.organization_settings import DEFAULT_SETTINGS
-
-        # Payload (pydantic).
-        assert "llm_tokens_per_run" in LifecycleForgeDistillRequest.model_fields, (
-            "LifecycleForgeDistillRequest.llm_tokens_per_run must match "
-            "the org_settings name; legacy ``llm_tokens_budget`` was "
-            "renamed for consistency with ``max_writes_per_run``."
-        )
-        assert "llm_tokens_budget" not in LifecycleForgeDistillRequest.model_fields, (
-            "legacy ``llm_tokens_budget`` field must be removed — drift trap"
-        )
-        # Settings key.
-        forge_settings = DEFAULT_SETTINGS["skills_factory"]["forge"]
-        assert "llm_tokens_per_run" in forge_settings
-        # Publisher kwarg.
-        sig = inspect.signature(publish_forge_distill_request)
-        assert "llm_tokens_per_run" in sig.parameters
-        assert "llm_tokens_budget" not in sig.parameters, (
-            "publish_forge_distill_request's legacy ``llm_tokens_budget`` "
-            "parameter must be removed"
-        )
+    # ``test_llm_tokens_field_name_matches_across_layers`` used to sit here,
+    # pinning that ``llm_tokens_per_run`` spelled the same thing in the payload,
+    # the publisher kwarg and the settings key. It was a correct test of the
+    # wrong thing: the three layers agreed perfectly on the name of a knob no
+    # consumer ever read (oss-0922-l-05). The knob is gone, and
+    # ``tests/test_oss_0922_l_05_forge_token_knob_removed.py`` now pins its
+    # ABSENCE across the same three layers — same drift trap, opposite sign.
 
 
 @pytest.mark.unit

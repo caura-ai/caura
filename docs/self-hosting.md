@@ -58,12 +58,14 @@ not for evaluating semantic recall.
 |---|---|---|
 | **OpenAI** (default) | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=openai` | `OPENAI_API_KEY` |
 | **Google Gemini** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=gemini` | `GEMINI_API_KEY` + `OPENAI_API_KEY` |
-| **Anthropic** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=anthropic` | `ANTHROPIC_API_KEY` + `OPENAI_API_KEY` |
 | **OpenRouter** | `EMBEDDING_PROVIDER=openai`<br>`ENTITY_EXTRACTION_PROVIDER=openrouter` | `OPENROUTER_API_KEY` + `OPENAI_API_KEY` |
 | **Self-hosted (TEI / bge-m3)** | `--profile embed-local` + `OPENAI_EMBEDDING_BASE_URL=http://tei:80/v1`<br>+ `OPENAI_EMBEDDING_MODEL=BAAI/bge-m3`<br>+ `OPENAI_EMBEDDING_SEND_DIMENSIONS=false` | none — runs locally |
 
-Anthropic, Gemini, and OpenRouter do not provide embedding APIs here, so pair
-them with OpenAI or TEI for embeddings. Gemini uses the Google AI Studio
+Gemini and OpenRouter do not provide embedding APIs here, so pair them with
+OpenAI or TEI for embeddings. `ENTITY_EXTRACTION_PROVIDER=anthropic` is not
+supported: enrichment, entity extraction and contradiction detection need
+structured JSON output, which Anthropic's OpenAI-compatible endpoint rejects,
+so core-api refuses to start with it. Gemini uses the Google AI Studio
 key-auth Developer API; it does not require a GCP project or application
 default credentials. TEI keeps `EMBEDDING_PROVIDER=openai` because it exposes
 an OpenAI-compatible API.

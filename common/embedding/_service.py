@@ -539,9 +539,16 @@ async def get_embeddings_batch(
       core-worker's sequential rate. That is the demand smoothing, and it
       is why a 429 here needs no special caller handling.
     * ``create_memories_bulk`` does NOT. Inline it re-raises (504 on a
-      timeout); otherwise it logs and leaves ``embedding=NULL`` for the
-      backfill sweep to collect. Durable either way, but there is no
-      second attempt in this request.
+      timeout); otherwise it logs and leaves ``embedding=NULL``. Durable
+      either way, but there is no second attempt in this request AND
+      nothing picks the row up afterwards. This used to say "for the
+      backfill sweep to collect"; the sweep is gated off by default and
+      has never run (oss-0924-m-05, measured 2026-09-26, findings in
+      ``docs/unembedded-rows/``), so the row's only retrieval path is the
+      CAURA-594 FTS admission guard, permanently. Provision the topic and
+      flip ``embed_backfill_enabled`` and the old sentence becomes true
+      again — see the ``EmbeddingBackendBusy`` branch in
+      ``_run_with_retry`` for the full account.
 
     A failed ``embed_batch`` also advances a bulk-only failure streak that
     single-embed successes cannot reset — see ``record_failure`` for why
@@ -678,7 +685,10 @@ async def _run_with_retry(
     fresh coroutine each time it runs (coroutines aren't reusable across
     awaits). Returns ``None`` after the attempt budget is exhausted —
     callers degrade gracefully (write path persists ``embedding=NULL``;
-    search path raises 503 upstream).
+    search path raises 503 upstream). "Gracefully" is about the REQUEST
+    surviving, not about the vector arriving later: a persisted NULL has
+    no recovery path behind it today. The ``EmbeddingBackendBusy`` branch
+    below carries the evidence and says what would make it one.
 
     *context* is a short human-readable label (``"Embedding"``,
     ``"Query embedding"``) interpolated into the per-attempt warning
@@ -705,8 +715,9 @@ async def _run_with_retry(
         # Nothing is lost by not retrying: the provider never saw the call,
         # so there is no partial work to reconcile, and the degradation
         # contract is unchanged — ``None`` still means "no vector", which the
-        # write path persists as NULL for the backfill sweep and the search
-        # path turns into a 503. What changes is that it arrives in ~5s
+        # write path persists as NULL (nothing collects it afterwards; see the
+        # busy-backend branch below) and the search path turns into a 503.
+        # What changes is that it arrives in ~5s
         # instead of ~11s, and without a second slot-wait.
         #
         # The timeout itself is deliberately NOT counted via
@@ -754,13 +765,23 @@ async def _run_with_retry(
         #
         # The message says what THIS layer did and stops there. It must not
         # claim the work is deferred: whether a ``None`` becomes durable
-        # work is the caller's property, not ours. A write's ``None``
-        # persists as ``embedding=NULL`` for the backfill sweep and a
-        # batch's fans out to EMBED_REQUESTED, but a query embed has no
-        # queue behind it at all — the search just fails with a 503. An
-        # operator reading "the work defers instead" during a search
-        # outage would be told recovery was in hand when it was not, in
-        # exactly the incident this classification exists to make legible.
+        # work is the caller's property, not ours. A batch's ``None`` fans
+        # out to EMBED_REQUESTED, which IS durable work. A write's ``None``
+        # persists as ``embedding=NULL`` and stops there — this comment
+        # used to add "for the backfill sweep", and that sweep is gated on
+        # ``embed_backfill_enabled``, False by default because its Pub/Sub
+        # topic is Terraform-provisioned, and it has never run
+        # (oss-0924-m-05, measured 2026-09-26, findings in
+        # ``docs/unembedded-rows/``); the row's only retrieval path is the
+        # CAURA-594 FTS admission guard. And a query embed has no queue
+        # behind it at all — the search just fails with a 503. An operator
+        # reading "the work defers instead" during a search outage would be
+        # told recovery was in hand when it was not, in exactly the incident
+        # this classification exists to make legible — which is the same
+        # reason the write case no longer names a sweep either. Provision
+        # the topic and flip the default and the write case rejoins the
+        # batch case; until then it does not, and none of the three
+        # descriptions above may be collapsed into one.
         except EmbeddingBackendBusy:
             logger.warning(
                 "%s stopped at a busy backend on attempt %d/%d — not retrying;"

@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.23.3](https://github.com/caura-ai/caura/compare/plugin-v2.23.2...plugin-v2.23.3) (2026-09-26)
+
+
+### Bug Fixes
+
+* **plugin:** stop re-requesting agent keys after the provision route 404s ([#1718](https://github.com/caura-ai/caura/issues/1718)) ([b5fe391](https://github.com/caura-ai/caura/commit/b5fe3911047379cd812373a4e7e47a41e6d8f909))
+
 ## [2.23.2](https://github.com/caura-ai/caura/compare/plugin-v2.23.1...plugin-v2.23.2) (2026-09-23)
 
 

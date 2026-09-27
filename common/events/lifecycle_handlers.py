@@ -95,11 +95,19 @@ class PipelineStorageAdapter(Protocol):
 
     async def insights(self, *, org_id: str, fleet_id: str | None) -> int: ...
 
-    # Skill Factory SF-007: Forge distillation run. Phase 0 ships a
-    # no-op adapter (returns 0, logs); Phase 1 swaps in the real
-    # cluster fingerprint + LLM distill pipeline. Method signature
-    # mirrors the other pipeline ops (org_id/fleet_id only) — extra
-    # run-knobs on :class:`LifecycleForgeDistillRequest` are
+    # Skill Factory SF-007: Forge distillation run. Signature mirrors
+    # the other pipeline ops (org_id/fleet_id) plus ``run_label``; the
+    # five per-run override fields on
+    # :class:`LifecycleForgeDistillRequest` are NOT plumbed through it.
+    # The tick resolves the bounds it applies from
+    # ``org_settings.skills_factory.forge.*`` instead, so the four
+    # value overrides are inert and ``dry_run`` is refused outright in
+    # ``forge_distill_op`` below. That is stated in three places on
+    # purpose (there, here, and at the declaration): this sentence used
+    # to carry the caveat alone, #311 truncated it mid-clause while
+    # wiring the real tick, and the fields then read as live for
+    # months (oss-0926-m-02).
+    #
     # Per-tick ``run_label`` IS plumbed through so the consumer-side
     # cron handler stamps ``origin.run_id`` on candidate docs with the
     # SAME label that was on the event payload + audit row. A
@@ -515,11 +523,46 @@ def register_pipeline_consumers(adapter: PipelineStorageAdapter) -> None:
         return await adapter.insights(org_id=req.org_id, fleet_id=req.fleet_id)
 
     async def forge_distill_op(req: LifecycleForgeDistillRequest) -> int:
+        # Refuse a dry run rather than perform a real one. Nothing here
+        # can honour ``dry_run``: the tick takes no such parameter and
+        # runs ``promote_pending_candidates`` unconditionally after
+        # mining, so proceeding would write real candidates and promote
+        # them — under ``sentinel.auto_promote_clean``, all the way to
+        # ``active``. Every other field on this payload that the
+        # consumer ignores fails safe (the run falls through to the
+        # tenant's configured bounds); this one fails open, and it is
+        # the single field whose entire purpose is to prevent side
+        # effects. Ignoring it is therefore strictly worse than
+        # erroring, so it errors.
+        #
+        # ``PermanentOpError`` and not a plain raise: a dry-run request
+        # this consumer cannot satisfy is a wiring disagreement between
+        # publisher and consumer, and no number of redeliveries fixes
+        # it. The shared runner writes the ``failure`` row with
+        # ``stats={"terminal": True}`` and then ACKs, so the refusal is
+        # durable and queryable instead of looping to the DLQ.
+        #
+        # Reachable only past the shared runner's dedup gate: a
+        # ``dry_run=True`` delivery inside the 23h window is skipped
+        # before it gets here, and reports success rather than a
+        # refusal. Both outcomes are side-effect-free, which is the
+        # property that matters, so the gate is left alone.
+        if req.dry_run:
+            raise PermanentOpError(
+                "forge-distill received dry_run=True, which this consumer "
+                "cannot honour: the tick has no dry-run mode and would "
+                "mine and promote for real. Refusing the event. Use "
+                "scripts/forge_dry_run.py, which calls the Forge pipeline "
+                "directly and never promotes."
+            )
         # Thread ``run_label`` from the event payload — the publisher
         # stamped it with the dispatching cron tick's UTC minute, and
         # the consumer-side cron handler stamps the same value onto
         # every candidate doc's ``origin.run_id``. Regenerating from
         # the consumer clock would drift across queue boundaries.
+        #
+        # The four value overrides are deliberately not read here; the
+        # declaration says why.
         return await adapter.forge_distill(
             org_id=req.org_id, fleet_id=req.fleet_id, run_label=req.run_label
         )

@@ -10,6 +10,39 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.20.1](https://github.com/caura-ai/caura/compare/backend-v3.20.0...backend-v3.20.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **keystones:** derive the verified trust floor from identity provenance (oss-0922-m-03) ([#1723](https://github.com/caura-ai/caura/issues/1723)) ([6126c85](https://github.com/caura-ai/caura/commit/6126c8503ed4622879ae6f7c0fec66964fa0a751))
+* **mcp:** give tools/call the request budget its bulkhead already claims (oss-0924-h-02) ([#1726](https://github.com/caura-ai/caura/issues/1726)) ([e781140](https://github.com/caura-ai/caura/commit/e78114088597b78508c20f08070ed71f7b73f1ce))
+* **search:** forward strict_fleet_scoping from the classifier's entity FTS ([#1728](https://github.com/caura-ai/caura/issues/1728)) ([fe30557](https://github.com/caura-ai/caura/commit/fe30557e80cce62f1c90c446b55513a799790b14))
+* **settings:** drop skills_factory.forge.llm_tokens_per_run, a knob nothing read ([#1729](https://github.com/caura-ai/caura/issues/1729)) ([43ebec3](https://github.com/caura-ai/caura/commit/43ebec3f851193c6377d501a0dc845347cca3125))
+
+
+### Documentation
+
+* **guards:** the un-embedded reservation is not a backfill window ([#1731](https://github.com/caura-ai/caura/issues/1731)) ([2998c07](https://github.com/caura-ai/caura/commit/2998c07498a795074699b38433ea2e0631298b45))
+* **m-05:** split the 2,139 un-embedded rows by provenance before anyone sizes them ([#1725](https://github.com/caura-ai/caura/issues/1725)) ([6b5930c](https://github.com/caura-ai/caura/commit/6b5930c03cce966f2e05a85a305b2d0d845d231c))
+
+## [3.20.0](https://github.com/caura-ai/caura/compare/backend-v3.19.2...backend-v3.20.0) (2026-09-26)
+
+
+### Features
+
+* **llm:** add Atlas Cloud provider ([#1510](https://github.com/caura-ai/caura/issues/1510)) ([0ee34f4](https://github.com/caura-ai/caura/commit/0ee34f4cbf8d590ca8f8b209493e950c6402817c))
+
+
+### Bug Fixes
+
+* **api:** align ConflictOut OpenAPI response with runtime schema fields ([#1536](https://github.com/caura-ai/caura/issues/1536)) ([1f929dc](https://github.com/caura-ai/caura/commit/1f929dcef4d8d909600b1d336088172ccc42d1db))
+* **client-python:** ship the Apache-2.0 LICENSE in the published package ([#1031](https://github.com/caura-ai/caura/issues/1031)) ([820d60b](https://github.com/caura-ai/caura/commit/820d60b315ec89c623f315392046a88e3852dd82))
+* **client-ts:** ship the Apache-2.0 LICENSE in the npm package ([#1032](https://github.com/caura-ai/caura/issues/1032)) ([26231d4](https://github.com/caura-ai/caura/commit/26231d4c477d826161b8b3acc3868ea22a3adaa7))
+* **contradiction:** give the forward chain-edge writes the CAS their comments claimed ([#1727](https://github.com/caura-ai/caura/issues/1727)) ([4599871](https://github.com/caura-ai/caura/commit/45998718d1dce12b8b27925080857a926cdbada1))
+* **plugin:** stop re-requesting agent keys after the provision route 404s ([#1718](https://github.com/caura-ai/caura/issues/1718)) ([b5fe391](https://github.com/caura-ai/caura/commit/b5fe3911047379cd812373a4e7e47a41e6d8f909))
+* **worker:** stop warning that the async path does not fan out — it has since A70 (oss-0924-m-03) ([#1724](https://github.com/caura-ai/caura/issues/1724)) ([cb84511](https://github.com/caura-ai/caura/commit/cb84511e8ffbe42bfb6e37fa2915a907bf6a3822))
+
 ## [3.19.2](https://github.com/caura-ai/caura/compare/backend-v3.19.1...backend-v3.19.2) (2026-09-25)
 
 

@@ -135,7 +135,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     atlascloud_api_key: str | None = None
     gemini_api_key: str | None = None
-    entity_extraction_provider: str = "openai"  # none | fake | openai | anthropic | openrouter | gemini
+    # none | fake | openai | openrouter | gemini — NOT anthropic, see
+    # ``_reject_anthropic_structured_output``.
+    entity_extraction_provider: str = "openai"
     entity_extraction_model: str = "gpt-5.4-nano"
     # E3 — reasoning-effort for the contradiction judge's LLM calls.
     # Valid values are MODEL-SPECIFIC (gpt-5.4 family, wet-tested:
@@ -242,6 +244,37 @@ class Settings(BaseSettings):
     # raise the platform timeout BEFORE raising this budget (the
     # startup validator enforces the ceiling).
     interview_request_timeout_seconds: float = 90.0
+    # Per-``tools/call`` budget on the MCP transport (oss-0924-h-02).
+    #
+    # ``RequestTimeoutMiddleware`` skips ``/mcp`` on purpose — the mount
+    # serves long-lived streaming responses and a blanket cancel would
+    # cut them — so until this existed a ``tools/call`` had NO
+    # server-side deadline at all. That is not merely a missing feature:
+    # ``per_tenant_storage_slot`` justifies its UNBOUNDED acquire queue
+    # with "the outer request budget already caps total wall time", and
+    # ``caura_recall`` reaches that exact semaphore through
+    # ``search_memories``. The invariant the code asserts was true on
+    # REST and false on the surface agents actually use. This budget is
+    # what makes it true on both, which is why it is a restoration
+    # rather than a new policy.
+    #
+    # Scoped to ONE tool dispatch, not to the mount: the SSE/streamable
+    # response that carries the session is untouched, so the reason the
+    # middleware skips ``/mcp`` does not apply here.
+    #
+    # 90s, matching ``bulk_request_timeout_seconds`` rather than the 45s
+    # hot-path ``request_timeout_seconds``, because the MCP surface
+    # serves the union of both shapes: ``caura_write`` with a batch calls
+    # ``create_memories_bulk`` directly (mcp_server.py), with none of the
+    # bulk ROUTE's own ``asyncio.wait_for`` around it, and ``caura_doc``
+    # ingest is comparable. At 45s this budget would cancel MCP work that
+    # REST grants 90s — shedding load in the name of restoring a cap,
+    # which is the one thing this change is not for. 90s also keeps
+    # bulk's and interview's 30s headroom under the 120s platform ceiling
+    # (``PLATFORM_REQUEST_CEILING_SECONDS``), above which a budget is
+    # dead config: nginx / Cloud Run sever the connection first. The
+    # startup validator enforces that ceiling.
+    mcp_request_timeout_seconds: float = 90.0
     # Async interview submit (#665). When True (default), the submit route
     # persists the masked window as a durable ``interview_jobs`` doc,
     # advances the watermark, and returns 200 ``accepted`` immediately;
@@ -630,6 +663,22 @@ class Settings(BaseSettings):
                 "timeout (nginx proxy_read_timeout / Cloud Run) and update "
                 "the constant before raising this budget."
             )
+        if self.mcp_request_timeout_seconds > PLATFORM_REQUEST_CEILING_SECONDS:
+            # Same rule as interview's, for the same reason: past the
+            # platform ceiling the budget can never fire, because the
+            # gateway severs the connection while the tool keeps running.
+            # Worth enforcing here specifically — this budget exists to make
+            # a cap that the code already CLAIMS actually exist, so a value
+            # that cannot fire would restore the claim in config and leave
+            # ``per_tenant_storage_slot``'s docstring lying exactly as before.
+            raise ValueError(
+                f"mcp_request_timeout_seconds "
+                f"({self.mcp_request_timeout_seconds}s) must be <= "
+                f"PLATFORM_REQUEST_CEILING_SECONDS "
+                f"({PLATFORM_REQUEST_CEILING_SECONDS}s); raise the platform "
+                "timeout (nginx proxy_read_timeout / Cloud Run) and update "
+                "the constant before raising this budget."
+            )
         binding_ceiling = min(PLATFORM_REQUEST_CEILING_SECONDS, STORAGE_READ_TIMEOUT_SECONDS)
         if self.cross_link_request_timeout_seconds >= binding_ceiling:
             # ``>=``, not ``>`` as the interview check above uses, and the
@@ -827,6 +876,29 @@ class Settings(BaseSettings):
                     "OPENAI_API_KEY or configure PLATFORM_LLM_PROVIDER to restore "
                     "enrichment."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _reject_anthropic_structured_output(self) -> "Settings":
+        """Refuse ``ENTITY_EXTRACTION_PROVIDER=anthropic`` at startup.
+
+        oss-0915-m-01. This provider drives enrichment, entity extraction and
+        the contradiction judge — all structured-output (``complete_json``)
+        calls — and Anthropic's OpenAI-compatible endpoint 400s on every one of
+        them (``ANTHROPIC_JSON_UNSUPPORTED`` in the OpenAI provider has the two
+        error shapes). At runtime that degraded to the fake provider while
+        writes reported success, so a crash here is the kinder failure.
+        String literal for the same circular-import reason as
+        ``_remap_deprecated_vertex``.
+        """
+        if self.entity_extraction_provider == "anthropic":
+            raise ValueError(
+                "ENTITY_EXTRACTION_PROVIDER=anthropic is not supported: "
+                "enrichment, entity extraction and contradiction detection use "
+                "structured JSON output, which Anthropic's OpenAI-compatible "
+                "endpoint rejects (HTTP 400 on every call). Set "
+                "ENTITY_EXTRACTION_PROVIDER to openai, openrouter or gemini."
+            )
         return self
 
     @property

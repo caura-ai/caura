@@ -2985,8 +2985,11 @@ class PostgresService:
             # CAURA-594: NULL-embedding rows are admitted only if they also
             # match the FTS query — otherwise they'd rank on `Memory.weight *
             # freshness * ...` alone and could fill top_k slots with rows
-            # that have no relationship to the query during a large backfill
-            # window. `search_vector @@ ts_query` is GIN-indexed, so the
+            # that have no relationship to the query. This is NOT only a
+            # backfill window: the embed backfill is gated off by default and
+            # has never run (oss-0924-m-05, measured 2026-09-26), so for an
+            # un-embedded row this guard is the only relevance test it ever
+            # faces. `search_vector @@ ts_query` is GIN-indexed, so the
             # extra predicate is free for rows that already had to scan
             # the tenant/fleet slice.
             # Other paths (find_semantic_duplicate, find_similar_candidates,
@@ -4693,7 +4696,16 @@ class PostgresService:
 
         Three distinct states, deliberately not collapsed:
 
-        * ``missing`` — no vector at all. The nightly sweep repairs these.
+        * ``missing`` — no vector at all. The NULL-embedding sweep is built
+          to repair these, but it is gated on ``embed_backfill_enabled``
+          (False by default, its Pub/Sub topic Terraform-provisioned) and has
+          never run (oss-0924-m-05, ``docs/unembedded-rows/``), so today
+          nothing drains this count on its own. The manual repair is the
+          standalone ``backfill_embeddings`` CLI — or, under per-tenant
+          embedding overrides, ``core_worker.cli backfill-embeddings``
+          (the standalone one embeds with the process-level provider; see its
+          docstring). Provision the topic and flip the flag and "the nightly
+          sweep repairs these" is true.
         * ``stale`` — a vector computed from DIFFERENT text than the row now
           holds (``embedded_content_hash`` disagrees with ``content_hash``).
           Non-NULL, so no NULL-based sweep can see it; recall silently ranks

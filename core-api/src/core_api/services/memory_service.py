@@ -127,7 +127,7 @@ from core_api.services.system_metadata import (
     sanitize_caller_metadata,
     set_system_value,
 )
-from core_api.services.task_tracker import tracked_task
+from core_api.services.task_tracker import record_task_failure, tracked_task
 
 logger = logging.getLogger(__name__)
 
@@ -1726,7 +1726,9 @@ async def create_memories_bulk(
     # item carrying that content is the one written. Scanning every index would
     # award the slot to the errored item, mark the real writer an intra-batch
     # duplicate, and skip its embedding — a vectorless row that persists,
-    # invisible to search until a backfill sweep finds it.
+    # invisible to vector search with no recovery path today (the backfill
+    # sweep is gated off by default and has never run: oss-0924-m-05,
+    # ``docs/unembedded-rows/``).
     first_writer: dict[str, int] = {}  # content hash -> index of the item that writes it
     prededuped: set[int] = set()
     for i in valid_indices:
@@ -2533,6 +2535,19 @@ async def create_memories_bulk(
 _REEMBED_MAX_RETRIES = 3
 _REEMBED_BACKOFF_BASE_S = 10
 
+#: ``background_task_log.task_name`` for a memory this process has given up on
+#: embedding. One name for both terminal exits in :func:`_reembed_memory`,
+#: because the consequence an operator queries for is identical — the row is
+#: ``embedding IS NULL``, it reports ``embedding_pending: true``, and nothing in
+#: this process will try again. Which of the two exits it took is in
+#: ``error_message``.
+#:
+#: Deliberately NOT one of the ``tracked_task`` names its callers pass
+#: (``embed_or_publish``, ``reembed``, ``reembed_bulk[N]``): every embed repair
+#: in the tree funnels through this one coroutine, and the operator wants one
+#: predicate for "permanently unembedded", not three.
+_REEMBED_STRANDED_TASK = "reembed_stranded"
+
 
 async def _schedule_embed_or_reembed(
     memory_id: UUID,
@@ -2773,6 +2788,65 @@ async def _schedule_enrich_or_inline(
         )
 
 
+async def _record_stranded(
+    memory_id: UUID,
+    tenant_id: str,
+    reason: str,
+    *,
+    from_except: bool = False,
+) -> None:
+    """Persist one ``background_task_log`` row for a memory left unembedded.
+
+    ``tracked_task`` writes a row only when the coroutine it wraps RAISES.
+    :func:`_reembed_memory` catches its own failures, logs, and returns
+    normally — so the wrapper saw a success, and the only table an operator
+    inspects stayed empty while the row stayed semantically unsearchable.
+    That is the shape :func:`record_task_failure` was split out for (09/02
+    M-40), and until now ``process_entity_extraction`` was its only adopter.
+
+    It matters more here than it did there, because of what does NOT catch
+    this afterwards. The daily sweep that would repair the row,
+    ``run_embed_backfill_tick``, is registered only when
+    ``embed_backfill_enabled`` is set, that setting defaults FALSE, and the
+    Pub/Sub topic it publishes into is Terraform-provisioned and has never
+    been created — so on every deployment that has not explicitly turned it on
+    (which is all of them, as far as this repository can tell) there is no
+    second chance. A deployment in exactly that state is how ~430 memories
+    were stranded in the 2026-07-27 incident this module carries a postmortem
+    for, and the reason it took an incident to notice is that this coroutine
+    reported success on its way out.
+
+    What the row buys, stated honestly and no further: ``background_task_log``
+    has one writer and no reader anywhere in the tree, so this does not repair
+    anything. It makes the loss COUNTABLE and hand-recoverable — the
+    ``(tenant_id, status)`` index is the shape such a query wants, and
+    ``memory_id`` is the id to re-embed. It is also the only thing that
+    distinguishes a row whose embed is still coming from one whose embed is
+    never coming: ``metadata.embedding_pending`` is ``True`` in both cases and
+    this change does not alter that. A reader holding only the row still
+    cannot tell the two apart.
+
+    ``reason`` is always what lands in ``error_message``, including at the
+    call site that has a real exception: the two exits differ in a way the
+    exception type alone does not say, and that difference is what decides
+    whether an operator chases the embedding provider or storage.
+
+    Never raises: :func:`record_task_failure` swallows its own storage
+    failures, and this adds nothing that can.
+    """
+    await record_task_failure(
+        _REEMBED_STRANDED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(reason),
+        # ``record_task_failure`` defaults to ``traceback.format_exc()``, which
+        # is only meaningful inside an ``except``. The exhaustion caller is not
+        # in one — nothing raised, the provider kept answering ``None`` — and
+        # would otherwise store the literal "NoneType: None" as its traceback.
+        tb=None if from_except else f"no traceback: {reason}",
+    )
+
+
 async def _reembed_memory(
     memory_id: UUID,
     content: str,
@@ -2790,6 +2864,12 @@ async def _reembed_memory(
     must pass ``is_failure_fallback=True`` to get the backoff, otherwise
     N serial retries land on the already-failing provider with zero
     delay — thundering herd.
+
+    Both ways this can end badly write a ``background_task_log`` row via
+    :func:`_record_stranded` — see there for why, and for what that row does
+    and does not buy. Returning normally is kept either way: this is
+    fire-and-forget, every caller wraps it in ``tracked_task``, and the row it
+    is repairing was committed and ACKed long ago.
     """
     from core_api.constants import EMBEDDING_REEMBED_DELAY_S
     from core_api.services.organization_settings import resolve_config
@@ -2826,6 +2906,12 @@ async def _reembed_memory(
             "Background re-embed exhausted all %d retries for memory %s",
             _REEMBED_MAX_RETRIES,
             memory_id,
+        )
+        await _record_stranded(
+            memory_id,
+            tenant_id,
+            f"embedding provider returned no vector after {_REEMBED_MAX_RETRIES} "
+            "re-embed attempts; the row stays embedding=NULL",
         )
         return
 
@@ -2874,8 +2960,20 @@ async def _reembed_memory(
             embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
         )
         logger.info("Background re-embed succeeded for memory %s", memory_id)
-    except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background re-embed error for memory %s", memory_id)
+        # The vector was produced and then lost: this branch is reached with a
+        # good ``embedding`` in hand that never reached the row. Unlike the
+        # batch path — where the same failure calls ``_fallback`` and tries
+        # again — there is no reschedule here, deliberately, because the retry
+        # would be this same coroutine and a storage fault that persists makes
+        # it a loop. So the row is stranded, and saying so is all that is left.
+        await _record_stranded(
+            memory_id,
+            tenant_id,
+            f"embedding computed but not persisted: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return
 
     # Contradiction coverage: the write path only fires contradiction
@@ -3391,9 +3489,27 @@ async def fan_out_atomic_facts(
             if not child_id:
                 # Loud, and NOT folded into fanout_unembedded: this
                 # row is unembedded with no repair queued, which is a
-                # strictly worse state than the counted one. The
-                # nightly sweep remains its only recovery, and only
-                # where enabled.
+                # strictly worse state than the counted one. It
+                # persists with ``embedding=NULL`` and NOTHING repairs
+                # it on its own today. This used to say the nightly
+                # sweep was its recovery; that sweep is gated on
+                # ``embed_backfill_enabled``, False by default because
+                # its Pub/Sub topic is Terraform-provisioned, and it has
+                # never run (oss-0924-m-05, findings in
+                # ``docs/unembedded-rows/``). So the log names the one
+                # repairs an operator can actually run: the standalone
+                # ``backfill_embeddings`` CLI, which walks NULL
+                # embeddings with no event bus behind it — hence the
+                # tenant id, for ``--tenant-id``. That CLI embeds with
+                # the PROCESS-level provider, so under per-tenant
+                # embedding overrides it would write wrong-model vectors,
+                # worse than NULL; the log names the override-safe path
+                # too, ``core_worker.cli backfill-embeddings``, which
+                # publishes to the live hot-path EMBED_REQUESTED topic
+                # (not the gated backfill one) and needs the pubsub bus.
+                # Provision the topic and
+                # flip ``embed_backfill_enabled`` and "the nightly sweep"
+                # becomes a true answer again.
                 # Log the response SHAPE, never the response. ``child``
                 # is the created row, so it carries the raw fact text
                 # and its metadata; interpolating it here would put
@@ -3403,10 +3519,17 @@ async def fan_out_atomic_facts(
                 # content-free.
                 logger.error(
                     "atomic-fact child persisted unembedded but create_memory "
-                    "returned no usable id (response keys: %s) for parent %s; "
-                    "NO re-embed scheduled — recovery depends on the nightly sweep",
+                    "returned no usable id (response keys: %s) for parent %s "
+                    "(tenant %s); NO re-embed scheduled and no automatic "
+                    "recovery — the row stays out of vector search until "
+                    "re-embedded: run `python -m "
+                    "core_storage_api.scripts.backfill_embeddings "
+                    "--tenant-id <tenant>` (per-tenant embedding overrides: "
+                    "use `python -m core_worker.cli backfill-embeddings` "
+                    "instead — see the script's docstring)",
                     sorted(child) if isinstance(child, dict) else type(child).__name__,
                     memory_id,
+                    tenant_id,
                 )
                 continue
             # Counted only once the repair is actually queued, so the
@@ -3472,6 +3595,75 @@ async def fan_out_atomic_facts(
     }
 
 
+#: ``background_task_log.task_name`` for a memory whose enrichment this process
+#: has given up on. One name across every terminal exit in
+#: :func:`_enrich_memory_background`, because the consequence an operator
+#: queries for is identical — the row keeps ``enrichment_pending: true`` and no
+#: title, summary or tags are coming. Which exit it took is in
+#: ``error_message``.
+#:
+#: Deliberately NOT one of the ``tracked_task`` names its callers pass
+#: (``background_enrichment``, ``enrich_or_publish``, ``enrichment``): every
+#: inline enrichment in the tree funnels through this one coroutine, and the
+#: operator wants one predicate for "permanently unenriched", not three.
+_ENRICH_STRANDED_TASK = "enrich_stranded"
+
+
+async def _record_enrich_stranded(
+    memory_id: UUID,
+    tenant_id: str,
+    reason: str,
+    *,
+    from_except: bool = False,
+) -> None:
+    """Persist one ``background_task_log`` row for a memory left unenriched.
+
+    ``tracked_task`` writes a row only when the coroutine it wraps RAISES.
+    :func:`_enrich_memory_background` catches its own failures, logs, and
+    returns ``None`` — so the wrapper saw a success, and the only table an
+    operator inspects stayed empty. That is the shape
+    :func:`record_task_failure` was split out for (09/02 M-40).
+
+    It matters more here than on the embed path, and the difference is the
+    whole reason this exists separately. A memory that loses its embedding at
+    least has a repair job in principle: ``run_embed_backfill_tick`` is real,
+    is gated off by default, and could be switched on once its topic is
+    provisioned. ``enrichment_pending`` has NO sweep at all — there is no job
+    to enable, nothing to provision, and no second chance even in principle.
+    ``tracked_task``'s own comment says as much: these rows "have no sweep at
+    all and stayed pending forever".
+
+    What the row buys, stated honestly and no further: ``background_task_log``
+    has one writer and no reader anywhere in the tree, so this repairs nothing.
+    It makes the loss COUNTABLE and hand-recoverable — the ``(tenant_id,
+    status)`` index is the shape such a query wants, and ``memory_id`` is the
+    id to re-enrich. It does NOT make the row self-describing:
+    ``metadata.enrichment_pending`` reads ``True`` whether enrichment is still
+    in flight or gone for good, its ABSENCE is documented as "that stage ran
+    inline", and this change alters neither. A reader holding only the row
+    still cannot tell the two apart.
+
+    ``reason`` is always what lands in ``error_message``, because the exits
+    differ in a way the exception type alone does not say — a config lookup
+    that failed before any LLM call and a PATCH that dropped a completed
+    enrichment send an operator to different places.
+
+    Never raises: :func:`record_task_failure` swallows its own storage
+    failures, and this adds nothing that can.
+    """
+    await record_task_failure(
+        _ENRICH_STRANDED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(reason),
+        # ``record_task_failure`` defaults to ``traceback.format_exc()``, which
+        # is only meaningful inside an ``except``. The contract-violation exit
+        # is not in one — nothing raised, ``enrich_memory`` simply answered
+        # ``None`` — and would otherwise store the literal "NoneType: None".
+        tb=None if from_except else f"no traceback: {reason}",
+    )
+
+
 async def _enrich_memory_background(
     memory_id: UUID,
     content: str,
@@ -3488,6 +3680,15 @@ async def _enrich_memory_background(
 
     After enrichment completes, applies the patch to the row and — when
     configured — runs governance remediation and the atomic-fact fan-out.
+
+    Every way this can end with the row still unenriched writes a
+    ``background_task_log`` row via :func:`_record_enrich_stranded` — see there
+    for why, and for what that row does and does not buy. The two exits that
+    are NOT failures are deliberately silent: a tenant with enrichment disabled
+    never wanted it, and a row that has been deleted underneath us has nothing
+    left to enrich. Returning rather than raising is kept throughout: this is
+    fire-and-forget, every caller wraps it in ``tracked_task``, and the memory
+    was committed and ACKed to its writer long ago.
 
     It does NOT schedule entity extraction or contradiction detection.
     ``ScheduleBackgroundTasks`` owns both: extraction unconditionally, and Path A
@@ -3547,8 +3748,17 @@ async def _enrich_memory_background(
 
     try:
         tenant_config = await resolve_config(tenant_id)
-    except Exception:
+    except Exception as exc:
         logger.exception("Background enrichment: failed to resolve config for memory %s", memory_id)
+        # The one exit below that fires in ordinary operation: no LLM call was
+        # attempted, so nothing was spent, but the row is as unenriched as if
+        # the provider had failed and nothing will revisit it.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"tenant config could not be resolved, so enrichment never ran: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return None
 
     if not tenant_config.enrichment_enabled:
@@ -3556,11 +3766,29 @@ async def _enrich_memory_background(
 
     try:
         enrichment = await enrich_memory(content, tenant_config)
-    except (ValueError, RuntimeError, OpenAIError, GoogleAPIError):
+    except (ValueError, RuntimeError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background enrichment LLM call failed for memory %s", memory_id)
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"enrichment provider raised: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return None
 
     if enrichment is None:
+        # Defensive, and recorded as such. ``enrich_memory`` is annotated
+        # ``-> EnrichmentResult`` and its docstring says "Never raises; always
+        # returns an EnrichmentResult" — it falls back through an alternative
+        # provider to a keyword heuristic that always succeeds. So reaching
+        # here means that contract broke, which is worth a row precisely
+        # because nothing else in the tree would notice.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            "enrich_memory returned None, violating its declared "
+            "EnrichmentResult contract; the row stays unenriched",
+        )
         return None
 
     # Returned even if the fan-out below then fails: an unrelated atomic-fact or
@@ -3693,8 +3921,19 @@ async def _enrich_memory_background(
             "metadata_": meta,
         }
 
-    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background enrichment error for memory %s", memory_id)
+        # The costly one: the LLM call above SUCCEEDED and this block is what
+        # writes the result to the row, so a failure here throws away work that
+        # was already paid for. ``governed_row`` is still ``None`` whenever the
+        # PATCH itself failed — it is assigned as the last statement of the
+        # ``try`` — so the caller cannot tell this from the cheap exits either.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"enrichment completed but was not persisted: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return governed_row
 
     # ── Govern, between enriching and deriving ────────────────────────────────
