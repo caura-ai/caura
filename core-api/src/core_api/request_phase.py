@@ -44,6 +44,14 @@ MCP arrived here with no deadline to attribute at all, and now has one
 (``mcp_request_timeout_seconds``, oss-0924-h-02) — so on that transport this
 module reports a budget the same way it does on REST, rather than only
 naming the hop an exception escaped from.
+
+That roster of four is a claim, and it was wrong once already. It is checked
+now: ``tests/test_ax_h01_deadline_armed_guard.py`` drives each surface through
+its real entry point and asserts an ARMED deadline — ``begin(None)`` and
+``own_deadline(None)`` bind a recorder with no clock and do not count — then
+saturates the bulkhead to prove that deadline cancels the wait. It also runs
+every OpenAPI path and every ASGI mount through ``RequestTimeoutMiddleware``
+itself, so a new opt-out route or a new mount fails there until it is declared.
 """
 
 from __future__ import annotations

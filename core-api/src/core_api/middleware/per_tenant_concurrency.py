@@ -176,15 +176,33 @@ async def per_tenant_storage_slot(
       ``search_memories``, and the wait here was capped by nothing but
       the client hanging up.
     * ``/admin/org/purge-data`` — opted out and enforces NO deadline of
-      its own, bounded instead by the storage client's httpx timeouts
+      its own. It reaches no acquire here either: it calls
+      ``purge_tenant_data`` on the storage client directly, so there is
+      no unbounded wait on this path for a budget to cap, and what
+      bounds it is that client's own httpx timeouts
       (``STORAGE_READ_TIMEOUT_SECONDS``). A terminal admin batch driven
       by the daily sweep, not a caller waiting on a queue; noted so the
       list above is exhaustive rather than convenient.
+    * The audit-queue flusher (``_flush_one_tenant``, ``app.py``) — a
+      background loop, not a request, so nothing arms a deadline over
+      it and this acquire is uncapped. What bounds the work is upstream:
+      the queue is capped at ``audit_queue_max_size`` and shutdown waits
+      only ``stop(timeout=5.0)`` before cancelling. Listed because the
+      roster above claims to be every path, and for months it was not.
 
     A new entry point that reaches a ``per_tenant_storage_slot`` caller
     without a budget of its own puts this docstring back into the state
     that made it a defect. Add the budget, or add the caller here and
     say what bounds it.
+
+    None of that is enforced by being written here — which is how the
+    MCP entry came to be false and stay false. It is enforced by
+    ``tests/test_ax_h01_deadline_armed_guard.py``, which drives each
+    surface above through its real entry point, reads the recorder AT
+    this acquire, and then saturates this semaphore to prove the
+    deadline really cancels the wait rather than merely being bound
+    beside it. The roster in that file is the checked copy of this list;
+    a surface added to one and not the other fails there by name.
 
     Tenant-A storm scenario: A's writes occupy ``cap`` storage slots;
     A's request 5+ queues on ``sem.acquire()``. Tenant B's write enters
