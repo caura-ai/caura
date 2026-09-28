@@ -37,6 +37,10 @@ WAKE_EVENTS = {
 }
 
 
+class WakeNotStarted(RuntimeError):
+    """The runtime process was never created, so retry cannot duplicate a prompt."""
+
+
 def state_path(config):
     identity = json.dumps([config.api_url, config.agent.tenant_id, config.agent.agent_id])
     digest = hashlib.sha256(identity.encode()).hexdigest()[:24]
@@ -104,10 +108,16 @@ class WakeState:
             # queue failure must not enqueue duplicate prompts on restart.
             current = {**saved, marker: generation, "recovery_key": recovery or saved.get("recovery_key")}
             self.save(current)
-            if snapshot.get("wake_reason") == "request_overdue":
-                await emit(OVERDUE_TEXT)
-            else:
-                await emit()
+            try:
+                if snapshot.get("wake_reason") == "request_overdue":
+                    await emit(OVERDUE_TEXT)
+                else:
+                    await emit()
+            except WakeNotStarted:
+                # The runtime never started, so nothing was delivered: restore
+                # the previous marker so a repaired install is retried.
+                self.save(saved)
+                raise
             # Inventory records only confirmed queue delivery or emitted hook
             # output; an ambiguous runtime failure never becomes a successful wake.
             self.save({**current, "last_wake_at": datetime.now(UTC).isoformat()})
@@ -121,18 +131,21 @@ class CodexQueue:
 
     async def __call__(self, message=WAKE_TEXT):
         env = {k: v for k, v in os.environ.items() if k not in {"CAURA_API_KEY", "CAURA_BUS_AGENT_CONFIG"}}
-        process = await asyncio.create_subprocess_exec(
-            self.executable,
-            "queue",
-            "--thread",
-            self.thread,
-            "--message",
-            message,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self.executable,
+                "queue",
+                "--thread",
+                self.thread,
+                "--message",
+                message,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=env,
+            )
+        except OSError as exc:
+            raise WakeNotStarted("Codex queue could not start; fix the runtime and retry") from exc
         try:
             await asyncio.wait_for(process.wait(), 15)
         except BaseException:
