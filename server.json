@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.caura-ai/caura",
+  "title": "Caura",
+  "description": "Shared governed memory for AI agents - fleet memory that is governed, shared and self-improving.",
+  "websiteUrl": "https://caura.ai",
+  "repository": {
+    "url": "https://github.com/caura-ai/caura-memclaw",
+    "source": "github"
+  },
+  "version": "3.4.1",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://caura.ai/mcp",
+      "headers": [
+        {
+          "name": "X-API-Key",
+          "description": "Caura API key (mc_...) from caura.ai",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
