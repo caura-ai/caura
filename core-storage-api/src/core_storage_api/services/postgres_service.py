@@ -103,7 +103,7 @@ from common.models.memory import (
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
-from common.organization_settings_merge import deep_merge, diff_settings
+from common.organization_settings_merge import diff_settings, merge_settings_update
 from core_storage_api.observability import PhaseTimer, db_measure
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
@@ -12690,12 +12690,12 @@ class PostgresService:
                 # So: claim the row instead of merging in SQL. One writer wins
                 # the INSERT; every other writer falls through to a lock that now
                 # has a row to hold and redoes the read-merge-write against what
-                # is actually stored, through the same ``deep_merge`` as every
-                # other path.
+                # is actually stored, through the same ``merge_settings_update``
+                # as every other path.
                 seed_diff = diff_settings({}, new_settings)
                 if not seed_diff:
                     return {"settings": {}, "changed": False}
-                seeded = deep_merge({}, new_settings)
+                seeded = merge_settings_update({}, new_settings)
                 claimed = (
                     await session.execute(
                         pg_insert(OrganizationSettings)
@@ -12716,7 +12716,7 @@ class PostgresService:
                 # Identical payload — skip the write and the audit row entirely.
                 return {"settings": current, "changed": False}
 
-            merged = deep_merge(current, new_settings)
+            merged = merge_settings_update(current, new_settings)
             await session.execute(
                 sql_update(OrganizationSettings)
                 .where(OrganizationSettings.org_id == org_id)

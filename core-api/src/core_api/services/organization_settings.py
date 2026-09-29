@@ -656,6 +656,12 @@ def _validate_default_search_profile(payload: dict) -> None:
         knob = SEARCH_KNOBS.get(key)
         if knob is None:
             raise ValueError(f"search.default_profile: unknown key {key!r} (allowed: {sorted(SEARCH_KNOBS)})")
+        # ``null`` on a KNOWN knob is the reset shape: storage deletes the key
+        # (``merge_settings_update``) and the resolver falls back to the global
+        # default. The unknown-key check above runs first, so a typo sent as
+        # null still 422s rather than "resetting" a knob that does not exist.
+        if value is None:
+            continue
         expected_type, (lo, hi) = knob.value_type, knob.bounds
         # Accept an int where a float is expected (e.g. min_similarity=0 → 0.0),
         # but never a bool (bool is an int subclass and would slip through).
@@ -679,6 +685,15 @@ def _validate_default_search_profile(payload: dict) -> None:
         )
 
 
+# Object-valued settings that may be sent as ``null`` to drop the whole object
+# back to its default. An allowlist rather than "any object" on purpose: most
+# resolvers read ``self._ts.get("<section>", {}).get(...)``, which crashes on a
+# stored ``None`` if a storage build that predates ``merge_settings_update``
+# stores the null instead of deleting it. The ``default_profile`` resolver reads
+# ``... or {}`` and is null-safe either way.
+_NULLABLE_OBJECT_KEYS: frozenset[str] = frozenset({"search.default_profile"})
+
+
 def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
     """Raise ``ValueError`` for any key in *payload* not present in *schema*.
 
@@ -691,8 +706,10 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
     for k, v in payload.items():
         schema_v = schema.get(k)
         if isinstance(schema_v, dict):
+            full_key = f"{path}.{k}" if path else k
+            if v is None and full_key in _NULLABLE_OBJECT_KEYS:
+                continue
             if not isinstance(v, dict):
-                full_key = f"{path}.{k}" if path else k
                 raise ValueError(f"Settings key {full_key!r} must be an object, got {type(v).__name__}")
             if schema_v:
                 _check_keys(v, schema_v, path=f"{path}.{k}" if path else k)
@@ -1430,6 +1447,12 @@ def validate_search_profile(profile: dict) -> dict:
             cleaned[key] = value
             continue
 
+        # ``null`` means "unset" (the settings reset shape), not a malformed
+        # value: drop it without the wrong-type warning. A row only holds one if
+        # a storage build that predates ``merge_settings_update`` stored it.
+        if value is None:
+            continue
+
         expected_type, (lo, hi) = knob.value_type, knob.bounds
 
         if expected_type is float and isinstance(value, int):
@@ -1575,12 +1598,16 @@ async def update_settings(
 ) -> dict:
     """Upsert tenant overrides + write an audit row with the flat diff.
 
-    Writes are a deep MERGE (``_deep_merge``), so an omitted key keeps its
-    current value. The reset shape is an explicit ``null``: ``_validate_leaf_types``
-    passes ``None`` through deliberately, every resolver property reads ``None``
-    as "no override", and a section set to ``None`` drops the whole group back to
-    defaults. ``{}`` for a section merges nothing and is a no-op — it looks like
-    a clear and is not one, which is the trap worth knowing about.
+    Writes are a deep MERGE, so an omitted key keeps its current value. The
+    reset shape is an explicit ``null``: validation passes ``None`` through
+    deliberately (for a ``search.default_profile`` knob too, provided the knob
+    exists), and storage applies the payload with ``merge_settings_update``,
+    which DELETES the override so the resolver falls back to the default.
+    ``search.default_profile`` itself may also be sent as ``null`` to drop every
+    tenant-default knob at once; other object-valued sections may not (see
+    ``_NULLABLE_OBJECT_KEYS``). ``{}`` for a section merges nothing and is a
+    no-op — it looks like a clear and is not one, which is the trap worth
+    knowing about.
 
     Returns the merged display view (``DEFAULT_SETTINGS`` ⊕ tenant overrides)
     so callers can echo back the resulting state. No-ops when the submitted

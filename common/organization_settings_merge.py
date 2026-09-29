@@ -28,6 +28,40 @@ def deep_merge(old: Any, new: Any) -> Any:
     return out
 
 
+def merge_settings_update(old: Any, new: Any) -> Any:
+    """Apply a settings UPDATE payload onto stored overrides.
+
+    Same as ``deep_merge`` except that an explicit ``None`` in ``new`` DELETES
+    the key instead of storing ``null``. ``null`` is the documented reset shape
+    ("return this setting to its default"), and removing the override is what
+    that means. Storing ``null`` instead breaks it in two places: a key whose
+    default is concrete (``skills_factory.body_max_bytes`` = 40000) reads back
+    as ``None`` once ``DEFAULT_SETTINGS`` is merged over it, and a
+    ``search.default_profile`` knob set back to ``null`` sat in the stored
+    profile as ``{"top_k": null}`` rather than being removed (SIDE-61).
+
+    Only the WRITE path uses this. ``deep_merge`` keeps storing ``None`` as a
+    value, because the display merge (``DEFAULT_SETTINGS`` with the overrides
+    merged over it) must not lose a schema key when a row still holds a
+    legacy ``null``.
+    """
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return new
+    out = dict(old)
+    for k, v in new.items():
+        if v is None:
+            out.pop(k, None)
+        elif isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = merge_settings_update(out[k], v)
+        elif isinstance(v, dict):
+            # A new subtree: run it through the same rule so a null nested
+            # inside it is not stored either.
+            out[k] = merge_settings_update({}, v)
+        else:
+            out[k] = v
+    return out
+
+
 def diff_settings(old: dict, new: dict, prefix: str = "") -> dict:
     """Flat diff: ``{"enrichment.provider": [old, new], ...}``.
 
