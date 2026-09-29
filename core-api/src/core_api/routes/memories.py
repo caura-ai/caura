@@ -2237,6 +2237,31 @@ def _superseded_winner(choices: tuple[str, ...], extras: dict) -> str | None:
 _MAX_REPORTED_UNKNOWN = 20
 
 
+def _request_ranking_knobs(body: SearchRequest, config, *, allow_recall_bump: bool) -> dict:
+    """Fold the per-request ranking opt-outs into the tenant's resolved values.
+
+    lme-0929-h-01 (SIDE-54). ``SearchRequest.recall_boost`` / ``entity_boost``
+    are opt-out only: ``False`` neutralises the factor for this call, anything
+    else leaves the tenant's value untouched (so every existing caller, which
+    sends neither, gets exactly what it got before).
+
+    ``recall_boost=False`` also withholds the ``recall_count`` bump — a "plain"
+    read must not mutate the state that ranks the next one. The bump gate is
+    AND-ed with the route's own ``allow_recall_bump`` decision (#1197), never
+    widened by it.
+
+    Returned as ``search_memories`` kwargs so /search and /recall, which share
+    the body, cannot drift on how the knobs are applied — both search paths
+    (pipeline and legacy) already honour these three kwargs.
+    """
+    plain_recall = body.recall_boost is False
+    return {
+        "recall_boost": config.recall_boost and not plain_recall,
+        "entity_retrieval": config.entity_retrieval and body.entity_boost is not False,
+        "allow_recall_bump": allow_recall_bump and not plain_recall,
+    }
+
+
 def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
     """Report the request keys this surface accepted and then ignored.
 
@@ -2478,14 +2503,20 @@ async def _search_inner(
             #
             # Resolved here rather than in the step because the tenant config
             # lives at the route; the pipeline gets the decision, not the inputs.
-            allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
+            #
+            # lme-0929-h-01 — the per-request ranking opt-outs are folded in by
+            # ``_request_ranking_knobs`` (recall_boost / entity_retrieval /
+            # allow_recall_bump), never widening the tenant or #1197 gates.
+            **_request_ranking_knobs(
+                body,
+                config,
+                allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
+            ),
             memory_type_filter=body.memory_type_filter,
             status_filter=body.status_filter,
             valid_at=body.valid_at,
             top_k=body.top_k,
-            recall_boost=config.recall_boost,
             graph_expand=config.graph_expand,
-            entity_retrieval=config.entity_retrieval,
             tenant_config=config,
             search_profile=_agent.get("search_profile") if _agent else None,
             readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
@@ -2820,14 +2851,19 @@ async def recall_endpoint(
         # caller_agent_id reshuffles results for every other caller. Carried
         # here because honouring the field without this would fix a dropped
         # knob by giving it a side effect /search deliberately suppresses.
-        allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
+        # lme-0929-h-01 — same per-request ranking opt-outs as /search (the
+        # body is shared, so honouring them on one route only would repeat
+        # the ``caller_agent_id`` divergence).
+        **_request_ranking_knobs(
+            body,
+            config,
+            allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
+        ),
         memory_type_filter=body.memory_type_filter,
         status_filter=body.status_filter,
         top_k=body.top_k,
         valid_at=body.valid_at,
-        recall_boost=config.recall_boost,
         graph_expand=config.graph_expand,
-        entity_retrieval=config.entity_retrieval,
         tenant_config=config,
         readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
         diagnostic=body.diagnostic,

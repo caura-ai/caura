@@ -213,7 +213,7 @@ class ParallelEmbedAndEntityBoost:
         # Kept as distinct log reasons so ops can tell a deliberate org-level
         # disable from the precision heuristic firing.
         if not data.get("entity_retrieval", True):
-            ent_skip_reason = "disabled by org setting search.entity_retrieval"
+            ent_skip_reason = "disabled by org setting search.entity_retrieval or request entity_boost=false"
         elif data.get("entity_match_declined"):
             ent_skip_reason = "entity match declined as over-broad in classify_query"
         else:

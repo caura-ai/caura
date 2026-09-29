@@ -118,7 +118,10 @@ class ClassifyQuery:
         tokens = extract_entity_tokens(query) if entity_retrieval else []
 
         if not entity_retrieval:
-            logger.info("classify_query: entity retrieval disabled by org setting (tenant=%s)", tenant_id)
+            logger.info(
+                "classify_query: entity retrieval disabled by org setting or request entity_boost=false (tenant=%s)",
+                tenant_id,
+            )
 
         if tokens:
             try:
