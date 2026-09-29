@@ -4814,6 +4814,7 @@ def resolve_search_params(
     query: str,
     top_k: int,
     tenant_config=None,
+    top_k_explicit: bool = False,
 ) -> dict:
     """Resolve every search knob for one query, for both search paths.
 
@@ -4843,6 +4844,16 @@ def resolve_search_params(
     ``tenant_config`` is a ``ResolvedConfig`` on the primary search/recall paths
     (routes resolve it before calling); ``None`` is tolerated so callers that
     don't have one behave exactly as before A47.
+
+    ``top_k_explicit`` (SIDE-60) — True when the REST body named ``top_k``
+    itself. A caller-named ``top_k`` then outranks the whole ladder for this
+    one call (request → agent profile → tenant default → constant), the same
+    precedence a per-request ``min_similarity`` already gets. A profile /
+    tenant ``top_k`` stays the DEFAULT for callers that did not send one.
+    Without this a tenant ``default_profile.top_k=10`` answered ``top_k=12``
+    and ``top_k=3`` alike with 10 rows. Both sources are already bounded by
+    ``MAX_SEARCH_TOP_K`` (schema ``le=`` on the request, ``SEARCH_KNOBS``
+    bounds on the profile), so either winner respects the ceiling.
     """
     resolved = validate_search_profile(search_profile) if search_profile else {}
 
@@ -4852,7 +4863,7 @@ def resolve_search_params(
             resolved = {**tenant_default, **resolved}
 
     return {
-        "top_k": resolved.get("top_k", top_k),
+        "top_k": top_k if top_k_explicit else resolved.get("top_k", top_k),
         "min_similarity": resolved.get("min_similarity", MIN_SEARCH_SIMILARITY),
         "graph_max_hops": resolved.get("graph_max_hops", GRAPH_MAX_HOPS),
         # The one default that is not a constant: it adapts to the query unless
@@ -5391,8 +5402,10 @@ async def search_memories(
     include_derived: bool | None = None,
     # SIDE-57 — True when the REST body named ``top_k`` itself (vs. taking the
     # schema default). Lets ClassifyQuery skip RECENT_CONTEXT's 5-row cap for a
-    # caller that explicitly asked for more. Default False keeps every other
-    # caller (MCP, internal paths) on the previous behaviour.
+    # caller that explicitly asked for more, and (SIDE-60) makes the named
+    # value beat an agent-profile / tenant-default ``top_k`` on both search
+    # paths. Default False keeps every other caller (MCP, internal paths) on
+    # the previous behaviour.
     top_k_explicit: bool = False,
     # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
     # strategy and any strategy-applied top_k cap. Pipeline path only.
@@ -5458,6 +5471,7 @@ async def search_memories(
         min_similarity=min_similarity,
         allow_recall_bump=allow_recall_bump,
         include_derived=include_derived,
+        top_k_explicit=top_k_explicit,
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
@@ -5631,12 +5645,19 @@ async def _search_memories_legacy(
     min_similarity: float | None = None,
     allow_recall_bump: bool = True,
     include_derived: bool | None = None,
+    top_k_explicit: bool = False,
 ) -> list[MemoryOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
 
     # Same resolver the pipeline step uses — see ``resolve_search_params``.
-    sp = resolve_search_params(search_profile, query=query, top_k=top_k, tenant_config=tenant_config)
+    sp = resolve_search_params(
+        search_profile,
+        query=query,
+        top_k=top_k,
+        tenant_config=tenant_config,
+        top_k_explicit=top_k_explicit,
+    )
     _top_k = sp["top_k"]
     # D12 — per-request floor beats the resolved profile, same precedence as
     # ResolveSearchProfile applies on the pipeline path.
