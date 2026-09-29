@@ -287,6 +287,26 @@ DEFAULT_SETTINGS: dict = {
         # stands. Ops escape valve for tenants whose retraction
         # misbehaves; flip per-tenant without a deploy.
         "retraction_enabled": None,
+        # lme-0929-m-05 (SIDE-58) — tenant master switch for contradiction
+        # detection. ``None``/``True`` (the default) is today's behaviour.
+        # ``False`` skips EVERY detection entry point for the tenant — Path A
+        # (write, bulk, update, re-embed, the ENRICHED/EMBEDDED back-channel)
+        # and Path C (post entity-extraction, including its retraction phase) —
+        # so no new row is marked ``outdated``/``conflicted`` and no judge LLM
+        # call is made. Writes are unaffected. Forward-only: rows already marked
+        # before the flip keep their status.
+        #
+        # For stores where every row is a verbatim source record (benchmark
+        # tenants: on LongMemEval, detection hid 4,374 stored turns across 500
+        # stores from default search) and customers that want an append-only
+        # store. The gate is read inside the two detector entries every trigger
+        # routes through (``contradiction_detector``), not at the dozen call
+        # sites, so a trigger added later is gated without anyone remembering.
+        #
+        # Listed here, not only as a ``ResolvedConfig`` property: a knob absent
+        # from this schema is rejected by ``_check_keys`` and so is unsettable
+        # (the pm-0918-c-04 lesson).
+        "contradiction_detection_enabled": None,
     },
     "agents": {
         "require_agent_approval": None,
@@ -717,6 +737,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "write.triple_emission_enabled": bool,
     "write.bulk_subject_batching": bool,
     "write.retraction_enabled": bool,
+    "write.contradiction_detection_enabled": bool,
     # Skill Factory SF-006 — type validators for the skills_factory namespace.
     "skills_factory.enabled": bool,
     "skills_factory.description_max_bytes": int,
@@ -1311,6 +1332,21 @@ class ResolvedConfig:
         # verdict in place unconditionally for this tenant; useful as
         # an ops escape valve if a tenant's retraction misbehaves.
         val = self._ts.get("write", {}).get("retraction_enabled")
+        return bool(val) if val is not None else True
+
+    @property
+    def contradiction_detection_enabled(self) -> bool:
+        """Tenant master switch for contradiction detection (default ON).
+
+        lme-0929-m-05 (SIDE-58). ``False`` makes both detector entries (Path A
+        ``detect_contradictions_async``, Path C
+        ``detect_contradictions_by_entities_async``) return before any storage
+        read, lock, admission slot or LLM call, so nothing is marked
+        ``outdated``/``conflicted`` for this tenant. When off it subsumes
+        ``retraction_enabled``: with Path C skipped there is nothing to retract.
+        Forward-only — existing statuses are left as they are.
+        """
+        val = self._ts.get("write", {}).get("contradiction_detection_enabled")
         return bool(val) if val is not None else True
 
     # Agents

@@ -606,6 +606,44 @@ async def _record_detection_lost(
     )
 
 
+async def _detection_disabled_for_tenant(tenant_id: str, memory_id, path: str) -> bool:
+    """True when the tenant switched contradiction detection off (SIDE-58).
+
+    lme-0929-m-05. Read at the top of BOTH detector entries, which every
+    trigger reaches — legacy and engine arch alike, via
+    ``run_contradiction_detection`` (``test_contradiction_trigger_coverage``
+    pins that no production path calls around them). Gating here rather than
+    at the call sites is the point: a switch that left one trigger live is the
+    defect class this module keeps fixing, and a trigger added later is gated
+    without anyone having to remember.
+
+    Checked BEFORE the A19 admission slot, the row fetch and the idempotency
+    lock, so a disabled tenant's pass costs one cached settings read and
+    nothing else: no storage traffic, no Redis, no LLM call, no slot held.
+
+    Only an explicit ``False`` disables (``is False``), and a settings read
+    that fails is treated as ENABLED — today's behaviour. The run then reaches
+    its own ``resolve_config`` inside the error handling it always had, so an
+    outage is recorded exactly as before rather than silently turning
+    detection off.
+    """
+    from core_api.services.organization_settings import resolve_config
+
+    try:
+        cfg = await resolve_config(tenant_id)
+    except Exception:
+        return False
+    if getattr(cfg, "contradiction_detection_enabled", True) is not False:
+        return False
+    logger.debug(
+        "%s contradiction detection skipped for memory %s: disabled for tenant_id=%s",
+        path,
+        memory_id,
+        tenant_id,
+    )
+    return True
+
+
 async def detect_contradictions_async(
     memory_id: UUID,
     tenant_id: str,
@@ -629,6 +667,10 @@ async def detect_contradictions_async(
     detection runs cleanly aborts.
     """
     from core_api.services.organization_settings import resolve_config
+
+    # SIDE-58 — tenant opt-out, before the slot / fetch / lock below.
+    if await _detection_disabled_for_tenant(tenant_id, memory_id, "content"):
+        return
 
     # Always-fire completion log (Gap 06): without this, "function ran and
     # found nothing" is indistinguishable from "function never fired" — the
@@ -790,6 +832,11 @@ async def detect_contradictions(
             "supersedes_id": str(new_memory.supersedes_id) if new_memory.supersedes_id else None,
             "status": new_memory.status,
         }
+    # SIDE-58 — honour the tenant switch when the caller hands us its config.
+    # (This in-session API has no production caller; it resolves nothing
+    # itself, so a caller without a config keeps today's behaviour.)
+    if tenant_config is not None and getattr(tenant_config, "contradiction_detection_enabled", True) is False:
+        return []
     return await _detect(new_memory, embedding, tenant_config)
 
 
@@ -2749,6 +2796,11 @@ async def detect_contradictions_by_entities_async(
     confidence, the retraction is undone via the A4 #10 storage primitive.
     """
     from core_api.services.organization_settings import resolve_config
+
+    # SIDE-58 — tenant opt-out. Skips the retraction phase and the post-
+    # extraction RDF pass too: both are contradiction detection.
+    if await _detection_disabled_for_tenant(tenant_id, memory_id, "entity"):
+        return
 
     # Always-fire completion log (Gap 06) — see ``detect_contradictions_async``
     # above for the rationale. Same memory-id-in-message convention.

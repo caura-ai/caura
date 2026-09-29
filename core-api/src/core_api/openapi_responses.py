@@ -323,6 +323,10 @@ class WriteSettings(BaseModel):
     default_write_mode: str | None = Field(description="fast or strong; null means fast.")
     triple_emission_enabled: bool | None
     retraction_enabled: bool | None
+    contradiction_detection_enabled: bool | None = Field(
+        description="Tenant switch for contradiction detection; null means on. False skips "
+        "every detection path for the tenant, so no row is marked outdated/conflicted."
+    )
 
 
 class SettingsResponse(BaseModel):
