@@ -369,7 +369,7 @@ def _event(payload: dict):
 @pytest.mark.parametrize("enabled", [None, False], ids=["default_on", "switched_off"])
 async def test_embedded_back_channel_respects_the_switch(enabled):
     """``memory-embedded`` is the SOLE Path A trigger on the deferred-embed path,
-    so it is the one a benchmark tenant on memclaw.dev actually hits."""
+    so it is the one a benchmark tenant on caura.dev (staging) actually hits."""
     from core_api import consumer
 
     mid = uuid4()
