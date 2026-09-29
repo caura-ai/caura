@@ -260,6 +260,22 @@ async def _recall_count(memory_id: str) -> int:
     return int(row[0])
 
 
+async def _settle_recall_bumps() -> None:
+    """Await the fire-and-forget TrackRecalls bumps already dispatched.
+
+    The pipeline bumps ``recall_count`` in a background task, so reading the
+    counter right after a response races it. Waiting here makes "the plain
+    call did not bump" a real assertion rather than a timing accident.
+    """
+    import asyncio
+
+    from core_api.tasks import _background_tasks
+
+    pending = [t for t in _background_tasks if not t.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
 _PATHS = pytest.mark.parametrize(
     "use_pipeline", [True, False], ids=["pipeline", "legacy"]
 )
@@ -284,8 +300,10 @@ async def test_both_flags_false_rank_by_the_plain_hybrid_score(
     p_embed, p_entity = _patches(use_pipeline, boosted_id=b)
     with p_embed, p_entity:
         default = await _search(client, tenant_id)
+        await _settle_recall_bumps()
         before = await _recall_count(b)
         plain = await _search(client, tenant_id, recall_boost=False, entity_boost=False)
+        await _settle_recall_bumps()
         after = await _recall_count(b)
 
     default_ids = [m["id"] for m in default["items"]]
@@ -303,6 +321,7 @@ async def test_both_flags_false_rank_by_the_plain_hybrid_score(
     # The default call reinforced; the plain call did not.
     assert default["recall_tracked"] is True
     assert plain["recall_tracked"] is False
+    assert before == 1_000_001  # the default call's bump landed
     assert after == before
 
 
