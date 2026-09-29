@@ -2109,6 +2109,17 @@ async def create_memories_bulk(
         # search comes back empty while an exact-words search does not.
         if embeddings[i] is None:
             set_system_value(metadata, "embedding_pending", True)
+        # lme-0929-m-03. The same durable signal for enrichment, on exactly the
+        # condition the post-persist loop below publishes ``ENRICH_REQUESTED``
+        # (``defer_enrich_publish``; a deferred deployment never enriches inline
+        # here, so ``enrichment is None``). The worker's PATCH writes ``false``
+        # into both homes. Absence alone is ambiguous — an inline-enriched row
+        # carries no key either — so without this a bulk-ingested store, the
+        # population with the LONGEST deferred window, could not be told apart
+        # from a settled one by reading its rows (``GET /memories/stats``
+        # ``pending.enrichment``).
+        if _enrichment_backfill_needed(enrichment, tenant_config):
+            set_system_value(metadata, "enrichment_pending", True)
 
         mem_data = {
             "tenant_id": data.tenant_id,

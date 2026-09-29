@@ -94,6 +94,12 @@ from common.models import (
 )
 from common.models.capability_usage import CapabilityUsage
 from common.models.entity import LINK_SOURCE_CALLER, LINK_SOURCE_EXTRACTION
+from common.models.memory import (
+    PENDING_EMBEDDING_SQL,
+    PENDING_ENRICHMENT_SQL,
+    PENDING_FANOUT_SQL,
+    PENDING_WORK_SQL,
+)
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
@@ -259,6 +265,22 @@ def _normalized_object_sql(column):
     (tenant, subject_entity_id, predicate) before this predicate is evaluated.
     """
     return func.lower(func.regexp_replace(column, r"[\s,]", "", "g"))
+
+
+def pending_work_count_stmt(filters: list[ColumnElement[bool]]) -> Select:
+    """``(embedding, enrichment, fanout)`` pending counts over ``filters``.
+
+    lme-0929-m-03. ``PENDING_WORK_SQL`` is ANDed in verbatim so the query
+    implies the predicate of the partial index ``ix_memories_pending_work``
+    (built from the same constant) and the planner can serve it from that
+    index, which holds only pending rows. Module-level so the plan can be
+    checked against the exact statement the service runs.
+    """
+    return select(
+        func.count().filter(text(PENDING_EMBEDDING_SQL)),
+        func.count().filter(text(PENDING_ENRICHMENT_SQL)),
+        func.count().filter(text(PENDING_FANOUT_SQL)),
+    ).where(*filters, text(PENDING_WORK_SQL))
 
 
 def _fleet_scope_clause(
@@ -6304,9 +6326,20 @@ class PostgresService:
         include_deleted: bool = False,
         include_scope_agent: bool = False,
         readable_tenant_ids: list[str] | None = None,
+        include_pending: bool = False,
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
-        ``by_tenant`` / ``deleted`` / ``total_including_deleted``).
+        ``by_tenant`` / ``deleted`` / ``total_including_deleted`` /
+        ``pending`` + ``settled``).
+
+        ``include_pending`` (lme-0929-m-03) adds ``pending: {embedding,
+        enrichment, fanout}`` — live rows in the same scope that still have
+        background work outstanding, read from durable row markers (see
+        ``common.models.memory.PENDING_WORK_SQL``) — and ``settled`` (all
+        three zero). One extra query served by the partial index
+        ``ix_memories_pending_work``, which holds only pending rows, so its
+        cost is O(pending) rather than O(tenant). Off by default so the MCP
+        ``caura_stats`` and report callers keep their exact shape and cost.
 
         ``created_after`` / ``created_before`` bound the aggregation to a
         half-open ``[after, before)`` window — used by the daily/weekly report
@@ -6520,7 +6553,28 @@ class PostgresService:
         if include_deleted:
             result["deleted"] = deleted
             result["total_including_deleted"] = total + deleted
+        if include_pending:
+            pending = await self._memory_pending_work_counts(filters)
+            result["pending"] = pending
+            result["settled"] = not any(pending.values())
         return result
+
+    async def _memory_pending_work_counts(self, filters: list[ColumnElement[bool]]) -> dict[str, int]:
+        """Count live rows under ``filters`` that still owe background work.
+
+        ``filters`` must already carry ``deleted_at IS NULL`` plus the caller's
+        scope. ``PENDING_WORK_SQL`` is added verbatim — the partial index
+        ``ix_memories_pending_work`` is keyed on exactly that text, and the
+        planner only uses a partial index whose predicate the query implies.
+        A row can be pending on several axes at once and is counted in each.
+        """
+        async with get_read_session() as session:
+            row = (await session.execute(pending_work_count_stmt(filters))).one()
+        return {
+            "embedding": int(row[0] or 0),
+            "enrichment": int(row[1] or 0),
+            "fanout": int(row[2] or 0),
+        }
 
     async def memory_daily_durable_counts(
         self,

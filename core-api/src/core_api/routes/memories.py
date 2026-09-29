@@ -683,6 +683,11 @@ async def memory_stats(
 ):
     """Aggregate counts: total plus breakdowns by type, agent, and status.
 
+    Also reports ``pending`` (live rows in the same scope still owed an
+    embedding, an LLM enrichment, or an atomic-fact fan-out) and ``settled``
+    (none of the three). Poll until ``settled`` is true before measuring a
+    freshly ingested store.
+
     Mirrors ``GET /memories``: same visibility scoping, same fleet-read gate, and
     the same optional ``scope`` ladder, so a count can never disagree with the
     list it summarises or be reachable at a lower trust level than the rows it
@@ -750,6 +755,11 @@ async def memory_stats(
             "memory_type": memory_type,
             "status": status,
             "include_deleted": include_deleted,
+            # lme-0929-m-03: additive ``pending`` / ``settled`` block so a caller
+            # can tell whether background work (embed / enrich / fan-out) is
+            # still due to change the store. REST-only; MCP ``caura_stats``
+            # keeps its shape.
+            "include_pending": True,
             # scope='agent' is home-tenant by definition — same rule as the list route.
             "readable_tenant_ids": (
                 auth.readable_tenant_ids

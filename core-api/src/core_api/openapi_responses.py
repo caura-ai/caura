@@ -31,6 +31,16 @@ from core_api.schemas import MemoryOut, SearchWarning
 # --------------------------------------------------------------------------
 
 
+class MemoryPendingWork(BaseModel):
+    embedding: int = Field(description="Live rows whose vector has not landed yet (`embedding IS NULL`).")
+    enrichment: int = Field(
+        description="Live rows still marked `enrichment_pending` — the deferred LLM enrichment has not written back."
+    )
+    fanout: int = Field(
+        description="Live rows whose persisted atomic facts have not been fanned out into child memories yet."
+    )
+
+
 class MemoryStatsResponse(BaseModel):
     total: int = Field(description="Live (non-deleted) memory count in scope.")
     by_type: dict[str, int]
@@ -42,6 +52,18 @@ class MemoryStatsResponse(BaseModel):
     )
     deleted: int | None = Field(default=None, description="Only when include_deleted=true.")
     total_including_deleted: int | None = Field(default=None, description="Only when include_deleted=true.")
+    pending: MemoryPendingWork | None = Field(
+        default=None,
+        description=(
+            "Background work still outstanding in this scope, from durable row markers. A row can count "
+            "on more than one axis. Contradiction marks are applied after embed/enrich events and carry "
+            "no durable marker, so allow a short grace period after `settled` flips."
+        ),
+    )
+    settled: bool | None = Field(
+        default=None,
+        description="True when every `pending` count is zero. Wait for this before measuring a freshly ingested store.",
+    )
 
 
 class MemoryCountResponse(BaseModel):

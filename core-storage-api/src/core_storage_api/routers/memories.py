@@ -1634,10 +1634,11 @@ async def stats_breakdown(request: Request) -> dict:
     """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
     Body: ``{tenant_id?, fleet_id?, agent_id?, memory_type?, status?,
-    include_deleted?, readable_tenant_ids?}``. Returns ``{total, by_type,
-    by_agent, by_status}`` plus optional ``by_tenant`` (when the readable set
-    spans >1 tenant) and ``deleted`` / ``total_including_deleted`` (when
-    ``include_deleted``). Distinct from ``/admin-stats`` (no scoping) and
+    include_deleted?, readable_tenant_ids?, include_pending?}``. Returns
+    ``{total, by_type, by_agent, by_status}`` plus optional ``by_tenant`` (when
+    the readable set spans >1 tenant), ``deleted`` / ``total_including_deleted``
+    (when ``include_deleted``) and ``pending`` / ``settled`` (when
+    ``include_pending``). Distinct from ``/admin-stats`` (no scoping) and
     ``/stats`` (health-stats shape).
     """
     body: dict = await request.json()
@@ -1673,6 +1674,7 @@ async def stats_breakdown(request: Request) -> dict:
         include_deleted=bool(body.get("include_deleted", False)),
         include_scope_agent=bool(body.get("include_scope_agent", False)),
         readable_tenant_ids=body.get("readable_tenant_ids"),
+        include_pending=bool(body.get("include_pending", False)),
     )
 
 
