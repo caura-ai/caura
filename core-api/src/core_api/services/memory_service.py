@@ -5378,6 +5378,14 @@ async def search_memories(
     recall_ctx: dict | None = None,
     allow_recall_bump: bool = True,
     include_derived: bool | None = None,
+    # SIDE-57 — True when the REST body named ``top_k`` itself (vs. taking the
+    # schema default). Lets ClassifyQuery skip RECENT_CONTEXT's 5-row cap for a
+    # caller that explicitly asked for more. Default False keeps every other
+    # caller (MCP, internal paths) on the previous behaviour.
+    top_k_explicit: bool = False,
+    # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
+    # strategy and any strategy-applied top_k cap. Pipeline path only.
+    retrieval_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
@@ -5410,6 +5418,8 @@ async def search_memories(
             min_similarity=min_similarity,
             recall_ctx=recall_ctx,
             include_derived=include_derived,
+            top_k_explicit=top_k_explicit,
+            retrieval_ctx=retrieval_ctx,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -5469,6 +5479,14 @@ async def _search_memories_pipeline(
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
     include_derived: bool | None = None,
+    # SIDE-57 — True when the REST body named ``top_k`` itself (vs. taking the
+    # schema default). Lets ClassifyQuery skip RECENT_CONTEXT's 5-row cap for a
+    # caller that explicitly asked for more. Default False keeps every other
+    # caller (MCP, internal paths) on the previous behaviour.
+    top_k_explicit: bool = False,
+    # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
+    # strategy and any strategy-applied top_k cap. Pipeline path only.
+    retrieval_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -5486,6 +5504,7 @@ async def _search_memories_pipeline(
             "status_filter": status_filter,
             "valid_at": valid_at,
             "top_k": top_k,
+            "top_k_explicit": top_k_explicit,
             "recall_boost_enabled": recall_boost,
             "graph_expand": graph_expand,
             # ``search.entity_retrieval`` — read by ClassifyQuery (skips the
@@ -5547,6 +5566,14 @@ async def _search_memories_pipeline(
         # ran, and that must survive as None rather than collapsing to 0.
         diagnostic_ctx["entity_matches"] = ctx.data.get("entity_matches")
         diagnostic_ctx["entity_match_declined"] = bool(ctx.data.get("entity_match_declined"))
+
+    if retrieval_ctx is not None:
+        plan = ctx.data.get("retrieval_plan")
+        retrieval_ctx["retrieval_strategy"] = plan.strategy.value if plan else None
+        # Present only when a strategy cut the caller's budget (today:
+        # RECENT_CONTEXT on a request that did not name ``top_k``).
+        if (cap := ctx.data.get("strategy_top_k_cap")) is not None:
+            retrieval_ctx["effective_top_k"] = cap
 
     if recall_ctx is not None:
         # Written by TrackRecalls on every path it takes. Defaulting to False

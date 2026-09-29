@@ -43,6 +43,10 @@ from core_api.services.entity_tokens import extract_entity_tokens
 
 _GRAPH_HOP_BOOST_FALLBACK = GRAPH_HOP_BOOST[max(GRAPH_HOP_BOOST)]
 
+# RECENT_CONTEXT's default row budget. Applies only when the caller did not
+# name ``top_k`` on the request (see the RECENT_CONTEXT branch below).
+_RECENT_CONTEXT_TOP_K_CAP = 5
+
 _RECENT_CONTEXT_RE = re.compile(
     r"\b(what was i|what did i|my recent|my latest"
     r"|most recent|latest updates?|recent updates?"
@@ -339,11 +343,27 @@ class ClassifyQuery:
 
         # RECENT_CONTEXT: recency-intent keywords.
         if _RECENT_CONTEXT_RE.search(query):
-            overrides = {
+            overrides: dict = {
                 "freshness_decay_days": 7,
                 "freshness_floor": 0.2,
-                "top_k": min(search_params["top_k"], 5),
             }
+            # SIDE-57 — the 5-row cap is a default for "what did I just do"
+            # queries, not a ceiling on the caller. A request that named
+            # ``top_k`` explicitly (``top_k_explicit``, set by the route from
+            # the body's ``model_fields_set``) gets what it asked for: before
+            # this, ``top_k=150`` silently came back as 5 rows whenever the
+            # query happened to contain "most recent" / "what did i". The cap
+            # still applies when the budget came from a default (request
+            # default, agent profile, tenant default), which is the case it
+            # was written for.
+            resolved_top_k = search_params["top_k"]
+            if not ctx.data.get("top_k_explicit"):
+                overrides["top_k"] = min(resolved_top_k, _RECENT_CONTEXT_TOP_K_CAP)
+                if overrides["top_k"] < resolved_top_k:
+                    # SIDE-59 — recorded only when the cap actually cut the
+                    # budget; the /search route surfaces it as a response
+                    # header so it is no longer invisible outside diagnostic.
+                    ctx.data["strategy_top_k_cap"] = overrides["top_k"]
             plan = RetrievalPlan(
                 strategy=RetrievalStrategy.RECENT_CONTEXT,
                 search_param_overrides=overrides,

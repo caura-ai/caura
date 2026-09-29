@@ -2358,6 +2358,31 @@ def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
     return warnings
 
 
+# SIDE-59 — cheap, always-on retrieval signal for ``POST /search``. Before this
+# the resolved strategy was visible only through ``diagnostic=true``, which also
+# dumps every candidate; a caller wondering why a "most recent ..." query came
+# back with 5 rows had no lighter way to find out.
+RETRIEVAL_STRATEGY_HEADER = "X-Caura-Retrieval-Strategy"
+EFFECTIVE_TOP_K_HEADER = "X-Caura-Effective-Top-K"
+
+
+def _set_retrieval_headers(response: Response, retrieval_ctx: dict) -> None:
+    """Expose the resolved strategy and any strategy-applied top_k cap as headers.
+
+    Header-only on purpose: ``SearchResponse`` is the /search body contract
+    (OpenAPI, SDKs), and the MCP tools build their own envelopes, so a header
+    changes neither. The strategy header is omitted when no strategy was
+    resolved (legacy search path); the top_k header only appears when a
+    strategy actually cut the caller's budget.
+    """
+    strategy = retrieval_ctx.get("retrieval_strategy")
+    if strategy:
+        response.headers[RETRIEVAL_STRATEGY_HEADER] = str(strategy)
+    effective_top_k = retrieval_ctx.get("effective_top_k")
+    if effective_top_k is not None:
+        response.headers[EFFECTIVE_TOP_K_HEADER] = str(effective_top_k)
+
+
 @router.post("/search", response_model=SearchResponse)
 @search_limit
 async def search(
@@ -2419,6 +2444,12 @@ async def _search_inner(
     # Filled by TrackRecalls (via search_memories) with whether this search
     # dispatched a recall_count bump — reported to the caller below.
     recall_ctx: dict = {}
+    # SIDE-59 — the resolved retrieval strategy (and any strategy-applied
+    # top_k cap), filled on every pipeline search and surfaced below as
+    # response headers. Headers rather than a ``SearchResponse`` field: the
+    # body schema stays untouched for integrators and the OpenAPI contract,
+    # and the full picture is still in ``diagnostic`` for callers who ask.
+    retrieval_ctx: dict = {}
     # A28 — always collected (no request flag gates it); only serialized below
     # when a step actually put something in it.
     # ax-0917-h-05 seeds it with any parameter the body carried and this route
@@ -2470,6 +2501,10 @@ async def _search_inner(
             # to a bool at this boundary would make every request an explicit
             # vote and the tenant setting could never take effect.
             include_derived=body.include_derived,
+            # SIDE-57 — ``limit`` is an alias of ``top_k``, and pydantic records
+            # the FIELD name in ``model_fields_set`` for either spelling.
+            top_k_explicit="top_k" in body.model_fields_set,
+            retrieval_ctx=retrieval_ctx,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -2505,6 +2540,7 @@ async def _search_inner(
                 },
             )
     recall_tracked = bool(recall_ctx.get("recall_tracked"))
+    _set_retrieval_headers(response, retrieval_ctx)
     # A28 — null when empty (matches ``diagnostic``); purely additive.
     warn_out = [SearchWarning(**w) for w in search_warnings] or None
     if not body.diagnostic:
@@ -2802,6 +2838,8 @@ async def recall_endpoint(
         # ``caller_agent_id`` already paid for once: the same body returned
         # different rows on the two routes with no error.
         include_derived=body.include_derived,
+        # SIDE-57 — same body as /search, same rule: a named top_k is honoured.
+        top_k_explicit="top_k" in body.model_fields_set,
     )
 
     # Release the pooled DB connection before the LLM round-trip.
