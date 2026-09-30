@@ -79,6 +79,7 @@ from core_api.schemas import (
     UsageSummary,
 )
 from core_api.services.agent_identity import reserved_write_refusal
+from core_api.services.agent_scope import explain_agent_scope
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_label,
@@ -2451,10 +2452,18 @@ async def _search_inner(
     # tenant/user credential (auth.agent_id None, no filter) keeps full-tenant
     # search, unchanged.
     eff_agent_id, identity_asserted = _resolve_read_identity(auth, body)
+    # CAURA-723 — filled by the ``get_or_create_agent`` call below, which does
+    # the ``agents`` lookup anyway. Captured because that call REGISTERS the
+    # asserted id, so after it the row exists whether or not it did before, and
+    # asking later would report every typo as a known agent. Stays empty for an
+    # admin credential, which skips the block entirely.
+    _agent_reg: dict = {}
     if auth.tenant_id:  # skip for admin
         if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
-            _agent = await get_or_create_agent(body.tenant_id, eff_agent_id, fleet_id_hint)
+            _agent = await get_or_create_agent(
+                body.tenant_id, eff_agent_id, fleet_id_hint, registration_ctx=_agent_reg
+            )
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]  # Force fleet scoping for trust < 2
             # EVERY requested fleet, not just the single-fleet case. Gating only
@@ -2580,6 +2589,30 @@ async def _search_inner(
                     "cancelled": cancelled,
                 },
             )
+    # CAURA-723 — after the search, so a successful one pays nothing: the
+    # storage probe fires only when ``results`` came back empty, and the
+    # deregistered case is answered from ``_agent_reg`` with no query at all.
+    search_warnings.extend(
+        await explain_agent_scope(
+            tenant_id=body.tenant_id,
+            # Both fields, not the resolved identity. ``_resolve_read_identity``
+            # prefers ``caller_agent_id``, but ``filter_agent_id`` is the one
+            # that becomes a SQL predicate — so keying on the identity reported
+            # the wrong id when a caller sent a valid ``caller_agent_id`` beside
+            # a typo'd filter, and the typo went unwarned. Both are ``None``
+            # under an authenticated agent identity, where naming anything but
+            # itself was already refused with a 403.
+            filter_agent_id=body.filter_agent_id if not auth.agent_id else None,
+            caller_agent_id=body.caller_agent_id if not auth.agent_id else None,
+            had_results=bool(results),
+            agent_preexisted=_agent_reg.get("preexisted"),
+            # ``registration_ctx`` was filled for the RESOLVED identity, which
+            # is not always the id explained above.
+            preexistence_of=eff_agent_id,
+            fleet_ids=body.fleet_ids,
+            readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
+        )
+    )
     recall_tracked = bool(recall_ctx.get("recall_tracked"))
     _set_retrieval_headers(response, retrieval_ctx)
     # A28 — null when empty (matches ``diagnostic``); purely additive.
@@ -2811,10 +2844,13 @@ async def recall_endpoint(
     # that peer's private rows and inherited its trust level for the fleet
     # forcing — the escalation /search already refuses.
     eff_agent_id, identity_asserted = _resolve_read_identity(auth, body)
+    _agent_reg: dict = {}  # CAURA-723 — see /search
     if auth.tenant_id:
         if eff_agent_id:
             fleet_id_hint = body.fleet_ids[0] if body.fleet_ids and len(body.fleet_ids) == 1 else None
-            _agent = await get_or_create_agent(body.tenant_id, eff_agent_id, fleet_id_hint)
+            _agent = await get_or_create_agent(
+                body.tenant_id, eff_agent_id, fleet_id_hint, registration_ctx=_agent_reg
+            )
             if not body.fleet_ids and _agent.get("fleet_id") and _agent.get("trust_level", 0) < 2:
                 body.fleet_ids = [_agent["fleet_id"]]
             # Both halves matter and they are independent: EVERY requested
@@ -2841,6 +2877,8 @@ async def recall_endpoint(
     # response's ``diagnostic`` block (the recall-flavoured shape, which also
     # carries the prompt/model/provider fields).
     diagnostic_ctx: dict = {}
+    # A28 / CAURA-723 — same collect-then-serialize shape /search uses.
+    recall_warnings: list = []
 
     # ── Phase 1: DB-bound — config + search ──────────────────────
     config = await resolve_config(body.tenant_id)
@@ -2878,6 +2916,10 @@ async def recall_endpoint(
         readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
         diagnostic=body.diagnostic,
         diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
+        # CAURA-723 — seeded with any agent-scope warning and then extended by
+        # the pipeline, so ``RecallResponse.warnings`` means what /search's
+        # does rather than carrying only this one code.
+        warnings_ctx=recall_warnings,
         min_similarity=body.min_similarity,
         # pm-0918-c-03 — /recall inherits the field from ``SearchRequest`` and
         # has to pass it on. Honouring it on /search alone is the divergence
@@ -2886,6 +2928,23 @@ async def recall_endpoint(
         include_derived=body.include_derived,
         # SIDE-57 — same body as /search, same rule: a named top_k is honoured.
         top_k_explicit="top_k" in body.model_fields_set,
+    )
+
+    # CAURA-723 — same shape as /search, and before the LLM brief so a
+    # misconfigured recall still gets its explanation.
+    recall_warnings.extend(
+        await explain_agent_scope(
+            tenant_id=body.tenant_id,
+            filter_agent_id=body.filter_agent_id if not auth.agent_id else None,
+            caller_agent_id=body.caller_agent_id if not auth.agent_id else None,
+            had_results=bool(memories),
+            agent_preexisted=_agent_reg.get("preexisted"),
+            # ``registration_ctx`` was filled for the RESOLVED identity, which
+            # is not always the id explained above.
+            preexistence_of=eff_agent_id,
+            fleet_ids=body.fleet_ids,
+            readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
+        )
     )
 
     # Release the pooled DB connection before the LLM round-trip.
@@ -2907,12 +2966,20 @@ async def recall_endpoint(
     # ax-0917-h-05 — same A28 channel /search uses, and the reason this route
     # needed it most: ``limit`` is now an alias of ``top_k`` (schemas.py), but
     # the NEXT plausible guess an agent makes still has to arrive as something
-    # other than silence. Added only when non-empty: unlike ``SearchResponse``
-    # this envelope is a plain dict, so an always-present ``"warnings": null``
-    # would be new bytes on every recall for the case where there is nothing
-    # to say — the opposite of what this PR is for.
-    if warnings := _unknown_param_warnings(body, route="memory-recall"):
-        brief["warnings"] = warnings
+    # other than silence.
+    #
+    # CAURA-723 joins the same channel rather than opening a second one: its
+    # codes answer "why is this result set empty", ax-0917-h-05's answer "which
+    # of your parameters did nothing", and both are the A28 shape — the call
+    # succeeded, but something you would assume happened did not.
+    #
+    # Still added only when non-empty, which is ax-0917-h-05's call and stands:
+    # unlike ``SearchResponse`` this envelope is a plain dict, so an
+    # always-present ``"warnings": null`` would be new bytes on every recall
+    # for the case where there is nothing to say.
+    recall_warnings.extend(_unknown_param_warnings(body, route="memory-recall"))
+    if recall_warnings:
+        brief["warnings"] = recall_warnings
     return brief
 
 

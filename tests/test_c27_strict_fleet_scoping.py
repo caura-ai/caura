@@ -146,6 +146,22 @@ FLEET_SCOPED_READS: dict[str, dict[str, object]] = {
         "strict": FROM_TENANT_SWITCH,
         "include_org_visibility": False,
     },
+    # A third shape, and the only member: a PROBE. It returns a boolean, never
+    # rows, so its scoping cannot disclose anything — which is why it is neither
+    # a SCOPE read nor a pinned FILTER one. CAURA-723 asks it "does this agent
+    # have any memory reachable in the requested fleets?" to decide whether an
+    # empty agent-filtered search is worth explaining.
+    #
+    # ``strict=False`` is the deliberate choice and the safe direction:
+    # non-strict is a SUPERSET, so the probe stays at least as permissive as
+    # the search it explains. Over-reporting "has memories" costs a warning we
+    # do not emit; under-reporting would claim an agent has nothing when the
+    # search could still have matched. ``include_org_visibility`` is left at
+    # its permissive default for the same reason.
+    #
+    # If this ever starts returning rows rather than a boolean, it stops being
+    # a probe and has to be re-classified into one of the two families above.
+    "memory_agent_scope_probe": {"strict": False},
     # FILTER reads — pinned, and the values are the assertion.
     "memory_list_by_filters": {"strict": True, "include_org_visibility": False},
     "memory_stats_breakdown": {"strict": True, "include_org_visibility": False},

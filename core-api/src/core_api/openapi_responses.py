@@ -164,11 +164,19 @@ class RecallResponse(BaseModel):
     )
     # ax-0917-h-05 — same shape as ``SearchResponse.warnings`` (A28). Absent
     # when there is nothing to report, which is the ordinary case.
+    #
+    # CAURA-723 adds a second family to it: coded caveats about the RESULT SET
+    # rather than about the request, e.g. ``filter_agent_unknown`` when the
+    # agent filter names an id this tenant has never seen. Kept in one field —
+    # both are "the call succeeded, but something you would assume happened did
+    # not", which is exactly what ``SearchWarning`` was defined for.
     warnings: list[SearchWarning] | None = Field(
         default=None,
         description=(
-            "Non-fatal notices about this request — e.g. parameters the "
-            "endpoint does not read and therefore ignored."
+            "Non-fatal notices about this request or its result set — e.g. "
+            "parameters the endpoint does not read and therefore ignored, or "
+            "'filter_agent_unknown' when the agent filter names an id this "
+            "tenant has never seen."
         ),
     )
 
