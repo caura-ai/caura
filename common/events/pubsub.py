@@ -1145,7 +1145,7 @@ class PubSubEventBus(EventBus):
     async def _hold_leases(
         self,
         subscriber: Any,
-        pull_executor: Any,
+        pull_executor: concurrent.futures.ThreadPoolExecutor,
         sub_path: str,
         ack_ids: list[str],
         subscription_name: str,
