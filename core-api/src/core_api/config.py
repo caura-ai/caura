@@ -185,6 +185,14 @@ class Settings(BaseSettings):
     caura_telemetry_state_dir: str = str(Path(tempfile.gettempdir()) / "caura-heartbeat")
     redis_url: str = ""  # e.g. redis://localhost:6379/0. Empty = in-memory fallback.
     cors_origins: str = "http://localhost:3000"
+    # Extra origins the installer endpoints (``/install-plugin``,
+    # ``/install-skill``) may bake into a generated script via ``api_url``,
+    # comma-separated, e.g. ``https://caura.example.com``. The origin that
+    # served the request is always allowed; set this only when a proxy hides
+    # the public host from this service. Anything else is refused, because
+    # the script sends the installer's API key to that URL and runs code it
+    # downloads from there.
+    installer_allowed_api_urls: str = ""
     # Request-wide budget enforced by RequestTimeoutMiddleware. 45s fits
     # comfortably under the 120s gateway/Cloud Run cap (CAURA-623 raised
     # the nginx ``proxy_read_timeout`` from 60s to 120s; the staging

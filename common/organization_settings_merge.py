@@ -80,5 +80,26 @@ def diff_settings(old: dict, new: dict, prefix: str = "") -> dict:
             old_dict = old_v if isinstance(old_v, dict) else {}
             out.update(diff_settings(old_dict, new_v, prefix=f"{path}."))
         elif new_v != old_v:
-            out[path] = [old_v, new_v]
+            if _is_secret_path(path):
+                # The audit row says that a secret changed, never what it was
+                # or became (plaintext or ciphertext).
+                out[path] = [_mask(old_v), _mask(new_v)]
+            else:
+                out[path] = [old_v, new_v]
     return out
+
+
+_SECRET_SECTION_PREFIXES = ("api_keys.",)
+_SECRET_LEAF_SUFFIXES = ("_token", "_secret", "_api_key", "_password")
+
+
+def _is_secret_path(path: str) -> bool:
+    """Provider keys, and any leaf named as a credential (e.g. the telemetry
+    ``deployment_token`` kept in the ``__deployment__`` settings row)."""
+    return path.startswith(_SECRET_SECTION_PREFIXES) or path.rsplit(".", 1)[
+        -1
+    ].lower().endswith(_SECRET_LEAF_SUFFIXES)
+
+
+def _mask(value: object) -> object:
+    return "****" if isinstance(value, str) and value else value

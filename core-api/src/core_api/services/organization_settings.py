@@ -45,6 +45,7 @@ from core_api.constants import (
     CRYSTALLIZER_DEDUP_THRESHOLD,
     CRYSTALLIZER_MIN_CLUSTER_SIZE,
 )
+from core_api.services.settings_crypto import decrypt_api_key, encrypt_api_keys
 
 logger = logging.getLogger(__name__)
 
@@ -1048,23 +1049,38 @@ class ResolvedConfig:
     # API keys (from global config only in OSS)
     @property
     def openai_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("openai_api_key") or global_settings.openai_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("openai_api_key"))
+            or global_settings.openai_api_key
+        )
 
     @property
     def anthropic_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("anthropic_api_key") or global_settings.anthropic_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("anthropic_api_key"))
+            or global_settings.anthropic_api_key
+        )
 
     @property
     def openrouter_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("openrouter_api_key") or global_settings.openrouter_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("openrouter_api_key"))
+            or global_settings.openrouter_api_key
+        )
 
     @property
     def atlascloud_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("atlascloud_api_key") or global_settings.atlascloud_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("atlascloud_api_key"))
+            or global_settings.atlascloud_api_key
+        )
 
     @property
     def gemini_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("gemini_api_key") or global_settings.gemini_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("gemini_api_key"))
+            or global_settings.gemini_api_key
+        )
 
     # Search
     @property
@@ -1645,6 +1661,10 @@ async def update_settings(
     # transaction (the FOR UPDATE lost-update guard can't span an HTTP read +
     # write, so it lives in storage-api). ``merged`` is the resulting raw
     # overrides; ``changed`` is False when the payload was a no-op.
+    # Provider keys are encrypted before they leave this service, so neither
+    # the settings row nor its audit diff ever holds them in plaintext.
+    if isinstance(new_settings.get("api_keys"), dict):
+        new_settings = {**new_settings, "api_keys": encrypt_api_keys(new_settings["api_keys"])}
     result = await get_storage_client().update_org_settings(tenant_id, new_settings, changed_by=changed_by)
     merged = result["settings"]
     if not result.get("changed"):

@@ -1,6 +1,30 @@
 """E2E install-plugin script generation tests through HTTP API."""
 
+import shlex
+
+import pytest
+
 from tests.conftest import get_test_auth
+
+_TEST_ORIGINS = (
+    "https://caura.example.com",
+    "https://example.com",
+    "https://x.com",
+    "https://env.example.com",
+    "https://safe.com",
+    "https://x.example",
+)
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_installer_origins(monkeypatch):
+    """These tests name example API hosts on purpose. Installers now only embed
+    an ``api_url`` that is this server's own origin or operator-allowlisted
+    (``INSTALLER_ALLOWED_API_URLS``), so allowlist the hosts used here."""
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "installer_allowed_api_urls", ",".join(_TEST_ORIGINS))
+
 
 # ---------------------------------------------------------------------------
 # POST /api/install-plugin (preferred — no secrets in URL)
@@ -165,13 +189,21 @@ async def test_shell_injection_api_url(client):
             "api_key": "k",
         },
     )
-    assert resp.status_code == 200
-    script = resp.text
-    # shlex.quote wraps the value in single quotes; the dangerous payload
-    # should NOT appear unquoted
-    assert "rm -rf" not in script or "'" in script
-    # The raw semicolon should be inside a quoted string, not bare
-    assert "CAURA_API_URL=" in script
+    # Not a URL this server would hand out, so it never reaches a script.
+    assert resp.status_code == 400, resp.text
+
+    # The generator still quotes whatever it is given (defence in depth).
+    from core_api.routes.plugin import _generate_install_script
+
+    script = _generate_install_script(
+        api_url=malicious_url,
+        api_key="k",
+        fleet_id="safe",
+        tenant_id="t",
+        node_name="",
+        tls_bootstrap="verify",
+    )
+    assert f"CAURA_API_URL={shlex.quote(malicious_url)}" in script
 
 
 async def test_shell_injection_fleet_id(client):

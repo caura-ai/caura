@@ -184,7 +184,8 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `GEMINI_API_KEY` | — | Required for Gemini (Developer API, from AI Studio) |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed CORS origins |
 | `ENVIRONMENT` | `development` | `development` or `production` |
-| `SETTINGS_ENCRYPTION_KEY` | — | Fernet key for encrypting tenant settings. Required in production |
+| `SETTINGS_ENCRYPTION_KEY` | — | Fernet key that encrypts tenant provider keys (`api_keys.*`) at rest. Required in production. Without it (dev, standalone) keys are stored as submitted; keys saved before encryption existed are encrypted on the tenant's next save |
+| `INSTALLER_ALLOWED_API_URLS` | *(empty)* | Comma-separated extra origins that `/install-plugin` and `/install-skill` accept as `api_url`. The serving origin is always accepted; set this only when a proxy hides the public host from core-api |
 | `PLATFORM_LLM_PROVIDER` | *(empty)* | Platform-default LLM: `openai`, `vertex`, or empty to disable |
 | `PLATFORM_LLM_MODEL` | *(empty)* | Model override (e.g. `gpt-5.4-nano`, `gemini-3.1-flash-lite-preview`) |
 | `PLATFORM_LLM_API_KEY` | — | OpenAI API key for the platform LLM singleton |

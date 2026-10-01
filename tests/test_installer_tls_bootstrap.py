@@ -25,6 +25,19 @@ import pytest
 from core_api.routes.plugin import TlsBootstrap, _generate_install_script
 from tests.conftest import get_test_auth
 
+_TEST_ORIGINS = ("https://caura.example.com",)
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_installer_origins(monkeypatch):
+    """These tests name example API hosts on purpose. Installers now only embed
+    an ``api_url`` that is this server's own origin or operator-allowlisted
+    (``INSTALLER_ALLOWED_API_URLS``), so allowlist the hosts used here."""
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "installer_allowed_api_urls", ",".join(_TEST_ORIGINS))
+
+
 HTTPS = "https://caura.example.com"
 
 # ``curl`` records its arguments (one line per call, fields split by \x1f) and,
