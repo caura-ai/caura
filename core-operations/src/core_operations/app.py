@@ -71,6 +71,7 @@ from core_operations.scheduler import (
     scheduler,
     seconds_until_next_utc_half_past,
     seconds_until_next_utc_hour,
+    seconds_until_next_utc_hour_multiple,
     seconds_until_next_utc_top_of_hour,
     seconds_until_next_utc_weekday_hour,
 )
@@ -131,10 +132,13 @@ def _register_scheduled_tasks() -> None:
     )
     # A72 — cadence is configurable. At the default (24) this is byte-for-byte
     # today's behaviour: one run, wall-clock aligned to
-    # ``lifecycle_pipeline_run_at_hour``. Below 24 the alignment changes meaning
-    # — "every N hours from the next top of hour" rather than "at 02:00" — so
-    # the delay provider switches with it rather than pretending a sub-daily
-    # cadence can still anchor to one hour of the day.
+    # ``lifecycle_pipeline_run_at_hour``. Below 24 it fires every N hours on
+    # slots counted from that hour (N=6 runs at 02, 08, 14, 20 by default).
+    #
+    # The delay provider is what sets the cadence, not the period: an aligned
+    # task sleeps only what its provider returns, and the period merely sizes
+    # the tick lease. This used to pair an N-hour period with the next-top-of-
+    # hour provider, so every sub-daily setting fired hourly.
     _crystallize_hours = max(1, settings.lifecycle_crystallize_every_hours)
     scheduler.register(
         "lifecycle-crystallize",
@@ -143,7 +147,11 @@ def _register_scheduled_tasks() -> None:
         delay_provider=(
             _daily_at("lifecycle_pipeline_run_at_hour")
             if _crystallize_hours >= 24
-            else (lambda: seconds_until_next_utc_top_of_hour())
+            else (
+                lambda: seconds_until_next_utc_hour_multiple(
+                    _crystallize_hours, anchor_hour=settings.lifecycle_pipeline_run_at_hour
+                )
+            )
         ),
     )
     scheduler.register(
