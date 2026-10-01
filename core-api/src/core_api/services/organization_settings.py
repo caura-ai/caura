@@ -719,7 +719,25 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
 # Expected Python types for leaf values that need validation beyond key presence.
 # Dotted paths match the nested structure in DEFAULT_SETTINGS.
 _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
+    # Per-service on/off switches. ``DEFAULT_SETTINGS`` holds ``None`` for
+    # these (unset → platform default), so a string "false" would otherwise
+    # be stored, echoed back as off, and resolve TRUTHY in every consumer.
+    "enrichment.enabled": bool,
+    "recall.enabled": bool,
+    "recall.premise_guard": bool,
+    "entity_extraction.enabled": bool,
     "enrichment.atomic_fact_fanout_enabled": bool,
+    "agent_digest.enabled": bool,
+    "agent_digest.cadence": str,
+    "agent_digest.provider": str,
+    "agent_digest.model": str,
+    "agent_digest.top_n": int,
+    "agent_digest.max_memories_per_agent": int,
+    "agent_digest.min_activity_threshold": int,
+    "agent_digest.event_floor": int,
+    "agent_digest.listed_max": int,
+    "agent_digest.max_cost_per_run_usd": (int, float),
+    "agent_digest.retention_days": int,
     "security_audit.schedule_enabled": bool,
     "security_audit.schedule_cron": str,
     "security_audit.alerts_enabled": bool,
