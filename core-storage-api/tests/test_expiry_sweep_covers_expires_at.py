@@ -113,8 +113,8 @@ async def test_a_row_with_neither_column_set_is_untouched(_ensure_schema) -> Non
 
 
 async def test_the_sweep_does_not_resurrect_or_re_archive(_ensure_schema) -> None:
-    """Only ``active`` rows are candidates, so a second tick is a no-op rather
-    than a rewrite — and a row already archived by another path stays as it is."""
+    """Only live rows are candidates, so a second tick is a no-op rather than a
+    rewrite — and a row already archived by another path stays as it is."""
     tenant = f"m60-{uuid.uuid4().hex[:12]}"
     await _seed(tenant, expires_at=datetime.now(UTC) - timedelta(hours=1))
     already = await _seed(tenant, expires_at=datetime.now(UTC) - timedelta(hours=1), status="archived")
@@ -125,3 +125,33 @@ async def test_the_sweep_does_not_resurrect_or_re_archive(_ensure_schema) -> Non
     assert first == 1
     assert second == 0
     assert await _status(already) == "archived"
+
+
+@pytest.mark.parametrize("status", ["confirmed", "pending"])
+async def test_an_enrichment_promoted_row_is_swept_too(_ensure_schema, status: str) -> None:
+    """Enrichment writes rows straight in as ``confirmed`` or ``pending``, and
+    recall serves them exactly like ``active`` ones. A sweep that tested
+    ``status = 'active'`` literally never archived them, so their
+    ``expires_at`` was enforced by nothing."""
+    tenant = f"m60-{uuid.uuid4().hex[:12]}"
+    promoted = await _seed(tenant, expires_at=datetime.now(UTC) - timedelta(hours=1), status=status)
+    closed = await _seed(tenant, ts_valid_end=datetime.now(UTC) - timedelta(hours=1), status=status)
+
+    swept = await PostgresService().memory_archive_expired(tenant_id=tenant)
+
+    assert swept == 2
+    assert await _status(promoted) == "outdated"
+    assert await _status(closed) == "outdated"
+
+
+@pytest.mark.parametrize("status", ["outdated", "conflicted", "archived"])
+async def test_a_row_that_is_not_live_is_not_rewritten(_ensure_schema, status: str) -> None:
+    """The other side of widening the predicate: a contradiction outcome or an
+    archived row is not live, and the sweep must not overwrite its status."""
+    tenant = f"m60-{uuid.uuid4().hex[:12]}"
+    gone = await _seed(tenant, expires_at=datetime.now(UTC) - timedelta(hours=1), status=status)
+
+    swept = await PostgresService().memory_archive_expired(tenant_id=tenant)
+
+    assert swept == 0
+    assert await _status(gone) == status

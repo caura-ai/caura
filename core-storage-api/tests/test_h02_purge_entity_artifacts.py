@@ -690,3 +690,54 @@ async def test_the_patch_link_writer_stamps_caller():
             await s.execute(select(MemoryEntityLink.source).where(MemoryEntityLink.memory_id == mem.id))
         ).scalar_one()
     assert stored == LINK_SOURCE_CALLER
+
+
+async def test_cross_link_discovery_writes_extraction_provenance():
+    """Cross-link discovery mines links from the memory's TEXT — it only keeps a
+    link whose entity name appears in the content — so they are extraction's,
+    and a content edit has to be able to clear them.
+
+    It inserted without ``source``, so every such link took the ``caller``
+    default and survived the edit-time reset: a row edited away from a name
+    kept ranking in graph-boosted recall for it.
+    """
+    svc = PostgresService()
+    tenant = f"h02-{uuid.uuid4().hex[:8]}"
+    name = f"Crosslinked {uuid.uuid4().hex[:6]}"
+    vec = [0.1] * 1024
+    mem = await svc.memory_add(
+        {
+            "tenant_id": tenant,
+            "agent_id": "h02-tester",
+            "content": f"met {name} today",
+            "memory_type": "fact",
+            "weight": 0.5,
+            "status": "active",
+            "visibility": "scope_team",
+            "embedding": vec,
+        }
+    )
+    ent = await _entity(svc, tenant, name)
+    async with get_session() as s:
+        (await s.get(Entity, ent.id)).name_embedding = vec
+
+    result = await svc.entity_discover_cross_links(
+        tenant_id=tenant,
+        fleet_id=None,
+        batch_size=10,
+        threshold=0.9,
+        text_verify=True,
+        target_memory_ids=[mem.id],
+    )
+    assert result["links_created"] == 1
+
+    async with get_session() as s:
+        stored = (
+            await s.execute(select(MemoryEntityLink.source).where(MemoryEntityLink.memory_id == mem.id))
+        ).scalar_one()
+    assert stored == LINK_SOURCE_EXTRACTION
+
+    counts = await svc.memory_reset_entity_artifacts(tenant_id=tenant, memory_id=mem.id)
+
+    assert counts["links"] == 1, "a text-mined cross-link survived the edit-time reset"
+    assert await _link_entity_ids(mem.id) == set()

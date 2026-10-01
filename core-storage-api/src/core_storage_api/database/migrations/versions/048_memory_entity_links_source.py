@@ -18,10 +18,14 @@ that PATCH need not mention ``entity_links`` at all.
 a shipped endpoint must not silently DELETE links a caller did not name.
 Reaching that outcome through a different code path is the same change.
 
-The three writers are already distinct methods, so nothing has to be inferred:
+The writers are already distinct methods, so nothing has to be inferred:
 ``memory_add_entity_links`` (PATCH ``entity_links``) and ``entity_create_link``
-(``POST /entities/links``) are callers; ``entity_bulk_upsert_links`` is the
-extraction worker.
+(``POST /entities/links``) are callers; ``entity_bulk_upsert_links`` (the
+extraction worker) and ``entity_discover_cross_links`` (text-verified
+cross-links, mined from the same content) are extraction. The last one shipped
+without setting ``source`` and so wrote ``caller`` through the default below
+until it was fixed; the rows it wrote before then stay ``caller``, for the
+reason the next paragraph gives.
 
 DEFAULT ``'caller'``, which is the conservative direction and deliberately not
 the common one. Rows already in the table predate this column and cannot be
