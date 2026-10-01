@@ -113,7 +113,7 @@ async def test_agent_cannot_overwrite_a_document_another_agent_wrote(
 ):
     tenant = new_tenant_id()
     await _seed_agent(sc, tenant, "author", 1, "f1")
-    await _seed_agent(sc, tenant, "low", 1, "f1")
+    await _seed_agent(sc, tenant, "low", 1, "f2")
     doc_id = f"doc-{_uid()}"
     as_auth(tenant, agent_id="author")
     assert (
@@ -127,6 +127,25 @@ async def test_agent_cannot_overwrite_a_document_another_agent_wrote(
     assert (await _stored_doc(sc, tenant, doc_id))["data"] == {
         "steps": "the real runbook"
     }
+
+
+async def test_fleet_peer_may_update_a_document_its_fleet_shares(client, as_auth, sc):
+    """Agents of one fleet share documents (task checklists, runbooks): a
+    trust-1 peer may update one another agent of its own fleet wrote."""
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "author", 1, "f1")
+    await _seed_agent(sc, tenant, "peer", 1, "f1")
+    doc_id = f"doc-{_uid()}"
+    as_auth(tenant, agent_id="author")
+    assert (
+        await _write_doc(client, tenant, doc_id, {"steps": "v1"})
+    ).status_code == 200
+
+    as_auth(tenant, agent_id="peer")
+    resp = await _write_doc(client, tenant, doc_id, {"steps": "v2"})
+
+    assert resp.status_code == 200, resp.text
+    assert (await _stored_doc(sc, tenant, doc_id))["data"] == {"steps": "v2"}
 
 
 async def test_agent_may_still_overwrite_an_unowned_document(client, as_auth, sc):

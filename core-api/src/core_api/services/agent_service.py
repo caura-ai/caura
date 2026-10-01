@@ -716,13 +716,17 @@ async def enforce_document_overwrite(
       - no author recorded (NULL)            -> allowed (unowned: legacy rows,
         MCP writes from before authors were recorded, system writes — shared
         documents such as task checklists keep working as before)
-      - a DIFFERENT recorded author          -> trust >= 3
+      - a different author in the caller's home fleet -> allowed (fleet peers
+        share documents; the fleet write gate already keeps the caller in
+        its own fleet)
+      - a different author in any other fleet -> trust >= 3
       - ``force=True``                       -> trust >= 3, whoever wrote it
 
     Same contract as ``enforce_delete``: invoke only for a credential that
     carries an authenticated agent identity. A tenant key has no trust level
     and keeps the tenant-wide authority it already holds.
     """
+    existing = None
     if not force:
         existing = await get_storage_client().get_document(
             tenant_id=tenant_id,
@@ -743,6 +747,13 @@ async def enforce_document_overwrite(
             return
     agent = await lookup_agent(tenant_id, agent_id)
     if agent and agent.get("trust_level", 0) >= 3:
+        return
+    if (
+        existing is not None
+        and agent
+        and agent.get("fleet_id") is not None
+        and existing.get("fleet_id") == agent.get("fleet_id")
+    ):
         return
     what = (
         "force a document overwrite"
