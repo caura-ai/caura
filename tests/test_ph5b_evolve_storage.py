@@ -166,12 +166,22 @@ async def test_filter_wide_scopes_drop_other_agents_private_rows(sc, scope):
     prompt and be summarised into a team/org-visible rule. The caller's own
     private row and shared rows stay."""
     tenant = _t()
-    shared = await _seed_memory(tenant_id=tenant, agent_id="b", fleet_id="fx", content="shared")
+    shared = await _seed_memory(
+        tenant_id=tenant, agent_id="b", fleet_id="fx", content="shared"
+    )
     own_private = await _seed_memory(
-        tenant_id=tenant, agent_id="a", fleet_id="fx", content="mine", visibility="scope_agent"
+        tenant_id=tenant,
+        agent_id="a",
+        fleet_id="fx",
+        content="mine",
+        visibility="scope_agent",
     )
     peer_private = await _seed_memory(
-        tenant_id=tenant, agent_id="b", fleet_id="fx", content="peer secret", visibility="scope_agent"
+        tenant_id=tenant,
+        agent_id="b",
+        fleet_id="fx",
+        content="peer secret",
+        visibility="scope_agent",
     )
     allowed = await sc.evolve_filter_by_scope(
         tenant_id=tenant,

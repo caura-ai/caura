@@ -43,7 +43,10 @@ async def test_fanout_children_inherit_expiry_run_and_source():
     ):
         await memory_service.fan_out_atomic_facts(
             sc,
-            atomic_facts=[AtomicFact(content="alpha fact"), AtomicFact(content="beta fact")],
+            atomic_facts=[
+                AtomicFact(content="alpha fact"),
+                AtomicFact(content="beta fact"),
+            ],
             memory_id=str(uuid.uuid4()),
             tenant_id="t1",
             fleet_id=None,
@@ -92,7 +95,10 @@ async def test_deleting_a_parent_deletes_its_children(client, tenant_id, sc):
                 "agent_id": agent,
                 "memory_type": "fact",
                 "content": f"child slice {i} {_uid()}",
-                "metadata_": {"parent_memory_id": str(parent["id"]), "source": "auto_chunk"},
+                "metadata_": {
+                    "parent_memory_id": str(parent["id"]),
+                    "source": "auto_chunk",
+                },
                 "status": "active",
                 "visibility": "scope_team",
             }
@@ -110,9 +116,13 @@ async def test_deleting_a_parent_deletes_its_children(client, tenant_id, sc):
         }
     )
 
-    resp = await client.delete(f"/api/v1/memories/{parent['id']}?tenant_id={tenant_id}", headers=headers)
+    resp = await client.delete(
+        f"/api/v1/memories/{parent['id']}?tenant_id={tenant_id}", headers=headers
+    )
     assert resp.status_code == 204, resp.text
 
     for child in children:
-        assert await sc.get_memory(str(child["id"]), tenant_id, read=False) is None, "child survived"
+        assert await sc.get_memory(str(child["id"]), tenant_id, read=False) is None, (
+            "child survived"
+        )
     assert await sc.get_memory(str(unrelated["id"]), tenant_id, read=False) is not None

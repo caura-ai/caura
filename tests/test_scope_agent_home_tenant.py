@@ -22,11 +22,21 @@ pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 async def test_by_id_gate_refuses_a_sibling_tenants_private_row():
     from core_api.services.agent_service import authorize_memory_access
 
-    kwargs = {"visibility": "scope_agent", "owner_agent_id": "rollup-bot", "fleet_id": None}
-    assert not await authorize_memory_access("sibling", "rollup-bot", caller_tenant_id="home", **kwargs)
-    assert await authorize_memory_access("home", "rollup-bot", caller_tenant_id="home", **kwargs)
+    kwargs = {
+        "visibility": "scope_agent",
+        "owner_agent_id": "rollup-bot",
+        "fleet_id": None,
+    }
+    assert not await authorize_memory_access(
+        "sibling", "rollup-bot", caller_tenant_id="home", **kwargs
+    )
+    assert await authorize_memory_access(
+        "home", "rollup-bot", caller_tenant_id="home", **kwargs
+    )
     # A tenant credential (no agent identity) keeps tenant-wide access.
-    assert await authorize_memory_access("sibling", None, caller_tenant_id="home", **kwargs)
+    assert await authorize_memory_access(
+        "sibling", None, caller_tenant_id="home", **kwargs
+    )
 
 
 async def test_scored_search_forwards_the_callers_home_tenant(monkeypatch):
@@ -79,10 +89,13 @@ async def test_rest_list_pinned_to_a_sibling_sends_the_home_tenant(monkeypatch):
     monkeypatch.setattr(memories_routes, "log_cross_tenant_read", AsyncMock())
     listed = AsyncMock(return_value=[])
     monkeypatch.setattr(
-        "core_api.clients.storage_client.CoreStorageClient.list_memories_by_filters", listed
+        "core_api.clients.storage_client.CoreStorageClient.list_memories_by_filters",
+        listed,
     )
     monkeypatch.setattr(memories_routes, "_gate_fleet_read", AsyncMock())
-    auth = AuthContext(tenant_id="home", agent_id="rollup-bot", readable_tenant_ids=["home", "sibling"])
+    auth = AuthContext(
+        tenant_id="home", agent_id="rollup-bot", readable_tenant_ids=["home", "sibling"]
+    )
 
     # Every parameter explicit: calling the endpoint function directly skips
     # FastAPI's dependency resolution (see test_cross_tenant_audit_surfaces).

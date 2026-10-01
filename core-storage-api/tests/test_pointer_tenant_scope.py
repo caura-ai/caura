@@ -104,12 +104,19 @@ class TestPointerTenantScope:
         _assert_refused(resp, "subject_entity_id")
         assert await _column(mid, "subject_entity_id") is None
 
-    async def test_subject_write_back_refuses_a_foreign_entity(self, client: AsyncClient, tenants: dict) -> None:
+    async def test_subject_write_back_skips_a_foreign_entity(
+        self, client: AsyncClient, tenants: dict
+    ) -> None:
+        """The CAS write-back answers "not written" — its answer for every other
+        row it must not touch — instead of a 500 or a cross-tenant subject."""
+        mid = tenants["own_memory"]
         resp = await client.post(
-            f"{PREFIX}/memories/{tenants['own_memory']}/subject-entity",
+            f"{PREFIX}/memories/{mid}/subject-entity",
             json={"tenant_id": tenants["mine"], "subject_entity_id": tenants["foreign_entity"]},
         )
-        _assert_refused(resp, "subject_entity_id")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"updated": False}
+        assert await _column(mid, "subject_entity_id") is None
 
     @pytest.mark.parametrize("which", ["foreign", "unknown"])
     async def test_status_route_refuses_a_foreign_supersedes_before_flipping(
@@ -124,7 +131,9 @@ class TestPointerTenantScope:
         _assert_refused(resp, "supersedes_id")
         assert await _column(mid, "status") == "active"
 
-    async def test_batch_status_refuses_before_writing_any_row(self, client: AsyncClient, tenants: dict) -> None:
+    async def test_batch_status_refuses_before_writing_any_row(
+        self, client: AsyncClient, tenants: dict
+    ) -> None:
         first = await _memory(client, tenants["mine"])
         resp = await client.post(
             f"{PREFIX}/memories/batch-update-status",

@@ -370,7 +370,13 @@ async def test_chained_insert_scrubs_raw_pii_and_keeps_the_event():
         tenant,
         [
             _event("ok-before"),
-            _event("leak", detail={"title": "card 4111 1111 1111 1111 and ssn 123-45-6789", "n": 3}),
+            _event(
+                "leak",
+                detail={
+                    "title": "card 4111 1111 1111 1111 and ssn 123-45-6789",
+                    "n": 3,
+                },
+            ),
             _event("ok-after"),
         ],
     )
@@ -380,7 +386,9 @@ async def test_chained_insert_scrubs_raw_pii_and_keeps_the_event():
     async with get_session() as s:
         detail = (
             await s.execute(
-                text("SELECT detail FROM audit_log WHERE tenant_id=:t AND action='leak'"),
+                text(
+                    "SELECT detail FROM audit_log WHERE tenant_id=:t AND action='leak'"
+                ),
                 {"t": tenant},
             )
         ).scalar_one()
@@ -430,7 +438,11 @@ async def test_bulk_route_answers_a_residual_pii_refusal_with_a_non_retryable_42
     monkeypatch.setattr(audit_router._svc, "audit_add_batch", refuse)
     resp = await storage_http.post(
         "/api/v1/storage/audit-logs/bulk",
-        json={"events": [{"tenant_id": _tenant(), "action": "a", "resource_type": "memory"}]},
+        json={
+            "events": [
+                {"tenant_id": _tenant(), "action": "a", "resource_type": "memory"}
+            ]
+        },
     )
     assert resp.status_code == 422, resp.text
     assert resp.json()["detail"]["retryable"] is False

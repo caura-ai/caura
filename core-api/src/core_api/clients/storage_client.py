@@ -257,7 +257,6 @@ def get_storage_client() -> CoreStorageClient:
     return _client
 
 
-
 def _entity_reader_params(reader: dict | None) -> dict[str, Any]:
     """Query-string form of an agent reader scope (``entity_reader_scope``).
 
@@ -277,6 +276,7 @@ def _entity_reader_params(reader: dict | None) -> dict[str, Any]:
         if fleets:
             params["caller_fleet_ids"] = list(fleets)
     return params
+
 
 class CoreStorageClient:
     """Async HTTP client for core-storage-api CRUD operations."""

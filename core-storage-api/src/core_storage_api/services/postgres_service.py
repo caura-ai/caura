@@ -49,7 +49,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import aliased, load_only
 from sqlalchemy.sql.dml import ReturningInsert
 from sqlalchemy.sql.selectable import Select
 
@@ -114,10 +114,10 @@ from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
     assert_pii_safe,
-    scrub_pii,
     canonical_created_at,
     canonical_event,
     compute_event_hash,
+    scrub_pii,
 )
 
 logger = logging.getLogger(__name__)
@@ -922,7 +922,6 @@ def _link_within_tenant(tenant_id: str) -> ColumnElement[bool]:
     )
 
 
-
 def _entity_reader_memory_clause(
     tenant_id: str,
     caller_agent_id: str,
@@ -1460,11 +1459,15 @@ class PointerNotInTenantError(permanent_failure.PermanentWriteFailure):
     Not a ``ValueError``: several routes map a bare ``ValueError`` to their own
     status, and this answer has to be the same on every path, so it is handled
     app-wide instead (``app.py``).
+
+    Built by ``_pointer_rejected`` rather than a constructor of its own: a
+    second ``__init__`` in this module takes ``scripts/tenant_scope_gate.py``
+    offline (see ``BulkRowShapeError``).
     """
 
-    def __init__(self, field: str) -> None:
-        super().__init__(f"{field} does not name a row in this tenant", {"field": field})
-        self.field = field
+
+def _pointer_rejected(field: str) -> PointerNotInTenantError:
+    return PointerNotInTenantError(f"{field} does not name a row in this tenant", {"field": field})
 
 
 # The pointer columns a write may carry, and the table each one names. Checked
@@ -1629,7 +1632,9 @@ class PostgresService:
         return out
 
     @staticmethod
-    async def _assert_pointers_in_tenant(session: AsyncSession, tenant_id: str, rows: Iterable[Mapping]) -> None:
+    async def _assert_pointers_in_tenant(
+        session: AsyncSession, tenant_id: str, rows: Iterable[Mapping]
+    ) -> None:
         """Refuse the write unless every pointer value in ``rows`` is a row of ``tenant_id``.
 
         One indexed ``id IN (...) AND tenant_id = :t`` lookup per target table,
@@ -1649,7 +1654,7 @@ class PostgresService:
                 try:
                     wanted.setdefault(field, set()).add(raw if isinstance(raw, UUID) else UUID(str(raw)))
                 except (ValueError, TypeError, AttributeError):
-                    raise PointerNotInTenantError(field) from None
+                    raise _pointer_rejected(field) from None
         if not wanted:
             return
         for fields, model in ((_ENTITY_POINTER_FIELDS, Entity), (_MEMORY_POINTER_FIELDS, Memory)):
@@ -1665,7 +1670,7 @@ class PostgresService:
             )
             for field in fields:
                 if wanted.get(field, set()) - found:
-                    raise PointerNotInTenantError(field)
+                    raise _pointer_rejected(field)
 
     async def memory_assert_pointers_in_tenant(self, tenant_id: str, rows: Iterable[Mapping]) -> None:
         """``_assert_pointers_in_tenant`` for a route that must refuse a whole
@@ -2226,8 +2231,11 @@ class PostgresService:
         carries a subject — callers log the distinction but treat all
         ``False`` cases as a benign skip.
         """
+        # The entity must be one of ``tenant_id``'s — a condition of the UPDATE,
+        # not a refusal: an unknown id used to be an FK violation (500) and
+        # another tenant's id was written, and "not written" is already this
+        # method's answer for everything else that should not happen.
         async with get_session() as session:
-            await self._assert_pointers_in_tenant(session, tenant_id, [{"subject_entity_id": subject_entity_id}])
             result = await session.execute(
                 sql_update(Memory)
                 .where(
@@ -2235,6 +2243,9 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
                     Memory.subject_entity_id.is_(None),
+                    select(Entity.id)
+                    .where(Entity.id == subject_entity_id, Entity.tenant_id == tenant_id)
+                    .exists(),
                 )
                 .values(subject_entity_id=subject_entity_id)
             )
@@ -2336,7 +2347,9 @@ class PostgresService:
             values["supersedes_id"] = supersedes_id
 
         async with get_session() as session:
-            await self._assert_pointers_in_tenant(session, tenant_id, [{"supersedes_id": values.get("supersedes_id")}])
+            await self._assert_pointers_in_tenant(
+                session, tenant_id, [{"supersedes_id": values.get("supersedes_id")}]
+            )
             stmt = sql_update(Memory).where(
                 Memory.id == memory_id,
                 Memory.tenant_id == tenant_id,
@@ -2395,8 +2408,12 @@ class PostgresService:
         A False is not an error: it means another writer got there first and
         owns the edge, which is exactly what the CAS is for.
         """
+        # The target must be a memory of ``tenant_id`` — a condition of the
+        # UPDATE, as in ``memory_set_subject_entity_if_null``, so a foreign or
+        # unknown id is one more "not written". (The status routes refuse such
+        # a pointer with a 422 before reaching here.)
+        target = aliased(Memory)
         async with get_session() as session:
-            await self._assert_pointers_in_tenant(session, tenant_id, [{"supersedes_id": supersedes_id}])
             result = await session.execute(
                 sql_update(Memory)
                 .where(
@@ -2404,6 +2421,9 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
                     Memory.supersedes_id.is_(None),
+                    select(target.id)
+                    .where(target.id == supersedes_id, target.tenant_id == tenant_id)
+                    .exists(),
                 )
                 .values(supersedes_id=supersedes_id)
             )
@@ -4561,7 +4581,13 @@ class PostgresService:
             ids = list((await session.execute(stmt)).scalars().all())
             if not ids:
                 return 0
-            await self._delete_entity_artifacts_in_session(session, tenant_id, ids, memories_going=True)
+            await self._delete_entity_artifacts(
+                tenant_id,
+                ids,
+                eligibility=Memory.deleted_at.is_not(None),
+                session=session,
+                memories_going=True,
+            )
             result = await session.execute(
                 delete(Memory).where(Memory.tenant_id == tenant_id, Memory.id.in_(ids)).returning(Memory.id)
             )
@@ -8025,10 +8051,12 @@ class PostgresService:
     async def _delete_entity_artifacts(
         self,
         tenant_id: str,
-        memory_id: UUID,
+        memory_ids: Sequence[UUID],
         *,
         eligibility: ColumnElement[bool],
         link_scope: ColumnElement[bool] | None = None,
+        session: AsyncSession | None = None,
+        memories_going: bool = False,
     ) -> dict:
         """The delete sequence itself. Two predicates decide what it reaches.
 
@@ -8054,54 +8082,51 @@ class PostgresService:
         deleted rather than from the memory's links as a whole.
 
         Ordering and scoping are documented on ``memory_purge_entity_artifacts``.
+
+        ``session``: run inside the caller's transaction instead of opening one
+        (``memory_purge_soft_deleted``, which deletes the memories themselves in
+        the same transaction). ``memories_going``: those memories are about to
+        be hard-deleted, so their own ``subject_entity_id`` is not a reason to
+        keep an entity — the FK would only SET NULL it a moment later and leave
+        the entity orphaned — and their subjects join the orphan candidates, a
+        subject pointer being a reference to the entity just as a link is.
         """
-        async with get_session() as session:
-            # One guard, checked before anything is deleted, rather than a
-            # predicate threaded through each statement. It answers the only
-            # question that authorises this call at all: is there a row with
-            # this id, in this tenant, in the state the caller's name promises?
-            #
-            # An early return rather than narrowing each delete, because the
-            # relation delete never took the ownership subquery: it keys on
-            # ``evidence_memory_id`` and the tenant alone, so guarding only the
-            # link path would leave a memory losing its RELATIONS while its
-            # links and entities survived — partial destruction, which is worse
-            # to diagnose than either outcome.
-            eligible = (
+        if session is None:
+            async with get_session() as own:
+                return await self._delete_entity_artifacts(
+                    tenant_id,
+                    memory_ids,
+                    eligibility=eligibility,
+                    link_scope=link_scope,
+                    session=own,
+                    memories_going=memories_going,
+                )
+        # One guard, checked before anything is deleted, rather than a
+        # predicate threaded through each statement. It answers the only
+        # question that authorises this call at all: is there a row with
+        # this id, in this tenant, in the state the caller's name promises?
+        #
+        # An early return rather than narrowing each delete, because the
+        # relation delete never took the ownership subquery: it keys on
+        # ``evidence_memory_id`` and the tenant alone, so guarding only the
+        # link path would leave a memory losing its RELATIONS while its
+        # links and entities survived — partial destruction, which is worse
+        # to diagnose than either outcome.
+        eligible = set(
+            (
                 await session.execute(
                     select(Memory.id).where(
-                        Memory.id == memory_id,
+                        Memory.id.in_(memory_ids),
                         Memory.tenant_id == tenant_id,
                         eligibility,
                     )
                 )
-            ).scalar_one_or_none()
-            if eligible is None:
-                return {"links": 0, "relations": 0, "entities": 0}
-            return await self._delete_entity_artifacts_in_session(
-                session, tenant_id, [memory_id], link_scope=link_scope
-            )
+            ).scalars()
+        )
+        memory_ids = [mid for mid in memory_ids if mid in eligible]
+        if not memory_ids:
+            return {"links": 0, "relations": 0, "entities": 0}
 
-    @staticmethod
-    async def _delete_entity_artifacts_in_session(
-        session: AsyncSession,
-        tenant_id: str,
-        memory_ids: Sequence[UUID],
-        *,
-        link_scope: ColumnElement[bool] | None = None,
-        memories_going: bool = False,
-    ) -> dict:
-        """Steps 0-3 of ``memory_purge_entity_artifacts`` for a set of memories,
-        inside the caller's transaction. The caller has already established that
-        it may destroy these memories' graph rows (see ``_delete_entity_artifacts``'s
-        guard and ``memory_purge_soft_deleted``).
-
-        ``memories_going``: the memories themselves are about to be hard-deleted
-        in the same transaction, so their own ``subject_entity_id`` is not a
-        reason to keep an entity — the FK would only SET NULL it a moment later
-        and leave the entity orphaned. Their subjects also join the candidate
-        set: a subject pointer is a reference to the entity just as a link is.
-        """
         subject_candidates: list[UUID] = []
         if memories_going:
             subject_candidates = [
@@ -8120,7 +8145,7 @@ class PostgresService:
         # ``RETURNING`` rather than a SELECT before the DELETE: the rows
         # this removes ARE the candidate set, so asking for them twice was
         # a round trip that could only ever agree with itself.
-        link_where = [MemoryEntityLink.memory_id.in_(memory_ids)]
+        link_where: list[ColumnElement[bool]] = [MemoryEntityLink.memory_id.in_(memory_ids)]
         if link_scope is not None:
             link_where.append(link_scope)
         candidates = list(
@@ -8292,7 +8317,7 @@ class PostgresService:
         """
         return await self._delete_entity_artifacts(
             tenant_id,
-            memory_id,
+            [memory_id],
             eligibility=Memory.deleted_at.is_(None),
             link_scope=MemoryEntityLink.source == LINK_SOURCE_EXTRACTION,
         )
@@ -8370,7 +8395,7 @@ class PostgresService:
         leak this function exists to close.
         """
         return await self._delete_entity_artifacts(
-            tenant_id, memory_id, eligibility=Memory.deleted_at.isnot(None)
+            tenant_id, [memory_id], eligibility=Memory.deleted_at.isnot(None)
         )
 
     async def entity_get_linked_memories(

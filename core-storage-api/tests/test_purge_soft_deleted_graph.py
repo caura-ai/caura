@@ -64,8 +64,15 @@ async def test_purge_removes_relations_and_orphaned_entities(_ensure_schema):
     shared = await _entity(svc, tenant, f"Shared {uuid.uuid4().hex[:6]}")
     subject_only = await _entity(svc, tenant, f"Subject {uuid.uuid4().hex[:6]}")
     async with get_session() as s:
-        for mid, eid in ((gone.id, anna.id), (gone.id, zenith.id), (gone.id, shared.id), (kept.id, shared.id)):
-            s.add(MemoryEntityLink(memory_id=mid, entity_id=eid, role="mentions", source=LINK_SOURCE_EXTRACTION))
+        for mid, eid in (
+            (gone.id, anna.id),
+            (gone.id, zenith.id),
+            (gone.id, shared.id),
+            (kept.id, shared.id),
+        ):
+            s.add(
+                MemoryEntityLink(memory_id=mid, entity_id=eid, role="mentions", source=LINK_SOURCE_EXTRACTION)
+            )
         s.add(
             Relation(
                 tenant_id=tenant,
@@ -95,7 +102,11 @@ async def test_purge_leaves_rows_inside_the_retention_window(_ensure_schema):
     recent = await _memory(svc, tenant)
     anna = await _entity(svc, tenant, f"Anna {uuid.uuid4().hex[:6]}")
     async with get_session() as s:
-        s.add(MemoryEntityLink(memory_id=recent.id, entity_id=anna.id, role="mentions", source=LINK_SOURCE_EXTRACTION))
+        s.add(
+            MemoryEntityLink(
+                memory_id=recent.id, entity_id=anna.id, role="mentions", source=LINK_SOURCE_EXTRACTION
+            )
+        )
     await svc.memory_soft_delete_by_ids(tenant, [recent.id])
 
     assert await svc.memory_purge_soft_deleted(tenant, retention_days=30) == 0

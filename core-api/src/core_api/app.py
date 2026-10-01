@@ -1061,7 +1061,9 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 @app.exception_handler(StoragePointerRejectedError)
-async def storage_pointer_rejected_handler(request: Request, exc: StoragePointerRejectedError) -> JSONResponse:
+async def storage_pointer_rejected_handler(
+    request: Request, exc: StoragePointerRejectedError
+) -> JSONResponse:
     """A write named a ``subject_entity_id`` / ``supersedes_id`` /
     ``evidence_memory_id`` that is not a row of the caller's tenant: 422.
 

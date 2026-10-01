@@ -25,7 +25,11 @@ pytestmark = [pytest.mark.integration]
 async def _entity(client, tenant_id: str, headers: dict) -> str:
     resp = await client.post(
         "/api/v1/entities/upsert",
-        json={"tenant_id": tenant_id, "entity_type": "person", "canonical_name": f"Ptr {_uid()}"},
+        json={
+            "tenant_id": tenant_id,
+            "entity_type": "person",
+            "canonical_name": f"Ptr {_uid()}",
+        },
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
@@ -49,13 +53,21 @@ def _assert_pointer_422(resp, field: str) -> None:
 
 
 @pytest.mark.parametrize("which", ["foreign", "unknown"])
-async def test_create_with_a_subject_outside_the_tenant_is_422(client, tenant_id, which):
+async def test_create_with_a_subject_outside_the_tenant_is_422(
+    client, tenant_id, which
+):
     _, headers = get_test_auth(tenant_id)
     other = f"test-tenant-{uuid.uuid4().hex[:8]}"
-    target = await _entity(client, other, headers) if which == "foreign" else str(uuid.uuid4())
+    target = (
+        await _entity(client, other, headers)
+        if which == "foreign"
+        else str(uuid.uuid4())
+    )
 
     resp = await client.post(
-        "/api/v1/memories", json=_memory_body(tenant_id, subject_entity_id=target), headers=headers
+        "/api/v1/memories",
+        json=_memory_body(tenant_id, subject_entity_id=target),
+        headers=headers,
     )
     _assert_pointer_422(resp, "subject_entity_id")
 
@@ -64,7 +76,9 @@ async def test_patch_with_a_foreign_subject_is_422(client, tenant_id):
     _, headers = get_test_auth(tenant_id)
     other = f"test-tenant-{uuid.uuid4().hex[:8]}"
     foreign = await _entity(client, other, headers)
-    created = await client.post("/api/v1/memories", json=_memory_body(tenant_id), headers=headers)
+    created = await client.post(
+        "/api/v1/memories", json=_memory_body(tenant_id), headers=headers
+    )
     assert created.status_code == 201, created.text
 
     resp = await client.patch(
@@ -87,9 +101,14 @@ async def test_patch_with_a_foreign_subject_is_422(client, tenant_id):
 async def test_relation_with_foreign_evidence_is_422(client, tenant_id):
     _, headers = get_test_auth(tenant_id)
     other = f"test-tenant-{uuid.uuid4().hex[:8]}"
-    foreign_mem = await client.post("/api/v1/memories", json=_memory_body(other), headers=headers)
+    foreign_mem = await client.post(
+        "/api/v1/memories", json=_memory_body(other), headers=headers
+    )
     assert foreign_mem.status_code == 201, foreign_mem.text
-    a, b = await _entity(client, tenant_id, headers), await _entity(client, tenant_id, headers)
+    a, b = (
+        await _entity(client, tenant_id, headers),
+        await _entity(client, tenant_id, headers),
+    )
 
     resp = await client.post(
         "/api/v1/relations/upsert",

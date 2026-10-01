@@ -8,7 +8,11 @@ import time
 from fastapi import HTTPException
 
 from common import duplicate_memory
-from core_api.clients.storage_client import DuplicateMemoryError, StoragePointerRejectedError, get_storage_client
+from core_api.clients.storage_client import (
+    DuplicateMemoryError,
+    StoragePointerRejectedError,
+    get_storage_client,
+)
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.schemas import EntityLinkIn
