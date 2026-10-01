@@ -921,6 +921,73 @@ def _link_within_tenant(tenant_id: str) -> ColumnElement[bool]:
     )
 
 
+
+def _entity_reader_memory_clause(
+    tenant_id: str,
+    caller_agent_id: str,
+    caller_tenant_id: str | None,
+    caller_fleet_ids: Sequence[str] | None,
+) -> ColumnElement[bool]:
+    """A live memory in ``tenant_id`` that an AGENT reader may read.
+
+    The SQL form of core-api's ``memory_access_allowed_for_agent``, for the
+    entity readers that summarise memories instead of returning them (entity
+    names on ``/entities`` and ``/graph``, and ``memory_count``). An entity is
+    mined from memory text, so its name is memory-derived content: listing it,
+    or counting the memories behind it, for a reader who may not open any of
+    those memories discloses what ``GET /entities/{id}`` hides.
+
+    ``_visibility_scope_clause`` decides ``scope_agent``; ``caller_fleet_ids``
+    is the cross-fleet trust ladder, already resolved by core-api — ``None``
+    when the reader may cross fleets (trust >= 2, or an unregistered
+    identity), otherwise the fleets it may read, in which case ``scope_team``
+    rows must be in one of them or fleet-less, and ``scope_org`` stays readable.
+    """
+    conds = [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        _visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id),
+    ]
+    if caller_fleet_ids is not None:
+        conds.append(_fleet_scope_clause(Memory, caller_fleet_ids, strict=False))
+    return and_(*conds)
+
+
+def _entity_has_readable_memory(memory_clause: ColumnElement[bool]) -> ColumnElement[bool]:
+    """``Entity`` has at least one link to a memory matching ``memory_clause``."""
+    return (
+        select(MemoryEntityLink.memory_id)
+        .join(Memory, Memory.id == MemoryEntityLink.memory_id)
+        .where(MemoryEntityLink.entity_id == Entity.id, memory_clause)
+        .exists()
+    )
+
+
+def _entity_visible_to_agent(
+    tenant_id: str,
+    caller_agent_id: str,
+    caller_tenant_id: str | None,
+    caller_fleet_ids: Sequence[str] | None,
+) -> ColumnElement[bool]:
+    """``Entity`` is listable for an agent reader.
+
+    Visible when it has NO memory links in the tenant at all, or at least one
+    link to a memory the reader may read (``_entity_reader_memory_clause``).
+    Hidden only when it has links and none is readable. A link-less entity —
+    a manual ``/entities/upsert``, say — was mined from no memory, so there is
+    nothing private behind its name, and agents that build graphs by hand
+    depend on seeing it. A link to a soft-deleted memory still counts as a
+    link (and is never readable), so an entity mined only from deleted
+    content stays hidden.
+    """
+    return or_(
+        ~_entity_has_readable_memory(Memory.tenant_id == tenant_id),
+        _entity_has_readable_memory(
+            _entity_reader_memory_clause(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
+        ),
+    )
+
+
 # Columns ``fleet_upsert_node``'s ON CONFLICT DO UPDATE must not rewrite. The
 # insert half of that statement still uses every key the caller sent; this is
 # only the branch that lands on a row that already exists.
@@ -7289,7 +7356,19 @@ class PostgresService:
         search: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        caller_fleet_ids: Sequence[str] | None = None,
     ) -> list[Entity]:
+        """List a tenant's entities.
+
+        With ``caller_agent_id`` (an agent reader) an entity whose memory links
+        all point at memories that reader may not read is left out — see
+        ``_entity_visible_to_agent``; link-less entities stay listed. In SQL,
+        before ``LIMIT``, so a page is never short because hidden rows took
+        its slots. Without one
+        (tenant / user / admin credentials) the list is tenant-wide.
+        """
         async with get_session() as session:
             # ORDER BY is what makes OFFSET/LIMIT mean anything. Postgres
             # guarantees no row order without it, so it is free to return the
@@ -7317,6 +7396,10 @@ class PostgresService:
                 stmt = stmt.where(Entity.entity_type == entity_type)
             if search:
                 stmt = stmt.where(Entity.canonical_name.ilike(f"%{search}%"))
+            if caller_agent_id:
+                stmt = stmt.where(
+                    _entity_visible_to_agent(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
+                )
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
@@ -7722,8 +7805,17 @@ class PostgresService:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        *,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        caller_fleet_ids: Sequence[str] | None = None,
     ) -> tuple[list[Entity], list[Relation]]:
         """Return all entities and relations for a tenant (optionally filtered by fleet).
+
+        With ``caller_agent_id`` the nodes are narrowed exactly as
+        ``entity_list`` narrows them, and an edge is kept only when both of its
+        endpoints survived — an edge to a hidden node would name it by id.
+        (core-api separately drops edges whose evidence the reader cannot read.)
 
         Skips the heavy ``name_embedding`` (pgvector) and ``search_vector`` (TSVECTOR)
         columns — the graph view doesn't need them, and loading + serialising them
@@ -7746,6 +7838,10 @@ class PostgresService:
             )
             if fleet_id:
                 entity_stmt = entity_stmt.where(or_(Entity.fleet_id == fleet_id, Entity.fleet_id.is_(None)))
+            if caller_agent_id:
+                entity_stmt = entity_stmt.where(
+                    _entity_visible_to_agent(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
+                )
             entities_result = await session.execute(entity_stmt)
             entities = list(entities_result.scalars().all())
 
@@ -7756,6 +7852,11 @@ class PostgresService:
                 )
             relations_result = await session.execute(relation_stmt)
             relations = list(relations_result.scalars().all())
+            if caller_agent_id:
+                node_ids = {e.id for e in entities}
+                relations = [
+                    r for r in relations if r.from_entity_id in node_ids and r.to_entity_id in node_ids
+                ]
 
             return entities, relations
 
@@ -7767,6 +7868,10 @@ class PostgresService:
         self,
         entity_ids: list[UUID],
         tenant_id: str,
+        *,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        caller_fleet_ids: Sequence[str] | None = None,
     ) -> dict[UUID, int]:
         """Return {entity_id: count} for the given entity IDs, within ``tenant_id``.
 
@@ -7779,9 +7884,21 @@ class PostgresService:
         ``core-api``'s client has always sent ``tenant_id`` in the body for this
         endpoint; the route read only ``entity_ids`` and dropped it. This is the
         parameter it was already being handed.
+
+        With ``caller_agent_id`` only memories that agent may read are counted
+        (``_entity_reader_memory_clause``), so the figure matches what
+        ``GET /entities/{id}`` would show it.
         """
         if not entity_ids:
             return {}
+        memory_conds: list[ColumnElement[bool]] = [
+            Memory.id == MemoryEntityLink.memory_id,
+            Memory.deleted_at.is_(None),
+        ]
+        if caller_agent_id:
+            memory_conds.append(
+                _entity_reader_memory_clause(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
+            )
         async with get_session() as session:
             result = await session.execute(
                 select(MemoryEntityLink.entity_id, func.count())
@@ -7801,12 +7918,7 @@ class PostgresService:
                     # about the same entity: the list reports a memory_count of
                     # 5 while /with-memories returns 3, and the gap is exactly
                     # the memories the caller deleted.
-                    select(Memory.id)
-                    .where(
-                        Memory.id == MemoryEntityLink.memory_id,
-                        Memory.deleted_at.is_(None),
-                    )
-                    .exists(),
+                    select(Memory.id).where(*memory_conds).exists(),
                 )
                 .group_by(MemoryEntityLink.entity_id)
             )

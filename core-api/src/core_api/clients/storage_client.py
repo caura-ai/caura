@@ -225,6 +225,27 @@ def get_storage_client() -> CoreStorageClient:
     return _client
 
 
+
+def _entity_reader_params(reader: dict | None) -> dict[str, Any]:
+    """Query-string form of an agent reader scope (``entity_reader_scope``).
+
+    A query string cannot carry an empty list, so "bound to no fleet" travels
+    as ``caller_fleet_bound=true`` with no ``caller_fleet_ids``.
+    """
+    if not reader:
+        return {}
+    params: dict[str, Any] = {
+        "caller_agent_id": reader["caller_agent_id"],
+    }
+    if reader.get("caller_tenant_id"):
+        params["caller_tenant_id"] = reader["caller_tenant_id"]
+    fleets = reader.get("caller_fleet_ids")
+    if fleets is not None:
+        params["caller_fleet_bound"] = "true"
+        if fleets:
+            params["caller_fleet_ids"] = list(fleets)
+    return params
+
 class CoreStorageClient:
     """Async HTTP client for core-storage-api CRUD operations."""
 
@@ -1725,8 +1746,9 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        reader: dict | None = None,
     ) -> dict:
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        params: dict[str, Any] = {"tenant_id": tenant_id, **_entity_reader_params(reader)}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
         return await self._get("/entities/full-graph", **params) or {}
@@ -1739,8 +1761,14 @@ class CoreStorageClient:
         search: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        reader: dict | None = None,
     ) -> list[dict]:
-        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
+        params: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "offset": offset,
+            **_entity_reader_params(reader),
+        }
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
         if entity_type is not None:
@@ -1753,10 +1781,11 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         entity_ids: list[str],
+        reader: dict | None = None,
     ) -> dict:
         return await self._post(  # type: ignore[return-value]
             "/entities/count-memories",
-            {"tenant_id": tenant_id, "entity_ids": entity_ids},
+            {"tenant_id": tenant_id, "entity_ids": entity_ids, **(reader or {})},
             read=True,
         )
 

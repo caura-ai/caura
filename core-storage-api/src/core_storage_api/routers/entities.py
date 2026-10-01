@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from common.constants import VECTOR_DIM
 from core_storage_api.routers._validation import _require, _require_number
@@ -62,6 +62,18 @@ async def create_entity(request: Request) -> dict:
     return orm_to_dict(entity, ENTITY_FIELDS)
 
 
+def _reader_fleets(fleet_ids: list[str] | None, bound: bool) -> list[str] | None:
+    """The agent reader's readable fleets for the entity summaries below.
+
+    ``None`` means "may cross fleets". A query string cannot carry an empty
+    list, so a reader bound to no fleet at all (only fleet-less and org rows)
+    arrives as ``caller_fleet_bound=true`` with no ``caller_fleet_ids``.
+    """
+    if not bound:
+        return None
+    return list(fleet_ids or [])
+
+
 @router.get("")
 async def list_entities(
     tenant_id: str,
@@ -70,6 +82,10 @@ async def list_entities(
     search: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
+    caller_fleet_ids: list[str] | None = Query(default=None),
+    caller_fleet_bound: bool = False,
 ) -> list[dict]:
     # C22 — accept and forward the filters entity_list has always supported;
     # core-api declared them publicly but this hop dropped them.
@@ -80,6 +96,9 @@ async def list_entities(
         search=search,
         limit=limit,
         offset=offset,
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
+        caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
     )
     return [orm_to_dict(e, ENTITY_FIELDS) for e in entities]
 
@@ -366,8 +385,18 @@ async def expand_graph(request: Request) -> dict:
 async def get_full_graph(
     tenant_id: str,
     fleet_id: str | None = None,
+    caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
+    caller_fleet_ids: list[str] | None = Query(default=None),
+    caller_fleet_bound: bool = False,
 ) -> dict:
-    entities, relations = await _svc.entity_get_full_graph(tenant_id, fleet_id)
+    entities, relations = await _svc.entity_get_full_graph(
+        tenant_id,
+        fleet_id,
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
+        caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
+    )
     return {
         "entities": [orm_to_dict(e, ENTITY_FIELDS) for e in entities],
         "relations": [orm_to_dict(r, RELATION_FIELDS) for r in relations],
@@ -496,7 +525,14 @@ async def count_memories_per_entity(request: Request) -> dict:
     # this reads the field it was already being sent.
     tenant_id = _require(body, "tenant_id")
     entity_ids = [UUID(eid) for eid in body["entity_ids"]]
-    counts = await _svc.entity_count_memories_per_entity(entity_ids, tenant_id)
+    fleets = body.get("caller_fleet_ids")
+    counts = await _svc.entity_count_memories_per_entity(
+        entity_ids,
+        tenant_id,
+        caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
+        caller_fleet_ids=_reader_fleets(fleets, fleets is not None),
+    )
     return {str(eid): count for eid, count in counts.items()}
 
 

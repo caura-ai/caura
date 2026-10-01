@@ -17,6 +17,7 @@ from core_api.schemas import (
 from core_api.services.agent_service import enforce_fleet_write
 from core_api.services.audit_service import log_cross_tenant_read
 from core_api.services.entity_service import (
+    entity_reader_scope,
     filter_relations_by_evidence_visibility,
     get_entity,
     upsert_entity,
@@ -45,6 +46,12 @@ async def list_entities(
     reads use (see ``routes/memories.py:list_memories``). Cross-tenant
     reads emit a ``cross_tenant_read`` audit event TO the source tenant
     so per-tenant audit-log queries surface "who read FROM my tenant".
+
+    An agent credential is not shown an entity whose linked memories are all
+    ones it may not read, and ``memory_count`` counts only the memories it may
+    read — the same contract ``GET /entities/{id}`` applies to the memories it
+    returns. An entity with no linked memories at all (a manual upsert) is
+    listed, with ``memory_count`` 0: it derives from no memory.
     """
     auth.enforce_readable_tenant(tenant_id)
     sc = get_storage_client()
@@ -52,17 +59,25 @@ async def list_entities(
     # day one but never forwarded, so ``GET /entities?search=foo`` silently
     # returned the unfiltered list. The storage service always supported both
     # (entity_list: ilike on canonical_name, equality on entity_type).
+    #
+    # An agent credential does not see entities mined only from memories it
+    # may not read, and ``memory_count`` covers the readable ones alone: the
+    # name is mined from memory text, and ``GET /entities/{id}`` already hides
+    # the memories behind it. Link-less entities stay visible. Tenant / user /
+    # admin credentials keep the full list.
+    reader = await entity_reader_scope(tenant_id, auth.agent_id, auth.tenant_id)
     entities = await sc.list_entities(
         tenant_id,
         fleet_id=fleet_id,
         entity_type=entity_type,
         search=search,
         limit=limit,
+        reader=reader,
     )
 
     # Count linked memories per entity
     eids = [e.get("id", "") for e in entities]
-    memory_counts_raw = await sc.count_memories_per_entity(tenant_id, eids) if eids else {}
+    memory_counts_raw = await sc.count_memories_per_entity(tenant_id, eids, reader=reader) if eids else {}
 
     if auth.is_cross_tenant_read and tenant_id != auth.tenant_id:
         await log_cross_tenant_read(
@@ -98,11 +113,20 @@ async def get_graph(
     Matches the read-widening contract used by memory reads — cross-tenant
     credentials may inspect the graph of any tenant in
     ``readable_tenant_ids``. Audited to the source tenant.
+
+    For an agent credential, nodes and ``memory_count`` follow ``GET
+    /entities`` (hidden only when every linked memory is one the agent may
+    not read), and an edge
+    is returned only when both its endpoints and its evidence memory are
+    visible to it.
     """
     auth.enforce_readable_tenant(tenant_id)
 
     sc = get_storage_client()
-    graph = await sc.get_full_graph(tenant_id, fleet_id)
+    # Nodes and ``memory_count`` follow the same agent reader scope as
+    # ``GET /entities`` (see there); storage also drops edges to hidden nodes.
+    reader = await entity_reader_scope(tenant_id, auth.agent_id, auth.tenant_id)
+    graph = await sc.get_full_graph(tenant_id, fleet_id, reader=reader)
 
     entities = graph.get("entities", [])
     relations = graph.get("relations", [])
@@ -147,7 +171,7 @@ async def get_graph(
 
     # Memory counts per entity
     eids = [e.get("id", "") for e in entities]
-    memory_counts_raw = await sc.count_memories_per_entity(tenant_id, eids) if eids else {}
+    memory_counts_raw = await sc.count_memories_per_entity(tenant_id, eids, reader=reader) if eids else {}
 
     nodes = [
         {
