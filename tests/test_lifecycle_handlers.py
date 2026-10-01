@@ -841,3 +841,52 @@ async def test_no_request_window_keeps_the_registration_default():
     handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
     await handler(_archive_event(Topics.Lifecycle.CRYSTALLIZE_REQUESTED))
     assert adapter.dedup_calls == [("tenant-x", "crystallize", 23)]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_run_releases_its_claim_and_still_propagates():
+    """Shutdown cancelling a run mid-primitive must not leave the row claimed.
+
+    ``except Exception`` does not see ``CancelledError``, so the row used to stay
+    ``in_progress`` under this run's claim: the redelivery then hit
+    ``claim_conflict`` and nacked until the claim lease expired an hour later.
+    """
+    import asyncio
+
+    adapter = _TokenRecordingAdapter(raise_on_op=asyncio.CancelledError())
+    handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
+
+    with pytest.raises(asyncio.CancelledError):
+        await handler(_archive_event(Topics.Lifecycle.CRYSTALLIZE_REQUESTED))
+
+    assert [c[1] for c in adapter.audit_calls] == ["in_progress", "failure"]
+    by_status = dict(adapter.tokens)
+    assert by_status["failure"] == by_status["in_progress"], (
+        "the release must present the run's own claim token"
+    )
+    assert "cancelled" in (adapter.audit_calls[-1][3] or "")
+
+
+@pytest.mark.asyncio
+async def test_a_hung_claim_release_cannot_hold_shutdown(monkeypatch):
+    import asyncio
+
+    from common.events import lifecycle_handlers as lh
+
+    monkeypatch.setattr(lh, "_CANCEL_RELEASE_TIMEOUT_SECONDS", 0.05)
+
+    class _Hung(_TokenRecordingAdapter):
+        async def update_lifecycle_audit_row(self, audit_id, *, status, **kw):
+            if status == "failure":
+                await asyncio.sleep(60)
+            return await super().update_lifecycle_audit_row(
+                audit_id, status=status, **kw
+            )
+
+    adapter = _Hung(raise_on_op=asyncio.CancelledError())
+    handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(
+            handler(_archive_event(Topics.Lifecycle.CRYSTALLIZE_REQUESTED)), timeout=2.0
+        )
