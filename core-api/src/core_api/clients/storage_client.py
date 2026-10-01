@@ -2971,6 +2971,21 @@ class CoreStorageClient:
             },
         )
 
+    async def release_idempotency_claim(
+        self,
+        *,
+        tenant_id: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> bool:
+        """Delete a still-pending claim; ``False`` if none was pending."""
+        return await self._delete(
+            "/idempotency/claim",
+            tenant_id=tenant_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+
     # =====================================================================
     # Audit
     # =====================================================================

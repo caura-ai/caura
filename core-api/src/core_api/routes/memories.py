@@ -53,6 +53,7 @@ from core_api.middleware.idempotency import (
     IdempotencyGuard,
     idempotency_for,
     idempotency_key_from_metadata,
+    release_claim_on_error,
 )
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot
 from core_api.middleware.rate_limit import search_limit, write_bulk_limit, write_limit
@@ -1394,7 +1395,9 @@ async def write_memory(
     # already saturating its slot budget on this instance, instead of
     # queueing requests until they time out at the worker layer. Only
     # the new-write path is gated; replays returned above bypass it.
-    async with per_tenant_slot("write", body.tenant_id):
+    # A failure from here on (including that 429) releases the claim so the
+    # retry sees the real outcome, not a synthetic "still in progress" 409.
+    async with release_claim_on_error(_idem), per_tenant_slot("write", body.tenant_id):
         return await _write_memory_inner(body, response, auth, _idem, chosen_agent_id)
 
 
@@ -1612,7 +1615,7 @@ async def write_memories_bulk(
         # quota-increment, so no rate-limit headers are available to
         # carry on the cached response.
         return JSONResponse(content=_body, status_code=_status)
-    async with per_tenant_slot("write", body.tenant_id):
+    async with release_claim_on_error(_idem), per_tenant_slot("write", body.tenant_id):
         return await _write_memories_bulk_inner(body, response, auth, _idem, bulk_attempt_id, chosen_agent_id)
 
 

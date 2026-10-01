@@ -13883,3 +13883,30 @@ class PostgresService:
             status_code=status_code,
             expires_at=expires_at,
         )
+
+    async def idempotency_release(
+        self,
+        *,
+        tenant_id: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> bool:
+        """Delete a still-PENDING claim so a retry can run afresh.
+
+        Called when the handler that claimed the key failed before
+        recording a response. Without it the pending row blocks every
+        retry with "still in progress" until its pending TTL lapses,
+        masking the real (often deterministic) error. Scoped to
+        ``is_pending`` and the claim's ``request_hash`` so a completed
+        response is never discarded. Returns whether a row was deleted.
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                delete(IdempotencyResponse).where(
+                    IdempotencyResponse.tenant_id == tenant_id,
+                    IdempotencyResponse.idempotency_key == idempotency_key,
+                    IdempotencyResponse.request_hash == request_hash,
+                    IdempotencyResponse.is_pending.is_(True),
+                )
+            )
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]

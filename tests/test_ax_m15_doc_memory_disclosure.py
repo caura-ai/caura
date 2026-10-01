@@ -88,7 +88,11 @@ def test_the_route_docstrings_describe_code_that_is_still_there():
     call leaves the write path, this test fails and the prose goes with it."""
     from core_api.routes import documents
 
-    assert "safe_sync_doc_memory" in inspect.getsource(documents.upsert_document)
+    # The route body after the idempotency claim lives in its helper.
+    write_src = inspect.getsource(documents.upsert_document) + inspect.getsource(
+        documents._upsert_document_claimed
+    )
+    assert "safe_sync_doc_memory" in write_src
     assert "safe_unmint_doc_memory" in inspect.getsource(documents.delete_document)
 
 

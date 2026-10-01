@@ -49,7 +49,10 @@ def test_the_write_route_sets_it_from_the_resolved_embedding():
     resolved the embed source."""
     from core_api.routes import documents
 
-    src = inspect.getsource(documents.upsert_document)
+    # The route body after the idempotency claim lives in its helper.
+    src = inspect.getsource(documents.upsert_document) + inspect.getsource(
+        documents._upsert_document_claimed
+    )
     assert "out.indexed = embedding is not None" in src
 
 
@@ -58,7 +61,10 @@ def test_the_audit_row_and_the_response_agree():
     able to disagree about the same write."""
     from core_api.routes import documents
 
-    src = inspect.getsource(documents.upsert_document)
+    # The route body after the idempotency claim lives in its helper.
+    src = inspect.getsource(documents.upsert_document) + inspect.getsource(
+        documents._upsert_document_claimed
+    )
     assert '"indexed": embedding is not None' in src
     assert "out.indexed = embedding is not None" in src
 

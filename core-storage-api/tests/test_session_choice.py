@@ -266,11 +266,14 @@ def test_the_writer_session_population_is_pinned() -> None:
     138 -> 139 (pure 64 -> 65): ``memory_assert_pointers_in_tenant`` is new and
     only selects, on the writer by design — see its ``_MUST_STAY_ON_THE_WRITER``
     entry — so the convertible count below does not move.
+
+    139 -> 140 (pure unchanged): ``idempotency_release`` is new and DELETEs a
+    still-pending Idempotency-Key claim, so it is a write, not a backlog entry.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 139, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 140, f"{len(methods)} methods open a writer session"
     assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 
