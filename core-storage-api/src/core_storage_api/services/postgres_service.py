@@ -70,7 +70,12 @@ from common.constants import (
     TYPE_DECAY_DAYS,
     predicate_cluster,
 )
-from common.entity_naming import canonical_match_key, normalize_entity_name
+from common.entity_naming import (
+    canonical_match_key,
+    has_identifier_or_qualifier,
+    normalize_entity_name,
+    same_identifier_signature,
+)
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.models import (
     Agent,
@@ -346,6 +351,34 @@ def _visibility_scope_clause(caller_agent_id: str | None) -> ColumnElement[bool]
             Memory.agent_id == caller_agent_id,
         ),
     )
+
+
+def _entity_compatible_groups(cluster_ids: list[UUID], names: dict[UUID, str]) -> list[list[UUID]]:
+    """Partition a duplicate cluster into groups whose names are all mutually
+    mergeable (``same_identifier_signature`` for every pair).
+
+    Greedy and deterministic: members are visited longest name first (then by
+    id), and each joins the first group it is compatible with. An unqualified
+    name such as 'acme' therefore joins one qualified group rather than
+    bridging two that must stay apart.
+    """
+    ordered = sorted(cluster_ids, key=lambda i: (-len(names.get(i, "")), str(i)))
+    groups: list[list[UUID]] = []
+    for uid in ordered:
+        name = names.get(uid, "")
+        for group in groups:
+            if all(same_identifier_signature(name, names.get(other, "")) for other in group):
+                group.append(uid)
+                break
+        else:
+            groups.append([uid])
+    return groups
+
+
+# Visibilities the crystallizer may merge (see
+# ``memory_find_near_duplicate_pairs``). ``scope_agent`` is private to its
+# author and never becomes part of a shared crystal.
+_CRYSTALLIZER_SHARED_VISIBILITIES = ("scope_team", "scope_org")
 
 
 def _scope_sql(
@@ -5045,6 +5078,15 @@ class PostgresService:
         ``CRYSTALLIZER_MAX_DEDUP_PAIRS`` — was whatever the executor happened to
         emit. Similarity is symmetric, so a tie never changed a pair's recorded
         score, only which pairs made the cap.
+
+        Only team- and org-visible rows take part, and a pair never spans
+        fleets. The crystal that a cluster becomes is written as a team-visible
+        memory, so a private (``scope_agent``) source would have been
+        republished to every reader of that fleet, and the source archived. An
+        allow-list rather than ``!= 'scope_agent'``, so a visibility added later
+        is excluded until someone decides otherwise. Pairs are kept inside one
+        fleet (``NULL`` pairs only with ``NULL``) because the nightly run passes
+        no fleet and the crystal would otherwise be readable across fleets.
         """
         async with get_session() as session:
             cand_scope, params = _scope_sql(tenant_id, fleet_id)
@@ -5052,12 +5094,13 @@ class PostgresService:
             result = await session.execute(
                 text(f"""
                 WITH candidates AS (
-                    SELECT m.id, m.embedding, m.created_at
+                    SELECT m.id, m.embedding, m.created_at, m.fleet_id
                     FROM memories m
                     WHERE {cand_scope}
                       AND m.embedding IS NOT NULL
                       AND m.deleted_at IS NULL
                       AND m.status = ANY(:live_statuses)
+                      AND m.visibility = ANY(:shared_visibilities)
                       AND m.last_dedup_checked_at IS NULL
                     ORDER BY m.created_at DESC
                     LIMIT :batch_size OFFSET :batch_offset
@@ -5074,6 +5117,8 @@ class PostgresService:
                       AND n.embedding IS NOT NULL
                       AND n.deleted_at IS NULL
                       AND n.status = ANY(:live_statuses)
+                      AND n.visibility = ANY(:shared_visibilities)
+                      AND n.fleet_id IS NOT DISTINCT FROM c.fleet_id
                       AND n.id != c.id
                       AND 1 - (n.embedding <=> c.embedding) >= :threshold
                     ORDER BY n.embedding <=> c.embedding
@@ -5088,6 +5133,7 @@ class PostgresService:
                     "threshold": threshold,
                     "k": neighbor_limit,
                     "live_statuses": list(LIVE_MEMORY_STATUSES),
+                    "shared_visibilities": list(_CRYSTALLIZER_SHARED_VISIBILITIES),
                 },
             )
             return result.all()  # type: ignore[return-value]
@@ -8509,6 +8555,16 @@ class PostgresService:
 
         async with get_session() as session:
             rows = (await session.execute(pair_sql, params)).all()
+            # Similarity alone is not identity: 'CAURA-712' / 'CAURA-713',
+            # 'v1.0.2' / 'v1.0.3' and 'acme (ohio)' / 'acme (delaware)' embed
+            # near-identically. The extraction worker refuses those merges
+            # (``same_identifier_signature``); this nightly pass must not
+            # undo them.
+            names: dict[UUID, str] = {}
+            for r in rows:
+                names[r.id_a] = r.name_a
+                names[r.id_b] = r.name_b
+            rows = [r for r in rows if same_identifier_signature(r.name_a, r.name_b)]
             if not rows:
                 # ``skipped`` lets the core-api step reproduce the source's
                 # early ``StepResult(SKIPPED)`` ONLY for the no-pairs case
@@ -8544,7 +8600,14 @@ class PostgresService:
             clusters_processed = 0
             cluster_errors = 0
 
-            for root, cluster_ids in clusters.items():
+            # Union-find chains through names that are compatible pairwise but
+            # not as a group: 'acme (ohio)' -- 'acme' -- 'acme (delaware)'.
+            # Split each cluster so every merge group is mutually compatible.
+            groups: list[list[UUID]] = []
+            for cluster_members in clusters.values():
+                groups.extend(_entity_compatible_groups(cluster_members, names))
+            for cluster_ids in groups:
+                root = cluster_ids[0]
                 if len(cluster_ids) < 2:
                     continue
 
@@ -8602,9 +8665,15 @@ class PostgresService:
         if not entities:
             return
 
+        # A qualified or identifier-bearing name wins over a bare one, then the
+        # longest. The group is mutually compatible (``_entity_compatible_groups``),
+        # so any such member carries the group's qualifier; keeping it as the
+        # canonical is what stops the next nightly run from seeing a bare
+        # 'Acme Corporation' and merging 'acme (ohio)' into what was
+        # 'acme (delaware)'.
         canonical = max(
             entities,
-            key=lambda e: (len(e.canonical_name), -e.id.int),
+            key=lambda e: (has_identifier_or_qualifier(e.canonical_name), len(e.canonical_name), -e.id.int),
         )
         dupes = [e for e in entities if e.id != canonical.id]
 
@@ -10519,6 +10588,12 @@ class PostgresService:
             Memory.tenant_id == tenant_id,
             Memory.deleted_at.is_(None),
             Memory.content.notlike(PostgresService._INSIGHTS_OPAQUE_CONTENT_PREFIX),
+            # The same visibility rule every read path applies: team and org
+            # rows, plus the caller's own private rows. Insights put row
+            # content into an LLM prompt and persist the findings team- or
+            # org-wide, so another agent's ``scope_agent`` rows must never be
+            # in the corpus, whatever the scope.
+            _visibility_scope_clause(agent_id),
         ]
         if scope == "agent":
             base.append(Memory.agent_id == agent_id)

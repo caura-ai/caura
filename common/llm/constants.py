@@ -197,6 +197,14 @@ LLM_FALLBACK_MODEL_OPENAI = os.environ.get("LLM_FALLBACK_MODEL_OPENAI", "gpt-5.4
 # first attempt, so the budget for a retry never existed.
 OPENAI_REQUEST_TIMEOUT_SECONDS = _read_float_env("OPENAI_REQUEST_TIMEOUT_SECONDS", 25.0)
 
+# The same per-request bound for the google-genai SDK (Vertex and Gemini).
+# Its default is no timeout at all, and the providers run the SDK in
+# ``asyncio.to_thread``: one stalled upstream call held a worker's enrich loop
+# and a core-api executor thread until Google's side gave up, if ever.
+GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS = _read_float_env(
+    "GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS", 25.0
+)
+
 
 # Hard ceiling on the *whole* business/personal pre-gate classification —
 # across retries and any provider fallback — enforced by the classifier itself

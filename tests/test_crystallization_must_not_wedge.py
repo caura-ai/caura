@@ -813,3 +813,66 @@ async def test_the_idempotency_check_reads_the_writer_not_the_replica() -> None:
     assert sc.get_report.await_args.kwargs.get("read") is False, (
         "the idempotency check read the replica, so lag can re-run a finished report"
     )
+
+
+# ---------------------------------------------------------------------------
+# Where the crystal lives: its sources' fleet and visibility, never private
+# ---------------------------------------------------------------------------
+
+
+async def _crystal_kwargs(memories: list[dict], *, fleet_id=None) -> list:
+    a, b, c = (m["id"] for m in memories)
+    hygiene = {"near_duplicates": {"pairs": [_pair(a, b), _pair(b, c), _pair(a, c)]}}
+    sc = _storage_mock(memories)
+    created = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+    with (
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            _stub_resolve_config,
+        ),
+        patch(
+            "core_api.services.crystallizer_service._crystallize_cluster",
+            AsyncMock(
+                return_value=[
+                    {"content": "crystal", "memory_type": "fact", "weight": 0.8}
+                ]
+            ),
+        ),
+        patch("core_api.services.memory_service.create_memory", created),
+    ):
+        await _run_crystallization(tenant_id="t1", fleet_id=fleet_id, hygiene=hygiene)
+    return [call.args[0] for call in created.await_args_list]
+
+
+@pytest.mark.asyncio
+async def test_the_crystal_takes_its_sources_fleet_on_the_nightly_run() -> None:
+    rows = [
+        {**_memory_row(uuid4()), "fleet_id": "f1", "visibility": "scope_team"}
+        for _ in range(3)
+    ]
+    (crystal,) = await _crystal_kwargs(rows, fleet_id=None)
+    assert crystal.fleet_id == "f1"
+    assert crystal.visibility == "scope_team"
+
+
+@pytest.mark.asyncio
+async def test_an_all_org_cluster_stays_org_visible() -> None:
+    rows = [
+        {**_memory_row(uuid4()), "fleet_id": None, "visibility": "scope_org"}
+        for _ in range(3)
+    ]
+    (crystal,) = await _crystal_kwargs(rows)
+    assert crystal.visibility == "scope_org"
+
+
+@pytest.mark.asyncio
+async def test_private_rows_never_reach_a_crystal() -> None:
+    """Defence in depth behind the storage pair query."""
+    rows = [
+        {**_memory_row(uuid4()), "fleet_id": "f1", "visibility": "scope_agent"}
+        for _ in range(3)
+    ]
+    assert await _crystal_kwargs(rows) == []
