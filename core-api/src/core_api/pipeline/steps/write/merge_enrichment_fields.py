@@ -116,12 +116,10 @@ class MergeEnrichmentFields:
         if weight is None:
             weight = DEFAULT_MEMORY_WEIGHT
 
-        # Status: agent-provided wins, then LLM, then default "active"
-        status = data.status
-        if not status and enrichment:
-            status = getattr(enrichment, "status", None)
-        if not status:
-            status = "active"
+        # Status: agent-provided, else "active". Never from enrichment: status
+        # is a lifecycle field the classifier is not asked for (CAURA-719), and
+        # core-worker stopped routing it for the same reason.
+        status = data.status or "active"
 
         # Write-mode metadata: track resolved mode and enrichment deferral
         resolved_write_mode = ctx.data.get("resolved_write_mode")
