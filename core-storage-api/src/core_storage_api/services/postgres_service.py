@@ -322,7 +322,15 @@ def _fleet_scope_clause(
     return or_(*disjuncts)
 
 
-def _visibility_scope_clause(caller_agent_id: str | None) -> ColumnElement[bool]:
+# Every visibility a reader with no agent identity may see. ``scope_agent`` is
+# private to its author; anything outside the three known values is unknown and
+# therefore not shared (see ``_visibility_scope_clause``).
+_SHARED_VISIBILITIES = ("scope_team", "scope_org")
+
+
+def _visibility_scope_clause(
+    caller_agent_id: str | None, caller_tenant_id: str | None = None
+) -> ColumnElement[bool]:
     """The read visibility predicate, in one place — the sibling of
     ``_fleet_scope_clause`` above, and centralised for the reason its docstring
     gives.
@@ -331,25 +339,39 @@ def _visibility_scope_clause(caller_agent_id: str | None) -> ColumnElement[bool]
     ``scope_agent`` rows. Without one, every ``scope_agent`` row is dropped —
     a credential that authenticates no agent is entitled to none of them.
 
+    "Own" means the caller's agent id IN THE CALLER'S HOME TENANT
+    (``caller_tenant_id``). ``agent_id`` is unique only per tenant
+    (``uq_agents_tenant_agent``), so on a read whose tenant predicate is wider
+    than the home tenant — ``readable_tenant_ids`` widening, or a pinned read of
+    a sibling tenant — a bare ``agent_id`` match would hand back a SIBLING
+    tenant's private rows written by a different agent that merely shares the
+    name. ``caller_tenant_id=None`` with an identity means the caller did not
+    say; every reader passes its request ``tenant_id`` then, which is the home
+    tenant for every caller that does not pin a sibling.
+
     Spelled as an allow-list, NOT as ``!= "scope_agent" OR agent_id ==
     caller``. ``Memory.visibility`` is plain Text with no CHECK constraint, so
     the two forms differ on any value outside the three: the allow-list omits
     it, the negation admits it. Every reader here has to make the same choice,
     which is the argument for the predicate living in one place — a count that
     disagrees with the list it summarises is the bug this was extracted for.
+    The no-identity arm is an allow-list for the same reason.
 
     (``Memory.visibility`` is NOT NULL with a server default, so the
     three-valued-logic NULL pitfall does not apply to either form.)
     """
     if not caller_agent_id:
-        return Memory.visibility != "scope_agent"
+        return Memory.visibility.in_(_SHARED_VISIBILITIES)
+    own_rows = [
+        Memory.visibility == "scope_agent",
+        Memory.agent_id == caller_agent_id,
+    ]
+    if caller_tenant_id:
+        own_rows.append(Memory.tenant_id == caller_tenant_id)
     return or_(
         Memory.visibility == "scope_org",
         Memory.visibility == "scope_team",
-        and_(
-            Memory.visibility == "scope_agent",
-            Memory.agent_id == caller_agent_id,
-        ),
+        and_(*own_rows),
     )
 
 
@@ -2878,6 +2900,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
@@ -3099,19 +3122,7 @@ class PostgresService:
         if fleet_ids:
             row_filters.append(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
 
-        if caller_agent_id:
-            row_filters.append(
-                or_(
-                    Memory.visibility == "scope_org",
-                    Memory.visibility == "scope_team",
-                    and_(
-                        Memory.visibility == "scope_agent",
-                        Memory.agent_id == caller_agent_id,
-                    ),
-                )
-            )
-        else:
-            row_filters.append(Memory.visibility != "scope_agent")
+        row_filters.append(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
 
         if filter_agent_id:
             row_filters.append(Memory.agent_id == filter_agent_id)
@@ -3848,6 +3859,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
@@ -3895,19 +3907,7 @@ class PostgresService:
             )
             if fleet_ids:
                 stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
-            if caller_agent_id:
-                stmt = stmt.where(
-                    or_(
-                        Memory.visibility == "scope_org",
-                        Memory.visibility == "scope_team",
-                        and_(
-                            Memory.visibility == "scope_agent",
-                            Memory.agent_id == caller_agent_id,
-                        ),
-                    )
-                )
-            else:
-                stmt = stmt.where(Memory.visibility != "scope_agent")
+            stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
             if filter_agent_id:
                 stmt = stmt.where(Memory.agent_id == filter_agent_id)
             if memory_type_filter:
@@ -4019,6 +4019,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         valid_at: datetime | None = None,
@@ -4038,19 +4039,7 @@ class PostgresService:
             )
             if fleet_ids:
                 stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
-            if caller_agent_id:
-                stmt = stmt.where(
-                    or_(
-                        Memory.visibility == "scope_org",
-                        Memory.visibility == "scope_team",
-                        and_(
-                            Memory.visibility == "scope_agent",
-                            Memory.agent_id == caller_agent_id,
-                        ),
-                    )
-                )
-            else:
-                stmt = stmt.where(Memory.visibility != "scope_agent")
+            stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
             if filter_agent_id:
                 stmt = stmt.where(Memory.agent_id == filter_agent_id)
             if memory_type_filter:
@@ -4668,7 +4657,7 @@ class PostgresService:
             if fleet_id:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             if exclude_scope_agent:
-                stmt = stmt.where(_visibility_scope_clause(caller_agent_id))
+                stmt = stmt.where(_visibility_scope_clause(caller_agent_id, tenant_id))
             result = await session.execute(stmt)
             return result.scalar() or 0
 
@@ -6242,6 +6231,7 @@ class PostgresService:
         *,
         tenant_id: str,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         fleet_id: str | None = None,
         written_by: str | None = None,
         memory_type: str | None = None,
@@ -6271,8 +6261,10 @@ class PostgresService:
         visibility scoping. Read-only (reader replica).
 
         **Visibility:** when ``caller_agent_id`` is set, ``scope_agent`` rows
-        are visible only to the authoring agent; team/org always visible. When
-        unset, all ``scope_agent`` rows are excluded. **Cross-tenant widening:**
+        are visible only to the authoring agent in its home tenant
+        (``caller_tenant_id``, defaulting to ``tenant_id``); team/org always
+        visible. When unset, all ``scope_agent`` rows are excluded.
+        **Cross-tenant widening:**
         a non-empty ``readable_tenant_ids`` expands ``tenant_id = $1`` to
         ``tenant_id = ANY($1)``; ``tenant_id`` stays the binding/home tenant.
         """
@@ -6285,19 +6277,7 @@ class PostgresService:
             stmt = base.where(Memory.tenant_id == tenant_id)
 
         # Visibility predicate (critical: prevents scope_agent leaks).
-        if caller_agent_id:
-            stmt = stmt.where(
-                or_(
-                    Memory.visibility == "scope_org",
-                    Memory.visibility == "scope_team",
-                    and_(
-                        Memory.visibility == "scope_agent",
-                        Memory.agent_id == caller_agent_id,
-                    ),
-                )
-            )
-        else:
-            stmt = stmt.where(Memory.visibility != "scope_agent")
+        stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
 
         if fleet_id:
             # Same predicate as the bare ``Memory.fleet_id == fleet_id`` this
@@ -6457,18 +6437,12 @@ class PostgresService:
             )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
-            scope_filters.append(
-                or_(
-                    Memory.visibility == "scope_org",
-                    Memory.visibility == "scope_team",
-                    and_(
-                        Memory.visibility == "scope_agent",
-                        Memory.agent_id == agent_id,
-                    ),
-                )
-            )
+            # Private rows count for the named agent in ``tenant_id`` (the
+            # binding/home tenant) only — under ``readable_tenant_ids`` a
+            # sibling tenant's same-named agent is a different agent.
+            scope_filters.append(_visibility_scope_clause(agent_id, tenant_id))
         elif not include_scope_agent:
-            scope_filters.append(Memory.visibility != "scope_agent")
+            scope_filters.append(_visibility_scope_clause(None))
         if memory_type:
             scope_filters.append(Memory.memory_type == memory_type)
         if status:
@@ -6745,15 +6719,12 @@ class PostgresService:
             )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
-            scope_filters.append(
-                or_(
-                    Memory.visibility == "scope_org",
-                    Memory.visibility == "scope_team",
-                    and_(Memory.visibility == "scope_agent", Memory.agent_id == agent_id),
-                )
-            )
+            # Private rows count for the named agent in ``tenant_id`` (the
+            # binding/home tenant) only — under ``readable_tenant_ids`` a
+            # sibling tenant's same-named agent is a different agent.
+            scope_filters.append(_visibility_scope_clause(agent_id, tenant_id))
         elif not include_scope_agent:
-            scope_filters.append(Memory.visibility != "scope_agent")
+            scope_filters.append(_visibility_scope_clause(None))
         if created_after:
             scope_filters.append(Memory.created_at >= created_after)
         if exclude_memory_types:

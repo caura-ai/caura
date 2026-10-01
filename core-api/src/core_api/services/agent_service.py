@@ -555,6 +555,7 @@ async def authorize_memory_access(
     owner_agent_id: str | None,
     fleet_id: str | None,
     write: bool = False,
+    caller_tenant_id: str | None = None,
 ) -> bool:
     """Authorize a *by-id* memory access against the fleet/scope contract.
 
@@ -572,7 +573,10 @@ async def authorize_memory_access(
     - ``caller_agent_id is None`` → a tenant-scoped user/dashboard credential
       (no gateway ``X-Agent-ID``) → full tenant access, unchanged. The agent
       isolation boundary only applies to agent-scoped credentials.
-    - ``scope_agent`` → author-only.
+    - ``scope_agent`` → author-only, and only in the caller's home tenant
+      (``caller_tenant_id``, when given). Agent ids are unique per tenant, so a
+      same-named agent in a sibling tenant the caller may read is a different
+      author, and its private rows are not the caller's.
     - ``scope_org`` → tenant-global (mirrors ``scored_search``'s rule that
       org-scoped rows escape fleet scoping).
     - ``scope_team`` / default → fleet-gated: own fleet (or fleet-less rows)
@@ -581,6 +585,8 @@ async def authorize_memory_access(
     """
     if not caller_agent_id:
         return True
+    if visibility == "scope_agent" and caller_tenant_id and tenant_id != caller_tenant_id:
+        return False
     if visibility in ("scope_agent", "scope_org"):
         # No agent row needed for these branches.
         return memory_access_allowed_for_agent(

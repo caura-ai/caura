@@ -162,6 +162,7 @@ class LoadAndSerialize:
                         # exactly what the scored query just excluded.
                         "strict_fleet_scoping": bool(data.get("strict_fleet_scoping")),
                         "caller_agent_id": data.get("caller_agent_id"),
+                        "caller_tenant_id": data.get("caller_tenant_id"),
                         "filter_agent_id": data.get("filter_agent_id"),
                         "memory_type_filter": data.get("memory_type_filter"),
                         "valid_at": str(data["valid_at"]) if data.get("valid_at") else None,

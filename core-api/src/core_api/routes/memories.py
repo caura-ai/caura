@@ -614,6 +614,7 @@ async def list_memories(
     list_payload: dict = {
         "tenant_id": tenant_id or "",
         "caller_agent_id": caller_agent_id,  # visibility scoping (authenticated identity)
+        "caller_tenant_id": auth.tenant_id,  # ...matched in the caller's home tenant only
         "fleet_id": fleet_id,
         "written_by": author_filter,  # author filter (written_by, else agent_id)
         "memory_type": memory_type,
@@ -1088,6 +1089,7 @@ async def get_memory(
             visibility=memory.get("visibility"),
             owner_agent_id=memory.get("agent_id"),
             fleet_id=memory.get("fleet_id"),
+            caller_tenant_id=auth.tenant_id,
         )
         if not allowed:
             raise HTTPException(status_code=404, detail="Memory not found")
@@ -1215,6 +1217,7 @@ async def get_contradictions(
         visibility=memory.get("visibility"),
         owner_agent_id=memory.get("agent_id"),
         fleet_id=memory.get("fleet_id"),
+        caller_tenant_id=auth.tenant_id,
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Memory not found")
@@ -2536,6 +2539,7 @@ async def _search_inner(
             # explicit filter) so the caller sees its own scope_agent rows and
             # nobody else's, even when filter_agent_id is omitted.
             caller_agent_id=eff_agent_id,
+            caller_tenant_id=auth.tenant_id,
             # An identity the caller ASSERTED does not move recall_count unless
             # the tenant opted in. Ranking is the reason: recall_boost defaults
             # to True, so without this gate one integration adding
@@ -2913,6 +2917,7 @@ async def recall_endpoint(
         # and no-op'd here, so the same body returned different rows on the two
         # routes with no error. The filter above stays a separate parameter.
         caller_agent_id=eff_agent_id,
+        caller_tenant_id=auth.tenant_id,
         # Same ranking guard /search applies: an ASSERTED identity must not move
         # recall_count unless the tenant opted in, or one integration adding
         # caller_agent_id reshuffles results for every other caller. Carried

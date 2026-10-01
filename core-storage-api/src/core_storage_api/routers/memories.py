@@ -198,6 +198,7 @@ async def scored_search(request: Request) -> list[dict]:
                 query=body["query"],
                 fleet_ids=body.get("fleet_ids"),
                 caller_agent_id=body.get("caller_agent_id"),
+                caller_tenant_id=body.get("caller_tenant_id"),
                 filter_agent_id=body.get("filter_agent_id"),
                 memory_type_filter=body.get("memory_type_filter"),
                 status_filter=body.get("status_filter"),
@@ -341,6 +342,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 tenant_id=tenant_id,
                 fleet_ids=body.get("fleet_ids"),
                 caller_agent_id=body.get("caller_agent_id"),
+                caller_tenant_id=body.get("caller_tenant_id"),
                 filter_agent_id=body.get("filter_agent_id"),
                 memory_type_filter=body.get("memory_type_filter"),
                 status_filter=body.get("status_filter"),
@@ -480,6 +482,7 @@ async def find_successors(request: Request) -> list[dict]:
         tenant_id=body["tenant_id"],
         fleet_ids=body.get("fleet_ids"),
         caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
         filter_agent_id=body.get("filter_agent_id"),
         memory_type_filter=body.get("memory_type_filter"),
         valid_at=valid_at,
@@ -1557,10 +1560,12 @@ async def admin_list(request: Request) -> list[dict]:
 async def list_by_filters(request: Request) -> list[dict]:
     """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
-    Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
-    status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
-    include_deleted, sort, order, limit, offset, cursor_ts?, cursor_id?,
-    readable_tenant_ids?, visibility?}``. ``limit`` is the caller's desired page size; this
+    Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
+    written_by?, memory_type?, status?, run_id?, weight_min?, weight_max?,
+    created_after?, created_before?, include_deleted, sort, order, limit, offset,
+    cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?}``.
+    ``caller_tenant_id`` is the caller's home tenant: its own ``scope_agent``
+    rows are matched there only (defaults to ``tenant_id``). ``limit`` is the caller's desired page size; this
     endpoint over-fetches ``limit+1`` rows internally for has_more detection and
     the caller slices to ``limit`` / builds the next cursor. Distinct from
     ``/admin-list`` which has NO visibility scoping.
@@ -1606,6 +1611,7 @@ async def list_by_filters(request: Request) -> list[dict]:
     memories = await _svc.memory_list_by_filters(
         tenant_id=tenant_id,
         caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
         fleet_id=body.get("fleet_id"),
         written_by=body.get("written_by"),
         memory_type=memory_type,

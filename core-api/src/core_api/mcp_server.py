@@ -1541,6 +1541,7 @@ async def caura_recall(
             fleet_ids=fleet_ids,
             filter_agent_id=filter_agent_id,
             caller_agent_id=agent_id,
+            caller_tenant_id=tenant_id,
             memory_type_filter=memory_type,
             status_filter=status,
             top_k=capped_top_k,
@@ -3550,6 +3551,7 @@ async def caura_list(
             list_payload: dict[str, Any] = {
                 "tenant_id": tenant_id,
                 "caller_agent_id": agent_id,
+                "caller_tenant_id": tenant_id,
                 "fleet_id": fleet_id,
                 "written_by": effective_written_by,
                 "memory_type": memory_type,
