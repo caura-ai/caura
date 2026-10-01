@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+
+from core_api.services import contradiction_detector as cd
+from core_storage_api.config import settings
+from core_storage_api.services import postgres_service as ps
 
 pytestmark = pytest.mark.unit
 
@@ -24,9 +28,6 @@ pytestmark = pytest.mark.unit
     [("writer", "primary"), ("reader", "replica"), ("hybrid", "replica")],
 )
 async def test_by_id_read_uses_the_primary_on_the_writer(monkeypatch, role, expected):
-    from core_storage_api.config import settings
-    from core_storage_api.services import postgres_service as ps
-
     used: list[str] = []
 
     def _factory(name):
@@ -34,7 +35,10 @@ async def test_by_id_read_uses_the_primary_on_the_writer(monkeypatch, role, expe
         async def _session():
             used.append(name)
             session = AsyncMock()
-            session.execute.return_value.scalar_one_or_none.return_value = None
+            # execute is async; the returned SQLAlchemy Result is synchronous.
+            result = MagicMock()
+            result.scalar_one_or_none.return_value = None
+            session.execute.return_value = result
             yield session
 
         return _session
@@ -42,16 +46,14 @@ async def test_by_id_read_uses_the_primary_on_the_writer(monkeypatch, role, expe
     monkeypatch.setattr(settings, "core_storage_role", role)
     monkeypatch.setattr(ps, "get_session", _factory("primary"))
     monkeypatch.setattr(ps, "get_read_session", _factory("replica"))
-    await ps.PostgresService().memory_get_by_id_for_tenant(uuid4(), "t1")
+    assert await ps.PostgresService().memory_get_by_id_for_tenant(uuid4(), "t1") is None
     assert used == [expected]
 
 
 async def test_path_a_reads_through_the_writer_and_logs_a_missing_row(caplog):
-    from core_api.services import contradiction_detector as cd
-
     sc = AsyncMock()
     sc.get_memory = AsyncMock(return_value=None)
-    gate = AsyncMock()
+    gate = MagicMock()  # Semaphore.release() is synchronous.
     with (
         patch.object(cd, "get_storage_client", return_value=sc),
         patch.object(cd, "_acquire_detection_slot", AsyncMock(return_value=(gate, 0))),
@@ -65,6 +67,7 @@ async def test_path_a_reads_through_the_writer_and_logs_a_missing_row(caplog):
             embedding=[0.0],
         )
     sc.get_memory.assert_awaited_once()
+    gate.release.assert_called_once_with()
     assert sc.get_memory.await_args.kwargs.get("read") is False
     assert any(
         "contradiction_detection_skipped_row_missing" in r.getMessage()

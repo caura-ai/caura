@@ -40,6 +40,9 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install reviewer sandbox and smoke-test pinned CLI (no API calls)
+        run: bash .github/scripts/install_review_sandbox.sh
+
       - name: Check plugin version-sync (gen-version.sh → src/version.ts)
         # Fails fast if plugin/src/version.ts has drifted from
         # plugin/package.json's "version" field — i.e., someone bumped

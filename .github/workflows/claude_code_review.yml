@@ -322,6 +322,7 @@ jobs:
   # ``author_association`` here — keeping the gate in one place avoids
   # the two conditions drifting out of sync.
   claude-review:
+    timeout-minutes: 20
     needs: pre-checks
     if: >-
       github.event_name == 'pull_request'
@@ -343,7 +344,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
+        run: bash .github/scripts/install_review_sandbox.sh
 
       # Same script as the @claude retrigger job below — feed the real diff to
       # `claude --print`. Replaces the claude-code-action agent, which never
@@ -454,7 +455,7 @@ jobs:
 
       - name: Install Claude CLI
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
-        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
+        run: bash .github/scripts/install_review_sandbox.sh
 
       # Same script as the on-open claude-review job above.
       - name: Review PR diff

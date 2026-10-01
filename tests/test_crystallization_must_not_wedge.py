@@ -219,10 +219,22 @@ def _driving(sc: AsyncMock):
     this PR widens, and a TypeError there wedged the report exactly the same way
     before the guard existed. The guard is what makes it survivable.
 
-    The hygiene checks are deliberately NOT stubbed — they fail against the mock
-    and are caught by their own handler, which is the realistic shape and keeps
-    the tests honest about what the guard is and is not responsible for.
+    Hygiene checks still execute, with explicit storage failures caught by their
+    own handlers. Bare AsyncMock results make synchronous dict.get calls create
+    unawaited coroutines, which can surface during a later test's collection.
     """
+    for name in (
+        "find_orphaned_entities",
+        "check_near_duplicates",
+        "get_embedding_coverage",
+        "get_lifecycle_candidates",
+        "find_broken_entity_links",
+    ):
+        setattr(
+            sc,
+            name,
+            AsyncMock(side_effect=RuntimeError("synthetic storage failure")),
+        )
     with (
         patch(
             "core_api.services.crystallizer_service.get_storage_client", return_value=sc
@@ -403,10 +415,7 @@ async def test_a_clean_run_still_completes_normally() -> None:
 
     with (
         _driving(sc),
-        # Stubbed only here: the hygiene checks run against a mock, so a
-        # non-awaited stub value reaches ``_generate_issues`` and TypeErrors on a
-        # comparison. That is a mock artefact, not the behaviour under test —
-        # this test is about the guard leaving the happy path alone.
+        # This test is about the outer guard leaving a completed run alone.
         patch(
             "core_api.services.crystallizer_service._generate_issues",
             MagicMock(return_value=[]),
@@ -419,9 +428,8 @@ async def test_a_clean_run_still_completes_normally() -> None:
         "completed",
         "failed",
     }
-    # 'failed' is legitimate here — the hygiene checks run against an AsyncMock
-    # storage client, so they may all report errors. What matters is that the row
-    # reached a TERMINAL status rather than staying 'running'.
+    # 'failed' is legitimate here — the hygiene storage calls explicitly fail.
+    # The row must reach a terminal status rather than stay 'running'.
 
 
 @pytest.mark.asyncio
@@ -497,6 +505,7 @@ async def test_the_reserved_report_is_executed_not_re_reserved() -> None:
     sc = AsyncMock()
     sc.find_running_report = AsyncMock()
     sc.create_report = AsyncMock()
+    sc.get_report = AsyncMock(return_value={"id": report_id, "status": "running"})
     execute = AsyncMock()
 
     with (
