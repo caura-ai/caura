@@ -11236,10 +11236,12 @@ class PostgresService:
     ) -> list[str]:
         """Return the subset of ``ids`` visible to the caller under ``scope``.
 
-        Ports ``_filter_by_scope``'s SELECT verbatim: base
-        ``id IN (...) AND tenant_id == :tid AND deleted_at IS NULL``; scope
-        ='agent' adds ``agent_id == :caller``, scope='fleet' adds
-        ``fleet_id == :fid`` (fleet_id required), scope='all' adds nothing.
+        Every scope applies the read visibility predicate: shared rows plus
+        the caller's own private rows. Evolve uses these IDs for both weight
+        changes and an LLM prompt whose output can be shared, so tenant/fleet
+        membership alone must not admit another agent's private content.
+        Scope='agent' additionally requires ``agent_id == :caller``;
+        scope='fleet' requires ``fleet_id == :fid`` (fleet_id required).
         Uses ``select(Memory.id).where(Memory.id.in_(...))`` (UUID objects,
         not stringified) so the asyncpg array-cast risk is avoided and
         canonical-form mismatches don't drop valid ids. Returns the matched
@@ -11255,6 +11257,7 @@ class PostgresService:
             .where(Memory.id.in_(uuids))
             .where(Memory.tenant_id == tenant_id)
             .where(Memory.deleted_at.is_(None))
+            .where(_visibility_scope_clause(caller_agent_id))
         )
         if scope == "agent":
             stmt = stmt.where(Memory.agent_id == caller_agent_id)
