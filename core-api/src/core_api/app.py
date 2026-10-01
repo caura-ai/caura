@@ -35,7 +35,11 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from common import permanent_failure
 from common.events.factory import get_event_bus
-from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
+from core_api.clients.storage_client import (
+    PermanentStorageWriteError,
+    StoragePointerRejectedError,
+    get_storage_client,
+)
 from core_api.constants import STM_WRITE_ROUTE_NOTE, VERSION, is_mcp_path
 from core_api.consumer import register_consumers
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
@@ -1054,6 +1058,22 @@ async def global_exception_handler(request: Request, exc: Exception):
     if app_settings.environment != "production":
         content["error_type"] = type(exc).__name__
     return JSONResponse(status_code=500, content=content)
+
+
+@app.exception_handler(StoragePointerRejectedError)
+async def storage_pointer_rejected_handler(request: Request, exc: StoragePointerRejectedError) -> JSONResponse:
+    """A write named a ``subject_entity_id`` / ``supersedes_id`` /
+    ``evidence_memory_id`` that is not a row of the caller's tenant: 422.
+
+    The caller supplied the id, so this is a request it can correct — unlike
+    the permanent refusal below, which is ours. Storage refuses absent and
+    foreign ids with the same answer, and so does this.
+    """
+    from core_api.errors import code_for_status, make_error_payload
+
+    message = str(exc)
+    body = {"detail": message, **make_error_payload(code_for_status(422), message, exc.fields or None)}
+    return JSONResponse(status_code=422, content=body)
 
 
 @app.exception_handler(PermanentStorageWriteError)

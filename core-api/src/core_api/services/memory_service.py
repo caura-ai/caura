@@ -2141,7 +2141,7 @@ async def create_memories_bulk(
             "content_hash": ch,
             "client_request_id": item_request_id,
             "expires_at": item.expires_at.isoformat() if item.expires_at else None,
-            "subject_entity_id": item.subject_entity_id,
+            "subject_entity_id": str(item.subject_entity_id) if item.subject_entity_id else None,
             "predicate": item.predicate,
             "object_value": item.object_value,
             "ts_valid_start": ts_valid_start.isoformat() if ts_valid_start else None,
@@ -4388,10 +4388,14 @@ async def update_memory(
                     "old": str(old_val)[:200] if old_val is not None else None,
                     "new": str(new_val)[:200] if new_val is not None else None,
                 }
-                # Serialize datetime fields for JSON transport
+                # Serialize datetime / UUID fields for JSON transport. A UUID
+                # (``subject_entity_id``) reached httpx's JSON encoder raw and
+                # raised TypeError, so any PATCH setting it was a 500.
                 val = new_val
                 if isinstance(val, datetime):
                     val = val.isoformat()
+                elif isinstance(val, UUID):
+                    val = str(val)
                 patch[attr_name] = val
 
     # CAURA-702: caller-supplied classifier-deprecated types (currently

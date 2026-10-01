@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict, defaultdict
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -1444,6 +1444,34 @@ class BulkRowShapeError(permanent_failure.PermanentWriteFailure):
     """
 
 
+class PointerNotInTenantError(permanent_failure.PermanentWriteFailure):
+    """A write named a pointer column value that is not a row of its tenant.
+
+    ``subject_entity_id`` / ``supersedes_id`` / ``evidence_memory_id`` are
+    foreign keys with no tenant pairing: the FK only asks that the row exist in
+    SOME tenant. Unchecked, an unknown UUID raised ``ForeignKeyViolationError``
+    (an unhandled 500 that core-api answers "503, retry" — forever, and an
+    existence test for UUIDs), while another tenant's UUID was accepted and
+    persisted a cross-tenant edge. Both now get this one answer, a 422 naming
+    the field and nothing about the row — the same "absent and not yours are
+    indistinguishable" rule ``POST /memories/conflicts`` follows.
+
+    Not a ``ValueError``: several routes map a bare ``ValueError`` to their own
+    status, and this answer has to be the same on every path, so it is handled
+    app-wide instead (``app.py``).
+    """
+
+    def __init__(self, field: str) -> None:
+        super().__init__(f"{field} does not name a row in this tenant", {"field": field})
+        self.field = field
+
+
+# The pointer columns a write may carry, and the table each one names. Checked
+# by ``_assert_pointers_in_tenant`` before every write that can set them.
+_ENTITY_POINTER_FIELDS = ("subject_entity_id",)
+_MEMORY_POINTER_FIELDS = ("supersedes_id", "evidence_memory_id")
+
+
 # How long a consumer's claim on an ``in_progress`` lifecycle audit row is
 # honoured before another delivery may take it. Sized well past any single-org
 # lifecycle op -- the Pub/Sub client extends the 60s ack deadline while a
@@ -1599,9 +1627,57 @@ class PostgresService:
         out.setdefault("embedded_content_hash", None)
         return out
 
+    @staticmethod
+    async def _assert_pointers_in_tenant(session: AsyncSession, tenant_id: str, rows: Iterable[Mapping]) -> None:
+        """Refuse the write unless every pointer value in ``rows`` is a row of ``tenant_id``.
+
+        One indexed ``id IN (...) AND tenant_id = :t`` lookup per target table,
+        whatever the batch size, and nothing at all when no row sets a pointer
+        — the common case. Soft-deleted targets still count: the FK only ever
+        asked for existence, and a supersession or evidence edge to a row that
+        was later deleted is history, not a fault. ``None`` means "no pointer".
+
+        Raises ``PointerNotInTenantError`` naming the first offending field.
+        """
+        wanted: dict[str, set[UUID]] = {}
+        for row in rows:
+            for field in (*_ENTITY_POINTER_FIELDS, *_MEMORY_POINTER_FIELDS):
+                raw = row.get(field)
+                if raw is None:
+                    continue
+                try:
+                    wanted.setdefault(field, set()).add(raw if isinstance(raw, UUID) else UUID(str(raw)))
+                except (ValueError, TypeError, AttributeError):
+                    raise PointerNotInTenantError(field) from None
+        if not wanted:
+            return
+        for fields, model in ((_ENTITY_POINTER_FIELDS, Entity), (_MEMORY_POINTER_FIELDS, Memory)):
+            ids = set().union(*(wanted.get(f, set()) for f in fields))
+            if not ids:
+                continue
+            found = set(
+                (
+                    await session.execute(
+                        select(model.id).where(model.id.in_(ids), model.tenant_id == tenant_id)
+                    )
+                ).scalars()
+            )
+            for field in fields:
+                if wanted.get(field, set()) - found:
+                    raise PointerNotInTenantError(field)
+
+    async def memory_assert_pointers_in_tenant(self, tenant_id: str, rows: Iterable[Mapping]) -> None:
+        """``_assert_pointers_in_tenant`` for a route that must refuse a whole
+        batch before writing any of it (``/batch-update-status``). Writer
+        session: a pointer to a row committed a moment ago must not be refused
+        for replica lag."""
+        async with get_session() as session:
+            await self._assert_pointers_in_tenant(session, tenant_id, rows)
+
     async def memory_add(self, data: dict) -> Memory:
         try:
             async with get_session() as session:
+                await self._assert_pointers_in_tenant(session, data["tenant_id"], [data])
                 memory = Memory(**self._filter_memory_fields(data))
                 session.add(memory)
                 await session.flush()
@@ -1809,6 +1885,10 @@ class PostgresService:
                 mapped["created_at"] = func.now() + timedelta(microseconds=i)
 
         async with get_session() as session:
+            # Before the INSERT: one foreign or unknown pointer would otherwise
+            # abort the whole multi-row statement with an FK violation (a 500),
+            # or — for another tenant's id — land a cross-tenant edge.
+            await self._assert_pointers_in_tenant(session, tenant_id, items)
             # The conflict target must mirror ``ix_memories_attempt_unique``
             # *expression-for-expression* — the planner only treats the
             # ON CONFLICT and the partial-unique index as matched if every
@@ -2049,6 +2129,9 @@ class PostgresService:
                 return False  # row truly absent — caller → 404
             if row.deleted_at is not None:
                 return False  # soft-deleted — caller → 404, no UPDATE runs
+            # After the existence check, so a patch on an absent row stays a 404
+            # rather than being judged on its pointers.
+            await self._assert_pointers_in_tenant(session, tenant_id, [values])
 
             metadata_patch = _withhold_caller_owned_keys(metadata_patch, row.metadata_)
 
@@ -2143,6 +2226,7 @@ class PostgresService:
         ``False`` cases as a benign skip.
         """
         async with get_session() as session:
+            await self._assert_pointers_in_tenant(session, tenant_id, [{"subject_entity_id": subject_entity_id}])
             result = await session.execute(
                 sql_update(Memory)
                 .where(
@@ -2251,6 +2335,7 @@ class PostgresService:
             values["supersedes_id"] = supersedes_id
 
         async with get_session() as session:
+            await self._assert_pointers_in_tenant(session, tenant_id, [{"supersedes_id": values.get("supersedes_id")}])
             stmt = sql_update(Memory).where(
                 Memory.id == memory_id,
                 Memory.tenant_id == tenant_id,
@@ -2310,6 +2395,7 @@ class PostgresService:
         owns the edge, which is exactly what the CAS is for.
         """
         async with get_session() as session:
+            await self._assert_pointers_in_tenant(session, tenant_id, [{"supersedes_id": supersedes_id}])
             result = await session.execute(
                 sql_update(Memory)
                 .where(
@@ -7616,6 +7702,11 @@ class PostgresService:
                     data["tenant_id"],
                 )
                 raise ValueError(_RELATION_REJECTED)
+            # The evidence memory too: an unknown id is an FK violation (500)
+            # and another tenant's id an edge whose evidence lives across the
+            # boundary. Checked after the endpoints so a bad endpoint keeps its
+            # established 409 answer.
+            await self._assert_pointers_in_tenant(session, data["tenant_id"], [data])
             insert_stmt = pg_insert(Relation).values(**data)
             upsert_stmt = insert_stmt.on_conflict_do_update(
                 constraint="uq_relations_natural_key",

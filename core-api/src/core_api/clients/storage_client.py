@@ -122,6 +122,38 @@ def _storage_duplicate_fields(response: httpx.Response) -> dict:
     return {k: body[k] for k in ("reason", "existing_id", "existing_status") if k in body}
 
 
+class StoragePointerRejectedError(permanent_failure.PermanentWriteFailure):
+    """Storage refused a write: a pointer it carried names no row of the tenant.
+
+    ``subject_entity_id`` / ``supersedes_id`` / ``evidence_memory_id`` arrive
+    from public request bodies (create, bulk, PATCH, relation upsert), so this
+    is the caller's mistake and ``app`` answers it 422. Translated here, at the
+    one boundary every write crosses, for the reason ``PermanentStorageWriteError``
+    is: left an ``httpx.HTTPStatusError``, a storage 4xx reaches
+    ``upstream_http_error_handler``, which re-raises it as a 500.
+
+    ``fields["field"]`` names the pointer. Nothing says whether the row is
+    absent or another tenant's — storage gives one answer for both.
+    """
+
+
+def _storage_pointer_rejected(response: httpx.Response) -> StoragePointerRejectedError | None:
+    """The typed error for storage's pointer refusal, or ``None`` for anything else."""
+    if response.status_code != 422:
+        return None
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(detail, dict) or detail.get("error") != permanent_failure.CAUSE_POINTER_NOT_IN_TENANT:
+        return None
+    message = detail.get("message")
+    return StoragePointerRejectedError(
+        message if isinstance(message, str) and message else "a pointer names no row in this tenant",
+        {k: v for k, v in detail.items() if k == "field"},
+    )
+
+
 def _storage_permanent(response: httpx.Response) -> tuple[str, dict] | None:
     """Storage's permanence marker as ``(message, fields)``, or ``None``.
 
@@ -590,6 +622,11 @@ class CoreStorageClient:
             # inside ``with_retry`` before reaching here. Bounded, so not the
             # unbounded-loop defect, but wasted; the bulk insert is
             # ``idempotent=False`` and is unaffected.
+            #
+            # The pointer refusal first: it carries the same ``retryable:
+            # false`` marker, but it is a 422 the caller fixes, not a 500.
+            if (pointer := _storage_pointer_rejected(resp)) is not None:
+                raise pointer from exc
             if (permanent := _storage_permanent(resp)) is None:
                 raise
             raise PermanentStorageWriteError(*permanent) from exc
@@ -605,6 +642,8 @@ class CoreStorageClient:
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=False)
+        if (pointer := _storage_pointer_rejected(resp)) is not None:
+            raise pointer
         resp.raise_for_status()
         return resp.json()
 

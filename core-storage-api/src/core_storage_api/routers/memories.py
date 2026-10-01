@@ -881,6 +881,14 @@ async def batch_update_status(request: Request) -> dict:
                 ),
             )
 
+    # Every pointer the batch would write, checked before ANY row is: the
+    # per-row writers check too, but a refusal there would land after rows
+    # 0..K-1 committed — the partial batch the validation pass above exists
+    # to prevent. Raises ``PointerNotInTenantError`` → 422 (app-wide handler).
+    await _svc.memory_assert_pointers_in_tenant(
+        tenant_id, [{"supersedes_id": p[2]} for p in parsed if p[2] is not None and not p[3]]
+    )
+
     skipped: list[str] = []
     edge_skipped: list[str] = []
     for mid, new_status, sup_uuid, unset_sup, exp_sup_uuid, expect_null in parsed:
@@ -2174,6 +2182,10 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     # Set or status-only paths. ``memory_update_status`` returns False
     # when the target row doesn't exist (or was already deleted); surface
     # as 404 so the caller doesn't silently treat a no-op as success.
+    if supersedes_id is not None:
+        # Before the status flip, so a pointer this tenant does not own (422)
+        # refuses the whole request instead of landing after the flip.
+        await _svc.memory_assert_pointers_in_tenant(tenant_id, [{"supersedes_id": supersedes_id}])
     ok = await _svc.memory_update_status(memory_id, status, tenant_id=tenant_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")

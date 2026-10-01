@@ -8,7 +8,7 @@ import time
 from fastapi import HTTPException
 
 from common import duplicate_memory
-from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
+from core_api.clients.storage_client import DuplicateMemoryError, StoragePointerRejectedError, get_storage_client
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.schemas import EntityLinkIn
@@ -166,6 +166,13 @@ class WriteMemoryRow:
                 status_code=409,
                 detail=duplicate_memory.core_api_detail(str(exc), **exc.fields),
             ) from exc
+        except StoragePointerRejectedError as exc:
+            # A caller-supplied pointer (``subject_entity_id``) that is not a row
+            # of this tenant — absent or another tenant's, storage does not say
+            # which. The caller's to fix, so 422; and raised as HTTPException
+            # because the pipeline runner turns anything else into a bare 500.
+            # Nothing was committed.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         timings["storage_ms"] = round((time.perf_counter() - storage_t0) * 1000)
 
         # H-05: the row above is COMMITTED, so everything after it degrades rather

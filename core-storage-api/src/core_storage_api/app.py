@@ -17,6 +17,7 @@ from core_storage_api.config import settings
 from core_storage_api.services.postgres_service import (
     BulkRowShapeError,
     DuplicateContentHashError,
+    PointerNotInTenantError,
 )
 
 # Must run before any other module-level import emits a log record —
@@ -229,6 +230,25 @@ def create_app() -> FastAPI:
             content={
                 "detail": permanent_failure.permanent_detail(
                     cause=permanent_failure.CAUSE_BULK_ROW_SHAPE,
+                    message=str(exc),
+                    **exc.fields,
+                )
+            },
+        )
+
+    @app.exception_handler(PointerNotInTenantError)
+    async def _pointer_not_in_tenant_handler(request: Request, exc: PointerNotInTenantError) -> JSONResponse:
+        # App-wide for the reason the two handlers above are: every memory
+        # writer and the relation upsert raise it, and the answer must be the
+        # same on all of them. 422 — the caller named the row, so the caller
+        # can fix it — and marked not retryable, because it fails identically
+        # on every attempt. One answer for "no such row" and "another tenant's
+        # row": only ``field`` says which pointer, never why.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": permanent_failure.permanent_detail(
+                    cause=permanent_failure.CAUSE_POINTER_NOT_IN_TENANT,
                     message=str(exc),
                     **exc.fields,
                 )
