@@ -64,6 +64,12 @@ This starts PostgreSQL + pgvector, Redis, and the core API with hot reload.
 pytest tests/ -v
 ```
 
+`core-api` also keeps a small unit suite of its own, which needs no database:
+
+```bash
+pytest core-api/tests/ -v
+```
+
 `core-storage-api` has a second suite that needs a **separate database**:
 
 ```bash
@@ -107,14 +113,14 @@ See `README.md` for more deployment options and environment variable details.
    ruff format already ran on `git commit`, so you only need:
    ```bash
    mypy core-api/src/ core-storage-api/src/
-   pytest tests/
+   pytest tests/ core-api/tests/
    ```
    Without the hook, also run ruff by hand:
    ```bash
-   ruff check core-api/src/ core-storage-api/src/
-   ruff format --check core-api/src/ core-storage-api/src/
+   ruff check core-api/src/ core-api/tests/ core-storage-api/src/
+   ruff format --check core-api/src/ core-api/tests/ core-storage-api/src/
    mypy core-api/src/ core-storage-api/src/
-   pytest tests/
+   pytest tests/ core-api/tests/
    ```
 6. **Open a PR against `main`.** Fill out the PR template. Branch protection requires CI green, DCO check green, and ≥1 maintainer approval before merge.
 7. **Respond to review.** Expect at least one round of feedback.
