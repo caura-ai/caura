@@ -326,7 +326,10 @@ async def _run_action(
         # for a silently stranded row, which is the failure this whole path
         # exists to end. A nack retries: by then the holder has either
         # finished, making the retry a sticky-success no-op, or its claim has
-        # gone stale and the retry takes the row legitimately.
+        # gone stale and the retry takes the row legitimately. "By then"
+        # relies on the Pub/Sub bus nacking with a growing redelivery delay
+        # (``pubsub._nack_delay_seconds``), not with deadline 0 — at 0 this
+        # delivery would come straight back for the holder's whole run.
         logger.info(
             "lifecycle audit row is claimed by another consumer; nacking",
             extra={"audit_id": audit_id, "action": action, "org_id": org_id},
