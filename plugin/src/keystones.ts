@@ -120,6 +120,38 @@ export function invalidateKeystoneCache(): void {
   inflight.clear();
 }
 
+const FRAME_TAG_RE = /<\/?(?:keystone_rules|recalled_memories)[^>]*>/gi;
+
+/**
+ * Make stored text safe to interpolate as ONE line of a system-prompt block.
+ *
+ * Strips any ``<keystone_rules…>`` / ``</keystone_rules…>`` and
+ * ``<recalled_memories…>`` / ``</recalled_memories…>`` tag, then flattens
+ * newlines to spaces. Without this, a field containing a closing tag (with
+ * or without attributes, on any line) would close its wrapping block early
+ * and let stored text appear OUTSIDE its frame in the model's system prompt
+ * — or, from a recalled memory, open a second, later ``<keystone_rules>``
+ * block that reads as mandatory. The ``[^>]*`` clause covers e.g.
+ * ``<keystone_rules ignored="true">``; the newline strip keeps one field
+ * from spanning lines and breaking the per-line ``- …`` shape both blocks
+ * depend on. Case-insensitive — LLMs don't care about case.
+ *
+ * Used for keystone rule fields here and for recalled memory content in
+ * ``context-engine.ts``; recalled memories include auto-ingested user
+ * messages, so they are text any chat participant can author.
+ */
+export function sanitizePromptField(s: string): string {
+  // Repeat until stable: one pass over ``<keystone_<keystone_rules>rules>``
+  // would remove the inner tag and leave a working outer one behind.
+  let out = s;
+  for (;;) {
+    const next = out.replace(FRAME_TAG_RE, "");
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/[\r\n\u2028\u2029]+/g, " ");
+}
+
 /**
  * Format a list of rules into the ``<keystone_rules>`` block. Lowest-
  * weight rules are dropped first when the token cap is hit so the
@@ -154,25 +186,12 @@ export function formatKeystones(rules: KeystoneRow[]): string {
   const TRUNCATION_RESERVE =
     `... (${Math.max(sorted.length - 1, 0)} more rules omitted)\n`.length;
 
-  // Strip any ``<keystone_rules…>`` / ``</keystone_rules…>`` tag from
-  // rule fields before interpolation, then flatten newlines to spaces.
-  // Without this, a rule whose content contains the closing tag (with
-  // or without attributes, on any line) would close the wrapping block
-  // early and let attacker-controlled text appear OUTSIDE the
-  // mandatory-rules frame in the model's system prompt. The
-  // ``[^>]*`` clause covers e.g. ``<keystone_rules ignored="true">``;
-  // the newline strip prevents a single rule from spanning lines and
-  // breaking the ``- title: content`` per-line shape the prompt
-  // depends on. Case-insensitive — LLMs don't care about case.
-  const sanitize = (s: string): string =>
-    s.replace(/<\/?keystone_rules[^>]*>/gi, "").replace(/[\r\n]+/g, " ");
-
   const lines: string[] = [];
   let charsUsed = header.length + footer.length + TRUNCATION_RESERVE;
   let included = 0;
   for (const rule of sorted) {
-    const title = sanitize((rule.data?.title ?? rule.doc_id).trim());
-    const content = sanitize((rule.data?.content ?? "").trim());
+    const title = sanitizePromptField((rule.data?.title ?? rule.doc_id).trim());
+    const content = sanitizePromptField((rule.data?.content ?? "").trim());
     const line = `- ${title}: ${content}\n`;
     if (charsUsed + line.length > maxChars) break;
     lines.push(line);

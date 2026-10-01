@@ -73,6 +73,13 @@ _DOCUMENTED_READ_YOUR_WRITES = {"entity_resolve_duplicates"}
 # docstring above already records as unsafe. The second pass follows
 # core-api's storage client across the HTTP boundary and finds the rest.
 _MUST_STAY_ON_THE_WRITER = {
+    "memory_assert_pointers_in_tenant": (
+        "routers/memories.py::batch_update_status and update_memory_status "
+        "check every supersedes_id before writing any row. The pointer can name "
+        "a memory written moments earlier (two contradicting writes in quick "
+        "succession); under lag that row reads as absent and a valid request "
+        "is refused with a 422."
+    ),
     "entity_resolve_duplicates": (
         "Its own docstring: the merge loop re-reads rows it mutates, inside "
         "SAVEPOINTs an HTTP boundary cannot express."
@@ -255,12 +262,16 @@ def test_the_writer_session_population_is_pinned() -> None:
     ``document_get_by_doc_id`` holds the writer for the same reason, and the two
     document lookups must not disagree about staleness — that would make the
     ``id`` path unreliable while the ``doc_id`` path was not.
+
+    138 -> 139 (pure 64 -> 65): ``memory_assert_pointers_in_tenant`` is new and
+    only selects, on the writer by design — see its ``_MUST_STAY_ON_THE_WRITER``
+    entry — so the convertible count below does not move.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 138, f"{len(methods)} methods open a writer session"
-    assert len(pure) == 64, f"{len(pure)} of them show no write marker"
+    assert len(methods) == 139, f"{len(methods)} methods open a writer session"
+    assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 
 @pytest.mark.parametrize(

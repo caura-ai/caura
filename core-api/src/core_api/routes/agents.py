@@ -60,11 +60,31 @@ async def patch_agent_trust(
     # Trust changes are the master key to the whole ladder — an agent must not
     # be able to PATCH its own (or a peer's) trust_level to self-promote.
     auth.enforce_not_agent_credential("change agent trust levels")
+    # The prior values, for the audit row below. Primary: a lagged replica
+    # would record the wrong "before" for the change being audited.
+    before = await lookup_agent(tenant_id, agent_id, read=False)
     agent = await update_trust_level(
         tenant_id,
         agent_id,
         body.trust_level,
         fleet_id=body.fleet_id,
+    )
+    # Every trust move leaves a row in the tenant audit log — this is the
+    # control the whole ladder hangs off, so who changed it, and from what,
+    # has to be answerable after the fact.
+    await log_action(
+        tenant_id=tenant_id,
+        action="agent_trust_update",
+        resource_type="agent",
+        resource_id=agent.get("id"),
+        detail={
+            "agent_id": agent.get("agent_id", agent_id),
+            "old_trust_level": (before or {}).get("trust_level"),
+            "new_trust_level": agent.get("trust_level", body.trust_level),
+            "old_fleet_id": (before or {}).get("fleet_id"),
+            "new_fleet_id": agent.get("fleet_id"),
+            "user_id": auth.user_id,
+        },
     )
     return AgentOut.model_validate(agent)
 
@@ -98,6 +118,20 @@ async def update_agent_fleet(
     old_fleet = agent.get("fleet_id")
     stored_agent_id = agent["agent_id"]
     await sc.update_agent_fleet(stored_agent_id, {"tenant_id": tenant_id, "fleet_id": fleet_id})
+    # A home-fleet move grants that fleet's own-fleet access, so it is audited
+    # like a trust change.
+    await log_action(
+        tenant_id=tenant_id,
+        action="agent_fleet_update",
+        resource_type="agent",
+        resource_id=agent.get("id"),
+        detail={
+            "agent_id": stored_agent_id,
+            "old_fleet_id": old_fleet,
+            "new_fleet_id": fleet_id,
+            "user_id": auth.user_id,
+        },
+    )
     return {"agent_id": stored_agent_id, "old_fleet_id": old_fleet, "new_fleet_id": fleet_id}
 
 

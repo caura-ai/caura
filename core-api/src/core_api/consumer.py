@@ -103,6 +103,9 @@ async def _fan_out_persisted_atomic_facts(sc, memory: dict, payload, outcome) ->
                 parent_weight=_resolve_parent_weight(memory.get("weight")),
                 parent_ts_start=memory.get("ts_valid_start"),
                 tenant_config=await resolve_config(payload.tenant_id),
+                parent_expires_at=memory.get("expires_at"),
+                parent_run_id=memory.get("run_id"),
+                parent_source_uri=memory.get("source_uri"),
             )
         except Exception:
             # Marker deliberately left in place: the facts are still stored, so a

@@ -70,10 +70,11 @@ from core_api.schemas import (
 )
 from core_api.services.agent_service import (
     authorize_memory_access,
+    broker_owned_agent_id,
     enforce_delete,
+    enforce_document_overwrite,
     enforce_fleet_read_many,
     enforce_fleet_write,
-    get_or_create_agent,
     lookup_agent,
     resolve_write_agent,
 )
@@ -628,6 +629,27 @@ def _is_install_credential() -> bool:
 def _get_install_uuid() -> str | None:
     """The broker's install UUID (X-Install-UUID), or None for non-broker calls."""
     return _install_uuid_var.get(None)
+
+
+async def _broker_owned_tool_agent_id(agent_id: str) -> str:
+    """Apply the broker agent-ownership boundary to a tool's resolved identity.
+
+    An install credential carries no agent identity on the wire, so the tool's
+    ``agent_id`` argument is a claim, not a fact. Degrade a claim naming an
+    agent another install owns (or another install's reserved ``broker:`` id)
+    to this install's own ``broker:<install>`` identity, exactly as
+    ``resolve_write_agent`` does for ``caura_write`` and
+    ``caller_identity.resolve_caller_and_gate`` does for the REST evolve /
+    insights routes. Every other credential passes through unchanged.
+
+    For tools that only ever act on an already-registered agent
+    (``caura_insights`` / ``caura_evolve``). Tools that may first-touch the row
+    (``caura_tune``, ``caura_doc op=write``) go through ``resolve_write_agent``
+    instead, which applies this same gate and also stamps ownership on create.
+    """
+    if not _is_install_credential():
+        return agent_id
+    return await broker_owned_agent_id(agent_id, _get_install_uuid(), _get_tenant())
 
 
 def _is_org_read_only() -> bool:
@@ -1519,6 +1541,7 @@ async def caura_recall(
             fleet_ids=fleet_ids,
             filter_agent_id=filter_agent_id,
             caller_agent_id=agent_id,
+            caller_tenant_id=tenant_id,
             memory_type_filter=memory_type,
             status_filter=status,
             top_k=capped_top_k,
@@ -2438,10 +2461,20 @@ async def caura_tune(
         return _with_latency(_error_response("INVALID_ARGUMENTS", f"{e}"), t0)
 
     updates = profile.model_dump(exclude_none=True)
-    # WRITE → home tenant only. ``get_or_create_agent`` scopes the lookup or
+    # WRITE → home tenant only. ``resolve_write_agent`` scopes the lookup or
     # create, and the search-profile PATCH binds that same tenant to the update.
     try:
-        agent = await get_or_create_agent(tenant_id, agent_id)
+        # Broker ownership boundary + owner stamp on first touch — the same
+        # resolution ``caura_write`` uses, so an install credential cannot
+        # rewrite the profile of an agent another install owns. Non-broker
+        # callers reach ``get_or_create_agent`` unchanged.
+        agent, agent_id = await resolve_write_agent(
+            agent_id,
+            tenant_id,
+            None,
+            is_install_credential=_is_install_credential(),
+            install_uuid=_get_install_uuid(),
+        )
         current = agent.get("search_profile") or {}
         if updates:
             current.update(updates)
@@ -2926,7 +2959,32 @@ async def caura_doc(
                 # Mirror caura_write's agent registration so a doc upsert
                 # via MCP creates the Agent row on first contact and enforces
                 # cross-fleet trust gating. WRITE → home tenant only.
+                #
+                # Broker ownership boundary first (parity with caura_write): an
+                # install credential's ``agent_id`` is a claim, so a doc — and
+                # the memory minted from it below — must not land under an
+                # agent another install owns.
+                _, agent_id = await resolve_write_agent(
+                    agent_id,
+                    tenant_id,
+                    fleet_id,
+                    is_install_credential=_is_install_credential(),
+                    install_uuid=_get_install_uuid(),
+                )
                 write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
+                # Replacing a document a different agent authored needs the
+                # trust op=delete needs (parity with REST POST /documents); an
+                # unowned, author-less doc does not. Agent credentials only —
+                # keyed on the authenticated identity, never on the
+                # ``agent_id`` argument, like the delete gate.
+                if caller_agent_id is not None:
+                    await enforce_document_overwrite(
+                        tenant_id,
+                        agent_id,
+                        collection=write_collection,
+                        doc_id=doc_id,
+                        force=False,
+                    )
                 # Same home-fleet resolution as caura_write: keep an omitted
                 # fleet_id from publishing a fleet_id=NULL doc/skill row that
                 # fleet-scoped teammates can't discover. No-op when the agent
@@ -2941,6 +2999,10 @@ async def caura_doc(
                         "collection": collection,
                         "doc_id": doc_id,
                         "data": data,
+                        # Author of this version, as REST records it. The
+                        # overwrite gate above reads it back, so a doc an
+                        # agent wrote here stays its own to update.
+                        "agent_id": agent_id,
                         "embedding": embedding,
                     }
                 )
@@ -3489,6 +3551,7 @@ async def caura_list(
             list_payload: dict[str, Any] = {
                 "tenant_id": tenant_id,
                 "caller_agent_id": agent_id,
+                "caller_tenant_id": tenant_id,
                 "fleet_id": fleet_id,
                 "written_by": effective_written_by,
                 "memory_type": memory_type,
@@ -3775,6 +3838,10 @@ async def caura_insights(
         # ``check_and_increment`` ignore db and the ``_QUERY_DISPATCH`` fns
         # call core-storage-api. No pooled DB connection is held.
         async with _no_db():
+            # Broker ownership boundary before the trust gate, so trust is read
+            # for — and findings are attributed to — the identity actually
+            # written (parity with REST ``resolve_caller_and_gate``).
+            agent_id = await _broker_owned_tool_agent_id(agent_id)
             # Mirror the REST insights gate: ``require_trust`` soft-passes
             # a missing Agent row at ``DEFAULT_TRUST_LEVEL`` (read-only
             # ergonomics — see ``caura_list`` below for the intended
@@ -3961,6 +4028,9 @@ async def caura_evolve(
         # ``check_and_increment`` ignore db and ``_filter_by_scope`` calls
         # core-storage-api. No pooled DB connection is held.
         async with _no_db():
+            # Broker ownership boundary before the trust gate — see
+            # ``caura_insights`` above.
+            agent_id = await _broker_owned_tool_agent_id(agent_id)
             # Mirror the REST evolve gate (and ``caura_insights`` above):
             # block unregistered agents on the write path so the
             # outcome/rule memories + audit-log rows have a real

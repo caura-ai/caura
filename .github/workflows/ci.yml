@@ -151,7 +151,7 @@ jobs:
           fi
 
       - name: Run Ruff linter (core-api)
-        run: uv run ruff check core-api/src/
+        run: uv run ruff check core-api/src/ core-api/tests/
 
       - name: Run Ruff linter (core-storage-api)
         run: uv run ruff check core-storage-api/src/
@@ -223,7 +223,7 @@ jobs:
         run: uv run ruff check tests/
 
       - name: Run Ruff formatter check (core-api)
-        run: uv run ruff format --check core-api/src/
+        run: uv run ruff format --check core-api/src/ core-api/tests/
 
       - name: Run Ruff formatter check (core-storage-api)
         run: uv run ruff format --check core-storage-api/src/
@@ -549,6 +549,22 @@ jobs:
             --rcfile=core-storage-api/pyproject.toml \
             --include="core-storage-api/src/core_storage_api/*" || status=1
           exit "$status"
+
+      - name: Run core-api unit tests
+        # core-api/tests/ is core-api's own tree, separate from the repo-root
+        # tests/ above, and no step ran it — an explicit path overrides the
+        # root pytest.ini's ``testpaths``. It holds the only regression cover
+        # for the tenantless ``AuthContext.enforce_tenant(None)`` write gate
+        # and for broker write attribution (``_broker_write_agent_id``), so a
+        # revert of either would have merged green.
+        # ``tests/test_ci_runs_every_service_test_tree.py`` now fails if any
+        # service tree drops out of the pytest or ruff steps.
+        #
+        # No env, deliberately: these are pure unit tests (no database, no
+        # settings), and the root pytest.ini — which pytest resolves for this
+        # path, since core-api/pyproject.toml carries no pytest table — puts
+        # core-api/src and the repo root on the path.
+        run: uv run pytest core-api/tests/ -v --tb=short
 
       - name: Create the storage-suite database
         # Its own database, NOT the one `tests/` uses. The two suites provision

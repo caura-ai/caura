@@ -163,7 +163,7 @@ async def test_submit_happy_path_writes_typed_memories_and_watermark(
 ):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
 
     resp = await client.post(
         "/api/v1/interview/submit",
@@ -199,7 +199,7 @@ async def test_submit_happy_path_writes_typed_memories_and_watermark(
 async def test_submit_retry_is_idempotent(client, canned_llm):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
     payload = _payload(tenant_id, node_id, agent_id)
 
     first = await client.post("/api/v1/interview/submit", json=payload, headers=headers)
@@ -222,7 +222,7 @@ async def test_submit_retry_is_idempotent(client, canned_llm):
 async def test_watermark_is_forward_only(client, canned_llm):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
 
     first = await client.post(
         "/api/v1/interview/submit",
@@ -327,15 +327,20 @@ def test_report_to_items_maps_types_and_event_time():
 # ── schedule (admin cron entry point) ──
 
 
-async def _seed_live_node(
-    client, tenant_id: str, headers: dict, node_name: str
-) -> None:
+async def _seed_live_node(client, tenant_id: str, headers: dict, node_name: str) -> str:
     resp = await client.post(
         "/api/v1/fleet/heartbeat",
         json={"tenant_id": tenant_id, "node_name": node_name},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
+    return resp.json()["node_id"]
+
+
+async def _node(client, tenant_id: str, headers: dict) -> str:
+    """A registered fleet node's UUID — the route refuses a ``node_id`` that
+    is not a node of the tenant, the key the scheduler hands the plugin."""
+    return await _seed_live_node(client, tenant_id, headers, f"node-{uid()}")
 
 
 async def _interview_commands(client, tenant_id: str, headers: dict) -> list[dict]:
@@ -554,7 +559,9 @@ async def test_submit_times_out_with_504_and_unconsumed_window(client, monkeypat
 
     resp = await client.post(
         "/api/v1/interview/submit",
-        json=_payload(tenant_id, f"node-{uid()}", f"agent-{uid()}"),
+        json=_payload(
+            tenant_id, await _node(client, tenant_id, headers), f"agent-{uid()}"
+        ),
         headers=headers,
     )
     assert resp.status_code == 504

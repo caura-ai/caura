@@ -135,6 +135,11 @@ What it does **not** bypass:
   warns are surfaced on the operator card but do not block activation
   (matching the inbox approve semantics; see
   `test_flag_on_but_warn_scan_still_auto_activates`).
+  The scan reads the skill body (`content`) — the file agents load —
+  plus `summary` and `description`: prompt-injection markers and shell
+  patterns such as a download piped into a shell are critical (no
+  auto-promotion); links to paste or webhook-capture hosts are a warn,
+  so they do **not** stop auto-promotion on their own.
 
 Audit visibility: the lifecycle-audit row's `stats.auto_approved`
 counts how many of that tick's promotions skipped the inbox; `promoted

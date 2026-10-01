@@ -5,8 +5,10 @@ touched. Two endpoints:
 
   - ``POST /tenant-suppression`` — upsert for the OSS suppression
     consumer (core-worker in SaaS, core-api in OSS-standalone if it
-    grows a subscriber). Body: ``{tenant_id, action, updated_by?}``
-    where ``action`` is ``suppress`` | ``restore``.
+    grows a subscriber). Body: ``{tenant_id, action, updated_by?,
+    occurred_at?}`` where ``action`` is ``suppress`` | ``restore`` and
+    ``occurred_at`` is the event's ISO-8601 time — an upsert older than
+    the stored one is ignored (last writer wins by event time).
   - ``GET  /tenant-suppression/{tenant_id}`` — boundary-guard read.
     Returns ``{tenant_id, suppressed_at, updated_at, updated_by}`` or
     a small ``{tenant_id, suppressed_at: null}`` for an unknown
@@ -22,6 +24,7 @@ core-api. Do NOT expose this surface to the public internet.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -39,7 +42,7 @@ _ALLOWED_ACTIONS: set[str] = {"suppress", "restore"}
 
 @router.post("")
 async def upsert_tenant_suppression(request: Request) -> dict:
-    """Upsert one row. Body: ``{tenant_id, action, updated_by?}``.
+    """Upsert one row. Body: ``{tenant_id, action, updated_by?, occurred_at?}``.
 
     Returns the resulting row so the caller can log the post-state
     without an extra GET. The service-layer ``set_tenant_suppression``
@@ -81,8 +84,28 @@ async def upsert_tenant_suppression(request: Request) -> dict:
             status_code=422,
             detail="'updated_by' must be a string when provided",
         )
+    # ``occurred_at`` is optional (callers without an event time get
+    # ``now()``), but when present it decides ordering, so a value that is
+    # not an offset-aware ISO-8601 timestamp is a 422 rather than a guess:
+    # a naive time would be compared as if it were UTC.
+    raw_occurred_at = body.get("occurred_at")
+    occurred_at: datetime | None = None
+    if raw_occurred_at is not None:
+        try:
+            occurred_at = (
+                datetime.fromisoformat(raw_occurred_at) if isinstance(raw_occurred_at, str) else None
+            )
+        except ValueError:
+            occurred_at = None
+        if occurred_at is None or occurred_at.tzinfo is None:
+            raise HTTPException(
+                status_code=422,
+                detail="'occurred_at' must be an ISO-8601 timestamp with a UTC offset when provided",
+            )
     typed_action: Literal["suppress", "restore"] = action  # narrowed above
-    row = await _svc.set_tenant_suppression(tenant_id, action=typed_action, updated_by=updated_by)
+    row = await _svc.set_tenant_suppression(
+        tenant_id, action=typed_action, updated_by=updated_by, occurred_at=occurred_at
+    )
     return row
 
 

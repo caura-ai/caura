@@ -75,6 +75,7 @@ class ClassifyQuery:
         fleet_ids: list[str] | None = ctx.data.get("fleet_ids")
         fleet_ids = fleet_ids or None  # normalise [] → None for consistent fleet filtering
         caller_agent_id: str | None = ctx.data.get("caller_agent_id")
+        caller_tenant_id: str | None = ctx.data.get("caller_tenant_id")
         filter_agent_id: str | None = ctx.data.get("filter_agent_id")
         memory_type_filter: str | None = ctx.data.get("memory_type_filter")
         status_filter: str | None = ctx.data.get("status_filter")
@@ -228,6 +229,7 @@ class ClassifyQuery:
                         query=query,
                         fleet_ids=fleet_ids,
                         caller_agent_id=caller_agent_id,
+                        caller_tenant_id=caller_tenant_id,
                         filter_agent_id=filter_agent_id,
                         memory_type_filter=memory_type_filter,
                         status_filter=status_filter,
@@ -541,6 +543,7 @@ class ClassifyQuery:
         query: str = "",
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
@@ -652,6 +655,7 @@ class ClassifyQuery:
             "memory_ids": list(memory_boost.keys()),
             "fleet_ids": fleet_ids,
             "caller_agent_id": caller_agent_id,
+            "caller_tenant_id": caller_tenant_id,
             "filter_agent_id": filter_agent_id,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,

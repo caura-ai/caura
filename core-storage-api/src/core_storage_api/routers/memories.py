@@ -198,6 +198,7 @@ async def scored_search(request: Request) -> list[dict]:
                 query=body["query"],
                 fleet_ids=body.get("fleet_ids"),
                 caller_agent_id=body.get("caller_agent_id"),
+                caller_tenant_id=body.get("caller_tenant_id"),
                 filter_agent_id=body.get("filter_agent_id"),
                 memory_type_filter=body.get("memory_type_filter"),
                 status_filter=body.get("status_filter"),
@@ -341,6 +342,7 @@ async def load_by_ids(request: Request) -> list[dict]:
                 tenant_id=tenant_id,
                 fleet_ids=body.get("fleet_ids"),
                 caller_agent_id=body.get("caller_agent_id"),
+                caller_tenant_id=body.get("caller_tenant_id"),
                 filter_agent_id=body.get("filter_agent_id"),
                 memory_type_filter=body.get("memory_type_filter"),
                 status_filter=body.get("status_filter"),
@@ -480,6 +482,7 @@ async def find_successors(request: Request) -> list[dict]:
         tenant_id=body["tenant_id"],
         fleet_ids=body.get("fleet_ids"),
         caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
         filter_agent_id=body.get("filter_agent_id"),
         memory_type_filter=body.get("memory_type_filter"),
         valid_at=valid_at,
@@ -877,6 +880,14 @@ async def batch_update_status(request: Request) -> dict:
                     f"{type(exc).__name__} in {field_hint}"
                 ),
             )
+
+    # Every pointer the batch would write, checked before ANY row is: the
+    # per-row writers check too, but a refusal there would land after rows
+    # 0..K-1 committed — the partial batch the validation pass above exists
+    # to prevent. Raises ``PointerNotInTenantError`` → 422 (app-wide handler).
+    await _svc.memory_assert_pointers_in_tenant(
+        tenant_id, [{"supersedes_id": p[2]} for p in parsed if p[2] is not None and not p[3]]
+    )
 
     skipped: list[str] = []
     edge_skipped: list[str] = []
@@ -1557,10 +1568,12 @@ async def admin_list(request: Request) -> list[dict]:
 async def list_by_filters(request: Request) -> list[dict]:
     """Non-admin memory list WITH visibility scoping (MCP ``caura_list``).
 
-    Body: ``{tenant_id, caller_agent_id?, fleet_id?, written_by?, memory_type?,
-    status?, run_id?, weight_min?, weight_max?, created_after?, created_before?,
-    include_deleted, sort, order, limit, offset, cursor_ts?, cursor_id?,
-    readable_tenant_ids?, visibility?}``. ``limit`` is the caller's desired page size; this
+    Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
+    written_by?, memory_type?, status?, run_id?, weight_min?, weight_max?,
+    created_after?, created_before?, include_deleted, sort, order, limit, offset,
+    cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?}``.
+    ``caller_tenant_id`` is the caller's home tenant: its own ``scope_agent``
+    rows are matched there only (defaults to ``tenant_id``). ``limit`` is the caller's desired page size; this
     endpoint over-fetches ``limit+1`` rows internally for has_more detection and
     the caller slices to ``limit`` / builds the next cursor. Distinct from
     ``/admin-list`` which has NO visibility scoping.
@@ -1606,6 +1619,7 @@ async def list_by_filters(request: Request) -> list[dict]:
     memories = await _svc.memory_list_by_filters(
         tenant_id=tenant_id,
         caller_agent_id=body.get("caller_agent_id"),
+        caller_tenant_id=body.get("caller_tenant_id"),
         fleet_id=body.get("fleet_id"),
         written_by=body.get("written_by"),
         memory_type=memory_type,
@@ -2168,6 +2182,10 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     # Set or status-only paths. ``memory_update_status`` returns False
     # when the target row doesn't exist (or was already deleted); surface
     # as 404 so the caller doesn't silently treat a no-op as success.
+    if supersedes_id is not None:
+        # Before the status flip, so a pointer this tenant does not own (422)
+        # refuses the whole request instead of landing after the flip.
+        await _svc.memory_assert_pointers_in_tenant(tenant_id, [{"supersedes_id": supersedes_id}])
     ok = await _svc.memory_update_status(memory_id, status, tenant_id=tenant_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")

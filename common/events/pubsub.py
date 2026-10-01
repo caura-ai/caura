@@ -114,6 +114,46 @@ LEASE_REFRESH_INTERVAL_SECONDS = 15.0
 # non-empty pull including the fast majority that need none.
 LEASE_FIRST_REFRESH_SECONDS = 5.0
 
+# How long a nacked message stays invisible before Pub/Sub redelivers it.
+#
+# A nack used to be ``modify_ack_deadline`` of 0 — "redeliver now". Nothing
+# else spaces redeliveries out: no subscription this codebase creates carries a
+# ``RetryPolicy``, durable ones are provisioned elsewhere, and some handlers
+# raise on purpose to be retried LATER (a lifecycle message whose claim is held
+# by a run still in progress raises ``claim_conflict`` expecting the holder to
+# have finished by the next attempt). At deadline 0 that message comes straight
+# back at pull-loop speed for the holder's whole run, and under a
+# ``max_delivery_attempts`` dead-letter policy it is dead-lettered within
+# seconds.
+#
+# So a nack now asks for a delay that grows with ``delivery_attempt``:
+# ``NACK_BACKOFF_BASE_SECONDS * 2**(attempt - 1)``, capped at
+# ``NACK_BACKOFF_MAX_SECONDS`` (600 is the API's ceiling). Pub/Sub only fills
+# ``delivery_attempt`` on subscriptions with a dead-letter policy — exactly the
+# ones that can run out of attempts — and reports 0 elsewhere, where every
+# redelivery gets the base delay. Base 10 keeps a one-off failure cheap; it is
+# deliberately not ``LEASE_EXTENSION_SECONDS``, so a nack and a lease extension
+# are distinguishable on the wire. A subscription-level ``RetryPolicy`` with a
+# minimum backoff is still the recommended setting for durable subscriptions;
+# this makes the bus safe without one.
+NACK_BACKOFF_BASE_SECONDS = 10
+NACK_BACKOFF_MAX_SECONDS = 600
+
+
+def _nack_delay_seconds(delivery_attempt: object) -> int:
+    """Ack deadline to nack with, for a message on its ``delivery_attempt``-th
+    delivery. Anything that is not a positive ``int`` (0 = not tracked by the
+    subscription) gets the base delay.
+    """
+    attempt = delivery_attempt if isinstance(delivery_attempt, int) else 0
+    if attempt <= 1:
+        return NACK_BACKOFF_BASE_SECONDS
+    # ``min`` on the exponent first, so a huge attempt count can't build a
+    # huge int just to be capped.
+    exponent = min(attempt - 1, 16)
+    return min(NACK_BACKOFF_BASE_SECONDS * 2**exponent, NACK_BACKOFF_MAX_SECONDS)
+
+
 # Per-call ceiling on the delete RPC in ``release_broadcast_subscriptions()``.
 #
 # The SDK's generated default is 60s, with a retry deadline also 60s — six times
@@ -375,7 +415,8 @@ class PubSubEventBus(EventBus):
     The handler side spawns one async pull task per subscription when
     `start()` is called. Each pull task receives a message, runs the
     handler, and ack/nacks based on the outcome. Pub/Sub handles redelivery
-    on nack.
+    on nack, after a delay that grows with the delivery attempt (see
+    ``_nack_delay_seconds``).
 
     **At-least-once delivery**: handlers registered against this bus
     *must* be idempotent. Pub/Sub redelivers on ack failure and on
@@ -1289,7 +1330,10 @@ class PubSubEventBus(EventBus):
                     ),
                 )
                 ack_ids: list[str] = []
-                nack_ids: list[str] = []
+                # Keyed by the redelivery delay each one asks for — see
+                # ``_nack_delay_seconds``. ``modify_ack_deadline`` takes one
+                # deadline per request, so each delay is its own request.
+                nack_ids: dict[int, list[str]] = {}
                 # Every id this pull returned, whatever its eventual outcome.
                 # The keeper holds ALL of them until the acks go out, because
                 # the point is precisely that a message which finished first
@@ -1345,7 +1389,13 @@ class PubSubEventBus(EventBus):
                         ack_ids.append(received.ack_id)
                         continue
                     success = await self._dispatch_all(handlers, event)
-                    (ack_ids if success else nack_ids).append(received.ack_id)
+                    if success:
+                        ack_ids.append(received.ack_id)
+                    else:
+                        delay = _nack_delay_seconds(
+                            getattr(received, "delivery_attempt", 0)
+                        )
+                        nack_ids.setdefault(delay, []).append(received.ack_id)
 
                 # DRAIN the keeper before the acks, and above all before the
                 # nack. Signalled and AWAITED, not cancelled: ``cancel()`` only
@@ -1355,10 +1405,10 @@ class PubSubEventBus(EventBus):
                 #
                 # On the ack path that leftover is harmless — it names ids the
                 # ack is retiring. On the nack path it is not. A nack is a
-                # ``modify_ack_deadline`` of 0, so an extension arriving behind
-                # it returns the FAILED message to ``LEASE_EXTENSION_SECONDS``
-                # of invisibility and silently inverts "redeliver now" into a
-                # minute of nothing. The original reasoning was sound for the
+                # ``modify_ack_deadline`` of a short, chosen delay (see
+                # ``_nack_delay_seconds``), so an extension arriving behind it
+                # overwrites that with ``LEASE_EXTENSION_SECONDS`` and silently
+                # replaces the backoff the nack asked for. The original reasoning was sound for the
                 # case it considered and simply did not reach this one.
                 #
                 # Awaiting is what closes it. ``stop`` is already set, so the
@@ -1410,11 +1460,11 @@ class PubSubEventBus(EventBus):
                         pull_executor,
                         functools.partial(subscriber.acknowledge, request=ack_request),
                     )
-                if nack_ids:
+                for delay, ids in nack_ids.items():
                     nack_request = {
                         "subscription": sub_path,
-                        "ack_ids": nack_ids,
-                        "ack_deadline_seconds": 0,
+                        "ack_ids": ids,
+                        "ack_deadline_seconds": delay,
                     }
                     await loop.run_in_executor(
                         pull_executor,

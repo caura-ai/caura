@@ -2290,11 +2290,13 @@
             }
           },
           {
+            "description": "Include soft-deleted rows. Honoured for tenant credentials; an agent credential needs trust >= 3, below which it is ignored (as on MCP `caura_list`).",
             "in": "query",
             "name": "include_deleted",
             "required": false,
             "schema": {
               "default": false,
+              "description": "Include soft-deleted rows. Honoured for tenant credentials; an agent credential needs trust >= 3, below which it is ignored (as on MCP `caura_list`).",
               "title": "Include Deleted",
               "type": "boolean"
             }

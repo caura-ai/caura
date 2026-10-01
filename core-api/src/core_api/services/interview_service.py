@@ -419,6 +419,15 @@ async def _read_watermark_seq(sc, tenant_id: str, doc_id: str) -> int:
     return -1
 
 
+async def read_watermark(tenant_id: str, node_id: str) -> int:
+    """The node's committed cursor (``-1`` when it has never been interviewed).
+
+    Primary read, like every other watermark read: the submit route bounds a
+    window against it, and a lagged answer would bound against a stale cursor.
+    """
+    return await _read_watermark_seq(get_storage_client(), tenant_id, watermark_doc_id(node_id))
+
+
 # Bounded verify-and-repair passes for the read-max-write loop below.
 _WATERMARK_WRITE_ATTEMPTS = 3
 
