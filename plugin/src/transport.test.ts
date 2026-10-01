@@ -67,6 +67,27 @@ describe("apiCall — CAURA_API_PREFIX handling", () => {
     assert.equal(calls[0].url, "http://localhost:8000/api/v1/search");
   });
 
+  test("exposes response headers without changing an array payload", async () => {
+    globalThis.fetch = (async () => new Response(JSON.stringify([{ id: "r1" }]), {
+      status: 200, headers: { "X-Truncated": "true" },
+    })) as typeof fetch;
+    let truncated: string | null = null;
+    const result = await apiCall("GET", "/memories", undefined, undefined, undefined,
+      undefined, undefined, (headers) => { truncated = headers.get("X-Truncated"); });
+    assert.equal(truncated, "true");
+    assert.deepEqual(result, [{ id: "r1" }]);
+  });
+
+  test("does not publish success metadata for failed responses", async () => {
+    globalThis.fetch = (async () => new Response("unavailable", {
+      status: 503, headers: { "X-Truncated": "true" },
+    })) as typeof fetch;
+    let notified = false;
+    await assert.rejects(apiCall("GET", "/memories", undefined, undefined, undefined,
+      undefined, undefined, () => { notified = true; }), /Caura API 503/);
+    assert.equal(notified, false);
+  });
+
   test("rejects paths starting with CAURA_API_PREFIX", async () => {
     await assert.rejects(
       () => apiCall("POST", "/api/v1/search", {}),

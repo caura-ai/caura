@@ -21,6 +21,7 @@ export async function apiCall(
   signal?: AbortSignal,
   agentId?: string,
   extraHeaders?: Record<string, string>,
+  onResponseHeaders?: (headers: Headers) => void,
 ): Promise<unknown> {
   const start = Date.now();
 
@@ -104,6 +105,10 @@ export async function apiCall(
       const safeText = text.length > 200 ? text.slice(0, 200) + "..." : text;
       throw new Error(`Caura API ${res.status}: ${safeText}`);
     }
+
+    // Expose metadata from the final successful response without changing
+    // the JSON payload contract for existing callers (including arrays).
+    onResponseHeaders?.(res.headers);
 
     // 204 No Content (e.g. DELETE)
     if (res.status === 204) {

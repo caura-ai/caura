@@ -30,6 +30,7 @@ import {
 import { assertSafePathSegment } from "./validation.js";
 import { resolveAgentIdQuiet } from "./resolve-agent.js";
 import { getSpec } from "./tool-specs.js";
+import { fetchKeystonesPayload } from "./keystones.js";
 
 interface ToolResult {
   content: Array<{ type: string; text: string }>;
@@ -734,7 +735,7 @@ const ENDPOINT_DISPATCH: Record<string, ExecuteFn> = {
       if (k === "agent_id" && !enriched.fleet_id) continue;
       query[k] = String(v);
     }
-    return apiCall("GET", "/memclaw/keystones", undefined, query, signal); // legacy-name-floor: live compatibility route
+    return fetchKeystonesPayload(query, signal);
   },
 
 };
