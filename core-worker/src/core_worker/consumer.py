@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from types import SimpleNamespace
 
 import httpx
@@ -788,7 +789,14 @@ class _SuppressionAdapter(SuppressionStorageAdapter):
     + enrich handlers use to reach the storage client.
     """
 
-    async def set_tenant_suppression(self, *, tenant_id: str, action: str, updated_by: str | None) -> None:
+    async def set_tenant_suppression(
+        self,
+        *,
+        tenant_id: str,
+        action: str,
+        updated_by: str | None,
+        occurred_at: datetime | None = None,
+    ) -> None:
         if _storage_client_factory is None:
             raise RuntimeError("consumer.configure() must run before register_consumers()")
         client = _storage_client_factory()
@@ -797,6 +805,7 @@ class _SuppressionAdapter(SuppressionStorageAdapter):
             tenant_id=tenant_id,
             action=action,
             updated_by=updated_by,
+            occurred_at=occurred_at,
         )
 
 

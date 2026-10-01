@@ -4726,6 +4726,7 @@ class PostgresService:
         *,
         action: str,
         updated_by: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> dict:
         """Upsert one row in ``public.tenant_suppression`` (CAURA-694).
 
@@ -4738,9 +4739,20 @@ class PostgresService:
         time is the meaningful one) but still bumps ``updated_at`` /
         ``updated_by``. A duplicate ``restore`` is a no-op-shaped
         update that still leaves the row in the ``live`` state.
+
+        Last writer wins BY EVENT TIME, not by arrival. ``occurred_at`` is
+        when the publisher made the decision; it is stored in
+        ``updated_at`` (``now()`` when the caller has none), and an upsert
+        whose time is OLDER than the stored one changes nothing. Pub/Sub
+        delivers at least once and in no particular order, so without this
+        a redelivered or dead-letter-replayed ``restore`` landing after a
+        newer ``suppress`` un-suppressed the org. An equal time applies, so
+        a plain redelivery of the latest event stays idempotent. A skipped
+        upsert returns the stored row with ``applied=False``.
         """
         if action not in {"suppress", "restore"}:
             raise ValueError(f"unknown suppression action: {action!r}")
+        params = {"tid": tenant_id, "who": updated_by, "at": occurred_at}
         async with get_session() as session:
             if action == "suppress":
                 # ON CONFLICT: keep the original suppressed_at (first one
@@ -4750,34 +4762,46 @@ class PostgresService:
                     text("""
                         INSERT INTO public.tenant_suppression
                             (tenant_id, suppressed_at, updated_at, updated_by)
-                        VALUES (:tid, now(), now(), :who)
+                        VALUES (:tid, now(), COALESCE(CAST(:at AS timestamptz), now()), :who)
                         ON CONFLICT (tenant_id) DO UPDATE
                           SET suppressed_at = COALESCE(
                                 public.tenant_suppression.suppressed_at,
                                 EXCLUDED.suppressed_at
                               ),
-                              updated_at = now(),
+                              updated_at = EXCLUDED.updated_at,
                               updated_by = EXCLUDED.updated_by
+                          WHERE public.tenant_suppression.updated_at <= EXCLUDED.updated_at
                         RETURNING tenant_id, suppressed_at, updated_at, updated_by
                     """),
-                    {"tid": tenant_id, "who": updated_by},
+                    params,
                 )
             else:  # restore
                 result = await session.execute(
                     text("""
                         INSERT INTO public.tenant_suppression
                             (tenant_id, suppressed_at, updated_at, updated_by)
-                        VALUES (:tid, NULL, now(), :who)
+                        VALUES (:tid, NULL, COALESCE(CAST(:at AS timestamptz), now()), :who)
                         ON CONFLICT (tenant_id) DO UPDATE
                           SET suppressed_at = NULL,
-                              updated_at = now(),
+                              updated_at = EXCLUDED.updated_at,
                               updated_by = EXCLUDED.updated_by
+                          WHERE public.tenant_suppression.updated_at <= EXCLUDED.updated_at
                         RETURNING tenant_id, suppressed_at, updated_at, updated_by
                     """),
-                    {"tid": tenant_id, "who": updated_by},
+                    params,
                 )
-            row = result.mappings().one()
-            return dict(row)
+            row = result.mappings().one_or_none()
+            if row is not None:
+                return {**dict(row), "applied": True}
+            # The WHERE refused a stale event: report what is stored.
+            current = await session.execute(
+                text(
+                    "SELECT tenant_id, suppressed_at, updated_at, updated_by "
+                    "FROM public.tenant_suppression WHERE tenant_id = :tid"
+                ),
+                {"tid": tenant_id},
+            )
+            return {**dict(current.mappings().one()), "applied": False}
 
     async def is_tenant_suppressed(self, tenant_id: str) -> bool:
         """Boundary-guard primitive used by core-api auth (CAURA-694).
