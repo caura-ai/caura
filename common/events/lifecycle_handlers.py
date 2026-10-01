@@ -179,8 +179,11 @@ async def _run_action(
     if a successful run for the same org+action exists within the
     window, this delivery is a no-op (audit row marked success with
     ``stats.skipped`` so observers can distinguish "did the work" from
-    "skipped because already done"). Filtering on ``finished_at``
-    naturally excludes the in-progress row pre-published moments ago.
+    "skipped because already done"). Only ``success`` rows count, so the
+    in-progress row pre-published moments ago is naturally excluded, and the
+    window is measured from each row's tick (``started_at``) rather than
+    from when it finished, so a late-finishing run cannot push the next
+    scheduled tick into a skip.
     """
     try:
         # ``model_validate`` (not a kwargs-splat) so a non-dict payload

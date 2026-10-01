@@ -13058,10 +13058,15 @@ class PostgresService:
         + immediate redeploy, manual re-trigger after a recent
         successful run, etc.).
 
-        Filters on ``finished_at`` rather than ``started_at`` so an
-        in-progress row from the current attempt — pre-published by
-        the fanout endpoint just moments ago — is naturally excluded
-        (its ``finished_at`` is still NULL).
+        The window is measured from ``started_at`` -- the moment the fanout
+        wrote the row, i.e. the tick the run belongs to -- not from when it
+        finished. Keyed on ``finished_at``, a run that finished late (the
+        reconcile sweep republishing a lost message an hour or more after
+        its tick, or simply a long run) landed inside the NEXT tick's window
+        and made the org skip its next scheduled run. The in-progress row of
+        the current attempt is excluded by the ``status`` filter. The
+        ``finished_at`` bound is implied by the ``started_at`` one and kept
+        because it is what the partial dedup index is ordered on.
         """
         async with get_read_session() as session:
             row = await session.execute(
@@ -13074,6 +13079,7 @@ class PostgresService:
                 # window ran once and then skipped forever. Only real runs count.
                 .where(func.coalesce(LifecycleAudit.stats["skipped"].astext, "false") != "true")
                 .where(LifecycleAudit.finished_at > func.now() - timedelta(hours=since_hours))
+                .where(LifecycleAudit.started_at > func.now() - timedelta(hours=since_hours))
                 .limit(1)
             )
             return row.scalar_one_or_none() is not None
