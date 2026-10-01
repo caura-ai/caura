@@ -77,6 +77,9 @@ export async function apiCall(
   try {
     const requestInit: RequestInit = {
       method,
+      // X-API-Key is not stripped on cross-origin redirects by fetch.
+      // Require the configured API URL to be the final destination.
+      redirect: "error",
       headers,
       body: body ? JSON.stringify(body) : undefined,
       signal: effectiveSignal,

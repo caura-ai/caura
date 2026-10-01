@@ -752,6 +752,8 @@ Content-hash rejects exact duplicates within a tenant+fleet scope (HTTP 409). Sa
 | Plugin allowed but not loading | Missing `plugins.entries.memclaw.enabled: true` or `plugins.load.paths` entry — the installer and Fix Configuration set both | <!-- legacy-name-floor: troubleshooting names the frozen live config key -->
 | All config issues | Use the "Fix Configuration" button in Fleet Browser Plugin Manager to auto-fix all settings |
 | `ECONNREFUSED` | Check `CAURA_API_URL`, ensure API is running |
+| API URL redirects | Set `CAURA_API_URL` to the final server URL. Credential-bearing plugin requests reject redirects so an API key cannot be forwarded to another host. |
+| Agent-key provisioning unavailable | Concurrent calls for one agent share one provisioning attempt. Failed attempts wait 60 seconds before retrying; a 404 disables provisioning until plugin restart. The existing tenant-key fallback remains, so this is not an agent-revocation control. |
 | 401 Unauthorized | Check `CAURA_API_KEY` env var on gateway |
 | 403 Forbidden | Key used for wrong tenant, or agent trust level too low |
 | 409 Conflict | Duplicate content — safe to ignore |

@@ -204,6 +204,7 @@ export async function resolveTenantId(): Promise<string> {
         new URL(`${CAURA_API_PREFIX}/whoami`, CAURA_API_URL).toString(),
         {
           method: "GET",
+          redirect: "error",
           headers: withUserAgent({ "X-API-Key": CAURA_API_KEY }),
           // Bound per-attempt wall-clock; see TENANT_RESOLVE_TIMEOUT_MS
           // docstring above for why this is critical to liveness.
@@ -316,7 +317,7 @@ export async function fetchToolDescriptions(): Promise<void> {
       // Bound the fetch — same rationale as resolveTenantId. Less
       // critical here (cold path, called at registration not per-turn)
       // but a hung registration still blocks plugin load.
-      { headers, signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS) },
+      { headers, redirect: "error", signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS) },
     );
     if (res.ok) {
       toolDescriptions = (await res.json()) as Record<string, string>;

@@ -796,6 +796,7 @@ async function processCommand(cmd: {
           }
           const mRes = await fetch(mUrl, {
             headers: mHeaders,
+            redirect: "error",
             signal: AbortSignal.timeout(10_000),
           });
           if (mRes.ok) {

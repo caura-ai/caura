@@ -10,6 +10,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
 
 process.env.CAURA_API_KEY = "mc_test_key_for_transport_tests";
@@ -209,6 +212,7 @@ describe("apiCall — rejected agent key fallback", () => {
     assert.equal((result as { ok: boolean }).ok, true);
     assert.equal(typeof (result as { _latency_ms: unknown })._latency_ms, "number");
     assert.equal(provisions, 2, "the later top-level call must replace the evicted key");
+    assert.ok(calls.every(call => call.init?.redirect === "error"), "provision, agent and fallback requests must all refuse redirects");
     const resourceCalls = calls.filter((call) => call.url.endsWith("/memories/bulk"));
     assert.deepEqual(
       resourceCalls.map(
@@ -223,6 +227,47 @@ describe("apiCall — rejected agent key fallback", () => {
       ["attempt-fixed", "attempt-fixed", "attempt-fixed"],
     );
   });
+});
+
+test("real fetch never sends the API key to a redirect destination", async () => {
+  const realFetch = globalThis.fetch;
+  let sourceHits = 0;
+  let destinationHits = 0;
+  let redirectStatus = 302;
+  const destination = createServer((_req, res) => {
+    destinationHits++;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ok: true }));
+  });
+  destination.listen(0, "127.0.0.1");
+  await once(destination, "listening");
+  const target = `http://127.0.0.1:${(destination.address() as AddressInfo).port}/target`;
+  const source = createServer((req, res) => {
+    sourceHits++;
+    assert.equal(req.headers["x-api-key"], process.env.CAURA_API_KEY);
+    res.writeHead(redirectStatus, { Location: target });
+    res.end();
+  });
+  try {
+    source.listen(0, "127.0.0.1");
+    await once(source, "listening");
+    const origin = `http://127.0.0.1:${(source.address() as AddressInfo).port}`;
+    // Route only the configured API request to our ephemeral source server.
+    // Redirect handling remains the real fetch implementation's responsibility.
+    globalThis.fetch = (input, init) => realFetch(new URL(new URL(String(input)).pathname, origin), init);
+    for (const status of [301, 302, 303, 307, 308]) {
+      redirectStatus = status;
+      await assert.rejects(() => apiCall("GET", "/memories"), TypeError);
+    }
+    assert.equal(sourceHits, 5);
+    assert.equal(destinationHits, 0, "no request or credential may reach the redirected host");
+  } finally {
+    globalThis.fetch = realFetch;
+    for (const server of [source, destination]) {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve()));
+    }
+  }
 });
 
 describe("apiCall — User-Agent identification (Caura Heartbeat v1 §7)", () => {
