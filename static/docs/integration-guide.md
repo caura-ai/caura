@@ -337,7 +337,11 @@ Caura enforces a 4-tier trust system for agents. Agents are auto-registered on t
 ### How it works
 
 - On first write, the agent is auto-registered with trust level 1 and the `fleet_id` from that write becomes its "home fleet"
+- When the tenant setting `agents.require_agent_approval` is on, a new agent is registered at trust level 0 instead — on whichever call first names it (a write, a search or recall, a fleet heartbeat, `caura_tune`, a document write) — and stays there until an admin raises it
 - Trust level is enforced on every API call — an agent at level 1 attempting a cross-fleet search gets a 403
+- Documents follow the delete bar: an agent below level 3 may create documents and update the ones it wrote, but replacing a document a different agent authored (or `force=true` on `POST /documents`) needs level 3. Documents with no recorded author stay writable. Graph writes (`POST /entities/upsert`, `POST /relations/upsert`) and document writes into a fleet other than the agent's own need level 3, as memory writes do
+- Soft-deleted rows (`include_deleted=true` on `GET /memories`, `GET /memories/stats`, `caura_list`, `caura_stats`) and `POST /ingest/undo/{run_id}` need level 3 for an agent credential
+- Trust and home-fleet changes (`PATCH /agents/{id}/trust`, `PATCH /agents/{id}/fleet`) are recorded in the tenant audit log as `agent_trust_update` / `agent_fleet_update`
 - The admin API key bypasses all trust enforcement
 
 ### Managing trust levels

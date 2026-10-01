@@ -366,14 +366,22 @@ async def _drive_interview_submit(ctx) -> dict | None:
         headers=headers,
     )
     assert enable.status_code == 200, enable.text
-    # Lowered AFTER the settings write, which is itself a request on this app.
+    # The route refuses a node_id that is not a node of the tenant.
+    node = await ctx.client.post(
+        "/api/v1/fleet/heartbeat",
+        json={"tenant_id": tenant_id, "node_name": f"node-{uid()}"},
+        headers=headers,
+    )
+    assert node.status_code == 200, node.text
+    # Lowered AFTER the settings write and the heartbeat, which are themselves
+    # requests on this app.
     _lower_setting(ctx.monkeypatch, "interview_request_timeout_seconds")
     base = datetime(2026, 9, 24, 8, 0, tzinfo=UTC)
     resp = await ctx.client.post(
         "/api/v1/interview/submit",
         json={
             "tenant_id": tenant_id,
-            "node_id": f"node-{uid()}",
+            "node_id": node.json()["node_id"],
             "agent_id": f"agent-{uid()}",
             "command_id": "cmd-1",
             "cursor_from": 0,

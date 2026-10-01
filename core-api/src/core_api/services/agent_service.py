@@ -27,7 +27,7 @@ async def get_or_create_agent(
     agent_id: str,
     fleet_id: str | None = None,
     *,
-    require_approval: bool = False,
+    require_approval: bool | None = None,
     display_name: str | None = None,
     install_id: str | None = None,
     owner_install_uuid: str | None = None,
@@ -35,6 +35,18 @@ async def get_or_create_agent(
     """Return the agent dict, creating it on first encounter.
 
     The storage API handles upsert semantics and race-condition safety.
+
+    ``require_approval`` decides the trust level of a NEWLY created row (0 =
+    awaiting admin approval, else ``DEFAULT_TRUST_LEVEL``). ``None`` — the
+    default — reads the tenant's ``agents.require_agent_approval`` setting, so
+    every first-touch path (search / recall identity resolution, the fleet
+    heartbeat roster, ``caura_tune``, ``enforce_fleet_write``, the doc-memory
+    mint) registers an agent the way the tenant asked for. Registration is a
+    one-shot decision: a row created at trust 1 by a read path would otherwise
+    walk straight past the approval check on the next gated write. Pass an
+    explicit bool only where a caller has deliberately decided otherwise (REST
+    bulk — see ``_write_memories_bulk_inner``). An existing row is returned
+    unchanged either way; the setting is consulted on the create branch only.
 
     ``display_name`` and ``install_id`` (Task 6) are accepted optionally
     on every call. On creation they're persisted; on lookup of an
@@ -106,6 +118,12 @@ async def get_or_create_agent(
     #   - leaves the legacy row intact so its memories stay queryable
     #     under ``agent_id="main"`` for admin recovery; operators
     #     decide later whether to delete or keep as archive
+    if require_approval is None:
+        # Create branch only — a hit above never pays for the settings read,
+        # and ``resolve_config`` is TTL-cached per tenant besides.
+        from core_api.services.organization_settings import resolve_config
+
+        require_approval = (await resolve_config(tenant_id)).require_agent_approval
     inherited_trust: int | None = None
     inherited_search_profile: dict[str, Any] | None = None
     if not require_approval and install_id is not None and agent_id == f"main-{install_id}":
@@ -271,7 +289,7 @@ async def resolve_write_agent(
     *,
     is_install_credential: bool,
     install_uuid: str | None,
-    require_approval: bool = False,
+    require_approval: bool | None = None,
 ) -> tuple[dict, AgentIdentity]:
     """Resolve the agent a write is attributed to, enforcing the broker
     ownership boundary, and return ``(agent_row, safe_agent_id)``.
@@ -674,6 +692,70 @@ async def enforce_delete(
                 f"access policy: principals of fleet '{agent.get('fleet_id') or 'none'}' are not permitted to delete memories.",
             ),
         )
+
+
+async def enforce_document_overwrite(
+    tenant_id: str,
+    agent_id: str,
+    *,
+    collection: str,
+    doc_id: str,
+    force: bool,
+) -> None:
+    """Gate an AGENT credential's document upsert the way deletes are gated.
+
+    A document upsert REPLACES ``data`` wholesale, and the upsert key
+    ``(tenant_id, collection, doc_id)`` carries no fleet or author, so
+    overwriting a document someone else wrote is a delete by another verb —
+    and ``force=True`` (the opt-out of the catastrophic-shrink guard) is the
+    way to blank one outright. Both therefore need the bar ``enforce_delete``
+    sets (trust >= 3) unless the write is the caller's own:
+
+      - the document does not exist yet      -> allowed (a create)
+      - its stored author is the caller      -> allowed (an update of its own)
+      - no author recorded (NULL)            -> allowed (unowned: legacy rows,
+        MCP writes from before authors were recorded, system writes — shared
+        documents such as task checklists keep working as before)
+      - a DIFFERENT recorded author          -> trust >= 3
+      - ``force=True``                       -> trust >= 3, whoever wrote it
+
+    Same contract as ``enforce_delete``: invoke only for a credential that
+    carries an authenticated agent identity. A tenant key has no trust level
+    and keeps the tenant-wide authority it already holds.
+    """
+    if not force:
+        existing = await get_storage_client().get_document(
+            tenant_id=tenant_id,
+            collection=collection,
+            doc_id=doc_id,
+            # PRIMARY: this read backs an authorization decision, and a replica
+            # that has not seen a just-written row would report "no such
+            # document" and wave the overwrite through as a create.
+            read=False,
+        )
+        # Storage falls back to a primary-key match on a natural-key miss; the
+        # upsert keys on ``doc_id`` only, so a pk hit is not the row this write
+        # would replace.
+        if existing is None or existing.get("doc_id") != doc_id:
+            return
+        author = existing.get("agent_id")
+        if author is None or canonical_service_agent_id(author) == agent_id:
+            return
+    agent = await lookup_agent(tenant_id, agent_id)
+    if agent and agent.get("trust_level", 0) >= 3:
+        return
+    what = (
+        "force a document overwrite"
+        if force
+        else f"overwrite document '{collection}/{doc_id}', which it did not write"
+    )
+    raise HTTPException(
+        status_code=403,
+        detail=coded_detail(
+            AUTH_AGENT_TRUST_TOO_LOW,
+            f"access policy: agent '{agent_id}' needs trust level 3 to {what}.",
+        ),
+    )
 
 
 async def enforce_update(

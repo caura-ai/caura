@@ -294,6 +294,13 @@ async def test_the_interview_504_names_which_half_of_the_window_stalled(
         headers=headers,
     )
     assert enable.status_code == 200, enable.text
+    # The route refuses a node_id that is not a node of the tenant.
+    node = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={"tenant_id": tenant_id, "node_name": f"node-{uid()}"},
+        headers=headers,
+    )
+    assert node.status_code == 200, node.text
 
     base = datetime(2026, 9, 24, 8, 0, tzinfo=UTC)
     with caplog.at_level(logging.WARNING):
@@ -301,7 +308,7 @@ async def test_the_interview_504_names_which_half_of_the_window_stalled(
             "/api/v1/interview/submit",
             json={
                 "tenant_id": tenant_id,
-                "node_id": f"node-{uid()}",
+                "node_id": node.json()["node_id"],
                 "agent_id": f"agent-{uid()}",
                 "command_id": "cmd-1",
                 "cursor_from": 0,

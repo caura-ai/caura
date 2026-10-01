@@ -14,6 +14,7 @@ from core_api.schemas import (
     RelationUpsert,
     RelationUpsertOut,
 )
+from core_api.services.agent_service import enforce_fleet_write
 from core_api.services.audit_service import log_cross_tenant_read
 from core_api.services.entity_service import (
     filter_relations_by_evidence_visibility,
@@ -183,6 +184,11 @@ async def upsert_entity_route(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    # Same fleet policy as a memory write: an agent credential writing graph
+    # nodes into a fleet other than its home fleet needs trust >= 3. Tenant
+    # keys carry no trust level and are unaffected.
+    if auth.tenant_id and auth.agent_id:
+        await enforce_fleet_write(body.tenant_id, auth.agent_id, body.fleet_id)
     if auth.tenant_id:
         await check_and_increment(body.tenant_id, "write")
     # NOTE: entity upsert uses its own connection (storage-api HTTP
@@ -226,6 +232,9 @@ async def upsert_relation_route(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    # Fleet policy, as on ``POST /entities/upsert`` above.
+    if auth.tenant_id and auth.agent_id:
+        await enforce_fleet_write(body.tenant_id, auth.agent_id, body.fleet_id)
     if auth.tenant_id:
         await check_and_increment(body.tenant_id, "write")
     return await upsert_relation(body)

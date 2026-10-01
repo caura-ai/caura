@@ -82,7 +82,6 @@ from core_api.services.agent_identity import reserved_write_refusal
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_label,
-    broker_owned_agent_id,
     enforce_delete,
     enforce_fleet_read,
     enforce_fleet_read_many,
@@ -360,6 +359,22 @@ async def _gate_fleet_read(
         await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
 
 
+async def _effective_include_deleted(auth: AuthContext, include_deleted: bool) -> bool:
+    """``include_deleted`` as the caller is allowed to have it.
+
+    Soft-deleted rows are a trust-3 read for an agent credential, the rule MCP
+    ``caura_list`` / ``caura_stats`` already apply (``include_deleted and trust
+    >= 3``): below that the flag is silently ignored, so a retracted row stays
+    retracted for the agents a delete was meant to hide it from. Tenant keys
+    and sessions carry no trust level and keep the flag as sent. An
+    unregistered agent identity has no trust row and resolves to False.
+    """
+    if not include_deleted or not auth.agent_id or not auth.tenant_id:
+        return include_deleted
+    agent = await lookup_agent(auth.tenant_id, auth.agent_id)
+    return agent is not None and agent.get("trust_level", 0) >= 3
+
+
 async def _resolve_scoped_read(
     scope: str,
     *,
@@ -485,7 +500,14 @@ async def list_memories(
             "with 422 (not silently clamped); page via `cursor`/`offset` for more."
         ),
     ),
-    include_deleted: bool = Query(default=False),
+    include_deleted: bool = Query(
+        default=False,
+        description=(
+            "Include soft-deleted rows. Honoured for tenant credentials; an agent "
+            "credential needs trust >= 3, below which it is ignored (as on MCP "
+            "`caura_list`)."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """List memories with filtering, sorting, and pagination.
@@ -602,7 +624,7 @@ async def list_memories(
         "run_id": run_id,
         "weight_min": weight_min,
         "weight_max": weight_max,
-        "include_deleted": include_deleted,
+        "include_deleted": await _effective_include_deleted(auth, include_deleted),
         "sort": sort,
         "order": order,
         "limit": limit,
@@ -678,7 +700,14 @@ async def memory_stats(
     ),
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
-    include_deleted: bool = Query(default=False),
+    include_deleted: bool = Query(
+        default=False,
+        description=(
+            "Also count soft-deleted rows. Honoured for tenant credentials; an "
+            "agent credential needs trust >= 3, below which it is ignored (as on "
+            "MCP `caura_stats`)."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Aggregate counts: total plus breakdowns by type, agent, and status.
@@ -754,7 +783,7 @@ async def memory_stats(
             "agent_id": effective_agent_id,
             "memory_type": memory_type,
             "status": status,
-            "include_deleted": include_deleted,
+            "include_deleted": await _effective_include_deleted(auth, include_deleted),
             # lme-0929-m-03: additive ``pending`` / ``settled`` block so a caller
             # can tell whether background work (embed / enrich / fan-out) is
             # still due to change the store. REST-only; MCP ``caura_stats``
@@ -1649,17 +1678,19 @@ async def _write_memories_bulk_inner(
     #
     # NOTE: unlike single-write (_write_memory_inner) and the MCP write tool,
     # bulk deliberately does NOT enforce the per-agent approval gate
-    # (require_agent_approval / trust_level==0): it passes no require_approval and
-    # has no trust==0 check. Bulk is the broker (caura-daemon) fan-in path that
+    # (require_agent_approval / trust_level==0): it passes require_approval=False
+    # and has no trust==0 check. Bulk is the broker (caura-daemon) fan-in path that
     # auto-registers many agents from item metadata; gating each on admin
     # approval would create trust-0 rows and 403 whole batches, breaking capture.
-    # Per-agent approval is an interactive / single-agent concern.
+    # Per-agent approval is an interactive / single-agent concern. The explicit
+    # False matters: omitting it now means "read the tenant setting".
     agent, body.agent_id = await resolve_write_agent(
         chosen_agent_id,
         body.tenant_id,
         body.fleet_id,
         is_install_credential=auth.is_install_credential,
         install_uuid=auth.install_uuid,
+        require_approval=False,
     )
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
@@ -2635,18 +2666,37 @@ async def ingest_commit_endpoint(
     response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Write previewed facts as memories."""
+    """Write previewed facts as memories.
+
+    Identity resolves exactly as on ``POST /memories/bulk``: an agent-scoped
+    credential writes as its own verified identity whatever ``agent_id`` says
+    (``agent_id`` keeps its ``"ingest-agent"`` default for credentials that
+    carry none), the agent is registered on first contact, the broker
+    ownership boundary applies to install credentials, an omitted ``fleet_id``
+    resolves to the agent's home fleet, and a cross-fleet ``fleet_id`` needs
+    trust >= 3.
+    """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
-    if body.agent_id:
-        body.agent_id = canonical_service_agent_id(body.agent_id)
-    # Broker ownership boundary: degrade a foreign / reserved agent id to the
-    # install's own broker:<install> fallback so a broker can't attribute an
-    # ingested memory to an agent owned by another install (parity with the
-    # data-plane write paths; ingest_commit itself takes no AuthContext).
-    if auth.is_install_credential and body.agent_id:
-        body.agent_id = await broker_owned_agent_id(body.agent_id, auth.install_uuid, body.tenant_id)
+    # The bulk route's write-identity chain (``ingest_commit`` takes no
+    # AuthContext, so it has to run here). Binding first: a verified agent
+    # identity wins over the body, so ``agent_id`` can't name a peer.
+    chosen_agent_id = _resolve_rest_write_agent_id(auth, body.agent_id)
+    # Ownership boundary (gate + owner stamp + post-create re-check) and
+    # registration. Like bulk, a multi-item write with no trust==0 refusal;
+    # registration still honours the tenant's approval setting (the default).
+    agent, body.agent_id = await resolve_write_agent(
+        chosen_agent_id,
+        body.tenant_id,
+        body.fleet_id,
+        is_install_credential=auth.is_install_credential,
+        install_uuid=auth.install_uuid,
+    )
+    if not body.fleet_id and agent.get("fleet_id"):
+        body.fleet_id = agent["fleet_id"]
+    if auth.tenant_id:  # skip enforcement for admin
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
     if auth.tenant_id:  # skip for admin
         # One unit PER FACT, not one per request. A commit writes
         # ``len(body.facts)`` memories, and every other multi-item write path
@@ -2745,9 +2795,16 @@ async def ingest_undo_endpoint(
 
     Returns ``{"deleted": N, "run_id": "..."}``. ``deleted=0`` is a valid
     response (no rows matched — already cleaned up or never existed).
+
+    Agent-scoped credentials need trust >= 3, as on every other delete route.
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
+    # A batch undo is a bulk delete: an agent credential needs the trust every
+    # other delete route requires (trust >= 3). Tenant keys are unaffected —
+    # see ``enforce_delete`` for the contract.
+    if auth.tenant_id and auth.agent_id:
+        await enforce_delete(tenant_id, auth.agent_id)
 
     sc = get_storage_client()
     # Soft-delete the memory rows server-side (filters by run_id AND
