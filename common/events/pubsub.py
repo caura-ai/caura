@@ -473,6 +473,10 @@ class PubSubEventBus(EventBus):
         # EVENT_BUS_DUAL_SUBSCRIBE per environment only after the expand apply
         # has landed there, and verify it per service.
         dual_subscribe: bool = False,
+        # How long ``stop()`` waits for handlers already running to finish before
+        # cancelling them. Sized to fit Cloud Run's 10s SIGTERM budget alongside
+        # the rest of shutdown; 0 restores cancel-immediately.
+        stop_grace_seconds: float = 5.0,
     ) -> None:
         # No SDK import at construction: the factory can return this
         # instance even in environments where google-cloud-pubsub isn't
@@ -519,6 +523,11 @@ class PubSubEventBus(EventBus):
         self._publisher: Any = None
         self._subscriber: Any = None
         self._pull_tasks: list[asyncio.Task[None]] = []
+        # Pull tasks currently holding a batch (dispatching or acking it), as
+        # opposed to blocked in ``pull``. ``stop()`` gives exactly these a grace
+        # period: an idle one has nothing to finish.
+        self._dispatching: set[asyncio.Task[Any]] = set()
+        self._stop_grace_seconds = stop_grace_seconds
         self._stopping = False
         self._publish_concurrency = publish_concurrency
         # One-shot flag so the "subscribe without start()" warning fires
@@ -1312,6 +1321,7 @@ class PubSubEventBus(EventBus):
                 "programming error in start()."
             )
 
+        current = asyncio.current_task()
         while not self._stopping:
             # Declared out here so the ``finally`` can always see them,
             # including when the pull itself raises before a batch exists.
@@ -1339,6 +1349,8 @@ class PubSubEventBus(EventBus):
                 # the point is precisely that a message which finished first
                 # stays unacked for the rest of the drain.
                 leased_ids = [r.ack_id for r in response.received_messages]
+                if leased_ids and current is not None:
+                    self._dispatching.add(current)
                 if leased_ids:
                     lease_keeper = self._spawn_background_task(
                         self._hold_leases(
@@ -1351,6 +1363,13 @@ class PubSubEventBus(EventBus):
                         )
                     )
                 for received in response.received_messages:
+                    if self._stopped:
+                        # ``stop()`` has begun (it sets ``_stopped`` first): hand
+                        # the rest of the batch straight back (deadline 0) for
+                        # another instance, rather than starting handlers the
+                        # stop grace would only cancel.
+                        nack_ids.setdefault(0, []).append(received.ack_id)
+                        continue
                     # Hoisted: proto-plus re-wraps the nested message on every
                     # ``.message`` access, so reading it three times costs
                     # three wrapper allocations per message on the hot path.
@@ -1562,6 +1581,8 @@ class PubSubEventBus(EventBus):
                 stop_extending.set()
                 if lease_keeper is not None:
                     lease_keeper.cancel()
+                if current is not None:
+                    self._dispatching.discard(current)
 
     @staticmethod
     def _decode(data: bytes, *, subscription: str, message_id: str) -> Event | None:
@@ -1686,6 +1707,30 @@ class PubSubEventBus(EventBus):
         if cancelled is not None:
             raise cancelled
         return all_ok
+
+    async def _drain_in_flight(self) -> None:
+        """Wait, bounded by ``stop_grace_seconds``, for pull tasks holding a
+        batch to finish it.
+
+        Called by ``stop()`` after ``_stopping`` is set and BEFORE the subscriber
+        is closed: a task finishing its batch still needs the client to ack it,
+        and then exits on its own because the loop condition is false. Cancelling
+        straight away, as ``stop()`` used to, raised ``CancelledError`` inside
+        whatever handler was running -- a lifecycle run, for one, left its audit
+        row claimed ``in_progress`` until the claim lease expired, and its message
+        neither acked nor nacked.
+        """
+        busy = {t for t in self._dispatching if not t.done()}
+        if not busy or self._stop_grace_seconds <= 0:
+            return
+        _done, pending = await asyncio.wait(busy, timeout=self._stop_grace_seconds)
+        if pending:
+            logger.warning(
+                "pubsub stop(): %d in-flight handler batch(es) still running after "
+                "%.1fs grace; cancelling",
+                len(pending),
+                self._stop_grace_seconds,
+            )
 
     async def release_broadcast_subscriptions(self) -> None:
         """Delete this process's ephemeral broadcast subscriptions.
@@ -1832,6 +1877,10 @@ class PubSubEventBus(EventBus):
             # they exit through the ``if self._stopping: return`` path rather
             # than logging NotFound.
             await self.release_broadcast_subscriptions()
+            # Let handlers already running finish (bounded) while the subscriber
+            # can still ack for them; see ``_drain_in_flight``. ``_stopping`` is
+            # already set, so nothing new is started meanwhile.
+            await self._drain_in_flight()
             # Close the subscriber BEFORE cancelling/awaiting the pull
             # tasks. Pull threads are blocked inside a synchronous
             # `subscriber.pull(timeout=pull_timeout)` — asyncio

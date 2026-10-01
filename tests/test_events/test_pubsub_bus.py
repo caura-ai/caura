@@ -2482,3 +2482,114 @@ async def test_a_keeper_that_raises_unexpectedly_is_logged_not_swallowed(
     assert [kind for kind, _ in calls] == ["ack"], (
         f"a keeper bug must not cost the batch its ack: {calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# stop() drains in-flight handlers before cancelling
+# ---------------------------------------------------------------------------
+
+
+def _running_pull_loop(
+    bus: PubSubEventBus, received: list[Any], handler
+) -> dict[str, Any]:
+    """Wire ``bus`` so a pull loop can run under ``stop()``: the first pull
+    yields ``received``; any later pull blocks until the subscriber is closed,
+    as the real SDK call does."""
+    acked: list[str] = []
+    nacked: list[tuple[str, int]] = []
+    closed = asyncio.Event()
+
+    fake_subscriber = MagicMock()
+    fake_subscriber.subscription_path = lambda proj, sub: (
+        f"projects/{proj}/subscriptions/{sub}"
+    )
+    calls = {"n": 0}
+
+    def fake_pull(request: Any = None, timeout: Any = None) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return MagicMock(received_messages=received)
+        raise RuntimeError("channel closed")
+
+    fake_subscriber.pull = MagicMock(side_effect=fake_pull)
+    fake_subscriber.acknowledge = MagicMock(
+        side_effect=lambda request: acked.extend(request["ack_ids"])
+    )
+    fake_subscriber.modify_ack_deadline = MagicMock(
+        side_effect=lambda request: nacked.extend(
+            (i, request["ack_deadline_seconds"]) for i in request["ack_ids"]
+        )
+    )
+    fake_subscriber.close = MagicMock(side_effect=lambda: closed.set())
+    bus._subscriber = fake_subscriber
+    bus._pull_executor = MagicMock()
+    bus._started = True
+    return {"acked": acked, "nacked": nacked}
+
+
+async def _direct_run(_executor: Any, fn: Any, *args: Any) -> Any:
+    return fn(*args)
+
+
+async def test_stop_lets_an_in_flight_handler_finish_and_ack() -> None:
+    """``stop()`` used to cancel every pull task at once, raising
+    ``CancelledError`` inside a running handler: the message was neither acked
+    nor nacked, and a lifecycle run left its audit row claimed for the lease."""
+    from unittest.mock import AsyncMock, patch
+
+    bus = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", dual_subscribe=True
+    )
+    started = asyncio.Event()
+    finished: list[bool] = []
+
+    async def handler(_event: Event) -> None:
+        started.set()
+        await asyncio.sleep(0.2)
+        finished.append(True)
+
+    received = [
+        _make_received(EMBEDDED_EVENT_BYTES, "ack-1", {}),
+        _make_received(EMBEDDED_EVENT_BYTES, "ack-2", {}),
+    ]
+    out = _running_pull_loop(bus, received, handler)
+    loop = asyncio.get_running_loop()
+    with patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)):
+        task = asyncio.create_task(bus._pull_loop("sub", [handler]))
+        bus._pull_tasks.append(task)
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        await asyncio.wait_for(bus.stop(), timeout=5.0)
+
+    assert finished == [True], "the running handler was cancelled instead of drained"
+    assert out["acked"] == ["ack-1"]
+    # The message not yet dispatched when stop began goes straight back.
+    assert out["nacked"] == [("ack-2", 0)]
+
+
+async def test_stop_grace_is_bounded() -> None:
+    from unittest.mock import AsyncMock, patch
+
+    bus = PubSubEventBus(
+        project_id="proj",
+        subscription_prefix="test",
+        dual_subscribe=True,
+        stop_grace_seconds=0.1,
+    )
+    started = asyncio.Event()
+
+    async def handler(_event: Event) -> None:
+        started.set()
+        await asyncio.sleep(60)
+
+    out = _running_pull_loop(
+        bus, [_make_received(EMBEDDED_EVENT_BYTES, "ack-1", {})], handler
+    )
+    loop = asyncio.get_running_loop()
+    with patch.object(loop, "run_in_executor", new=AsyncMock(side_effect=_direct_run)):
+        task = asyncio.create_task(bus._pull_loop("sub", [handler]))
+        bus._pull_tasks.append(task)
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        await asyncio.wait_for(bus.stop(), timeout=3.0)
+
+    assert task.done()
+    assert out["acked"] == []
