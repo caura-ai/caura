@@ -160,7 +160,9 @@ within the window is a no-op for any tenant whose prior tick succeeded.
 **This is why the 6-hourly schedule above is deliberate, not arbitrary.**
 With a 23-hour dedup window, ticks 2, 3 and 4 of each day are expected
 no-ops; the schedule is oversampling so that a single failed or missed
-tick does not cost a whole day. If you shorten the cron interval hoping
+tick does not cost a whole day. Only a successful tick counts: a tick in
+which every attempted cluster failed on I/O (an LLM or storage outage)
+is finalised as `failure` and redelivered, so the next tick still runs. If you shorten the cron interval hoping
 for more frequent distillation, nothing changes — the window, not the
 schedule, sets the real cadence. Change `_PIPELINE_DEDUP_WINDOW_HOURS`
 instead. Manual `python scripts/forge_dry_run.py` invocations
@@ -184,6 +186,7 @@ bypass the lifecycle path entirely and are not affected.
 |---|---|---|
 | Audit rows stuck in `pending` | Pub/Sub publish failed but `audit_begin` succeeded | Operator-visible; either re-publish (idempotent — same dedup window) or mark `failure` manually |
 | Audit row `failure: common.llm not importable` | LLM provider chain not installed in deploy image | Install the provider chain (`pip install ...` per `core-api/pyproject.toml`); the cron path **does not** fall back to a fake LLM (intentional — see `_wire_llm_fn`) |
+| Audit row `failure: forge tick wrote no candidates: all N attempted cluster(s) failed on I/O or LLM errors` | LLM provider or storage outage during the tick | Retried automatically (redelivery, then the next scheduled tick); check the provider and the `skipped_io_error` tracebacks if it persists |
 | No candidates produced for a tenant | Either no labeled session traces in the freshness window, or `min_cluster_size`/`min_distinct_agents` thresholds set too high | Inspect `stats.scanned` + the 5 skip counters on the audit row; lower thresholds via `org_settings.skills_factory.forge.*` |
 | Same fingerprint keeps being re-proposed despite reject | Cooloff window already elapsed, or fleet/tenant scope mismatch | Inspect `forge_rejected_fingerprints` row; bump `rejection_cooloff_days` if too short |
 

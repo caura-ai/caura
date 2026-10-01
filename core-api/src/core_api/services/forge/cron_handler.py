@@ -487,4 +487,29 @@ async def run_forge_cron_tick(
             f"bug; see candidates_skipped_internal_error and the tracebacks above"
         )
 
+    # Every cluster this tick attempted ended in the I/O bucket and nothing was
+    # written: the tick did no mining at all. An LLM outage takes exactly this
+    # shape -- ``_refuse_fake`` raises per cluster and ``run_forge_distill``
+    # files each one under ``skipped_io_error`` -- and so does a storage outage.
+    # Returning normally finalised the audit row as a success, which the 23h
+    # dedup gate then read as "already done", so the oversampled schedule's
+    # later ticks all skipped and the outage cost the whole day.
+    #
+    # A plain raise, not ``PermanentOpError``: unlike a wiring bug this is the
+    # case a retry can fix, so the runner records a failure and nacks.
+    # Narrower than "wrote nothing": a tick whose clusters were skipped for any
+    # other reason (poisoned, Sentinel, existing, unparseable) reached a verdict
+    # on them, and failing it would retry work that will be skipped again.
+    attempted = forge_result.clusters_attempted
+    if (
+        attempted
+        and not forge_result.candidates_written
+        and forge_result.candidates_skipped_io_error == attempted
+    ):
+        raise RuntimeError(
+            f"forge tick wrote no candidates: all {attempted} attempted cluster(s) "
+            f"failed on I/O or LLM errors (tenant={tenant_id} fleet={fleet_id} "
+            f"run={run_label}); see skipped_io_error and the tracebacks above"
+        )
+
     return stats
