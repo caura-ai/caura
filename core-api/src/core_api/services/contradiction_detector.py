@@ -2643,8 +2643,20 @@ async def _attempt_entity_retraction(
     # is exactly what the forward paths did not do.
     if str(edge_owner.get("supersedes_id") or "") != str(candidate.get("id")):
         return False
+    # A row cannot be judged against itself. The chain says the two differ, so
+    # this only fires on a corrupt self-edge; refuse it rather than ask the judge
+    # whether X contradicts X, which it always answers "no" with full confidence.
+    if str(edge_owner.get("id")) == str(candidate.get("id")):
+        return False
 
-    new_content = new_memory.get("content", "") or ""
+    # Judge the PAIR the chain describes: the edge owner (the verdict's winner)
+    # against the row it superseded. In the canonical direction the owner is
+    # ``new_memory``; in the flipped one it is the OTHER row and ``new_memory``
+    # is the loser. Reading the winner side from ``new_memory`` unconditionally
+    # made the flipped branch compare the loser with itself, which the judge
+    # answers "no contradiction" at 0.90 -- enough to retract every flipped
+    # verdict it reached.
+    new_content = edge_owner.get("content", "") or ""
     old_content = candidate.get("content", "") or ""
 
     # CAURA-129 — fetch resolved entity context for BOTH memories. If
@@ -2662,17 +2674,17 @@ async def _attempt_entity_retraction(
     # network, storage error), treat as "no context, leave Path A
     # alone" rather than retrying. See ``_CONTEXT_FETCH_TIMEOUT_SECONDS``
     # for the timeout rationale (CAURA-134).
-    new_memory_id = str(new_memory.get("id"))
+    owner_id = str(edge_owner.get("id"))
     candidate_id = str(candidate.get("id"))
     try:
         # One batched fetch for BOTH sides rather than two parallel
         # per-memory fetches: same contexts, two round-trips instead of
         # 2 + one per link on each side. See ``_fetch_entity_contexts``.
         ctx_by_memory = await asyncio.wait_for(
-            _fetch_entity_contexts(sc, [new_memory_id, candidate_id], retraction_tenant_id),
+            _fetch_entity_contexts(sc, [owner_id, candidate_id], retraction_tenant_id),
             timeout=_CONTEXT_FETCH_TIMEOUT_SECONDS,
         )
-        new_entities = ctx_by_memory.get(new_memory_id, [])
+        new_entities = ctx_by_memory.get(owner_id, [])
         old_entities = ctx_by_memory.get(candidate_id, [])
     except Exception as e:
         # CAURA-134 — include exception class name in the log. The
