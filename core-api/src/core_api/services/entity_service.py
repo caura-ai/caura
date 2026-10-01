@@ -1,6 +1,9 @@
 import logging
 from uuid import UUID
 
+import httpx
+from fastapi import HTTPException
+
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     ENTITY_RESOLUTION_THRESHOLD,
@@ -468,17 +471,27 @@ async def upsert_relation(data: RelationUpsert) -> RelationUpsertOut:
     # ``uq_relations_natural_key``) — duplicate-relation IntegrityErrors
     # are silently absorbed and the existing row's weight + evidence
     # are refreshed to the new values.
-    relation = await sc.create_relation(
-        {
-            "tenant_id": data.tenant_id,
-            "fleet_id": data.fleet_id,
-            "from_entity_id": str(data.from_entity_id),
-            "relation_type": data.relation_type,
-            "to_entity_id": str(data.to_entity_id),
-            "weight": data.weight,
-            "evidence_memory_id": str(data.evidence_memory_id) if data.evidence_memory_id else None,
-        }
-    )
+    try:
+        relation = await sc.create_relation(
+            {
+                "tenant_id": data.tenant_id,
+                "fleet_id": data.fleet_id,
+                "from_entity_id": str(data.from_entity_id),
+                "relation_type": data.relation_type,
+                "to_entity_id": str(data.to_entity_id),
+                "weight": data.weight,
+                "evidence_memory_id": str(data.evidence_memory_id) if data.evidence_memory_id else None,
+            }
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 409:
+            raise
+        # Storage refuses foreign and missing endpoints identically. Preserve
+        # that boundary without leaking upstream details or returning a 500.
+        raise HTTPException(
+            status_code=422,
+            detail="from_entity_id or to_entity_id does not exist in this tenant",
+        ) from exc
 
     return RelationUpsertOut(
         id=relation.get("id"),

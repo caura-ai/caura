@@ -4277,13 +4277,19 @@ class PostgresService:
         existing caller.
         """
         async with get_session() as session:
-            # Subquery: canonical names of entities linked to the target memory
+            # Scope the seed as well as the candidates: a foreign seed must
+            # not reveal entity-name overlap or a supersedes chain.
             new_mel = MemoryEntityLink.__table__.alias("new_mel")
             new_ent = Entity.__table__.alias("new_ent")
+            seed_memory = Memory.__table__.alias("seed_memory")
             new_entity_names = (
                 select(func.lower(new_ent.c.canonical_name))
-                .select_from(new_mel.join(new_ent, new_mel.c.entity_id == new_ent.c.id))
-                .where(new_mel.c.memory_id == memory_id)
+                .select_from(
+                    new_mel.join(new_ent, new_mel.c.entity_id == new_ent.c.id).join(
+                        seed_memory, new_mel.c.memory_id == seed_memory.c.id
+                    )
+                )
+                .where(seed_memory.c.id == memory_id, seed_memory.c.tenant_id == tenant_id)
                 .subquery()
             )
 
@@ -4296,7 +4302,9 @@ class PostgresService:
                 # memory itself. If non-NULL, it points at the row Path A
                 # marked conflicted on this memory's behalf.
                 target_supersedes = (
-                    select(Memory.supersedes_id).where(Memory.id == memory_id).scalar_subquery()
+                    select(seed_memory.c.supersedes_id)
+                    .where(seed_memory.c.id == memory_id, seed_memory.c.tenant_id == tenant_id)
+                    .scalar_subquery()
                 )
                 status_filter = or_(
                     Memory.status.in_(("active", "confirmed", "pending")),

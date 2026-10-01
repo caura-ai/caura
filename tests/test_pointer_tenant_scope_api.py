@@ -124,6 +124,41 @@ async def test_relation_with_foreign_evidence_is_422(client, tenant_id):
     _assert_pointer_422(resp, "evidence_memory_id")
 
 
+@pytest.mark.parametrize("endpoint", ["from_entity_id", "to_entity_id"])
+@pytest.mark.parametrize("which", ["foreign", "unknown"])
+async def test_relation_with_an_endpoint_outside_the_tenant_is_422(
+    client, tenant_id, endpoint, which
+):
+    _, headers = get_test_auth(tenant_id)
+    own = await _entity(client, tenant_id, headers)
+    other = f"test-tenant-{uuid.uuid4().hex[:8]}"
+    target = (
+        await _entity(client, other, headers)
+        if which == "foreign"
+        else str(uuid.uuid4())
+    )
+    body = {
+        "tenant_id": tenant_id,
+        "from_entity_id": own,
+        "to_entity_id": own,
+        "relation_type": "knows",
+        endpoint: target,
+    }
+    resp = await client.post("/api/v1/relations/upsert", json=body, headers=headers)
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == (
+        "from_entity_id or to_entity_id does not exist in this tenant"
+    )
+
+    # A valid pair still succeeds, including an idempotent second upsert.
+    body[endpoint] = await _entity(client, tenant_id, headers)
+    created = await client.post("/api/v1/relations/upsert", json=body, headers=headers)
+    assert created.status_code == 200, created.text
+    repeated = await client.post("/api/v1/relations/upsert", json=body, headers=headers)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["id"] == created.json()["id"]
+
+
 async def test_bulk_with_a_foreign_subject_is_422(client, tenant_id):
     _, headers = get_test_auth(tenant_id)
     other = f"test-tenant-{uuid.uuid4().hex[:8]}"
