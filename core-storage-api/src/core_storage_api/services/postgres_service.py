@@ -114,6 +114,7 @@ from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
     GENESIS_PREV_HASH,
     assert_pii_safe,
+    scrub_pii,
     canonical_created_at,
     canonical_event,
     compute_event_hash,
@@ -12287,8 +12288,27 @@ class PostgresService:
         by_tenant: dict[str, list[dict]] = {}
         for ev in events:
             by_tenant.setdefault(ev["tenant_id"], []).append(ev)
+        # Every tenant is attempted even when an earlier one fails. Each group
+        # commits in its own transaction, so stopping at the first failure only
+        # threw away the LATER tenants' events — the caller's retry re-sends the
+        # whole request, committed groups dedupe on ``client_event_id``, and only
+        # the failed tenant is actually redone. The first failure is re-raised
+        # once all groups have had their attempt, so the request still fails.
+        first_error: BaseException | None = None
         for tenant_id, tenant_events in by_tenant.items():
-            await self._audit_chain_one_tenant(tenant_id, tenant_events)
+            try:
+                await self._audit_chain_one_tenant(tenant_id, tenant_events)
+            except Exception as exc:
+                logger.error(
+                    "audit chain write failed for tenant %s (%d events); continuing with the rest",
+                    tenant_id,
+                    len(tenant_events),
+                    exc_info=True,
+                )
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     async def _audit_chain_one_tenant(self, tenant_id: str, events: list[dict]) -> None:
         """Chain + insert one tenant's events inside a single transaction.
@@ -12355,10 +12375,13 @@ class PostgresService:
                     if client_event_id in already_chained or client_event_id in seen_in_batch:
                         continue
                     seen_in_batch.add(client_event_id)
-                # Scrub-before-hash: refuse to chain a raw secret. Runs
-                # BEFORE hashing so the chain only ever attests the redacted
-                # detail (raising here fails the write loudly instead).
-                assert_pii_safe(ev.get("detail"))
+                # Scrub-before-hash: the chain must never attest a raw secret.
+                # Scrubbed rather than refused — a refusal here rolled back
+                # every event of this tenant in the batch (see ``scrub_pii``).
+                # The assertion stays as the backstop on what is actually
+                # chained; after the scrub it has nothing left to find.
+                detail = scrub_pii(ev.get("detail"))
+                assert_pii_safe(detail)
                 seq += 1
                 # Assign created_at in-app (not server_default now()) because
                 # the hash binds it — reading it back post-insert would risk
@@ -12374,7 +12397,7 @@ class PostgresService:
                     action=ev["action"],
                     resource_type=ev["resource_type"],
                     resource_id=resource_id,
-                    detail=ev.get("detail"),
+                    detail=detail,
                     created_at_iso=canonical_created_at(created),
                 )
                 this_hash = compute_event_hash(canon, prev_hash)
@@ -12385,7 +12408,7 @@ class PostgresService:
                         action=ev["action"],
                         resource_type=ev["resource_type"],
                         resource_id=resource_id,
-                        detail=ev.get("detail"),
+                        detail=detail,
                         created_at=created,
                         seq=seq,
                         prev_hash=prev_hash,
