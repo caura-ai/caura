@@ -11211,6 +11211,13 @@ class PostgresService:
         ``id IN (...) AND tenant_id == :tid AND deleted_at IS NULL``; scope
         ='agent' adds ``agent_id == :caller``, scope='fleet' adds
         ``fleet_id == :fid`` (fleet_id required), scope='all' adds nothing.
+
+        Every scope also applies the read visibility rule
+        (``_visibility_scope_clause``): team and org rows plus the caller's
+        own private rows. The kept ids feed an LLM rule prompt by content and
+        the rule is persisted team- or org-wide, so another agent's
+        ``scope_agent`` row must never pass, whatever the scope — the same
+        reasoning ``_insights_scope_filters`` and the crystallizer apply.
         Uses ``select(Memory.id).where(Memory.id.in_(...))`` (UUID objects,
         not stringified) so the asyncpg array-cast risk is avoided and
         canonical-form mismatches don't drop valid ids. Returns the matched
@@ -11226,6 +11233,7 @@ class PostgresService:
             .where(Memory.id.in_(uuids))
             .where(Memory.tenant_id == tenant_id)
             .where(Memory.deleted_at.is_(None))
+            .where(_visibility_scope_clause(caller_agent_id, tenant_id))
         )
         if scope == "agent":
             stmt = stmt.where(Memory.agent_id == caller_agent_id)
