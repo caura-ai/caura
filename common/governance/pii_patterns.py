@@ -104,6 +104,20 @@ def _iban_mod97_ok(value: str) -> bool:
     return int("".join(digits)) % 97 == 1
 
 
+def _uk_national_length_ok(value: str) -> bool:
+    """A UK national number (leading 0 included) is 10 or 11 digits."""
+    return sum(c.isdigit() for c in value) in (10, 11)
+
+
+_DNI_LETTERS = "TRWAGMYFPDXBNJZSQVHLCKE"
+
+
+def _dni_letter_ok(value: str) -> bool:
+    """Spanish DNI / NIF check letter: ``_DNI_LETTERS[number % 23]``."""
+    digits = value[:8]
+    return digits.isdigit() and value[-1].upper() == _DNI_LETTERS[int(digits) % 23]
+
+
 def _shannon_entropy(value: str) -> float:
     if not value:
         return 0.0
@@ -194,8 +208,36 @@ _RULES: tuple[_Rule, ...] = (
         Severity.MEDIUM,
         _c(r"(?<!\d)(?:\(\d{3}\)\s?|\d{3}[-.\s])\d{3}[-.\s]\d{4}\b"),
     ),
-    # UK mobile / national 07xxx xxxxxx
-    _Rule(PIICategory.PHONE, Severity.MEDIUM, _c(r"\b0\d{3,4}\s?\d{5,6}\b")),
+    # UK national numbers. The previous single rule, ``0\d{3,4}\s?\d{5,6}``,
+    # made the space optional and accepted any second digit, so every
+    # zero-led 9-11 digit run — order numbers, SAP document ids, zero-padded
+    # keys — was a "phone" and the mask policy rewrote it. A UK number has no
+    # checksum, so shape and context are the signals:
+    #
+    # 1. Separated groups ("01632 960123", "020 7946 0958", "0161 496 0000") —
+    #    a real UK prefix (01/02/03/07/08), the separator a person types, and
+    #    the 10-11 digit length of a UK national number.
+    _Rule(
+        PIICategory.PHONE,
+        Severity.MEDIUM,
+        _c(r"(?<!\d)0[12378]\d{1,3}[ -]\d{3,4}[ -]?\d{3,4}\b"),
+        validator=_uk_national_length_ok,
+    ),
+    # 2. Unseparated mobile (07 + 9 digits, 11 in all) — distinctive enough to
+    #    stand alone; landline-length runs are not.
+    _Rule(PIICategory.PHONE, Severity.MEDIUM, _c(r"(?<!\d)07\d{9}\b")),
+    # 3. Any other unseparated national number only next to a phone cue.
+    #    ``group=1`` redacts just the digits and keeps the cue word.
+    _Rule(
+        PIICategory.PHONE,
+        Severity.MEDIUM,
+        _c(
+            r"\b(?:tel|phone|telephone|mobile|mob|cell|landline)\b[^0-9\n]{0,12}"
+            r"(0[12378]\d{8,9})\b",
+            re.IGNORECASE,
+        ),
+        group=1,
+    ),
     # ── Payment cards (HIGH, Luhn-gated) ──
     # Visa / MC / Amex / Discover / 2-series / JCB / Diners. A 4-digit issuer
     # prefix then 9-15 more digits (total 13-19), separator-agnostic so the
@@ -266,12 +308,49 @@ _RULES: tuple[_Rule, ...] = (
         Severity.HIGH,
         _c(r"\b[ABCEGHJ-PRSTW-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b"),
     ),
-    # US ITIN (9xx-7x/8x-xxxx)
+    # US ITIN (9xx-7x/8x-xxxx) — the same two-rule split as the SSN above.
+    # With optional separators every bare nine-digit run starting 9 with a 7/8
+    # in the fourth place ("order 987812345") was a HIGH national id.
+    # 1. Separated form, matched separators.
     _Rule(
-        PIICategory.NATIONAL_ID, Severity.HIGH, _c(r"\b9\d{2}[- ]?[78]\d[- ]?\d{4}\b")
+        PIICategory.NATIONAL_ID,
+        Severity.HIGH,
+        _c(r"\b9\d{2}([- ])[78]\d\1\d{4}\b"),
     ),
-    # Spain DNI / NIF
-    _Rule(PIICategory.NATIONAL_ID, Severity.HIGH, _c(r"\b\d{8}[- ]?[A-HJ-NP-TV-Z]\b")),
+    # 2. Bare form only next to an ITIN cue; ``group=1`` keeps the cue word.
+    _Rule(
+        PIICategory.NATIONAL_ID,
+        Severity.HIGH,
+        _c(
+            r"\b(?:itin|individual\s+taxpayer\s+identification(?:\s+number)?)\b"
+            r"[^0-9\n]{0,16}(9\d{2}[78]\d{5})\b",
+            re.IGNORECASE,
+        ),
+        group=1,
+    ),
+    # Spain DNI / NIF — the check letter is ``_DNI_LETTERS[number % 23]``, so
+    # the validator rejects the 22 in 23 "8 digits + capital letter" strings
+    # (PO numbers, build stamps, SKUs) that are not a DNI.
+    # 1. Written as a DNI is written: "12345678Z" or "12345678-Z".
+    _Rule(
+        PIICategory.NATIONAL_ID,
+        Severity.HIGH,
+        _c(r"\b\d{8}-?[A-HJ-NP-TV-Z]\b"),
+        validator=_dni_letter_ok,
+    ),
+    # 2. The space-separated form ("build 20260930 T") reads as a number and a
+    #    word far more often than as a DNI, so it needs a DNI/NIF cue as well.
+    _Rule(
+        PIICategory.NATIONAL_ID,
+        Severity.HIGH,
+        _c(
+            r"\b(?:dni|nif|d\.n\.i\.|n\.i\.f\.)(?!\w)[^0-9\n]{0,16}"
+            r"(\d{8} [A-HJ-NP-TV-Z])\b",
+            re.IGNORECASE,
+        ),
+        validator=_dni_letter_ok,
+        group=1,
+    ),
     # ── API keys (HIGH) — provider-specific prefixes ──
     _Rule(
         PIICategory.API_KEY,
