@@ -39,9 +39,14 @@ USE_LLM_FOR_MEMORY_CREATION=true
 OPENAI_API_KEY=sk-...
 ```
 
-Without AI keys the stack still starts. Its dummy providers return
-non-semantic embeddings, which are useful for exercising the API surface but
-not for evaluating semantic recall.
+Without AI keys the stack still starts. With the default
+`EMBEDDING_PROVIDER=openai` and no key (and no `PLATFORM_EMBEDDING_*`),
+memories are stored **without** an embedding — keyword search still finds
+them, and core-api logs one ERROR naming the missing key — so they are not
+mistaken for embedded rows once a key is configured. Set
+`EMBEDDING_PROVIDER=fake` to store deterministic, non-semantic test vectors
+instead; that is useful for exercising the API surface but not for evaluating
+semantic recall.
 
 > **Want zero cloud API calls?** v2.0+ includes a self-hosted embedder profile
 > (`BAAI/bge-m3` on a

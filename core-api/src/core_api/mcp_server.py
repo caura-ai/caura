@@ -2928,7 +2928,7 @@ async def caura_doc(
                     return _with_latency(_error_response("INVALID_ARGUMENTS", str(exc)), t0)
                 embedding: list[float] | None = None
                 if source is not None:
-                    from common.embedding import get_embedding
+                    from common.embedding import embedding_configured, get_embedding
 
                     # Tenant config so provider resolution matches the memory
                     # paths and per-tenant embedding keys/models apply — see
@@ -2947,7 +2947,8 @@ async def caura_doc(
                         tenant_config = None
                     # Synchronous write — see routes/documents.py.
                     embedding = await get_embedding(source, tenant_config, background=False)
-                    if embedding is None:
+                    # Unconfigured provider → write unindexed, as routes/documents.py.
+                    if embedding is None and embedding_configured(tenant_config):
                         return _with_latency(
                             _error_response(
                                 "UPSTREAM_ERROR",

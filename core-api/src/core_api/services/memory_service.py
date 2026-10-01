@@ -38,6 +38,7 @@ except ImportError:
 
 from common.constants import VECTOR_DIM
 from common.embedding import (
+    embedding_configured,
     get_embedding,
     get_embeddings_batch,
     get_query_embedding,
@@ -2893,6 +2894,17 @@ async def _reembed_memory(
     except Exception:
         logger.warning("Failed to resolve tenant config for re-embed (tenant=%s)", tenant_id, exc_info=True)
         tenant_config = None
+
+    # No real provider configured: retrying cannot produce a vector, so record
+    # the row as unembedded once instead of spending the retry budget on it.
+    if not embedding_configured(tenant_config):
+        await _record_stranded(
+            memory_id,
+            tenant_id,
+            "no embedding provider is configured; the row stays embedding=NULL "
+            "until one is and the row is re-embedded",
+        )
+        return
 
     embedding = None
     for attempt in range(1, _REEMBED_MAX_RETRIES + 1):

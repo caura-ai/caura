@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
-from common.embedding import get_embedding
+from common.embedding import embedding_configured, get_embedding
 from core_api import openapi_responses as _oar
 from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
@@ -642,7 +642,10 @@ async def _upsert_document_claimed(
         # below if it returns None, so it must not sit on the reduced
         # deferred budget. See EMBEDDING_INTERACTIVE_RESERVED_SLOTS.
         embedding = await get_embedding(source, tenant_config, background=False)
-        if embedding is None:
+        # No provider configured is not a provider failure: store the document
+        # unindexed (``indexed=False``) rather than with a stand-in vector, or
+        # refuse a write that no retry could ever fix.
+        if embedding is None and embedding_configured(tenant_config):
             raise HTTPException(
                 status_code=502,
                 detail=(

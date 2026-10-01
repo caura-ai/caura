@@ -24,6 +24,7 @@ from common.embedding.constants import (
     EMBEDDING_RETRY_DELAY_S,
 )
 from common.embedding.protocols import EmbeddingProvider, InstructionAwareEmbedder
+from common.embedding.providers.fake import UnconfiguredEmbeddingProvider
 from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
 
 logger = logging.getLogger(__name__)
@@ -503,8 +504,9 @@ def _resolve_provider_name(tenant_config: object | None) -> str:
     real provider (pydantic's ``env_file`` loads ``.env`` into Settings
     only, never into ``os.environ``, so bare-metal runs hit exactly that
     split). Falling back to the real-provider name is still safe with no
-    keys configured: the registry degrades to ``FakeEmbeddingProvider``
-    at construction, but through a path that WARNS.
+    keys configured: the registry returns ``UnconfiguredEmbeddingProvider``,
+    logs an ERROR once, and the persisting entry points below store the row
+    unembedded rather than with a hash vector.
     """
     if tenant_config is not None:
         name = getattr(tenant_config, "embedding_provider", None)
@@ -513,14 +515,34 @@ def _resolve_provider_name(tenant_config: object | None) -> str:
     return os.environ.get("EMBEDDING_PROVIDER", DEFAULT_EMBEDDING_PROVIDER)
 
 
+def embedding_configured(tenant_config: object | None = None) -> bool:
+    """Whether a real embedding provider (or the explicit fake) can run.
+
+    ``False`` only when a real provider was requested and no credential
+    resolves — the case the persisting entry points answer with ``None``
+    rather than a hash vector (see ``UnconfiguredEmbeddingProvider``). A
+    registry misconfiguration (``ValueError``) counts as configured here: it
+    is a different fault, surfaced by its own ERROR path.
+    """
+    try:
+        provider = get_embedding_provider(_resolve_provider_name(tenant_config), tenant_config)
+    except ValueError:
+        return True
+    return not isinstance(provider, UnconfiguredEmbeddingProvider)
+
+
 async def get_embeddings_batch(
     texts: list[str],
     tenant_config: object | None = None,
     *,
     budget_s: float | None = None,
     background: bool,
-) -> list[list[float]]:
+) -> list[list[float] | None]:
     """Generate embeddings for multiple texts in a single API call.
+
+    Returns one ``None`` per text, without calling anything, when no real
+    provider is configured (see ``UnconfiguredEmbeddingProvider``): every
+    caller already handles a ``None`` slot by persisting that row unembedded.
 
     Raises on any provider-side error. Both bulk callers wrap this in
     ``try: ... except Exception:``, so any exception type is acceptable
@@ -616,6 +638,8 @@ async def get_embeddings_batch(
         # no provider object to take an identity from.
         await _stats_for(_stats_scope(None, provider_name), _stats_label(None, provider_name)).record_failure()
         raise
+    if isinstance(provider, UnconfiguredEmbeddingProvider):
+        return [None] * len(texts)
     scope = _stats_scope(provider, provider_name)
     label = _stats_label(provider, provider_name)
     # ``BaseException``, not ``Exception``, and deliberately so. A caller that
@@ -669,7 +693,8 @@ async def get_embeddings_batch(
         await _stats_for(scope, label).record_failure(bulk_batch_size=len(texts))
         raise
     await _stats_for(scope, label).record_success(bulk=True)
-    return result
+    vectors: list[list[float] | None] = list(result)
+    return vectors
 
 
 async def _run_with_retry(
@@ -916,6 +941,10 @@ async def get_embedding(
     provider = await _resolve_provider_or_degrade(tenant_config, "Embedding")
     if provider is None:
         return None
+    # This is the document/ingest path, so its result is persisted: no hash
+    # vector posing as a real one. The registry already logged the cause.
+    if isinstance(provider, UnconfiguredEmbeddingProvider):
+        return None
     return await _run_with_retry(
         lambda: provider.embed(text),
         "Embedding",
@@ -961,6 +990,10 @@ async def get_query_embedding(
     provider = await _resolve_provider_or_degrade(tenant_config, "Query embedding")
     if provider is None:
         return None
+    # An ``UnconfiguredEmbeddingProvider`` is used as-is here, unlike
+    # :func:`get_embedding`: a query vector is never stored, and answering
+    # ``None`` would turn every keyless search into a 503 instead of letting
+    # the keyword half of the ranking (which admits unembedded rows) work.
 
     # ``InstructionAwareEmbedder`` is an optional ``@runtime_checkable``
     # Protocol declared in ``common.embedding.protocols`` for exactly

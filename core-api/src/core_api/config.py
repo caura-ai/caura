@@ -904,14 +904,14 @@ class Settings(BaseSettings):
             )
             object.__setattr__(self, "embedding_provider", "openai")
             # A user coming from Vertex likely has no OPENAI_API_KEY — without a
-            # key the registry silently falls back to FakeEmbeddingProvider,
-            # which breaks semantic search with no clear signal. Escalate.
+            # key memories are stored without embeddings, so semantic search
+            # finds nothing new. Escalate.
             if not self.openai_api_key and not self.platform_embedding_provider:
                 logger.error(
                     "EMBEDDING_PROVIDER was remapped from 'vertex' to 'openai', but "
                     "OPENAI_API_KEY is unset and PLATFORM_EMBEDDING_PROVIDER is not "
-                    "configured. Semantic search will use FakeEmbeddingProvider and "
-                    "produce zero-vectors. Set OPENAI_API_KEY or configure "
+                    "configured. Memories will be stored without embeddings (keyword "
+                    "search only). Set OPENAI_API_KEY or configure "
                     "PLATFORM_EMBEDDING_PROVIDER=openai to restore embeddings."
                 )
         if self.entity_extraction_provider == "vertex":

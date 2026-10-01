@@ -54,7 +54,7 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 ### Try it locally — no API key, no signup
 
-The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (With no key there's nothing to configure: memories are stored without embeddings and found by keyword. Add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
 
 ```bash
 git clone https://github.com/caura-ai/caura.git

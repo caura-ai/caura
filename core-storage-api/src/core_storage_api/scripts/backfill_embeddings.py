@@ -717,8 +717,10 @@ async def _amain(argv: list[str]) -> int:
     # Preflight: refuse a live run whose rows would be "repaired" with fake
     # vectors. Two roads lead there — ``EMBEDDING_PROVIDER=fake`` set
     # explicitly, and provider ``openai`` with no key resolving anywhere
-    # (the registry then degrades to ``FakeEmbeddingProvider``, logging a
-    # warning per call but never failing). Either way the poisoned rows
+    # (the registry then returns ``UnconfiguredEmbeddingProvider``, a
+    # ``FakeEmbeddingProvider`` whose vectors ``get_embedding`` refuses to
+    # hand back for storage — so a live run would only fail every row). In
+    # the explicit-fake case the poisoned rows
     # stop being NULL, so the selector never revisits them: permanent
     # damage, hence a hard refusal rather than a warning. Overridable with
     # ``--allow-fake-provider`` for dev/test databases.
