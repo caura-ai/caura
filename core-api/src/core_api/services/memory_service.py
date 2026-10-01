@@ -3283,6 +3283,9 @@ async def fan_out_atomic_facts(
     parent_weight: float,
     parent_ts_start,
     tenant_config,
+    parent_expires_at=None,
+    parent_run_id: str | None = None,
+    parent_source_uri: str | None = None,
 ) -> dict[str, int]:
     """Create one child memory per extracted atomic fact.
 
@@ -3303,6 +3306,12 @@ async def fan_out_atomic_facts(
     ``parent_visibility`` is passed IN, never re-read from the row: it must be
     the post-remediation value, because a row read before the governance PATCH
     still carries the visibility ``keep_private`` just removed (#808).
+
+    ``parent_expires_at`` / ``parent_run_id`` / ``parent_source_uri`` are copied
+    onto every child, as the auto-chunk children already get them: a child is
+    the parent's content, so it must expire with it (the expiry sweep archives
+    by ``expires_at``) and keep its provenance. Accepted as a datetime or the
+    ISO string a storage row carries.
 
     Returns ``{"created", "deduped", "unembedded"}``. Never raises for a single
     fact — each failure mode is counted and logged, so one bad fact cannot cost
@@ -3456,6 +3465,13 @@ async def fan_out_atomic_facts(
                     "status": "active",
                     "visibility": parent_visibility,
                     "ts_valid_start": parent_ts_start,
+                    "expires_at": (
+                        parent_expires_at.isoformat()
+                        if isinstance(parent_expires_at, datetime)
+                        else parent_expires_at
+                    ),
+                    "run_id": parent_run_id,
+                    "source_uri": parent_source_uri,
                 }
             )
         except DuplicateMemoryError:
@@ -3575,6 +3591,17 @@ async def fan_out_atomic_facts(
             fanout_created,
             memory_id,
         )
+        # Mark the parent so a later delete knows to look for its children
+        # (``_may_have_derived_children``): the lookup is an unindexed JSON-key
+        # scan and runs only for parents that say they have some. Best-effort —
+        # the children exist either way, and failing the fan-out over a marker
+        # would cost the facts.
+        try:
+            await sc.update_memory(
+                str(memory_id), tenant_id, {"metadata_patch": {"atomic_fact_children": fanout_created}}
+            )
+        except Exception:
+            logger.warning("could not mark parent %s as having fan-out children", memory_id, exc_info=True)
     if fanout_deduped:
         # Its own line rather than a field on the created line above,
         # because it explains a discrepancy an operator would otherwise
@@ -4024,6 +4051,9 @@ async def _enrich_memory_background(
                 parent_weight=parent_weight,
                 parent_ts_start=parent_ts_start,
                 tenant_config=tenant_config,
+                parent_expires_at=mem.get("expires_at"),
+                parent_run_id=mem.get("run_id"),
+                parent_source_uri=mem.get("source_uri"),
             )
 
         # OSS 09/02 L-20 — the entity-extraction fan-out that stood here is
@@ -4068,26 +4098,58 @@ async def _enrich_memory_background(
     return governed_row
 
 
+def _may_have_derived_children(metadata: dict | None) -> bool:
+    """Could rows derived from this one exist (``metadata.parent_memory_id``)?
+
+    Gates the child lookup, which filters on a JSON key with no supporting
+    index — the reason ``governance_remediation._pre_verdict_children`` gates
+    too. ``auto_chunked`` is stamped on every auto-chunk parent; ``atomic_facts``
+    is the key the async fan-out persists on a parent (left in place, nulled,
+    once consumed); ``atomic_fact_children`` is stamped by the fan-out itself.
+    """
+    md = metadata or {}
+    return bool(md.get("auto_chunked")) or "atomic_facts" in md or bool(md.get("atomic_fact_children"))
+
+
 async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
+    """Soft-delete one memory and every row derived from it.
+
+    Auto-chunk and atomic-fact children carry the parent's own text, so a
+    delete that reached only the parent left the document recallable through
+    them, with ``parent_memory_id`` naming a deleted row. Governance
+    remediation already cascades a drop for the same reason; a user's or
+    agent's delete now does too. Children first: if their delete fails the
+    parent is still live and the caller's retry repeats the whole operation,
+    rather than leaving children nothing points back to.
+    """
     sc = get_storage_client()
     mem = await sc.get_memory(str(memory_id), tenant_id)
     if not mem:
         raise HTTPException(status_code=404, detail="Memory not found")
 
+    md = mem.get("metadata_") if mem.get("metadata_") is not None else mem.get("metadata")
+    children: list[dict] = []
+    if _may_have_derived_children(md):
+        children = [c for c in await sc.find_children_by_parent_id(tenant_id, str(memory_id)) if c.get("id")]
+        if children:
+            await sc.soft_delete_by_ids(tenant_id, [str(c["id"]) for c in children])
+
     await sc.soft_delete_memory(str(memory_id), tenant_id)
 
     _hooks = get_hooks()
     if _hooks.audit_log:
-        try:
-            await _hooks.audit_log(
-                tenant_id=tenant_id,
-                agent_id=mem.get("agent_id"),
-                action="soft_delete",
-                resource_type="memory",
-                resource_id=memory_id,
-            )
-        except Exception:
-            logger.warning("Audit hook failed (non-critical)", exc_info=True)
+        deleted = [*((c["id"], c.get("agent_id")) for c in children), (memory_id, mem.get("agent_id"))]
+        for row_id, row_agent in deleted:
+            try:
+                await _hooks.audit_log(
+                    tenant_id=tenant_id,
+                    agent_id=row_agent,
+                    action="soft_delete",
+                    resource_type="memory",
+                    resource_id=row_id,
+                )
+            except Exception:
+                logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
 
 async def _revert_superseded_row(sc, tenant_id: str, superseded_id: str, editor_id: str) -> None:
