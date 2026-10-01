@@ -248,6 +248,7 @@ def test_exactly_the_flipped_families_are_flipped() -> None:
 def test_known_families_are_derived_from_the_enums() -> None:
     """The set a flip is validated against comes from the topics themselves."""
     assert topics_mod.known_families() == {
+        "collaboration",
         "memory",
         "audit",
         "lifecycle",
