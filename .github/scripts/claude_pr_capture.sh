@@ -32,11 +32,11 @@
 #   CAURA_AGENTS_KEY     internal-agents tenant key (empty => dark no-op)
 #   CAURA_API_URL        default https://caura.ai; also accepts its pre-rename spelling  # legacy-name-ok: rule 3 dual-read alias
 #   CODE_REVIEW_FLEET_ID default code-review
-#   MODEL                default claude-sonnet-5
+#   MODEL                default claude-sonnet-5-5
 #   MAX_BUDGET_USD       per-invocation ceiling (default 2.00)
 set -euo pipefail
 
-MODEL="${MODEL:-claude-sonnet-5}"
+MODEL="${MODEL:-claude-sonnet-5-5}"
 MAX_NOTES=5
 MAX_NOTE_CHARS=600
 MAX_THREAD_CHARS=60000
