@@ -19,8 +19,10 @@ knows. Using it is the job, not an optional extra.
 runtime the Caura plugin handles the automatic layer: it injects the mandatory
 keystones at session start (§1), recalls relevant memory before your substantive
 turns (§11), and writes a short **turn summary** afterward as a backstop
-(`CAURA_AUTO_WRITE_TURNS`, on by default). Treat that as a floor, not a
-substitute. You still call the `caura_*` tools **directly** whenever you need
+(`CAURA_AUTO_WRITE_TURNS`, on by default). The same switch also controls
+automatic saves of user messages and compaction summaries; set it to `false`
+and restart the plugin to disable all three. Treat the automatic layer as a
+floor, not a substitute. You still call the `caura_*` tools **directly** whenever you need
 to interact deliberately — above all to **write the high-value memories the
 auto-summary won't** (a decision and its *why*, an outcome, a rule), and to
 recall something specific the auto-gate didn't fetch, look up or publish a
@@ -137,7 +139,8 @@ Interviewer enabled, a scheduled server-side job reads your durable work trail
 it — episodes, decisions, outcomes — after the fact. You don't invoke it and
 won't see it run. This is a **different mechanism** from the plugin's per-turn
 auto-writes (`CAURA_AUTO_WRITE_TURNS`, described in the preamble): the
-auto-write layer summarizes turns locally as you work; the Interviewer is a
+auto-write layer saves user messages and turn/compaction summaries as you work;
+the Interviewer is a
 server-side scheduled synthesis from the work trail. Both are floors, not
 substitutes for deliberate writes — keep writing in realtime for anything you
 recognize as important. Realtime writes are immediate and precise; the
@@ -299,8 +302,15 @@ don't hit the backend and pay tokens for an unhelpful recall block.
 Rolling skip counters (`recall_metrics`) ride the heartbeat for per-fleet
 visibility.
 
-The plugin also auto-writes a short **turn summary** after substantive turns
-(`CAURA_AUTO_WRITE_TURNS`, on by default). That's a backstop, not a
+The plugin also automatically saves **user messages**, short **assistant turn
+summaries** and **compaction summaries** as episode memories with the server's
+default `scope_team` visibility. User-message saves require at least 100
+characters, are truncated to 500 characters plus an ellipsis, and are capped
+at 10 per session. `CAURA_AUTO_WRITE_TURNS=false` disables all three automatic
+writes after a plugin restart. Local buffering, recall, explicit memory tools
+and runtime compaction remain available; existing memories are not deleted.
+The separately enabled Interviewer (`CAURA_INTERVIEWER`) is unaffected.
+These automatic writes are a backstop, not a
 replacement for the deliberate, high-value writes in §3 — and it never evolves,
 supersedes, or files docs for you. Do that work yourself.
 

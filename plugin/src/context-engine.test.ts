@@ -8,6 +8,8 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import {
   shouldRecall,
@@ -25,6 +27,26 @@ import {
 } from "./context-engine.js";
 import { sanitizePromptField } from "./keystones.js";
 import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
+import { hasPluginEnvPrefix } from "./env.js";
+
+describe("automatic conversation-write opt-out", () => {
+  // env.ts resolves flags at module load. Separate processes exercise the real
+  // environment boundary without leaking state into the rest of this suite.
+  for (const setting of [undefined, "true", "false"]) {
+    test(`all automatic write paths honor ${setting ?? "the default"}`, () => {
+      const env: NodeJS.ProcessEnv = Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !hasPluginEnvPrefix(key)),
+      );
+      env.CAURA_TENANT_ID = "auto-write-fixture";
+      env.CAURA_INTERVIEWER = "false";
+      if (setting !== undefined) env.CAURA_AUTO_WRITE_TURNS = setting;
+      execFileSync(process.execPath, [
+        fileURLToPath(new URL("./context-engine-auto-write.fixture.js", import.meta.url)),
+        setting === "false" ? "disabled" : "enabled",
+      ], { env, timeout: 15_000, stdio: "pipe" });
+    });
+  }
+});
 
 describe("prepareSubagentSpawn — OpenClaw's rollback contract", () => {
   // OpenClaw's contract is `Promise<SubagentSpawnPreparation | undefined>` with

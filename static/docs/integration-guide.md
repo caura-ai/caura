@@ -223,11 +223,19 @@ CAURA_API_KEY=mc_your_key_here                          # tenant-scoped API key
 CAURA_FLEET_ID=fleet-001                                # identifies this fleet
 CAURA_NODE_NAME=my-gateway                              # friendly name shown in Fleet page
 # CAURA_TENANT_ID=                                      # auto-resolved from API key
-# CAURA_AUTO_WRITE_TURNS=true                           # default; set false to disable auto-write
+# CAURA_AUTO_WRITE_TURNS=true                           # false disables automatic conversation writes
 # CAURA_AUTO_FIX_CONFIG=false                           # set true to auto-fix openclaw.json on startup
 ```
 
 The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The pre-rename `MEMCLAW_*` spelling of every name above keeps working; where both are set the first **non-empty** one wins, so a half-filled template cannot blank out a working value. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-floor: rule 3 dual-read alias -->
+
+Automatic conversation writes include user messages from `ingest`, assistant
+turn summaries and compaction summaries, stored as episode memories with the
+server's default `scope_team` visibility. Set `CAURA_AUTO_WRITE_TURNS=false` and
+restart the plugin to disable all three. Local message buffering, recall,
+explicit memory tools and runtime compaction continue to work. This does not
+delete existing memories or disable the separately enabled Interviewer
+(`CAURA_INTERVIEWER`).
 
 **Configure OpenClaw** — edit `~/.openclaw/openclaw.json`:
 

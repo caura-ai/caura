@@ -102,9 +102,10 @@ export const CAURA_FLEET_ID = readEnv(["CAURA_FLEET_ID", "MEMCLAW_FLEET_ID"]) ||
 export let CAURA_TENANT_ID = readEnv(["CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 export const CAURA_NODE_NAME = readEnv(["CAURA_NODE_NAME", "MEMCLAW_NODE_NAME"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 export const CAURA_AGENT_ID = readEnv(["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
-// Default to true — auto-writing turn summaries is the core fix for the
-// "100% dark matter" problem (memories written but never recalled).
-// Users can opt out with CAURA_AUTO_WRITE_TURNS=false.
+// Default to true for all automatic conversation-memory writes: user messages
+// from ingest, turn summaries and compaction summaries. Setting false disables
+// these three persistence paths; explicit writes and runtime compaction remain
+// available. The independently enabled Interviewer has its own controls.
 export const CAURA_AUTO_WRITE_TURNS =
   readEnv(["CAURA_AUTO_WRITE_TURNS", "MEMCLAW_AUTO_WRITE_TURNS"]) !== "false";  // legacy-name-ok: rule 3 dual-read alias
 

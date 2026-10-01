@@ -61,7 +61,16 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 | `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
 | `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
 | `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |
-| `CAURA_AUTO_WRITE_TURNS` | Auto-write turn summaries (default `true`). |
+| `CAURA_AUTO_WRITE_TURNS` | Automatic conversation-memory writes (default `true`): user messages from `ingest`, assistant turn summaries and compaction summaries. Set `false` to disable all three. |
+
+The automatic writes create episode memories using the server's default
+visibility (`scope_team`). Ingest saves user messages of at least 100 characters,
+truncates them to 500 characters plus an ellipsis, and caps writes at 10 per
+session. Turning this flag off leaves in-memory buffering, recall, explicit
+`caura_write` calls and OpenClaw's runtime compaction available. It does not
+delete previously saved memories. The independently enabled Interviewer and
+its durable work-trail buffer have separate controls (`CAURA_INTERVIEWER`).
+Restart the plugin after changing the environment variable.
 
 **Legacy spellings.** Every `CAURA_*` variable in this document — the table above, the `CAURA_API_KEY` server gate, and `CAURA_VERSION` in compose — currently also answers to its pre-rename `MEMCLAW_*` name. Use `CAURA_*` for new configuration. Where both are set the first **non-empty** value wins — deliberately, rather than the first one *defined* — so an unfilled `CAURA_FOO=` in a deploy template cannot blank out a working `MEMCLAW_FOO`. <!-- legacy-name-floor: documents the current dual-read behavior -->
 

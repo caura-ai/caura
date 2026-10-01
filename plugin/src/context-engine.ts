@@ -7,7 +7,8 @@
  * OpenClaw runtime via ``openclaw-sdk-bridge``).
  *
  * Security:
- * - afterTurn enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false
+ * - Automatic user-message, turn-summary and compaction-summary writes are
+ *   enabled by default; opt out with CAURA_AUTO_WRITE_TURNS=false.
  * - Recall timeout enforced via AbortController
  */
 
@@ -712,6 +713,8 @@ export class CauraContextEngine {
   /**
    * ingest — buffer messages per session and persist user messages as episodes.
    * Enables buildQueryFromMessages for richer recall in assemble().
+   * The auto-write opt-out disables persistence, not the in-memory buffer or
+   * the independently enabled Interviewer buffer.
    */
   async ingest(message: IngestMessage): Promise<void> {
     await this.bootstrap();
@@ -743,7 +746,7 @@ export class CauraContextEngine {
     // Persist user messages as episode memories (async, non-blocking).
     // Capped at MAX_INGEST_WRITES_PER_SESSION to prevent memory spam in long sessions.
     // The in-memory buffer still receives all messages for buildQueryFromMessages.
-    if (message.role === "user") {
+    if (CAURA_AUTO_WRITE_TURNS && message.role === "user") {
       const content =
         typeof message.content === "string"
           ? message.content
@@ -1183,12 +1186,12 @@ export class CauraContextEngine {
     context: CompactContext,
   ): Promise<{ ok: boolean; compacted: boolean; reason?: string; result?: unknown }> {
     // 1. Persist OpenClaw's summary into Caura as an episode
-    // memory. This runs regardless of whether the delegation
-    // succeeds below — even on a degraded environment the summary
+    // memory when automatic writes are enabled. This runs regardless of
+    // whether delegation succeeds below — even on a degraded environment the summary
     // is worth keeping if we can. Failure here is logged and
     // swallowed; never let it cascade into "compaction failed."
     const summary = context?.summary || context?.compactionSummary;
-    if (summary && typeof summary === "string") {
+    if (CAURA_AUTO_WRITE_TURNS && summary && typeof summary === "string") {
       try {
         const tid = await ensureTenantId();
         const agentId = resolveAgentId(
