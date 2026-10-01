@@ -69,6 +69,10 @@ _INDEX_NAME = "ix_memory_entity_links_extraction"
 
 
 def upgrade() -> None:
+    # ``if_not_exists``: entering the autocommit block below COMMITS this add
+    # before the CONCURRENTLY build, while alembic_version moves only once
+    # upgrade() returns. A build interrupted there leaves the column behind,
+    # and a plain ADD COLUMN would fail every retry with DuplicateColumn.
     op.add_column(
         "memory_entity_links",
         sa.Column(
@@ -77,6 +81,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.text(f"'{_CALLER}'"),
         ),
+        if_not_exists=True,
     )
     # Partial, on the only predicate that reads this column: the reset deletes
     # ``source = 'extraction'`` for one memory. The composite PK already leads

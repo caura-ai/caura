@@ -187,6 +187,31 @@ write rather than globally.
 `POST /search` returns matches in an `items` array. Each item contains the full
 memory plus its `similarity` score.
 
+## Upgrading
+
+Pull the new images and run `docker compose up -d`. `core-storage-api` applies
+any pending schema migrations when it starts, before it serves traffic. If a
+migration is interrupted (the container is killed or the database drops the
+connection), restart the service. Each migration either rolls back completely
+or is written to be retried, so the restart runs it again from the start.
+
+Restore a database with a full `pg_dump`, which includes the `alembic_version`
+table that records the schema revision. If that table is missing (a dump of
+selected tables, or one dropped by hand), the service records the current
+revision only when the schema shows the newest migration was applied. Otherwise
+it refuses to start, because it cannot tell how many migrations still need to
+run. Find the revision the database was really at (from the `alembic_version`
+of the database it was copied from, or the release it last ran), record it,
+and start the service. It then applies the remaining migrations. From a source
+checkout, run `alembic stamp <revision>` from the repository root. With the
+compose stack, write the same row directly:
+
+```bash
+docker compose exec db psql -U caura -d caura -c \
+  "CREATE TABLE alembic_version (version_num varchar(32) PRIMARY KEY);
+   INSERT INTO alembic_version VALUES ('<revision>');"
+```
+
 ## Authentication modes
 
 Choose one mode in `.env`, then restart with `docker compose up -d`.

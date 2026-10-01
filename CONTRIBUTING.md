@@ -79,11 +79,13 @@ pytest core-storage-api/tests/ -v
 Two databases, because the suites provision incompatibly and cannot share one:
 `tests/` builds its schema with `Base.metadata.create_all`, while
 `core-storage-api/tests/` runs the real Alembic chain. Run them against one
-database and nothing fails loudly — `create_all` leaves tables with no
-`alembic_version`, so the Alembic side stamps head and skips every migration,
-and any migration-only table (one with no ORM model, e.g. `tenant_suppression`)
-is missing from a database whose stamp claims it is current. Run them the other
-way round and the migrated schema is the one that gets polluted.
+database and it breaks in a way that points away from the cause — `create_all`
+leaves tables with no `alembic_version` and none of the chain's migration-only
+objects (e.g. `tenant_suppression`, which has no ORM model), so the storage
+suite's `init_database()` refuses to stamp it and every storage test errors at
+setup. (It used to stamp head and skip every migration, which was worse: nothing
+failed at all.) Run them the other way round and the migrated schema is the one
+that gets polluted.
 
 Each suite defaults to its own database — `caura_test` for `tests/` and
 `caura_storage` for `core-storage-api/tests/` — so no environment variable is

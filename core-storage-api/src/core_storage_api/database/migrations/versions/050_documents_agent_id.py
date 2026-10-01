@@ -51,7 +51,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column("documents", sa.Column("agent_id", sa.Text(), nullable=True))
+    # ``if_not_exists``: entering the autocommit block below COMMITS this add
+    # before the CONCURRENTLY build, while alembic_version moves only once
+    # upgrade() returns. A build interrupted there leaves the column behind,
+    # and a plain ADD COLUMN would fail every retry with DuplicateColumn.
+    op.add_column("documents", sa.Column("agent_id", sa.Text(), nullable=True), if_not_exists=True)
     with op.get_context().autocommit_block():
         drop_invalid_indexes("ix_documents_tenant_agent")
         # One source line, so the CONCURRENTLY guard's regex sees the clause.
