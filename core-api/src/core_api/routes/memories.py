@@ -1438,11 +1438,15 @@ async def _write_memory_inner(
     usage = None
     if auth.tenant_id:  # skip enforcement + metering for admin
         await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
-        if charges_write_quota("create"):
-            usage = await check_and_increment(body.tenant_id, "write")
-    set_usage_headers(response, usage)
     _observe_rest_reserved_write(auth, body.agent_id or chosen_agent_id)
     result = await create_memory(body)
+    # Metered only after the write succeeded, like the bulk route: a write that
+    # raised wrote nothing, and a client retrying it must not pay per attempt.
+    # The meter only records (enforcement travels via ``x-org-read-only``), so
+    # moving it past the write gates nothing.
+    if auth.tenant_id and charges_write_quota("create"):
+        usage = await check_and_increment(body.tenant_id, "write")
+    set_usage_headers(response, usage)
     # STM writes return STMWriteResponse (different shape from MemoryOut)
     if isinstance(result, STMWriteResponse):
         stm_body = result.model_dump(mode="json")
@@ -2714,11 +2718,13 @@ async def ingest_commit_endpoint(
         # counter feeds ``_is_over_plan_limits``, so the cheapest way past a
         # write cap was to ingest in bulk.
         #
-        # Before the write, matching the ordering
-        # ``test_billing_happens_before_the_write`` pins for the MCP surface: a
-        # batch that fails partway still costs what it attempted, and two
-        # orderings for one operation is the drift that test exists to stop.
+        #
+        # AFTER the write, the ordering every write surface now shares (REST
+        # single and bulk, MCP single and batch): a commit that raised wrote
+        # nothing, and a client retrying it must not pay once per attempt.
+        result = await ingest_commit(body)
         await bulk_check_and_increment(body.tenant_id, len(body.facts))
+        return result
     return await ingest_commit(body)
 
 

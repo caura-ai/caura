@@ -1830,8 +1830,6 @@ async def caura_write(
                 # would let a refused write push the tenant further over.
                 if refuse := _check_plan_limit("create", tenant_id):
                     return _with_latency(refuse, t0)
-                if charges_write_quota("create"):
-                    await check_and_increment(tenant_id, "write")
                 result = await create_memory(
                     MemoryCreate(
                         tenant_id=tenant_id,
@@ -1851,6 +1849,11 @@ async def caura_write(
                         write_mode=write_mode,  # type: ignore[arg-type]
                     ),
                 )
+                # Charged only once the write succeeded, as REST does: a write
+                # that raised (rejected, duplicate, storage failure) wrote
+                # nothing, and an agent retrying it must not pay per attempt.
+                if charges_write_quota("create"):
+                    await check_and_increment(tenant_id, "write")
                 return _with_latency(_serialize(result), t0)
             # Batch path. ``items`` is populated: the guard near the top of
             # this handler admits exactly one of {content, items} and the
@@ -1903,27 +1906,6 @@ async def caura_write(
             # landed; REST's bulk route refuses whole for the same reason.
             if refuse := _check_plan_limit("bulk_create", tenant_id):
                 return _with_latency(refuse, t0)
-            # One unit per item, mirroring REST's ``POST /memories/bulk``, which
-            # charges ``len(body.items)`` before the write. Before this the path
-            # charged nothing at all (caura-ai/caura#1220).
-            #
-            # Ordering is copied from REST deliberately rather than reasoned out
-            # afresh: the charge lands BEFORE the write, so a batch that fails
-            # partway still costs what it attempted. Two conventions for the
-            # same operation across two surfaces is the drift this whole area
-            # keeps producing.
-            #
-            # ``meters_mcp_bulk_write()`` is ON since caura-ai/caura#1638. It
-            # is still a billing switch rather than a correctness one — see its
-            # docstring — and still reversible by env without a redeploy. What
-            # changed is that this path now contributes to the counters the gate
-            # above reads, so a quiet observation log is no longer explained by
-            # the batch path being invisible to it.
-            #
-            # Unreachable while the plan-limit gate refuses, which is the point:
-            # a refused batch charges nothing.
-            if charges_write_quota("bulk_create") and meters_mcp_bulk_write():
-                await bulk_check_and_increment(tenant_id, len(bulk_items))
             bulk_data = BulkMemoryCreate(
                 tenant_id=tenant_id,
                 fleet_id=fleet_id,
@@ -1941,6 +1923,24 @@ async def caura_write(
             # simple. If a use case needs MCP retry idempotency, the
             # client can pass an explicit token via metadata.
             bulk_result = await create_memories_bulk(bulk_data, bulk_attempt_id=f"mcp:{uuid4()}")
+            # One unit per item, mirroring REST's ``POST /memories/bulk``. Before
+            # caura-ai/caura#1220 this path charged nothing at all.
+            #
+            # AFTER the write, as REST bulk now does: a batch that raised wrote
+            # nothing, and each MCP retry mints a fresh attempt id above, so
+            # charging first billed one never-written batch once per attempt.
+            # Still ``len(bulk_items)`` rather than the created count, so a
+            # successful batch costs what it did before — this changes charging
+            # on failure, not the price of per-item duplicates or errors.
+            #
+            # ``meters_mcp_bulk_write()`` is ON since caura-ai/caura#1638. It
+            # is still a billing switch rather than a correctness one — see its
+            # docstring — and still reversible by env without a redeploy.
+            #
+            # Unreachable while the plan-limit gate refuses, which is the point:
+            # a refused batch charges nothing.
+            if charges_write_quota("bulk_create") and meters_mcp_bulk_write():
+                await bulk_check_and_increment(tenant_id, len(bulk_items))
             return _with_latency(_serialize(bulk_result), t0)
         except ValidationError as e:
             # ``MemoryCreate(...)`` on the single-write path above validates
