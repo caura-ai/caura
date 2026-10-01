@@ -353,6 +353,20 @@ def _visibility_scope_clause(caller_agent_id: str | None) -> ColumnElement[bool]
     )
 
 
+def _document_fleet_clause(collection: str | None, fleet_id: str) -> ColumnElement[bool]:
+    """Fleet filter for document reads.
+
+    Skills without a fleet are tenant-wide: the nightly Skill Factory mints
+    them with ``fleet_id=NULL``, and a plugin node that filters by its own
+    ``CAURA_FLEET_ID`` must still receive them (the same NULL-is-tenant-wide
+    rule ``_fleet_scope_clause`` applies to memories). Other collections keep
+    exact fleet matching; widening them is a separate decision.
+    """
+    if collection == "skills":
+        return or_(Document.fleet_id == fleet_id, Document.fleet_id.is_(None))
+    return Document.fleet_id == fleet_id
+
+
 def _entity_compatible_groups(cluster_ids: list[UUID], names: dict[UUID, str]) -> list[list[UUID]]:
     """Partition a duplicate cluster into groups whose names are all mutually
     mergeable (``same_identifier_signature`` for every pair).
@@ -1418,8 +1432,14 @@ class PostgresService:
         # Wrap the full session block so db_ms includes connection-pool
         # wait time — a saturated pool shows up as slow "DB" here, which
         # is exactly how we want to see it in Cloud Logging.
+        from core_storage_api.config import settings as _role_settings
+
+        # The writer reads the primary: callers come to the writer for this GET
+        # when they need their own fresh write back (``read=False``), and the
+        # read pool lags behind it.
+        session_factory = get_session if _role_settings.core_storage_role == "writer" else get_read_session
         with db_measure():
-            async with get_read_session() as session:
+            async with session_factory() as session:
                 stmt = select(Memory).where(
                     Memory.id == memory_id,
                     Memory.tenant_id == tenant_id,
@@ -1688,6 +1708,16 @@ class PostgresService:
                 "memory_add_all: mapped rows disagree on which columns they set",
                 {"columns": _divergent_keys(row_keys)},
             )
+        # One INSERT gives every row the same ``now()``, so ``created_at`` ties
+        # and anything ordering by it (contradiction direction above all:
+        # ``_pick_older`` then falls back to random UUID order and marks the
+        # NEWER fact stale about half the time) sees no order. Stamp each row
+        # strictly after the previous one, in batch order, when the caller set
+        # no timestamp. Every row gets the column, so the batch's column list
+        # stays uniform; a 1000-row batch spans one millisecond.
+        if "created_at" not in row_keys[0]:
+            for i, mapped in enumerate(rows):
+                mapped["created_at"] = func.now() + timedelta(microseconds=i)
 
         async with get_session() as session:
             # The conflict target must mirror ``ix_memories_attempt_unique``
@@ -9778,7 +9808,7 @@ class PostgresService:
         if collection is not None:
             stmt = stmt.where(Document.collection == collection)
         if fleet_id:
-            stmt = stmt.where(Document.fleet_id == fleet_id)
+            stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
         if status is not None:
             stmt = stmt.where(Document.data["status"].astext == status)
         async with get_read_session() as session:
@@ -9913,7 +9943,7 @@ class PostgresService:
                 Document.collection == collection,
             )
             if fleet_id:
-                stmt = stmt.where(Document.fleet_id == fleet_id)
+                stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
 
             for key, value in (where or {}).items():
                 if isinstance(value, bool):
@@ -12663,7 +12693,7 @@ class PostgresService:
         *,
         org_id: str,
         action: str,
-        since_hours: int,
+        since_hours: float,
     ) -> bool:
         """CAURA-657 dedup gate: did this org+action succeed within the
         last ``since_hours``? Used by the pipeline-op consumers to
@@ -12682,6 +12712,10 @@ class PostgresService:
                 .where(LifecycleAudit.org_id == org_id)
                 .where(LifecycleAudit.action == action)
                 .where(LifecycleAudit.status == "success")
+                # A skip is finalized as ``success{skipped}``; counting it
+                # re-armed the gate on every tick, so any cadence under the
+                # window ran once and then skipped forever. Only real runs count.
+                .where(func.coalesce(LifecycleAudit.stats["skipped"].astext, "false") != "true")
                 .where(LifecycleAudit.finished_at > func.now() - timedelta(hours=since_hours))
                 .limit(1)
             )

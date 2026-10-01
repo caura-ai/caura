@@ -411,3 +411,74 @@ async def test_bulk_flag_marks_stored_metadata():
     assert any(
         r["action"] == "pii_flag" and r["detail"]["write_mode"] == "bulk" for r in rows
     ), rows
+
+
+# ── PII deterministic gate on CONTENT EDITS (update_memory) ──────────────────
+#
+# An edit used to store new content as sent: no scan, no mask, no drop, and no
+# governance audit row, so text a create would have refused reached the row,
+# its embedding and the audit diff.
+
+
+async def _clean_memory_then_edit(tenant: str, action: str):
+    from core_api.schemas import MemoryUpdate
+    from core_api.services.memory_service import update_memory
+
+    created = await create_memory(
+        _make_input(tenant, f"Launch notes for the team.{_PADDING}")
+    )
+    await _seed_governance(tenant, pii={"enabled": True, "action": action})
+    edited = f"Card for the vendor is 4111 1111 1111 1111.{_PADDING}"
+    return created, edited, update_memory, MemoryUpdate
+
+
+async def test_pii_drop_refuses_an_edit_and_keeps_the_old_content():
+    tenant = _tenant()
+    created, edited, update_memory, MemoryUpdate = await _clean_memory_then_edit(
+        tenant, "drop"
+    )
+    with pytest.raises(HTTPException) as exc:
+        await update_memory(created.id, tenant, MemoryUpdate(content=edited))
+    assert exc.value.status_code == 422
+    row = await get_storage_client().get_memory(str(created.id), tenant, read=False)
+    assert "4111" not in row["content"]
+    assert any(r["action"] == "pii_drop" for r in await _governance_audit_rows(tenant))
+
+
+async def test_pii_mask_redacts_an_edit():
+    tenant = _tenant()
+    created, edited, update_memory, MemoryUpdate = await _clean_memory_then_edit(
+        tenant, "mask"
+    )
+    out = await update_memory(created.id, tenant, MemoryUpdate(content=edited))
+    assert "4111 1111 1111 1111" not in out.content and "«CARD»" in out.content
+    assert any(r["action"] == "pii_mask" for r in await _governance_audit_rows(tenant))
+
+
+async def test_pii_flag_marks_an_edited_memory():
+    tenant = _tenant()
+    created, edited, update_memory, MemoryUpdate = await _clean_memory_then_edit(
+        tenant, "flag"
+    )
+    await update_memory(created.id, tenant, MemoryUpdate(content=edited))
+    row = await get_storage_client().get_memory(str(created.id), tenant, read=False)
+    meta = row.get("metadata_") or row.get("metadata") or {}
+    assert meta.get("contains_pii") is True, meta
+    assert any(r["action"] == "pii_flag" for r in await _governance_audit_rows(tenant))
+    # The update's own audit record is written too (raw PII used to make the
+    # audit chain refuse it), and it does not carry the flagged text.
+    async with get_session() as s:
+        details = (
+            (
+                await s.execute(
+                    text(
+                        "SELECT detail::text FROM audit_log WHERE tenant_id=:t AND action='update'"
+                    ),
+                    {"t": tenant},
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert details, "the update audit record was dropped"
+    assert all("4111" not in d for d in details)

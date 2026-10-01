@@ -40,7 +40,7 @@ async def create_lifecycle_audit(request: Request) -> dict:
 
 
 @router.get("/has-recent-success")
-async def has_recent_success(org_id: str, action: str, since_hours: int) -> dict:
+async def has_recent_success(org_id: str, action: str, since_hours: float) -> dict:
     """Dedup gate for CAURA-657 pipeline ops. Returns whether the
     given org+action has a successful audit row within
     ``since_hours``; the consumer skips its run when this is True.
@@ -49,10 +49,10 @@ async def has_recent_success(org_id: str, action: str, since_hours: int) -> dict
     operator passing 0 would short-circuit every check (always False),
     and a runaway negative value would scan effectively all rows.
     """
-    if since_hours < 1 or since_hours > 168:
+    if since_hours <= 0 or since_hours > 168:
         raise HTTPException(
             status_code=422,
-            detail="'since_hours' must be in [1, 168] (hours)",
+            detail="'since_hours' must be in (0, 168] (hours)",
         )
     found = await _svc.lifecycle_audit_has_recent_success(
         org_id=org_id, action=action, since_hours=since_hours
@@ -81,7 +81,7 @@ async def summarize_lifecycle_audits(request: Request) -> dict:
     if type(since_hours) is not int or since_hours < 1 or since_hours > 168:
         raise HTTPException(
             status_code=422,
-            detail="'since_hours' must be in [1, 168] (hours)",
+            detail="'since_hours' must be in (0, 168] (hours)",
         )
     triggered_by = body.get("triggered_by")
     if triggered_by is not None and not isinstance(triggered_by, str):

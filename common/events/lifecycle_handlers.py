@@ -120,7 +120,7 @@ class PipelineStorageAdapter(Protocol):
     ) -> int: ...
 
     async def has_recent_lifecycle_success(
-        self, *, org_id: str, action: str, since_hours: int
+        self, *, org_id: str, action: str, since_hours: float
     ) -> bool: ...
 
     async def update_lifecycle_audit_row(
@@ -167,7 +167,7 @@ async def _run_action(
     run_op: _OpFn,
     stats_key: str,
     action: str,
-    dedup_window_hours: int | None = None,
+    dedup_window_hours: float | None = None,
 ) -> None:
     """Shared body for every lifecycle action — bound to a specific
     primitive at registration time so this function never branches on
@@ -208,9 +208,13 @@ async def _run_action(
     # so the audit row's life cycle stays clean — pending → success
     # with skipped=true, no in_progress flicker.
     if dedup_window_hours is not None:
+        # A scheduler running this op more often than daily says so on the
+        # request; the registration default (23h) would otherwise swallow
+        # every run after the first of each day.
+        window = getattr(request, "dedup_window_hours", None) or dedup_window_hours
         try:
             already_done = await adapter.has_recent_lifecycle_success(  # type: ignore[union-attr]
-                org_id=org_id, action=action, since_hours=dedup_window_hours
+                org_id=org_id, action=action, since_hours=window
             )
         except Exception:
             # Failed dedup check shouldn't block the op — better to run

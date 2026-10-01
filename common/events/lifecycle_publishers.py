@@ -130,6 +130,7 @@ async def publish_crystallize_request(
     org_id: str,
     triggered_by: str,
     fleet_id: str | None = None,
+    dedup_window_hours: float | None = None,
 ) -> None:
     """CAURA-657: trigger crystallization for one org. Reuses the
     archive payload — the action carries no per-message data beyond
@@ -144,6 +145,7 @@ async def publish_crystallize_request(
             org_id=org_id,
             triggered_by=triggered_by,
             fleet_id=fleet_id,
+            dedup_window_hours=dedup_window_hours,
         ),
     )
 
@@ -181,6 +183,7 @@ async def publish_entity_link_request(
     org_id: str,
     triggered_by: str,
     fleet_id: str | None = None,
+    dedup_window_hours: float | None = None,
 ) -> None:
     """CAURA-657: trigger entity-link cross-link discovery for one org.
     Same payload shape as archive ops. ``auto_entity_linking_enabled``
@@ -193,6 +196,7 @@ async def publish_entity_link_request(
             org_id=org_id,
             triggered_by=triggered_by,
             fleet_id=fleet_id,
+            dedup_window_hours=dedup_window_hours,
         ),
     )
 
@@ -203,6 +207,7 @@ async def publish_insights_request(
     org_id: str,
     triggered_by: str,
     fleet_id: str | None = None,
+    dedup_window_hours: float | None = None,
 ) -> None:
     """Trigger insights discovery (focus='discover') for one org.
     Same payload shape as the other pipeline ops. ``auto_insights_enabled``
@@ -217,6 +222,7 @@ async def publish_insights_request(
             org_id=org_id,
             triggered_by=triggered_by,
             fleet_id=fleet_id,
+            dedup_window_hours=dedup_window_hours,
         ),
     )
 
@@ -228,6 +234,7 @@ async def publish_forge_distill_request(
     triggered_by: str,
     run_label: str,
     fleet_id: str | None = None,
+    dedup_window_hours: float | None = None,
     freshness_window_days: int | None = None,
     min_cluster_size: int | None = None,
     min_distinct_agents: int | None = None,
@@ -258,6 +265,7 @@ async def publish_forge_distill_request(
             org_id=org_id,
             triggered_by=triggered_by,
             fleet_id=fleet_id,
+            dedup_window_hours=dedup_window_hours,
             run_label=run_label,
             freshness_window_days=freshness_window_days,
             min_cluster_size=min_cluster_size,

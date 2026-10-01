@@ -3065,7 +3065,7 @@ class CoreStorageClient:
         *,
         org_id: str,
         action: str,
-        since_hours: int,
+        since_hours: float,
     ) -> bool:
         """CAURA-657 dedup gate. The pipeline-op consumers (crystallize,
         entity-link) check this before invoking the primitive — skip the

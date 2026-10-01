@@ -699,9 +699,17 @@ async def detect_contradictions_async(
     try:
         if new_memory is None:
             sc = get_storage_client()
-            new_memory = await sc.get_memory(str(memory_id), tenant_id)
+            # ``read=False``: the row was committed moments ago and the read
+            # pool lags the primary; a replica miss used to end detection here
+            # without a trace (and judge an edit on its pre-edit text).
+            new_memory = await sc.get_memory(str(memory_id), tenant_id, read=False)
         if not new_memory or new_memory.get("deleted_at") is not None:
             # Resolved before the lock is taken, so a gone row never holds one.
+            if not new_memory:
+                logger.warning(
+                    "contradiction_detection_skipped_row_missing",
+                    extra={"memory_id": str(memory_id), "tenant_id": tenant_id},
+                )
             return
 
         # A4 #14 — back-channel idempotency. Both the ENRICHED and

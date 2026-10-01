@@ -4222,9 +4222,20 @@ async def update_memory(
     content_changed = "content" in fields_set and data.content != mem.get("content")
 
     new_embedding = None
+    pii_flags: dict = {}
     # Content change: re-embed, re-hash, check dedup
     if content_changed:
         tenant_config = await resolve_config(tenant_id)
+        # The tenant's PII policy applies to an edit exactly as to a create, and
+        # before anything below sees the text (embedding, hash, audit diff).
+        from core_api.services.pii_update_gate import apply_pii_policy_to_update
+
+        data.content, pii_flags = await apply_pii_policy_to_update(
+            tenant_id=tenant_id,
+            agent_id=agent_id or mem.get("agent_id"),
+            content=data.content,
+            gov=getattr(tenant_config, "governance_pii", None),
+        )
         # Synchronous update: the caller awaits the re-embed.
         new_embedding = await get_embedding(data.content, tenant_config, background=False)
         new_hash = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
@@ -4300,7 +4311,13 @@ async def update_memory(
                     ),
                 )
 
-        changes["content"] = {"old": mem.get("content", "")[:200], "new": data.content[:200]}
+        changes["content"] = {
+            "old": mem.get("content", "")[:200],
+            # A flagged edit keeps its text, which contains detected PII; the
+            # audit chain refuses raw PII, and the whole update record was then
+            # dropped. Record that it changed, not what it says.
+            "new": "[content flagged as PII; not recorded]" if pii_flags else data.content[:200],
+        }
 
     # Build patch dict for storage client
     patch: dict = {}
@@ -4515,6 +4532,12 @@ async def update_memory(
             pending_patch = dict(patch.get("metadata_patch") or {})
             set_system_value(pending_patch, "embedding_pending", pending)
             patch["metadata_patch"] = pending_patch
+        if pii_flags:
+            # ``flag`` action: the same markers a create would set.
+            if "metadata_" in patch:
+                patch["metadata_"].update(pii_flags)
+            else:
+                patch["metadata_patch"] = {**(patch.get("metadata_patch") or {}), **pii_flags}
 
     # Entity links: ADD the named links when explicitly provided. Never a
     # replace — see the ``changes`` entry below for what the storage call does
