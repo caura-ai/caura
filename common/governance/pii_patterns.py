@@ -120,6 +120,39 @@ def _entropy_ok(value: str) -> bool:
     return len(value) >= 16 and _shannon_entropy(value) >= 3.0
 
 
+def _token_body_ok(value: str) -> bool:
+    """Gate for prefix rules whose prefix alone is too common to trust.
+
+    A minted credential body (``secrets.token_urlsafe``, an HMAC digest in
+    base64url, an OpenAI key) is mixed-case and high-entropy. What the same
+    prefix also starts in ordinary text is a snake_case or kebab-case
+    identifier — ``ca_certificate_bundle_path``,
+    ``sk-hynix-memory-roadmap-2026`` — which is single-case. Requiring both
+    cases, with the entropy floor on top, keeps those out. Digits are not
+    required: a 43-char random base64url body has none about once in 1,500
+    draws, while it lacks a case about once in ten billion.
+    """
+    return (
+        any(c.islower() for c in value)
+        and any(c.isupper() for c in value)
+        and _entropy_ok(value)
+    )
+
+
+# Every prefix Caura mints or still accepts on a credential — see the Caura
+# rule in ``_RULES`` for what each one is.
+_CAURA_CREDENTIAL_PREFIX = r"(?:mc(?:a|x|o|rk|ft)?|ca(?:rk|ft)?|(?:mc|ca)i_v\d+)_"
+_CAURA_CREDENTIAL_PREFIX_RE = re.compile(_CAURA_CREDENTIAL_PREFIX)
+
+
+def _caura_credential_ok(value: str) -> bool:
+    """Token-shape gate on the body only. Gating the whole match would let the
+    lowercase prefix count as a character class, so ``ca_SOME_LONG_CONSTANT``
+    would pass on its upper-case body plus the prefix's ``ca``.
+    """
+    return _token_body_ok(_CAURA_CREDENTIAL_PREFIX_RE.sub("", value, count=1))
+
+
 # ── Pattern rules ────────────────────────────────────────────────────
 
 
@@ -276,7 +309,35 @@ _RULES: tuple[_Rule, ...] = (
     ),  # Anthropic
     _Rule(
         PIICategory.API_KEY, Severity.HIGH, _c(r"\bsk-[0-9A-Za-z]{20,}\b")
-    ),  # OpenAI-style
+    ),  # OpenAI-style, legacy hyphen-less body
+    # Current OpenAI keys carry a type segment and ``-`` / ``_`` in the body —
+    # ``sk-proj-…``, ``sk-svcacct-…``, ``sk-admin-…`` — which the rule above
+    # can never match (``proj`` is four alphanumerics, then a hyphen). Widened
+    # here rather than there so the hyphen-less form keeps matching with no
+    # gate, while the hyphenated form is token-shape-gated: ``sk-`` also starts
+    # kebab-case words. An ``sk-ant-`` key matches both this and the Anthropic
+    # rule over the same span; overlap resolution keeps one ``API_KEY`` finding.
+    _Rule(
+        PIICategory.API_KEY,
+        Severity.HIGH,
+        _c(r"\bsk-[0-9A-Za-z_\-]{20,}"),
+        validator=_token_body_ok,
+    ),  # OpenAI project / service-account / admin
+    # Caura's own credentials — every prefix the platform mints or still
+    # accepts (see caura-enterprise ``common/credential_schemes.py``):
+    # ``mc_`` / ``ca_`` API credentials, ``mca_`` / ``mcx_`` / ``mco_``
+    # pre-unification spellings, ``mcrk_`` / ``cark_`` registration keys,
+    # ``mcft_`` / ``caft_`` fleet join tokens, and ``mci_v<N>_`` /
+    # ``cai_v<N>_`` install credentials. Bodies are ``token_urlsafe(32)`` or a
+    # base64url HMAC-SHA256 digest — 43 chars either way — so 32 is a floor
+    # that still catches a lightly truncated paste. Token-shape-gated because
+    # ``ca_`` and ``mc_`` also start ordinary snake_case identifiers.
+    _Rule(
+        PIICategory.API_KEY,
+        Severity.HIGH,
+        _c(rf"\b{_CAURA_CREDENTIAL_PREFIX}[A-Za-z0-9_\-]{{32,}}"),
+        validator=_caura_credential_ok,
+    ),  # Caura
     _Rule(
         PIICategory.API_KEY,
         Severity.HIGH,
@@ -334,10 +395,17 @@ _RULES: tuple[_Rule, ...] = (
     ),  # Bearer token
     # AWS secret access key in an assignment context (40-char base64); gated
     # by entropy so a 40-char path/sentence doesn't trip it. Group 1 = value.
+    #
+    # Both key/value rules accept an optional closing quote between the name
+    # and the separator, so the JSON spelling (``"api_key": "…"``) matches as
+    # well as the ``.env`` / YAML ones; without it the name's closing ``"``
+    # sat where ``[:=]`` was required and no JSON-quoted credential matched.
     _Rule(
         PIICategory.SECRET,
         Severity.HIGH,
-        _c(r"(?i)aws_secret_access_key\s*[:=]\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"),
+        _c(
+            r"(?i)aws_secret_access_key['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"
+        ),
         validator=_entropy_ok,
         group=1,
     ),
@@ -348,7 +416,25 @@ _RULES: tuple[_Rule, ...] = (
         Severity.HIGH,
         _c(
             r"(?i)\b(?:secret|token|api[_-]?key|access[_-]?token|auth[_-]?token|"
-            r"client[_-]?secret|password|passwd|pwd)\b\s*[:=]\s*['\"]?([A-Za-z0-9+/_\-]{16,})['\"]?"
+            r"client[_-]?secret|password|passwd|pwd)\b['\"]?\s*[:=]\s*['\"]?"
+            r"([A-Za-z0-9+/_\-]{16,})['\"]?"
+        ),
+        validator=_entropy_ok,
+        group=1,
+    ),
+    # The same, for environment-variable names: ``OPENAI_API_KEY=…``,
+    # ``CAURA_API_KEY=…``, ``GITHUB_TOKEN=…``. The rule above cannot see the
+    # cue inside them — ``_`` is a word character, so there is no ``\b``
+    # before ``API_KEY``. Case-SENSITIVE and upper-case only, which is what
+    # makes it an env-var name rather than any identifier ending in
+    # ``_token`` (``next_page_token``, ``csrf_token`` in prose); the value
+    # still has to pass the same entropy gate.
+    _Rule(
+        PIICategory.SECRET,
+        Severity.HIGH,
+        _c(
+            r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_?KEY|TOKEN|SECRET|SECRET_KEY|"
+            r"ACCESS_KEY|PASSWORD|PASSWD)\b['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9+/_\-]{16,})['\"]?"
         ),
         validator=_entropy_ok,
         group=1,
