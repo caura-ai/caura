@@ -11,10 +11,12 @@ behavior — see :class:`ScanFinding`):
 
   1. **prompt-injection** markers in name / content / description /
      summary / goal / tags[] / evidence (``critical``) — quarantine.
-  2. **shell-injection** patterns inside ``support_files`` entry
-     bodies, under EVERY ``role`` (``critical``) — quarantine.
-  3. **URL exfiltration** patterns in script-roled bodies only
-     (``warn``) — surfaces on the inbox card; doc may still proceed.
+  2. **shell-injection** patterns in the skill body (``content``),
+     ``summary`` and ``description``, and inside ``support_files``
+     entry bodies under EVERY ``role`` (``critical``) — quarantine.
+  3. **URL exfiltration** patterns in the same three doc fields and in
+     script-roled ``support_files`` bodies (``warn``) — surfaces on the
+     inbox card; doc may still proceed.
   4. **path violations** on ``support_files`` (absolute, traversal,
      hidden, bare-dot, executable, non-ASCII) — ``fatal=True``;
      refuse the write.
@@ -32,6 +34,11 @@ behavior — see :class:`ScanFinding`):
 
 ``support_files`` (checks #2, #3, #4) has no production WRITER yet
 ─────────────────────────────────────────────────────────────────
+(Checks #2 and #3 ALSO run over ``content`` / ``summary`` /
+``description`` — the text that does reach disk as ``<slug>/SKILL.md``
+and that the harness loads. The paragraphs below are about the
+``support_files`` half only.)
+
 09/02 L-01. Nothing in the shipped product populates the key.
 ``forge_service._distill_cluster`` — the only production writer of a
 skill doc — builds ``data`` without it, and the only harness-install
@@ -254,7 +261,7 @@ def _scan_prompt_injection(text: object, field_name: str) -> Iterable[ScanFindin
             return
 
 
-# ── Check #2 — shell-injection in support_file bodies ──────────────
+# ── Check #2 — shell-injection in skill text + support_file bodies ─
 #
 # Runs on EVERY support_file body regardless of ``role`` — see the
 # orchestrator, which deliberately dropped the role gate because a
@@ -265,13 +272,19 @@ def _scan_prompt_injection(text: object, field_name: str) -> Iterable[ScanFindin
 # placement) gate on, and it does not narrow this check.
 _SCRIPT_ROLES: frozenset[str] = frozenset({"scripts", "script", "exec", "command"})
 
+# Any ``rm -rf`` that starts a command. Named because the doc-text scan
+# below leaves it out — see ``_DOC_TEXT_SHELL_PATTERNS``.
+_GENERIC_RM_PATTERN: re.Pattern[str] = re.compile(
+    r"(?:^|[;&|`])\s*rm\s+-(?:rf|fr)\s", re.IGNORECASE | re.MULTILINE
+)
+
 _SHELL_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     # Match both ``-rf`` and ``-fr`` — functionally identical, equally
     # common in the wild. A single-flag regex (``-rf`` only) lets the
     # rarer-but-still-trivial ``-fr`` slip through.
     re.compile(r"\brm\s+-(?:rf|fr)\s+/(?!tmp\b)", re.IGNORECASE),  # rm -rf / (but not /tmp)
     re.compile(r"\$\(\s*rm\s", re.IGNORECASE),
-    re.compile(r"(?:^|[;&|`])\s*rm\s+-(?:rf|fr)\s", re.IGNORECASE | re.MULTILINE),
+    _GENERIC_RM_PATTERN,
     re.compile(r":\(\s*\)\s*\{\s*:\|:&\s*\}\s*;\s*:", re.MULTILINE),  # fork bomb
     re.compile(r"\bdd\s+if=/dev/(?:zero|random|urandom)\b", re.IGNORECASE),
     re.compile(r"\bmkfs\.[a-z0-9]+\s", re.IGNORECASE),
@@ -283,10 +296,27 @@ _SHELL_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-def _scan_shell_injection(body: str, locator_prefix: str) -> Iterable[ScanFinding]:
+# The skill text itself (``content`` / ``summary`` / ``description``)
+# gets every pattern above except the bare "``rm -rf`` at the start of a
+# command" one. A skill body is prose plus fenced snippets, and
+# ``rm -rf node_modules`` / ``rm -rf ./build`` are ordinary steps there;
+# quarantining every one of them would bury the real hits. The patterns
+# that matter keep firing: ``rm -rf /`` (the first entry) and
+# ``$(rm …)``. A ``support_files`` body is a script that runs as
+# written, so it keeps the full set.
+_DOC_TEXT_SHELL_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    p for p in _SHELL_INJECTION_PATTERNS if p is not _GENERIC_RM_PATTERN
+)
+
+
+def _scan_shell_injection(
+    body: str,
+    locator_prefix: str,
+    patterns: tuple[re.Pattern[str], ...] = _SHELL_INJECTION_PATTERNS,
+) -> Iterable[ScanFinding]:
     if not body:
         return
-    for pat in _SHELL_INJECTION_PATTERNS:
+    for pat in patterns:
         m = pat.search(body)
         if m:
             yield ScanFinding(
@@ -298,7 +328,7 @@ def _scan_shell_injection(body: str, locator_prefix: str) -> Iterable[ScanFindin
             return
 
 
-# ── Check #3 — URL exfiltration in script bodies ───────────────────
+# ── Check #3 — URL exfiltration in skill text + script bodies ──────
 #
 # Looser net than shell-injection — we flag suspicious outbound POST
 # patterns + obviously fishy hosts, but DON'T fail the doc (warn only).
@@ -699,6 +729,24 @@ async def scan_skill_doc(
         for locator, text_val in _iter_evidence_strings(evidence, "evidence"):
             findings.extend(_scan_prompt_injection(text_val, locator.removeprefix("evidence.")))
             findings.extend(_scan_pii(text_val, locator.removeprefix("evidence.")))
+
+    # Checks #2 + #3 over the doc text that ships. ``content`` is the
+    # SKILL.md body the plugin's reconciler writes to disk verbatim and
+    # the harness loads as instructions; ``description`` lands in the
+    # synthesised frontmatter beside it, and ``summary`` is what the
+    # inbox card shows a reviewer. These checks used to run over
+    # ``support_files`` alone — a key no production writer populates —
+    # so a body whose steps said ``curl … | bash`` scanned clean and,
+    # under ``auto_promote_clean``, went straight to ``active``. Shell
+    # patterns stay critical (quarantine → human review) — minus the
+    # generic ``rm -rf`` one, see ``_DOC_TEXT_SHELL_PATTERNS``; URL
+    # patterns stay warn-only, as for script bodies.
+    for field_name in ("content", "summary", "description"):
+        doc_text = data.get(field_name)
+        if not isinstance(doc_text, str):
+            continue
+        findings.extend(_scan_shell_injection(doc_text, f"data.{field_name}", _DOC_TEXT_SHELL_PATTERNS))
+        findings.extend(_scan_url_exfil(doc_text, f"data.{field_name}"))
 
     # Checks #2 + #3 — shell-injection runs on EVERY support_file body
     # regardless of role: a malicious writer could ship a fork-bomb
