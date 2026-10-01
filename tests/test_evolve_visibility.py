@@ -43,7 +43,16 @@ async def test_scope_filter_preserves_visibility_and_existing_boundaries(scope):
     foreign = await _seed(f"{tenant}-other", "caller", "scope_agent")
     deleted = await _seed(tenant, "caller", "scope_team", deleted=True)
     unknown_visibility = await _seed(tenant, "caller", "unknown")
-    ids = [own, private_peer, team, org, other_fleet, foreign, deleted, unknown_visibility]
+    ids = [
+        own,
+        private_peer,
+        team,
+        org,
+        other_fleet,
+        foreign,
+        deleted,
+        unknown_visibility,
+    ]
 
     allowed, dropped = await evolve_service._filter_by_scope(
         tenant_id=tenant,
