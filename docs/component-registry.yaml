@@ -38,7 +38,7 @@ cron_ticks:
     cadence: daily (configurable UTC hour, default 02:00)
     module: core_operations.app
   - name: lifecycle-crystallize
-    cadence: daily (configurable UTC hour, default 02:00)
+    cadence: daily (configurable UTC hour, default 02:00); LIFECYCLE_CRYSTALLIZE_EVERY_HOURS below 24 runs every N hours on slots counted from that hour
     module: core_operations.app
   - name: lifecycle-entity-link
     cadence: daily (configurable UTC hour, default 02:00)
