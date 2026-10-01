@@ -499,7 +499,13 @@ async def _execute_crystallization(
             # migration and rides the route that already serialises hygiene.
             hygiene["type_ii_staleness"] = type_ii
 
-        if auto_crystallize:
+        if not auto_crystallize:
+            # Nothing will act on the duplicates this sweep found, so their rows
+            # are as settled as they will get; stamp them as the sweep always
+            # did. (With auto-curate on, ``_run_crystallization`` does this per
+            # cluster, keeping back the ones it could not finish.)
+            await _stamp_settled(sc, tenant_id, hygiene.get("near_duplicates", {}).get("pairs", []), set())
+        else:
             try:
                 crystallization = await _run_crystallization(tenant_id, fleet_id, hygiene)
             except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError, HTTPException):
@@ -616,6 +622,10 @@ async def _run_crystallization(
     dup_pairs = dup_data.get("pairs", [])
     if not dup_pairs:
         return result
+    # Members of clusters that did NOT reach a final outcome this run. Every
+    # other paired id is stamped dedup-checked on the way out; these stay
+    # unstamped so the next sweep finds their cluster again.
+    unsettled: set[UUID] = set()
 
     # Build clusters from overlapping pairs
     clusters = _build_clusters(dup_pairs)
@@ -630,22 +640,33 @@ async def _run_crystallization(
     # deploy's, or a test double — resolves to today's behaviour instead of
     # raising.
     min_cluster = getattr(config, "crystallizer_min_cluster_size", CRYSTALLIZER_MIN_CLUSTER_SIZE)
+    # Below the floor is a policy outcome, not a deferral: those rows are
+    # stamped like any settled cluster, or every pair would be re-swept nightly.
     clusters = [c for c in clusters if len(c) >= min_cluster]
     result["clusters_found"] = len(clusters)
 
     if not clusters:
+        await _stamp_settled(sc, tenant_id, dup_pairs, unsettled)
         return result
 
-    # Limit total memories processed
+    # Limit total memories processed. Smallest first, and a cluster that does
+    # not fit is skipped, not the end of selection: this used to ``break`` at
+    # the first one over the budget, in arbitrary set order, so one large
+    # duplicate family starved every cluster after it. A family larger than the
+    # whole budget could never be processed at all, so it is split into
+    # budget-sized parts first; each part is still a set of near-duplicates.
     total_ids: list[UUID] = []
     selected_clusters: list[set[UUID]] = []
-    for cluster in clusters:
+    parts = [part for cluster in clusters for part in _split_cluster(cluster, CRYSTALLIZER_MAX_BATCH_SIZE)]
+    for cluster in sorted(parts, key=lambda c: (len(c), min(str(m) for m in c))):
         if len(total_ids) + len(cluster) > CRYSTALLIZER_MAX_BATCH_SIZE:
-            break
+            unsettled.update(cluster)
+            continue
         selected_clusters.append(cluster)
         total_ids.extend(cluster)
 
     if not total_ids:
+        await _stamp_settled(sc, tenant_id, dup_pairs, unsettled)
         return result
 
     # Fetch full memory content for all candidates in one round-trip.
@@ -695,6 +716,9 @@ async def _run_crystallization(
         # Call LLM to crystallize
         extracted = await _crystallize_cluster(cluster_memories, config)
         if not extracted:
+            # An outage (``_skip_crystallize``) or an unusable answer: nothing
+            # was decided about this cluster, so it must come back next sweep.
+            unsettled.update(cluster_ids)
             continue
 
         # The crystal lives where its sources lived: their fleet (the nightly
@@ -811,14 +835,24 @@ async def _run_crystallization(
         # licenses the archive is that a replacement EXISTS, not that nothing was
         # rejected. A cluster that created one fact and skipped two duplicates is
         # still safe to archive; a cluster that created none never is.
-        if not new_ids:
+        #
+        # But a FAILED fact is different from a duplicate one. A 409 means the
+        # fact's content is already live; a 422/5xx or storage error means it is
+        # nowhere. Archiving the sources then would take that fact out of recall
+        # with no replacement, so any failure keeps the whole cluster live and
+        # leaves it for the next sweep. The facts that did persist stay; the
+        # re-run's own dedup gates absorb them.
+        if not new_ids or failed_facts:
             logger.info(
-                "Crystallizer kept %d source(s) live: cluster produced no new memory "
-                "(duplicates=%d failed=%d)",
+                "Crystallizer kept %d source(s) live: cluster produced no complete "
+                "replacement (new=%d duplicates=%d failed=%d)",
                 len(cluster_memories),
+                len(new_ids),
                 duplicate_facts,
                 failed_facts,
             )
+            if failed_facts:
+                unsettled.update(cluster_ids)
             cluster_ids_to_archive = []
         else:
             cluster_ids_to_archive = [
@@ -848,6 +882,7 @@ async def _run_crystallization(
                 )
         except Exception:
             logger.exception("Failed to archive %d-memory cluster (rolled back)", len(cluster_ids_to_archive))
+            unsettled.update(cluster_ids)
 
         result["clusters"].append(
             {
@@ -863,7 +898,41 @@ async def _run_crystallization(
         result["failed_facts"] += failed_facts
 
     result["memories_crystallized"] = result["memories_archived"]
+    await _stamp_settled(sc, tenant_id, dup_pairs, unsettled)
     return result
+
+
+def _pair_member_ids(pairs: list[dict]) -> set[str]:
+    return {p["id1"] for p in pairs} | {p["id2"] for p in pairs}
+
+
+async def _stamp_settled(sc, tenant_id: str, pairs: list[dict], unsettled: set[UUID]) -> None:
+    """Stamp dedup-checked every paired row whose cluster reached a final
+    outcome, i.e. all of them except ``unsettled``.
+
+    ``_check_near_duplicates`` deliberately leaves paired rows unstamped (see its
+    stamp), so this is what eventually retires them. Best effort: a failed stamp
+    only means those rows are swept once more.
+    """
+    skip = {str(m) for m in unsettled}
+    ids = sorted(mid for mid in _pair_member_ids(pairs) if mid not in skip)
+    if not ids:
+        return
+    try:
+        await sc.mark_dedup_checked(ids, tenant_id)
+    except Exception:
+        logger.warning("Crystallizer could not stamp %d settled row(s)", len(ids), exc_info=True)
+
+
+def _split_cluster(cluster: set[UUID], limit: int) -> list[set[UUID]]:
+    """``cluster`` itself when it fits in ``limit``, else balanced parts that
+    each do. Deterministic (sorted ids) so the same family splits the same way
+    on every run."""
+    if len(cluster) <= limit:
+        return [cluster]
+    ordered = sorted(cluster, key=str)
+    n = -(-len(ordered) // limit)
+    return [set(ordered[i::n]) for i in range(n)]
 
 
 def _build_clusters(pairs: list[dict]) -> list[set[UUID]]:
@@ -953,7 +1022,8 @@ def _skip_crystallize() -> list[dict]:
 
     Returning ``[]`` takes the caller's existing ``if not extracted: continue``
     path, so nothing is created and nothing is archived. The cluster is still there
-    to crystallize once a provider answers.
+    to crystallize once a provider answers: its rows are left unstamped, so the
+    next sweep finds it again.
     """
     logger.warning("crystallizer: no LLM — cluster skipped, nothing archived")
     return []
@@ -1026,6 +1096,9 @@ async def _check_near_duplicates(
 
     pairs: dict[tuple[str, str], float] = {}  # (id1, id2) -> similarity
     checked_ids: list[str] = []
+    # Every id seen in ANY pair the scan returned, including pairs the cap then
+    # discarded. These are not stamped here; see the stamp below.
+    paired_ids: set[str] = set()
     offset = 0
 
     if threshold is None:
@@ -1069,6 +1142,7 @@ async def _check_near_duplicates(
         checked_ids.extend(candidate_ids)
 
         for pair in batch.get("pairs", []):
+            paired_ids.update((pair["id"], pair["neighbor_id"]))
             id1, id2 = sorted([pair["id"], pair["neighbor_id"]])
             pair_key = (id1, id2)
             if pair_key not in pairs and len(pairs) < CRYSTALLIZER_MAX_DEDUP_PAIRS:
@@ -1076,9 +1150,17 @@ async def _check_near_duplicates(
 
         offset += CRYSTALLIZER_DEDUP_BATCH_SIZE
 
-    # Mark all processed memories as dedup-checked
-    if checked_ids:
-        await sc.mark_dedup_checked(checked_ids, tenant_id)
+    # Stamp only the swept rows that turned out to have no duplicate. The stamp
+    # takes a row out of every future sweep for good, and a row that IS in a
+    # pair is not settled yet: whether its cluster gets crystallized is decided
+    # later, by ``_run_crystallization``, which stamps the members whose cluster
+    # reached a final outcome and leaves the rest (LLM outage, a failed fact,
+    # the batch cap, a pair the cap below discarded) for the next sweep.
+    # Stamping them here, as this used to, meant a cluster skipped for any of
+    # those reasons was never swept again.
+    to_stamp = [mid for mid in checked_ids if mid not in paired_ids]
+    if to_stamp:
+        await sc.mark_dedup_checked(to_stamp, tenant_id)
 
     pairs_list = [{"id1": k[0], "id2": k[1], "similarity": v} for k, v in pairs.items()]
     return {"count": len(pairs_list), "pairs": pairs_list}
