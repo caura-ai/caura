@@ -176,7 +176,7 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `JWT_SECRET` | `change-me-in-production` | JWT signing secret; must be changed in production |
 | `EMBEDDING_PROVIDER` | `openai` | `openai`, `local`, or `fake` |
 | `ENTITY_EXTRACTION_PROVIDER` | `openai` | `openai`, `gemini`, `openrouter`, `fake`, or `none` (`anthropic` is refused at startup — no structured-output support) |
-| `ENTITY_EXTRACTION_MODEL` | `gpt-5.4-nano` | LLM model for enrichment and entity extraction |
+| `ENTITY_EXTRACTION_MODEL` | `gpt-5.4-nano` | LLM model for enrichment and entity extraction; ignored (with a warning) for a provider whose model family it does not belong to, which then uses its own default |
 | `OPENAI_API_KEY` | — | Required for OpenAI embeddings and enrichment |
 | `USE_LLM_FOR_MEMORY_CREATION` | `true` | LLM auto-classifies type, weight, title, summary on write |
 | `ANTHROPIC_API_KEY` | — | Required for Anthropic |
