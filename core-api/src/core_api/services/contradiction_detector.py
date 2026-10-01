@@ -18,6 +18,7 @@ import logging
 import time
 import traceback
 import uuid as _uuid
+from contextvars import ContextVar
 from datetime import datetime
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -582,6 +583,46 @@ async def _rdf_conflict_pass(
 _CONTRADICTION_STRANDED_TASK = "contradiction_stranded"
 
 
+class _JudgeAbstentions:
+    """How many verdicts in the current detection run were no-LLM abstentions.
+
+    An abstain is NOT a verdict. ``call_with_fallback`` does not raise when every
+    provider fails; it returns the abstaining ``fake_fn`` result, so a run whose
+    judge never answered used to finish normally, count as concluded, keep its
+    lock for the full TTL (swallowing the back-channel re-delivery that might
+    have succeeded) and write no stranded row. The entry points read this to
+    treat such a run as not concluded.
+
+    A mutable holder in a ``ContextVar`` rather than a counter in the var, so a
+    judge call running in a COPIED context (a task spawned under the run) still
+    reports into the run's holder.
+    """
+
+    __slots__ = ("count",)
+
+    def __init__(self) -> None:
+        self.count = 0
+
+
+_judge_abstentions: ContextVar[_JudgeAbstentions | None] = ContextVar("_judge_abstentions", default=None)
+
+
+def _note_abstentions(count: int) -> None:
+    holder = _judge_abstentions.get()
+    if holder is not None:
+        holder.count += count
+
+
+class ContradictionJudgeUnavailableError(RuntimeError):
+    """Recorded (never raised) for a run whose judge abstained on some pair."""
+
+
+def _abstained_failure(abstentions: _JudgeAbstentions) -> ContradictionJudgeUnavailableError:
+    return ContradictionJudgeUnavailableError(
+        f"{abstentions.count} verdict(s) abstained because no LLM provider answered"
+    )
+
+
 async def _record_detection_lost(
     memory_id: UUID, tenant_id: str, path: str, exc: BaseException, tb: str
 ) -> None:
@@ -696,6 +737,8 @@ async def detect_contradictions_async(
     # ``cancel_all_tasks``) cannot reach a ``release()`` for a slot that was
     # never taken.
     _gate, queued_ms = await _acquire_detection_slot()
+    abstentions = _JudgeAbstentions()
+    abstentions_token = _judge_abstentions.set(abstentions)
     try:
         if new_memory is None:
             sc = get_storage_client()
@@ -788,6 +831,13 @@ async def detect_contradictions_async(
         # release and the completion log are not the contended work the gate
         # protects, and a queued pass may as well start during them.
         _gate.release()
+        _judge_abstentions.reset(abstentions_token)
+        # A judge that abstained reached no verdict on that pair, so the run did
+        # not conclude: release the lock for the next trigger and record the
+        # memory as unchecked, exactly as for a run that raised.
+        if concluded and abstentions.count and failure is None:
+            concluded = False
+            failure = _abstained_failure(abstentions)
         # H-06: keep the lock only for a run that reached a verdict. The lock
         # is taken BEFORE detection, so without this one transient LLM or
         # storage failure suppressed every later trigger for this memory for a
@@ -1749,6 +1799,7 @@ def _skip_contradiction_pairwise() -> tuple[bool, float]:
     duplicate rather than dropping data.
     """
     logger.warning("contradiction_check_skipped candidates=1 reason=no_llm_abstained")
+    _note_abstentions(1)
     return False, _CONF_FALLBACK
 
 
@@ -1777,6 +1828,7 @@ def _skip_contradiction_batch(count: int) -> list[dict]:
     what acting on that costs.
     """
     logger.warning("contradiction_check_skipped candidates=%d reason=no_llm_abstained", count)
+    _note_abstentions(count)
     return [{} for _ in range(count)]
 
 
@@ -2833,6 +2885,8 @@ async def detect_contradictions_by_entities_async(
     # a held slot spends on storage from ~170 to 4 across both phases; it did
     # not change which gate Path C belongs in.
     _gate, queued_ms = await _acquire_detection_slot()
+    abstentions = _JudgeAbstentions()
+    abstentions_token = _judge_abstentions.set(abstentions)
     try:
         # The row is fetched BEFORE the lock is taken, unlike Path A. The lock
         # key carries a fingerprint of the content this run will examine (H-06)
@@ -3436,6 +3490,11 @@ async def detect_contradictions_by_entities_async(
     finally:
         # A19 — free the slot before the bookkeeping; see Path A's block.
         _gate.release()
+        _judge_abstentions.reset(abstentions_token)
+        # An abstaining judge is not a verdict; see Path A's block.
+        if concluded and abstentions.count and failure is None:
+            concluded = False
+            failure = _abstained_failure(abstentions)
         # H-06 — see the matching block in ``detect_contradictions_async``.
         # ``concluded`` is set at each legitimate exit rather than once early,
         # so a throw ANYWHERE in the judging loop still releases: a failure
@@ -3461,8 +3520,12 @@ async def detect_contradictions_by_entities_async(
             queued_ms,
             tenant_id,
         )
-    if failure is not None:
-        await _record_detection_lost(memory_id, tenant_id, "entity", failure, failure_tb)
+        # Inside the ``finally``, unlike Path A: this body exits through
+        # ``return`` at every concluded outcome, so a record placed after the
+        # ``finally`` would only ever see the exception path, never a run whose
+        # judge abstained. The slot is already free by this point.
+        if failure is not None:
+            await _record_detection_lost(memory_id, tenant_id, "entity", failure, failure_tb)
 
 
 # Backward-compat re-exports for tests
