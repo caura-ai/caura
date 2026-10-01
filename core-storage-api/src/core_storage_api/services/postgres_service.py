@@ -4531,32 +4531,38 @@ class PostgresService:
         days. After that window the row is gone for good — including its
         embedding, entity links, and idempotency response cache lines
         (cascaded by their FKs to ``memories.id``).
+
+        The graph mined from the batch goes with it, in the same transaction
+        and BEFORE the rows: relations whose evidence is a purged memory, and
+        the entities those memories alone kept alive — the
+        ``memory_purge_entity_artifacts`` sequence over the whole batch. The
+        FKs alone would not do it. ``relations.evidence_memory_id`` is ``ON
+        DELETE SET NULL``, which leaves the triple in place with no evidence,
+        and a relation with no evidence reads as "nothing memory-derived here"
+        to every agent (``filter_relations_by_evidence_visibility``) — so a
+        triple mined from a deleted private memory would surface to its
+        author's peers exactly because the memory was deleted. Entities have no
+        FK to memories at all and would simply stay listed. Done at hard-delete
+        time, not at soft delete, so the undo window keeps the graph intact.
         """
         async with get_session() as session:
-            params: dict = {
-                "tenant_id": tenant_id,
-                "retention_days": retention_days,
-                "batch_size": batch_size,
-            }
-            fleet_clause = ""
-            if fleet_id:
-                fleet_clause = "AND fleet_id = :fleet_id"
-                params["fleet_id"] = fleet_id
-
-            result = await session.execute(
-                text(f"""
-                DELETE FROM memories
-                WHERE id IN (
-                    SELECT id FROM memories
-                    WHERE tenant_id = :tenant_id
-                      {fleet_clause}
-                      AND deleted_at IS NOT NULL
-                      AND deleted_at < NOW() - INTERVAL '1 day' * :retention_days
-                    LIMIT :batch_size
+            stmt = (
+                select(Memory.id)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_not(None),
+                    Memory.deleted_at < func.now() - timedelta(days=retention_days),
                 )
-                RETURNING id
-            """),
-                params,
+                .limit(batch_size)
+            )
+            if fleet_id:
+                stmt = stmt.where(Memory.fleet_id == fleet_id)
+            ids = list((await session.execute(stmt)).scalars().all())
+            if not ids:
+                return 0
+            await self._delete_entity_artifacts_in_session(session, tenant_id, ids, memories_going=True)
+            result = await session.execute(
+                delete(Memory).where(Memory.tenant_id == tenant_id, Memory.id.in_(ids)).returning(Memory.id)
             )
             return len(result.all())
 
@@ -8071,120 +8077,161 @@ class PostgresService:
             ).scalar_one_or_none()
             if eligible is None:
                 return {"links": 0, "relations": 0, "entities": 0}
+            return await self._delete_entity_artifacts_in_session(
+                session, tenant_id, [memory_id], link_scope=link_scope
+            )
 
-            # ``RETURNING`` rather than a SELECT before the DELETE: the rows
-            # this removes ARE the candidate set, so asking for them twice was
-            # a round trip that could only ever agree with itself.
-            link_where = [MemoryEntityLink.memory_id == memory_id]
-            if link_scope is not None:
-                link_where.append(link_scope)
-            candidates = list(
-                (
+    @staticmethod
+    async def _delete_entity_artifacts_in_session(
+        session: AsyncSession,
+        tenant_id: str,
+        memory_ids: Sequence[UUID],
+        *,
+        link_scope: ColumnElement[bool] | None = None,
+        memories_going: bool = False,
+    ) -> dict:
+        """Steps 0-3 of ``memory_purge_entity_artifacts`` for a set of memories,
+        inside the caller's transaction. The caller has already established that
+        it may destroy these memories' graph rows (see ``_delete_entity_artifacts``'s
+        guard and ``memory_purge_soft_deleted``).
+
+        ``memories_going``: the memories themselves are about to be hard-deleted
+        in the same transaction, so their own ``subject_entity_id`` is not a
+        reason to keep an entity — the FK would only SET NULL it a moment later
+        and leave the entity orphaned. Their subjects also join the candidate
+        set: a subject pointer is a reference to the entity just as a link is.
+        """
+        subject_candidates: list[UUID] = []
+        if memories_going:
+            subject_candidates = [
+                sid
+                for sid in (
                     await session.execute(
-                        delete(MemoryEntityLink).where(*link_where).returning(MemoryEntityLink.entity_id)
+                        select(Memory.subject_entity_id).where(
+                            Memory.tenant_id == tenant_id,
+                            Memory.id.in_(memory_ids),
+                            Memory.subject_entity_id.is_not(None),
+                        )
                     )
+                ).scalars()
+                if sid is not None
+            ]
+        # ``RETURNING`` rather than a SELECT before the DELETE: the rows
+        # this removes ARE the candidate set, so asking for them twice was
+        # a round trip that could only ever agree with itself.
+        link_where = [MemoryEntityLink.memory_id.in_(memory_ids)]
+        if link_scope is not None:
+            link_where.append(link_scope)
+        candidates = list(
+            (
+                await session.execute(
+                    delete(MemoryEntityLink).where(*link_where).returning(MemoryEntityLink.entity_id)
                 )
-                .scalars()
-                .all()
             )
-            relation_rows = await session.execute(
-                delete(Relation).where(
-                    Relation.tenant_id == tenant_id,
-                    Relation.evidence_memory_id == memory_id,
+            .scalars()
+            .all()
+        )
+        relation_rows = await session.execute(
+            delete(Relation).where(
+                Relation.tenant_id == tenant_id,
+                Relation.evidence_memory_id.in_(memory_ids),
+            )
+        )
+
+        entity_count = 0
+        orphan_candidates = [*candidates, *subject_candidates]
+        if orphan_candidates:
+            # "Is this entity still referenced by anything?" — asked only
+            # about the candidates, which is what keeps these cheap. Left
+            # unbounded, each anti-join selects every referencing id in the
+            # tenant and PostgreSQL materialises it as a hashed SubPlan, so
+            # a four-link memory scanned the tenant's whole link and
+            # relation tables three times. Bounding them changes no row —
+            # the outer DELETE is already restricted to ``candidates`` — and
+            # turns each into an index lookup on a handful of ids. That
+            # matters more since the reset path put this on every
+            # content-changing PATCH rather than only on governance drops.
+            #
+            # Narrowed by the ENTITY's tenant, never by the referencing
+            # row's own tenant_id — and the difference is not stylistic.
+            # Scoping relations on ``Relation.tenant_id`` would drop a
+            # historical straddling row (a relation in another tenant
+            # pointing at an entity here) out of the anti-join, and this
+            # entity would then be deleted while something still referenced
+            # it. Keying on the entity's tenant narrows the scan just as
+            # much and cannot lose a reference: every row that could name a
+            # candidate names an entity in THIS tenant, because that is
+            # what a candidate is.
+            #
+            # Erring wide here is free — an extra reference only keeps an
+            # entity alive, and under-deleting is recoverable where
+            # over-deleting is not.
+            still_linked = (
+                select(MemoryEntityLink.entity_id)
+                .join(Entity, Entity.id == MemoryEntityLink.entity_id)
+                .where(
+                    Entity.tenant_id == tenant_id,
+                    MemoryEntityLink.entity_id.in_(orphan_candidates),
                 )
             )
+            rel_from = (
+                select(Relation.from_entity_id)
+                .join(Entity, Entity.id == Relation.from_entity_id)
+                .where(
+                    Entity.tenant_id == tenant_id,
+                    Relation.from_entity_id.in_(orphan_candidates),
+                )
+            )
+            rel_to = (
+                select(Relation.to_entity_id)
+                .join(Entity, Entity.id == Relation.to_entity_id)
+                .where(
+                    Entity.tenant_id == tenant_id,
+                    Relation.to_entity_id.in_(orphan_candidates),
+                )
+            )
+            # The fourth reference, and the one a link-and-relation-only
+            # sweep misses: ``memories.subject_entity_id`` is the RDF
+            # subject pointer, and it is a FK with ``ON DELETE SET NULL``.
+            # An entity that is some other live memory's subject but holds
+            # no links and no relations satisfied the three anti-joins
+            # above, so it was deleted and that memory's subject silently
+            # became NULL — a row losing a field nobody asked to change,
+            # recorded nowhere. Rare while this only ran on governance
+            # drops; routine once the reset path runs it on ordinary edits.
+            #
+            # Bounding this one is load-bearing rather than merely cheap:
+            # ``subject_entity_id`` is nullable and almost always NULL, and
+            # a bare ``NOT IN`` over a set containing NULL matches nothing
+            # at all — which would have turned entity deletion off entirely.
+            subject_of = select(Memory.subject_entity_id).where(
+                Memory.tenant_id == tenant_id,
+                Memory.subject_entity_id.in_(orphan_candidates),
+            )
+            if memories_going:
+                subject_of = subject_of.where(Memory.id.not_in(memory_ids))
+            entity_rows = await session.execute(
+                delete(Entity).where(
+                    # Tenant-scoped like everything else here. Not about id
+                    # collisions — about never letting one tenant's
+                    # remediation reach another tenant's rows.
+                    Entity.tenant_id == tenant_id,
+                    Entity.id.in_(orphan_candidates),
+                    Entity.id.not_in(still_linked),
+                    Entity.id.not_in(rel_from),
+                    Entity.id.not_in(rel_to),
+                    Entity.id.not_in(subject_of),
+                )
+            )
+            entity_count = entity_rows.rowcount or 0  # type: ignore[attr-defined]
 
-            entity_count = 0
-            if candidates:
-                # "Is this entity still referenced by anything?" — asked only
-                # about the candidates, which is what keeps these cheap. Left
-                # unbounded, each anti-join selects every referencing id in the
-                # tenant and PostgreSQL materialises it as a hashed SubPlan, so
-                # a four-link memory scanned the tenant's whole link and
-                # relation tables three times. Bounding them changes no row —
-                # the outer DELETE is already restricted to ``candidates`` — and
-                # turns each into an index lookup on a handful of ids. That
-                # matters more since the reset path put this on every
-                # content-changing PATCH rather than only on governance drops.
-                #
-                # Narrowed by the ENTITY's tenant, never by the referencing
-                # row's own tenant_id — and the difference is not stylistic.
-                # Scoping relations on ``Relation.tenant_id`` would drop a
-                # historical straddling row (a relation in another tenant
-                # pointing at an entity here) out of the anti-join, and this
-                # entity would then be deleted while something still referenced
-                # it. Keying on the entity's tenant narrows the scan just as
-                # much and cannot lose a reference: every row that could name a
-                # candidate names an entity in THIS tenant, because that is
-                # what a candidate is.
-                #
-                # Erring wide here is free — an extra reference only keeps an
-                # entity alive, and under-deleting is recoverable where
-                # over-deleting is not.
-                still_linked = (
-                    select(MemoryEntityLink.entity_id)
-                    .join(Entity, Entity.id == MemoryEntityLink.entity_id)
-                    .where(
-                        Entity.tenant_id == tenant_id,
-                        MemoryEntityLink.entity_id.in_(candidates),
-                    )
-                )
-                rel_from = (
-                    select(Relation.from_entity_id)
-                    .join(Entity, Entity.id == Relation.from_entity_id)
-                    .where(
-                        Entity.tenant_id == tenant_id,
-                        Relation.from_entity_id.in_(candidates),
-                    )
-                )
-                rel_to = (
-                    select(Relation.to_entity_id)
-                    .join(Entity, Entity.id == Relation.to_entity_id)
-                    .where(
-                        Entity.tenant_id == tenant_id,
-                        Relation.to_entity_id.in_(candidates),
-                    )
-                )
-                # The fourth reference, and the one a link-and-relation-only
-                # sweep misses: ``memories.subject_entity_id`` is the RDF
-                # subject pointer, and it is a FK with ``ON DELETE SET NULL``.
-                # An entity that is some other live memory's subject but holds
-                # no links and no relations satisfied the three anti-joins
-                # above, so it was deleted and that memory's subject silently
-                # became NULL — a row losing a field nobody asked to change,
-                # recorded nowhere. Rare while this only ran on governance
-                # drops; routine once the reset path runs it on ordinary edits.
-                #
-                # Bounding this one is load-bearing rather than merely cheap:
-                # ``subject_entity_id`` is nullable and almost always NULL, and
-                # a bare ``NOT IN`` over a set containing NULL matches nothing
-                # at all — which would have turned entity deletion off entirely.
-                subject_of = select(Memory.subject_entity_id).where(
-                    Memory.tenant_id == tenant_id,
-                    Memory.subject_entity_id.in_(candidates),
-                )
-                entity_rows = await session.execute(
-                    delete(Entity).where(
-                        # Tenant-scoped like everything else here. Not about id
-                        # collisions — about never letting one tenant's
-                        # remediation reach another tenant's rows.
-                        Entity.tenant_id == tenant_id,
-                        Entity.id.in_(candidates),
-                        Entity.id.not_in(still_linked),
-                        Entity.id.not_in(rel_from),
-                        Entity.id.not_in(rel_to),
-                        Entity.id.not_in(subject_of),
-                    )
-                )
-                entity_count = entity_rows.rowcount or 0  # type: ignore[attr-defined]
-
-            # ``rowcount`` is untyped on ``Result`` — same ignore as
-            # ``memory_soft_delete_by_ids`` above, for the same reason.
-            return {
-                "links": len(candidates),
-                "relations": relation_rows.rowcount or 0,  # type: ignore[attr-defined]
-                "entities": entity_count,
-            }
+        # ``rowcount`` is untyped on ``Result`` — same ignore as
+        # ``memory_soft_delete_by_ids`` above, for the same reason.
+        return {
+            "links": len(candidates),
+            "relations": relation_rows.rowcount or 0,  # type: ignore[attr-defined]
+            "entities": entity_count,
+        }
 
     async def memory_reset_entity_artifacts(self, tenant_id: str, memory_id: UUID) -> dict:
         """Clear the graph rows mined out of a LIVE memory whose content changed.
