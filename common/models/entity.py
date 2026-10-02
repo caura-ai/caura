@@ -65,6 +65,8 @@ class Relation(Base):
         ForeignKey("entities.id", ondelete="CASCADE"), nullable=False
     )
     weight: Mapped[float] = mapped_column(Float, server_default=text("1.0"))
+    # Current visibility anchor. RelationEvidence records all memory
+    # assertions so deleting this one can select another real asserter.
     evidence_memory_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("memories.id", ondelete="SET NULL")
     )
@@ -110,6 +112,21 @@ class Relation(Base):
             postgresql_where=text("evidence_memory_id IS NOT NULL"),
         ),
     )
+
+
+class RelationEvidence(Base):
+    """Each memory that actually asserted a typed relation."""
+
+    __tablename__ = "relation_evidence"
+
+    relation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("relations.id", ondelete="CASCADE"), primary_key=True
+    )
+    memory_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    __table_args__ = (Index("ix_relation_evidence_memory_id", "memory_id"),)
 
 
 # Who created a ``memory_entity_links`` row. Not a free-form string: one

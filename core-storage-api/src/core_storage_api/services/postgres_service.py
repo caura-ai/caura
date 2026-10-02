@@ -96,6 +96,7 @@ from common.models import (
     MemoryConflict,
     MemoryEntityLink,
     Relation,
+    RelationEvidence,
 )
 from common.models.capability_usage import CapabilityUsage
 from common.models.entity import LINK_SOURCE_CALLER, LINK_SOURCE_EXTRACTION
@@ -7725,7 +7726,9 @@ class PostgresService:
         On conflict, refresh ``weight`` (latest write wins) and
         ``evidence_memory_id`` (latest non-NULL write wins; a caller
         that omits/NULLs the field does NOT wipe an existing evidence
-        link). ``fleet_id`` is **first-writer-wins**: it is not part of
+        link). Every non-NULL evidence memory is also recorded in
+        ``relation_evidence`` so removal can retain an independently
+        asserted edge. ``fleet_id`` is **first-writer-wins**: it is not part of
         the unique constraint and is intentionally NOT touched by the
         UPDATE clause. The returned ``Relation``'s ``fleet_id`` may
         therefore differ from ``data["fleet_id"]`` if the row was
@@ -7809,7 +7812,16 @@ class PostgresService:
                 Relation.to_entity_id == data["to_entity_id"],
             )
             result = await session.execute(select_stmt)
-            return result.scalar_one()
+            relation = result.scalar_one()
+            if evidence_id := data.get("evidence_memory_id"):
+                # The row's single pointer remains the current visibility
+                # marker, while this table remembers every actual assertion.
+                await session.execute(
+                    pg_insert(RelationEvidence)
+                    .values(relation_id=relation.id, memory_id=UUID(str(evidence_id)))
+                    .on_conflict_do_nothing(index_elements=["relation_id", "memory_id"])
+                )
+            return relation
 
     async def relation_get_outgoing(
         self,
@@ -8189,12 +8201,45 @@ class PostgresService:
             .scalars()
             .all()
         )
-        relation_rows = await session.execute(
-            delete(Relation).where(
-                Relation.tenant_id == tenant_id,
-                Relation.evidence_memory_id.in_(memory_ids),
+        # Endpoint links do not prove that a memory asserted this particular
+        # typed edge. Remove only the affected memory's recorded assertions;
+        # then repoint a surviving relation to an actual live co-asserter.
+        # A relation without one must be deleted, never left evidence-less.
+        await session.execute(delete(RelationEvidence).where(RelationEvidence.memory_id.in_(memory_ids)))
+        other_memory = aliased(Memory)
+        replacement = (
+            select(other_memory.id)
+            .join(RelationEvidence, RelationEvidence.memory_id == other_memory.id)
+            .where(
+                RelationEvidence.relation_id == Relation.id,
+                other_memory.tenant_id == tenant_id,
+                other_memory.deleted_at.is_(None),
+                other_memory.status.in_(LIVE_MEMORY_STATUSES),
             )
+            .order_by(other_memory.created_at.desc(), other_memory.id)
+            .limit(1)
+            .correlate(Relation)
+            .scalar_subquery()
         )
+        affected_relations = (
+            await session.execute(
+                select(Relation.id, replacement)
+                .where(Relation.tenant_id == tenant_id, Relation.evidence_memory_id.in_(memory_ids))
+                .with_for_update(of=Relation)
+            )
+        ).all()
+        relation_ids_to_delete = []
+        for relation_id, replacement_id in affected_relations:
+            if replacement_id is None:
+                relation_ids_to_delete.append(relation_id)
+            else:
+                await session.execute(
+                    sql_update(Relation)
+                    .where(Relation.id == relation_id)
+                    .values(evidence_memory_id=replacement_id)
+                )
+        if relation_ids_to_delete:
+            await session.execute(delete(Relation).where(Relation.id.in_(relation_ids_to_delete)))
 
         entity_count = 0
         orphan_candidates = [*candidates, *subject_candidates]
@@ -8287,7 +8332,7 @@ class PostgresService:
         # ``memory_soft_delete_by_ids`` above, for the same reason.
         return {
             "links": len(candidates),
-            "relations": relation_rows.rowcount or 0,  # type: ignore[attr-defined]
+            "relations": len(relation_ids_to_delete),
             "entities": entity_count,
         }
 
@@ -8330,8 +8375,8 @@ class PostgresService:
         memory leaves nothing behind, curated or mined.
 
         Relations are NOT narrowed the same way, because they have no caller
-        path: ``evidence_memory_id`` is written by extraction alone, so every
-        relation this removes was mined from the content that changed.
+        path. Each assertion by this memory is removed; an edge another live
+        memory also asserted keeps that other memory as its evidence.
 
         Returns the same per-table counts, and the caller is expected to
         re-extract: this leaves the memory with no extraction-derived graph
@@ -8395,9 +8440,8 @@ class PostgresService:
 
         0. note which entities THIS memory linked to, before the links go,
         1. delete those links,
-        2. delete relations whose evidence IS this memory — one row carries one
-           evidence id, so a relation attributed to dropped content has no
-           other justification,
+        2. remove this memory's relation assertions; repoint a shared edge to
+           another live asserter, or delete it when none remains,
         3. delete, FROM THE NOTED SET ONLY, entities now left with no links, no
            relations, and no memory naming them as its subject.
 

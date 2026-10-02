@@ -19,7 +19,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from common.models import Entity, Memory, MemoryEntityLink, Relation
+from common.models import Entity, Memory, MemoryEntityLink, Relation, RelationEvidence
 from common.models.entity import LINK_SOURCE_CALLER, LINK_SOURCE_EXTRACTION
 from core_storage_api.services.postgres_service import PostgresService, get_session
 
@@ -110,6 +110,109 @@ async def test_purges_links_relations_and_the_orphaned_entity():
 
     assert counts == {"links": 2, "relations": 1, "entities": 2}, counts
     assert await _entity_names(tenant) == set()
+
+
+async def test_purge_repoints_a_relation_its_latest_evidence_did_not_own_alone(_ensure_schema):
+    svc = PostgresService()
+    tenant = f"h02-{uuid.uuid4().hex[:8]}"
+    survivor = await _memory(svc, tenant)
+    dropped = await _memory(svc, tenant)
+    alice = await _entity(svc, tenant, f"Alice {uuid.uuid4().hex[:6]}")
+    bob = await _entity(svc, tenant, f"Bob {uuid.uuid4().hex[:6]}")
+    for memory in (survivor, dropped):
+        await _link(memory.id, alice.id)
+        await _link(memory.id, bob.id)
+        await svc.relation_add(
+            {
+                "tenant_id": tenant,
+                "from_entity_id": alice.id,
+                "relation_type": "knows",
+                "to_entity_id": bob.id,
+                "evidence_memory_id": memory.id,
+            }
+        )
+    async with get_session() as session:
+        assertions = set((await session.execute(select(RelationEvidence.memory_id))).scalars())
+    assert {survivor.id, dropped.id} <= assertions
+
+    await svc.memory_soft_delete_by_ids(tenant, [dropped.id])
+    counts = await svc.memory_purge_entity_artifacts(tenant, dropped.id)
+
+    assert counts["relations"] == 0
+    async with get_session() as session:
+        evidence = await session.scalar(
+            select(Relation.evidence_memory_id).where(
+                Relation.tenant_id == tenant,
+                Relation.from_entity_id == alice.id,
+                Relation.to_entity_id == bob.id,
+            )
+        )
+    assert evidence == survivor.id
+    async with get_session() as session:
+        assertions = set((await session.execute(select(RelationEvidence.memory_id))).scalars())
+    assert survivor.id in assertions and dropped.id not in assertions
+
+
+async def test_edit_reset_keeps_a_relation_asserted_by_another_live_memory(_ensure_schema):
+    svc = PostgresService()
+    tenant = f"h02-{uuid.uuid4().hex[:8]}"
+    survivor = await _memory(svc, tenant)
+    edited = await _memory(svc, tenant)
+    alice = await _entity(svc, tenant, f"Alice {uuid.uuid4().hex[:6]}")
+    bob = await _entity(svc, tenant, f"Bob {uuid.uuid4().hex[:6]}")
+    for memory in (survivor, edited):
+        await _link(memory.id, alice.id)
+        await _link(memory.id, bob.id)
+        await svc.relation_add(
+            {
+                "tenant_id": tenant,
+                "from_entity_id": alice.id,
+                "relation_type": "knows",
+                "to_entity_id": bob.id,
+                "evidence_memory_id": memory.id,
+            }
+        )
+
+    counts = await svc.memory_reset_entity_artifacts(tenant, edited.id)
+
+    assert counts["relations"] == 0
+    assert await _link_entity_ids(edited.id) == set()
+    assert await _link_entity_ids(survivor.id) == {alice.id, bob.id}
+    async with get_session() as session:
+        evidence = await session.scalar(
+            select(Relation.evidence_memory_id).where(Relation.tenant_id == tenant)
+        )
+    assert evidence == survivor.id
+
+
+async def test_shared_endpoints_without_relation_assertion_do_not_keep_the_edge(_ensure_schema):
+    svc = PostgresService()
+    tenant = f"h02-{uuid.uuid4().hex[:8]}"
+    survivor = await _memory(svc, tenant)
+    dropped = await _memory(svc, tenant)
+    alice = await _entity(svc, tenant, f"Alice {uuid.uuid4().hex[:6]}")
+    bob = await _entity(svc, tenant, f"Bob {uuid.uuid4().hex[:6]}")
+    await _link(survivor.id, alice.id)
+    await _link(survivor.id, bob.id)
+    await _link(dropped.id, alice.id)
+    await _link(dropped.id, bob.id)
+    await svc.relation_add(
+        {
+            "tenant_id": tenant,
+            "from_entity_id": alice.id,
+            "relation_type": "knows",
+            "to_entity_id": bob.id,
+            "evidence_memory_id": dropped.id,
+        }
+    )
+
+    await svc.memory_soft_delete_by_ids(tenant, [dropped.id])
+    counts = await svc.memory_purge_entity_artifacts(tenant, dropped.id)
+
+    assert counts["relations"] == 1
+    async with get_session() as session:
+        remaining = await session.scalar(select(Relation.id).where(Relation.tenant_id == tenant))
+    assert remaining is None
 
 
 async def test_keeps_an_entity_another_live_memory_still_asserts():
