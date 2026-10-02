@@ -269,11 +269,15 @@ def test_the_writer_session_population_is_pinned() -> None:
 
     139 -> 140 (pure unchanged): ``idempotency_release`` is new and DELETEs a
     still-pending Idempotency-Key claim, so it is a write, not a backlog entry.
+
+    140 -> 141 (pure unchanged at 65): ``fleet_release_node`` is new (M-85). It
+    clears a node's binding with ``sql_update``, so it is a write and belongs on
+    the writer.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 140, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 141, f"{len(methods)} methods open a writer session"
     assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 

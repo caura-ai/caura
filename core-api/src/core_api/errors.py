@@ -125,6 +125,14 @@ AUTH_SKILLS_FACTORY_DISABLED = "SKILLS_FACTORY_DISABLED"
 AUTH_SKILLS_INBOX_FORBIDDEN = "SKILLS_INBOX_FORBIDDEN"
 AUTH_ORG_ADMIN_REQUIRED = "ORG_ADMIN_REQUIRED"
 
+# M-85 — a fleet node answers only to the credential it is bound to. Its own
+# code because the way out is its own: send the node's heartbeats with that
+# credential, or have a tenant credential release the node.
+AUTH_FLEET_NODE_BOUND = "FLEET_NODE_BOUND_TO_OTHER_CREDENTIAL"
+# M-85 — an install credential with no install UUID has nothing a node can be
+# bound to, so it may not act as one.
+AUTH_INSTALL_UUID_MISSING = "INSTALL_UUID_MISSING"
+
 
 # ── Code for the request-budget deadline (ax-0917-h-01/h-02) ──────────────
 #

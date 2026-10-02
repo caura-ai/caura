@@ -803,3 +803,13 @@ AGENT_TUNABLE_KEYS: tuple[str, ...] = tuple(
 # Raising this lengthens the outage a crash causes; lowering it risks two
 # concurrent runs, whose only consequence is a second report row.
 REPORT_RUNNING_STALE_AFTER = timedelta(hours=1)
+
+
+# ---------------------------------------------------------------------------
+# Fleet
+# ---------------------------------------------------------------------------
+
+# M-85: ``fleet_nodes.owner_principal`` for a node bound to a tenant-wide
+# credential. A gateway-verified narrow credential binds as ``agent:<id>`` or
+# ``install:<uuid>`` instead.
+NODE_PRINCIPAL_TENANT = "tenant"

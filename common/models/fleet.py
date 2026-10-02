@@ -30,6 +30,11 @@ class FleetNode(Base):
     tools_json: Mapped[dict | None] = mapped_column(JSONB)
     channels_json: Mapped[dict | None] = mapped_column(JSONB)
     extra: Mapped[dict | None] = mapped_column("metadata", JSONB)
+    # The credential that may act as this node: heartbeat, take its commands,
+    # report their results. NULL until the node's first heartbeat after
+    # binding shipped (migration 055), or after a tenant credential released
+    # it; the next heartbeat binds it again.
+    owner_principal: Mapped[str | None] = mapped_column(Text)
     last_heartbeat: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
     )

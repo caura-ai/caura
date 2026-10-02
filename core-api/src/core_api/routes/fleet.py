@@ -15,9 +15,11 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
+from common.constants import NODE_PRINCIPAL_TENANT
 from common.env_utils import read_int_env
 from core_api import errors
 from core_api import openapi_responses as _oar
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
@@ -156,6 +158,44 @@ AUTO_UPGRADE_ATTEMPT_WINDOW = timedelta(hours=24)
 AUTO_UPGRADE_MAX_ATTEMPTS = 5
 
 router = APIRouter(tags=["Fleet"])
+
+
+def _agent_principal(agent_id: str) -> str:
+    return f"agent:{canonical_service_agent_id(agent_id)}"
+
+
+def _install_principal(install_uuid: str) -> str:
+    return f"install:{install_uuid}"
+
+
+def _node_principal(auth: AuthContext) -> str | None:
+    """The credential a node this request acts as must be bound to (M-85).
+
+    Narrow only where the gateway established it: an install credential, or an
+    agent key whose identity the gateway injected (``agent_id_verified``). An
+    ``X-Agent-ID`` the caller asserted itself, on the shared-key and standalone
+    paths, binds nothing, because that caller could as easily assert any other.
+    Every such credential is tenant-wide, as is every tenant, user and admin one,
+    and gets None: it acts as any node of its tenant.
+
+    An install credential with no install UUID is refused (403). The gateway
+    sends the UUID with the credential kind, so this is a broken contract rather
+    than a real install, and a shared placeholder such as ``install:unknown``
+    would let every such credential act as each other's nodes.
+    """
+    if auth.is_install_credential:
+        if not auth.install_uuid:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    errors.AUTH_INSTALL_UUID_MISSING,
+                    "This install credential carries no install UUID, so it cannot act as a fleet node.",
+                ),
+            )
+        return _install_principal(auth.install_uuid)
+    if auth.agent_id and auth.agent_id_verified:
+        return _agent_principal(auth.agent_id)
+    return None
 
 
 # ── Schemas ──
@@ -858,24 +898,53 @@ async def heartbeat(
             if _now_ms < body.deploy_blocked_until <= _now_ms + MAX_BLOCK_MS:
                 merged_metadata["deploy_blocked_until"] = body.deploy_blocked_until
 
-    node = await sc.upsert_node(
-        {
-            "tenant_id": body.tenant_id,
-            "node_name": body.node_name,
-            "fleet_id": body.fleet_id,
-            "hostname": body.hostname,
-            "ip": body.ip,
-            "openclaw_version": body.openclaw_version,
-            "plugin_version": body.plugin_version,
-            "plugin_hash": body.plugin_hash,
-            "os_info": body.os_info,
-            "agents_json": body.agents,
-            "tools_json": body.tools,
-            "channels_json": body.channels,
-            "metadata": merged_metadata,
-            "last_heartbeat": now.isoformat(),
-        }
-    )
+    # The node is bound to the credential that heartbeats it (M-85). Keyed on
+    # ``node_name`` alone, this let any write credential in the tenant name
+    # another node and drain its queue, including deploy payloads an agent
+    # credential may not queue itself. Now a narrow credential acts only as a node
+    # bound to it; a tenant-wide one still acts as any node of its tenant, and
+    # takes back a node a narrow credential bound first. Storage decides and
+    # binds in the same statement, so nothing below runs for a refused caller.
+    try:
+        node = await sc.upsert_node(
+            {
+                "tenant_id": body.tenant_id,
+                "node_name": body.node_name,
+                "fleet_id": body.fleet_id,
+                "hostname": body.hostname,
+                "ip": body.ip,
+                "openclaw_version": body.openclaw_version,
+                "plugin_version": body.plugin_version,
+                "plugin_hash": body.plugin_hash,
+                "os_info": body.os_info,
+                "agents_json": body.agents,
+                "tools_json": body.tools,
+                "channels_json": body.channels,
+                "metadata": merged_metadata,
+                "last_heartbeat": now.isoformat(),
+                "owner_principal": _node_principal(auth) or NODE_PRINCIPAL_TENANT,
+            }
+        )
+    except httpx.HTTPStatusError as exc:
+        # Storage refuses with a 409, which ``upstream_http_error_handler``
+        # would surface as a 500, so it is carried across here as
+        # ``create_command`` carries its 404.
+        if exc.response.status_code != 409:
+            raise
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                errors.AUTH_FLEET_NODE_BOUND,
+                f"Node '{body.node_name}' is bound to another credential.",
+                remediation=(
+                    "Send this node's heartbeats with the credential it is bound to, or "
+                    "have a tenant credential bind it to this one with "
+                    "POST /api/v1/fleet/nodes/{node_id}/release?bind_agent_id=... "
+                    "(or bind_install_uuid=...)."
+                ),
+                node_name=body.node_name,
+            ),
+        ) from exc
 
     # Materialise / refresh per-agent rows on every heartbeat so the
     # admin UI sees agents the moment they appear (not only after their
@@ -1097,10 +1166,15 @@ async def command_result(
     # authenticated tenant complete another tenant's command by UUID
     # (cross-tenant BOLA). ``auth.tenant_id`` is None only for admin
     # credentials, which legitimately operate unscoped.
+    #
+    # M-85 — and a narrow credential reports only on its own node's commands,
+    # the node-side half of the binding the heartbeat applies. Another node's
+    # command is the same 404 as one that does not exist.
     updated = await sc.update_command_status(
         str(command_id),
         {
             "tenant_id": auth.tenant_id,
+            "owner_principal": _node_principal(auth),
             "status": body.status,
             "result": body.result,
             "completed_at": datetime.now(UTC).isoformat(),
@@ -1170,6 +1244,61 @@ async def list_nodes(
         )
 
     return out
+
+
+@router.post("/fleet/nodes/{node_id}/release", responses={200: {"model": _oar.OkResponse}})
+async def release_node(
+    node_id: UUID,
+    tenant_id: str = Query(...),
+    bind_agent_id: str | None = Query(default=None),
+    bind_install_uuid: str | None = Query(default=None),
+    auth: AuthContext = Depends(get_auth_context),
+):
+    """Release a node from the credential it is bound to (M-85).
+
+    This is how a node moves to a new narrow credential: bound to one, it
+    refuses every other, including the one an operator just rotated it to. Name
+    the new credential with ``bind_agent_id`` or ``bind_install_uuid`` and the
+    node is bound to it at once, so no other credential can claim it in
+    between. Bare, the node is left unbound and its next heartbeat binds it to
+    whichever credential sends it first.
+
+    Auth: a write-capable tenant credential. Agent and install credentials are
+    refused, since releasing a node is how one would take it from its owner.
+    """
+    auth.enforce_read_only()
+    auth.enforce_tenant(tenant_id)
+    auth.enforce_not_agent_credential("release a fleet node")
+    if auth.is_install_credential:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                errors.AUTH_AGENT_CREDENTIAL_FORBIDDEN,
+                "Install credentials cannot release a fleet node; use a tenant credential.",
+                action="release a fleet node",
+            ),
+        )
+
+    if bind_agent_id and bind_install_uuid:
+        raise HTTPException(
+            status_code=422, detail="Name at most one of bind_agent_id and bind_install_uuid."
+        )
+    owner_principal: str | None = None
+    if bind_agent_id:
+        owner_principal = _agent_principal(bind_agent_id)
+    elif bind_install_uuid:
+        owner_principal = _install_principal(bind_install_uuid)
+
+    if not await get_storage_client().release_node(tenant_id, str(node_id), owner_principal):
+        raise HTTPException(status_code=404, detail="Node not found")
+    await log_action(
+        tenant_id=tenant_id,
+        action="release",
+        resource_type="fleet_node",
+        resource_id=str(node_id),
+        detail={"bound_to": owner_principal},
+    )
+    return {"ok": True}
 
 
 # ── Fleet & agent stats ──
@@ -1346,7 +1475,15 @@ async def list_commands(
     # function's docstring ("optionally filtered by node") promised a filter
     # that was never applied: every call returned every command in the tenant,
     # so a caller polling for one node's work saw the whole fleet's.
-    commands = await sc.list_commands(tenant_id=tenant_id, node_id=str(node_id) if node_id else None)
+    #
+    # M-85 — a narrow credential lists only its own nodes' commands. Their
+    # payloads and results are another node's deploy material, and their ids
+    # are what a result is reported against.
+    commands = await sc.list_commands(
+        tenant_id=tenant_id,
+        node_id=str(node_id) if node_id else None,
+        owner_principal=_node_principal(auth),
+    )
 
     return [
         {

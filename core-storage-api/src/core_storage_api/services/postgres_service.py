@@ -62,6 +62,7 @@ from common.constants import (
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
     LIVE_MEMORY_STATUSES,
+    NODE_PRINCIPAL_TENANT,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     REPORT_RUNNING_STALE_AFTER,
@@ -1516,6 +1517,14 @@ class Unscoped:
 
 UNSCOPED = Unscoped()
 """The only ``Unscoped`` instance. Compare with ``isinstance``, not ``is``."""
+
+
+def _node_ids_bound_to(owner_principal: str, tenant_id: str | Unscoped) -> Select:
+    """Ids of the nodes one credential is bound to: the only nodes it may act as (M-85)."""
+    stmt = select(FleetNode.id).where(FleetNode.owner_principal == owner_principal)
+    if not isinstance(tenant_id, Unscoped):
+        stmt = stmt.where(FleetNode.tenant_id == tenant_id)
+    return stmt
 
 
 class PostgresService:
@@ -11984,16 +11993,74 @@ class PostgresService:
         self,
         *,
         values: dict[str, Any],
-    ) -> UUID:
+        owner_principal: str | None = None,
+    ) -> UUID | None:
+        """Insert or refresh a node row. ``None`` when its binding refuses the caller.
+
+        ``owner_principal`` is the credential the heartbeat came from (M-85):
+        ``NODE_PRINCIPAL_TENANT`` for a tenant-wide one, ``agent:<id>`` or
+        ``install:<uuid>`` for a narrow one. A new or unbound row takes it. A row
+        bound to another narrow credential refuses a narrow caller; a
+        tenant-wide caller is always admitted and takes the node back, so a node
+        a narrow credential bound first is recovered by its tenant's own next
+        heartbeat. Omitted, as for the sentinel row ``POST /fleet`` writes, the
+        binding is left as it is.
+
+        An unbound row is claimed by the first credential to heartbeat it, and
+        that heartbeat receives the node's pending commands. Every row that
+        predates migration 055 starts unbound, as does one released without a
+        named credential. That window is the accepted cost of binding existing
+        nodes with no record of their owner; ``fleet_release_node`` can name the
+        new credential so a key rotation does not reopen it.
+
+        Decided in the conflict arm's WHERE, against the row the statement
+        locked, so two heartbeats racing for an unbound node cannot both be
+        admitted. A refused caller changes nothing: no row comes back.
+        """
+        # Only the argument moves the binding, never a key of ``values``.
+        values = dict(values)
+        values.pop("owner_principal", None)
+        where: ColumnElement[bool] | None = None
+        if owner_principal is not None:
+            values["owner_principal"] = owner_principal
+            if owner_principal != NODE_PRINCIPAL_TENANT:
+                bound = FleetNode.__table__.c.owner_principal
+                where = or_(bound.is_(None), bound == owner_principal)
+        set_ = {k: v for k, v in values.items() if k not in _FLEET_NODE_IMMUTABLE_FIELDS}
         async with get_session() as session:
             stmt = pg_insert(_table(FleetNode)).values(**values)
             stmt = stmt.on_conflict_do_update(  # type: ignore[assignment]
                 constraint="uq_fleet_nodes_tenant_node",
-                set_={k: v for k, v in values.items() if k not in _FLEET_NODE_IMMUTABLE_FIELDS},
+                set_=set_,
+                where=where,
             ).returning(FleetNode.__table__.c.id)
             result = await session.execute(stmt)
             await session.flush()
-            return result.scalar_one()
+            return result.scalar_one_or_none()
+
+    async def fleet_release_node(
+        self,
+        *,
+        tenant_id: str,
+        node_id: UUID,
+        owner_principal: str | None = None,
+    ) -> bool:
+        """Rebind a node to ``owner_principal``, or clear its binding. True when it exists.
+
+        The way out of a refused heartbeat after a credential change (M-85): a
+        node bound to one narrow credential refuses every other narrow one, by
+        design, including the one an operator just rotated it to. Naming the new
+        credential binds the node to it in this statement, so no other narrow
+        credential can claim it first. Cleared (``None``), it binds to whichever
+        credential heartbeats next.
+        """
+        async with get_session() as session:
+            result = await session.execute(
+                sql_update(FleetNode)
+                .where(FleetNode.id == node_id, FleetNode.tenant_id == tenant_id)
+                .values(owner_principal=owner_principal)
+            )
+            return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def fleet_get_node_id(
         self,
@@ -12281,6 +12348,7 @@ class PostgresService:
         tenant_id: str | Unscoped,
         result: dict | None = None,
         completed_at: datetime | None = None,
+        owner_principal: str | None = None,
     ) -> bool:
         """Record a command's completion (``done`` / ``failed`` / ``acked``).
 
@@ -12294,6 +12362,9 @@ class PostgresService:
         the argument got the pre-fix cross-tenant UPDATE back with nothing to
         notice it. Admin callers legitimately run unscoped and now say so —
         ``tenant_id=UNSCOPED``. See :class:`Unscoped`.
+
+        ``owner_principal`` narrows it further to commands of nodes bound to
+        that credential (M-85), for a caller that may act only as its own node.
         """
         values: dict
         if status == "acked":
@@ -12308,6 +12379,8 @@ class PostgresService:
             stmt = sql_update(FleetCommand).where(FleetCommand.id == command_id)
             if not isinstance(tenant_id, Unscoped):
                 stmt = stmt.where(FleetCommand.tenant_id == tenant_id)
+            if owner_principal is not None:
+                stmt = stmt.where(FleetCommand.node_id.in_(_node_ids_bound_to(owner_principal, tenant_id)))
             res = await session.execute(stmt.values(**values))
             return (res.rowcount or 0) > 0  # type: ignore[attr-defined]
 
@@ -12326,11 +12399,13 @@ class PostgresService:
         status: str | None = None,
         command: str | None = None,
         limit: int = 50,
+        owner_principal: str | None = None,
     ) -> Sequence[FleetCommand]:
         # ``status``/``command`` filter in SQL, BEFORE the limit — a
         # post-limit filter would silently drop matching rows older than
         # the ``limit`` newest commands (e.g. a long-pending
-        # interview_request behind 50 newer deploys).
+        # interview_request behind 50 newer deploys). ``owner_principal`` the
+        # same way: a caller that may see only its own nodes' commands (M-85).
         async with get_session() as session:
             stmt = (
                 select(FleetCommand)
@@ -12344,6 +12419,8 @@ class PostgresService:
                 stmt = stmt.where(FleetCommand.status == status)
             if command:
                 stmt = stmt.where(FleetCommand.command == command)
+            if owner_principal is not None:
+                stmt = stmt.where(FleetCommand.node_id.in_(_node_ids_bound_to(owner_principal, tenant_id)))
             result = await session.execute(stmt)
             return result.scalars().all()
 

@@ -195,6 +195,7 @@ FLEET_NODE_FIELDS: list[str] = [
     "tools_json",
     "channels_json",
     "extra",
+    "owner_principal",
     "last_heartbeat",
     "created_at",
 ]

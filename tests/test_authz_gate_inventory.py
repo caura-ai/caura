@@ -165,6 +165,10 @@ SELF_ID_PARAMS_EXCLUDED: dict[str, str] = {
         "IS gated on it"
     ),
     "agents": "fleet/heartbeat's node roster: a report about agents, not a claim to be one",
+    "bind_agent_id": (
+        "fleet node release's target: the agent key a tenant credential binds the "
+        "node to, not a claim about who the caller is (agent credentials are refused)"
+    ),
     "agent": "install-skill's runtime selector (claude-code | codex | both)",
 }
 # ``written_by`` is the nearest miss and is deliberately not here: it is an
@@ -367,11 +371,11 @@ PLANE_GATE_ALLOWLIST: dict[str, str] = {
     # NODE-plane, not admin-plane. The plugin holds whatever credential the
     # install was given, and both of these are how a node stays live and
     # reports back (``plugin/src/heartbeat.ts`` posts them). Refusing an
-    # agent-scoped credential here would take fleets offline, which is worse
-    # than the gap it would close. Note the over-refusal guards in
-    # ``tests/test_route_authz_gaps.py`` cover read-only and demo credentials
-    # on these routes, NOT agent-scoped ones — so this line is a judgement
-    # about the deployment, not a restatement of something already tested.
+    # agent-scoped credential here would take fleets offline. What the gate
+    # would have closed is closed by binding instead (M-85): each node is bound
+    # to the credential that heartbeats it, so an agent or install credential
+    # acts only as its own node. ``tests/test_fleet_node_binding.py`` covers
+    # that, and keeps agent credentials working on the nodes bound to them.
     "POST /api/v1/fleet/heartbeat": "node-plane: the plugin's own check-in",
     "POST /api/v1/fleet/commands/{command_id}/result": "node-plane: the plugin's own ack",
     # SELF-plane. An agent tuning its OWN search profile is the documented

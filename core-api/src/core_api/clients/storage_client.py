@@ -2757,6 +2757,18 @@ class CoreStorageClient:
     async def delete_node(self, tenant_id: str, node_name: str) -> bool:
         return await self._delete(f"/fleet/nodes/{node_name}", tenant_id=tenant_id)
 
+    async def release_node(
+        self, tenant_id: str, node_id: str, owner_principal: str | None = None
+    ) -> dict | None:
+        """Clear a node's credential binding, or move it to ``owner_principal`` (M-85).
+
+        None if no such node.
+        """
+        return await self._post_optional(
+            f"/fleet/nodes/{node_id}/release",
+            {"tenant_id": tenant_id, "owner_principal": owner_principal},
+        )
+
     async def create_command(self, data: dict) -> dict:
         return await self._post("/fleet/commands", data)  # type: ignore[return-value]
 
@@ -2768,8 +2780,12 @@ class CoreStorageClient:
         command: str | None = None,
         limit: int = 50,
         node_id: str | None = None,
+        owner_principal: str | None = None,
     ) -> list[dict]:
         params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
+        if owner_principal is not None:
+            # M-85 — only commands of nodes bound to this credential.
+            params["owner_principal"] = owner_principal
         if node_name is not None:
             params["node_name"] = node_name
         if node_id is not None:

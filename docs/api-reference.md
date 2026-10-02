@@ -88,10 +88,12 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/fleet/heartbeat` | POST | Plugin heartbeat — upserts node status, returns pending commands |
+| `/fleet/heartbeat` | POST | Plugin heartbeat — upserts node status, returns pending commands. A node is bound to the credential that heartbeats it: an agent or install credential acts only as nodes bound to it, while a tenant credential acts as any node of its tenant and takes back one bound to a narrower credential |
 | `/fleet/nodes` | GET | List fleet nodes with status (online/stale/offline) |
+| `/fleet/nodes/{node_id}/release` | POST | Release a node from its credential, for example after rotating its key (tenant credential). With `bind_agent_id` or `bind_install_uuid` the node is bound to that credential at once; without either, its next heartbeat binds it to whichever credential sends it first. A node with no binding yet, including every node from before binding existed, is claimed the same way |
 | `/fleet/commands` | POST | Queue a command for a node |
-| `/fleet/commands` | GET | List command history |
+| `/fleet/commands` | GET | List command history; an agent or install credential sees only its own nodes' commands |
+| `/fleet/commands/{command_id}/result` | POST | Report a command's result; an agent or install credential reports only on its own nodes' commands |
 
 **Admin + System**
 
