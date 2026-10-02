@@ -409,23 +409,44 @@ async def _keystone_lines(tenant_id: str, fleet_id: str | None, agent_id: str) -
 # ── Watermark ──
 
 
-async def _read_watermark_seq(sc, tenant_id: str, doc_id: str) -> int:
-    doc = await sc.get_document(tenant_id, WATERMARK_COLLECTION, doc_id, read=False)
-    if doc and isinstance(doc.get("data"), dict):
+def _watermark_seq(data: dict | None) -> int:
+    if isinstance(data, dict):
         try:
-            return int(doc["data"].get("last_seq", -1))
+            return int(data.get("last_seq", -1))
         except (TypeError, ValueError):
             return -1
     return -1
 
 
-async def read_watermark(tenant_id: str, node_id: str) -> int:
-    """The node's committed cursor (``-1`` when it has never been interviewed).
+async def _read_watermark_data(sc, tenant_id: str, doc_id: str) -> dict | None:
+    doc = await sc.get_document(tenant_id, WATERMARK_COLLECTION, doc_id, read=False)
+    data = doc.get("data") if doc else None
+    return data if isinstance(data, dict) else None
 
-    Primary read, like every other watermark read: the submit route bounds a
-    window against it, and a lagged answer would bound against a stale cursor.
+
+async def _read_watermark_seq(sc, tenant_id: str, doc_id: str) -> int:
+    return _watermark_seq(await _read_watermark_data(sc, tenant_id, doc_id))
+
+
+async def read_watermark_state(tenant_id: str, node_id: str) -> tuple[int, str | None]:
+    """The stream's committed cursor and the agent that last advanced it.
+
+    ``(-1, None)`` when it has never been interviewed. One read serves both,
+    because the submit route needs both: it bounds the window against the
+    cursor and refuses to let one agent continue another agent's stream.
+
+    Primary read, like every other watermark read: a lagged answer would bound
+    against a stale cursor.
     """
-    return await _read_watermark_seq(get_storage_client(), tenant_id, watermark_doc_id(node_id))
+    data = await _read_watermark_data(get_storage_client(), tenant_id, watermark_doc_id(node_id))
+    agent_id = data.get("agent_id") if data else None
+    return _watermark_seq(data), agent_id if isinstance(agent_id, str) and agent_id else None
+
+
+async def read_watermark(tenant_id: str, node_id: str) -> int:
+    """The node's committed cursor (``-1`` when it has never been interviewed)."""
+    seq, _agent_id = await read_watermark_state(tenant_id, node_id)
+    return seq
 
 
 # Bounded verify-and-repair passes for the read-max-write loop below.

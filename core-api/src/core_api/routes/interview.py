@@ -24,6 +24,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -52,7 +53,7 @@ from core_api.services.interview_service import (
     advance_watermark,
     enqueue_interview_job,
     process_interview_job,
-    read_watermark,
+    read_watermark_state,
     run_interview,
     run_interview_schedule,
     synthesis_sem,
@@ -80,6 +81,15 @@ async def _bounded_process(tenant_id: str, doc_id: str) -> None:
     # global synthesis cap holds even when both paths run concurrently.
     async with synthesis_sem:
         await process_interview_job(tenant_id, doc_id)
+
+
+def _names_fleet_node(node_id: str) -> bool:
+    """True when ``node_id`` has a fleet-node id's shape (a UUID)."""
+    try:
+        UUID(node_id)
+    except ValueError:
+        return False
+    return True
 
 
 def _log_task_exc(task: asyncio.Task) -> None:
@@ -156,10 +166,12 @@ async def submit_interview(
     one job).
 
     ``agent_id`` resolves like a memory write (an agent-scoped credential
-    writes as itself; install credentials get the broker ownership boundary),
-    ``node_id`` must be a fleet node of the tenant (404 otherwise), and
+    writes as itself; install credentials get the broker ownership boundary).
+    A UUID ``node_id`` must be a fleet node of the tenant (404 otherwise); any
+    other ``node_id`` is an adapter stream, which an agent-bound credential may
+    continue only if its own agent last advanced it (409 otherwise). And
     ``cursor_to`` may run at most ``INTERVIEW_MAX_CURSOR_ADVANCE`` past the
-    node's committed watermark (422 otherwise).
+    stream's committed watermark (422 otherwise).
     """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
@@ -209,16 +221,40 @@ async def submit_interview(
     if auth.tenant_id:  # skip enforcement for admin
         await enforce_fleet_write(tenant_id, body.agent_id, body.fleet_id)
 
-    # ``node_id`` keys the watermark and the job doc, so it must name a real
-    # node of THIS tenant — the fleet-node UUID the scheduler put in the
-    # ``interview_request`` payload. Same 404 for a node of another tenant as
-    # for one that never existed.
-    nodes = await get_storage_client().list_nodes(tenant_id)
-    if not any(str(n.get("id") or "") == body.node_id for n in nodes):
-        raise HTTPException(status_code=404, detail="node_id is not a node of this tenant")
+    # ``node_id`` keys the watermark and the job doc. Its shape says which of
+    # two kinds of stream it names:
+    #
+    # - A UUID is a FLEET NODE: the fleet-node id the scheduler put in the
+    #   ``interview_request`` payload. It must name a node of THIS tenant, with
+    #   the same 404 for another tenant's node as for one that never existed.
+    # - Anything else is an ADAPTER STREAM, keyed by its client.
+    #   ``caura-interviewer`` (``clients/python``) submits one per transcript as
+    #   ``cc:<machine>:<session>`` or ``cursor:...``. No fleet node exists for
+    #   it, so requiring one refused every window that adapter sends.
+    #
+    # An adapter stream belongs to the agent that last advanced it. Above, an
+    # agent credential's ``body.agent_id`` resolved to its own identity and an
+    # install credential's to an agent the install owns, so either may continue
+    # only streams of that agent and cannot jump another agent's cursor. Tenant
+    # credentials keep tenant-wide authority. 409 rather than 403: the
+    # credential is valid and only this stream is refused, which
+    # ``caura-interviewer`` handles by skipping the one transcript, where a 403
+    # aborts its whole run.
+    names_fleet_node = _names_fleet_node(body.node_id)
+    if names_fleet_node:
+        nodes = await get_storage_client().list_nodes(tenant_id)
+        if not any(str(n.get("id") or "") == body.node_id for n in nodes):
+            raise HTTPException(status_code=404, detail="node_id is not a node of this tenant")
+    committed, stream_agent_id = await read_watermark_state(tenant_id, body.node_id)
+    if (
+        not names_fleet_node
+        and (auth.agent_id or auth.is_install_credential)
+        and stream_agent_id is not None
+        and canonical_service_agent_id(stream_agent_id) != body.agent_id
+    ):
+        raise HTTPException(status_code=409, detail="node_id names another agent's interview stream")
     # The watermark only moves forward, so a window claiming a cursor far past
     # anything the node can hold would permanently skip the node's real events.
-    committed = await read_watermark(tenant_id, body.node_id)
     if body.cursor_to - committed > INTERVIEW_MAX_CURSOR_ADVANCE:
         raise HTTPException(
             status_code=422,

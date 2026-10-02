@@ -632,3 +632,113 @@ async def test_interview_submit_attributes_to_the_verified_agent(
     )
     assert job["data"]["agent_id"] == "low"
     assert await interview_service.read_watermark(tenant, node_id) == 2
+
+
+def _adapter_stream() -> str:
+    """A ``caura-interviewer`` stream key: ``cc:<machine12>:<session uuid>``."""
+    return f"cc:{uuid.uuid4().hex[:12]}:{uuid.uuid4()}"
+
+
+# One event far ahead of a fresh stream's cursor, yet inside the per-submit cap:
+# the jump the stream binding exists to refuse.
+_JUMP = _events(1, start_seq=999_999)
+
+
+async def test_interview_submit_accepts_an_adapter_stream(
+    client, as_auth, interview_tenant
+):
+    # caura-interviewer keys a stream per transcript and registers no fleet
+    # node for it, so a fleet-node check on its key refused every window.
+    tenant, _node = interview_tenant
+    stream = _adapter_stream()
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, stream, "worker")
+    )
+    assert resp.status_code == 200, resp.text
+    assert await interview_service.read_watermark(tenant, stream) == 2
+
+
+async def test_an_agent_cannot_continue_another_agents_adapter_stream(
+    client, as_auth, sc, interview_tenant
+):
+    tenant, _node = interview_tenant
+    await _seed_agent(sc, tenant, "owner", 1)
+    await _seed_agent(sc, tenant, "peer", 1)
+    stream = _adapter_stream()
+    as_auth(tenant, agent_id="owner")
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, stream, "owner")
+    )
+    assert resp.status_code == 200, resp.text
+
+    as_auth(tenant, agent_id="peer")
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, stream, "peer", events=_JUMP)
+    )
+    assert resp.status_code == 409, resp.text
+    assert await interview_service.read_watermark(tenant, stream) == 2
+    job = await sc.get_document(
+        tenant,
+        interview_service.JOBS_COLLECTION,
+        interview_service.interview_job_doc_id(stream, 999_999, 999_999),
+        read=False,
+    )
+    assert job is None
+
+
+async def test_an_install_cannot_continue_another_installs_adapter_stream(
+    client, as_auth, interview_tenant
+):
+    # The second install names the first one's agent; the broker ownership
+    # gate degrades it to its own ``broker:`` identity, which owns no stream.
+    tenant, _node = interview_tenant
+    stream = _adapter_stream()
+    as_auth(tenant, is_install_credential=True, install_uuid=f"install-{_uid()}")
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, stream, "laptop")
+    )
+    assert resp.status_code == 200, resp.text
+
+    as_auth(tenant, is_install_credential=True, install_uuid=f"install-{_uid()}")
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, stream, "laptop", events=_JUMP)
+    )
+    assert resp.status_code == 409, resp.text
+    assert await interview_service.read_watermark(tenant, stream) == 2
+
+
+async def test_an_agent_continues_its_own_adapter_stream(
+    client, as_auth, sc, interview_tenant
+):
+    tenant, _node = interview_tenant
+    await _seed_agent(sc, tenant, "owner", 1)
+    stream = _adapter_stream()
+    as_auth(tenant, agent_id="owner")
+    for window in (_events(), _events(start_seq=3)):
+        resp = await client.post(
+            "/api/v1/interview/submit",
+            json=_submit(tenant, stream, "owner", events=window),
+        )
+        assert resp.status_code == 200, resp.text
+    assert await interview_service.read_watermark(tenant, stream) == 5
+
+
+async def test_a_tenant_credential_continues_any_adapter_stream(
+    client, as_auth, sc, interview_tenant
+):
+    tenant, _node = interview_tenant
+    await _seed_agent(sc, tenant, "owner", 1)
+    stream = _adapter_stream()
+    as_auth(tenant, agent_id="owner")
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, stream, "owner")
+    )
+    assert resp.status_code == 200, resp.text
+
+    as_auth(tenant)
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_submit(tenant, stream, "peer", events=_events(start_seq=3)),
+    )
+    assert resp.status_code == 200, resp.text
+    assert await interview_service.read_watermark(tenant, stream) == 5
