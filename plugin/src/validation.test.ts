@@ -19,7 +19,11 @@ import { createHmac } from "node:crypto";
 import { win32 } from "node:path";
 
 import {
+  insecureKeyTransportMessage,
   isContainedResolvedPath,
+  isLoopbackHost,
+  keyTransportPolicy,
+  reportKeyTransportPolicy,
   verifyCommandSignature,
 } from "./validation.js";
 
@@ -133,5 +137,74 @@ describe("verifyCommandSignature", () => {
     const tampered = { ...cmd, payload: { name: "skill-b" } };
     assert.equal(verifyCommandSignature(tampered, KEY).valid, false);
     assert.equal(verifyCommandSignature(tampered, KEY).reason, "invalid_signature");
+  });
+});
+
+describe("keyTransportPolicy — API key never crosses the network in cleartext", () => {
+  test("loopback plain HTTP is allowed without opt-in", () => {
+    for (const url of [
+      "http://localhost:8000",
+      "http://127.0.0.1:8000",
+      "http://127.5.6.7",
+      "http://[::1]:8000",
+      "http://api.localhost",
+    ]) {
+      assert.equal(keyTransportPolicy(url, false), "send", url);
+    }
+  });
+
+  test("https is always allowed", () => {
+    assert.equal(keyTransportPolicy("https://10.0.0.5:8000", false), "send");
+    assert.equal(keyTransportPolicy("https://caura.example.com", false), "send");
+  });
+
+  test("remote plain HTTP is refused without opt-in", () => {
+    for (const url of [
+      "http://10.0.0.5:8000",
+      "http://caura.internal",
+      "http://localhost.evil.com",
+      "http://128.0.0.1",
+      "not a url",
+    ]) {
+      assert.equal(keyTransportPolicy(url, false), "refuse", url);
+    }
+  });
+
+  test("remote plain HTTP is sent-insecure with opt-in", () => {
+    assert.equal(keyTransportPolicy("http://10.0.0.5:8000", true), "send-insecure");
+  });
+
+  test("isLoopbackHost rejects look-alikes", () => {
+    assert.equal(isLoopbackHost("localhost"), true);
+    assert.equal(isLoopbackHost("[::1]"), true);
+    assert.equal(isLoopbackHost("localhost.evil.com"), false);
+    assert.equal(isLoopbackHost("127.0.0.1.nip.io"), false);
+  });
+
+  test("refusal message names the host and the exact fix", () => {
+    const msg = insecureKeyTransportMessage("http://10.0.0.5:8000");
+    assert.match(msg, /10\.0\.0\.5:8000/);
+    assert.match(msg, /CAURA_ALLOW_INSECURE_HTTP=true/);
+    assert.match(msg, /https:\/\//);
+  });
+
+  test("import-time report: silent for loopback, error on refuse, warn on opt-in", (t) => {
+    const errors: string[] = [];
+    const warns: string[] = [];
+    t.mock.method(console, "error", (m: string) => errors.push(m));
+    t.mock.method(console, "warn", (m: string) => warns.push(m));
+
+    reportKeyTransportPolicy("http://localhost:8000", "k", "send");
+    assert.deepEqual([errors.length, warns.length], [0, 0]);
+
+    reportKeyTransportPolicy("http://10.0.0.5:8000", "", "refuse");
+    assert.deepEqual([errors.length, warns.length], [0, 0], "no key, nothing to protect");
+
+    reportKeyTransportPolicy("http://10.0.0.5:8000", "k", "refuse");
+    assert.equal(errors.length, 1);
+
+    reportKeyTransportPolicy("http://10.0.0.5:8000", "k", "send-insecure");
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /CAURA_ALLOW_INSECURE_HTTP/);
   });
 });

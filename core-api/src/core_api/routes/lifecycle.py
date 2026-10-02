@@ -24,7 +24,7 @@ import weakref
 from collections.abc import Awaitable, Callable, MutableMapping
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from common.env_utils import read_int_env
 from common.events import (
@@ -57,6 +57,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Admin", "Lifecycle"])
 
 _PublisherFn = Callable[..., Awaitable[None]]
+# Pipeline ops gated by the consumer's dedup window (``lifecycle_handlers``),
+# whose publishers accept ``dedup_window_hours``.
+_DEDUP_WINDOW_ACTIONS = frozenset({"crystallize", "entity-link", "insights", "forge-distill"})
+
 _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     "archive-expired": publish_archive_expired_request,
     "archive-stale": publish_archive_stale_request,
@@ -263,6 +267,15 @@ async def _trigger_one(
 async def fanout_lifecycle_action(
     action: str,
     auth: AuthContext = Depends(get_auth_context),
+    dedup_window_hours: float | None = Query(
+        default=None,
+        gt=0,
+        le=168,
+        description=(
+            "Pipeline ops only: the consumer's dedup window in hours. Send a value just "
+            "under the schedule's interval when it runs more often than daily."
+        ),
+    ),
 ) -> dict:
     """Cron entry point — publish one message per active org.
 
@@ -276,6 +289,11 @@ async def fanout_lifecycle_action(
     """
     auth.enforce_admin()
     publisher = _resolve_publisher(action)
+    if dedup_window_hours is not None and action not in _DEDUP_WINDOW_ACTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"dedup_window_hours applies only to {sorted(_DEDUP_WINDOW_ACTIONS)}",
+        )
 
     org_ids = await _list_tenants_for_action(action)
 
@@ -289,6 +307,8 @@ async def fanout_lifecycle_action(
     async def _bounded_trigger(org_id: str) -> int:
         async with sem:
             extra = await resolve_publisher_kwargs(action, org_id)
+            if dedup_window_hours is not None:
+                extra = {**(extra or {}), "dedup_window_hours": dedup_window_hours}
             return await _trigger_one(
                 action=action,
                 org_id=org_id,

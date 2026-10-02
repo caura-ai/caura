@@ -6,8 +6,9 @@ import logging
 import shlex
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
@@ -724,7 +725,7 @@ async def install_plugin_script(
     tenant_id = _resolve_tenant_id()
 
     script = _generate_install_script(
-        api_url=api_url or _derive_api_url_from_request(request),
+        api_url=_resolve_installer_api_url(request, api_url),
         api_key=api_key,
         fleet_id=fleet_id,
         tenant_id=tenant_id,
@@ -748,7 +749,7 @@ async def install_plugin_script_post(
     tenant_id = _resolve_tenant_id()
 
     script = _generate_install_script(
-        api_url=body.api_url or _derive_api_url_from_request(request),
+        api_url=_resolve_installer_api_url(request, body.api_url),
         api_key=api_key,
         fleet_id=body.fleet_id,
         tenant_id=tenant_id,
@@ -796,6 +797,45 @@ def _derive_api_url_from_request(request: Request) -> str:
     scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
     return f"{scheme}://{host}"
+
+
+def _origin(url: str) -> str | None:
+    """``scheme://host[:port]`` lowercased, or None if ``url`` is not http(s)."""
+    parts = urlsplit(url.strip())
+    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+        return None
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}"
+
+
+def _resolve_installer_api_url(request: Request, requested: str | None) -> str:
+    """The API URL an installer script may embed.
+
+    The generated script sends the installer's API key to this URL, downloads
+    plugin source from it, compiles and runs it. Echoing any caller-supplied
+    value made ``https://<this host>/api/install-plugin?api_url=<anywhere>`` a
+    script served from a trusted host that ships the victim's key and code
+    execution to ``<anywhere>``. A supplied value is therefore accepted only
+    when it names this server's own origin or an operator-allowlisted one
+    (``INSTALLER_ALLOWED_API_URLS``).
+    """
+    derived = _derive_api_url_from_request(request)
+    if not requested:
+        return derived
+    from core_api.config import settings
+
+    allowed = {_origin(derived)} | {
+        _origin(u) for u in settings.installer_allowed_api_urls.split(",") if u.strip()
+    }
+    allowed.discard(None)
+    if _origin(requested) in allowed:
+        return requested.rstrip("/")
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "api_url must be this server's own URL. To allow another origin, "
+            "set INSTALLER_ALLOWED_API_URLS on the server."
+        ),
+    )
 
 
 def _generate_skill_install_script(
@@ -940,7 +980,7 @@ async def install_skill_script(
             f"Invalid 'skill' parameter. Expected one of: {sorted(_VALID_SKILLS)}. Got: {skill!r}",
             status_code=400,
         )
-    resolved_api_url = api_url if api_url else _derive_api_url_from_request(request)
+    resolved_api_url = _resolve_installer_api_url(request, api_url)
     api_key = request.headers.get("x-api-key", "")
     script = _generate_skill_install_script(
         api_url=resolved_api_url, agent=agent, api_key=api_key, skill=skill

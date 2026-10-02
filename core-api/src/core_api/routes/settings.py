@@ -55,8 +55,13 @@ async def update_tenant_settings(
     it as it was — omission means "don't touch", never "clear". To return a
     setting to its default, send it explicitly as ``null``:
 
-        {"search": {"recall_boost": null}}          # one leaf back to default
-        {"search": {"default_profile": null}}       # a whole section back to default
+        {"search": {"recall_boost": null}}                  # one leaf back to default
+        {"search": {"default_profile": {"top_k": null}}}    # one profile knob back to default
+        {"search": {"default_profile": null}}               # every profile knob back to default
+
+    A ``null`` removes the stored override rather than storing ``null``, so a
+    GET afterwards shows the default. Only keys that exist are accepted: an
+    unknown key is still a 422, ``null`` or not.
 
     Sending ``{}`` for a section is a NO-OP, not a reset — an empty dict merges
     nothing. That reads like a clear and is the shape operators reach for first,

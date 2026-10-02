@@ -18,7 +18,11 @@ from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
 from core_api.middleware.idempotency import IDEMPOTENCY_HEADER, idempotency_for
 from core_api.middleware.rate_limit import write_limit
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
-from core_api.services.agent_service import enforce_delete
+from core_api.services.agent_service import (
+    enforce_delete,
+    enforce_document_overwrite,
+    enforce_fleet_write,
+)
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 
 # Skill Factory SF-002 — imported at module scope (rather than lazily
@@ -183,7 +187,8 @@ class DocWriteRequest(TenantScopedBody):
     # refuses to replace a substantial document with a near-empty one. A
     # truncated payload from a failed read looks exactly like an intentional
     # wipe; that is how the shared task checklist was destroyed on
-    # 2026-08-27. Callers who genuinely mean to gut a document set this.
+    # 2026-08-27. Callers who genuinely mean to gut a document set this. An
+    # agent-scoped credential needs trust >= 3 to set it (the delete bar).
     force: bool = False
     # Embed source is no longer caller-chosen. Server reads data["summary"]
     # (and, for collection="skills", falls back to data["description"] for
@@ -417,6 +422,12 @@ async def upsert_document(
     ``_``-prefixed system collections, for a ``data`` that renders empty, and
     for one over the memory size limit. ``DELETE /documents/{doc_id}``
     un-mints it. Never fails the write.
+
+    Agent-scoped credentials are held to the agent trust ladder: a cross-fleet
+    ``fleet_id`` needs trust >= 3 (an omitted one resolves to the agent's home
+    fleet), and so does replacing a document whose stored author is a
+    different agent, or sending ``force=true``. A document with no recorded
+    author is unowned and stays writable. Tenant keys are unaffected.
     """
     # ax-0917-m-14 — a caller must not write a document under a name that is
     # not its own. REFUSE rather than silently substitute: an agent credential
@@ -433,6 +444,27 @@ async def upsert_document(
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()
     auth.enforce_usage_limits()
+    # Agent credentials get the trust ladder every other agent write gets.
+    # Tenant keys / sessions carry no trust level and keep their tenant-wide
+    # authority (the same split ``DELETE /documents/{doc_id}`` draws).
+    if auth.tenant_id and auth.agent_id and author is not None:
+        # Fleet policy, as on ``POST /memories`` and MCP ``caura_doc``: a
+        # cross-fleet ``fleet_id`` needs trust >= 3. Also registers the agent
+        # on first contact. An omitted ``fleet_id`` resolves to the agent's
+        # home fleet, so the document (and the memory minted from it) scopes
+        # like an MCP write instead of landing fleet-less.
+        write_agent = await enforce_fleet_write(body.tenant_id, author, body.fleet_id)
+        if not body.fleet_id and write_agent.get("fleet_id"):
+            body.fleet_id = write_agent["fleet_id"]
+        # Replacing a document a different agent authored, or forcing past
+        # the shrink guard, needs the trust ``DELETE /documents`` needs.
+        await enforce_document_overwrite(
+            body.tenant_id,
+            author,
+            collection=body.collection,
+            doc_id=body.doc_id,
+            force=body.force,
+        )
     _idem = await idempotency_for(request, body.tenant_id, idempotency_key)
     if _idem and (_replay := _idem.cached_replay):
         _body, _status = _replay

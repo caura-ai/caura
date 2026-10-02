@@ -78,6 +78,17 @@ so you can reproduce the methodology against your own Caura instance:
    [LongMemEval](https://arxiv.org/abs/2410.10813) are publicly available.
 3. **Ingest** — for each conversation, write its turns with
    `POST /api/v1/memories` (one memory per turn / fact).
+   **Then wait for the store to settle before querying.** Embedding, LLM
+   enrichment and atomic-fact fan-out can finish long after the write returns
+   (always so for `POST /api/v1/memories/bulk` on a deferred deployment), and
+   a store measured mid-flight scores differently from the same store later.
+   Poll `GET /api/v1/memories/stats?tenant_id=…` (optionally `agent_id` /
+   `fleet_id`) until it returns `"settled": true`; `pending` breaks the
+   outstanding work down by `embedding` / `enrichment` / `fanout`. Contradiction
+   marks carry no row marker and land a few seconds after the last of those, so
+   allow a short grace period after the flip. A `pending` count that stops
+   shrinking means stranded work (e.g. a disabled embed backfill), not a store
+   that is still converging.
 4. **Query** — for each benchmark question, call `POST /api/v1/search` and pass
    the retrieved memories to your answering LLM.
 5. **Score** — judge each answer against the benchmark's expected answer with an

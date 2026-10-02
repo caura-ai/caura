@@ -2109,6 +2109,17 @@ async def create_memories_bulk(
         # search comes back empty while an exact-words search does not.
         if embeddings[i] is None:
             set_system_value(metadata, "embedding_pending", True)
+        # lme-0929-m-03. The same durable signal for enrichment, on exactly the
+        # condition the post-persist loop below publishes ``ENRICH_REQUESTED``
+        # (``defer_enrich_publish``; a deferred deployment never enriches inline
+        # here, so ``enrichment is None``). The worker's PATCH writes ``false``
+        # into both homes. Absence alone is ambiguous — an inline-enriched row
+        # carries no key either — so without this a bulk-ingested store, the
+        # population with the LONGEST deferred window, could not be told apart
+        # from a settled one by reading its rows (``GET /memories/stats``
+        # ``pending.enrichment``).
+        if _enrichment_backfill_needed(enrichment, tenant_config):
+            set_system_value(metadata, "enrichment_pending", True)
 
         mem_data = {
             "tenant_id": data.tenant_id,
@@ -2130,7 +2141,7 @@ async def create_memories_bulk(
             "content_hash": ch,
             "client_request_id": item_request_id,
             "expires_at": item.expires_at.isoformat() if item.expires_at else None,
-            "subject_entity_id": item.subject_entity_id,
+            "subject_entity_id": str(item.subject_entity_id) if item.subject_entity_id else None,
             "predicate": item.predicate,
             "object_value": item.object_value,
             "ts_valid_start": ts_valid_start.isoformat() if ts_valid_start else None,
@@ -3272,6 +3283,9 @@ async def fan_out_atomic_facts(
     parent_weight: float,
     parent_ts_start,
     tenant_config,
+    parent_expires_at=None,
+    parent_run_id: str | None = None,
+    parent_source_uri: str | None = None,
 ) -> dict[str, int]:
     """Create one child memory per extracted atomic fact.
 
@@ -3292,6 +3306,12 @@ async def fan_out_atomic_facts(
     ``parent_visibility`` is passed IN, never re-read from the row: it must be
     the post-remediation value, because a row read before the governance PATCH
     still carries the visibility ``keep_private`` just removed (#808).
+
+    ``parent_expires_at`` / ``parent_run_id`` / ``parent_source_uri`` are copied
+    onto every child, as the auto-chunk children already get them: a child is
+    the parent's content, so it must expire with it (the expiry sweep archives
+    by ``expires_at``) and keep its provenance. Accepted as a datetime or the
+    ISO string a storage row carries.
 
     Returns ``{"created", "deduped", "unembedded"}``. Never raises for a single
     fact — each failure mode is counted and logged, so one bad fact cannot cost
@@ -3445,6 +3465,13 @@ async def fan_out_atomic_facts(
                     "status": "active",
                     "visibility": parent_visibility,
                     "ts_valid_start": parent_ts_start,
+                    "expires_at": (
+                        parent_expires_at.isoformat()
+                        if isinstance(parent_expires_at, datetime)
+                        else parent_expires_at
+                    ),
+                    "run_id": parent_run_id,
+                    "source_uri": parent_source_uri,
                 }
             )
         except DuplicateMemoryError:
@@ -3564,6 +3591,17 @@ async def fan_out_atomic_facts(
             fanout_created,
             memory_id,
         )
+        # Mark the parent so a later delete knows to look for its children
+        # (``_may_have_derived_children``): the lookup is an unindexed JSON-key
+        # scan and runs only for parents that say they have some. Best-effort —
+        # the children exist either way, and failing the fan-out over a marker
+        # would cost the facts.
+        try:
+            await sc.update_memory(
+                str(memory_id), tenant_id, {"metadata_patch": {"atomic_fact_children": fanout_created}}
+            )
+        except Exception:
+            logger.warning("could not mark parent %s as having fan-out children", memory_id, exc_info=True)
     if fanout_deduped:
         # Its own line rather than a field on the created line above,
         # because it explains a discrepancy an operator would otherwise
@@ -3607,6 +3645,10 @@ async def fan_out_atomic_facts(
 #: inline enrichment in the tree funnels through this one coroutine, and the
 #: operator wants one predicate for "permanently unenriched", not three.
 _ENRICH_STRANDED_TASK = "enrich_stranded"
+
+#: The derive phase's give-up: enrichment landed, the atomic-fact children did
+#: not. ``memory_id`` is the PARENT — the id to re-run the fan-out from.
+_FANOUT_STRANDED_TASK = "fanout_stranded"
 
 
 async def _record_enrich_stranded(
@@ -4009,6 +4051,9 @@ async def _enrich_memory_background(
                 parent_weight=parent_weight,
                 parent_ts_start=parent_ts_start,
                 tenant_config=tenant_config,
+                parent_expires_at=mem.get("expires_at"),
+                parent_run_id=mem.get("run_id"),
+                parent_source_uri=mem.get("source_uri"),
             )
 
         # OSS 09/02 L-20 — the entity-extraction fan-out that stood here is
@@ -4038,35 +4083,73 @@ async def _enrich_memory_background(
         # they fire ``detect_contradictions_async`` when their
         # respective worker PATCHes land.
         logger.info("Background enrichment succeeded for memory %s", memory_id)
-    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError) as exc:
         # Distinct from the enrichment handler above so the two phases are
         # tellable apart in logs: by this point the row is enriched AND
         # governed, and only the derived rows failed.
         logger.exception("Background enrichment fan-out error for memory %s", memory_id)
+        # oss-0927-m-03: the atomic-fact children were never written and nothing
+        # retries them — the parent is enriched, so no enrichment-side check will
+        # ever look at this row again. Its own task name, not ``enrich_stranded``:
+        # the parent is NOT unenriched, and folding the two would make that
+        # predicate lie about it.
+        await record_task_failure(_FANOUT_STRANDED_TASK, memory_id, tenant_id, exc)
 
     return governed_row
 
 
+def _may_have_derived_children(metadata: dict | None) -> bool:
+    """Could rows derived from this one exist (``metadata.parent_memory_id``)?
+
+    Gates the child lookup, which filters on a JSON key with no supporting
+    index — the reason ``governance_remediation._pre_verdict_children`` gates
+    too. ``auto_chunked`` is stamped on every auto-chunk parent; ``atomic_facts``
+    is the key the async fan-out persists on a parent (left in place, nulled,
+    once consumed); ``atomic_fact_children`` is stamped by the fan-out itself.
+    """
+    md = metadata or {}
+    return bool(md.get("auto_chunked")) or "atomic_facts" in md or bool(md.get("atomic_fact_children"))
+
+
 async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
+    """Soft-delete one memory and every row derived from it.
+
+    Auto-chunk and atomic-fact children carry the parent's own text, so a
+    delete that reached only the parent left the document recallable through
+    them, with ``parent_memory_id`` naming a deleted row. Governance
+    remediation already cascades a drop for the same reason; a user's or
+    agent's delete now does too. Children first: if their delete fails the
+    parent is still live and the caller's retry repeats the whole operation,
+    rather than leaving children nothing points back to.
+    """
     sc = get_storage_client()
     mem = await sc.get_memory(str(memory_id), tenant_id)
     if not mem:
         raise HTTPException(status_code=404, detail="Memory not found")
 
+    md = mem.get("metadata_") if mem.get("metadata_") is not None else mem.get("metadata")
+    children: list[dict] = []
+    if _may_have_derived_children(md):
+        children = [c for c in await sc.find_children_by_parent_id(tenant_id, str(memory_id)) if c.get("id")]
+        if children:
+            await sc.soft_delete_by_ids(tenant_id, [str(c["id"]) for c in children])
+
     await sc.soft_delete_memory(str(memory_id), tenant_id)
 
     _hooks = get_hooks()
     if _hooks.audit_log:
-        try:
-            await _hooks.audit_log(
-                tenant_id=tenant_id,
-                agent_id=mem.get("agent_id"),
-                action="soft_delete",
-                resource_type="memory",
-                resource_id=memory_id,
-            )
-        except Exception:
-            logger.warning("Audit hook failed (non-critical)", exc_info=True)
+        deleted = [*((c["id"], c.get("agent_id")) for c in children), (memory_id, mem.get("agent_id"))]
+        for row_id, row_agent in deleted:
+            try:
+                await _hooks.audit_log(
+                    tenant_id=tenant_id,
+                    agent_id=row_agent,
+                    action="soft_delete",
+                    resource_type="memory",
+                    resource_id=row_id,
+                )
+            except Exception:
+                logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
 
 async def _revert_superseded_row(sc, tenant_id: str, superseded_id: str, editor_id: str) -> None:
@@ -4201,9 +4284,20 @@ async def update_memory(
     content_changed = "content" in fields_set and data.content != mem.get("content")
 
     new_embedding = None
+    pii_flags: dict = {}
     # Content change: re-embed, re-hash, check dedup
     if content_changed:
         tenant_config = await resolve_config(tenant_id)
+        # The tenant's PII policy applies to an edit exactly as to a create, and
+        # before anything below sees the text (embedding, hash, audit diff).
+        from core_api.services.pii_update_gate import apply_pii_policy_to_update
+
+        data.content, pii_flags = await apply_pii_policy_to_update(
+            tenant_id=tenant_id,
+            agent_id=agent_id or mem.get("agent_id"),
+            content=data.content,
+            gov=getattr(tenant_config, "governance_pii", None),
+        )
         # Synchronous update: the caller awaits the re-embed.
         new_embedding = await get_embedding(data.content, tenant_config, background=False)
         new_hash = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
@@ -4279,7 +4373,13 @@ async def update_memory(
                     ),
                 )
 
-        changes["content"] = {"old": mem.get("content", "")[:200], "new": data.content[:200]}
+        changes["content"] = {
+            "old": mem.get("content", "")[:200],
+            # A flagged edit keeps its text, which contains detected PII; the
+            # audit chain refuses raw PII, and the whole update record was then
+            # dropped. Record that it changed, not what it says.
+            "new": "[content flagged as PII; not recorded]" if pii_flags else data.content[:200],
+        }
 
     # Build patch dict for storage client
     patch: dict = {}
@@ -4350,10 +4450,14 @@ async def update_memory(
                     "old": str(old_val)[:200] if old_val is not None else None,
                     "new": str(new_val)[:200] if new_val is not None else None,
                 }
-                # Serialize datetime fields for JSON transport
+                # Serialize datetime / UUID fields for JSON transport. A UUID
+                # (``subject_entity_id``) reached httpx's JSON encoder raw and
+                # raised TypeError, so any PATCH setting it was a 500.
                 val = new_val
                 if isinstance(val, datetime):
                     val = val.isoformat()
+                elif isinstance(val, UUID):
+                    val = str(val)
                 patch[attr_name] = val
 
     # CAURA-702: caller-supplied classifier-deprecated types (currently
@@ -4494,6 +4598,12 @@ async def update_memory(
             pending_patch = dict(patch.get("metadata_patch") or {})
             set_system_value(pending_patch, "embedding_pending", pending)
             patch["metadata_patch"] = pending_patch
+        if pii_flags:
+            # ``flag`` action: the same markers a create would set.
+            if "metadata_" in patch:
+                patch["metadata_"].update(pii_flags)
+            else:
+                patch["metadata_patch"] = {**(patch.get("metadata_patch") or {}), **pii_flags}
 
     # Entity links: ADD the named links when explicitly provided. Never a
     # replace — see the ``changes`` entry below for what the storage call does
@@ -4793,6 +4903,7 @@ def resolve_search_params(
     query: str,
     top_k: int,
     tenant_config=None,
+    top_k_explicit: bool = False,
 ) -> dict:
     """Resolve every search knob for one query, for both search paths.
 
@@ -4822,6 +4933,16 @@ def resolve_search_params(
     ``tenant_config`` is a ``ResolvedConfig`` on the primary search/recall paths
     (routes resolve it before calling); ``None`` is tolerated so callers that
     don't have one behave exactly as before A47.
+
+    ``top_k_explicit`` (SIDE-60) — True when the REST body named ``top_k``
+    itself. A caller-named ``top_k`` then outranks the whole ladder for this
+    one call (request → agent profile → tenant default → constant), the same
+    precedence a per-request ``min_similarity`` already gets. A profile /
+    tenant ``top_k`` stays the DEFAULT for callers that did not send one.
+    Without this a tenant ``default_profile.top_k=10`` answered ``top_k=12``
+    and ``top_k=3`` alike with 10 rows. Both sources are already bounded by
+    ``MAX_SEARCH_TOP_K`` (schema ``le=`` on the request, ``SEARCH_KNOBS``
+    bounds on the profile), so either winner respects the ceiling.
     """
     resolved = validate_search_profile(search_profile) if search_profile else {}
 
@@ -4831,7 +4952,7 @@ def resolve_search_params(
             resolved = {**tenant_default, **resolved}
 
     return {
-        "top_k": resolved.get("top_k", top_k),
+        "top_k": top_k if top_k_explicit else resolved.get("top_k", top_k),
         "min_similarity": resolved.get("min_similarity", MIN_SEARCH_SIMILARITY),
         "graph_max_hops": resolved.get("graph_max_hops", GRAPH_MAX_HOPS),
         # The one default that is not a constant: it adapts to the query unless
@@ -5348,6 +5469,9 @@ async def search_memories(
     fleet_ids: list[str] | None = None,
     filter_agent_id: str | None = None,
     caller_agent_id: str | None = None,
+    # The caller's HOME tenant — its own ``scope_agent`` rows are matched
+    # there only. ``tenant_id`` can be a sibling the caller pinned.
+    caller_tenant_id: str | None = None,
     memory_type_filter: str | None = None,
     status_filter: str | None = None,
     valid_at: datetime | None = None,
@@ -5368,6 +5492,16 @@ async def search_memories(
     recall_ctx: dict | None = None,
     allow_recall_bump: bool = True,
     include_derived: bool | None = None,
+    # SIDE-57 — True when the REST body named ``top_k`` itself (vs. taking the
+    # schema default). Lets ClassifyQuery skip RECENT_CONTEXT's 5-row cap for a
+    # caller that explicitly asked for more, and (SIDE-60) makes the named
+    # value beat an agent-profile / tenant-default ``top_k`` on both search
+    # paths. Default False keeps every other caller (MCP, internal paths) on
+    # the previous behaviour.
+    top_k_explicit: bool = False,
+    # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
+    # strategy and any strategy-applied top_k cap. Pipeline path only.
+    retrieval_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
@@ -5382,6 +5516,7 @@ async def search_memories(
             fleet_ids=fleet_ids,
             filter_agent_id=filter_agent_id,
             caller_agent_id=caller_agent_id,
+            caller_tenant_id=caller_tenant_id,
             allow_recall_bump=allow_recall_bump,
             memory_type_filter=memory_type_filter,
             status_filter=status_filter,
@@ -5400,6 +5535,8 @@ async def search_memories(
             min_similarity=min_similarity,
             recall_ctx=recall_ctx,
             include_derived=include_derived,
+            top_k_explicit=top_k_explicit,
+            retrieval_ctx=retrieval_ctx,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -5415,6 +5552,7 @@ async def search_memories(
         fleet_ids=fleet_ids,
         filter_agent_id=filter_agent_id,
         caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
         memory_type_filter=memory_type_filter,
         status_filter=status_filter,
         valid_at=valid_at,
@@ -5427,6 +5565,7 @@ async def search_memories(
         min_similarity=min_similarity,
         allow_recall_bump=allow_recall_bump,
         include_derived=include_derived,
+        top_k_explicit=top_k_explicit,
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
@@ -5439,6 +5578,7 @@ async def _search_memories_pipeline(
     fleet_ids: list[str] | None = None,
     filter_agent_id: str | None = None,
     caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
     allow_recall_bump: bool = True,
     memory_type_filter: str | None = None,
     status_filter: str | None = None,
@@ -5459,6 +5599,14 @@ async def _search_memories_pipeline(
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
     include_derived: bool | None = None,
+    # SIDE-57 — True when the REST body named ``top_k`` itself (vs. taking the
+    # schema default). Lets ClassifyQuery skip RECENT_CONTEXT's 5-row cap for a
+    # caller that explicitly asked for more. Default False keeps every other
+    # caller (MCP, internal paths) on the previous behaviour.
+    top_k_explicit: bool = False,
+    # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
+    # strategy and any strategy-applied top_k cap. Pipeline path only.
+    retrieval_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -5471,11 +5619,13 @@ async def _search_memories_pipeline(
             "fleet_ids": fleet_ids,
             "filter_agent_id": filter_agent_id,
             "caller_agent_id": caller_agent_id,
+            "caller_tenant_id": caller_tenant_id,
             "allow_recall_bump": allow_recall_bump,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
             "valid_at": valid_at,
             "top_k": top_k,
+            "top_k_explicit": top_k_explicit,
             "recall_boost_enabled": recall_boost,
             "graph_expand": graph_expand,
             # ``search.entity_retrieval`` — read by ClassifyQuery (skips the
@@ -5538,6 +5688,14 @@ async def _search_memories_pipeline(
         diagnostic_ctx["entity_matches"] = ctx.data.get("entity_matches")
         diagnostic_ctx["entity_match_declined"] = bool(ctx.data.get("entity_match_declined"))
 
+    if retrieval_ctx is not None:
+        plan = ctx.data.get("retrieval_plan")
+        retrieval_ctx["retrieval_strategy"] = plan.strategy.value if plan else None
+        # Present only when a strategy cut the caller's budget (today:
+        # RECENT_CONTEXT on a request that did not name ``top_k``).
+        if (cap := ctx.data.get("strategy_top_k_cap")) is not None:
+            retrieval_ctx["effective_top_k"] = cap
+
     if recall_ctx is not None:
         # Written by TrackRecalls on every path it takes. Defaulting to False
         # when the key is absent keeps the honest failure direction: a caller
@@ -5571,6 +5729,7 @@ async def _search_memories_legacy(
     fleet_ids: list[str] | None = None,
     filter_agent_id: str | None = None,
     caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
     memory_type_filter: str | None = None,
     status_filter: str | None = None,
     valid_at: datetime | None = None,
@@ -5583,12 +5742,19 @@ async def _search_memories_legacy(
     min_similarity: float | None = None,
     allow_recall_bump: bool = True,
     include_derived: bool | None = None,
+    top_k_explicit: bool = False,
 ) -> list[MemoryOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
 
     # Same resolver the pipeline step uses — see ``resolve_search_params``.
-    sp = resolve_search_params(search_profile, query=query, top_k=top_k, tenant_config=tenant_config)
+    sp = resolve_search_params(
+        search_profile,
+        query=query,
+        top_k=top_k,
+        tenant_config=tenant_config,
+        top_k_explicit=top_k_explicit,
+    )
     _top_k = sp["top_k"]
     # D12 — per-request floor beats the resolved profile, same precedence as
     # ResolveSearchProfile applies on the pipeline path.
@@ -5665,6 +5831,7 @@ async def _search_memories_legacy(
         "strict_fleet_scoping": bool(getattr(tenant_config, "strict_fleet_scoping", False)),
         "filter_agent_id": filter_agent_id,
         "caller_agent_id": caller_agent_id,
+        "caller_tenant_id": caller_tenant_id,
         "memory_type_filter": memory_type_filter,
         "status_filter": status_filter,
         "valid_at": valid_at.isoformat() if valid_at else None,

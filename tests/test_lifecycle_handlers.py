@@ -89,7 +89,7 @@ class _FakeAdapter:
         return self.insights_count
 
     async def has_recent_lifecycle_success(
-        self, *, org_id: str, action: str, since_hours: int
+        self, *, org_id: str, action: str, since_hours: float
     ) -> bool:
         self.dedup_calls.append((org_id, action, since_hours))
         if self.raise_on_dedup_check is not None:
@@ -818,3 +818,26 @@ async def test_claim_lost_on_the_failure_path_is_also_logged(caplog):
     # The original op error must still propagate — the log is additive.
     statuses = [c[1] for c in adapter.audit_calls]
     assert statuses == ["in_progress", "failure"]
+
+
+@pytest.mark.asyncio
+async def test_request_dedup_window_overrides_the_registration_default():
+    """A sub-daily scheduler sends its own window; the 23h default would
+    otherwise skip every run after the first of the day."""
+    adapter = _FakeAdapter(has_recent_success=False)
+    handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
+    payload = LifecycleArchiveRequest(
+        audit_id=7, org_id="tenant-x", triggered_by="test", dedup_window_hours=5.5
+    ).model_dump(mode="json")
+    await handler(
+        Event(event_type=Topics.Lifecycle.CRYSTALLIZE_REQUESTED, payload=payload)
+    )
+    assert adapter.dedup_calls == [("tenant-x", "crystallize", 5.5)]
+
+
+@pytest.mark.asyncio
+async def test_no_request_window_keeps_the_registration_default():
+    adapter = _FakeAdapter(has_recent_success=False)
+    handler = _bind(adapter, action="crystallize", dedup_window_hours=23)
+    await handler(_archive_event(Topics.Lifecycle.CRYSTALLIZE_REQUESTED))
+    assert adapter.dedup_calls == [("tenant-x", "crystallize", 23)]

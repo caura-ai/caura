@@ -22,7 +22,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories/{id}/status` | PATCH | Update lifecycle status |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
 | `/memories` | DELETE | Bulk soft-delete |
-| `/memories/stats` | GET | Counts by type, agent, and status |
+| `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself) |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
 | `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under `memories` (also mirrored to `items` for /search-shaped consumers — **`items` is deprecated and scheduled for removal in v4.0.0**; send `items_alias: false` to drop that copy now and halve the response, and read `memories`. The MCP recall brief already omits it by default). `top_k` is the result count — `limit` is accepted as an alias for it |
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
@@ -184,7 +184,8 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `GEMINI_API_KEY` | — | Required for Gemini (Developer API, from AI Studio) |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed CORS origins |
 | `ENVIRONMENT` | `development` | `development` or `production` |
-| `SETTINGS_ENCRYPTION_KEY` | — | Fernet key for encrypting tenant settings. Required in production |
+| `SETTINGS_ENCRYPTION_KEY` | — | Fernet key that encrypts tenant provider keys (`api_keys.*`) at rest. Required in production. Without it (dev, standalone) keys are stored as submitted; keys saved before encryption existed are encrypted on the tenant's next save |
+| `INSTALLER_ALLOWED_API_URLS` | *(empty)* | Comma-separated extra origins that `/install-plugin` and `/install-skill` accept as `api_url`. The serving origin is always accepted; set this only when a proxy hides the public host from core-api |
 | `PLATFORM_LLM_PROVIDER` | *(empty)* | Platform-default LLM: `openai`, `vertex`, or empty to disable |
 | `PLATFORM_LLM_MODEL` | *(empty)* | Model override (e.g. `gpt-5.4-nano`, `gemini-3.1-flash-lite-preview`) |
 | `PLATFORM_LLM_API_KEY` | — | OpenAI API key for the platform LLM singleton |

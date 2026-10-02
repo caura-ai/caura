@@ -37,6 +37,7 @@ import {
   INTERVIEW_SUBMIT_TIMEOUT_MS,
   BUILD_TIMEOUT_MS,
   MAX_SOURCE_SIZE,
+  assertKeyTransportAllowed,
   ensureTenantId,
   readEnv,
 } from "./env.js";
@@ -789,9 +790,13 @@ async function processCommand(cmd: {
           // gateway; the bootstrap-router alias path is the
           // unauthenticated route for fresh installs.
           const mHeaders: Record<string, string> = withUserAgent();
-          if (CAURA_API_KEY) mHeaders["X-API-Key"] = CAURA_API_KEY;
+          if (CAURA_API_KEY) {
+            assertKeyTransportAllowed();
+            mHeaders["X-API-Key"] = CAURA_API_KEY;
+          }
           const mRes = await fetch(mUrl, {
             headers: mHeaders,
+            redirect: "error",
             signal: AbortSignal.timeout(10_000),
           });
           if (mRes.ok) {

@@ -322,6 +322,7 @@ jobs:
   # ``author_association`` here — keeping the gate in one place avoids
   # the two conditions drifting out of sync.
   claude-review:
+    timeout-minutes: 20
     needs: pre-checks
     if: >-
       github.event_name == 'pull_request'
@@ -343,7 +344,7 @@ jobs:
           fetch-depth: 1
 
       - name: Install Claude CLI
-        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
+        run: bash .github/scripts/install_review_sandbox.sh
 
       # Same script as the @claude retrigger job below — feed the real diff to
       # `claude --print`. Replaces the claude-code-action agent, which never
@@ -351,7 +352,7 @@ jobs:
       # produced an empty result that got stamped "No issues found".
       - name: Review PR diff
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_REVIEW_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -454,13 +455,13 @@ jobs:
 
       - name: Install Claude CLI
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
-        run: npm install -g @anthropic-ai/claude-code@2.1.159 # pinned: reproducible reviews; bump deliberately
+        run: bash .github/scripts/install_review_sandbox.sh
 
       # Same script as the on-open claude-review job above.
       - name: Review PR diff
         if: steps.auth.outputs.authorized == 'true' && steps.pr.outputs.is_pr == 'true'
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_REVIEW_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
@@ -513,7 +514,7 @@ jobs:
 
       - name: Capture declined review findings
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.CLAUDE_CODE_REVIEW_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           # pull_request supplies the number; on workflow_dispatch that context is absent and the

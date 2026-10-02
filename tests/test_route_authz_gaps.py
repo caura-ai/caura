@@ -1305,7 +1305,10 @@ async def test_a_tenant_credential_can_still_queue_a_fleet_command(client, as_au
     tenant = f"tenant-{_uid()}"
     node_id = (await _seed_node(client, as_auth, tenant)).node_id
 
-    as_auth(tenant)
+    # The dashboard sends this as an org admin (the gateway stamps
+    # ``X-Org-Role``). Custom ``source`` from a plain tenant key is refused
+    # (``test_code_delivery_and_secrets_hardening.py``).
+    as_auth(tenant, org_role="admin")
     resp = await client.post(
         "/api/v1/fleet/commands",
         json={

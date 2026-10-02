@@ -4,10 +4,10 @@
  * Security fixes:
  * - Default 15s timeout on all requests via AbortController
  * - Signal forwarding from callers
- * - HTTPS enforced by default
+ * - API key refused over plain HTTP to a non-loopback host
  */
 
-import { CAURA_API_PREFIX, CAURA_API_URL, CAURA_API_KEY } from "./env.js";
+import { CAURA_API_PREFIX, CAURA_API_URL, CAURA_API_KEY, assertKeyTransportAllowed } from "./env.js";
 import { resolveAgentKey, evictAgentKey } from "./agent-auth.js";
 import { withUserAgent } from "./user-agent.js";
 
@@ -21,6 +21,7 @@ export async function apiCall(
   signal?: AbortSignal,
   agentId?: string,
   extraHeaders?: Record<string, string>,
+  onResponseHeaders?: (headers: Headers) => void,
 ): Promise<unknown> {
   const start = Date.now();
 
@@ -41,6 +42,10 @@ export async function apiCall(
     }
   }
 
+  // Refuse before resolving (and possibly provisioning) any credential when
+  // it would cross the network in cleartext.
+  if (CAURA_API_KEY) assertKeyTransportAllowed();
+
   // Resolve agent-scoped credential, or fall back to the tenant-scoped key
   const effectiveAgentId = agentId || (body?.agent_id as string) || (query?.agent_id as string);
   let effectiveKey = CAURA_API_KEY;
@@ -51,7 +56,10 @@ export async function apiCall(
 
   const headers: Record<string, string> = withUserAgent();
   if (body) headers["Content-Type"] = "application/json";
-  if (effectiveKey) headers["X-API-Key"] = effectiveKey;
+  if (effectiveKey) {
+    assertKeyTransportAllowed();
+    headers["X-API-Key"] = effectiveKey;
+  }
   // Caller-supplied headers (e.g. the per-attempt `X-Bulk-Attempt-Id`
   // required by POST /memories/bulk). Applied after the defaults so a
   // caller can override them deliberately if ever needed.
@@ -70,6 +78,9 @@ export async function apiCall(
   try {
     const requestInit: RequestInit = {
       method,
+      // X-API-Key is not stripped on cross-origin redirects by fetch.
+      // Require the configured API URL to be the final destination.
+      redirect: "error",
       headers,
       body: body ? JSON.stringify(body) : undefined,
       signal: effectiveSignal,
@@ -94,6 +105,10 @@ export async function apiCall(
       const safeText = text.length > 200 ? text.slice(0, 200) + "..." : text;
       throw new Error(`Caura API ${res.status}: ${safeText}`);
     }
+
+    // Expose metadata from the final successful response without changing
+    // the JSON payload contract for existing callers (including arrays).
+    onResponseHeaders?.(res.headers);
 
     // 204 No Content (e.g. DELETE)
     if (res.status === 204) {

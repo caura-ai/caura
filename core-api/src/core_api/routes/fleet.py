@@ -16,10 +16,12 @@ from pydantic import BaseModel, Field, field_validator
 logger = logging.getLogger(__name__)
 
 from common.env_utils import read_int_env
+from core_api import errors
 from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import NODE_OFFLINE_SECONDS, NODE_STALE_SECONDS
+from core_api.errors import coded_detail
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import get_raw_settings
@@ -1188,6 +1190,70 @@ async def fleet_stats(
 # ── Queue command (frontend posts) ──
 
 
+# ── Code-delivery guard ──
+#
+# ``deploy`` / ``update_plugin`` with a ``source`` payload is remote code
+# execution on the node by design: the plugin writes the source over its own
+# tree, builds it and restarts (``plugin/src/deploy.ts``). Commands are not yet
+# signed (see ``create_command``), so until they are, the route is the only
+# gate. Two rules close the widest part of it:
+#
+# * Custom ``source`` comes only from an org admin (dashboard admin session,
+#   operator admin key, or a standalone install, whose caller is the admin).
+#   A tenant API key handed to software can still queue a source-less deploy,
+#   which makes the node fetch the canonical source from this server.
+# * ``env_vars`` may not rewrite where the node sends its key, the key itself,
+#   or the switches that keep it safe (TLS, signed commands). The plugin
+#   refuses the same keys (``REMOTE_ENV_DENYLIST`` in ``plugin/src/deploy.ts``).
+_CODE_DELIVERY_COMMANDS = frozenset({"deploy", "update_plugin"})
+_REMOTE_ENV_DENYLIST_SUFFIXES = (
+    "_API_URL",
+    "_API_KEY",
+    "_API_PREFIX",
+    "_KEY_TRANSPORT",
+    "_TENANT_ID",
+    "_ALLOW_INSECURE_HTTP",
+    "_REQUIRE_SIGNED_COMMANDS",
+    "_TASK_DB_PATH",
+)
+
+
+def _denied_env_keys(env_vars: object) -> list[str]:
+    if not isinstance(env_vars, dict):
+        return []
+    return sorted(
+        k
+        for k in env_vars
+        if isinstance(k, str)
+        and k.upper().startswith(("CAURA_", "MEMCLAW_"))  # legacy-name-ok: rule 3 dual-read alias
+        and k.upper().endswith(_REMOTE_ENV_DENYLIST_SUFFIXES)
+    )
+
+
+def _enforce_code_delivery_policy(body: "CommandIn", auth: AuthContext) -> None:
+    if body.command not in _CODE_DELIVERY_COMMANDS:
+        return
+    payload = body.payload or {}
+    if payload.get("source") is not None and not auth.is_org_admin:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                errors.AUTH_ORG_ADMIN_REQUIRED,
+                "Deploying custom plugin source requires an org admin.",
+                remediation=(
+                    "Queue the deploy without 'source' to roll out this server's "
+                    "plugin, or send it from an org-admin session."
+                ),
+            ),
+        )
+    denied = _denied_env_keys(payload.get("env_vars"))
+    if denied:
+        raise HTTPException(
+            status_code=422,
+            detail=f"env_vars may not set: {', '.join(denied)}",
+        )
+
+
 @router.post(
     "/fleet/commands",
     status_code=201,
@@ -1240,6 +1306,7 @@ async def create_command(
     tenant_id = body.tenant_id or auth.tenant_id
     auth.enforce_tenant(tenant_id)
     auth.enforce_not_agent_credential("queue fleet commands")
+    _enforce_code_delivery_policy(body, auth)
 
     sc = get_storage_client()
     try:

@@ -19,10 +19,27 @@ from core_api.routes import memories as memories_route
 pytestmark = [pytest.mark.asyncio]
 
 
+@pytest.fixture(autouse=True)
+def _no_identity_storage(monkeypatch):
+    """The commit route now resolves its write identity like ``/memories/bulk``
+    (registration + fleet policy), both storage calls; metering is the subject
+    here, so they are stubbed out."""
+
+    async def _resolve(agent_id, tenant_id, fleet_id, **_kw):
+        return {"agent_id": agent_id, "fleet_id": None, "trust_level": 1}, agent_id
+
+    async def _fleet(*_a, **_kw):
+        return {}
+
+    monkeypatch.setattr(memories_route, "resolve_write_agent", _resolve)
+    monkeypatch.setattr(memories_route, "enforce_fleet_write", _fleet)
+
+
 class _Auth:
     """The narrowest AuthContext stand-in the endpoint actually reads."""
 
     tenant_id = "t-meter"
+    agent_id = None
     is_install_credential = False
     install_uuid = None
 

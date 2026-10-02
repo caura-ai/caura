@@ -45,6 +45,7 @@ from core_api.constants import (
     CRYSTALLIZER_DEDUP_THRESHOLD,
     CRYSTALLIZER_MIN_CLUSTER_SIZE,
 )
+from core_api.services.settings_crypto import decrypt_api_key, encrypt_api_keys
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +288,26 @@ DEFAULT_SETTINGS: dict = {
         # stands. Ops escape valve for tenants whose retraction
         # misbehaves; flip per-tenant without a deploy.
         "retraction_enabled": None,
+        # lme-0929-m-05 (SIDE-58) — tenant master switch for contradiction
+        # detection. ``None``/``True`` (the default) is today's behaviour.
+        # ``False`` skips EVERY detection entry point for the tenant — Path A
+        # (write, bulk, update, re-embed, the ENRICHED/EMBEDDED back-channel)
+        # and Path C (post entity-extraction, including its retraction phase) —
+        # so no new row is marked ``outdated``/``conflicted`` and no judge LLM
+        # call is made. Writes are unaffected. Forward-only: rows already marked
+        # before the flip keep their status.
+        #
+        # For stores where every row is a verbatim source record (benchmark
+        # tenants: on LongMemEval, detection hid 4,374 stored turns across 500
+        # stores from default search) and customers that want an append-only
+        # store. The gate is read inside the two detector entries every trigger
+        # routes through (``contradiction_detector``), not at the dozen call
+        # sites, so a trigger added later is gated without anyone remembering.
+        #
+        # Listed here, not only as a ``ResolvedConfig`` property: a knob absent
+        # from this schema is rejected by ``_check_keys`` and so is unsettable
+        # (the pm-0918-c-04 lesson).
+        "contradiction_detection_enabled": None,
     },
     "agents": {
         "require_agent_approval": None,
@@ -636,6 +657,12 @@ def _validate_default_search_profile(payload: dict) -> None:
         knob = SEARCH_KNOBS.get(key)
         if knob is None:
             raise ValueError(f"search.default_profile: unknown key {key!r} (allowed: {sorted(SEARCH_KNOBS)})")
+        # ``null`` on a KNOWN knob is the reset shape: storage deletes the key
+        # (``merge_settings_update``) and the resolver falls back to the global
+        # default. The unknown-key check above runs first, so a typo sent as
+        # null still 422s rather than "resetting" a knob that does not exist.
+        if value is None:
+            continue
         expected_type, (lo, hi) = knob.value_type, knob.bounds
         # Accept an int where a float is expected (e.g. min_similarity=0 → 0.0),
         # but never a bool (bool is an int subclass and would slip through).
@@ -659,6 +686,15 @@ def _validate_default_search_profile(payload: dict) -> None:
         )
 
 
+# Object-valued settings that may be sent as ``null`` to drop the whole object
+# back to its default. An allowlist rather than "any object" on purpose: most
+# resolvers read ``self._ts.get("<section>", {}).get(...)``, which crashes on a
+# stored ``None`` if a storage build that predates ``merge_settings_update``
+# stores the null instead of deleting it. The ``default_profile`` resolver reads
+# ``... or {}`` and is null-safe either way.
+_NULLABLE_OBJECT_KEYS: frozenset[str] = frozenset({"search.default_profile"})
+
+
 def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
     """Raise ``ValueError`` for any key in *payload* not present in *schema*.
 
@@ -671,8 +707,10 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
     for k, v in payload.items():
         schema_v = schema.get(k)
         if isinstance(schema_v, dict):
+            full_key = f"{path}.{k}" if path else k
+            if v is None and full_key in _NULLABLE_OBJECT_KEYS:
+                continue
             if not isinstance(v, dict):
-                full_key = f"{path}.{k}" if path else k
                 raise ValueError(f"Settings key {full_key!r} must be an object, got {type(v).__name__}")
             if schema_v:
                 _check_keys(v, schema_v, path=f"{path}.{k}" if path else k)
@@ -717,6 +755,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "write.triple_emission_enabled": bool,
     "write.bulk_subject_batching": bool,
     "write.retraction_enabled": bool,
+    "write.contradiction_detection_enabled": bool,
     # Skill Factory SF-006 — type validators for the skills_factory namespace.
     "skills_factory.enabled": bool,
     "skills_factory.description_max_bytes": int,
@@ -1010,23 +1049,38 @@ class ResolvedConfig:
     # API keys (from global config only in OSS)
     @property
     def openai_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("openai_api_key") or global_settings.openai_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("openai_api_key"))
+            or global_settings.openai_api_key
+        )
 
     @property
     def anthropic_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("anthropic_api_key") or global_settings.anthropic_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("anthropic_api_key"))
+            or global_settings.anthropic_api_key
+        )
 
     @property
     def openrouter_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("openrouter_api_key") or global_settings.openrouter_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("openrouter_api_key"))
+            or global_settings.openrouter_api_key
+        )
 
     @property
     def atlascloud_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("atlascloud_api_key") or global_settings.atlascloud_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("atlascloud_api_key"))
+            or global_settings.atlascloud_api_key
+        )
 
     @property
     def gemini_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("gemini_api_key") or global_settings.gemini_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("gemini_api_key"))
+            or global_settings.gemini_api_key
+        )
 
     # Search
     @property
@@ -1313,6 +1367,21 @@ class ResolvedConfig:
         val = self._ts.get("write", {}).get("retraction_enabled")
         return bool(val) if val is not None else True
 
+    @property
+    def contradiction_detection_enabled(self) -> bool:
+        """Tenant master switch for contradiction detection (default ON).
+
+        lme-0929-m-05 (SIDE-58). ``False`` makes both detector entries (Path A
+        ``detect_contradictions_async``, Path C
+        ``detect_contradictions_by_entities_async``) return before any storage
+        read, lock, admission slot or LLM call, so nothing is marked
+        ``outdated``/``conflicted`` for this tenant. When off it subsumes
+        ``retraction_enabled``: with Path C skipped there is nothing to retract.
+        Forward-only — existing statuses are left as they are.
+        """
+        val = self._ts.get("write", {}).get("contradiction_detection_enabled")
+        return bool(val) if val is not None else True
+
     # Agents
     @property
     def require_agent_approval(self) -> bool:
@@ -1392,6 +1461,12 @@ def validate_search_profile(profile: dict) -> dict:
         knob = SEARCH_KNOBS.get(key)
         if knob is None:
             cleaned[key] = value
+            continue
+
+        # ``null`` means "unset" (the settings reset shape), not a malformed
+        # value: drop it without the wrong-type warning. A row only holds one if
+        # a storage build that predates ``merge_settings_update`` stored it.
+        if value is None:
             continue
 
         expected_type, (lo, hi) = knob.value_type, knob.bounds
@@ -1539,12 +1614,16 @@ async def update_settings(
 ) -> dict:
     """Upsert tenant overrides + write an audit row with the flat diff.
 
-    Writes are a deep MERGE (``_deep_merge``), so an omitted key keeps its
-    current value. The reset shape is an explicit ``null``: ``_validate_leaf_types``
-    passes ``None`` through deliberately, every resolver property reads ``None``
-    as "no override", and a section set to ``None`` drops the whole group back to
-    defaults. ``{}`` for a section merges nothing and is a no-op — it looks like
-    a clear and is not one, which is the trap worth knowing about.
+    Writes are a deep MERGE, so an omitted key keeps its current value. The
+    reset shape is an explicit ``null``: validation passes ``None`` through
+    deliberately (for a ``search.default_profile`` knob too, provided the knob
+    exists), and storage applies the payload with ``merge_settings_update``,
+    which DELETES the override so the resolver falls back to the default.
+    ``search.default_profile`` itself may also be sent as ``null`` to drop every
+    tenant-default knob at once; other object-valued sections may not (see
+    ``_NULLABLE_OBJECT_KEYS``). ``{}`` for a section merges nothing and is a
+    no-op — it looks like a clear and is not one, which is the trap worth
+    knowing about.
 
     Returns the merged display view (``DEFAULT_SETTINGS`` ⊕ tenant overrides)
     so callers can echo back the resulting state. No-ops when the submitted
@@ -1582,6 +1661,10 @@ async def update_settings(
     # transaction (the FOR UPDATE lost-update guard can't span an HTTP read +
     # write, so it lives in storage-api). ``merged`` is the resulting raw
     # overrides; ``changed`` is False when the payload was a no-op.
+    # Provider keys are encrypted before they leave this service, so neither
+    # the settings row nor its audit diff ever holds them in plaintext.
+    if isinstance(new_settings.get("api_keys"), dict):
+        new_settings = {**new_settings, "api_keys": encrypt_api_keys(new_settings["api_keys"])}
     result = await get_storage_client().update_org_settings(tenant_id, new_settings, changed_by=changed_by)
     merged = result["settings"]
     if not result.get("changed"):

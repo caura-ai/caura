@@ -277,7 +277,9 @@ async def test_an_explicit_subject_beats_the_content_auto_clear(monkeypatch):
         mem_extra={"subject_entity_id": str(subject)},
     )
 
-    assert client.patches[0].get("subject_entity_id") == subject, (
+    # A string on the wire: the patch is JSON, and a raw UUID here made httpx
+    # raise TypeError before the request was sent.
+    assert client.patches[0].get("subject_entity_id") == str(subject), (
         f"an explicitly named subject_entity_id did not land: {client.patches[0]!r}"
     )
 

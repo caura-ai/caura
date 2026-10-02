@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -434,6 +435,7 @@ async def upsert_tenant_suppression(
     tenant_id: str,
     action: str,
     updated_by: str | None,
+    occurred_at: datetime | None = None,
 ) -> None:
     """POST one tenant_suppression upsert (CAURA-694).
 
@@ -441,10 +443,15 @@ async def upsert_tenant_suppression(
     validates the value and ours stays a pass-through so the wire shape
     has one source of truth. ``updated_by`` propagates the
     correlation id from the bus event for audit-trail use.
+    ``occurred_at`` is the event's time; storage ignores an upsert older
+    than the one it holds, so a redelivered stale event cannot undo a
+    newer one.
     """
     body: dict[str, Any] = {"tenant_id": tenant_id, "action": action}
     if updated_by is not None:
         body["updated_by"] = updated_by
+    if occurred_at is not None:
+        body["occurred_at"] = occurred_at.isoformat()
     resp = await _signed_call(
         client.post,
         f"{_PREFIX}/tenant-suppression",

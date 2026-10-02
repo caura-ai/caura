@@ -35,19 +35,19 @@ WHAT IT ENFORCES, in two halves that fail for different reasons:
 WHAT IT CANNOT ENFORCE, stated rather than implied: a caller that is neither an
 HTTP route nor an ASGI mount is invisible to the structural half, because there
 is no wiring here to walk, and a background caller has no request budget to
-assert anyway. Two such callers are live today and are NOT gated here:
+assert anyway. Two such callers are live today:
 
 * the audit-queue flusher (``_flush_one_tenant`` in ``app.py``) reaches this
-  same bulkhead from a background loop with nothing arming a deadline over it;
-  the queue's own ``audit_queue_max_size`` and its 5s shutdown drain are what
-  bound it. It is recorded in the bulkhead docstring's roster, which had
-  omitted it;
+  same bulkhead from a background loop. It has no request recorder, so it
+  arms its own ``asyncio.timeout`` over the acquire
+  (``audit_flush_slot_timeout_seconds``, oss-0927-m-04) and is gated by NAME
+  in ``BACKGROUND`` below — driven against the saturated semaphore like the
+  request surfaces, minus the recorder read it has no recorder for. What is
+  still not walked is the discovery of a THIRD background caller: that one
+  gets in by being added here, not by being found;
 * ``core_worker.per_tenant_concurrency`` is a SEPARATE bulkhead in a separate
   service, justified by the Pub/Sub redelivery budget rather than a request
   budget, and deliberately out of scope.
-
-For those, the roster below and the bulkhead docstring that now points at it
-are the anchor, not an automated gate.
 
 No provider calls and no LLM calls: the interview surface runs its fallback
 chain's ``fake_fn``, and every stalled hop is a patched semaphore.
@@ -366,14 +366,22 @@ async def _drive_interview_submit(ctx) -> dict | None:
         headers=headers,
     )
     assert enable.status_code == 200, enable.text
-    # Lowered AFTER the settings write, which is itself a request on this app.
+    # The route refuses a node_id that is not a node of the tenant.
+    node = await ctx.client.post(
+        "/api/v1/fleet/heartbeat",
+        json={"tenant_id": tenant_id, "node_name": f"node-{uid()}"},
+        headers=headers,
+    )
+    assert node.status_code == 200, node.text
+    # Lowered AFTER the settings write and the heartbeat, which are themselves
+    # requests on this app.
     _lower_setting(ctx.monkeypatch, "interview_request_timeout_seconds")
     base = datetime(2026, 9, 24, 8, 0, tzinfo=UTC)
     resp = await ctx.client.post(
         "/api/v1/interview/submit",
         json={
             "tenant_id": tenant_id,
-            "node_id": f"node-{uid()}",
+            "node_id": node.json()["node_id"],
             "agent_id": f"agent-{uid()}",
             "command_id": "cmd-1",
             "cursor_from": 0,
@@ -721,3 +729,133 @@ def test_the_opt_out_list_and_the_roster_name_the_same_routes():
         f"undeclared={sorted(set(_TIMEOUT_OPT_OUT_PATHS) - rest_bypasses)} "
         f"stale={sorted(rest_bypasses - set(_TIMEOUT_OPT_OUT_PATHS))}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 6 — background callers: no request, so their OWN budget is what is checked
+# ---------------------------------------------------------------------------
+
+# Callers of the unbounded acquire that no request budget can reach. Separate
+# from ``ROSTER`` because nothing here has an ASGI path or a request recorder;
+# what they must prove instead is that their own budget cancels the wait.
+BACKGROUND: tuple[Surface, ...] = (
+    Surface(
+        name="background.audit_flusher",
+        path=None,
+        budget_setting="audit_flush_slot_timeout_seconds",
+        # No request recorder on a background loop, so no phase to read.
+        expected_phase=None,
+        why=(
+            "AuditEventQueue's flusher gathers _flush_one_tenant over every "
+            "tenant in a chunk. Uncapped, one tenant with saturated "
+            "storage_write slots held the whole flush cycle until the queue "
+            "filled and dropped every tenant's events (oss-0927-m-04)."
+        ),
+    ),
+)
+
+
+class _RecordingStorage:
+    """Stands in for the storage client; records what reached the POST."""
+
+    def __init__(self, delay_s: float = 0.0) -> None:
+        self.delay_s = delay_s
+        self.posted: list[list[dict]] = []
+
+    async def create_audit_logs_bulk(self, events: list[dict]) -> dict:
+        await asyncio.sleep(self.delay_s)
+        self.posted.append(events)
+        return {"inserted": len(events)}
+
+
+async def test_the_audit_flusher_budget_cancels_the_unbounded_wait(monkeypatch):
+    """A saturated tenant must fail its own slice at the budget, not park.
+
+    ``_flush_audit_batch`` gathers this per tenant, so a slice that parks here
+    parks the whole flush cycle with it. Run as a task and bounded by the
+    ceiling from outside, so a missing budget reads as "still running", which
+    cannot be mistaken for the budget's own ``TimeoutError``.
+    """
+    import core_api.app as app_module
+
+    (surface,) = BACKGROUND
+    _saturate_storage_slots(monkeypatch)
+    _lower_setting(monkeypatch, surface.budget_setting)
+    storage = _RecordingStorage()
+    monkeypatch.setattr(app_module, "get_storage_client", lambda: storage)
+
+    started = time.monotonic()
+    task = asyncio.create_task(
+        app_module._flush_one_tenant(new_tenant_id(), [{"action": "x"}])
+    )
+    done, _ = await asyncio.wait({task}, timeout=_TERMINATION_CEILING_S)
+    elapsed = time.monotonic() - started
+    if not done:
+        task.cancel()
+    assert done, (
+        f"{surface.name} was still waiting on a storage_write slot after "
+        f"{elapsed:.2f}s against a {_BUDGET_S}s {surface.budget_setting}. Its "
+        f"acquire is uncapped again. {surface.why}"
+    )
+    assert isinstance(task.exception(), TimeoutError), task.exception()
+    assert elapsed >= _BUDGET_S * 0.9, (
+        f"{surface.name} gave up after {elapsed:.2f}s, before the {_BUDGET_S}s "
+        "budget — something other than the budget ended the wait"
+    )
+    assert storage.posted == [], "a slot that was never acquired reached storage"
+
+
+async def test_the_audit_flusher_budget_is_disarmed_once_the_slot_is_held(
+    monkeypatch,
+):
+    """The budget caps the WAIT, not the write.
+
+    Cancelling a POST already in flight would drop a slice storage may have
+    committed and count it lost. The POST here outlasts the budget on purpose,
+    through the real (unsaturated) bulkhead, and must still land.
+    """
+    import core_api.app as app_module
+
+    (surface,) = BACKGROUND
+    _lower_setting(monkeypatch, surface.budget_setting)
+    storage = _RecordingStorage(delay_s=_BUDGET_S * 2)
+    monkeypatch.setattr(app_module, "get_storage_client", lambda: storage)
+
+    events = [{"action": "x"}]
+    await asyncio.wait_for(
+        app_module._flush_one_tenant(new_tenant_id(), events),
+        _TERMINATION_CEILING_S,
+    )
+    assert storage.posted == [events]
+
+
+def test_the_audit_flusher_reaches_the_bulkhead_only_through_the_gated_helper():
+    """Pin the flusher's one acquire to the function the tests above drive.
+
+    The lifespan builds the flusher's closures; a slot acquire inlined there
+    again would be a background caller these tests never exercise.
+    """
+    import inspect
+
+    import core_api.app as app_module
+
+    lifespan_src = inspect.getsource(app_module.lifespan)
+    assert "per_tenant_storage_slot" not in lifespan_src, (
+        "the lifespan acquires a per_tenant_storage_slot directly again; route "
+        "it through _flush_one_tenant (budgeted) or add it to BACKGROUND"
+    )
+    assert "_flush_one_tenant(" in lifespan_src, (
+        "the audit flusher no longer calls _flush_one_tenant, so BACKGROUND "
+        "drives a helper nothing uses; re-point the roster at the real caller"
+    )
+    helper_src = inspect.getsource(app_module._flush_one_tenant)
+    assert BACKGROUND[0].budget_setting in helper_src
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_a_non_positive_audit_flusher_budget_refuses_to_boot(value):
+    """``asyncio.timeout(0)`` would drop every slice on every flush."""
+    from core_api.config import Settings
+
+    with pytest.raises(ValueError, match="audit_flush_slot_timeout_seconds"):
+        Settings(audit_flush_slot_timeout_seconds=value)

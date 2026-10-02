@@ -122,6 +122,38 @@ def _storage_duplicate_fields(response: httpx.Response) -> dict:
     return {k: body[k] for k in ("reason", "existing_id", "existing_status") if k in body}
 
 
+class StoragePointerRejectedError(permanent_failure.PermanentWriteFailure):
+    """Storage refused a write: a pointer it carried names no row of the tenant.
+
+    ``subject_entity_id`` / ``supersedes_id`` / ``evidence_memory_id`` arrive
+    from public request bodies (create, bulk, PATCH, relation upsert), so this
+    is the caller's mistake and ``app`` answers it 422. Translated here, at the
+    one boundary every write crosses, for the reason ``PermanentStorageWriteError``
+    is: left an ``httpx.HTTPStatusError``, a storage 4xx reaches
+    ``upstream_http_error_handler``, which re-raises it as a 500.
+
+    ``fields["field"]`` names the pointer. Nothing says whether the row is
+    absent or another tenant's — storage gives one answer for both.
+    """
+
+
+def _storage_pointer_rejected(response: httpx.Response) -> StoragePointerRejectedError | None:
+    """The typed error for storage's pointer refusal, or ``None`` for anything else."""
+    if response.status_code != 422:
+        return None
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(detail, dict) or detail.get("error") != permanent_failure.CAUSE_POINTER_NOT_IN_TENANT:
+        return None
+    message = detail.get("message")
+    return StoragePointerRejectedError(
+        message if isinstance(message, str) and message else "a pointer names no row in this tenant",
+        {k: v for k, v in detail.items() if k == "field"},
+    )
+
+
 def _storage_permanent(response: httpx.Response) -> tuple[str, dict] | None:
     """Storage's permanence marker as ``(message, fields)``, or ``None``.
 
@@ -223,6 +255,27 @@ def get_storage_client() -> CoreStorageClient:
     if _client is None:
         _client = CoreStorageClient()
     return _client
+
+
+def _entity_reader_params(reader: dict | None) -> dict[str, Any]:
+    """Query-string form of an agent reader scope (``entity_reader_scope``).
+
+    A query string cannot carry an empty list, so "bound to no fleet" travels
+    as ``caller_fleet_bound=true`` with no ``caller_fleet_ids``.
+    """
+    if not reader:
+        return {}
+    params: dict[str, Any] = {
+        "caller_agent_id": reader["caller_agent_id"],
+    }
+    if reader.get("caller_tenant_id"):
+        params["caller_tenant_id"] = reader["caller_tenant_id"]
+    fleets = reader.get("caller_fleet_ids")
+    if fleets is not None:
+        params["caller_fleet_bound"] = "true"
+        if fleets:
+            params["caller_fleet_ids"] = list(fleets)
+    return params
 
 
 class CoreStorageClient:
@@ -569,6 +622,11 @@ class CoreStorageClient:
             # inside ``with_retry`` before reaching here. Bounded, so not the
             # unbounded-loop defect, but wasted; the bulk insert is
             # ``idempotent=False`` and is unaffected.
+            #
+            # The pointer refusal first: it carries the same ``retryable:
+            # false`` marker, but it is a 422 the caller fixes, not a 500.
+            if (pointer := _storage_pointer_rejected(resp)) is not None:
+                raise pointer from exc
             if (permanent := _storage_permanent(resp)) is None:
                 raise
             raise PermanentStorageWriteError(*permanent) from exc
@@ -584,6 +642,8 @@ class CoreStorageClient:
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=False)
+        if (pointer := _storage_pointer_rejected(resp)) is not None:
+            raise pointer
         resp.raise_for_status()
         return resp.json()
 
@@ -1725,8 +1785,9 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        reader: dict | None = None,
     ) -> dict:
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        params: dict[str, Any] = {"tenant_id": tenant_id, **_entity_reader_params(reader)}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
         return await self._get("/entities/full-graph", **params) or {}
@@ -1739,8 +1800,14 @@ class CoreStorageClient:
         search: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        reader: dict | None = None,
     ) -> list[dict]:
-        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
+        params: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "offset": offset,
+            **_entity_reader_params(reader),
+        }
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
         if entity_type is not None:
@@ -1753,10 +1820,11 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         entity_ids: list[str],
+        reader: dict | None = None,
     ) -> dict:
         return await self._post(  # type: ignore[return-value]
             "/entities/count-memories",
-            {"tenant_id": tenant_id, "entity_ids": entity_ids},
+            {"tenant_id": tenant_id, "entity_ids": entity_ids, **(reader or {})},
             read=True,
         )
 
@@ -3065,7 +3133,7 @@ class CoreStorageClient:
         *,
         org_id: str,
         action: str,
-        since_hours: int,
+        since_hours: float,
     ) -> bool:
         """CAURA-657 dedup gate. The pipeline-op consumers (crystallize,
         entity-link) check this before invoking the primitive — skip the

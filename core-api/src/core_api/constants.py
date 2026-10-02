@@ -1011,6 +1011,14 @@ INTERVIEW_MAX_EVENTS_PER_SUBMIT = (
     500  # plugin-side submit cap; the cursor-driven catch-up loop drains any backlog
 )
 INTERVIEW_EVENT_MAX_CHARS = 8_000  # per-event content truncation before masking/prompting
+# Furthest one submit may move a node's watermark past its committed cursor.
+# The watermark is max-preserving, so an over-long jump is unrecoverable: the
+# scheduler asks from ``last_seq + 1`` and every real event below it is never
+# interviewed. A legitimate gap comes only from the plugin compacting its
+# buffer (oldest half dropped at 50 MB, ``INTERVIEW_BUFFER_MAX_BYTES`` in
+# plugin/src/env.ts), and even 50 MB of the smallest possible event lines
+# (~80 bytes) is ~625k seqs — so a jump beyond this is never a real backlog.
+INTERVIEW_MAX_CURSOR_ADVANCE = 1_000_000
 INTERVIEW_CHUNK_MAX_CHARS = 96_000  # ~24k tokens per map-phase chunk
 INTERVIEW_MAX_ITEMS_PER_SECTION = 15  # 6 sections x 15 = 90, safely under BULK_MAX_ITEMS
 INTERVIEW_MAX_KEYSTONES_IN_PROMPT = 8

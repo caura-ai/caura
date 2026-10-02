@@ -1,6 +1,9 @@
 import logging
 from uuid import UUID
 
+import httpx
+from fastapi import HTTPException
+
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     ENTITY_RESOLUTION_THRESHOLD,
@@ -176,6 +179,43 @@ async def find_entity_by_exact_name(
         # the caller treats None as "unresolved" and skips the triple.
         logger.warning("find_entity_by_exact_name: unparseable entity id %r", raw)
         return None
+
+
+async def entity_reader_scope(
+    tenant_id: str,
+    caller_agent_id: str | None,
+    caller_tenant_id: str | None,
+) -> dict | None:
+    """The agent reader scope storage applies to ``/entities`` and ``/graph``.
+
+    An entity name is mined from memory text and ``memory_count`` counts the
+    memories behind it, so for an agent credential both follow the memory
+    read contract: storage drops entities whose linked memories are all ones
+    the agent may not read (link-less entities stay), and counts only the
+    readable memories. This resolves that contract's
+    two inputs once — the identity (paired with its home tenant, since agent
+    ids are unique per tenant) and the cross-fleet trust ladder of
+    :func:`~core_api.services.agent_service.memory_access_allowed_for_agent`:
+    ``caller_fleet_ids`` is ``None`` when the agent may cross fleets (trust
+    >= 2, or an unregistered identity, mirroring that helper's allow-on-
+    unknown), otherwise the fleets its ``scope_team`` reads are confined to.
+
+    ``None`` for tenant / user / admin credentials: those keep the
+    tenant-wide listing, as ``get_entity`` and the relation filter do.
+    """
+    if not caller_agent_id:
+        return None
+    from core_api.services.agent_service import lookup_agent
+
+    agent = await lookup_agent(tenant_id, caller_agent_id)
+    fleets: list[str] | None = None
+    if agent and agent.get("trust_level", 0) < 2:
+        fleets = [agent["fleet_id"]] if agent.get("fleet_id") else []
+    return {
+        "caller_agent_id": caller_agent_id,
+        "caller_tenant_id": caller_tenant_id,
+        "caller_fleet_ids": fleets,
+    }
 
 
 async def filter_relations_by_evidence_visibility(
@@ -431,17 +471,27 @@ async def upsert_relation(data: RelationUpsert) -> RelationUpsertOut:
     # ``uq_relations_natural_key``) — duplicate-relation IntegrityErrors
     # are silently absorbed and the existing row's weight + evidence
     # are refreshed to the new values.
-    relation = await sc.create_relation(
-        {
-            "tenant_id": data.tenant_id,
-            "fleet_id": data.fleet_id,
-            "from_entity_id": str(data.from_entity_id),
-            "relation_type": data.relation_type,
-            "to_entity_id": str(data.to_entity_id),
-            "weight": data.weight,
-            "evidence_memory_id": str(data.evidence_memory_id) if data.evidence_memory_id else None,
-        }
-    )
+    try:
+        relation = await sc.create_relation(
+            {
+                "tenant_id": data.tenant_id,
+                "fleet_id": data.fleet_id,
+                "from_entity_id": str(data.from_entity_id),
+                "relation_type": data.relation_type,
+                "to_entity_id": str(data.to_entity_id),
+                "weight": data.weight,
+                "evidence_memory_id": str(data.evidence_memory_id) if data.evidence_memory_id else None,
+            }
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 409:
+            raise
+        # Storage refuses foreign and missing endpoints identically. Preserve
+        # that boundary without leaking upstream details or returning a 500.
+        raise HTTPException(
+            status_code=422,
+            detail="from_entity_id or to_entity_id does not exist in this tenant",
+        ) from exc
 
     return RelationUpsertOut(
         id=relation.get("id"),

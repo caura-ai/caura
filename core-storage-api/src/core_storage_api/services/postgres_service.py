@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict, defaultdict
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -49,7 +49,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import aliased, load_only
 from sqlalchemy.sql.dml import ReturningInsert
 from sqlalchemy.sql.selectable import Select
 
@@ -70,7 +70,12 @@ from common.constants import (
     TYPE_DECAY_DAYS,
     predicate_cluster,
 )
-from common.entity_naming import canonical_match_key, normalize_entity_name
+from common.entity_naming import (
+    canonical_match_key,
+    has_identifier_or_qualifier,
+    normalize_entity_name,
+    same_identifier_signature,
+)
 from common.events.lifecycle_purge_request import MEMORY_RETENTION_MAX_DAYS
 from common.models import (
     Agent,
@@ -94,10 +99,16 @@ from common.models import (
 )
 from common.models.capability_usage import CapabilityUsage
 from common.models.entity import LINK_SOURCE_CALLER, LINK_SOURCE_EXTRACTION
+from common.models.memory import (
+    PENDING_EMBEDDING_SQL,
+    PENDING_ENRICHMENT_SQL,
+    PENDING_FANOUT_SQL,
+    PENDING_WORK_SQL,
+)
 from common.models.organization_settings import OrganizationSettings, OrganizationSettingsAudit
 from common.models.recall_log import RecallCandidate, RecallEvent
 from common.models.tenant_usage_counter import TenantUsageCounter
-from common.organization_settings_merge import deep_merge, diff_settings
+from common.organization_settings_merge import diff_settings, merge_settings_update
 from core_storage_api.observability import PhaseTimer, db_measure
 from core_storage_api.schemas import MEMORY_LIST_FIELDS, orm_to_dict
 from core_storage_api.services.audit_chain import (
@@ -106,6 +117,7 @@ from core_storage_api.services.audit_chain import (
     canonical_created_at,
     canonical_event,
     compute_event_hash,
+    scrub_pii,
 )
 
 logger = logging.getLogger(__name__)
@@ -261,6 +273,22 @@ def _normalized_object_sql(column):
     return func.lower(func.regexp_replace(column, r"[\s,]", "", "g"))
 
 
+def pending_work_count_stmt(filters: list[ColumnElement[bool]]) -> Select:
+    """``(embedding, enrichment, fanout)`` pending counts over ``filters``.
+
+    lme-0929-m-03. ``PENDING_WORK_SQL`` is ANDed in verbatim so the query
+    implies the predicate of the partial index ``ix_memories_pending_work``
+    (built from the same constant) and the planner can serve it from that
+    index, which holds only pending rows. Module-level so the plan can be
+    checked against the exact statement the service runs.
+    """
+    return select(
+        func.count().filter(text(PENDING_EMBEDDING_SQL)),
+        func.count().filter(text(PENDING_ENRICHMENT_SQL)),
+        func.count().filter(text(PENDING_FANOUT_SQL)),
+    ).where(*filters, text(PENDING_WORK_SQL))
+
+
 def _fleet_scope_clause(
     model,
     fleet_ids: Sequence[str],
@@ -295,7 +323,15 @@ def _fleet_scope_clause(
     return or_(*disjuncts)
 
 
-def _visibility_scope_clause(caller_agent_id: str | None) -> ColumnElement[bool]:
+# Every visibility a reader with no agent identity may see. ``scope_agent`` is
+# private to its author; anything outside the three known values is unknown and
+# therefore not shared (see ``_visibility_scope_clause``).
+_SHARED_VISIBILITIES = ("scope_team", "scope_org")
+
+
+def _visibility_scope_clause(
+    caller_agent_id: str | None, caller_tenant_id: str | None = None
+) -> ColumnElement[bool]:
     """The read visibility predicate, in one place — the sibling of
     ``_fleet_scope_clause`` above, and centralised for the reason its docstring
     gives.
@@ -304,26 +340,82 @@ def _visibility_scope_clause(caller_agent_id: str | None) -> ColumnElement[bool]
     ``scope_agent`` rows. Without one, every ``scope_agent`` row is dropped —
     a credential that authenticates no agent is entitled to none of them.
 
+    "Own" means the caller's agent id IN THE CALLER'S HOME TENANT
+    (``caller_tenant_id``). ``agent_id`` is unique only per tenant
+    (``uq_agents_tenant_agent``), so on a read whose tenant predicate is wider
+    than the home tenant — ``readable_tenant_ids`` widening, or a pinned read of
+    a sibling tenant — a bare ``agent_id`` match would hand back a SIBLING
+    tenant's private rows written by a different agent that merely shares the
+    name. ``caller_tenant_id=None`` with an identity means the caller did not
+    say; every reader passes its request ``tenant_id`` then, which is the home
+    tenant for every caller that does not pin a sibling.
+
     Spelled as an allow-list, NOT as ``!= "scope_agent" OR agent_id ==
     caller``. ``Memory.visibility`` is plain Text with no CHECK constraint, so
     the two forms differ on any value outside the three: the allow-list omits
     it, the negation admits it. Every reader here has to make the same choice,
     which is the argument for the predicate living in one place — a count that
     disagrees with the list it summarises is the bug this was extracted for.
+    The no-identity arm is an allow-list for the same reason.
 
     (``Memory.visibility`` is NOT NULL with a server default, so the
     three-valued-logic NULL pitfall does not apply to either form.)
     """
     if not caller_agent_id:
-        return Memory.visibility != "scope_agent"
+        return Memory.visibility.in_(_SHARED_VISIBILITIES)
+    own_rows = [
+        Memory.visibility == "scope_agent",
+        Memory.agent_id == caller_agent_id,
+    ]
+    if caller_tenant_id:
+        own_rows.append(Memory.tenant_id == caller_tenant_id)
     return or_(
         Memory.visibility == "scope_org",
         Memory.visibility == "scope_team",
-        and_(
-            Memory.visibility == "scope_agent",
-            Memory.agent_id == caller_agent_id,
-        ),
+        and_(*own_rows),
     )
+
+
+def _document_fleet_clause(collection: str | None, fleet_id: str) -> ColumnElement[bool]:
+    """Fleet filter for document reads.
+
+    Skills without a fleet are tenant-wide: the nightly Skill Factory mints
+    them with ``fleet_id=NULL``, and a plugin node that filters by its own
+    ``CAURA_FLEET_ID`` must still receive them (the same NULL-is-tenant-wide
+    rule ``_fleet_scope_clause`` applies to memories). Other collections keep
+    exact fleet matching; widening them is a separate decision.
+    """
+    if collection == "skills":
+        return or_(Document.fleet_id == fleet_id, Document.fleet_id.is_(None))
+    return Document.fleet_id == fleet_id
+
+
+def _entity_compatible_groups(cluster_ids: list[UUID], names: dict[UUID, str]) -> list[list[UUID]]:
+    """Partition a duplicate cluster into groups whose names are all mutually
+    mergeable (``same_identifier_signature`` for every pair).
+
+    Greedy and deterministic: members are visited longest name first (then by
+    id), and each joins the first group it is compatible with. An unqualified
+    name such as 'acme' therefore joins one qualified group rather than
+    bridging two that must stay apart.
+    """
+    ordered = sorted(cluster_ids, key=lambda i: (-len(names.get(i, "")), str(i)))
+    groups: list[list[UUID]] = []
+    for uid in ordered:
+        name = names.get(uid, "")
+        for group in groups:
+            if all(same_identifier_signature(name, names.get(other, "")) for other in group):
+                group.append(uid)
+                break
+        else:
+            groups.append([uid])
+    return groups
+
+
+# Visibilities the crystallizer may merge (see
+# ``memory_find_near_duplicate_pairs``). ``scope_agent`` is private to its
+# author and never becomes part of a shared crystal.
+_CRYSTALLIZER_SHARED_VISIBILITIES = ("scope_team", "scope_org")
 
 
 def _scope_sql(
@@ -830,6 +922,72 @@ def _link_within_tenant(tenant_id: str) -> ColumnElement[bool]:
     )
 
 
+def _entity_reader_memory_clause(
+    tenant_id: str,
+    caller_agent_id: str,
+    caller_tenant_id: str | None,
+    caller_fleet_ids: Sequence[str] | None,
+) -> ColumnElement[bool]:
+    """A live memory in ``tenant_id`` that an AGENT reader may read.
+
+    The SQL form of core-api's ``memory_access_allowed_for_agent``, for the
+    entity readers that summarise memories instead of returning them (entity
+    names on ``/entities`` and ``/graph``, and ``memory_count``). An entity is
+    mined from memory text, so its name is memory-derived content: listing it,
+    or counting the memories behind it, for a reader who may not open any of
+    those memories discloses what ``GET /entities/{id}`` hides.
+
+    ``_visibility_scope_clause`` decides ``scope_agent``; ``caller_fleet_ids``
+    is the cross-fleet trust ladder, already resolved by core-api — ``None``
+    when the reader may cross fleets (trust >= 2, or an unregistered
+    identity), otherwise the fleets it may read, in which case ``scope_team``
+    rows must be in one of them or fleet-less, and ``scope_org`` stays readable.
+    """
+    conds = [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        _visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id),
+    ]
+    if caller_fleet_ids is not None:
+        conds.append(_fleet_scope_clause(Memory, caller_fleet_ids, strict=False))
+    return and_(*conds)
+
+
+def _entity_has_readable_memory(memory_clause: ColumnElement[bool]) -> ColumnElement[bool]:
+    """``Entity`` has at least one link to a memory matching ``memory_clause``."""
+    return (
+        select(MemoryEntityLink.memory_id)
+        .join(Memory, Memory.id == MemoryEntityLink.memory_id)
+        .where(MemoryEntityLink.entity_id == Entity.id, memory_clause)
+        .exists()
+    )
+
+
+def _entity_visible_to_agent(
+    tenant_id: str,
+    caller_agent_id: str,
+    caller_tenant_id: str | None,
+    caller_fleet_ids: Sequence[str] | None,
+) -> ColumnElement[bool]:
+    """``Entity`` is listable for an agent reader.
+
+    Visible when it has NO memory links in the tenant at all, or at least one
+    link to a memory the reader may read (``_entity_reader_memory_clause``).
+    Hidden only when it has links and none is readable. A link-less entity —
+    a manual ``/entities/upsert``, say — was mined from no memory, so there is
+    nothing private behind its name, and agents that build graphs by hand
+    depend on seeing it. A link to a soft-deleted memory still counts as a
+    link (and is never readable), so an entity mined only from deleted
+    content stays hidden.
+    """
+    return or_(
+        ~_entity_has_readable_memory(Memory.tenant_id == tenant_id),
+        _entity_has_readable_memory(
+            _entity_reader_memory_clause(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
+        ),
+    )
+
+
 # Columns ``fleet_upsert_node``'s ON CONFLICT DO UPDATE must not rewrite. The
 # insert half of that statement still uses every key the caller sent; this is
 # only the branch that lands on a row that already exists.
@@ -1286,6 +1444,38 @@ class BulkRowShapeError(permanent_failure.PermanentWriteFailure):
     """
 
 
+class PointerNotInTenantError(permanent_failure.PermanentWriteFailure):
+    """A write named a pointer column value that is not a row of its tenant.
+
+    ``subject_entity_id`` / ``supersedes_id`` / ``evidence_memory_id`` are
+    foreign keys with no tenant pairing: the FK only asks that the row exist in
+    SOME tenant. Unchecked, an unknown UUID raised ``ForeignKeyViolationError``
+    (an unhandled 500 that core-api answers "503, retry" — forever, and an
+    existence test for UUIDs), while another tenant's UUID was accepted and
+    persisted a cross-tenant edge. Both now get this one answer, a 422 naming
+    the field and nothing about the row — the same "absent and not yours are
+    indistinguishable" rule ``POST /memories/conflicts`` follows.
+
+    Not a ``ValueError``: several routes map a bare ``ValueError`` to their own
+    status, and this answer has to be the same on every path, so it is handled
+    app-wide instead (``app.py``).
+
+    Built by ``_pointer_rejected`` rather than a constructor of its own: a
+    second ``__init__`` in this module takes ``scripts/tenant_scope_gate.py``
+    offline (see ``BulkRowShapeError``).
+    """
+
+
+def _pointer_rejected(field: str) -> PointerNotInTenantError:
+    return PointerNotInTenantError(f"{field} does not name a row in this tenant", {"field": field})
+
+
+# The pointer columns a write may carry, and the table each one names. Checked
+# by ``_assert_pointers_in_tenant`` before every write that can set them.
+_ENTITY_POINTER_FIELDS = ("subject_entity_id",)
+_MEMORY_POINTER_FIELDS = ("supersedes_id", "evidence_memory_id")
+
+
 # How long a consumer's claim on an ``in_progress`` lifecycle audit row is
 # honoured before another delivery may take it. Sized well past any single-org
 # lifecycle op -- the Pub/Sub client extends the 60s ack deadline while a
@@ -1363,8 +1553,14 @@ class PostgresService:
         # Wrap the full session block so db_ms includes connection-pool
         # wait time — a saturated pool shows up as slow "DB" here, which
         # is exactly how we want to see it in Cloud Logging.
+        from core_storage_api.config import settings as _role_settings
+
+        # The writer reads the primary: callers come to the writer for this GET
+        # when they need their own fresh write back (``read=False``), and the
+        # read pool lags behind it.
+        session_factory = get_session if _role_settings.core_storage_role == "writer" else get_read_session
         with db_measure():
-            async with get_read_session() as session:
+            async with session_factory() as session:
                 stmt = select(Memory).where(
                     Memory.id == memory_id,
                     Memory.tenant_id == tenant_id,
@@ -1435,9 +1631,59 @@ class PostgresService:
         out.setdefault("embedded_content_hash", None)
         return out
 
+    @staticmethod
+    async def _assert_pointers_in_tenant(
+        session: AsyncSession, tenant_id: str, rows: Iterable[Mapping]
+    ) -> None:
+        """Refuse the write unless every pointer value in ``rows`` is a row of ``tenant_id``.
+
+        One indexed ``id IN (...) AND tenant_id = :t`` lookup per target table,
+        whatever the batch size, and nothing at all when no row sets a pointer
+        — the common case. Soft-deleted targets still count: the FK only ever
+        asked for existence, and a supersession or evidence edge to a row that
+        was later deleted is history, not a fault. ``None`` means "no pointer".
+
+        Raises ``PointerNotInTenantError`` naming the first offending field.
+        """
+        wanted: dict[str, set[UUID]] = {}
+        for row in rows:
+            for field in (*_ENTITY_POINTER_FIELDS, *_MEMORY_POINTER_FIELDS):
+                raw = row.get(field)
+                if raw is None:
+                    continue
+                try:
+                    wanted.setdefault(field, set()).add(raw if isinstance(raw, UUID) else UUID(str(raw)))
+                except (ValueError, TypeError, AttributeError):
+                    raise _pointer_rejected(field) from None
+        if not wanted:
+            return
+        for fields, model in ((_ENTITY_POINTER_FIELDS, Entity), (_MEMORY_POINTER_FIELDS, Memory)):
+            ids = set().union(*(wanted.get(f, set()) for f in fields))
+            if not ids:
+                continue
+            found = set(
+                (
+                    await session.execute(
+                        select(model.id).where(model.id.in_(ids), model.tenant_id == tenant_id)
+                    )
+                ).scalars()
+            )
+            for field in fields:
+                if wanted.get(field, set()) - found:
+                    raise _pointer_rejected(field)
+
+    async def memory_assert_pointers_in_tenant(self, tenant_id: str, rows: Iterable[Mapping]) -> None:
+        """``_assert_pointers_in_tenant`` for a route that must refuse a whole
+        batch before writing any of it (``/batch-update-status``). Writer
+        session: a pointer to a row committed a moment ago must not be refused
+        for replica lag."""
+        async with get_session() as session:
+            await self._assert_pointers_in_tenant(session, tenant_id, rows)
+
     async def memory_add(self, data: dict) -> Memory:
         try:
             async with get_session() as session:
+                await self._assert_pointers_in_tenant(session, data["tenant_id"], [data])
                 memory = Memory(**self._filter_memory_fields(data))
                 session.add(memory)
                 await session.flush()
@@ -1633,8 +1879,22 @@ class PostgresService:
                 "memory_add_all: mapped rows disagree on which columns they set",
                 {"columns": _divergent_keys(row_keys)},
             )
+        # One INSERT gives every row the same ``now()``, so ``created_at`` ties
+        # and anything ordering by it (contradiction direction above all:
+        # ``_pick_older`` then falls back to random UUID order and marks the
+        # NEWER fact stale about half the time) sees no order. Stamp each row
+        # strictly after the previous one, in batch order, when the caller set
+        # no timestamp. Every row gets the column, so the batch's column list
+        # stays uniform; a 1000-row batch spans one millisecond.
+        if "created_at" not in row_keys[0]:
+            for i, mapped in enumerate(rows):
+                mapped["created_at"] = func.now() + timedelta(microseconds=i)
 
         async with get_session() as session:
+            # Before the INSERT: one foreign or unknown pointer would otherwise
+            # abort the whole multi-row statement with an FK violation (a 500),
+            # or — for another tenant's id — land a cross-tenant edge.
+            await self._assert_pointers_in_tenant(session, tenant_id, items)
             # The conflict target must mirror ``ix_memories_attempt_unique``
             # *expression-for-expression* — the planner only treats the
             # ON CONFLICT and the partial-unique index as matched if every
@@ -1875,6 +2135,9 @@ class PostgresService:
                 return False  # row truly absent — caller → 404
             if row.deleted_at is not None:
                 return False  # soft-deleted — caller → 404, no UPDATE runs
+            # After the existence check, so a patch on an absent row stays a 404
+            # rather than being judged on its pointers.
+            await self._assert_pointers_in_tenant(session, tenant_id, [values])
 
             metadata_patch = _withhold_caller_owned_keys(metadata_patch, row.metadata_)
 
@@ -1968,6 +2231,10 @@ class PostgresService:
         carries a subject — callers log the distinction but treat all
         ``False`` cases as a benign skip.
         """
+        # The entity must be one of ``tenant_id``'s — a condition of the UPDATE,
+        # not a refusal: an unknown id used to be an FK violation (500) and
+        # another tenant's id was written, and "not written" is already this
+        # method's answer for everything else that should not happen.
         async with get_session() as session:
             result = await session.execute(
                 sql_update(Memory)
@@ -1976,6 +2243,9 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
                     Memory.subject_entity_id.is_(None),
+                    select(Entity.id)
+                    .where(Entity.id == subject_entity_id, Entity.tenant_id == tenant_id)
+                    .exists(),
                 )
                 .values(subject_entity_id=subject_entity_id)
             )
@@ -2077,6 +2347,9 @@ class PostgresService:
             values["supersedes_id"] = supersedes_id
 
         async with get_session() as session:
+            await self._assert_pointers_in_tenant(
+                session, tenant_id, [{"supersedes_id": values.get("supersedes_id")}]
+            )
             stmt = sql_update(Memory).where(
                 Memory.id == memory_id,
                 Memory.tenant_id == tenant_id,
@@ -2135,6 +2408,11 @@ class PostgresService:
         A False is not an error: it means another writer got there first and
         owns the edge, which is exactly what the CAS is for.
         """
+        # The target must be a memory of ``tenant_id`` — a condition of the
+        # UPDATE, as in ``memory_set_subject_entity_if_null``, so a foreign or
+        # unknown id is one more "not written". (The status routes refuse such
+        # a pointer with a 422 before reaching here.)
+        target = aliased(Memory)
         async with get_session() as session:
             result = await session.execute(
                 sql_update(Memory)
@@ -2143,6 +2421,9 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
                     Memory.supersedes_id.is_(None),
+                    select(target.id)
+                    .where(target.id == supersedes_id, target.tenant_id == tenant_id)
+                    .exists(),
                 )
                 .values(supersedes_id=supersedes_id)
             )
@@ -2793,6 +3074,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
@@ -3014,19 +3296,7 @@ class PostgresService:
         if fleet_ids:
             row_filters.append(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
 
-        if caller_agent_id:
-            row_filters.append(
-                or_(
-                    Memory.visibility == "scope_org",
-                    Memory.visibility == "scope_team",
-                    and_(
-                        Memory.visibility == "scope_agent",
-                        Memory.agent_id == caller_agent_id,
-                    ),
-                )
-            )
-        else:
-            row_filters.append(Memory.visibility != "scope_agent")
+        row_filters.append(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
 
         if filter_agent_id:
             row_filters.append(Memory.agent_id == filter_agent_id)
@@ -3763,6 +4033,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         status_filter: str | None = None,
@@ -3810,19 +4081,7 @@ class PostgresService:
             )
             if fleet_ids:
                 stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
-            if caller_agent_id:
-                stmt = stmt.where(
-                    or_(
-                        Memory.visibility == "scope_org",
-                        Memory.visibility == "scope_team",
-                        and_(
-                            Memory.visibility == "scope_agent",
-                            Memory.agent_id == caller_agent_id,
-                        ),
-                    )
-                )
-            else:
-                stmt = stmt.where(Memory.visibility != "scope_agent")
+            stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
             if filter_agent_id:
                 stmt = stmt.where(Memory.agent_id == filter_agent_id)
             if memory_type_filter:
@@ -3934,6 +4193,7 @@ class PostgresService:
         *,
         fleet_ids: list[str] | None = None,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         filter_agent_id: str | None = None,
         memory_type_filter: str | None = None,
         valid_at: datetime | None = None,
@@ -3953,19 +4213,7 @@ class PostgresService:
             )
             if fleet_ids:
                 stmt = stmt.where(_fleet_scope_clause(Memory, fleet_ids, strict=strict_fleet_scoping))
-            if caller_agent_id:
-                stmt = stmt.where(
-                    or_(
-                        Memory.visibility == "scope_org",
-                        Memory.visibility == "scope_team",
-                        and_(
-                            Memory.visibility == "scope_agent",
-                            Memory.agent_id == caller_agent_id,
-                        ),
-                    )
-                )
-            else:
-                stmt = stmt.where(Memory.visibility != "scope_agent")
+            stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
             if filter_agent_id:
                 stmt = stmt.where(Memory.agent_id == filter_agent_id)
             if memory_type_filter:
@@ -4029,13 +4277,19 @@ class PostgresService:
         existing caller.
         """
         async with get_session() as session:
-            # Subquery: canonical names of entities linked to the target memory
+            # Scope the seed as well as the candidates: a foreign seed must
+            # not reveal entity-name overlap or a supersedes chain.
             new_mel = MemoryEntityLink.__table__.alias("new_mel")
             new_ent = Entity.__table__.alias("new_ent")
+            seed_memory = Memory.__table__.alias("seed_memory")
             new_entity_names = (
                 select(func.lower(new_ent.c.canonical_name))
-                .select_from(new_mel.join(new_ent, new_mel.c.entity_id == new_ent.c.id))
-                .where(new_mel.c.memory_id == memory_id)
+                .select_from(
+                    new_mel.join(new_ent, new_mel.c.entity_id == new_ent.c.id).join(
+                        seed_memory, new_mel.c.memory_id == seed_memory.c.id
+                    )
+                )
+                .where(seed_memory.c.id == memory_id, seed_memory.c.tenant_id == tenant_id)
                 .subquery()
             )
 
@@ -4048,7 +4302,9 @@ class PostgresService:
                 # memory itself. If non-NULL, it points at the row Path A
                 # marked conflicted on this memory's behalf.
                 target_supersedes = (
-                    select(Memory.supersedes_id).where(Memory.id == memory_id).scalar_subquery()
+                    select(seed_memory.c.supersedes_id)
+                    .where(seed_memory.c.id == memory_id, seed_memory.c.tenant_id == tenant_id)
+                    .scalar_subquery()
                 )
                 status_filter = or_(
                     Memory.status.in_(("active", "confirmed", "pending")),
@@ -4304,32 +4560,44 @@ class PostgresService:
         days. After that window the row is gone for good — including its
         embedding, entity links, and idempotency response cache lines
         (cascaded by their FKs to ``memories.id``).
+
+        The graph mined from the batch goes with it, in the same transaction
+        and BEFORE the rows: relations whose evidence is a purged memory, and
+        the entities those memories alone kept alive — the
+        ``memory_purge_entity_artifacts`` sequence over the whole batch. The
+        FKs alone would not do it. ``relations.evidence_memory_id`` is ``ON
+        DELETE SET NULL``, which leaves the triple in place with no evidence,
+        and a relation with no evidence reads as "nothing memory-derived here"
+        to every agent (``filter_relations_by_evidence_visibility``) — so a
+        triple mined from a deleted private memory would surface to its
+        author's peers exactly because the memory was deleted. Entities have no
+        FK to memories at all and would simply stay listed. Done at hard-delete
+        time, not at soft delete, so the undo window keeps the graph intact.
         """
         async with get_session() as session:
-            params: dict = {
-                "tenant_id": tenant_id,
-                "retention_days": retention_days,
-                "batch_size": batch_size,
-            }
-            fleet_clause = ""
-            if fleet_id:
-                fleet_clause = "AND fleet_id = :fleet_id"
-                params["fleet_id"] = fleet_id
-
-            result = await session.execute(
-                text(f"""
-                DELETE FROM memories
-                WHERE id IN (
-                    SELECT id FROM memories
-                    WHERE tenant_id = :tenant_id
-                      {fleet_clause}
-                      AND deleted_at IS NOT NULL
-                      AND deleted_at < NOW() - INTERVAL '1 day' * :retention_days
-                    LIMIT :batch_size
+            stmt = (
+                select(Memory.id)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.deleted_at.is_not(None),
+                    Memory.deleted_at < func.now() - timedelta(days=retention_days),
                 )
-                RETURNING id
-            """),
-                params,
+                .limit(batch_size)
+            )
+            if fleet_id:
+                stmt = stmt.where(Memory.fleet_id == fleet_id)
+            ids = list((await session.execute(stmt)).scalars().all())
+            if not ids:
+                return 0
+            await self._delete_entity_artifacts(
+                tenant_id,
+                ids,
+                eligibility=Memory.deleted_at.is_not(None),
+                session=session,
+                memories_going=True,
+            )
+            result = await session.execute(
+                delete(Memory).where(Memory.tenant_id == tenant_id, Memory.id.in_(ids)).returning(Memory.id)
             )
             return len(result.all())
 
@@ -4466,6 +4734,7 @@ class PostgresService:
         *,
         action: str,
         updated_by: str | None = None,
+        occurred_at: datetime | None = None,
     ) -> dict:
         """Upsert one row in ``public.tenant_suppression`` (CAURA-694).
 
@@ -4478,9 +4747,20 @@ class PostgresService:
         time is the meaningful one) but still bumps ``updated_at`` /
         ``updated_by``. A duplicate ``restore`` is a no-op-shaped
         update that still leaves the row in the ``live`` state.
+
+        Last writer wins BY EVENT TIME, not by arrival. ``occurred_at`` is
+        when the publisher made the decision; it is stored in
+        ``updated_at`` (``now()`` when the caller has none), and an upsert
+        whose time is OLDER than the stored one changes nothing. Pub/Sub
+        delivers at least once and in no particular order, so without this
+        a redelivered or dead-letter-replayed ``restore`` landing after a
+        newer ``suppress`` un-suppressed the org. An equal time applies, so
+        a plain redelivery of the latest event stays idempotent. A skipped
+        upsert returns the stored row with ``applied=False``.
         """
         if action not in {"suppress", "restore"}:
             raise ValueError(f"unknown suppression action: {action!r}")
+        params = {"tid": tenant_id, "who": updated_by, "at": occurred_at}
         async with get_session() as session:
             if action == "suppress":
                 # ON CONFLICT: keep the original suppressed_at (first one
@@ -4490,34 +4770,46 @@ class PostgresService:
                     text("""
                         INSERT INTO public.tenant_suppression
                             (tenant_id, suppressed_at, updated_at, updated_by)
-                        VALUES (:tid, now(), now(), :who)
+                        VALUES (:tid, now(), COALESCE(CAST(:at AS timestamptz), now()), :who)
                         ON CONFLICT (tenant_id) DO UPDATE
                           SET suppressed_at = COALESCE(
                                 public.tenant_suppression.suppressed_at,
                                 EXCLUDED.suppressed_at
                               ),
-                              updated_at = now(),
+                              updated_at = EXCLUDED.updated_at,
                               updated_by = EXCLUDED.updated_by
+                          WHERE public.tenant_suppression.updated_at <= EXCLUDED.updated_at
                         RETURNING tenant_id, suppressed_at, updated_at, updated_by
                     """),
-                    {"tid": tenant_id, "who": updated_by},
+                    params,
                 )
             else:  # restore
                 result = await session.execute(
                     text("""
                         INSERT INTO public.tenant_suppression
                             (tenant_id, suppressed_at, updated_at, updated_by)
-                        VALUES (:tid, NULL, now(), :who)
+                        VALUES (:tid, NULL, COALESCE(CAST(:at AS timestamptz), now()), :who)
                         ON CONFLICT (tenant_id) DO UPDATE
                           SET suppressed_at = NULL,
-                              updated_at = now(),
+                              updated_at = EXCLUDED.updated_at,
                               updated_by = EXCLUDED.updated_by
+                          WHERE public.tenant_suppression.updated_at <= EXCLUDED.updated_at
                         RETURNING tenant_id, suppressed_at, updated_at, updated_by
                     """),
-                    {"tid": tenant_id, "who": updated_by},
+                    params,
                 )
-            row = result.mappings().one()
-            return dict(row)
+            row = result.mappings().one_or_none()
+            if row is not None:
+                return {**dict(row), "applied": True}
+            # The WHERE refused a stale event: report what is stored.
+            current = await session.execute(
+                text(
+                    "SELECT tenant_id, suppressed_at, updated_at, updated_by "
+                    "FROM public.tenant_suppression WHERE tenant_id = :tid"
+                ),
+                {"tid": tenant_id},
+            )
+            return {**dict(current.mappings().one()), "applied": False}
 
     async def is_tenant_suppressed(self, tenant_id: str) -> bool:
         """Boundary-guard primitive used by core-api auth (CAURA-694).
@@ -4583,7 +4875,7 @@ class PostgresService:
             if fleet_id:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             if exclude_scope_agent:
-                stmt = stmt.where(_visibility_scope_clause(caller_agent_id))
+                stmt = stmt.where(_visibility_scope_clause(caller_agent_id, tenant_id))
             result = await session.execute(stmt)
             return result.scalar() or 0
 
@@ -5023,6 +5315,15 @@ class PostgresService:
         ``CRYSTALLIZER_MAX_DEDUP_PAIRS`` — was whatever the executor happened to
         emit. Similarity is symmetric, so a tie never changed a pair's recorded
         score, only which pairs made the cap.
+
+        Only team- and org-visible rows take part, and a pair never spans
+        fleets. The crystal that a cluster becomes is written as a team-visible
+        memory, so a private (``scope_agent``) source would have been
+        republished to every reader of that fleet, and the source archived. An
+        allow-list rather than ``!= 'scope_agent'``, so a visibility added later
+        is excluded until someone decides otherwise. Pairs are kept inside one
+        fleet (``NULL`` pairs only with ``NULL``) because the nightly run passes
+        no fleet and the crystal would otherwise be readable across fleets.
         """
         async with get_session() as session:
             cand_scope, params = _scope_sql(tenant_id, fleet_id)
@@ -5030,12 +5331,13 @@ class PostgresService:
             result = await session.execute(
                 text(f"""
                 WITH candidates AS (
-                    SELECT m.id, m.embedding, m.created_at
+                    SELECT m.id, m.embedding, m.created_at, m.fleet_id
                     FROM memories m
                     WHERE {cand_scope}
                       AND m.embedding IS NOT NULL
                       AND m.deleted_at IS NULL
                       AND m.status = ANY(:live_statuses)
+                      AND m.visibility = ANY(:shared_visibilities)
                       AND m.last_dedup_checked_at IS NULL
                     ORDER BY m.created_at DESC
                     LIMIT :batch_size OFFSET :batch_offset
@@ -5052,6 +5354,8 @@ class PostgresService:
                       AND n.embedding IS NOT NULL
                       AND n.deleted_at IS NULL
                       AND n.status = ANY(:live_statuses)
+                      AND n.visibility = ANY(:shared_visibilities)
+                      AND n.fleet_id IS NOT DISTINCT FROM c.fleet_id
                       AND n.id != c.id
                       AND 1 - (n.embedding <=> c.embedding) >= :threshold
                     ORDER BY n.embedding <=> c.embedding
@@ -5066,6 +5370,7 @@ class PostgresService:
                     "threshold": threshold,
                     "k": neighbor_limit,
                     "live_statuses": list(LIVE_MEMORY_STATUSES),
+                    "shared_visibilities": list(_CRYSTALLIZER_SHARED_VISIBILITIES),
                 },
             )
             return result.all()  # type: ignore[return-value]
@@ -6144,6 +6449,7 @@ class PostgresService:
         *,
         tenant_id: str,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
         fleet_id: str | None = None,
         written_by: str | None = None,
         memory_type: str | None = None,
@@ -6173,8 +6479,10 @@ class PostgresService:
         visibility scoping. Read-only (reader replica).
 
         **Visibility:** when ``caller_agent_id`` is set, ``scope_agent`` rows
-        are visible only to the authoring agent; team/org always visible. When
-        unset, all ``scope_agent`` rows are excluded. **Cross-tenant widening:**
+        are visible only to the authoring agent in its home tenant
+        (``caller_tenant_id``, defaulting to ``tenant_id``); team/org always
+        visible. When unset, all ``scope_agent`` rows are excluded.
+        **Cross-tenant widening:**
         a non-empty ``readable_tenant_ids`` expands ``tenant_id = $1`` to
         ``tenant_id = ANY($1)``; ``tenant_id`` stays the binding/home tenant.
         """
@@ -6187,19 +6495,7 @@ class PostgresService:
             stmt = base.where(Memory.tenant_id == tenant_id)
 
         # Visibility predicate (critical: prevents scope_agent leaks).
-        if caller_agent_id:
-            stmt = stmt.where(
-                or_(
-                    Memory.visibility == "scope_org",
-                    Memory.visibility == "scope_team",
-                    and_(
-                        Memory.visibility == "scope_agent",
-                        Memory.agent_id == caller_agent_id,
-                    ),
-                )
-            )
-        else:
-            stmt = stmt.where(Memory.visibility != "scope_agent")
+        stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
 
         if fleet_id:
             # Same predicate as the bare ``Memory.fleet_id == fleet_id`` this
@@ -6304,9 +6600,20 @@ class PostgresService:
         include_deleted: bool = False,
         include_scope_agent: bool = False,
         readable_tenant_ids: list[str] | None = None,
+        include_pending: bool = False,
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
-        ``by_tenant`` / ``deleted`` / ``total_including_deleted``).
+        ``by_tenant`` / ``deleted`` / ``total_including_deleted`` /
+        ``pending`` + ``settled``).
+
+        ``include_pending`` (lme-0929-m-03) adds ``pending: {embedding,
+        enrichment, fanout}`` — live rows in the same scope that still have
+        background work outstanding, read from durable row markers (see
+        ``common.models.memory.PENDING_WORK_SQL``) — and ``settled`` (all
+        three zero). One extra query served by the partial index
+        ``ix_memories_pending_work``, which holds only pending rows, so its
+        cost is O(pending) rather than O(tenant). Off by default so the MCP
+        ``caura_stats`` and report callers keep their exact shape and cost.
 
         ``created_after`` / ``created_before`` bound the aggregation to a
         half-open ``[after, before)`` window — used by the daily/weekly report
@@ -6348,18 +6655,12 @@ class PostgresService:
             )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
-            scope_filters.append(
-                or_(
-                    Memory.visibility == "scope_org",
-                    Memory.visibility == "scope_team",
-                    and_(
-                        Memory.visibility == "scope_agent",
-                        Memory.agent_id == agent_id,
-                    ),
-                )
-            )
+            # Private rows count for the named agent in ``tenant_id`` (the
+            # binding/home tenant) only — under ``readable_tenant_ids`` a
+            # sibling tenant's same-named agent is a different agent.
+            scope_filters.append(_visibility_scope_clause(agent_id, tenant_id))
         elif not include_scope_agent:
-            scope_filters.append(Memory.visibility != "scope_agent")
+            scope_filters.append(_visibility_scope_clause(None))
         if memory_type:
             scope_filters.append(Memory.memory_type == memory_type)
         if status:
@@ -6520,7 +6821,28 @@ class PostgresService:
         if include_deleted:
             result["deleted"] = deleted
             result["total_including_deleted"] = total + deleted
+        if include_pending:
+            pending = await self._memory_pending_work_counts(filters)
+            result["pending"] = pending
+            result["settled"] = not any(pending.values())
         return result
+
+    async def _memory_pending_work_counts(self, filters: list[ColumnElement[bool]]) -> dict[str, int]:
+        """Count live rows under ``filters`` that still owe background work.
+
+        ``filters`` must already carry ``deleted_at IS NULL`` plus the caller's
+        scope. ``PENDING_WORK_SQL`` is added verbatim — the partial index
+        ``ix_memories_pending_work`` is keyed on exactly that text, and the
+        planner only uses a partial index whose predicate the query implies.
+        A row can be pending on several axes at once and is counted in each.
+        """
+        async with get_read_session() as session:
+            row = (await session.execute(pending_work_count_stmt(filters))).one()
+        return {
+            "embedding": int(row[0] or 0),
+            "enrichment": int(row[1] or 0),
+            "fanout": int(row[2] or 0),
+        }
 
     async def memory_daily_durable_counts(
         self,
@@ -6615,15 +6937,12 @@ class PostgresService:
             )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
-            scope_filters.append(
-                or_(
-                    Memory.visibility == "scope_org",
-                    Memory.visibility == "scope_team",
-                    and_(Memory.visibility == "scope_agent", Memory.agent_id == agent_id),
-                )
-            )
+            # Private rows count for the named agent in ``tenant_id`` (the
+            # binding/home tenant) only — under ``readable_tenant_ids`` a
+            # sibling tenant's same-named agent is a different agent.
+            scope_filters.append(_visibility_scope_clause(agent_id, tenant_id))
         elif not include_scope_agent:
-            scope_filters.append(Memory.visibility != "scope_agent")
+            scope_filters.append(_visibility_scope_clause(None))
         if created_after:
             scope_filters.append(Memory.created_at >= created_after)
         if exclude_memory_types:
@@ -7188,7 +7507,19 @@ class PostgresService:
         search: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        caller_fleet_ids: Sequence[str] | None = None,
     ) -> list[Entity]:
+        """List a tenant's entities.
+
+        With ``caller_agent_id`` (an agent reader) an entity whose memory links
+        all point at memories that reader may not read is left out — see
+        ``_entity_visible_to_agent``; link-less entities stay listed. In SQL,
+        before ``LIMIT``, so a page is never short because hidden rows took
+        its slots. Without one
+        (tenant / user / admin credentials) the list is tenant-wide.
+        """
         async with get_session() as session:
             # ORDER BY is what makes OFFSET/LIMIT mean anything. Postgres
             # guarantees no row order without it, so it is free to return the
@@ -7216,6 +7547,10 @@ class PostgresService:
                 stmt = stmt.where(Entity.entity_type == entity_type)
             if search:
                 stmt = stmt.where(Entity.canonical_name.ilike(f"%{search}%"))
+            if caller_agent_id:
+                stmt = stmt.where(
+                    _entity_visible_to_agent(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
+                )
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
@@ -7432,6 +7767,11 @@ class PostgresService:
                     data["tenant_id"],
                 )
                 raise ValueError(_RELATION_REJECTED)
+            # The evidence memory too: an unknown id is an FK violation (500)
+            # and another tenant's id an edge whose evidence lives across the
+            # boundary. Checked after the endpoints so a bad endpoint keeps its
+            # established 409 answer.
+            await self._assert_pointers_in_tenant(session, data["tenant_id"], [data])
             insert_stmt = pg_insert(Relation).values(**data)
             upsert_stmt = insert_stmt.on_conflict_do_update(
                 constraint="uq_relations_natural_key",
@@ -7621,8 +7961,17 @@ class PostgresService:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        *,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        caller_fleet_ids: Sequence[str] | None = None,
     ) -> tuple[list[Entity], list[Relation]]:
         """Return all entities and relations for a tenant (optionally filtered by fleet).
+
+        With ``caller_agent_id`` the nodes are narrowed exactly as
+        ``entity_list`` narrows them, and an edge is kept only when both of its
+        endpoints survived — an edge to a hidden node would name it by id.
+        (core-api separately drops edges whose evidence the reader cannot read.)
 
         Skips the heavy ``name_embedding`` (pgvector) and ``search_vector`` (TSVECTOR)
         columns — the graph view doesn't need them, and loading + serialising them
@@ -7645,6 +7994,10 @@ class PostgresService:
             )
             if fleet_id:
                 entity_stmt = entity_stmt.where(or_(Entity.fleet_id == fleet_id, Entity.fleet_id.is_(None)))
+            if caller_agent_id:
+                entity_stmt = entity_stmt.where(
+                    _entity_visible_to_agent(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
+                )
             entities_result = await session.execute(entity_stmt)
             entities = list(entities_result.scalars().all())
 
@@ -7655,6 +8008,11 @@ class PostgresService:
                 )
             relations_result = await session.execute(relation_stmt)
             relations = list(relations_result.scalars().all())
+            if caller_agent_id:
+                node_ids = {e.id for e in entities}
+                relations = [
+                    r for r in relations if r.from_entity_id in node_ids and r.to_entity_id in node_ids
+                ]
 
             return entities, relations
 
@@ -7666,6 +8024,10 @@ class PostgresService:
         self,
         entity_ids: list[UUID],
         tenant_id: str,
+        *,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        caller_fleet_ids: Sequence[str] | None = None,
     ) -> dict[UUID, int]:
         """Return {entity_id: count} for the given entity IDs, within ``tenant_id``.
 
@@ -7678,9 +8040,21 @@ class PostgresService:
         ``core-api``'s client has always sent ``tenant_id`` in the body for this
         endpoint; the route read only ``entity_ids`` and dropped it. This is the
         parameter it was already being handed.
+
+        With ``caller_agent_id`` only memories that agent may read are counted
+        (``_entity_reader_memory_clause``), so the figure matches what
+        ``GET /entities/{id}`` would show it.
         """
         if not entity_ids:
             return {}
+        memory_conds: list[ColumnElement[bool]] = [
+            Memory.id == MemoryEntityLink.memory_id,
+            Memory.deleted_at.is_(None),
+        ]
+        if caller_agent_id:
+            memory_conds.append(
+                _entity_reader_memory_clause(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
+            )
         async with get_session() as session:
             result = await session.execute(
                 select(MemoryEntityLink.entity_id, func.count())
@@ -7700,12 +8074,7 @@ class PostgresService:
                     # about the same entity: the list reports a memory_count of
                     # 5 while /with-memories returns 3, and the gap is exactly
                     # the memories the caller deleted.
-                    select(Memory.id)
-                    .where(
-                        Memory.id == MemoryEntityLink.memory_id,
-                        Memory.deleted_at.is_(None),
-                    )
-                    .exists(),
+                    select(Memory.id).where(*memory_conds).exists(),
                 )
                 .group_by(MemoryEntityLink.entity_id)
             )
@@ -7714,10 +8083,12 @@ class PostgresService:
     async def _delete_entity_artifacts(
         self,
         tenant_id: str,
-        memory_id: UUID,
+        memory_ids: Sequence[UUID],
         *,
         eligibility: ColumnElement[bool],
         link_scope: ColumnElement[bool] | None = None,
+        session: AsyncSession | None = None,
+        memories_going: bool = False,
     ) -> dict:
         """The delete sequence itself. Two predicates decide what it reaches.
 
@@ -7743,144 +8114,182 @@ class PostgresService:
         deleted rather than from the memory's links as a whole.
 
         Ordering and scoping are documented on ``memory_purge_entity_artifacts``.
+
+        ``session``: run inside the caller's transaction instead of opening one
+        (``memory_purge_soft_deleted``, which deletes the memories themselves in
+        the same transaction). ``memories_going``: those memories are about to
+        be hard-deleted, so their own ``subject_entity_id`` is not a reason to
+        keep an entity — the FK would only SET NULL it a moment later and leave
+        the entity orphaned — and their subjects join the orphan candidates, a
+        subject pointer being a reference to the entity just as a link is.
         """
-        async with get_session() as session:
-            # One guard, checked before anything is deleted, rather than a
-            # predicate threaded through each statement. It answers the only
-            # question that authorises this call at all: is there a row with
-            # this id, in this tenant, in the state the caller's name promises?
-            #
-            # An early return rather than narrowing each delete, because the
-            # relation delete never took the ownership subquery: it keys on
-            # ``evidence_memory_id`` and the tenant alone, so guarding only the
-            # link path would leave a memory losing its RELATIONS while its
-            # links and entities survived — partial destruction, which is worse
-            # to diagnose than either outcome.
-            eligible = (
+        if session is None:
+            async with get_session() as own:
+                return await self._delete_entity_artifacts(
+                    tenant_id,
+                    memory_ids,
+                    eligibility=eligibility,
+                    link_scope=link_scope,
+                    session=own,
+                    memories_going=memories_going,
+                )
+        # One guard, checked before anything is deleted, rather than a
+        # predicate threaded through each statement. It answers the only
+        # question that authorises this call at all: is there a row with
+        # this id, in this tenant, in the state the caller's name promises?
+        #
+        # An early return rather than narrowing each delete, because the
+        # relation delete never took the ownership subquery: it keys on
+        # ``evidence_memory_id`` and the tenant alone, so guarding only the
+        # link path would leave a memory losing its RELATIONS while its
+        # links and entities survived — partial destruction, which is worse
+        # to diagnose than either outcome.
+        eligible = set(
+            (
                 await session.execute(
                     select(Memory.id).where(
-                        Memory.id == memory_id,
+                        Memory.id.in_(memory_ids),
                         Memory.tenant_id == tenant_id,
                         eligibility,
                     )
                 )
-            ).scalar_one_or_none()
-            if eligible is None:
-                return {"links": 0, "relations": 0, "entities": 0}
+            ).scalars()
+        )
+        memory_ids = [mid for mid in memory_ids if mid in eligible]
+        if not memory_ids:
+            return {"links": 0, "relations": 0, "entities": 0}
 
-            # ``RETURNING`` rather than a SELECT before the DELETE: the rows
-            # this removes ARE the candidate set, so asking for them twice was
-            # a round trip that could only ever agree with itself.
-            link_where = [MemoryEntityLink.memory_id == memory_id]
-            if link_scope is not None:
-                link_where.append(link_scope)
-            candidates = list(
-                (
+        subject_candidates: list[UUID] = []
+        if memories_going:
+            subject_candidates = [
+                sid
+                for sid in (
                     await session.execute(
-                        delete(MemoryEntityLink).where(*link_where).returning(MemoryEntityLink.entity_id)
+                        select(Memory.subject_entity_id).where(
+                            Memory.tenant_id == tenant_id,
+                            Memory.id.in_(memory_ids),
+                            Memory.subject_entity_id.is_not(None),
+                        )
                     )
+                ).scalars()
+                if sid is not None
+            ]
+        # ``RETURNING`` rather than a SELECT before the DELETE: the rows
+        # this removes ARE the candidate set, so asking for them twice was
+        # a round trip that could only ever agree with itself.
+        link_where: list[ColumnElement[bool]] = [MemoryEntityLink.memory_id.in_(memory_ids)]
+        if link_scope is not None:
+            link_where.append(link_scope)
+        candidates = list(
+            (
+                await session.execute(
+                    delete(MemoryEntityLink).where(*link_where).returning(MemoryEntityLink.entity_id)
                 )
-                .scalars()
-                .all()
             )
-            relation_rows = await session.execute(
-                delete(Relation).where(
-                    Relation.tenant_id == tenant_id,
-                    Relation.evidence_memory_id == memory_id,
+            .scalars()
+            .all()
+        )
+        relation_rows = await session.execute(
+            delete(Relation).where(
+                Relation.tenant_id == tenant_id,
+                Relation.evidence_memory_id.in_(memory_ids),
+            )
+        )
+
+        entity_count = 0
+        orphan_candidates = [*candidates, *subject_candidates]
+        if orphan_candidates:
+            # "Is this entity still referenced by anything?" — asked only
+            # about the candidates, which is what keeps these cheap. Left
+            # unbounded, each anti-join selects every referencing id in the
+            # tenant and PostgreSQL materialises it as a hashed SubPlan, so
+            # a four-link memory scanned the tenant's whole link and
+            # relation tables three times. Bounding them changes no row —
+            # the outer DELETE is already restricted to ``candidates`` — and
+            # turns each into an index lookup on a handful of ids. That
+            # matters more since the reset path put this on every
+            # content-changing PATCH rather than only on governance drops.
+            #
+            # Narrowed by the ENTITY's tenant, never by the referencing
+            # row's own tenant_id — and the difference is not stylistic.
+            # Scoping relations on ``Relation.tenant_id`` would drop a
+            # historical straddling row (a relation in another tenant
+            # pointing at an entity here) out of the anti-join, and this
+            # entity would then be deleted while something still referenced
+            # it. Keying on the entity's tenant narrows the scan just as
+            # much and cannot lose a reference: every row that could name a
+            # candidate names an entity in THIS tenant, because that is
+            # what a candidate is.
+            #
+            # Erring wide here is free — an extra reference only keeps an
+            # entity alive, and under-deleting is recoverable where
+            # over-deleting is not.
+            still_linked = (
+                select(MemoryEntityLink.entity_id)
+                .join(Entity, Entity.id == MemoryEntityLink.entity_id)
+                .where(
+                    Entity.tenant_id == tenant_id,
+                    MemoryEntityLink.entity_id.in_(orphan_candidates),
                 )
             )
+            rel_from = (
+                select(Relation.from_entity_id)
+                .join(Entity, Entity.id == Relation.from_entity_id)
+                .where(
+                    Entity.tenant_id == tenant_id,
+                    Relation.from_entity_id.in_(orphan_candidates),
+                )
+            )
+            rel_to = (
+                select(Relation.to_entity_id)
+                .join(Entity, Entity.id == Relation.to_entity_id)
+                .where(
+                    Entity.tenant_id == tenant_id,
+                    Relation.to_entity_id.in_(orphan_candidates),
+                )
+            )
+            # The fourth reference, and the one a link-and-relation-only
+            # sweep misses: ``memories.subject_entity_id`` is the RDF
+            # subject pointer, and it is a FK with ``ON DELETE SET NULL``.
+            # An entity that is some other live memory's subject but holds
+            # no links and no relations satisfied the three anti-joins
+            # above, so it was deleted and that memory's subject silently
+            # became NULL — a row losing a field nobody asked to change,
+            # recorded nowhere. Rare while this only ran on governance
+            # drops; routine once the reset path runs it on ordinary edits.
+            #
+            # Bounding this one is load-bearing rather than merely cheap:
+            # ``subject_entity_id`` is nullable and almost always NULL, and
+            # a bare ``NOT IN`` over a set containing NULL matches nothing
+            # at all — which would have turned entity deletion off entirely.
+            subject_of = select(Memory.subject_entity_id).where(
+                Memory.tenant_id == tenant_id,
+                Memory.subject_entity_id.in_(orphan_candidates),
+            )
+            if memories_going:
+                subject_of = subject_of.where(Memory.id.not_in(memory_ids))
+            entity_rows = await session.execute(
+                delete(Entity).where(
+                    # Tenant-scoped like everything else here. Not about id
+                    # collisions — about never letting one tenant's
+                    # remediation reach another tenant's rows.
+                    Entity.tenant_id == tenant_id,
+                    Entity.id.in_(orphan_candidates),
+                    Entity.id.not_in(still_linked),
+                    Entity.id.not_in(rel_from),
+                    Entity.id.not_in(rel_to),
+                    Entity.id.not_in(subject_of),
+                )
+            )
+            entity_count = entity_rows.rowcount or 0  # type: ignore[attr-defined]
 
-            entity_count = 0
-            if candidates:
-                # "Is this entity still referenced by anything?" — asked only
-                # about the candidates, which is what keeps these cheap. Left
-                # unbounded, each anti-join selects every referencing id in the
-                # tenant and PostgreSQL materialises it as a hashed SubPlan, so
-                # a four-link memory scanned the tenant's whole link and
-                # relation tables three times. Bounding them changes no row —
-                # the outer DELETE is already restricted to ``candidates`` — and
-                # turns each into an index lookup on a handful of ids. That
-                # matters more since the reset path put this on every
-                # content-changing PATCH rather than only on governance drops.
-                #
-                # Narrowed by the ENTITY's tenant, never by the referencing
-                # row's own tenant_id — and the difference is not stylistic.
-                # Scoping relations on ``Relation.tenant_id`` would drop a
-                # historical straddling row (a relation in another tenant
-                # pointing at an entity here) out of the anti-join, and this
-                # entity would then be deleted while something still referenced
-                # it. Keying on the entity's tenant narrows the scan just as
-                # much and cannot lose a reference: every row that could name a
-                # candidate names an entity in THIS tenant, because that is
-                # what a candidate is.
-                #
-                # Erring wide here is free — an extra reference only keeps an
-                # entity alive, and under-deleting is recoverable where
-                # over-deleting is not.
-                still_linked = (
-                    select(MemoryEntityLink.entity_id)
-                    .join(Entity, Entity.id == MemoryEntityLink.entity_id)
-                    .where(
-                        Entity.tenant_id == tenant_id,
-                        MemoryEntityLink.entity_id.in_(candidates),
-                    )
-                )
-                rel_from = (
-                    select(Relation.from_entity_id)
-                    .join(Entity, Entity.id == Relation.from_entity_id)
-                    .where(
-                        Entity.tenant_id == tenant_id,
-                        Relation.from_entity_id.in_(candidates),
-                    )
-                )
-                rel_to = (
-                    select(Relation.to_entity_id)
-                    .join(Entity, Entity.id == Relation.to_entity_id)
-                    .where(
-                        Entity.tenant_id == tenant_id,
-                        Relation.to_entity_id.in_(candidates),
-                    )
-                )
-                # The fourth reference, and the one a link-and-relation-only
-                # sweep misses: ``memories.subject_entity_id`` is the RDF
-                # subject pointer, and it is a FK with ``ON DELETE SET NULL``.
-                # An entity that is some other live memory's subject but holds
-                # no links and no relations satisfied the three anti-joins
-                # above, so it was deleted and that memory's subject silently
-                # became NULL — a row losing a field nobody asked to change,
-                # recorded nowhere. Rare while this only ran on governance
-                # drops; routine once the reset path runs it on ordinary edits.
-                #
-                # Bounding this one is load-bearing rather than merely cheap:
-                # ``subject_entity_id`` is nullable and almost always NULL, and
-                # a bare ``NOT IN`` over a set containing NULL matches nothing
-                # at all — which would have turned entity deletion off entirely.
-                subject_of = select(Memory.subject_entity_id).where(
-                    Memory.tenant_id == tenant_id,
-                    Memory.subject_entity_id.in_(candidates),
-                )
-                entity_rows = await session.execute(
-                    delete(Entity).where(
-                        # Tenant-scoped like everything else here. Not about id
-                        # collisions — about never letting one tenant's
-                        # remediation reach another tenant's rows.
-                        Entity.tenant_id == tenant_id,
-                        Entity.id.in_(candidates),
-                        Entity.id.not_in(still_linked),
-                        Entity.id.not_in(rel_from),
-                        Entity.id.not_in(rel_to),
-                        Entity.id.not_in(subject_of),
-                    )
-                )
-                entity_count = entity_rows.rowcount or 0  # type: ignore[attr-defined]
-
-            # ``rowcount`` is untyped on ``Result`` — same ignore as
-            # ``memory_soft_delete_by_ids`` above, for the same reason.
-            return {
-                "links": len(candidates),
-                "relations": relation_rows.rowcount or 0,  # type: ignore[attr-defined]
-                "entities": entity_count,
-            }
+        # ``rowcount`` is untyped on ``Result`` — same ignore as
+        # ``memory_soft_delete_by_ids`` above, for the same reason.
+        return {
+            "links": len(candidates),
+            "relations": relation_rows.rowcount or 0,  # type: ignore[attr-defined]
+            "entities": entity_count,
+        }
 
     async def memory_reset_entity_artifacts(self, tenant_id: str, memory_id: UUID) -> dict:
         """Clear the graph rows mined out of a LIVE memory whose content changed.
@@ -7940,7 +8349,7 @@ class PostgresService:
         """
         return await self._delete_entity_artifacts(
             tenant_id,
-            memory_id,
+            [memory_id],
             eligibility=Memory.deleted_at.is_(None),
             link_scope=MemoryEntityLink.source == LINK_SOURCE_EXTRACTION,
         )
@@ -8018,7 +8427,7 @@ class PostgresService:
         leak this function exists to close.
         """
         return await self._delete_entity_artifacts(
-            tenant_id, memory_id, eligibility=Memory.deleted_at.isnot(None)
+            tenant_id, [memory_id], eligibility=Memory.deleted_at.isnot(None)
         )
 
     async def entity_get_linked_memories(
@@ -8455,6 +8864,16 @@ class PostgresService:
 
         async with get_session() as session:
             rows = (await session.execute(pair_sql, params)).all()
+            # Similarity alone is not identity: 'CAURA-712' / 'CAURA-713',
+            # 'v1.0.2' / 'v1.0.3' and 'acme (ohio)' / 'acme (delaware)' embed
+            # near-identically. The extraction worker refuses those merges
+            # (``same_identifier_signature``); this nightly pass must not
+            # undo them.
+            names: dict[UUID, str] = {}
+            for r in rows:
+                names[r.id_a] = r.name_a
+                names[r.id_b] = r.name_b
+            rows = [r for r in rows if same_identifier_signature(r.name_a, r.name_b)]
             if not rows:
                 # ``skipped`` lets the core-api step reproduce the source's
                 # early ``StepResult(SKIPPED)`` ONLY for the no-pairs case
@@ -8490,7 +8909,14 @@ class PostgresService:
             clusters_processed = 0
             cluster_errors = 0
 
-            for root, cluster_ids in clusters.items():
+            # Union-find chains through names that are compatible pairwise but
+            # not as a group: 'acme (ohio)' -- 'acme' -- 'acme (delaware)'.
+            # Split each cluster so every merge group is mutually compatible.
+            groups: list[list[UUID]] = []
+            for cluster_members in clusters.values():
+                groups.extend(_entity_compatible_groups(cluster_members, names))
+            for cluster_ids in groups:
+                root = cluster_ids[0]
                 if len(cluster_ids) < 2:
                     continue
 
@@ -8548,9 +8974,15 @@ class PostgresService:
         if not entities:
             return
 
+        # A qualified or identifier-bearing name wins over a bare one, then the
+        # longest. The group is mutually compatible (``_entity_compatible_groups``),
+        # so any such member carries the group's qualifier; keeping it as the
+        # canonical is what stops the next nightly run from seeing a bare
+        # 'Acme Corporation' and merging 'acme (ohio)' into what was
+        # 'acme (delaware)'.
         canonical = max(
             entities,
-            key=lambda e: (len(e.canonical_name), -e.id.int),
+            key=lambda e: (has_identifier_or_qualifier(e.canonical_name), len(e.canonical_name), -e.id.int),
         )
         dupes = [e for e in entities if e.id != canonical.id]
 
@@ -9655,7 +10087,7 @@ class PostgresService:
         if collection is not None:
             stmt = stmt.where(Document.collection == collection)
         if fleet_id:
-            stmt = stmt.where(Document.fleet_id == fleet_id)
+            stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
         if status is not None:
             stmt = stmt.where(Document.data["status"].astext == status)
         async with get_read_session() as session:
@@ -9790,7 +10222,7 @@ class PostgresService:
                 Document.collection == collection,
             )
             if fleet_id:
-                stmt = stmt.where(Document.fleet_id == fleet_id)
+                stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
 
             for key, value in (where or {}).items():
                 if isinstance(value, bool):
@@ -10465,6 +10897,12 @@ class PostgresService:
             Memory.tenant_id == tenant_id,
             Memory.deleted_at.is_(None),
             Memory.content.notlike(PostgresService._INSIGHTS_OPAQUE_CONTENT_PREFIX),
+            # The same visibility rule every read path applies: team and org
+            # rows, plus the caller's own private rows. Insights put row
+            # content into an LLM prompt and persist the findings team- or
+            # org-wide, so another agent's ``scope_agent`` rows must never be
+            # in the corpus, whatever the scope.
+            _visibility_scope_clause(agent_id),
         ]
         if scope == "agent":
             base.append(Memory.agent_id == agent_id)
@@ -11081,6 +11519,13 @@ class PostgresService:
         ``id IN (...) AND tenant_id == :tid AND deleted_at IS NULL``; scope
         ='agent' adds ``agent_id == :caller``, scope='fleet' adds
         ``fleet_id == :fid`` (fleet_id required), scope='all' adds nothing.
+
+        Every scope also applies the read visibility rule
+        (``_visibility_scope_clause``): team and org rows plus the caller's
+        own private rows. The kept ids feed an LLM rule prompt by content and
+        the rule is persisted team- or org-wide, so another agent's
+        ``scope_agent`` row must never pass, whatever the scope — the same
+        reasoning ``_insights_scope_filters`` and the crystallizer apply.
         Uses ``select(Memory.id).where(Memory.id.in_(...))`` (UUID objects,
         not stringified) so the asyncpg array-cast risk is avoided and
         canonical-form mismatches don't drop valid ids. Returns the matched
@@ -11096,6 +11541,7 @@ class PostgresService:
             .where(Memory.id.in_(uuids))
             .where(Memory.tenant_id == tenant_id)
             .where(Memory.deleted_at.is_(None))
+            .where(_visibility_scope_clause(caller_agent_id, tenant_id))
         )
         if scope == "agent":
             stmt = stmt.where(Memory.agent_id == caller_agent_id)
@@ -11899,8 +12345,27 @@ class PostgresService:
         by_tenant: dict[str, list[dict]] = {}
         for ev in events:
             by_tenant.setdefault(ev["tenant_id"], []).append(ev)
+        # Every tenant is attempted even when an earlier one fails. Each group
+        # commits in its own transaction, so stopping at the first failure only
+        # threw away the LATER tenants' events — the caller's retry re-sends the
+        # whole request, committed groups dedupe on ``client_event_id``, and only
+        # the failed tenant is actually redone. The first failure is re-raised
+        # once all groups have had their attempt, so the request still fails.
+        first_error: BaseException | None = None
         for tenant_id, tenant_events in by_tenant.items():
-            await self._audit_chain_one_tenant(tenant_id, tenant_events)
+            try:
+                await self._audit_chain_one_tenant(tenant_id, tenant_events)
+            except Exception as exc:
+                logger.error(
+                    "audit chain write failed for tenant %s (%d events); continuing with the rest",
+                    tenant_id,
+                    len(tenant_events),
+                    exc_info=True,
+                )
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     async def _audit_chain_one_tenant(self, tenant_id: str, events: list[dict]) -> None:
         """Chain + insert one tenant's events inside a single transaction.
@@ -11967,10 +12432,13 @@ class PostgresService:
                     if client_event_id in already_chained or client_event_id in seen_in_batch:
                         continue
                     seen_in_batch.add(client_event_id)
-                # Scrub-before-hash: refuse to chain a raw secret. Runs
-                # BEFORE hashing so the chain only ever attests the redacted
-                # detail (raising here fails the write loudly instead).
-                assert_pii_safe(ev.get("detail"))
+                # Scrub-before-hash: the chain must never attest a raw secret.
+                # Scrubbed rather than refused — a refusal here rolled back
+                # every event of this tenant in the batch (see ``scrub_pii``).
+                # The assertion stays as the backstop on what is actually
+                # chained; after the scrub it has nothing left to find.
+                detail = scrub_pii(ev.get("detail"))
+                assert_pii_safe(detail)
                 seq += 1
                 # Assign created_at in-app (not server_default now()) because
                 # the hash binds it — reading it back post-insert would risk
@@ -11986,7 +12454,7 @@ class PostgresService:
                     action=ev["action"],
                     resource_type=ev["resource_type"],
                     resource_id=resource_id,
-                    detail=ev.get("detail"),
+                    detail=detail,
                     created_at_iso=canonical_created_at(created),
                 )
                 this_hash = compute_event_hash(canon, prev_hash)
@@ -11997,7 +12465,7 @@ class PostgresService:
                         action=ev["action"],
                         resource_type=ev["resource_type"],
                         resource_id=resource_id,
-                        detail=ev.get("detail"),
+                        detail=detail,
                         created_at=created,
                         seq=seq,
                         prev_hash=prev_hash,
@@ -12534,7 +13002,7 @@ class PostgresService:
         *,
         org_id: str,
         action: str,
-        since_hours: int,
+        since_hours: float,
     ) -> bool:
         """CAURA-657 dedup gate: did this org+action succeed within the
         last ``since_hours``? Used by the pipeline-op consumers to
@@ -12553,6 +13021,10 @@ class PostgresService:
                 .where(LifecycleAudit.org_id == org_id)
                 .where(LifecycleAudit.action == action)
                 .where(LifecycleAudit.status == "success")
+                # A skip is finalized as ``success{skipped}``; counting it
+                # re-armed the gate on every tick, so any cadence under the
+                # window ran once and then skipped forever. Only real runs count.
+                .where(func.coalesce(LifecycleAudit.stats["skipped"].astext, "false") != "true")
                 .where(LifecycleAudit.finished_at > func.now() - timedelta(hours=since_hours))
                 .limit(1)
             )
@@ -12636,12 +13108,12 @@ class PostgresService:
                 # So: claim the row instead of merging in SQL. One writer wins
                 # the INSERT; every other writer falls through to a lock that now
                 # has a row to hold and redoes the read-merge-write against what
-                # is actually stored, through the same ``deep_merge`` as every
-                # other path.
+                # is actually stored, through the same ``merge_settings_update``
+                # as every other path.
                 seed_diff = diff_settings({}, new_settings)
                 if not seed_diff:
                     return {"settings": {}, "changed": False}
-                seeded = deep_merge({}, new_settings)
+                seeded = merge_settings_update({}, new_settings)
                 claimed = (
                     await session.execute(
                         pg_insert(OrganizationSettings)
@@ -12662,7 +13134,7 @@ class PostgresService:
                 # Identical payload — skip the write and the audit row entirely.
                 return {"settings": current, "changed": False}
 
-            merged = deep_merge(current, new_settings)
+            merged = merge_settings_update(current, new_settings)
             await session.execute(
                 sql_update(OrganizationSettings)
                 .where(OrganizationSettings.org_id == org_id)

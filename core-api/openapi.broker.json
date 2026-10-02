@@ -1619,6 +1619,18 @@
             "title": "Diagnostic",
             "type": "boolean"
           },
+          "entity_boost": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set false for this call only to rank by the plain hybrid (vector + full-text) score: entity/graph retrieval is skipped, so no entity boost multiplier is applied and the ENTITY_LOOKUP short-circuit cannot fire. Omit (or true) for the tenant's search.entity_retrieval behaviour; a request cannot enable entity retrieval over a tenant that disabled it. REST only: the MCP tools do not expose this per request.",
+            "title": "Entity Boost"
+          },
           "filter_agent_id": {
             "anyOf": [
               {
@@ -1686,6 +1698,18 @@
             "minLength": 1,
             "title": "Query",
             "type": "string"
+          },
+          "recall_boost": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set false for this call only to neutralise the popularity recall_boost factor (score multiplier fixed at 1.0) AND to skip the recall_count bump for the returned rows, so the read neither uses nor feeds the recall signal (the response reports recall_tracked: false). Omit (or true) for the tenant's behaviour; a request cannot enable the boost over a tenant that disabled it. REST only: the MCP tools do not expose this per request.",
+            "title": "Recall Boost"
           },
           "status_filter": {
             "anyOf": [
@@ -1756,7 +1780,7 @@
           },
           "recall_tracked": {
             "default": false,
-            "description": "Whether this search bumped recall_count for the memories it returned. False means they were not reinforced: the caller presented no agent identity (a tenant-scoped key that did not set filter_agent_id — recall_count stays 0 for that caller and recall_boost never engages), the call set diagnostic=true, or nothing matched.",
+            "description": "Whether this search bumped recall_count for the memories it returned. False means they were not reinforced: the caller presented no agent identity (a tenant-scoped key that did not set filter_agent_id — recall_count stays 0 for that caller and recall_boost never engages), the call set diagnostic=true or recall_boost=false, or nothing matched.",
             "title": "Recall Tracked",
             "type": "boolean"
           },
@@ -2266,11 +2290,13 @@
             }
           },
           {
+            "description": "Include soft-deleted rows. Honoured for tenant credentials; an agent credential needs trust >= 3, below which it is ignored (as on MCP `caura_list`).",
             "in": "query",
             "name": "include_deleted",
             "required": false,
             "schema": {
               "default": false,
+              "description": "Include soft-deleted rows. Honoured for tenant credentials; an agent credential needs trust >= 3, below which it is ignored (as on MCP `caura_list`).",
               "title": "Include Deleted",
               "type": "boolean"
             }

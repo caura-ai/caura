@@ -47,6 +47,10 @@ from core_api.providers._retry import call_with_fallback, deliberate_fake_provid
 
 logger = logging.getLogger(__name__)
 
+# Visibilities a crystal may be built from. ``scope_agent`` rows are private to
+# their author; merging them into a shared crystal would republish them.
+_SHARED_VISIBILITIES = frozenset({"scope_team", "scope_org"})
+
 # A59 — bounded read for the subject-local Type-II sweep. Subjects are small
 # (~1.4 memories each in practice), so this page covers a large tenant while
 # keeping one predictable storage round-trip.
@@ -671,10 +675,17 @@ async def _run_crystallization(
         # what close the reported loop. It earns its place by making the
         # invariant checkable next to the delete instead of depending on two
         # remote queries staying right.
+        # Private rows never reach a crystal (the pair query already excludes
+        # them; re-checked here like the status guard above, so the invariant
+        # holds next to the write that would republish them).
         cluster_memories = [
             memories_by_id[mid]
             for mid in cluster_ids
-            if mid in memories_by_id and memories_by_id[mid].get("status") in LIVE_MEMORY_STATUSES
+            if mid in memories_by_id
+            and memories_by_id[mid].get("status") in LIVE_MEMORY_STATUSES
+            # ``visibility`` is NOT NULL and always serialized by storage; an
+            # absent key only occurs in hand-built rows, which predate it.
+            and memories_by_id[mid].get("visibility", "scope_team") in _SHARED_VISIBILITIES
         ]
         # Same floor as the filter above — re-checked because the live-status
         # filter directly above can shrink a cluster below it.
@@ -685,6 +696,13 @@ async def _run_crystallization(
         extracted = await _crystallize_cluster(cluster_memories, config)
         if not extracted:
             continue
+
+        # The crystal lives where its sources lived: their fleet (the nightly
+        # run passes none) and the narrowest visibility among them.
+        crystal_fleet_id = fleet_id if fleet_id is not None else cluster_memories[0].get("fleet_id")
+        crystal_visibility = (
+            "scope_org" if all(m.get("visibility") == "scope_org" for m in cluster_memories) else "scope_team"
+        )
 
         # Create new crystallized memories via create_memory
         from core_api.schemas import MemoryCreate
@@ -710,7 +728,8 @@ async def _run_crystallization(
                 mem_out = await create_memory(
                     MemoryCreate(
                         tenant_id=tenant_id,
-                        fleet_id=fleet_id,
+                        fleet_id=crystal_fleet_id,
+                        visibility=crystal_visibility,
                         agent_id="crystallizer",
                         content=fact["content"],
                         memory_type=mt,

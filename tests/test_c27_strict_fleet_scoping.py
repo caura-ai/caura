@@ -146,6 +146,13 @@ FLEET_SCOPED_READS: dict[str, dict[str, object]] = {
         "strict": FROM_TENANT_SWITCH,
         "include_org_visibility": False,
     },
+    # The agent reader's cross-fleet trust ladder for entity summaries
+    # (/entities, /graph, memory_count). Permissive on purpose and NOT the
+    # tenant switch: it is the SQL form of core-api's
+    # ``memory_access_allowed_for_agent``, which lets a trust<2 agent read
+    # fleet-less and ``scope_org`` rows whatever the tenant's strict setting —
+    # a summary must not hide less than the by-id read it summarises.
+    "_entity_reader_memory_clause": {"strict": False},
     # FILTER reads — pinned, and the values are the assertion.
     "memory_list_by_filters": {"strict": True, "include_org_visibility": False},
     "memory_stats_breakdown": {"strict": True, "include_org_visibility": False},

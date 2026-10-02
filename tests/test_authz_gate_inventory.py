@@ -469,17 +469,16 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
     # route exists for (``routes/interview.py`` declares it required and its own
     # comment calls it "the WORKER agent the window belongs to").
     #
-    # Recorded as a gap anyway, because by this file's taxonomy that is what it
-    # is: ``interview_service`` persists memories with
-    # ``agent_id=<caller-named>``, the same property the two ``POST /memories``
-    # lines below record. Narrower in blast radius — visibility is forced to
-    # ``scope_team``, so nothing lands in a peer's private scope — and the
-    # ``metadata.written_by`` the service comment offers as the mitigation is
-    # the constant string ``"interviewer"``, not the submitting credential, so
-    # no row identifies who sent it.
+    # It now runs the write-identity chain the memory routes use
+    # (``_resolve_rest_write_agent_id`` then ``resolve_write_agent``), so an
+    # agent-scoped credential submits as itself and an install credential gets
+    # the broker ownership boundary. What is left is the residual the
+    # ``POST /memories`` lines below record: a reserved verified ``main`` still
+    # names its subject until the reserved-id policy reaches reject.
     "POST /api/v1/interview/submit": (
-        "KNOWN GAP: node-plane by intent, but persists memories attributed to "
-        "a caller-named agent; scope_team caps the blast radius"
+        "KNOWN GAP: node-plane by intent; _resolve_rest_write_agent_id binds "
+        "normal verified identities, but reserved main remains caller-named "
+        "until policy=reject"
     ),
     # The handlers expose a caller-named ``agent_id`` field. The default-on
     # ``bind_write_identity_to_auth`` control replaces it for normal verified
@@ -495,14 +494,12 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
         "KNOWN GAP: bind_write_identity_to_auth uses normal verified identities, "
         "but reserved main remains caller-named until policy=reject"
     ),
-    # Named without the flag, deliberately: this handler never reads it, and
-    # ``test_allowlist_reasons_that_name_a_mechanism_are_corroborated`` is what
-    # said so. The two entries above DO read it, which is the difference — this
-    # path would still be caller-named with Phase 2 fully enabled.
+    # Now runs the bulk route's chain (``_resolve_rest_write_agent_id`` →
+    # ``resolve_write_agent`` → ``enforce_fleet_write``), so it is left with
+    # exactly the residual the two entries above record, and no other.
     "POST /api/v1/ingest/commit": (
-        "KNOWN GAP: attribution is caller-named; broker_owned_agent_id gates "
-        "install ownership only, and nothing here binds the write to the "
-        "calling credential"
+        "KNOWN GAP: bind_write_identity_to_auth uses normal verified identities, "
+        "but reserved main remains caller-named until policy=reject"
     ),
 }
 

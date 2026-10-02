@@ -1,6 +1,6 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FROZEN_PLUGIN_ID } from "./legacy-contracts.fixture.js";
@@ -55,23 +55,94 @@ test("a persistence failure retains the freshly provisioned key in memory", asyn
   }
 });
 
-test("a non-404 provisioning failure is retried on the next cold resolution", async () => {
+test("failed provisioning cools down per agent, then retries and caches success", async () => {
   const originalFetch = globalThis.fetch;
   const originalWarn = console.warn;
+  const originalNow = Date.now;
+  let now = 1_000;
   let fetches = 0;
-  globalThis.fetch = (async () => {
+  let status = 503;
+  globalThis.fetch = (async (_input, init) => {
+    assert.equal(init?.redirect, "error", "provisioning must not forward the tenant key on redirects");
     fetches++;
-    return new Response("unavailable", { status: 503 });
+    if (status === 0) throw new TypeError("fetch failed");
+    return new Response(status === 200 ? JSON.stringify({ raw_key: "recovered-key", key_prefix: "test" }) : "unavailable", { status });
   }) as typeof fetch;
   console.warn = () => {};
+  Date.now = () => now;
 
   try {
-    assert.equal(await resolveAgentKey("transient-agent"), null);
-    assert.equal(await resolveAgentKey("transient-agent"), null);
-    assert.equal(fetches, 2, "a transient failure must not disable provisioning");
+    for (const failure of [401, 403, 503, 0]) {
+      status = failure;
+      const agent = `retry-agent-${failure}`;
+      const before = fetches;
+      assert.equal(await resolveAgentKey(agent), null);
+      assert.equal(await resolveAgentKey(agent), null);
+      now += 59_999;
+      assert.equal(await resolveAgentKey(agent), null);
+      assert.equal(fetches, before + 1, "calls in the cooldown must not provision again");
+      now++;
+      status = 200;
+      assert.equal(await resolveAgentKey(agent), "recovered-key");
+      assert.equal(await resolveAgentKey(agent), "recovered-key");
+      assert.equal(fetches, before + 2, "retry succeeds and subsequent calls use the cache");
+    }
   } finally {
+    Date.now = originalNow;
     globalThis.fetch = originalFetch;
     console.warn = originalWarn;
+  }
+});
+
+test("concurrent cold lookups share one provision per agent", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const requested: string[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    const agent = JSON.parse(String(init?.body)).agent_id as string;
+    requested.push(agent);
+    await barrier;
+    return new Response(JSON.stringify({ raw_key: `key-for-${agent}`, key_prefix: "test" }), { status: 200 });
+  }) as typeof fetch;
+  console.warn = () => {};
+  try {
+    const lookups = Array.from({ length: 10 }, () => resolveAgentKey("parallel-a"));
+    const other = resolveAgentKey("parallel-b");
+    assert.deepEqual(requested, ["parallel-a", "parallel-b"]);
+    release();
+    assert.deepEqual(await Promise.all(lookups), Array(10).fill("key-for-parallel-a"));
+    assert.equal(await other, "key-for-parallel-b");
+    assert.equal(await resolveAgentKey("parallel-a"), "key-for-parallel-a");
+    assert.equal(requested.length, 2);
+  } finally {
+    release();
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  }
+});
+
+test("different agents provisioning concurrently keep both persisted keys", async () => {
+  rmSync(secretsPath, { recursive: true });
+  const originalFetch = globalThis.fetch;
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  globalThis.fetch = (async (_input, init) => {
+    const agent = JSON.parse(String(init?.body)).agent_id as string;
+    await barrier;
+    return new Response(JSON.stringify({ raw_key: `key-for-${agent}`, key_prefix: "test" }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const pending = [resolveAgentKey("persist-a"), resolveAgentKey("persist-b")];
+    release();
+    await Promise.all(pending);
+    const saved = JSON.parse(readFileSync(secretsPath, "utf8"));
+    assert.equal(saved.keys["persist-a"].key, "key-for-persist-a");
+    assert.equal(saved.keys["persist-b"].key, "key-for-persist-b");
+  } finally {
+    release();
+    globalThis.fetch = originalFetch;
   }
 });
 

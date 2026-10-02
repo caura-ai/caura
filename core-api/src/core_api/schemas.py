@@ -524,9 +524,12 @@ class MemoryOut(BaseModel):
     # `BulkMemoryItem.write_mode` is narrower: there 'strong' governs the
     # embedding only and enrichment defers either way. ax-0917-h-06: the bulk
     # path now DOES set `embedding_pending` on items written without a vector,
-    # so a bulk caller can read pendingness off its own write response. It
-    # still sets no `enrichment_pending`, because bulk enrichment defers
-    # unconditionally — there is no inline case for that flag to distinguish.
+    # so a bulk caller can read pendingness off its own write response.
+    # lme-0929-m-03: it now also sets `enrichment_pending` when the deployment
+    # defers enrichment (the case it publishes ENRICH_REQUESTED for), so the
+    # store-level `GET /memories/stats` `pending.enrichment` count can see bulk
+    # rows; an inline-enriching deployment enriches bulk items inline and sets
+    # neither.
     metadata: dict | None
     # C25 — platform-written telemetry/enrichment (llm_ms, write_latency_ms,
     # semantic_dedup_ms, summary, tags, pii flags, write-mode flags …) exposed
@@ -868,8 +871,8 @@ class SearchResponse(BaseModel):
             "returned. False means they were not reinforced: the caller "
             "presented no agent identity (a tenant-scoped key that did not set "
             "filter_agent_id — recall_count stays 0 for that caller and "
-            "recall_boost never engages), the call set diagnostic=true, or "
-            "nothing matched."
+            "recall_boost never engages), the call set diagnostic=true or "
+            "recall_boost=false, or nothing matched."
         ),
     )
     # D12 — present only when the request set ``diagnostic=true``.
@@ -1067,6 +1070,48 @@ class SearchRequest(TenantScopedBody):
     # ``model_extra`` and comes back in ``SearchResponse.warnings`` as a name the
     # endpoint does not read (ax-0917-h-05). A server older than THAT discards it
     # silently. Check the warnings rather than assuming the filter applied.
+
+    # lme-0929-h-01 (SIDE-54) — per-request "plain hybrid ranking" knobs. Both
+    # are OPT-OUT only: ``None`` (and ``true``) leave the tenant/profile
+    # behaviour exactly as it was; ``false`` neutralises that factor for THIS
+    # call. A request cannot switch a factor ON over a tenant that disabled it
+    # — the tenant setting stays the ceiling, the request can only subtract.
+    #
+    # Why they exist: every returned row gets ``recall_count + 1`` and
+    # ``recall_boost`` then ranks it higher next time, and the entity boost
+    # reorders on top of that, so re-running the same query on the same store
+    # returns a different order each run. Before these, the only way out was a
+    # tenant setting or a search profile — store-wide, for a need that is
+    # per-call (a benchmark, an A/B, a reproducibility check).
+    #
+    # ``recall_boost=false`` ALSO skips the ``recall_count`` bump for this
+    # call: a plain read that still reinforced its rows would neutralise the
+    # boost for itself while feeding it for every later caller — the exact
+    # run-to-run drift the knob is meant to remove.
+    recall_boost: bool | None = Field(
+        default=None,
+        description=(
+            "Set false for this call only to neutralise the popularity "
+            "recall_boost factor (score multiplier fixed at 1.0) AND to skip "
+            "the recall_count bump for the returned rows, so the read neither "
+            "uses nor feeds the recall signal (the response reports "
+            "recall_tracked: false). Omit (or true) for the tenant's behaviour; "
+            "a request cannot enable the boost over a tenant that disabled it. "
+            "REST only: the MCP tools do not expose this per request."
+        ),
+    )
+    entity_boost: bool | None = Field(
+        default=None,
+        description=(
+            "Set false for this call only to rank by the plain hybrid "
+            "(vector + full-text) score: entity/graph retrieval is skipped, so "
+            "no entity boost multiplier is applied and the ENTITY_LOOKUP "
+            "short-circuit cannot fire. Omit (or true) for the tenant's "
+            "search.entity_retrieval behaviour; a request cannot enable entity "
+            "retrieval over a tenant that disabled it. REST only: the MCP tools "
+            "do not expose this per request."
+        ),
+    )
 
 
 class RecallRequest(SearchRequest):

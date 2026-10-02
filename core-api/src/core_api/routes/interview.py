@@ -32,19 +32,27 @@ from pydantic import BaseModel, Field
 from core_api import request_phase
 from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
+from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as app_settings
-from core_api.constants import INTERVIEW_EVENT_MAX_CHARS, INTERVIEW_MAX_EVENTS_PER_SUBMIT
+from core_api.constants import (
+    INTERVIEW_EVENT_MAX_CHARS,
+    INTERVIEW_MAX_CURSOR_ADVANCE,
+    INTERVIEW_MAX_EVENTS_PER_SUBMIT,
+)
 from core_api.errors import (
     AUTH_FEATURE_DISABLED,
     REQUEST_BUDGET_EXCEEDED,
     coded_detail,
 )
+from core_api.routes.memories import _resolve_rest_write_agent_id
 from core_api.schemas import STRICT_WRITE_BODY
+from core_api.services.agent_service import enforce_fleet_write, resolve_write_agent
 from core_api.services.interview_service import (
     InterviewJobPermanentlyFailedError,
     advance_watermark,
     enqueue_interview_job,
     process_interview_job,
+    read_watermark,
     run_interview,
     run_interview_schedule,
     synthesis_sem,
@@ -146,6 +154,12 @@ async def submit_interview(
     forward-only watermark — never duplicates, never a gap (the async job
     doc id is derived from the same identity, so duplicate submits upsert
     one job).
+
+    ``agent_id`` resolves like a memory write (an agent-scoped credential
+    writes as itself; install credentials get the broker ownership boundary),
+    ``node_id`` must be a fleet node of the tenant (404 otherwise), and
+    ``cursor_to`` may run at most ``INTERVIEW_MAX_CURSOR_ADVANCE`` past the
+    node's committed watermark (422 otherwise).
     """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
@@ -175,6 +189,43 @@ async def submit_interview(
         raise HTTPException(
             status_code=403,
             detail=coded_detail(AUTH_FEATURE_DISABLED, "interviewer is not enabled for this tenant"),
+        )
+
+    # Write identity — the chain ``POST /memories/bulk`` runs, because the
+    # synthesized report lands as memories attributed to ``agent_id``. A
+    # verified agent identity wins over the body; install credentials get the
+    # broker ownership boundary; the agent is registered on first contact; an
+    # omitted ``fleet_id`` resolves to its home fleet; a cross-fleet one needs
+    # trust >= 3.
+    agent, body.agent_id = await resolve_write_agent(
+        _resolve_rest_write_agent_id(auth, body.agent_id),
+        tenant_id,
+        body.fleet_id,
+        is_install_credential=auth.is_install_credential,
+        install_uuid=auth.install_uuid,
+    )
+    if not body.fleet_id and agent.get("fleet_id"):
+        body.fleet_id = agent["fleet_id"]
+    if auth.tenant_id:  # skip enforcement for admin
+        await enforce_fleet_write(tenant_id, body.agent_id, body.fleet_id)
+
+    # ``node_id`` keys the watermark and the job doc, so it must name a real
+    # node of THIS tenant — the fleet-node UUID the scheduler put in the
+    # ``interview_request`` payload. Same 404 for a node of another tenant as
+    # for one that never existed.
+    nodes = await get_storage_client().list_nodes(tenant_id)
+    if not any(str(n.get("id") or "") == body.node_id for n in nodes):
+        raise HTTPException(status_code=404, detail="node_id is not a node of this tenant")
+    # The watermark only moves forward, so a window claiming a cursor far past
+    # anything the node can hold would permanently skip the node's real events.
+    committed = await read_watermark(tenant_id, body.node_id)
+    if body.cursor_to - committed > INTERVIEW_MAX_CURSOR_ADVANCE:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"cursor_to {body.cursor_to} is more than {INTERVIEW_MAX_CURSOR_ADVANCE} "
+                f"past the node's committed watermark ({committed})"
+            ),
         )
 
     if app_settings.interview_async_submit:

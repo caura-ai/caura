@@ -71,3 +71,56 @@ def canonical_match_key(name: str) -> str:
     while len(tokens) >= 3 and tokens[0] in ENTITY_NAME_QUALIFIERS:
         tokens = tokens[1:]
     return " ".join(tokens)
+
+
+# A42 — parenthetical qualifiers, e.g. the "(delaware)" in "acme (delaware)".
+# Matches the discriminator vocabulary ``_reattach_subject_discriminators``
+# already established ("#NNNN" and parentheticals); deliberately NOT any
+# trailing word, because unbracketed tokens are usually harmless surface
+# variation ("acme" / "acme corp") rather than a distinguisher.
+QUALIFIER_RE = re.compile(r"[(\[]([^)\]]{1,64})[)\]]")
+
+
+def qualifier_signature(name: str) -> frozenset[str]:
+    """Bracketed qualifiers in ``name``, normalised for comparison."""
+    return frozenset(
+        " ".join(m.strip().lower().split())
+        for m in QUALIFIER_RE.findall(name)
+        if m.strip()
+    )
+
+
+def same_identifier_signature(a: str, b: str) -> bool:
+    """Two names may only merge if nothing in them says they are different things.
+
+    CAURA graph-build fix (B): same set of digit-bearing identifier tokens.
+    Synthetic suffix-distinct names like 'comet #0002' vs 'comet #0012' embed
+    near-identically and trip the 0.85 similarity merge, collapsing distinct
+    entities into one contaminated mega-node.
+
+    A42 (A33 mechanism ②): digits alone are too narrow. Two genuinely distinct
+    entities distinguished by a NON-digit qualifier — 'acme (delaware)' vs
+    'acme (ohio)' — both yield an empty digit set, compare equal, and merge.
+    Downstream that reads as same_subject=true and produces a false
+    contradiction between two different things.
+
+    Asymmetry is deliberate: a name with NO qualifier merges freely with a
+    qualified one ('acme' vs 'acme (ohio)' -> allowed). An absent qualifier
+    means "unspecified", not "different", and blocking it would strand every
+    qualified mention from its own plain surface form. The chosen failure
+    direction favours coalescence — an over-merge is visible and recoverable,
+    whereas an entity that never coalesces fragments the graph silently.
+    """
+    ta = set(re.findall(r"\d[\w.\-]*", a.lower()))
+    tb = set(re.findall(r"\d[\w.\-]*", b.lower()))
+    if ta != tb:
+        return False
+    qa, qb = qualifier_signature(a), qualifier_signature(b)
+    # Only a CONFLICT between two present qualifiers blocks the merge.
+    return not qa or not qb or qa == qb
+
+
+def has_identifier_or_qualifier(name: str) -> bool:
+    """Whether ``name`` carries something ``same_identifier_signature`` compares:
+    a digit-bearing token or a bracketed qualifier."""
+    return bool(re.search(r"\d", name)) or bool(qualifier_signature(name))

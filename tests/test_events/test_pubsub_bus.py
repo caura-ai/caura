@@ -2333,11 +2333,11 @@ async def test_no_lease_extension_lands_after_the_batch_is_nacked(
 ) -> None:
     """A nack must be the LAST word on a failed message's deadline.
 
-    A nack is ``modify_ack_deadline`` of 0 — redeliver now. A lease extension
-    still in flight when the batch ends carries ``LEASE_EXTENSION_SECONDS`` for
-    the WHOLE leased batch, ``nack_ids`` included, so landing behind the nack
-    it returns the failed message to a minute of invisibility and inverts the
-    nack silently.
+    A nack is ``modify_ack_deadline`` of a short backoff delay. A lease
+    extension still in flight when the batch ends carries
+    ``LEASE_EXTENSION_SECONDS`` for the WHOLE leased batch, ``nack_ids``
+    included, so landing behind the nack it overwrites the delay the nack
+    asked for and inverts the nack silently.
 
     Real threads, deliberately, rather than the inline ``run_in_executor``
     stand-in the other lease tests use: the entire defect is that cancelling
@@ -2422,7 +2422,7 @@ async def test_no_lease_extension_lands_after_the_batch_is_nacked(
     assert calls.index("extend") < calls.index("nack"), (
         "a lease extension landed AFTER the nack, returning the failed message "
         f"to {pubsub_module.LEASE_EXTENSION_SECONDS}s of invisibility instead "
-        f"of redelivering it now: {calls}"
+        f"of the backoff the nack asked for: {calls}"
     )
 
 

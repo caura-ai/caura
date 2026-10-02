@@ -30,6 +30,11 @@ was minted by the 06:00 UTC tick."
 
 ## Required external schedule entry
 
+Pass `dedup_window_hours` with a value just under the schedule's interval
+(`5.5` for every 6 hours). The consumer skips an org that already ran within
+its dedup window, which defaults to 23 hours for daily schedules; without the
+parameter a 6-hourly schedule runs once a day.
+
 ### Google Cloud Scheduler
 
 ```yaml
@@ -38,7 +43,7 @@ schedule: "0 */6 * * *"   # every 6 hours
 time_zone: "UTC"
 http_target:
   http_method: POST
-  uri: https://<core-api-host>/api/v1/admin/lifecycle/fanout/forge-distill
+  uri: https://<core-api-host>/api/v1/admin/lifecycle/fanout/forge-distill?dedup_window_hours=5.5
   oidc_token:
     service_account_email: <core-operations-sa>@<project>.iam.gserviceaccount.com
   headers:
@@ -68,7 +73,7 @@ spec:
                   curl -fsS \
                     -X POST \
                     -H "X-API-Key: $ADMIN_API_KEY" \
-                    "$CORE_API_BASE_URL/api/v1/admin/lifecycle/fanout/forge-distill"
+                    "$CORE_API_BASE_URL/api/v1/admin/lifecycle/fanout/forge-distill?dedup_window_hours=5.5"
               envFrom:
                 # whichever secret you use, it must expose ADMIN_API_KEY
                 - secretRef: { name: caura-admin }
@@ -130,6 +135,11 @@ What it does **not** bypass:
   warns are surfaced on the operator card but do not block activation
   (matching the inbox approve semantics; see
   `test_flag_on_but_warn_scan_still_auto_activates`).
+  The scan reads the skill body (`content`) — the file agents load —
+  plus `summary` and `description`: prompt-injection markers and shell
+  patterns such as a download piped into a shell are critical (no
+  auto-promotion); links to paste or webhook-capture hosts are a warn,
+  so they do **not** stop auto-promotion on their own.
 
 Audit visibility: the lifecycle-audit row's `stats.auto_approved`
 counts how many of that tick's promotions skipped the inbox; `promoted

@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import logging
 import time
+import traceback
 import uuid as _uuid
 from datetime import datetime
 from typing import Any, NamedTuple
@@ -28,6 +29,7 @@ from core_api.constants import CONTRADICTED_STATUSES, SINGLE_VALUE_PREDICATES
 from core_api.providers._retry import call_with_fallback, deliberate_fake_provider
 from core_api.schemas import ContradictionInfo
 from core_api.services.subject_preflight import _subjects_differ_with_certainty
+from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
 
@@ -572,6 +574,76 @@ async def _rdf_conflict_pass(
     return _RdfPassResult(contradictions, _record_pairs, supersedes_id, ran)
 
 
+#: oss-0927-m-03 — one name for both paths, so "this memory was never checked
+#: for contradictions" is one predicate; which path gave up is in
+#: ``error_message``. Deliberately not the ``tracked_task`` name
+#: (``contradiction_detection``): that one only ever records a RAISE, and these
+#: runs do not raise.
+_CONTRADICTION_STRANDED_TASK = "contradiction_stranded"
+
+
+async def _record_detection_lost(
+    memory_id: UUID, tenant_id: str, path: str, exc: BaseException, tb: str
+) -> None:
+    """Persist one ``background_task_log`` row for a detection pass that failed.
+
+    Both detectors catch everything, log, and return normally, so the
+    ``tracked_task`` wrapping them saw a success and wrote nothing. The lock is
+    released on that exit (H-06), so a LATER trigger can retry — but nothing
+    schedules one, and for most memories no later trigger ever comes. The row
+    makes the loss countable and names the memory to re-check; it repairs
+    nothing. Called AFTER the ``finally`` so the A19 slot is not held across
+    the storage write, hence the traceback captured inside the ``except``.
+
+    Never raises: :func:`record_task_failure` swallows its own storage failures.
+    """
+    await record_task_failure(
+        _CONTRADICTION_STRANDED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(f"{path} detection failed: {type(exc).__name__}: {exc}"),
+        tb=tb,
+    )
+
+
+async def _detection_disabled_for_tenant(tenant_id: str, memory_id, path: str) -> bool:
+    """True when the tenant switched contradiction detection off (SIDE-58).
+
+    lme-0929-m-05. Read at the top of BOTH detector entries, which every
+    trigger reaches — legacy and engine arch alike, via
+    ``run_contradiction_detection`` (``test_contradiction_trigger_coverage``
+    pins that no production path calls around them). Gating here rather than
+    at the call sites is the point: a switch that left one trigger live is the
+    defect class this module keeps fixing, and a trigger added later is gated
+    without anyone having to remember.
+
+    Checked BEFORE the A19 admission slot, the row fetch and the idempotency
+    lock, so a disabled tenant's pass costs one cached settings read and
+    nothing else: no storage traffic, no Redis, no LLM call, no slot held.
+
+    Only an explicit ``False`` disables (``is False``), and a settings read
+    that fails is treated as ENABLED — today's behaviour. The run then reaches
+    its own ``resolve_config`` inside the error handling it always had, so an
+    outage is recorded exactly as before rather than silently turning
+    detection off.
+    """
+    from core_api.services.organization_settings import resolve_config
+
+    try:
+        cfg = await resolve_config(tenant_id)
+    except Exception:
+        return False
+    if getattr(cfg, "contradiction_detection_enabled", True) is not False:
+        return False
+    logger.debug(
+        "%s contradiction detection skipped for memory %s: disabled for tenant_id=%s",
+        path,
+        memory_id,
+        tenant_id,
+    )
+    return True
+
+
 async def detect_contradictions_async(
     memory_id: UUID,
     tenant_id: str,
@@ -596,6 +668,10 @@ async def detect_contradictions_async(
     """
     from core_api.services.organization_settings import resolve_config
 
+    # SIDE-58 — tenant opt-out, before the slot / fetch / lock below.
+    if await _detection_disabled_for_tenant(tenant_id, memory_id, "content"):
+        return
+
     # Always-fire completion log (Gap 06): without this, "function ran and
     # found nothing" is indistinguishable from "function never fired" — the
     # exact failure mode that hid Gap 01 and Gap 04 for weeks. Memory id is
@@ -609,6 +685,8 @@ async def detect_contradictions_async(
     concluded = False
     lock_key = None
     lock_token = ""
+    failure: Exception | None = None
+    failure_tb = ""
     # A19 — admission gate BEFORE any storage or Redis traffic, so a queued
     # pass consumes nothing but a waiting coroutine. Acquired before the
     # idempotency lock on purpose: the lock's 1h TTL must clock detection,
@@ -621,9 +699,17 @@ async def detect_contradictions_async(
     try:
         if new_memory is None:
             sc = get_storage_client()
-            new_memory = await sc.get_memory(str(memory_id), tenant_id)
+            # ``read=False``: the row was committed moments ago and the read
+            # pool lags the primary; a replica miss used to end detection here
+            # without a trace (and judge an edit on its pre-edit text).
+            new_memory = await sc.get_memory(str(memory_id), tenant_id, read=False)
         if not new_memory or new_memory.get("deleted_at") is not None:
             # Resolved before the lock is taken, so a gone row never holds one.
+            if not new_memory:
+                logger.warning(
+                    "contradiction_detection_skipped_row_missing",
+                    extra={"memory_id": str(memory_id), "tenant_id": tenant_id},
+                )
             return
 
         # A4 #14 — back-channel idempotency. Both the ENRICHED and
@@ -694,8 +780,9 @@ async def detect_contradictions_async(
             },
         )
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Async contradiction detection failed for memory %s", memory_id)
+        failure, failure_tb = exc, traceback.format_exc()
     finally:
         # A19 — free the slot before the bookkeeping below: the Redis lock
         # release and the completion log are not the contended work the gate
@@ -719,6 +806,8 @@ async def detect_contradictions_async(
             queued_ms,
             tenant_id,
         )
+    if failure is not None:
+        await _record_detection_lost(memory_id, tenant_id, "content", failure, failure_tb)
 
 
 # ---------------------------------------------------------------------------
@@ -751,6 +840,11 @@ async def detect_contradictions(
             "supersedes_id": str(new_memory.supersedes_id) if new_memory.supersedes_id else None,
             "status": new_memory.status,
         }
+    # SIDE-58 — honour the tenant switch when the caller hands us its config.
+    # (This in-session API has no production caller; it resolves nothing
+    # itself, so a caller without a config keeps today's behaviour.)
+    if tenant_config is not None and getattr(tenant_config, "contradiction_detection_enabled", True) is False:
+        return []
     return await _detect(new_memory, embedding, tenant_config)
 
 
@@ -2711,6 +2805,11 @@ async def detect_contradictions_by_entities_async(
     """
     from core_api.services.organization_settings import resolve_config
 
+    # SIDE-58 — tenant opt-out. Skips the retraction phase and the post-
+    # extraction RDF pass too: both are contradiction detection.
+    if await _detection_disabled_for_tenant(tenant_id, memory_id, "entity"):
+        return
+
     # Always-fire completion log (Gap 06) — see ``detect_contradictions_async``
     # above for the rationale. Same memory-id-in-message convention.
     t_start = time.monotonic()
@@ -2722,6 +2821,8 @@ async def detect_contradictions_by_entities_async(
     concluded = False
     lock_key = None
     lock_token = ""
+    failure: Exception | None = None
+    failure_tb = ""
     # A19 — same admission gate as Path A, and deliberately the SAME gate:
     # Path C is the heavier occupant (it runs the entity-context fetch, and
     # on the per-id fallback path that still holds up to
@@ -3329,8 +3430,9 @@ async def detect_contradictions_by_entities_async(
                 )
             except Exception:
                 logger.warning("path_d_shadow wrapper failed for %s", memory_id, exc_info=True)
-    except Exception:
+    except Exception as exc:
         logger.exception("Entity-based contradiction detection failed for %s", memory_id)
+        failure, failure_tb = exc, traceback.format_exc()
     finally:
         # A19 — free the slot before the bookkeeping; see Path A's block.
         _gate.release()
@@ -3359,6 +3461,8 @@ async def detect_contradictions_by_entities_async(
             queued_ms,
             tenant_id,
         )
+    if failure is not None:
+        await _record_detection_lost(memory_id, tenant_id, "entity", failure, failure_tb)
 
 
 # Backward-compat re-exports for tests

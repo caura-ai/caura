@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 // Env is read into module constants at import time, so it must be set before
 // the dynamic imports below. The configured identity must still default
 // identity-bearing writes without silently narrowing recall reads.
-process.env.CAURA_API_URL = "http://identity.test";
+process.env.CAURA_API_URL = "https://identity.test";
 process.env.CAURA_API_KEY = "test-key";
 process.env.CAURA_TENANT_ID = "t-identity";
 process.env.CAURA_FLEET_ID = "fleet-default";
@@ -115,10 +115,65 @@ describe("agent identity is resolved, never invented", () => {
   test("an explicit agent_id always wins over the default", async () => {
     const req = await run("caura_tune", {
       agent_id: "explicit-agent",
-      weight_delta: 0.1,
-      memory_id: "m-1",
+      min_similarity: 0.4,
     });
     assert.equal(req.url.pathname, "/api/v1/agents/explicit-agent/tune");
+    assert.deepEqual(req.body, { min_similarity: 0.4 });
+  });
+
+  test("document writes preserve explicit and defaulted authors", async () => {
+    for (const agent_id of [undefined, "document-author"]) {
+      const req = await run("caura_doc", {
+        op: "write", collection: "runbooks", doc_id: "doc-1",
+        data: { title: "Runbook" }, agent_id,
+      });
+      assert.equal(req.method, "POST");
+      assert.equal(req.url.pathname, "/api/v1/documents");
+      assert.deepEqual(req.body, {
+        tenant_id: "t-identity", collection: "runbooks", doc_id: "doc-1",
+        data: { title: "Runbook" }, fleet_id: "fleet-default",
+        agent_id: agent_id ?? EXPECTED_AGENT_ID,
+      });
+    }
+  });
+
+  test("recall forwards temporal and diagnostic options on both request paths", async () => {
+    for (const include_brief of [false, true]) {
+      await run("caura_recall", {
+        query: "historical decision", valid_at: "2026-09-30",
+        min_similarity: 0, diagnostic: true, include_brief,
+      });
+      const requests = captured.filter(c => ["/api/v1/search", "/api/v1/recall"].includes(c.url.pathname));
+      assert.equal(requests.length, include_brief ? 2 : 1);
+      for (const req of requests) {
+        assert.equal(req.body?.valid_at, "2026-09-30");
+        assert.equal(req.body?.min_similarity, 0);
+        assert.equal(req.body?.diagnostic, true);
+        assert.equal(req.body?.include_brief, undefined);
+      }
+    }
+  });
+
+  test("stats preserves explicit include_deleted values and omission", async () => {
+    for (const include_deleted of [undefined, false, true]) {
+      const req = await run("caura_stats", { include_deleted });
+      assert.equal(req.url.pathname, "/api/v1/memories/stats");
+      assert.equal(req.url.searchParams.get("include_deleted"),
+        include_deleted === undefined ? null : String(include_deleted));
+    }
+  });
+
+  test("metadata update modes reach the PATCH body without forcing replacement", async () => {
+    for (const metadata_mode of [undefined, "merge", "replace"]) {
+      const req = await run("caura_manage", {
+        op: "update", memory_id: "11111111-1111-4111-8111-111111111111",
+        metadata: { owner: "writer" }, metadata_mode,
+      });
+      assert.equal(req.method, "PATCH");
+      assert.equal(req.body?.metadata_mode, metadata_mode);
+      assert.deepEqual(req.body?.metadata, { owner: "writer" });
+      assert.equal(req.url.searchParams.get("metadata_mode"), null);
+    }
   });
 
   test("reads do not inherit configured agent identity and narrow scope", async () => {

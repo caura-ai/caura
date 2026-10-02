@@ -20,6 +20,37 @@ from sqlalchemy.orm import Mapped, mapped_column
 from common.constants import VECTOR_DIM
 from common.models.base import Base
 
+#: Row-state predicate for "this live memory still has background work coming".
+#: Each disjunct is a durable marker the async write path sets and clears on the
+#: row itself, so it survives process restarts (no in-memory counter):
+#:
+#: * ``embedding IS NULL`` -- the vector has not landed. core-worker's embed
+#:   PATCH (or the backfill sweep) fills it.
+#: * ``enrichment_pending = true`` -- set by the fast single-write path and by
+#:   the deferred bulk path; the worker's enrich PATCH writes ``false`` into
+#:   both homes. ``_system`` wins over the legacy top-level key, as it does in
+#:   ``extract_system_metadata``.
+#: * ``atomic_facts`` is set and not JSON ``null`` -- the worker persisted
+#:   facts that core-api's ENRICHED consumer has not fanned out into child rows
+#:   yet; the consumer overwrites the key with JSON ``null`` once it has
+#:   (``->>`` yields SQL NULL for that).
+#:
+#: Only ``->`` / ``->>`` are used: the migrated ``metadata`` column is ``json``
+#: (migration 001) while ``create_all`` builds it ``jsonb``, and these operators
+#: are the ones both types share.
+#:
+#: Shared verbatim by ``ix_memories_pending_work`` below and by the storage
+#: query that counts pending work, so the planner can match the partial index.
+PENDING_EMBEDDING_SQL = "embedding IS NULL"
+PENDING_ENRICHMENT_SQL = (
+    "COALESCE(metadata -> '_system' ->> 'enrichment_pending', "
+    "metadata ->> 'enrichment_pending') = 'true'"
+)
+PENDING_FANOUT_SQL = "(metadata ->> 'atomic_facts') IS NOT NULL"
+PENDING_WORK_SQL = (
+    f"({PENDING_EMBEDDING_SQL} OR {PENDING_ENRICHMENT_SQL} OR {PENDING_FANOUT_SQL})"
+)
+
 
 class Memory(Base):
     __tablename__ = "memories"
@@ -231,5 +262,15 @@ class Memory(Base):
             "ix_memories_purgeable",
             "tenant_id",
             postgresql_where=text("deleted_at IS NOT NULL"),
+        ),
+        # Backs the ``pending`` / ``settled`` block of ``GET /memories/stats``
+        # (lme-0929-m-03). Partial on ``PENDING_WORK_SQL``, so it holds only
+        # rows with background work outstanding: empty for a settled store,
+        # and the count costs O(pending rows) instead of a tenant-wide scan.
+        # Created CONCURRENTLY in migration 053 with the same predicate.
+        Index(
+            "ix_memories_pending_work",
+            "tenant_id",
+            postgresql_where=text(f"deleted_at IS NULL AND {PENDING_WORK_SQL}"),
         ),
     )

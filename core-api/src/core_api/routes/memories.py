@@ -82,7 +82,6 @@ from core_api.services.agent_identity import reserved_write_refusal
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_label,
-    broker_owned_agent_id,
     enforce_delete,
     enforce_fleet_read,
     enforce_fleet_read_many,
@@ -360,6 +359,22 @@ async def _gate_fleet_read(
         await enforce_fleet_read(tenant_id, caller_agent_id, fleet_id)
 
 
+async def _effective_include_deleted(auth: AuthContext, include_deleted: bool) -> bool:
+    """``include_deleted`` as the caller is allowed to have it.
+
+    Soft-deleted rows are a trust-3 read for an agent credential, the rule MCP
+    ``caura_list`` / ``caura_stats`` already apply (``include_deleted and trust
+    >= 3``): below that the flag is silently ignored, so a retracted row stays
+    retracted for the agents a delete was meant to hide it from. Tenant keys
+    and sessions carry no trust level and keep the flag as sent. An
+    unregistered agent identity has no trust row and resolves to False.
+    """
+    if not include_deleted or not auth.agent_id or not auth.tenant_id:
+        return include_deleted
+    agent = await lookup_agent(auth.tenant_id, auth.agent_id)
+    return agent is not None and agent.get("trust_level", 0) >= 3
+
+
 async def _resolve_scoped_read(
     scope: str,
     *,
@@ -485,7 +500,14 @@ async def list_memories(
             "with 422 (not silently clamped); page via `cursor`/`offset` for more."
         ),
     ),
-    include_deleted: bool = Query(default=False),
+    include_deleted: bool = Query(
+        default=False,
+        description=(
+            "Include soft-deleted rows. Honoured for tenant credentials; an agent "
+            "credential needs trust >= 3, below which it is ignored (as on MCP "
+            "`caura_list`)."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """List memories with filtering, sorting, and pagination.
@@ -592,6 +614,7 @@ async def list_memories(
     list_payload: dict = {
         "tenant_id": tenant_id or "",
         "caller_agent_id": caller_agent_id,  # visibility scoping (authenticated identity)
+        "caller_tenant_id": auth.tenant_id,  # ...matched in the caller's home tenant only
         "fleet_id": fleet_id,
         "written_by": author_filter,  # author filter (written_by, else agent_id)
         "memory_type": memory_type,
@@ -602,7 +625,7 @@ async def list_memories(
         "run_id": run_id,
         "weight_min": weight_min,
         "weight_max": weight_max,
-        "include_deleted": include_deleted,
+        "include_deleted": await _effective_include_deleted(auth, include_deleted),
         "sort": sort,
         "order": order,
         "limit": limit,
@@ -678,10 +701,22 @@ async def memory_stats(
     ),
     memory_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
-    include_deleted: bool = Query(default=False),
+    include_deleted: bool = Query(
+        default=False,
+        description=(
+            "Also count soft-deleted rows. Honoured for tenant credentials; an "
+            "agent credential needs trust >= 3, below which it is ignored (as on "
+            "MCP `caura_stats`)."
+        ),
+    ),
     auth: AuthContext = Depends(get_auth_context),
 ):
     """Aggregate counts: total plus breakdowns by type, agent, and status.
+
+    Also reports ``pending`` (live rows in the same scope still owed an
+    embedding, an LLM enrichment, or an atomic-fact fan-out) and ``settled``
+    (none of the three). Poll until ``settled`` is true before measuring a
+    freshly ingested store.
 
     Mirrors ``GET /memories``: same visibility scoping, same fleet-read gate, and
     the same optional ``scope`` ladder, so a count can never disagree with the
@@ -749,7 +784,12 @@ async def memory_stats(
             "agent_id": effective_agent_id,
             "memory_type": memory_type,
             "status": status,
-            "include_deleted": include_deleted,
+            "include_deleted": await _effective_include_deleted(auth, include_deleted),
+            # lme-0929-m-03: additive ``pending`` / ``settled`` block so a caller
+            # can tell whether background work (embed / enrich / fan-out) is
+            # still due to change the store. REST-only; MCP ``caura_stats``
+            # keeps its shape.
+            "include_pending": True,
             # scope='agent' is home-tenant by definition — same rule as the list route.
             "readable_tenant_ids": (
                 auth.readable_tenant_ids
@@ -1049,6 +1089,7 @@ async def get_memory(
             visibility=memory.get("visibility"),
             owner_agent_id=memory.get("agent_id"),
             fleet_id=memory.get("fleet_id"),
+            caller_tenant_id=auth.tenant_id,
         )
         if not allowed:
             raise HTTPException(status_code=404, detail="Memory not found")
@@ -1176,6 +1217,7 @@ async def get_contradictions(
         visibility=memory.get("visibility"),
         owner_agent_id=memory.get("agent_id"),
         fleet_id=memory.get("fleet_id"),
+        caller_tenant_id=auth.tenant_id,
     )
     if not allowed:
         raise HTTPException(status_code=404, detail="Memory not found")
@@ -1639,17 +1681,19 @@ async def _write_memories_bulk_inner(
     #
     # NOTE: unlike single-write (_write_memory_inner) and the MCP write tool,
     # bulk deliberately does NOT enforce the per-agent approval gate
-    # (require_agent_approval / trust_level==0): it passes no require_approval and
-    # has no trust==0 check. Bulk is the broker (caura-daemon) fan-in path that
+    # (require_agent_approval / trust_level==0): it passes require_approval=False
+    # and has no trust==0 check. Bulk is the broker (caura-daemon) fan-in path that
     # auto-registers many agents from item metadata; gating each on admin
     # approval would create trust-0 rows and 403 whole batches, breaking capture.
-    # Per-agent approval is an interactive / single-agent concern.
+    # Per-agent approval is an interactive / single-agent concern. The explicit
+    # False matters: omitting it now means "read the tenant setting".
     agent, body.agent_id = await resolve_write_agent(
         chosen_agent_id,
         body.tenant_id,
         body.fleet_id,
         is_install_credential=auth.is_install_credential,
         install_uuid=auth.install_uuid,
+        require_approval=False,
     )
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
@@ -2237,6 +2281,31 @@ def _superseded_winner(choices: tuple[str, ...], extras: dict) -> str | None:
 _MAX_REPORTED_UNKNOWN = 20
 
 
+def _request_ranking_knobs(body: SearchRequest, config, *, allow_recall_bump: bool) -> dict:
+    """Fold the per-request ranking opt-outs into the tenant's resolved values.
+
+    lme-0929-h-01 (SIDE-54). ``SearchRequest.recall_boost`` / ``entity_boost``
+    are opt-out only: ``False`` neutralises the factor for this call, anything
+    else leaves the tenant's value untouched (so every existing caller, which
+    sends neither, gets exactly what it got before).
+
+    ``recall_boost=False`` also withholds the ``recall_count`` bump — a "plain"
+    read must not mutate the state that ranks the next one. The bump gate is
+    AND-ed with the route's own ``allow_recall_bump`` decision (#1197), never
+    widened by it.
+
+    Returned as ``search_memories`` kwargs so /search and /recall, which share
+    the body, cannot drift on how the knobs are applied — both search paths
+    (pipeline and legacy) already honour these three kwargs.
+    """
+    plain_recall = body.recall_boost is False
+    return {
+        "recall_boost": config.recall_boost and not plain_recall,
+        "entity_retrieval": config.entity_retrieval and body.entity_boost is not False,
+        "allow_recall_bump": allow_recall_bump and not plain_recall,
+    }
+
+
 def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
     """Report the request keys this surface accepted and then ignored.
 
@@ -2358,6 +2427,31 @@ def _unknown_param_warnings(body: SearchRequest, *, route: str) -> list[dict]:
     return warnings
 
 
+# SIDE-59 — cheap, always-on retrieval signal for ``POST /search``. Before this
+# the resolved strategy was visible only through ``diagnostic=true``, which also
+# dumps every candidate; a caller wondering why a "most recent ..." query came
+# back with 5 rows had no lighter way to find out.
+RETRIEVAL_STRATEGY_HEADER = "X-Caura-Retrieval-Strategy"
+EFFECTIVE_TOP_K_HEADER = "X-Caura-Effective-Top-K"
+
+
+def _set_retrieval_headers(response: Response, retrieval_ctx: dict) -> None:
+    """Expose the resolved strategy and any strategy-applied top_k cap as headers.
+
+    Header-only on purpose: ``SearchResponse`` is the /search body contract
+    (OpenAPI, SDKs), and the MCP tools build their own envelopes, so a header
+    changes neither. The strategy header is omitted when no strategy was
+    resolved (legacy search path); the top_k header only appears when a
+    strategy actually cut the caller's budget.
+    """
+    strategy = retrieval_ctx.get("retrieval_strategy")
+    if strategy:
+        response.headers[RETRIEVAL_STRATEGY_HEADER] = str(strategy)
+    effective_top_k = retrieval_ctx.get("effective_top_k")
+    if effective_top_k is not None:
+        response.headers[EFFECTIVE_TOP_K_HEADER] = str(effective_top_k)
+
+
 @router.post("/search", response_model=SearchResponse)
 @search_limit
 async def search(
@@ -2419,6 +2513,12 @@ async def _search_inner(
     # Filled by TrackRecalls (via search_memories) with whether this search
     # dispatched a recall_count bump — reported to the caller below.
     recall_ctx: dict = {}
+    # SIDE-59 — the resolved retrieval strategy (and any strategy-applied
+    # top_k cap), filled on every pipeline search and surfaced below as
+    # response headers. Headers rather than a ``SearchResponse`` field: the
+    # body schema stays untouched for integrators and the OpenAPI contract,
+    # and the full picture is still in ``diagnostic`` for callers who ask.
+    retrieval_ctx: dict = {}
     # A28 — always collected (no request flag gates it); only serialized below
     # when a step actually put something in it.
     # ax-0917-h-05 seeds it with any parameter the body carried and this route
@@ -2439,6 +2539,7 @@ async def _search_inner(
             # explicit filter) so the caller sees its own scope_agent rows and
             # nobody else's, even when filter_agent_id is omitted.
             caller_agent_id=eff_agent_id,
+            caller_tenant_id=auth.tenant_id,
             # An identity the caller ASSERTED does not move recall_count unless
             # the tenant opted in. Ranking is the reason: recall_boost defaults
             # to True, so without this gate one integration adding
@@ -2447,14 +2548,20 @@ async def _search_inner(
             #
             # Resolved here rather than in the step because the tenant config
             # lives at the route; the pipeline gets the decision, not the inputs.
-            allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
+            #
+            # lme-0929-h-01 — the per-request ranking opt-outs are folded in by
+            # ``_request_ranking_knobs`` (recall_boost / entity_retrieval /
+            # allow_recall_bump), never widening the tenant or #1197 gates.
+            **_request_ranking_knobs(
+                body,
+                config,
+                allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
+            ),
             memory_type_filter=body.memory_type_filter,
             status_filter=body.status_filter,
             valid_at=body.valid_at,
             top_k=body.top_k,
-            recall_boost=config.recall_boost,
             graph_expand=config.graph_expand,
-            entity_retrieval=config.entity_retrieval,
             tenant_config=config,
             search_profile=_agent.get("search_profile") if _agent else None,
             readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
@@ -2470,6 +2577,10 @@ async def _search_inner(
             # to a bool at this boundary would make every request an explicit
             # vote and the tenant setting could never take effect.
             include_derived=body.include_derived,
+            # SIDE-57 — ``limit`` is an alias of ``top_k``, and pydantic records
+            # the FIELD name in ``model_fields_set`` for either spelling.
+            top_k_explicit="top_k" in body.model_fields_set,
+            retrieval_ctx=retrieval_ctx,
         )
     except HTTPException:
         # Auth / tenant errors raised downstream are expected outcomes,
@@ -2505,6 +2616,7 @@ async def _search_inner(
                 },
             )
     recall_tracked = bool(recall_ctx.get("recall_tracked"))
+    _set_retrieval_headers(response, retrieval_ctx)
     # A28 — null when empty (matches ``diagnostic``); purely additive.
     warn_out = [SearchWarning(**w) for w in search_warnings] or None
     if not body.diagnostic:
@@ -2558,18 +2670,37 @@ async def ingest_commit_endpoint(
     response: Response,
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Write previewed facts as memories."""
+    """Write previewed facts as memories.
+
+    Identity resolves exactly as on ``POST /memories/bulk``: an agent-scoped
+    credential writes as its own verified identity whatever ``agent_id`` says
+    (``agent_id`` keeps its ``"ingest-agent"`` default for credentials that
+    carry none), the agent is registered on first contact, the broker
+    ownership boundary applies to install credentials, an omitted ``fleet_id``
+    resolves to the agent's home fleet, and a cross-fleet ``fleet_id`` needs
+    trust >= 3.
+    """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
-    if body.agent_id:
-        body.agent_id = canonical_service_agent_id(body.agent_id)
-    # Broker ownership boundary: degrade a foreign / reserved agent id to the
-    # install's own broker:<install> fallback so a broker can't attribute an
-    # ingested memory to an agent owned by another install (parity with the
-    # data-plane write paths; ingest_commit itself takes no AuthContext).
-    if auth.is_install_credential and body.agent_id:
-        body.agent_id = await broker_owned_agent_id(body.agent_id, auth.install_uuid, body.tenant_id)
+    # The bulk route's write-identity chain (``ingest_commit`` takes no
+    # AuthContext, so it has to run here). Binding first: a verified agent
+    # identity wins over the body, so ``agent_id`` can't name a peer.
+    chosen_agent_id = _resolve_rest_write_agent_id(auth, body.agent_id)
+    # Ownership boundary (gate + owner stamp + post-create re-check) and
+    # registration. Like bulk, a multi-item write with no trust==0 refusal;
+    # registration still honours the tenant's approval setting (the default).
+    agent, body.agent_id = await resolve_write_agent(
+        chosen_agent_id,
+        body.tenant_id,
+        body.fleet_id,
+        is_install_credential=auth.is_install_credential,
+        install_uuid=auth.install_uuid,
+    )
+    if not body.fleet_id and agent.get("fleet_id"):
+        body.fleet_id = agent["fleet_id"]
+    if auth.tenant_id:  # skip enforcement for admin
+        await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
     if auth.tenant_id:  # skip for admin
         # One unit PER FACT, not one per request. A commit writes
         # ``len(body.facts)`` memories, and every other multi-item write path
@@ -2668,9 +2799,16 @@ async def ingest_undo_endpoint(
 
     Returns ``{"deleted": N, "run_id": "..."}``. ``deleted=0`` is a valid
     response (no rows matched — already cleaned up or never existed).
+
+    Agent-scoped credentials need trust >= 3, as on every other delete route.
     """
     auth.enforce_read_only()
     auth.enforce_tenant(tenant_id)
+    # A batch undo is a bulk delete: an agent credential needs the trust every
+    # other delete route requires (trust >= 3). Tenant keys are unaffected —
+    # see ``enforce_delete`` for the contract.
+    if auth.tenant_id and auth.agent_id:
+        await enforce_delete(tenant_id, auth.agent_id)
 
     sc = get_storage_client()
     # Soft-delete the memory rows server-side (filters by run_id AND
@@ -2779,19 +2917,25 @@ async def recall_endpoint(
         # and no-op'd here, so the same body returned different rows on the two
         # routes with no error. The filter above stays a separate parameter.
         caller_agent_id=eff_agent_id,
+        caller_tenant_id=auth.tenant_id,
         # Same ranking guard /search applies: an ASSERTED identity must not move
         # recall_count unless the tenant opted in, or one integration adding
         # caller_agent_id reshuffles results for every other caller. Carried
         # here because honouring the field without this would fix a dropped
         # knob by giving it a side effect /search deliberately suppresses.
-        allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
+        # lme-0929-h-01 — same per-request ranking opt-outs as /search (the
+        # body is shared, so honouring them on one route only would repeat
+        # the ``caller_agent_id`` divergence).
+        **_request_ranking_knobs(
+            body,
+            config,
+            allow_recall_bump=(not identity_asserted) or config.recall_for_asserted_identity,
+        ),
         memory_type_filter=body.memory_type_filter,
         status_filter=body.status_filter,
         top_k=body.top_k,
         valid_at=body.valid_at,
-        recall_boost=config.recall_boost,
         graph_expand=config.graph_expand,
-        entity_retrieval=config.entity_retrieval,
         tenant_config=config,
         readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
         diagnostic=body.diagnostic,
@@ -2802,6 +2946,8 @@ async def recall_endpoint(
         # ``caller_agent_id`` already paid for once: the same body returned
         # different rows on the two routes with no error.
         include_derived=body.include_derived,
+        # SIDE-57 — same body as /search, same rule: a named top_k is honoured.
+        top_k_explicit="top_k" in body.model_fields_set,
     )
 
     # Release the pooled DB connection before the LLM round-trip.

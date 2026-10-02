@@ -40,6 +40,7 @@ class _StubAsyncClient:
         self._response = response
         self._raise = raise_on_post
         self.calls: list[tuple[str, dict | None]] = []
+        self.params: list[dict | None] = []
         # Kwargs the production code passed to ``httpx.AsyncClient(...)``.
         # Recorded so a test can assert the TIMEOUT reaches the client: the
         # call sites read it from settings, and nothing else here would notice
@@ -52,8 +53,11 @@ class _StubAsyncClient:
     async def __aexit__(self, *_: Any) -> None:
         return None
 
-    async def post(self, url: str, *, headers: dict | None = None) -> _StubResponse:
+    async def post(
+        self, url: str, *, headers: dict | None = None, params: dict | None = None
+    ) -> _StubResponse:
         self.calls.append((url, headers))
+        self.params.append(params)
         if self._raise is not None:
             raise self._raise
         assert self._response is not None
@@ -652,3 +656,30 @@ async def test_fanout_client_uses_the_core_api_timeout(monkeypatch: pytest.Monke
     assert timeout is not None, "fanout client was constructed without a timeout"
     assert timeout.read == settings.core_api_http_timeout_s
     assert timeout.connect == settings.core_api_http_timeout_s
+
+
+# ---------------------------------------------------------------------------
+# Sub-daily crystallize cadence: the consumer's dedup window follows it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("every_hours", "expected"), [(24, None), (48, None), (12, 11.5), (6, 5.5), (1, 0.5)]
+)
+def test_crystallize_dedup_window_follows_the_cadence(monkeypatch, every_hours, expected):
+    monkeypatch.setattr(tasks.settings, "lifecycle_crystallize_every_hours", every_hours)
+    assert tasks.crystallize_dedup_window_hours() == expected
+
+
+async def test_sub_daily_crystallize_tick_sends_its_dedup_window(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(tasks.settings, "lifecycle_crystallize_every_hours", 6)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, {"published": 1})) as stub:
+        await tasks.run_crystallize_tick()
+    assert stub.params == [{"dedup_window_hours": 5.5}]
+
+
+async def test_daily_crystallize_tick_sends_no_window(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(tasks.settings, "lifecycle_crystallize_every_hours", 24)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, {"published": 1})) as stub:
+        await tasks.run_crystallize_tick()
+    assert stub.params == [None]
