@@ -6727,7 +6727,11 @@ class PostgresService:
                 # carries an unexpanded ``[POSTCOMPILE_x]`` placeholder that the
                 # raw ``text()`` re-execution below cannot bind ("column __ ...").
                 .compile(
-                    dialect=postgresql.dialect(paramstyle="named"),
+                    # psycopg2's dialect, pinned: from SQLAlchemy 2.1 the default
+                    # PostgreSQL dialect is psycopg (v3), which renders
+                    # ``:name::VARCHAR`` bind casts, and ``text()`` does not
+                    # recognise a ``:name`` followed by ``::`` as a parameter.
+                    dialect=postgresql.psycopg2.dialect(paramstyle="named"),
                     compile_kwargs={"render_postcompile": True},
                 )
             )
