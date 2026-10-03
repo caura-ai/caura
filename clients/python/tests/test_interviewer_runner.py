@@ -32,7 +32,7 @@ class FakeServer:
     def __init__(self):
         self.watermarks: dict[str, int] = {}  # doc_id -> last_seq
         self.submits: list[dict] = []
-        self.script: list = []  # queue of "ok" | int status to force
+        self.script: list = []  # queue of "ok" | "timeout" | int status to force
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -50,6 +50,8 @@ class FakeServer:
             assert all(a < b for a, b in zip(seqs, seqs[1:])), "seqs not strictly ascending"
             assert seqs[0] >= body["cursor_from"] and seqs[-1] <= body["cursor_to"], "seq outside window"
             outcome = self.script.pop(0) if self.script else "ok"
+            if outcome == "timeout":
+                raise httpx.ReadTimeout("scripted timeout", request=request)
             if outcome == "ok" or outcome == 207:
                 doc_id = watermark_doc_id(body["node_id"])
                 self.watermarks[doc_id] = max(self.watermarks.get(doc_id, -1), body["cursor_to"])
@@ -135,6 +137,25 @@ def test_504_retries_once_then_succeeds(server, mc, tmp_path):
     assert server.submits[0]["cursor_from"] == server.submits[1]["cursor_from"]
     assert summary.files[0].windows_submitted == 1
     assert not summary.files[0].error
+
+
+def test_transport_error_retries_once_then_succeeds(server, mc, tmp_path):
+    transcript = _transcript(tmp_path)
+    server.script = ["timeout", "ok"]
+    summary = run_all(mc, [transcript], _cfg())
+    assert len(server.submits) == 2  # same window twice (dedup-safe)
+    assert server.submits[0]["cursor_from"] == server.submits[1]["cursor_from"]
+    assert summary.files[0].windows_submitted == 1
+    assert not summary.files[0].error
+
+
+def test_repeated_transport_error_skips_file(server, mc, tmp_path):
+    transcript = _transcript(tmp_path)
+    server.script = ["timeout", "timeout"]
+    summary = run_all(mc, [transcript], _cfg())
+    assert len(server.submits) == 2  # one retry, then give up on the file
+    assert summary.files[0].error.startswith("transport:")
+    assert summary.files[0].windows_submitted == 0
 
 
 def test_500_skips_file_without_retry(server, mc, tmp_path):
