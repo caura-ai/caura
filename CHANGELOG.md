@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.1](https://github.com/caura-ai/caura/compare/backend-v3.21.0...backend-v3.21.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **fleet:** bind each node to the credential that heartbeats it ([#1789](https://github.com/caura-ai/caura/issues/1789)) ([078b2c1](https://github.com/caura-ai/caura/commit/078b2c16a1bc8336d1176d18404824bbd3eefa08))
+
 ## [3.21.0](https://github.com/caura-ai/caura/compare/backend-v3.20.1...backend-v3.21.0) (2026-10-03)
 
 
