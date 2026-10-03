@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.4](https://github.com/caura-ai/caura/compare/backend-v3.21.3...backend-v3.21.4) (2026-10-03)
+
+
+### Bug Fixes
+
+* **core-api:** guard hosted sandboxes and test routes like production ([#1800](https://github.com/caura-ai/caura/issues/1800)) ([b5b27ab](https://github.com/caura-ai/caura/commit/b5b27ab5426c9ab19c54a1b9dbcd6c8b6bab67cf))
+
 ## [3.21.3](https://github.com/caura-ai/caura/compare/backend-v3.21.2...backend-v3.21.3) (2026-10-03)
 
 
