@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.2](https://github.com/caura-ai/caura/compare/backend-v3.21.1...backend-v3.21.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **graph:** hide graph data mined from soft-deleted memories from every reader ([#1796](https://github.com/caura-ai/caura/issues/1796)) ([97315d0](https://github.com/caura-ai/caura/commit/97315d06979beab324b8e400be911e46b722c2b1))
+* **interview:** admit a fleet node's window only on the request sent to it ([#1792](https://github.com/caura-ai/caura/issues/1792)) ([4c56b8e](https://github.com/caura-ai/caura/commit/4c56b8ed1af4d2d4972c79c048b535da0e95630e))
+* **models:** declare the JSON columns migration 001 creates as json ([#1794](https://github.com/caura-ai/caura/issues/1794)) ([e0a0a9b](https://github.com/caura-ai/caura/commit/e0a0a9bb6359b1395ca31b03a13b59d0df302258))
+
 ## [3.21.1](https://github.com/caura-ai/caura/compare/backend-v3.21.0...backend-v3.21.1) (2026-10-03)
 
 
