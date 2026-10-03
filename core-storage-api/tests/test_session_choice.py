@@ -276,11 +276,15 @@ def test_the_writer_session_population_is_pinned() -> None:
 
     141 -> 142 (pure unchanged at 65): ``fleet_claim_interview_request`` is new
     (M-86). It spends an interview request with ``sql_update``, a write.
+
+    142 -> 143 (pure unchanged at 65): ``organization_settings_encrypt_api_keys``
+    is new (M-99). It swaps keys with ``sql_update`` and audits with
+    ``pg_insert``, so it is a write.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 142, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 143, f"{len(methods)} methods open a writer session"
     assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 

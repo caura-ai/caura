@@ -8,8 +8,10 @@ provider call needs them (``ResolvedConfig``).
 
 * No key configured (dev, standalone): values are stored as before, so a
   local install keeps working without new setup.
-* Values written before this change have no prefix and are read as-is; they
-  are encrypted the next time the tenant saves them.
+* Values written before this change have no prefix and are read as-is. core-api
+  encrypts them the first time it loads the tenant's settings
+  (``organization_settings._encrypt_legacy_api_keys``, M-99), or when the
+  tenant next saves them.
 * ``SETTINGS_ENCRYPTION_KEY`` is normally a Fernet key. Any other non-empty
   string is accepted by deriving a Fernet key from its SHA-256, so an
   operator who set a random string does not lose settings writes.
@@ -21,12 +23,15 @@ import base64
 import hashlib
 import logging
 from functools import lru_cache
+from typing import TypeGuard
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from common.constants import ENCRYPTED_SETTING_PREFIX
+
 logger = logging.getLogger(__name__)
 
-PREFIX = "enc:v1:"
+PREFIX = ENCRYPTED_SETTING_PREFIX
 
 
 @lru_cache(maxsize=4)
@@ -45,6 +50,16 @@ def _fernet() -> Fernet | None:
     return _fernet_for(key) if key else None
 
 
+def encryption_enabled() -> bool:
+    """True when ``SETTINGS_ENCRYPTION_KEY`` is set, so keys are stored encrypted."""
+    return _fernet() is not None
+
+
+def needs_encryption(value: object) -> TypeGuard[str]:
+    """A stored ``api_keys`` value still in plaintext: a non-empty string without ``PREFIX``."""
+    return isinstance(value, str) and bool(value) and not value.startswith(PREFIX)
+
+
 def encrypt_api_keys(section: dict) -> dict:
     """``api_keys`` section with every non-empty string value encrypted."""
     f = _fernet()
@@ -52,7 +67,7 @@ def encrypt_api_keys(section: dict) -> dict:
         return section
     out: dict = {}
     for name, value in section.items():
-        if isinstance(value, str) and value and not value.startswith(PREFIX):
+        if needs_encryption(value):
             out[name] = PREFIX + f.encrypt(value.encode()).decode()
         else:
             out[name] = value

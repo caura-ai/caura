@@ -3265,6 +3265,24 @@ class CoreStorageClient:
             )
         return result
 
+    async def encrypt_org_api_keys(
+        self, org_id: str, *, expected: dict[str, str], encrypted: dict[str, str], changed_by: str
+    ) -> list[str]:
+        """Swap each key for its ciphertext while it still holds ``expected`` (M-99).
+
+        Returns the names swapped. Non-idempotent ``_post``, though a replay is
+        harmless: a swapped key no longer matches ``expected``.
+        """
+        result = await self._post(
+            f"/organization-settings/{org_id}/encrypt-api-keys",
+            {"expected": expected, "encrypted": encrypted, "changed_by": changed_by},
+        )
+        if not isinstance(result, dict):
+            raise ValueError(
+                f"core-storage-api returned unexpected type for api-key encryption: {type(result).__name__!r}"
+            )
+        return result.get("swapped", [])
+
     # =====================================================================
     # Tenant discovery (Fix 2 Phase 1) — lifecycle-fanout target lists
     # =====================================================================

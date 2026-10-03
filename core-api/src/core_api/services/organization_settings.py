@@ -45,7 +45,12 @@ from core_api.constants import (
     CRYSTALLIZER_DEDUP_THRESHOLD,
     CRYSTALLIZER_MIN_CLUSTER_SIZE,
 )
-from core_api.services.settings_crypto import decrypt_api_key, encrypt_api_keys
+from core_api.services.settings_crypto import (
+    decrypt_api_key,
+    encrypt_api_keys,
+    encryption_enabled,
+    needs_encryption,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -849,6 +854,23 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
 }
 
 
+def _validate_api_keys(payload: dict) -> None:
+    """Raise ``ValueError`` for a provider key that is neither a string nor ``null``.
+
+    ``api_keys`` declares no keys, so ``_check_keys`` accepts any value under it.
+    Only strings are encrypted, so a key sent inside a list or an object would be
+    stored as submitted, and it could not work as a key anyway (M-99).
+    """
+    api_keys = payload.get("api_keys")
+    if not isinstance(api_keys, dict):
+        return
+    for name, value in api_keys.items():
+        if value is not None and not isinstance(value, str):
+            raise ValueError(
+                f"Settings key 'api_keys.{name}' must be a string or null, got {type(value).__name__}"
+            )
+
+
 def _validate_leaf_types(payload: dict, prefix: str = "") -> None:
     """Raise ``ValueError`` if any leaf value has the wrong Python type
     or falls outside its declared inclusive range.
@@ -1570,10 +1592,42 @@ async def _load_and_cache(tenant_id: str) -> dict:
     # The cost is bounded by the thing the cache already guarantees: at most one
     # read per tenant per TTL per process. That is what makes taking it from the
     # primary affordable here and not elsewhere.
-    resolved = await get_storage_client().get_org_settings(tenant_id)
+    stored = await get_storage_client().get_org_settings(tenant_id)
+    resolved = await _encrypt_legacy_api_keys(tenant_id, stored)
     _settings_cache[tenant_id] = resolved
     logger.info("organization_settings cache miss for %s; loaded via storage-api and cached", tenant_id)
     return resolved
+
+
+async def _encrypt_legacy_api_keys(tenant_id: str, stored: dict) -> dict:
+    """Encrypt provider keys stored before ``api_keys`` were encrypted (M-99).
+
+    ``update_settings`` encrypts every key it saves, but a key saved before that
+    stays plaintext until its tenant saves again. The first load after the
+    deploy swaps it, so every tenant in use is converted without a cross-tenant
+    sweep. Storage swaps a key only while it still holds the plaintext read
+    here, so a tenant saving a new key meanwhile keeps it, and workers loading
+    together swap each key once. Without ``SETTINGS_ENCRYPTION_KEY`` nothing
+    changes, as the save path then stores plaintext too. A failure leaves the
+    keys as they were, which ``decrypt_api_key`` reads, and the next load retries.
+    """
+    api_keys = stored.get("api_keys")
+    if not encryption_enabled() or not isinstance(api_keys, dict):
+        return stored
+    plaintext = {name: value for name, value in api_keys.items() if needs_encryption(value)}
+    if not plaintext:
+        return stored
+    encrypted = encrypt_api_keys(plaintext)
+    try:
+        swapped = await get_storage_client().encrypt_org_api_keys(
+            tenant_id, expected=plaintext, encrypted=encrypted, changed_by="system:encrypt-legacy-api-keys"
+        )
+    except Exception:
+        logger.warning(
+            "legacy api_keys encryption failed for %s; keys left as stored", tenant_id, exc_info=True
+        )
+        return stored
+    return {**stored, "api_keys": {**api_keys, **{name: encrypted[name] for name in swapped}}}
 
 
 # C36 — provider keys must never leave the server readable. Display replaces
@@ -1668,6 +1722,7 @@ async def update_settings(
     new_settings = filtered
 
     _check_keys(new_settings, DEFAULT_SETTINGS)
+    _validate_api_keys(new_settings)
     _validate_leaf_types(new_settings)
     _validate_governance_enums(new_settings)
     _validate_default_search_profile(new_settings)

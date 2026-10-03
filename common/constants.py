@@ -813,3 +813,13 @@ REPORT_RUNNING_STALE_AFTER = timedelta(hours=1)
 # credential. A gateway-verified narrow credential binds as ``agent:<id>`` or
 # ``install:<uuid>`` instead.
 NODE_PRINCIPAL_TENANT = "tenant"
+
+
+# ---------------------------------------------------------------------------
+# Settings encryption
+# ---------------------------------------------------------------------------
+
+# Prefix of an ``api_keys`` value core-api encrypted with SETTINGS_ENCRYPTION_KEY
+# (``enc:v1:<Fernet token>``). Here so storage can tell a legacy plaintext key
+# from an encrypted one without holding the key (M-99).
+ENCRYPTED_SETTING_PREFIX = "enc:v1:"

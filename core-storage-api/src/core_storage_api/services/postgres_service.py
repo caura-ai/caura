@@ -58,6 +58,7 @@ from common.constants import (
     CONTRADICTION_CANDIDATE_MAX,
     CONTRADICTION_SIMILARITY_THRESHOLD,
     DEFAULT_RELATION_TYPE_WEIGHT,
+    ENCRYPTED_SETTING_PREFIX,
     ENTITY_RESOLUTION_CANDIDATE_LIMIT,
     GRAPH_MAX_EXPANDED_ENTITIES,
     GRAPH_MAX_HOPS,
@@ -13386,6 +13387,56 @@ class PostgresService:
             )
             await _write_audit(diff)
             return {"settings": merged, "changed": True}
+
+    async def organization_settings_encrypt_api_keys(
+        self,
+        *,
+        org_id: str,
+        expected: dict[str, str],
+        encrypted: dict[str, str],
+        changed_by: str | None = None,
+    ) -> list[str]:
+        """Swap plaintext provider keys for core-api's ciphertext, each only while unchanged (M-99).
+
+        ``expected`` is the plaintext core-api read and encrypted. A key the
+        tenant has saved since no longer matches it and is left alone, so a
+        newer save is never overwritten with an older key, and workers loading
+        the same org at once swap each key once. A replacement without the encrypted prefix
+        is refused, so this never stores plaintext. Same transaction as
+        ``organization_settings_update``: the row ``FOR UPDATE``, the write, and an
+        audit row through ``diff_settings``, which masks both sides. Returns the
+        names swapped, sorted.
+        """
+        async with get_session() as session:
+            current = (
+                await session.execute(
+                    select(OrganizationSettings.settings)
+                    .where(OrganizationSettings.org_id == org_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if not isinstance(current, dict) or not isinstance(current.get("api_keys"), dict):
+                return []
+            stored = current["api_keys"]
+            swap = {
+                name: encrypted[name]
+                for name, value in expected.items()
+                if encrypted.get(name, "").startswith(ENCRYPTED_SETTING_PREFIX) and stored.get(name) == value
+            }
+            if not swap:
+                return []
+            patch = {"api_keys": swap}
+            await session.execute(
+                sql_update(OrganizationSettings)
+                .where(OrganizationSettings.org_id == org_id)
+                .values(settings=merge_settings_update(current, patch), updated_at=func.now())
+            )
+            await session.execute(
+                pg_insert(OrganizationSettingsAudit).values(
+                    org_id=org_id, changed_by=changed_by, diff=diff_settings(current, patch)
+                )
+            )
+            return sorted(swap)
 
     # ══════════════════════════════════════════════════════════════════════
     #  TENANT DISCOVERY (lifecycle fanout target lists)
