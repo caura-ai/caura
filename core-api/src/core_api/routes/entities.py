@@ -64,7 +64,8 @@ async def list_entities(
     # may not read, and ``memory_count`` covers the readable ones alone: the
     # name is mined from memory text, and ``GET /entities/{id}`` already hides
     # the memories behind it. Link-less entities stay visible. Tenant / user /
-    # admin credentials keep the full list.
+    # admin credentials keep the full list, less entities mined only from
+    # soft-deleted memories, which storage hides from every reader (M-92).
     reader = await entity_reader_scope(tenant_id, auth.agent_id, auth.tenant_id)
     entities = await sc.list_entities(
         tenant_id,

@@ -990,6 +990,39 @@ def _entity_visible_to_agent(
     )
 
 
+def _entity_visible_to_tenant(tenant_id: str) -> ColumnElement[bool]:
+    """``Entity`` is listable for a tenant / user / admin reader (M-92).
+
+    ``_entity_visible_to_agent`` with every live memory readable: visible with
+    no memory links, or with a link to a memory that is not soft-deleted. An
+    entity mined only from deleted content is hidden for the undo window, as it
+    already was for agents, and comes back if the delete is undone; the
+    retention purge then removes it with the memory.
+    """
+    return or_(
+        ~_entity_has_readable_memory(Memory.tenant_id == tenant_id),
+        _entity_has_readable_memory(and_(Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None))),
+    )
+
+
+def _relation_has_live_evidence() -> ColumnElement[bool]:
+    """``Relation`` is not derived only from soft-deleted memories (M-92).
+
+    Kept when it has no evidence at all (a caller's own edge, or one whose
+    evidence a pre-#1775 hard delete set to NULL, which nothing can tell apart),
+    or when any of its evidence is live: ``evidence_memory_id`` or any
+    ``relation_evidence`` row. So an edge some live memory still asserts stays,
+    even when its latest evidence is the deleted one.
+    """
+    live = Memory.deleted_at.is_(None)
+    recorded = select(RelationEvidence.memory_id).where(RelationEvidence.relation_id == Relation.id)
+    return or_(
+        and_(Relation.evidence_memory_id.is_(None), ~recorded.exists()),
+        select(Memory.id).where(Memory.id == Relation.evidence_memory_id, live).exists(),
+        recorded.join(Memory, Memory.id == RelationEvidence.memory_id).where(live).exists(),
+    )
+
+
 # Columns ``fleet_upsert_node``'s ON CONFLICT DO UPDATE must not rewrite. The
 # insert half of that statement still uses every key the caller sent; this is
 # only the branch that lands on a row that already exists.
@@ -7542,8 +7575,9 @@ class PostgresService:
         all point at memories that reader may not read is left out — see
         ``_entity_visible_to_agent``; link-less entities stay listed. In SQL,
         before ``LIMIT``, so a page is never short because hidden rows took
-        its slots. Without one
-        (tenant / user / admin credentials) the list is tenant-wide.
+        its slots. Without one (tenant / user / admin credentials) only an
+        entity mined solely from soft-deleted memories is left out — see
+        ``_entity_visible_to_tenant`` (M-92).
         """
         async with get_session() as session:
             # ORDER BY is what makes OFFSET/LIMIT mean anything. Postgres
@@ -7576,6 +7610,8 @@ class PostgresService:
                 stmt = stmt.where(
                     _entity_visible_to_agent(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
                 )
+            else:
+                stmt = stmt.where(_entity_visible_to_tenant(tenant_id))
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
@@ -7876,6 +7912,8 @@ class PostgresService:
                 .where(
                     Relation.from_entity_id == entity_id,
                     Relation.tenant_id == tenant_id,
+                    # M-92 — not an edge mined only from soft-deleted memories.
+                    _relation_has_live_evidence(),
                 )
             )
             result = await session.execute(stmt)
@@ -8004,10 +8042,11 @@ class PostgresService:
     ) -> tuple[list[Entity], list[Relation]]:
         """Return all entities and relations for a tenant (optionally filtered by fleet).
 
-        With ``caller_agent_id`` the nodes are narrowed exactly as
-        ``entity_list`` narrows them, and an edge is kept only when both of its
-        endpoints survived — an edge to a hidden node would name it by id.
-        (core-api separately drops edges whose evidence the reader cannot read.)
+        The nodes are narrowed exactly as ``entity_list`` narrows them for the
+        same reader, and an edge is kept only when both of its endpoints
+        survived (an edge to a hidden node would name it by id) and it is not
+        derived only from soft-deleted memories (``_relation_has_live_evidence``,
+        M-92). core-api separately drops edges whose evidence an agent cannot read.
 
         Skips the heavy ``name_embedding`` (pgvector) and ``search_vector`` (TSVECTOR)
         columns — the graph view doesn't need them, and loading + serialising them
@@ -8034,21 +8073,25 @@ class PostgresService:
                 entity_stmt = entity_stmt.where(
                     _entity_visible_to_agent(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
                 )
+            else:
+                entity_stmt = entity_stmt.where(_entity_visible_to_tenant(tenant_id))
             entities_result = await session.execute(entity_stmt)
             entities = list(entities_result.scalars().all())
 
-            relation_stmt = select(Relation).where(Relation.tenant_id == tenant_id)
+            relation_stmt = select(Relation).where(
+                Relation.tenant_id == tenant_id, _relation_has_live_evidence()
+            )
             if fleet_id:
                 relation_stmt = relation_stmt.where(
                     or_(Relation.fleet_id == fleet_id, Relation.fleet_id.is_(None))
                 )
             relations_result = await session.execute(relation_stmt)
-            relations = list(relations_result.scalars().all())
-            if caller_agent_id:
-                node_ids = {e.id for e in entities}
-                relations = [
-                    r for r in relations if r.from_entity_id in node_ids and r.to_entity_id in node_ids
-                ]
+            node_ids = {e.id for e in entities}
+            relations = [
+                r
+                for r in relations_result.scalars().all()
+                if r.from_entity_id in node_ids and r.to_entity_id in node_ids
+            ]
 
             return entities, relations
 

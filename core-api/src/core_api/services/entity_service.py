@@ -201,7 +201,9 @@ async def entity_reader_scope(
     unknown), otherwise the fleets its ``scope_team`` reads are confined to.
 
     ``None`` for tenant / user / admin credentials: those keep the
-    tenant-wide listing, as ``get_entity`` and the relation filter do.
+    tenant-wide listing, as ``get_entity`` and the relation filter do, less
+    what storage hides from every reader: entities mined only from
+    soft-deleted memories, and edges with no live evidence (M-92).
     """
     if not caller_agent_id:
         return None
