@@ -102,4 +102,6 @@ def _is_secret_path(path: str) -> bool:
 
 
 def _mask(value: object) -> object:
-    return "****" if isinstance(value, str) and value else value
+    """Every value but ``None`` and ``""``: ``api_keys`` takes any value under it,
+    so a key can arrive in a list or an object and is still a key."""
+    return value if value is None or value == "" else "****"
