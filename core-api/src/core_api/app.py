@@ -167,16 +167,71 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
     entire job is to prevent unsafe production boots had no tests of its own.
 
     Storage authentication is required in every environment because the storage
-    service enforces it unconditionally. The remaining guards are production-only.
+    service enforces it unconditionally. Standalone mode and a missing perimeter
+    are refused in every hosted environment, ``sandbox`` included. The remaining
+    guards are production-only.
     """
     if _blank_secret(app_settings.core_storage_shared_secret):
         raise RuntimeError("CORE_STORAGE_SHARED_SECRET is required for core-api")
-    if app_settings.environment != "production":
+    if app_settings.environment == "development":
         return
+    # Hosted from here: production, and ``sandbox``, which staging and every
+    # sandbox deployment run as (M-78). Both are reachable like production, so
+    # both refuse the two settings that leave the service open to anyone.
     if app_settings.is_standalone:
         raise RuntimeError(
-            "IS_STANDALONE=true is not allowed in production. "
-            "Set IS_STANDALONE=false for production deployments."
+            f"IS_STANDALONE=true is not allowed when ENVIRONMENT={app_settings.environment}. "
+            "Set IS_STANDALONE=false for hosted deployments."
+        )
+    no_gateway_secret = _blank_secret(app_settings.gateway_shared_secret)
+    no_compat_key = _blank_secret(app_settings.memclaw_api_key)  # legacy-name-ok: compat alias field
+    if no_gateway_secret and no_compat_key:
+        # What production actually requires is A PERIMETER — not specifically the
+        # gateway one. ``CAURA_API_KEY`` is the other way to have one: when it
+        # is set, auth.py's "Path 2" either authenticates the request against
+        # that key or raises 401 for everything else, so "Path 4" below it is
+        # UNREACHABLE and there is no header-trust surface left to protect. That
+        # is the documented network-exposed OSS pattern, and such a deployment
+        # legitimately sets ENVIRONMENT=production for JSON logging and Sentry.
+        # Demanding a gateway secret it has no gateway for would be a boot
+        # failure with no security value.
+        #
+        # The X-Tenant-ID auth path (auth.py "Path 4") carries NO credential of
+        # its own — it trusts the gateway to have authenticated the caller and
+        # injected the identity headers. Its perimeter check reads
+        # ``if gw_secret and not compare_digest(...)``, which is a NO-OP when the
+        # secret is unset. So an unset secret does not weaken that path, it
+        # DISABLES it: anyone able to reach this service directly (its public
+        # run.app URL, a sidecar, anything inside the VPC) becomes any tenant by
+        # setting a header.
+        #
+        # Refusing to boot is deliberately louder than 401ing the path per
+        # request. A silently-open perimeter is indistinguishable from a working
+        # one from the outside — which is how it would reach production
+        # unnoticed in the first place — whereas a service that will not start
+        # gets caught at deploy.
+        raise RuntimeError(
+            "GATEWAY_SHARED_SECRET (or CAURA_API_KEY, legacy: MEMCLAW_API_KEY) "  # legacy-name-ok: taught as legacy alias
+            f"must be set when ENVIRONMENT={app_settings.environment}. With neither, the "
+            "X-Tenant-ID header-trust auth path accepts caller-supplied identity "
+            "headers from anyone who can reach this service directly. Set "
+            "GATEWAY_SHARED_SECRET to the same value the gateway injects as "
+            "X-Gateway-Secret, or set CAURA_API_KEY if this deployment is not "
+            "fronted by the gateway."
+        )
+    if app_settings.environment != "production":
+        # JWT_SECRET, ADMIN_API_KEY and SETTINGS_ENCRYPTION_KEY stay
+        # production-only, by decision: whether staging and the sandboxes set
+        # them lives in their Cloud Run state, outside this repo, and a guard
+        # that fails there takes the deployment down rather than warning.
+        return
+    if _os.getenv("TESTING") == "1":
+        # TESTING=1 registers the test-only ``/testing`` routes (time-warp
+        # rewrites memory timestamps), and the same variable is their runtime
+        # check, so one inherited from a CI image would leave them live (L-68).
+        raise RuntimeError(
+            "TESTING=1 is not allowed when ENVIRONMENT=production: it registers the test-only "
+            "/testing routes. Unset TESTING for production deployments."
         )
     if _blank_secret(app_settings.settings_encryption_key):
         raise RuntimeError(
@@ -207,42 +262,6 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
             raise RuntimeError(f"{var.upper()} must be changed from default for production")
     if _blank_secret(app_settings.admin_api_key):
         raise RuntimeError("ADMIN_API_KEY must be set for production")
-    no_gateway_secret = _blank_secret(app_settings.gateway_shared_secret)
-    no_compat_key = _blank_secret(app_settings.memclaw_api_key)  # legacy-name-ok: compat alias field
-    if no_gateway_secret and no_compat_key:
-        # What production actually requires is A PERIMETER — not specifically the
-        # gateway one. ``CAURA_API_KEY`` is the other way to have one: when it
-        # is set, auth.py's "Path 2" either authenticates the request against
-        # that key or raises 401 for everything else, so "Path 4" below it is
-        # UNREACHABLE and there is no header-trust surface left to protect. That
-        # is the documented network-exposed OSS pattern, and such a deployment
-        # legitimately sets ENVIRONMENT=production for JSON logging and Sentry.
-        # Demanding a gateway secret it has no gateway for would be a boot
-        # failure with no security value.
-        #
-        # The X-Tenant-ID auth path (auth.py "Path 4") carries NO credential of
-        # its own — it trusts the gateway to have authenticated the caller and
-        # injected the identity headers. Its perimeter check reads
-        # ``if gw_secret and not compare_digest(...)``, which is a NO-OP when the
-        # secret is unset. So an unset secret does not weaken that path, it
-        # DISABLES it: anyone able to reach this service directly (its public
-        # run.app URL, a sidecar, anything inside the VPC) becomes any tenant by
-        # setting a header.
-        #
-        # Refusing to boot is deliberately louder than 401ing the path per
-        # request. A silently-open perimeter is indistinguishable from a working
-        # one from the outside — which is how it would reach production
-        # unnoticed in the first place — whereas a service that will not start
-        # gets caught at deploy.
-        raise RuntimeError(
-            "GATEWAY_SHARED_SECRET (or CAURA_API_KEY, legacy: MEMCLAW_API_KEY) "  # legacy-name-ok: taught as legacy alias
-            "must be set when ENVIRONMENT=production. With neither, the "
-            "X-Tenant-ID header-trust auth path accepts caller-supplied identity "
-            "headers from anyone who can reach this service directly. Set "
-            "GATEWAY_SHARED_SECRET to the same value the gateway injects as "
-            "X-Gateway-Secret, or set CAURA_API_KEY if this deployment is not "
-            "fronted by the gateway."
-        )
 
 
 async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
@@ -1041,21 +1060,24 @@ app.add_middleware(
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch-all for non-HTTPException failures. Returns 500 with both
     the back-compat ``detail`` field AND the canonical ``error`` envelope.
-    Includes ``path`` and ``error_type`` outside production for debugging.
+    Includes the exception's message and ``error_type`` only in development:
+    a hosted ``sandbox`` is reachable like production, and the message can
+    carry internal hostnames or URLs (M-78). The log keeps the full exception.
     """
     from core_api.errors import make_error_payload
 
     logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
-    detail = str(exc) if app_settings.environment != "production" else "Internal Server Error"
+    expose = app_settings.environment == "development"
+    detail = str(exc) if expose else "Internal Server Error"
     details: dict = {"path": request.url.path}
-    if app_settings.environment != "production":
+    if expose:
         details["error_type"] = type(exc).__name__
     content: dict = {
         "detail": detail,
         "path": request.url.path,
         **make_error_payload("INTERNAL_ERROR", detail, details=details),
     }
-    if app_settings.environment != "production":
+    if expose:
         content["error_type"] = type(exc).__name__
     return JSONResponse(status_code=500, content=content)
 
