@@ -204,7 +204,7 @@ _TARGETS: tuple[_TableSpec, ...] = (
         content_column="content",
         has_deleted_at=True,
         # The DATABASE column is ``metadata``. ``metadata_`` is the Python
-        # attribute name on the ORM model — ``mapped_column("metadata", JSONB)``
+        # attribute name on the ORM model — ``mapped_column("metadata", JSON)``
         # renames it because ``metadata`` collides with SQLAlchemy's own
         # ``Base.metadata``. This script emits raw SQL, so it needs the
         # database's name. Carrying the ORM's spelling here meant
@@ -298,8 +298,8 @@ async def _iter_rows(
                     f"_TableSpec.table={spec.table!r}; got metadata_column=None"
                 )
             # No ``? 'retrieval_hint'`` existence test. ``?`` is jsonb-only and
-            # this column is ``json`` (the migration chain creates it that way
-            # regardless of the model declaring JSONB), so it raised
+            # this column is ``json`` (migration 001 creates it that way; the
+            # model declared JSONB until CAURA-595 was reconciled), so it raised
             # UndefinedFunctionError: operator does not exist: json ? unknown.
             # It was also redundant — the COALESCE below already excludes an
             # absent key: ``->>`` yields NULL for a missing key and for a NULL

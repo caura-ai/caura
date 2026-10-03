@@ -2,7 +2,7 @@ import uuid
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Float, ForeignKey, Index, Text, UniqueConstraint, func, text
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
+from sqlalchemy.dialects.postgresql import JSON, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.constants import VECTOR_DIM
@@ -19,7 +19,9 @@ class Entity(Base):
     fleet_id: Mapped[str | None] = mapped_column(Text)
     entity_type: Mapped[str] = mapped_column(Text, nullable=False)
     canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
-    attributes: Mapped[dict | None] = mapped_column(JSONB)
+    # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
+    # ``test_models_match_the_migrated_schema`` holds the model to the schema.
+    attributes: Mapped[dict | None] = mapped_column(JSON)
     name_embedding = mapped_column(Vector(VECTOR_DIM))
     search_vector = mapped_column(TSVECTOR)
 

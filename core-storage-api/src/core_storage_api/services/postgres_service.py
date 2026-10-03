@@ -2181,13 +2181,13 @@ class PostgresService:
                 # ``||`` operator.
                 #
                 # ``metadata::jsonb`` cast on the column handles the
-                # CAURA-595 production drift case: the ORM declares the
-                # column as ``JSONB`` (common/models/memory.py) but
-                # legacy Postgres tables created before the JSONB
-                # migration store it as ``json`` (lowercase). Without
-                # the explicit cast, ``COALESCE(metadata, '{}'::jsonb)``
-                # raises ``CannotCoerceError: COALESCE could not
-                # convert type jsonb to json`` on those installations.
+                # CAURA-595 drift: migration 001 creates the column as
+                # ``json`` (lowercase), and a database ``create_all``
+                # built from the old JSONB model may still hold
+                # ``jsonb``. Without the explicit cast,
+                # ``COALESCE(metadata, '{}'::jsonb)`` raises
+                # ``CannotCoerceError: COALESCE could not convert type
+                # jsonb to json`` on every migrated installation.
                 # The cast is a no-op when the column is already
                 # ``jsonb`` and a one-time conversion when it isn't —
                 # cheap either way relative to the network round-trip.
@@ -12411,8 +12411,8 @@ class PostgresService:
                     FleetCommand.command == "interview_request",
                     FleetCommand.status == "acked",
                     # Written without a result it holds SQL NULL; with an explicit
-                    # ``None``, JSON ``null``. Compared as text because migration 001
-                    # made the column ``json``, not the ``jsonb`` the model declares.
+                    # ``None``, JSON ``null``. Compared as text so it holds on ``json``
+                    # (every migrated database) and on ``jsonb`` (CAURA-595).
                     or_(FleetCommand.result.is_(None), cast(FleetCommand.result, String) == "null"),
                 )
                 .values(result={"claimed_by": "interview_submit"})
