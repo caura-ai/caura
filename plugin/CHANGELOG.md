@@ -4,6 +4,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.23.4](https://github.com/caura-ai/caura/compare/plugin-v2.23.3...plugin-v2.23.4) (2026-10-03)
+
+
+### Bug Fixes
+
+* apply the same identity, trust, fleet and visibility rules across write paths, lifecycle and audit ([#1775](https://github.com/caura-ai/caura/issues/1775)) ([b58759f](https://github.com/caura-ai/caura/commit/b58759f0da0b2a6921a070723c25f6c353a5a7bf))
+* **plugin:** align tool parameters and document requests with REST ([#1779](https://github.com/caura-ai/caura/issues/1779)) ([b3ef98d](https://github.com/caura-ai/caura/commit/b3ef98d40ab931c7bbf5c3b89cab7b3aafedffd6))
+* **plugin:** bound credential provisioning and reject API redirects ([#1780](https://github.com/caura-ai/caura/issues/1780)) ([8bf503d](https://github.com/caura-ai/caura/commit/8bf503d13031ea48c2027d228b5f12a66f028c97))
+* **plugin:** honor auto-write opt-out for conversation persistence ([#1778](https://github.com/caura-ai/caura/issues/1778)) ([ad8f8c3](https://github.com/caura-ai/caura/commit/ad8f8c3501325a8a908a56fdab800d6a5334c60b))
+* **plugin:** preserve keystone truncation and normalize tool results ([#1781](https://github.com/caura-ai/caura/issues/1781)) ([1adae88](https://github.com/caura-ai/caura/commit/1adae8887701723b81e3d570d4ed9eb319aa7a34))
+* **plugin:** refuse to send the API key over plain HTTP to non-loopback hosts (oss-0917-m-01) ([#1745](https://github.com/caura-ai/caura/issues/1745)) ([4981f45](https://github.com/caura-ai/caura/commit/4981f45cab1029d1f33009c0529302b9309a093b))
+* tighten fleet command validation, installer URL handling and settings storage ([#1769](https://github.com/caura-ai/caura/issues/1769)) ([f96768c](https://github.com/caura-ai/caura/commit/f96768c7fe1fd46c903c130946b841ba5fe07a33))
+
 ## [2.23.3](https://github.com/caura-ai/caura/compare/plugin-v2.23.2...plugin-v2.23.3) (2026-09-26)
 
 

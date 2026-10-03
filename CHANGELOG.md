@@ -10,6 +10,62 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.0](https://github.com/caura-ai/caura/compare/backend-v3.20.1...backend-v3.21.0) (2026-10-03)
+
+
+### Features
+
+* **contradiction:** add a per-tenant switch to turn contradiction detection off (SIDE-58) ([#1761](https://github.com/caura-ai/caura/issues/1761)) ([8ce0fff](https://github.com/caura-ai/caura/commit/8ce0fffbfbcedd20ee6f8b34c5a20bb615111b75))
+* **search:** per-request recall_boost/entity_boost opt-outs on REST /search ([#1763](https://github.com/caura-ai/caura/issues/1763)) ([9a6eb4e](https://github.com/caura-ai/caura/commit/9a6eb4eda90d537c42fcc3de7c14ce2543425c2b))
+* **stats:** report pending background work and a settled flag on GET /memories/stats ([#1768](https://github.com/caura-ai/caura/issues/1768)) ([5ea8f80](https://github.com/caura-ai/caura/commit/5ea8f8024ba4b49f711898b8f182681a4da670a6))
+
+
+### Bug Fixes
+
+* apply the same identity, trust, fleet and visibility rules across write paths, lifecycle and audit ([#1775](https://github.com/caura-ai/caura/issues/1775)) ([b58759f](https://github.com/caura-ai/caura/commit/b58759f0da0b2a6921a070723c25f6c353a5a7bf))
+* **audit:** give the audit flusher's storage-slot acquire its own budget (oss-0927-m-04) ([#1741](https://github.com/caura-ai/caura/issues/1741)) ([ac33b26](https://github.com/caura-ai/caura/commit/ac33b26f080846517a3d900e4012eacb7a07ad89))
+* **ci:** isolate review tools from runner credentials ([#1784](https://github.com/caura-ai/caura/issues/1784)) ([5bc489e](https://github.com/caura-ai/caura/commit/5bc489ec4d833045253eefa81a013d15759220cf))
+* **ci:** validate review-memory authors before model capture ([#1783](https://github.com/caura-ai/caura/issues/1783)) ([2273911](https://github.com/caura-ai/caura/commit/2273911588f495ef6a8cf07bb88a212efd2ccefc))
+* **embed:** record the re-embed give-up that reported success (oss-0924-m-05) ([#1733](https://github.com/caura-ai/caura/issues/1733)) ([d9ee8a5](https://github.com/caura-ai/caura/commit/d9ee8a5572b6125a04de1a4a088b1dd5cb5ef540))
+* **enrich:** record the enrichment give-up that reported success (oss-0927-m-02) ([#1736](https://github.com/caura-ai/caura/issues/1736)) ([94a142b](https://github.com/caura-ai/caura/commit/94a142b3a808ae024b0382d98f609e515f05ad0a))
+* **events:** refuse a forge dry_run instead of silently running for real ([#1737](https://github.com/caura-ai/caura/issues/1737)) ([2e10e33](https://github.com/caura-ai/caura/commit/2e10e33eac9d496f2f7ea3ba3c2c486262fd2c43))
+* **graph:** preserve relations with surviving evidence ([#1787](https://github.com/caura-ai/caura/issues/1787)) ([37f8f15](https://github.com/caura-ai/caura/commit/37f8f15877121037eba98d9cbba6934208a17e18))
+* **graph:** validate relation errors and tenant-scope overlap seeds ([#1782](https://github.com/caura-ai/caura/issues/1782)) ([17da42f](https://github.com/caura-ai/caura/commit/17da42f54b91249dd4ffcb0e16d3e91f499d5fe6))
+* **interview:** accept adapter streams and bind them to their agent ([#1788](https://github.com/caura-ai/caura/issues/1788)) ([3930964](https://github.com/caura-ai/caura/commit/39309640336da2d2c466286e7693598fbeb6bf62))
+* lifecycle dedup cadence, bulk write ordering, fresh reads, skill fleet scope, PII policy on edits ([#1772](https://github.com/caura-ai/caura/issues/1772)) ([f5983a0](https://github.com/caura-ai/caura/commit/f5983a0081bb977d171d50854cc6b075520002b6))
+* lifecycle, storage, write-path and configuration reliability ([#1776](https://github.com/caura-ai/caura/issues/1776)) ([adca395](https://github.com/caura-ai/caura/commit/adca3951dc575f496f76d54b39c83b7d749dc843))
+* **lifecycle:** settle the embed-backfill topic on one spelling ([#1739](https://github.com/caura-ai/caura/issues/1739)) ([586b249](https://github.com/caura-ai/caura/commit/586b249518c3f5db173a70cd3b8d1f2d5ccb3b11))
+* **llm:** refuse anthropic structured output instead of silently faking it (oss-0915-m-01) ([#1742](https://github.com/caura-ai/caura/issues/1742)) ([fab8174](https://github.com/caura-ai/caura/commit/fab81744a3a43a753696523edfe26954892b0e18))
+* low-batch (oss-0909-l-02, l-03, l-04) ([#1744](https://github.com/caura-ai/caura/issues/1744)) ([77abe9e](https://github.com/caura-ai/caura/commit/77abe9e86524a6fd0d1c117f9818c77199e65355))
+* **plugin:** align tool parameters and document requests with REST ([#1779](https://github.com/caura-ai/caura/issues/1779)) ([b3ef98d](https://github.com/caura-ai/caura/commit/b3ef98d40ab931c7bbf5c3b89cab7b3aafedffd6))
+* **plugin:** bound credential provisioning and reject API redirects ([#1780](https://github.com/caura-ai/caura/issues/1780)) ([8bf503d](https://github.com/caura-ai/caura/commit/8bf503d13031ea48c2027d228b5f12a66f028c97))
+* **plugin:** honor auto-write opt-out for conversation persistence ([#1778](https://github.com/caura-ai/caura/issues/1778)) ([ad8f8c3](https://github.com/caura-ai/caura/commit/ad8f8c3501325a8a908a56fdab800d6a5334c60b))
+* **plugin:** preserve keystone truncation and normalize tool results ([#1781](https://github.com/caura-ai/caura/issues/1781)) ([1adae88](https://github.com/caura-ai/caura/commit/1adae8887701723b81e3d570d4ed9eb319aa7a34))
+* **plugin:** refuse to send the API key over plain HTTP to non-loopback hosts (oss-0917-m-01) ([#1745](https://github.com/caura-ai/caura/issues/1745)) ([4981f45](https://github.com/caura-ai/caura/commit/4981f45cab1029d1f33009c0529302b9309a093b))
+* **ratchet:** a new file inherits old-name lines only from files the change deletes ([#1785](https://github.com/caura-ai/caura/issues/1785)) ([71b8883](https://github.com/caura-ai/caura/commit/71b88832514bce31cb24570521b355c9ab85e31c))
+* **ratchet:** read a JSON key's $comment marker on the line below it ([#1732](https://github.com/caura-ai/caura/issues/1732)) ([a196921](https://github.com/caura-ai/caura/commit/a196921031872f4a221e2d0e2023133bd5d69836))
+* respect memory visibility in lifecycle passes, keep distinct entities apart, bound Google LLM calls ([#1771](https://github.com/caura-ai/caura/issues/1771)) ([bed4935](https://github.com/caura-ai/caura/commit/bed49357c1c11eb698c994f683773d8c8996e9a2))
+* **search:** caller-named top_k beats profile/tenant default top_k ([#1764](https://github.com/caura-ai/caura/issues/1764)) ([47c2796](https://github.com/caura-ai/caura/commit/47c2796734e99e12e71f926536f41478e64d143b))
+* **search:** honour explicit top_k on recent_context; expose retrieval strategy header ([#1762](https://github.com/caura-ai/caura/issues/1762)) ([b6dde15](https://github.com/caura-ai/caura/commit/b6dde154d2504f72c941f1890af1cacae83bebbc))
+* **settings:** let a null unset a search.default_profile knob ([#1765](https://github.com/caura-ai/caura/issues/1765)) ([0e6f4ab](https://github.com/caura-ai/caura/commit/0e6f4ab8729dae021d21edd7de43f19bfe47a968))
+* **storage:** compile the stats breakdown filter without psycopg bind casts ([#1790](https://github.com/caura-ai/caura/issues/1790)) ([11d5d13](https://github.com/caura-ai/caura/commit/11d5d13168370628da8b303225b93a6ba94787f5))
+* **tasks:** record the three known-open give-ups; exclude the audit one (oss-0927-m-03) ([#1746](https://github.com/caura-ai/caura/issues/1746)) ([2f6c247](https://github.com/caura-ai/caura/commit/2f6c247a2388ec850176fa1e30c90cf546d45108))
+* **tests:** let unit-marked tests run without a database ([#1747](https://github.com/caura-ai/caura/issues/1747)) ([51542cb](https://github.com/caura-ai/caura/commit/51542cb92a882fe9027ae67fe6773e037d8cdfba))
+* tighten fleet command validation, installer URL handling and settings storage ([#1769](https://github.com/caura-ai/caura/issues/1769)) ([f96768c](https://github.com/caura-ai/caura/commit/f96768c7fe1fd46c903c130946b841ba5fe07a33))
+
+
+### Dependencies
+
+* bump the uv-minor-patch group across 4 directories with 9 updates ([#1770](https://github.com/caura-ai/caura/issues/1770)) ([0194ce6](https://github.com/caura-ai/caura/commit/0194ce69c6b7afdb457e06220bd2e8140423fe99))
+* update sqlalchemy[asyncio] requirement from &lt;2.1,&gt;=2.0.51 to &gt;=2.0.51,&lt;2.2 in /core-storage-api ([#1758](https://github.com/caura-ai/caura/issues/1758)) ([1e9d73f](https://github.com/caura-ai/caura/commit/1e9d73f5117ae1236205c6d5c44ff41c9766fb64))
+
+
+### Documentation
+
+* **embedding:** stop telling operators the nightly sweep repairs unembedded rows (oss-0927-h-01) ([#1740](https://github.com/caura-ai/caura/issues/1740)) ([b6cc308](https://github.com/caura-ai/caura/commit/b6cc30876378916a5faf6d61f93373afb489ad06))
+* **embedding:** the gateway's None is not queued for a backfill sweep (oss-0927-m-01) ([#1735](https://github.com/caura-ai/caura/issues/1735)) ([5e1179e](https://github.com/caura-ai/caura/commit/5e1179eed273b9c276bebbb11612c9aef7bb8c0a))
+* update Eldad's GitHub handle to [@eldad-caura-ai](https://github.com/eldad-caura-ai) ([#1767](https://github.com/caura-ai/caura/issues/1767)) ([d148bb6](https://github.com/caura-ai/caura/commit/d148bb6922b26a3945aaec6554413be1de95de70))
+
 ## [3.20.1](https://github.com/caura-ai/caura/compare/backend-v3.20.0...backend-v3.20.1) (2026-09-27)
 
 
