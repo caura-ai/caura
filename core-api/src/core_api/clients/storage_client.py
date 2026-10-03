@@ -2769,6 +2769,13 @@ class CoreStorageClient:
             {"tenant_id": tenant_id, "owner_principal": owner_principal},
         )
 
+    async def claim_interview_request(self, tenant_id: str, command_id: str, node_id: str) -> bool:
+        """Spend a delivered ``interview_request`` on one window (M-86). False if it admits none."""
+        resp = await self._post(
+            f"/fleet/commands/{command_id}/claim", {"tenant_id": tenant_id, "node_id": node_id}
+        )
+        return isinstance(resp, dict) and resp.get("ok") is True
+
     async def create_command(self, data: dict) -> dict:
         return await self._post("/fleet/commands", data)  # type: ignore[return-value]
 

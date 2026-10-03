@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
 
-from core_storage_api.routers._validation import _require
+from core_storage_api.routers._validation import _require, _require_uuid
 from core_storage_api.schemas import FLEET_COMMAND_FIELDS, FLEET_NODE_FIELDS, orm_to_dict
 from core_storage_api.services.postgres_service import UNSCOPED, PostgresService
 
@@ -344,6 +344,22 @@ async def update_command_status(command_id: UUID, request: Request) -> dict:
         owner_principal=owner_principal,
     )
     return {"ok": matched}
+
+
+@router.post("/commands/{command_id}/claim")
+async def claim_interview_request(command_id: UUID, request: Request) -> dict:
+    """Spend a delivered ``interview_request`` on one interview window (M-86).
+
+    ``ok`` is True only the first time, and only for this tenant's request,
+    queued for ``node_id`` and acked by that node's heartbeat.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    node_id = _require_uuid(body, "node_id")
+    claimed = await _svc.fleet_claim_interview_request(
+        tenant_id=tenant_id, command_id=command_id, node_id=node_id
+    )
+    return {"ok": claimed}
 
 
 @router.post("/commands/ack")

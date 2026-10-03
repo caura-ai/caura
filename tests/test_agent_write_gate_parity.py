@@ -35,6 +35,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import core_api.services.interview_service as interview_service
+from core_api import errors
 from core_api.routes import agents as agents_routes
 from core_api.routes import memories as memories_routes
 from core_api.services.agent_service import get_or_create_agent
@@ -588,6 +589,34 @@ def _submit(tenant: str, node_id: str, agent_id: str, **kw) -> dict:
     }
 
 
+async def _queue_request(client, tenant: str, node_id: str) -> str:
+    """Queue an ``interview_request`` for the node, as the scheduler does."""
+    resp = await client.post(
+        "/api/v1/fleet/commands",
+        json={
+            "tenant_id": tenant,
+            "node_id": node_id,
+            "command": "interview_request",
+            "payload": {"node_id": node_id},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+async def _delivered_request(client, as_auth, tenant: str, node_id: str) -> str:
+    """An ``interview_request`` the node's heartbeat has collected (and acked)."""
+    as_auth(tenant)
+    command_id = await _queue_request(client, tenant, node_id)
+    nodes = await client.get(f"/api/v1/fleet/nodes?tenant_id={tenant}")
+    name = next(n["node_name"] for n in nodes.json() if n["node_id"] == node_id)
+    beat = await client.post(
+        "/api/v1/fleet/heartbeat", json={"tenant_id": tenant, "node_name": name}
+    )
+    assert command_id in {c["id"] for c in beat.json()["commands"]}, beat.text
+    return command_id
+
+
 async def test_interview_submit_for_an_unknown_node_is_refused(
     client, as_auth, interview_tenant
 ):
@@ -617,10 +646,12 @@ async def test_interview_submit_attributes_to_the_verified_agent(
 ):
     tenant, node_id = interview_tenant
     await _seed_agent(sc, tenant, "low", 1)
+    command_id = await _delivered_request(client, as_auth, tenant, node_id)
     as_auth(tenant, agent_id="low")
 
     resp = await client.post(
-        "/api/v1/interview/submit", json=_submit(tenant, node_id, "peer")
+        "/api/v1/interview/submit",
+        json=_submit(tenant, node_id, "peer", command_id=command_id),
     )
     assert resp.status_code == 200, resp.text
 
@@ -632,6 +663,115 @@ async def test_interview_submit_attributes_to_the_verified_agent(
     )
     assert job["data"]["agent_id"] == "low"
     assert await interview_service.read_watermark(tenant, node_id) == 2
+
+
+async def test_an_agent_cannot_submit_a_fleet_node_window_uninvited(
+    client, as_auth, sc, interview_tenant
+):
+    """THE GAP (M-86): any agent credential could write any node's window.
+
+    It named the node and any ``command_id``, and the window advanced that
+    node's watermark and took its job doc. A fleet node's window now has to
+    cite the ``interview_request`` the scheduler sent that node.
+    """
+    tenant, node_id = interview_tenant
+    await _seed_agent(sc, tenant, "low", 1)
+    as_auth(tenant, agent_id="low")
+
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, node_id, "low")
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_INTERVIEW_REQUEST_REQUIRED
+    assert await interview_service.read_watermark(tenant, node_id) == -1
+
+
+async def test_an_install_cannot_submit_a_fleet_node_window_uninvited(
+    client, as_auth, interview_tenant
+):
+    tenant, node_id = interview_tenant
+    as_auth(tenant, is_install_credential=True, install_uuid=f"install-{_uid()}")
+
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, node_id, "laptop")
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert await interview_service.read_watermark(tenant, node_id) == -1
+
+
+async def test_a_queued_but_undelivered_request_admits_nothing(
+    client, as_auth, sc, interview_tenant
+):
+    tenant, node_id = interview_tenant
+    await _seed_agent(sc, tenant, "low", 1)
+    command_id = await _queue_request(client, tenant, node_id)
+    as_auth(tenant, agent_id="low")
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_submit(tenant, node_id, "low", command_id=command_id),
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert await interview_service.read_watermark(tenant, node_id) == -1
+
+
+async def test_a_request_admits_one_window(client, as_auth, sc, interview_tenant):
+    """Once used, a request's id is no secret: the job doc and the watermark
+    record it. So a second window citing it is refused."""
+    tenant, node_id = interview_tenant
+    await _seed_agent(sc, tenant, "low", 1)
+    command_id = await _delivered_request(client, as_auth, tenant, node_id)
+    as_auth(tenant, agent_id="low")
+    first = _submit(tenant, node_id, "low", command_id=command_id)
+    resp = await client.post("/api/v1/interview/submit", json=first)
+    assert resp.status_code == 200, resp.text
+
+    again = _submit(
+        tenant, node_id, "low", command_id=command_id, events=_events(start_seq=3)
+    )
+    resp = await client.post("/api/v1/interview/submit", json=again)
+
+    assert resp.status_code == 403, resp.text
+    assert await interview_service.read_watermark(tenant, node_id) == 2
+
+
+async def test_a_request_for_another_node_admits_nothing(
+    client, as_auth, sc, interview_tenant
+):
+    tenant, node_id = interview_tenant
+    await _seed_agent(sc, tenant, "low", 1)
+    other = await client.post(
+        "/api/v1/fleet/heartbeat",
+        json={"tenant_id": tenant, "node_name": f"node-{_uid()}"},
+    )
+    other_id = other.json()["node_id"]
+    command_id = await _delivered_request(client, as_auth, tenant, other_id)
+    as_auth(tenant, agent_id="low")
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_submit(tenant, node_id, "low", command_id=command_id),
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert await interview_service.read_watermark(tenant, node_id) == -1
+
+
+async def test_a_tenant_credential_submits_a_fleet_node_window_directly(
+    client, as_auth, interview_tenant
+):
+    """OVER-REFUSAL GUARD: tenant credentials keep tenant-wide authority."""
+    tenant, node_id = interview_tenant
+    as_auth(tenant)
+
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, node_id, "worker")
+    )
+
+    assert resp.status_code == 200, resp.text
 
 
 def _adapter_stream() -> str:

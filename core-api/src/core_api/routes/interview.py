@@ -42,6 +42,7 @@ from core_api.constants import (
 )
 from core_api.errors import (
     AUTH_FEATURE_DISABLED,
+    AUTH_INTERVIEW_REQUEST_REQUIRED,
     REQUEST_BUDGET_EXCEEDED,
     coded_detail,
 )
@@ -83,10 +84,10 @@ async def _bounded_process(tenant_id: str, doc_id: str) -> None:
         await process_interview_job(tenant_id, doc_id)
 
 
-def _names_fleet_node(node_id: str) -> bool:
-    """True when ``node_id`` has a fleet-node id's shape (a UUID)."""
+def _is_uuid(value: str) -> bool:
+    """True when ``value`` has a fleet-node or command id's shape (a UUID)."""
     try:
-        UUID(node_id)
+        UUID(value)
     except ValueError:
         return False
     return True
@@ -172,6 +173,12 @@ async def submit_interview(
     continue only if its own agent last advanced it (409 otherwise). And
     ``cursor_to`` may run at most ``INTERVIEW_MAX_CURSOR_ADVANCE`` past the
     stream's committed watermark (422 otherwise).
+
+    An agent or install credential's window for a fleet node must also cite an
+    unused ``interview_request`` that was delivered to that node (403
+    otherwise). Each request admits one window, so a resubmit under a spent
+    request is refused; the scheduler issues a fresh one, as it does after any
+    failed submit.
     """
     auth.enforce_read_only()
     auth.enforce_usage_limits()
@@ -240,7 +247,7 @@ async def submit_interview(
     # credential is valid and only this stream is refused, which
     # ``caura-interviewer`` handles by skipping the one transcript, where a 403
     # aborts its whole run.
-    names_fleet_node = _names_fleet_node(body.node_id)
+    names_fleet_node = _is_uuid(body.node_id)
     if names_fleet_node:
         nodes = await get_storage_client().list_nodes(tenant_id)
         if not any(str(n.get("id") or "") == body.node_id for n in nodes):
@@ -263,6 +270,26 @@ async def submit_interview(
                 f"past the node's committed watermark ({committed})"
             ),
         )
+    # M-86 — a fleet node's window from an agent or install credential must cite
+    # the ``interview_request`` the scheduler queued for that node and its
+    # heartbeat delivered, and each request admits one window. Naming the node
+    # used to be enough, so any such credential could advance any node's
+    # watermark and take its job doc. Storage checks and spends the request in
+    # one statement; the node's own result report still closes the command. It
+    # runs last, so a window refused for its shape does not spend the request.
+    if names_fleet_node and (auth.agent_id or auth.is_install_credential):
+        command_id = body.command_id or ""
+        if not (
+            _is_uuid(command_id)
+            and await get_storage_client().claim_interview_request(tenant_id, command_id, body.node_id)
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_INTERVIEW_REQUEST_REQUIRED,
+                    "Cite an unused interview_request that was delivered to this fleet node.",
+                ),
+            )
 
     if app_settings.interview_async_submit:
         # Persist-and-accept (#665). The 60-90s inline synthesis outlived

@@ -12384,6 +12384,41 @@ class PostgresService:
             res = await session.execute(stmt.values(**values))
             return (res.rowcount or 0) > 0  # type: ignore[attr-defined]
 
+    async def fleet_claim_interview_request(
+        self,
+        *,
+        tenant_id: str,
+        command_id: UUID,
+        node_id: UUID,
+    ) -> bool:
+        """Spend a delivered ``interview_request`` on one window. True the first time only.
+
+        An agent or install credential may submit a fleet node's interview window
+        only by citing the request the scheduler queued for that node (M-86): this
+        tenant's, for this node, and ``acked``, which the node's heartbeat does on
+        delivery. The same conditional UPDATE writes a marker into ``result``, so
+        the id admits nothing a second time; once used, the job doc and watermark
+        record it. The node's own result report overwrites the marker and closes
+        the command.
+        """
+        async with get_session() as session:
+            res = await session.execute(
+                sql_update(FleetCommand)
+                .where(
+                    FleetCommand.id == command_id,
+                    FleetCommand.tenant_id == tenant_id,
+                    FleetCommand.node_id == node_id,
+                    FleetCommand.command == "interview_request",
+                    FleetCommand.status == "acked",
+                    # Written without a result it holds SQL NULL; with an explicit
+                    # ``None``, JSON ``null``. Compared as text because migration 001
+                    # made the column ``json``, not the ``jsonb`` the model declares.
+                    or_(FleetCommand.result.is_(None), cast(FleetCommand.result, String) == "null"),
+                )
+                .values(result={"claimed_by": "interview_submit"})
+            )
+            return (res.rowcount or 0) > 0  # type: ignore[attr-defined]
+
     async def fleet_add_command(self, data: dict) -> FleetCommand:
         async with get_session() as session:
             command = FleetCommand(**self._filter_fields(FleetCommand, data))
