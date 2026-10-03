@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.3](https://github.com/caura-ai/caura/compare/backend-v3.21.2...backend-v3.21.3) (2026-10-03)
+
+
+### Bug Fixes
+
+* **settings:** encrypt provider keys stored before api_keys encryption ([#1798](https://github.com/caura-ai/caura/issues/1798)) ([6cd6ec6](https://github.com/caura-ai/caura/commit/6cd6ec69ab3f3eaba0174d228abf5b23771c5336))
+* **settings:** mask provider keys in historical settings audit rows ([#1797](https://github.com/caura-ai/caura/issues/1797)) ([fcb8b87](https://github.com/caura-ai/caura/commit/fcb8b87d0e04b82ecf9b3b7dae7958403ac04618))
+
 ## [3.21.2](https://github.com/caura-ai/caura/compare/backend-v3.21.1...backend-v3.21.2) (2026-10-03)
 
 
