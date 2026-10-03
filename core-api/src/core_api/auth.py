@@ -576,6 +576,41 @@ def _stash_request_tenant(request: Request, tenant_id: str) -> None:
         pass
 
 
+def _set_rate_limit_key(request: Request, value: str) -> None:
+    """Name the request's rate-limit bucket after what auth verified (L-69).
+
+    The limiter buckets by this value, hashed, and by client IP when auth named
+    none: a header nothing checked must not name a bucket, or a fresh made-up
+    value per request is a fresh budget per request. Guarded like
+    ``_stash_request_tenant``; failure here must never break auth.
+    """
+    try:
+        request.state.rate_limit_key = value
+    except AttributeError:
+        pass
+
+
+def _gateway_rate_limit_key(request: Request, tenant_id: str) -> str:
+    """The bucket for a request the gateway authenticated (Path 4 behind the secret).
+
+    Core-api cannot tell which credential the gateway accepted: its auth
+    subrequest tries a JWT bearer, then the session cookie, then ``X-API-Key``,
+    and forwards all of them unchanged. So a credential names the bucket only
+    when it is the request's sole one (``X-API-Key`` or ``Authorization``, and no
+    cookie), since the gateway can only have accepted that. Otherwise the bucket
+    is the identity the gateway set, which it overwrites on every request like
+    ``X-Agent-ID`` and ``X-Org-Role``: tenant, user, agent and install.
+    """
+    api_key = request.headers.get("x-api-key") or ""
+    authorization = request.headers.get("authorization") or ""
+    if not request.headers.get("cookie") and bool(api_key) != bool(authorization):
+        bearer = authorization[len("Bearer ") :] if authorization.startswith("Bearer ") else ""
+        if api_key or bearer:
+            return f"credential:{api_key or bearer}"
+    identity = [request.headers.get(h) or "" for h in ("x-user-id", "x-agent-id", "x-install-uuid")]
+    return "identity:" + "|".join([tenant_id, *identity])
+
+
 async def get_auth_context(
     request: Request,
     key: str | None = Security(api_key_header),
@@ -623,6 +658,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
 
     # ── Path 1: Admin API key ──
     if key and admin_key and hmac.compare_digest(key, admin_key):
+        _set_rate_limit_key(request, f"credential:{key}")
         set_current_tenant(None)  # Admin — RLS bypass
         return AuthContext(tenant_id=None, is_admin=True)
 
@@ -640,6 +676,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
     mclaw_key = settings.memclaw_api_key  # legacy-name-ok: live compatibility field
     if mclaw_key:
         if key and hmac.compare_digest(key, mclaw_key):
+            _set_rate_limit_key(request, f"credential:{key}")
             # Valid Caura key — resolve tenant from standalone or header
             if settings.is_standalone:
                 from core_api.standalone import get_standalone_tenant_id
@@ -715,6 +752,10 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
                     remediation="Route the request through the public gateway host.",
                 ),
             )
+        if gw_secret:
+            # Through the gateway. Without a secret these headers are the
+            # caller's own and name no bucket, so the limiter falls back to IP.
+            _set_rate_limit_key(request, _gateway_rate_limit_key(request, tenant_id))
         await _block_if_suppressed(tenant_id)
         # Cross-tenant credentials carry a list of readable tenants via
         # ``X-Readable-Tenant-IDs``. The home tenant was just checked
