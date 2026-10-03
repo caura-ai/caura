@@ -98,8 +98,10 @@ async def update_tenant_settings(
     # named the missing call; the omission is the decision, not an oversight.
     # Tenant settings include security-relevant toggles (e.g. require_agent_approval,
     # which governs whether new agents start quarantined). An agent-scoped
-    # credential must not be able to flip them.
+    # credential must not be able to flip them, and neither may an org member
+    # (L-72): the Skills Inbox already keeps its actions to org admins.
     auth.enforce_not_agent_credential("change tenant settings")
+    auth.enforce_not_org_member("change tenant settings")
     # Only trust X-Changed-By from admin-key callers (the enterprise proxy).
     # Regular users could forge this header otherwise.
     changed_by: str | None

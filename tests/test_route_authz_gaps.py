@@ -1325,3 +1325,126 @@ async def test_a_tenant_credential_can_still_queue_a_fleet_command(client, as_au
     assert [c["id"] for c in listed.json()] == [resp.json()["id"]], (
         f"a legitimate command did not reach the queue: {listed.text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# L-72: an org member reached what the Skills Inbox keeps for org admins.
+#
+# The gateway stamps a signed-in user's requests ``X-Org-Role`` (admin |
+# member), and the Skills Inbox actions refuse a member. ``PUT /settings`` and
+# the agent trust, fleet and delete routes refused only agent credentials, so
+# the same member could turn off ``require_agent_approval``, swap provider keys
+# or promote any agent to trust 3. They now refuse an explicit member. A caller
+# with NO org role keeps its access: the CAURA_API_KEY path and any gateway
+# credential stamped without a role reach these routes today.
+#
+# Each refusal asserts the error code and the unchanged row, not just a 403.
+# ---------------------------------------------------------------------------
+
+
+async def _agent_row(client, as_auth, tenant: str, agent: str) -> dict | None:
+    as_auth(tenant)
+    resp = await client.get(f"/api/v1/agents?tenant_id={tenant}")
+    assert resp.status_code == 200, resp.text
+    return next((a for a in resp.json() if a["agent_id"] == agent), None)
+
+
+def _refused_as_member(resp) -> None:
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_ORG_ADMIN_REQUIRED, resp.text
+
+
+async def test_an_org_member_cannot_change_tenant_settings(client, as_auth):
+    tenant = f"tenant-{_uid()}"
+    as_auth(tenant)
+    resp = await client.put(
+        "/api/v1/settings",
+        json={"tenant_id": tenant, "agents": {"require_agent_approval": True}},
+    )
+    assert resp.status_code == 200, resp.text
+
+    as_auth(tenant, org_role="member")
+    _refused_as_member(
+        await client.put(
+            "/api/v1/settings",
+            json={"tenant_id": tenant, "agents": {"require_agent_approval": False}},
+        )
+    )
+
+    as_auth(tenant)
+    reread = await client.get("/api/v1/settings")
+    assert reread.status_code == 200, reread.text
+    assert reread.json()["agents"]["require_agent_approval"] is True
+
+
+async def test_an_org_member_cannot_move_an_agents_trust(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1)
+
+    as_auth(tenant, org_role="member")
+    _refused_as_member(
+        await client.patch(
+            f"/api/v1/agents/{agent}/trust?tenant_id={tenant}",
+            json={"trust_level": 3},
+        )
+    )
+    row = await _agent_row(client, as_auth, tenant, agent)
+    assert row["trust_level"] == 1
+
+
+async def test_an_org_member_cannot_reassign_an_agents_fleet(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1, fleet_id="fleet-home")
+
+    as_auth(tenant, org_role="member")
+    _refused_as_member(
+        await client.patch(
+            f"/api/v1/agents/{agent}/fleet?tenant_id={tenant}",
+            json={"fleet_id": "fleet-other"},
+        )
+    )
+    row = await _agent_row(client, as_auth, tenant, agent)
+    assert row["fleet_id"] == "fleet-home"
+
+
+async def test_an_org_member_cannot_delete_an_agent(client, as_auth, sc):
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1)
+
+    as_auth(tenant, org_role="member")
+    _refused_as_member(
+        await client.delete(f"/api/v1/agents/{agent}?tenant_id={tenant}")
+    )
+    assert await _agent_row(client, as_auth, tenant, agent) is not None
+
+
+@pytest.mark.parametrize("org_role", [None, "admin"])
+async def test_an_org_admin_or_a_roleless_caller_keeps_these_routes(
+    client, as_auth, sc, org_role
+):
+    """OVER-REFUSAL GUARD. Refusing every caller would pass the tests above and
+    lock the dashboard and the CAURA_API_KEY path out of their own tenant."""
+    tenant = f"tenant-{_uid()}"
+    agent = f"agent-{_uid()}"
+    await _seed_agent(sc, tenant, agent, trust_level=1, fleet_id="fleet-home")
+
+    as_auth(tenant, org_role=org_role)
+    resp = await client.put(
+        "/api/v1/settings",
+        json={"tenant_id": tenant, "agents": {"require_agent_approval": True}},
+    )
+    assert resp.status_code == 200, resp.text
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/trust?tenant_id={tenant}", json={"trust_level": 2}
+    )
+    assert resp.status_code == 200, resp.text
+    resp = await client.patch(
+        f"/api/v1/agents/{agent}/fleet?tenant_id={tenant}",
+        json={"fleet_id": "fleet-other"},
+    )
+    assert resp.status_code == 200, resp.text
+    resp = await client.delete(f"/api/v1/agents/{agent}?tenant_id={tenant}")
+    assert resp.status_code == 204, resp.text

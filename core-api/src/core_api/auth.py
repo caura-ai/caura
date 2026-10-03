@@ -284,6 +284,26 @@ class AuthContext:
                 ),
             )
 
+    def enforce_not_org_member(self, action: str) -> None:
+        """Raise 403 if the gateway stamped the caller ``X-Org-Role: member``.
+
+        Org settings and agent trust, fleet and deletion are org-admin
+        surfaces, like the Skills Inbox actions ``is_org_admin`` gates (L-72).
+        This refuses only an explicit member, not "anyone short of
+        ``is_org_admin``": a caller with no org role (the CAURA_API_KEY path,
+        a gateway credential stamped without one) keeps the access
+        ``enforce_not_agent_credential`` gives it.
+        """
+        if self.org_role == "member":
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    errors.AUTH_ORG_ADMIN_REQUIRED,
+                    f"Org members cannot {action}; ask an org admin.",
+                    action=action,
+                ),
+            )
+
     def enforce_self_agent(
         self,
         requested_agent_id: str | None,
