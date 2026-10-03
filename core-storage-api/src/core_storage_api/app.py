@@ -345,8 +345,9 @@ def create_app() -> FastAPI:
     app.include_router(tenant_suppression_router, prefix=prefix)
     # CAURA-686: ``GET /api/v1/storage/_debug/pg_locks`` for live
     # pg_locks / pg_stat_activity snapshots during contention triage.
-    # Behind the same private-VPC posture as everything else here —
-    # not exposed via the gateway.
+    # Answers 404 unless CORE_STORAGE_DEBUG_ENDPOINTS is on (L-75), and
+    # needs the storage shared secret like every route here; not exposed
+    # via the gateway.
     app.include_router(debug_router, prefix=prefix)
     # Fix 2 final-cleanup (PR1): adoption-counter flush, moved off core-api's
     # direct DB pool. Intentionally cross-tenant / RLS-free (migration 023) —

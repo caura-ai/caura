@@ -17,6 +17,7 @@ from httpx import AsyncClient
 from sqlalchemy import text
 
 from common.constants import VECTOR_DIM
+from core_storage_api.config import settings
 
 # The transactional session (commits on success), used by the one test that has
 # to age rows directly — no endpoint sets ``created_at``.
@@ -89,7 +90,7 @@ class TestHealth:
         resp = await client.get(f"{PREFIX}/healthz")
         assert resp.status_code == 200
 
-    async def test_debug_pg_locks_returns_shape(self, client: AsyncClient) -> None:
+    async def test_debug_pg_locks_returns_shape(self, client: AsyncClient, monkeypatch) -> None:
         """GET /_debug/pg_locks returns the expected snapshot shape.
 
         CAURA-686: the endpoint is wired up and runs the
@@ -97,8 +98,9 @@ class TestHealth:
         the test DB without raising. ``rows`` may be empty when no
         contention is happening (the normal case during a unit
         test); the contract pinned here is the response shape,
-        not the row count.
+        not the row count. The route is opt-in (L-75), so this turns it on.
         """
+        monkeypatch.setattr(settings, "core_storage_debug_endpoints", True)
         resp = await client.get(f"{PREFIX}/_debug/pg_locks")
         assert resp.status_code == 200
         body = resp.json()

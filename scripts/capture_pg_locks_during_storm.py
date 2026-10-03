@@ -22,7 +22,10 @@ each containing a timestamp + the endpoint payload. Post-process with
 
 The endpoint is intentionally separate from the gateway so it's
 reachable only via this proxy or from inside the VPC; the script is a
-thin polling loop on top of it, not a permanent surface.
+thin polling loop on top of it, not a permanent surface. It is also off
+by default: set ``CORE_STORAGE_DEBUG_ENDPOINTS=true`` on the target
+core-storage-api for the capture, and unset it afterwards. It lists only
+core-storage-api's own database sessions.
 """
 
 from __future__ import annotations
