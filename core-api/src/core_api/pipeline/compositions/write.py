@@ -7,6 +7,7 @@ from core_api.pipeline.steps.write import (
     CheckExactDuplicate,
     CheckSemanticDuplicate,
     ComputeContentHash,
+    CreatePendingSubject,
     DetectNearDuplicate,
     EmitMemoryTriple,
     GovernanceDecision,
@@ -75,6 +76,7 @@ def _persist_steps(semantic_gate) -> list:
         EmitMemoryTriple(),
         semantic_gate,
         WriteMemoryRow(),
+        CreatePendingSubject(),
         ScheduleBackgroundTasks(),
     ]
 
@@ -172,6 +174,7 @@ def build_fast_write_pipeline() -> Pipeline:
             EmitMemoryTriple(),
             DetectNearDuplicate(),
             WriteMemoryRow(),
+            CreatePendingSubject(),
             ScheduleBackgroundTasks(),
         ],
     )
@@ -233,6 +236,7 @@ def build_strong_write_pipeline() -> Pipeline:
             EmitMemoryTriple(),
             CheckSemanticDuplicate(),
             WriteMemoryRow(),
+            CreatePendingSubject(),
             ScheduleBackgroundTasks(),
         ],
     )
