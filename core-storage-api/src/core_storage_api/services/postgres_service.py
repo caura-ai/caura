@@ -799,6 +799,26 @@ def _merge_entity_attributes(stored: Any, incoming: Any) -> dict:
     return merged
 
 
+def _like_escape(value: str) -> str:
+    """``value`` as literal text inside a LIKE pattern built with ``escape="\\"``.
+
+    Backslash first, or the escapes added for ``%`` and ``_`` would be escaped
+    again.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# L-129. An entity whose ``attributes._aliases`` holds an alias matching
+# ``:alias_pattern``. ``attributes`` is ``json``, and a value that is not an
+# array is read as no aliases, as the search_vector trigger (migration 057) reads
+# it, rather than making ``json_array_elements_text`` raise.
+_ALIAS_ILIKE = (
+    "EXISTS (SELECT 1 FROM json_array_elements_text("
+    "CASE WHEN json_typeof(entities.attributes->'_aliases') = 'array' "
+    "THEN entities.attributes->'_aliases' ELSE CAST('[]' AS json) END"
+    ") AS a(alias) WHERE a.alias ILIKE :alias_pattern ESCAPE '\\')"
+)
+
 # The one answer ``entity_add_entity_link`` gives for every way a link can be
 # refused: either endpoint absent, either endpoint owned by another tenant, or
 # the pair already linked. A constant rather than the string repeated at each
@@ -7385,7 +7405,7 @@ class PostgresService:
                 # The DECIDER is the Python-side key equality below — the
                 # suffix LIKE can never merge on its own ("data analytics
                 # service" is prefetched but rejected: its own key differs).
-                escaped = match_key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                escaped = _like_escape(match_key)
                 cand_stmt = (
                     select(Entity)
                     .where(
@@ -7682,7 +7702,16 @@ class PostgresService:
             if entity_type:
                 stmt = stmt.where(Entity.entity_type == entity_type)
             if search:
-                stmt = stmt.where(Entity.canonical_name.ilike(f"%{search}%"))
+                # L-48: the user's text is matched literally; unescaped, ``%`` and
+                # ``_`` were wildcards and a backslash escaped the next character.
+                # L-129: an alias matches too, as first-seen-wins promises.
+                pattern = f"%{_like_escape(search)}%"
+                stmt = stmt.where(
+                    or_(
+                        Entity.canonical_name.ilike(pattern, escape="\\"),
+                        text(_ALIAS_ILIKE).bindparams(alias_pattern=pattern),
+                    )
+                )
             if caller_agent_id:
                 stmt = stmt.where(
                     _entity_visible_to_agent(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
