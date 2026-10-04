@@ -51,6 +51,8 @@ from core_api.services.settings_crypto import (
     encryption_enabled,
     needs_encryption,
 )
+from core_api.services.task_tracker import tracked_task
+from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
 
@@ -1678,6 +1680,23 @@ async def get_settings_for_display(tenant_id: str) -> dict:
     return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, raw))
 
 
+#: The crystallizer settings a dedup stamp was settled under (M-38).
+_SWEEP_POLICY_KEYS = frozenset({"min_cluster_size", "dedup_threshold", "auto_crystallize"})
+
+
+async def _reopen_dedup_sweep(tenant_id: str) -> None:
+    """Clear the tenant's dedup stamps, one bounded storage call at a time (M-38).
+
+    A storage build without ``done`` cleared every row in one call, so its
+    answer ends the loop.
+    """
+    sc = get_storage_client()
+    while True:
+        result = await sc.reset_dedup_checked(tenant_id)
+        if result.get("done", True):
+            return
+
+
 async def update_settings(
     tenant_id: str,
     new_settings: dict,
@@ -1767,5 +1786,15 @@ async def update_settings(
             tenant_id,
             exc_info=True,
         )
+
+    # M-38: a crystallizer sweep setting is the policy a dedup stamp was settled
+    # under, so a change to one reopens the stamped rows for the next run. Keyed
+    # on the payload, as storage returns no diff: a save that resends an
+    # unchanged value costs one re-scan. In the background, so the save does not
+    # wait on a large tenant, and never failing the write, which has committed.
+    # A failure is logged at ERROR and recorded in ``background_task_log``:
+    # re-saving the same value is a no-op, so nothing else would retry it.
+    if _SWEEP_POLICY_KEYS & set(new_settings.get("crystallizer") or {}):
+        track_task(tracked_task(_reopen_dedup_sweep(tenant_id), "crystallizer_reopen_sweep", None, tenant_id))
 
     return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))

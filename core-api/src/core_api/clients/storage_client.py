@@ -1435,6 +1435,15 @@ class CoreStorageClient:
             {"memory_ids": memory_ids, "tenant_id": tenant_id},
         )  # type: ignore[return-value]
 
+    async def reset_dedup_checked(self, tenant_id: str) -> dict:
+        """M-38 — return up to one batch of the tenant's settled rows to the dedup sweep.
+
+        Returns ``{"reset": n, "done": bool}``; repeat the call until ``done``.
+        Idempotent: clearing a cleared stamp changes nothing, so a retried POST is
+        safe.
+        """
+        return await self._post("/memories/reset-dedup-checked", {"tenant_id": tenant_id}, idempotent=True)  # type: ignore[return-value]
+
     async def batch_update_status(self, data: dict, *, tenant_id: str) -> dict:
         """Apply status updates to many memories within one tenant.
 

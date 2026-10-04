@@ -5451,6 +5451,39 @@ class PostgresService:
                 .values(last_dedup_checked_at=func.now())
             )
 
+    async def memory_reset_dedup_checked(self, tenant_id: str, *, limit: int) -> int:
+        """Return up to ``limit`` of the tenant's settled rows to the dedup sweep (M-38).
+
+        ``last_dedup_checked_at`` means "settled under the crystallizer policy in
+        force when it was written", and ``memory_mark_dedup_checked`` only ever
+        sets it. When the policy changes (cluster floor, dedup threshold,
+        auto-crystallize), core-api calls this so the next sweep revisits rows the
+        old policy settled. Only rows the sweep can pick up are touched: live,
+        shared and not deleted. One bounded transaction per call, so no request
+        outlives its client's timeout however large the tenant: the caller repeats
+        it until a call clears fewer than ``limit``. Returns how many rows it
+        cleared.
+        """
+        async with get_session() as session:
+            batch = (
+                select(Memory.id)
+                .where(
+                    Memory.tenant_id == tenant_id,
+                    Memory.last_dedup_checked_at.is_not(None),
+                    Memory.deleted_at.is_(None),
+                    Memory.status.in_(LIVE_MEMORY_STATUSES),
+                    Memory.visibility.in_(_CRYSTALLIZER_SHARED_VISIBILITIES),
+                )
+                .limit(limit)
+            )
+            result = await session.execute(
+                sql_update(Memory)
+                .where(Memory.tenant_id == tenant_id, Memory.id.in_(batch))
+                .values(last_dedup_checked_at=None)
+                .execution_options(synchronize_session=False)
+            )
+        return result.rowcount or 0  # type: ignore[attr-defined]
+
     async def memory_find_expired_still_active(
         self,
         tenant_id: str,

@@ -81,13 +81,12 @@ def test_the_stand_in_really_would_have_returned_a_copy() -> None:
 
 @pytest.mark.asyncio
 async def test_crystallizer_returns_nothing_on_an_outage() -> None:
-    """Empty means the caller's ``if not extracted: continue`` fires, so nothing is
-    created and — the point — nothing is archived."""
+    """``None`` means nothing was decided, so the caller creates nothing, archives
+    nothing — the point — and leaves the cluster for the next sweep. ``[]`` is
+    kept for the model's own verdict that nothing is worth preserving."""
     out = await _crystallize_cluster(_MEMORIES, _outage_config())
 
-    assert out == [], (
-        f"a non-empty result archives every source memory in the cluster; got {out!r}"
-    )
+    assert out is None, f"an outage must decide nothing about the cluster; got {out!r}"
 
 
 @pytest.mark.asyncio

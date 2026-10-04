@@ -280,11 +280,15 @@ def test_the_writer_session_population_is_pinned() -> None:
     142 -> 143 (pure unchanged at 65): ``organization_settings_encrypt_api_keys``
     is new (M-99). It swaps keys with ``sql_update`` and audits with
     ``pg_insert``, so it is a write.
+
+    143 -> 144 (pure unchanged at 65): ``memory_reset_dedup_checked`` is new
+    (M-38). It clears the crystallizer's dedup stamps with ``sql_update``, a
+    write.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 143, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 144, f"{len(methods)} methods open a writer session"
     assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 

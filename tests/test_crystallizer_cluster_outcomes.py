@@ -210,6 +210,57 @@ async def test_an_llm_outage_leaves_the_cluster_unstamped():
     assert not (_stamped(sc) & {str(m) for m in ids})
 
 
+async def test_an_empty_answer_from_a_healthy_llm_settles_the_cluster():
+    """``[]`` is the model's verdict that nothing is worth keeping, which the
+    prompt asks it to give. Treated as an outage, the cluster was re-sent and
+    re-paid on every run, and enough of them took the whole batch budget."""
+    ids = [uuid4() for _ in range(3)]
+    sc = _storage()
+
+    async def nothing_to_keep(_memories, _config):
+        return []
+
+    with _env(sc, extracted=nothing_to_keep):
+        result = await cs._run_crystallization(
+            "t1", None, {"near_duplicates": {"pairs": _chain(ids)}}
+        )
+
+    assert _stamped(sc) == {str(m) for m in ids}
+    sc.batch_update_status.assert_not_awaited()
+    assert result["memories_archived"] == 0
+
+
+def _answering(raw):
+    """``_crystallize_cluster`` with a healthy provider that answers ``raw``."""
+    llm = AsyncMock()
+    llm.complete_json = AsyncMock(return_value=raw)
+
+    async def run_call_fn(*_args, call_fn, **_kwargs):
+        return await call_fn(llm)
+
+    return patch.object(cs, "call_with_fallback", AsyncMock(side_effect=run_call_fn))
+
+
+_CONFIG = SimpleNamespace(enrichment_provider="openai")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [{"content": "not a list"}, "not json", [{"memory_type": "fact"}], [None]],
+)
+async def test_an_unusable_answer_decides_nothing(raw):
+    """Not the model saying "nothing to keep": the cluster must come back."""
+    with _answering(raw):
+        out = await cs._crystallize_cluster([_row(uuid4())], _CONFIG)
+    assert out is None
+
+
+async def test_an_empty_list_is_the_models_verdict():
+    with _answering([]):
+        out = await cs._crystallize_cluster([_row(uuid4())], _CONFIG)
+    assert out == []
+
+
 async def test_a_crystallized_cluster_is_stamped():
     ids = [uuid4() for _ in range(3)]
     sc = _storage()

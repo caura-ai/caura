@@ -775,6 +775,25 @@ async def mark_dedup_checked(request: Request) -> dict:
     return {"ok": True}
 
 
+#: Rows one reset call clears (M-38). One bounded transaction, so a large tenant
+#: is drained across calls rather than in one request that outlives its timeout.
+_DEDUP_RESET_BATCH = 5000
+
+
+@router.post("/reset-dedup-checked")
+async def reset_dedup_checked(request: Request) -> dict:
+    """M-38 — return up to one batch of the tenant's settled rows to the dedup sweep.
+
+    ``done`` is false while stamped rows may remain; the caller repeats the call.
+    """
+    body: dict = await request.json()
+    tenant_id = body.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail="tenant_id is required")
+    reset = await _svc.memory_reset_dedup_checked(tenant_id, limit=_DEDUP_RESET_BATCH)
+    return {"reset": reset, "done": reset < _DEDUP_RESET_BATCH}
+
+
 @router.post("/entity-links")
 async def get_entity_links_for_memories(request: Request) -> dict:
     body: dict = await request.json()

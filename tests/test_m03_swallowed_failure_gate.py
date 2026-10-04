@@ -58,7 +58,7 @@ import pytest
 
 from common.enrichment.schema import AtomicFact, EnrichmentResult
 from core_api.constants import VECTOR_DIM
-from core_api.services import memory_service, task_tracker
+from core_api.services import memory_service, organization_settings, task_tracker
 from tests._scoped_module import scoped
 from tests.conftest import close_scheduled_coro
 
@@ -414,6 +414,15 @@ def _contradiction(stack: ExitStack, *, engine: bool, trigger_name: str):
     return coro, sc.get_memory
 
 
+def _reopen_sweep(stack: ExitStack):
+    sc = MagicMock()
+    sc.reset_dedup_checked = AsyncMock(side_effect=_boom())
+    stack.enter_context(
+        patch.object(organization_settings, "get_storage_client", lambda: sc)
+    )
+    return organization_settings._reopen_dedup_sweep(TENANT), sc.reset_dedup_checked
+
+
 @dataclass(frozen=True)
 class Scenario:
     id: str
@@ -502,6 +511,12 @@ ROSTER: dict[str, dict[str, Any]] = {
     "_run_ann_pool_shadow": {
         "wraps": {"_run_ann_pool_shadow"},
         "scenarios": [Scenario("ann-shadow", "ann_pool_shadow", _ann_shadow)],
+    },
+    "_reopen_dedup_sweep": {
+        "wraps": {"_reopen_dedup_sweep"},
+        "scenarios": [
+            Scenario("reopen-sweep", "crystallizer_reopen_sweep", _reopen_sweep)
+        ],
     },
     "run_contradiction_detection": {
         # A sync function returning the detector coroutine, so what tracked_task

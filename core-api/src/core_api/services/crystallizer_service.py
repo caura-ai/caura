@@ -506,9 +506,10 @@ async def _execute_crystallization(
 
         if not auto_crystallize:
             # Nothing will act on the duplicates this sweep found, so their rows
-            # are as settled as they will get; stamp them as the sweep always
-            # did. (With auto-curate on, ``_run_crystallization`` does this per
-            # cluster, keeping back the ones it could not finish.)
+            # are as settled as this policy gets; stamp them as the sweep always
+            # did. Turning auto-curate on reopens them (M-38: ``update_settings``
+            # resets the stamps). (With auto-curate on, ``_run_crystallization``
+            # does this per cluster, keeping back the ones it could not finish.)
             await _stamp_settled(sc, tenant_id, hygiene.get("near_duplicates", {}).get("pairs", []), set())
         else:
             try:
@@ -647,6 +648,7 @@ async def _run_crystallization(
     min_cluster = getattr(config, "crystallizer_min_cluster_size", CRYSTALLIZER_MIN_CLUSTER_SIZE)
     # Below the floor is a policy outcome, not a deferral: those rows are
     # stamped like any settled cluster, or every pair would be re-swept nightly.
+    # Lowering the floor reopens them (M-38: ``update_settings`` resets stamps).
     clusters = [c for c in clusters if len(c) >= min_cluster]
     result["clusters_found"] = len(clusters)
 
@@ -720,10 +722,16 @@ async def _run_crystallization(
 
         # Call LLM to crystallize
         extracted = await _crystallize_cluster(cluster_memories, config)
-        if not extracted:
+        if extracted is None:
             # An outage (``_skip_crystallize``) or an unusable answer: nothing
             # was decided about this cluster, so it must come back next sweep.
             unsettled.update(cluster_ids)
+            continue
+        if not extracted:
+            # The model's verdict that nothing here is worth keeping, which the
+            # prompt asks it to give. Settled: stamped with the rest, nothing
+            # created and nothing archived. Left unsettled, it was re-sent and
+            # re-paid on every run.
             continue
 
         # The crystal lives where its sources lived: their fleet (the nightly
@@ -967,8 +975,13 @@ def _build_clusters(pairs: list[dict]) -> list[set[UUID]]:
     return list(groups.values())
 
 
-async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
-    """Send a cluster of memories to the LLM for crystallization."""
+async def _crystallize_cluster(memories: list[dict], config) -> list[dict] | None:
+    """Send a cluster of memories to the LLM for crystallization.
+
+    ``None`` means nothing was decided: an outage, or an answer that is not a
+    list or holds no usable fact. ``[]`` is the model's verdict that nothing in
+    the cluster is worth preserving.
+    """
     mem_texts = []
     for i, m in enumerate(memories, 1):
         mem_texts.append(
@@ -976,10 +989,10 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
         )
     prompt = CRYSTALLIZATION_PROMPT.format(memories="\n".join(mem_texts))
 
-    async def _do_crystallize(llm) -> list[dict]:
+    async def _do_crystallize(llm) -> list[dict] | None:
         raw = await llm.complete_json(prompt)
         if not isinstance(raw, list):
-            return []
+            return None
         results = []
         for item in raw:
             if not isinstance(item, dict) or not item.get("content"):
@@ -996,14 +1009,15 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
             except (TypeError, ValueError):
                 item["weight"] = 0.7
             results.append(item)
-        return results
+        # Items, but none usable, is a malformed answer, not "nothing to keep".
+        return results if results or not raw else None
 
     return await call_with_fallback(
         primary_provider_name=config.enrichment_provider,
         call_fn=_do_crystallize,
-        # An outage must yield NOTHING here, not a stand-in. The caller does
-        # ``if not extracted: continue`` before it creates anything, so an empty
-        # list skips the cluster untouched — see ``_crystallize_fake``.
+        # An outage must yield NOTHING here, not a stand-in. The caller skips a
+        # ``None`` result before it creates anything and keeps the cluster for
+        # the next sweep — see ``_skip_crystallize``.
         fake_fn=(
             (lambda: _crystallize_fake(memories))
             if deliberate_fake_provider(config.enrichment_provider)
@@ -1015,8 +1029,8 @@ async def _crystallize_cluster(memories: list[dict], config) -> list[dict]:
     )
 
 
-def _skip_crystallize() -> list[dict]:
-    """No-LLM crystallization: produce nothing, so the cluster is left alone.
+def _skip_crystallize() -> None:
+    """No-LLM crystallization: decide nothing, so the cluster is left alone.
 
     This is not cosmetic. The caller creates one memory per returned fact and then
     ARCHIVES every source memory in the cluster. With ``_crystallize_fake`` on the
@@ -1025,13 +1039,14 @@ def _skip_crystallize() -> list[dict]:
     behind, having synthesised nothing. The other N-1 memories' content is not in
     the survivor, and ``archived`` is outside ``LIVE_MEMORY_STATUSES``.
 
-    Returning ``[]`` takes the caller's existing ``if not extracted: continue``
-    path, so nothing is created and nothing is archived. The cluster is still there
-    to crystallize once a provider answers: its rows are left unstamped, so the
-    next sweep finds it again.
+    Returning ``None`` takes the caller's "nothing decided" path, so nothing is
+    created and nothing is archived. The cluster is still there to crystallize once
+    a provider answers: its rows are left unstamped, so the next sweep finds it
+    again. (``[]`` would not do: it is the model's verdict that nothing is worth
+    keeping, and it settles the cluster.)
     """
     logger.warning("crystallizer: no LLM — cluster skipped, nothing archived")
-    return []
+    return None
 
 
 def _crystallize_fake(memories: list[dict]) -> list[dict]:
