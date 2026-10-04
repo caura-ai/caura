@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.7](https://github.com/caura-ai/caura/compare/backend-v3.21.6...backend-v3.21.7) (2026-10-04)
+
+
+### Dependencies
+
+* **clients:** bump the clients-npm-minor-patch group across 1 directory with 2 updates ([#1755](https://github.com/caura-ai/caura/issues/1755)) ([07ade6a](https://github.com/caura-ai/caura/commit/07ade6aa288524a82c52bba5c7fbae8da9ae38f7))
+
 ## [3.21.6](https://github.com/caura-ai/caura/compare/backend-v3.21.5...backend-v3.21.6) (2026-10-04)
 
 
