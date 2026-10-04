@@ -28,6 +28,7 @@ from core_api.schemas import (
     IngestCommitRequest,
     IngestRequest,
 )
+from core_api.services.agent_service import lookup_agent
 from core_api.services.ingest_chunking import (
     DOC_HARD_TOKEN_LIMIT,
     chunk_blocks,
@@ -971,16 +972,27 @@ async def _prior_ingest_was_complete(tenant_id: str, run_id: str) -> bool:
     return errored == 0
 
 
-async def _find_prior_ingest_by_doc_hash(tenant_id: str, doc_hash: str) -> list[dict]:
-    """A2 cache lookup. Returns memory rows from the most recent prior ingest of
-    the same content for the same tenant — or empty list if no cache hit.
+async def _find_prior_ingest_by_doc_hash(
+    tenant_id: str, doc_hash: str, *, fleet_id: str | None, agent_id: str
+) -> list[dict]:
+    """A2 cache lookup. Returns the caller's memory rows from its prior ingests
+    of the same content — or empty list if no cache hit.
 
     A "prior ingest" means a non-deleted row whose metadata carries the same
-    ``doc_hash`` value and was tagged as ``source="ingest"``. When multiple
-    runs match, the storage endpoint returns the rows tagged with the
-    most-recent ``run_id`` (the newest-run filter runs server-side).
+    ``doc_hash`` value and was tagged as ``source="ingest"``, written by this
+    agent in this fleet (L-74: ``doc_hash`` is whatever a committing caller
+    sent, so another principal's rows can never be this caller's cache). Rows
+    span every such run, newest first, so ``[0]`` is from the newest run.
+
+    An omitted fleet is the agent's home fleet: the fleet ``/ingest/commit``
+    writes to when the request names none.
     """
-    return await get_storage_client().find_prior_ingest_by_doc_hash(tenant_id, doc_hash)
+    if not fleet_id:
+        agent = await lookup_agent(tenant_id, agent_id)
+        fleet_id = (agent or {}).get("fleet_id")
+    return await get_storage_client().find_prior_ingest_by_doc_hash(
+        tenant_id, doc_hash, fleet_id=fleet_id, agent_id=agent_id
+    )
 
 
 async def ingest_preview(request: IngestRequest) -> dict:
@@ -997,10 +1009,11 @@ async def ingest_preview(request: IngestRequest) -> dict:
       skipped_reason  — only present when no LLM call happened
                         ("content_too_short" today; future reasons may surface)
       cached          — A2: present and True iff this content was previously
-                        ingested by the same tenant. ``facts`` then come from
-                        the prior run, ``run_id`` is set to the prior run's id,
-                        and no LLM call was made.
-      run_id          — only set when cached=True; the prior ingest_run_id.
+                        ingested by the same agent in the same fleet.
+                        ``facts`` then come from those prior runs, ``run_id``
+                        is set to the newest of them, and no LLM call was made.
+      run_id          — only set when cached=True; the caller's own newest
+                        prior ingest_run_id.
     """
     tenant_config = await resolve_config(request.tenant_id)
 
@@ -1023,8 +1036,8 @@ async def ingest_preview(request: IngestRequest) -> dict:
     # ---- A2: doc-hash idempotency ----
     # Hash the full content (post-PR#7 there's no more truncate-to-50k cap
     # — the chunker handles arbitrarily large docs up to ``DOC_HARD_TOKEN_LIMIT``).
-    # If a prior ingest of identical content already exists for this tenant,
-    # return the cached facts straight from those memories — no LLM call.
+    # If this agent already ingested identical content in this fleet, return
+    # the cached facts straight from those memories — no LLM call.
     # Per-fact source_uri precedence:
     #   1. Caller-supplied ``request.source_uri`` — used by ``/ingest/file``
     #      to thread ``upload:<filename>`` through so the filename survives.
@@ -1032,7 +1045,9 @@ async def ingest_preview(request: IngestRequest) -> dict:
     #   3. ``"text-input"`` marker for pasted-content / no-source ingests.
     source_uri_default = request.source_uri or url or "text-input"
     doc_hash = _doc_hash(request.tenant_id, content)
-    cached_memories = await _find_prior_ingest_by_doc_hash(request.tenant_id, doc_hash)
+    cached_memories = await _find_prior_ingest_by_doc_hash(
+        request.tenant_id, doc_hash, fleet_id=request.fleet_id, agent_id=request.agent_id
+    )
     if cached_memories and not await _prior_ingest_was_complete(
         request.tenant_id, cached_memories[0]["run_id"]
     ):

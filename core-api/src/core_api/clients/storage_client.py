@@ -1393,11 +1393,13 @@ class CoreStorageClient:
         """Agent-activity + peak-hours from audit_log (crystallizer usage)."""
         return await self._get("/memories/audit-usage", tenant_id=tenant_id) or {}
 
-    async def find_prior_ingest_by_doc_hash(self, tenant_id: str, doc_hash: str) -> list[dict]:
-        """Prior ingest rows for a doc_hash (idempotency cache; write-path read)."""
+    async def find_prior_ingest_by_doc_hash(
+        self, tenant_id: str, doc_hash: str, *, fleet_id: str | None, agent_id: str
+    ) -> list[dict]:
+        """The caller's prior ingest rows for a doc_hash (idempotency cache; write-path read)."""
         result = await self._post(
             "/memories/prior-ingest-by-doc-hash",
-            {"tenant_id": tenant_id, "doc_hash": doc_hash},
+            {"tenant_id": tenant_id, "doc_hash": doc_hash, "fleet_id": fleet_id, "agent_id": agent_id},
             read=False,
         )
         return result.get("rows", []) if isinstance(result, dict) else []

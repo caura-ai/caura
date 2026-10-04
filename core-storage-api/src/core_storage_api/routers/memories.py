@@ -1987,11 +1987,14 @@ async def prior_ingest_by_doc_hash(request: Request) -> dict:
     """Doc-hash idempotency lookup for the ingest write path.
 
     Ports ``ingest_service._find_prior_ingest_by_doc_hash``: returns the
-    memories of the most-recent prior ingest of identical content for this
-    tenant (``metadata_->>'doc_hash'`` match, ``source='ingest'``, not deleted),
-    or ``[]``. Body: ``{"tenant_id": str, "doc_hash": str}`` → ``{"rows":
+    caller's memories from its prior ingests of identical content
+    (``metadata_->>'doc_hash'`` match, ``source='ingest'``, not deleted, this
+    agent and fleet), newest first, or ``[]``. Body: ``{"tenant_id": str,
+    "doc_hash": str, "agent_id": str, "fleet_id": str | null}`` → ``{"rows":
     [memory dicts]}``. POST (not GET) keeps body-based validation consistent
-    with the sibling endpoints. Fail-closed 422 on a missing field. Rows use
+    with the sibling endpoints. Fail-closed 422 on a missing field; the cache
+    is the caller's own (L-74), so a lookup naming no agent is refused. An
+    absent ``fleet_id`` is the NULL fleet. Rows use
     ``MEMORY_LIST_FIELDS`` (no embedding/search_vector) — ``ingest_preview``
     consumes ``run_id``, ``content``, ``memory_type``, ``source_uri`` and
     ``metadata_`` (salience), none of which is the vector.
@@ -1999,7 +2002,10 @@ async def prior_ingest_by_doc_hash(request: Request) -> dict:
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     doc_hash = _require(body, "doc_hash")
-    rows = await _svc.find_prior_ingest_by_doc_hash(tenant_id, doc_hash)
+    agent_id = _require(body, "agent_id")
+    rows = await _svc.find_prior_ingest_by_doc_hash(
+        tenant_id, doc_hash, fleet_id=body.get("fleet_id"), agent_id=agent_id
+    )
     return {"rows": [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in rows]}
 
 

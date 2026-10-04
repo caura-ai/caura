@@ -467,13 +467,6 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
     # a caller of the gate; see the note in AuthContext.enforce_self_agent.
     "POST /api/v1/evolve/report": "bound by resolve_caller_and_gate: the verified identity wins",
     "POST /api/v1/insights/generate": "bound by resolve_caller_and_gate: the verified identity wins",
-    # INERT. Both reach ``ingest_preview``, which never reads
-    # ``request.agent_id`` — its first use is on the commit path, which is the
-    # entry below. "Persists nothing" is also true but argues the write axis,
-    # and this invariant opens by saying it is not about mutation; the
-    # parameter being unread is the fact that settles a read too.
-    "POST /api/v1/ingest/file": "inert: ingest_preview never reads the agent_id it is handed",
-    "POST /api/v1/ingest/preview": "inert: ingest_preview never reads the agent_id it is handed",
     # NODE-plane in intent — the interviewer runs under the install's
     # credential and reports on the worker node it watches, so ``agent_id``
     # names the SUBJECT and ``enforce_self_agent`` would refuse the case the

@@ -84,6 +84,7 @@ from core_api.services.agent_scope import explain_agent_scope
 from core_api.services.agent_service import (
     authorize_memory_access,
     broker_label,
+    broker_owned_agent_id,
     enforce_delete,
     enforce_fleet_read,
     enforce_fleet_read_many,
@@ -2687,6 +2688,24 @@ async def _search_inner(
     )
 
 
+async def _ingest_preview_agent_id(auth: AuthContext, tenant_id: str, claimed_id: str) -> str:
+    """The agent whose prior ingests a preview may serve from the doc-hash cache.
+
+    L-74: the cache is the caller's own, so this is the identity the request
+    acts as: the verified credential over the body, and for a broker credential
+    an agent ``/ingest/commit`` would let it write as. Read precedence rather
+    than commit's write binding, so where the two differ (a reserved ``main``
+    credential naming an agent while the reserved-id policy allows it) preview
+    misses the cache instead of reading the named agent's. Nothing is
+    registered or stamped.
+    """
+    # ``or``: for the type only; a non-None assertion always resolves.
+    agent_id = auth.effective_agent_id(claimed_id) or claimed_id
+    if auth.is_install_credential:
+        agent_id = await broker_owned_agent_id(agent_id, auth.install_uuid, tenant_id)
+    return agent_id
+
+
 @router.post("/ingest/preview", responses={200: {"model": _oar.IngestPreviewResponse}})
 async def ingest_preview_endpoint(
     body: IngestRequest,
@@ -2699,6 +2718,7 @@ async def ingest_preview_endpoint(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
+    body.agent_id = await _ingest_preview_agent_id(auth, body.tenant_id, body.agent_id)
     return await ingest_preview(body)
 
 
@@ -2818,6 +2838,7 @@ async def ingest_file_endpoint(
     filename = (file.filename or "").strip() or None
     kwargs["source_uri"] = f"upload:{filename}" if filename else "upload"
     req = IngestRequest(**kwargs)
+    req.agent_id = await _ingest_preview_agent_id(auth, tenant_id, req.agent_id)
     return await ingest_preview(req)
 
 

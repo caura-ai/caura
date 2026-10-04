@@ -49,7 +49,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import aliased, load_only
+from sqlalchemy.orm import aliased, defer, load_only
 from sqlalchemy.sql.dml import ReturningInsert
 from sqlalchemy.sql.selectable import Select
 
@@ -5813,43 +5813,55 @@ class PostgresService:
     # G2) Doc-hash idempotency (ingest write-path gate)
     # ------------------------------------------------------------------
 
-    async def find_prior_ingest_by_doc_hash(self, tenant_id: str, doc_hash: str) -> list[Memory]:
-        """Return memories from the most-recent prior ingest of identical content.
+    async def find_prior_ingest_by_doc_hash(
+        self, tenant_id: str, doc_hash: str, *, fleet_id: str | None, agent_id: str
+    ) -> list[Memory]:
+        """Return the caller's memories from its prior ingests of identical content.
 
-        Ports ``ingest_service._find_prior_ingest_by_doc_hash`` verbatim: a
-        non-deleted, tenant-scoped row whose metadata carries the same
-        ``doc_hash`` and was tagged ``source="ingest"``. When several runs
-        match, only the memories of the newest ``run_id`` are returned.
+        Non-deleted rows of this tenant, fleet and agent whose metadata carries
+        the same ``doc_hash`` and was tagged ``source="ingest"``.
+
+        L-74 / L-31: scoped to the caller's agent and fleet, as commit's own
+        pre-dedup is. ``doc_hash`` is whatever the committing caller sent, so a
+        tenant-wide lookup served a peer's forged facts to every agent as the
+        cached extraction, along with the peer's ``run_id``.
+
+        M-47: every live row across those runs, newest first and one per fact,
+        so ``rows[0]`` comes from the newest run (preview checks that run's
+        parent). Keeping only the newest run served a re-ingest's complement,
+        the facts an earlier partial run had not stored, as the whole document.
+
+        L-192: the two vector columns are never loaded; the router serialises
+        ``MEMORY_LIST_FIELDS``, which omits them.
 
         Runs on ``get_session`` (the WRITER), NOT ``get_read_session``: this is
         a write-path idempotency gate — replica lag would miss a just-committed
         prior ingest and re-ingest the same document. ``metadata_->>'key'`` text
         extraction matches the source's ``.astext`` filter.
         """
+        fleet_match = Memory.fleet_id.is_(None) if fleet_id is None else Memory.fleet_id == fleet_id
         async with get_session() as session:
             stmt = (
                 select(Memory)
+                .options(defer(Memory.embedding), defer(Memory.search_vector))
                 .where(
                     Memory.tenant_id == tenant_id,
+                    fleet_match,
+                    Memory.agent_id == agent_id,
                     Memory.metadata_["doc_hash"].astext == doc_hash,
                     Memory.metadata_["source"].astext == "ingest",
                     Memory.deleted_at.is_(None),
                 )
                 .order_by(Memory.created_at.desc())
             )
-            result = await session.execute(stmt)
-            rows: list[Memory] = list(result.scalars().all())
-        if not rows:
-            return []
-        # Newest run wins (top-level ``run_id`` column is the single source of
-        # truth for batch identity). Guard the NULL case: ``r.run_id == None`` is
-        # truthy in Python, so an anonymous (run_id IS NULL) newest row would
-        # otherwise collapse EVERY null-run_id ingest across runs into one
-        # result — return just the single newest row instead.
-        newest_run_id = rows[0].run_id
-        if newest_run_id is None:
-            return [rows[0]]
-        return [r for r in rows if r.run_id == newest_run_id]
+            rows: list[Memory] = list((await session.execute(stmt)).scalars().all())
+        seen: set[str] = set()
+        union: list[Memory] = []
+        for row in rows:
+            if row.content not in seen:
+                seen.add(row.content)
+                union.append(row)
+        return union
 
     # ------------------------------------------------------------------
     # G3) Capability-usage analytics flush (cross-tenant, RLS-free)
