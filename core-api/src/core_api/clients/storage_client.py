@@ -1028,15 +1028,18 @@ class CoreStorageClient:
         # is picked up by a later crystallizer pass.
         return await self._post("/memories/entity-overlap-candidates", data, read=True)  # type: ignore[return-value]
 
-    async def find_by_supersedes_id(self, tenant_id: str, supersedes_id: str) -> list[dict]:
+    async def find_by_supersedes_id(
+        self, tenant_id: str, supersedes_id: str, *, read: bool = True
+    ) -> list[dict]:
         """A53 — rows whose supersedes_id points at ``supersedes_id``.
 
         Retraction-shaped: unlike ``find_successors`` this applies no status or
         visibility filter, because retraction must reach the row that owns the
-        chain edge whatever state it is in.
+        chain edge whatever state it is in. ``read=False`` routes to the WRITER,
+        for a caller about to write on what it finds.
         """
         return await self._get_list(
-            "/memories/by-supersedes-id", tenant_id=tenant_id, supersedes_id=supersedes_id
+            "/memories/by-supersedes-id", read=read, tenant_id=tenant_id, supersedes_id=supersedes_id
         )
 
     async def find_children_by_parent_id(self, tenant_id: str, parent_id: str) -> list[dict]:
