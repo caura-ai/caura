@@ -104,7 +104,7 @@ DEFAULT_SETTINGS: dict = {
     # generation spends LLM tokens. See core_api.services.agent_digest.
     "agent_digest": {
         "enabled": False,
-        "cadence": "daily",  # daily | weekly | both
+        "cadence": "daily",  # daily | weekly | both — see AGENT_DIGEST_CADENCE_PERIODS
         "provider": "openai",
         "model": "gpt-5.4-mini",
         "top_n": 25,
@@ -610,6 +610,12 @@ _NON_BUSINESS_DISPOSITIONS = frozenset({"drop", "keep_private", "store"})
 # The fast pre-gate accepts any known LLM provider name (incl. ``none``/``fake``
 # for disable/test). Membership-checked so a typo can't silently disable the gate.
 _PREGATE_PROVIDERS = frozenset(p.value for p in ProviderName)
+#: Which digest runs (``period``) each ``agent_digest.cadence`` takes (M-113).
+AGENT_DIGEST_CADENCE_PERIODS: dict[str, frozenset[str]] = {
+    "daily": frozenset({"day"}),
+    "weekly": frozenset({"week"}),
+    "both": frozenset({"day", "week"}),
+}
 
 
 def _validate_governance_enums(payload: dict) -> None:
@@ -643,6 +649,21 @@ def _validate_governance_enums(payload: dict) -> None:
     if min_conf is not None and not (0.0 <= min_conf <= 1.0):
         raise ValueError(
             f"governance.non_business.pregate.min_confidence must be in [0.0, 1.0], got {min_conf!r}"
+        )
+
+
+def _validate_agent_digest_cadence(payload: dict) -> None:
+    """Raise ``ValueError`` for an ``agent_digest.cadence`` outside its three values.
+
+    ``None`` passes: it resets the override to the default, as for every key. A
+    non-string is refused here too: a dict passes ``_validate_leaf_types``, which
+    recurses into dicts, and would reach the lookup below unhashable.
+    """
+    digest = payload.get("agent_digest")
+    cadence = digest.get("cadence") if isinstance(digest, dict) else None
+    if cadence is not None and (not isinstance(cadence, str) or cadence not in AGENT_DIGEST_CADENCE_PERIODS):
+        raise ValueError(
+            f"agent_digest.cadence must be one of {sorted(AGENT_DIGEST_CADENCE_PERIODS)}, got {cadence!r}"
         )
 
 
@@ -1744,6 +1765,7 @@ async def update_settings(
     _validate_api_keys(new_settings)
     _validate_leaf_types(new_settings)
     _validate_governance_enums(new_settings)
+    _validate_agent_digest_cadence(new_settings)
     _validate_default_search_profile(new_settings)
     cron_override = new_settings.get("security_audit", {}).get("schedule_cron")
     if cron_override is not None:
