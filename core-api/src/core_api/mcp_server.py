@@ -4095,6 +4095,7 @@ async def caura_evolve(
             config,
             agent_id,
             fleet_id,
+            ids_supplied=bool(related_ids),
         )
 
         # ── Phase 3: persist (storage-routed) ──────────────────────
