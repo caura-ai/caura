@@ -2011,18 +2011,15 @@ class CoreStorageClient:
         tenant_id: str,
         fleet_id: str | None,
         batch_size: int,
+        after_id: str | None = None,
     ) -> list[dict]:
         """Entities needing a name embedding (read half of backfill). Returns a
-        list of ``{id, canonical_name}`` dicts for the core-api LLM embed loop."""
-        resp = await self._post(
-            "/entities/list-null-embeddings",
-            {
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                "batch_size": batch_size,
-            },
-            read=True,
-        )
+        list of ``{id, canonical_name}`` dicts for the core-api LLM embed loop,
+        ordered by id and resuming after ``after_id`` (L-174)."""
+        body: dict[str, Any] = {"tenant_id": tenant_id, "fleet_id": fleet_id, "batch_size": batch_size}
+        if after_id is not None:
+            body["after_id"] = after_id
+        resp = await self._post("/entities/list-null-embeddings", body, read=True)
         return resp["rows"]  # type: ignore[index,return-value]
 
     async def set_entity_embeddings(

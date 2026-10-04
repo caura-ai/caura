@@ -664,15 +664,23 @@ async def infer_relations(request: Request) -> dict:
 async def list_null_embeddings(request: Request) -> dict:
     """Entities needing a name embedding (read half of backfill).
 
-    Body ``{tenant_id, fleet_id?, batch_size}``. Returns
-    ``{rows:[{id, canonical_name}, ...]}``."""
+    Body ``{tenant_id, fleet_id?, batch_size, after_id?}``. Returns
+    ``{rows:[{id, canonical_name}, ...]}`` ordered by id, after ``after_id``
+    when given (L-174)."""
     body: dict = await request.json()
     tenant_id = _require(body, "tenant_id")
     batch_size = int(_require_number(body, "batch_size"))
+    after_id = body.get("after_id")
+    if after_id is not None:
+        try:
+            after_id = str(UUID(str(after_id)))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="'after_id' must be a UUID")
     rows = await _svc.entity_list_null_embeddings(
         tenant_id=tenant_id,
         fleet_id=body.get("fleet_id"),
         batch_size=batch_size,
+        after_id=after_id,
     )
     return {"rows": rows}
 

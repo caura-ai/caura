@@ -9158,13 +9158,9 @@ class PostgresService:
                 if len(cluster_ids) < 2:
                     continue
 
+                before = len(merged_ids)
                 try:
-                    before = len(merged_ids)
                     await self._entity_merge_cluster(session, cluster_ids, merged_ids, tenant_id)
-                    actual_merges = len(merged_ids) - before
-                    merge_count += actual_merges
-                    if actual_merges > 0:
-                        clusters_processed += 1
                 except Exception:
                     cluster_errors += 1
                     logger.exception(
@@ -9172,6 +9168,14 @@ class PostgresService:
                         root,
                         len(cluster_ids),
                     )
+                # L-51: counted after the try, not inside it. Each merge is its
+                # own released SAVEPOINT, so the ones before a failure stay
+                # committed with the run; counting only clean clusters reported
+                # them as nothing, and a run of such clusters as total failure.
+                actual_merges = len(merged_ids) - before
+                merge_count += actual_merges
+                if actual_merges > 0:
+                    clusters_processed += 1
 
             if clusters_processed == 0 and cluster_errors > 0:
                 return {
@@ -9485,7 +9489,10 @@ class PostgresService:
                 return {"skipped": True, "links_created": 0}
 
             # ── 2. Find similar entities for all candidate memories (LATERAL JOIN) ──
-            entity_fleet_clause = "AND e.fleet_id = :fleet_id" if fleet_id else ""
+            # L-149: a fleet's memories link to tenant-shared (NULL-fleet)
+            # entities too, which wire contract D4 makes readable by every
+            # fleet. The candidate memories above stay the fleet's own.
+            entity_fleet_clause = "AND (e.fleet_id = :fleet_id OR e.fleet_id IS NULL)" if fleet_id else ""
             memory_id_strs = [str(row[0]) for row in candidates]
             # ``content`` is only consulted by the text-verify filter below; skip
             # building the map (and holding every candidate's content in memory)
@@ -9769,12 +9776,20 @@ class PostgresService:
         tenant_id: str,
         fleet_id: str | None,
         batch_size: int,
+        after_id: str | None = None,
     ) -> list[dict]:
         """Entities whose ``name_embedding`` is NULL (read half of backfill).
 
-        Ports B1 verbatim. Read-only → ``get_read_session()``. Returns
-        ``[{id, canonical_name}, ...]`` for core-api's LLM embed loop."""
-        fleet_clause = "AND fleet_id = :fleet_id" if fleet_id else ""
+        Read-only → ``get_read_session()``. Returns ``[{id, canonical_name},
+        ...]`` for core-api's LLM embed loop.
+
+        L-174: ordered by id, resuming after ``after_id``. The scan had no order
+        or cursor, so names that fail to embed every night came back first every
+        night and could stall the rows behind them; the step now pages past
+        them. L-149: a fleet's run includes tenant-shared (NULL-fleet) entities,
+        which wire contract D4 makes readable by every fleet."""
+        fleet_clause = "AND (fleet_id = :fleet_id OR fleet_id IS NULL)" if fleet_id else ""
+        after_clause = "AND id > CAST(:after_id AS uuid)" if after_id else ""
         async with get_read_session() as session:
             rows = (
                 await session.execute(
@@ -9784,11 +9799,14 @@ class PostgresService:
                         WHERE tenant_id = :tenant_id
                           AND name_embedding IS NULL
                           {fleet_clause}
+                          {after_clause}
+                        ORDER BY id
                         LIMIT :batch_size
                     """),
                     {
                         "tenant_id": tenant_id,
                         **({"fleet_id": fleet_id} if fleet_id else {}),
+                        **({"after_id": after_id} if after_id else {}),
                         "batch_size": batch_size,
                     },
                 )
