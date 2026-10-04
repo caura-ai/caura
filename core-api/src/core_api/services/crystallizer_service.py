@@ -3,7 +3,10 @@
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from functools import partial
+from typing import Any
 from uuid import UUID
 
 import httpx
@@ -391,13 +394,15 @@ async def _execute_crystallization(
 
         # --- Hygiene checks ---
         hygiene: dict = {}
+        # L-180: storage reads several sections share, made once per run.
+        reads: dict = {}
         for name, fn in [
             ("orphaned_entities", _check_orphaned_entities),
             ("near_duplicates", _check_near_duplicates),
-            ("missing_embeddings", _check_missing_embeddings),
-            ("expired_still_active", _check_expired_still_active),
-            ("stale_memories", _check_stale_memories),
-            ("short_content", _check_short_content),
+            ("missing_embeddings", partial(_check_missing_embeddings, reads=reads)),
+            ("expired_still_active", partial(_check_expired_still_active, reads=reads)),
+            ("stale_memories", partial(_check_stale_memories, reads=reads)),
+            ("short_content", partial(_check_short_content, reads=reads)),
             ("broken_entity_links", _check_broken_entity_links),
         ]:
             checks_total += 1
@@ -412,7 +417,7 @@ async def _execute_crystallization(
         health: dict = {}
         checks_total += 1
         try:
-            health = await _compute_health(tenant_id, fleet_id)
+            health = await _compute_health(tenant_id, fleet_id, reads=reads)
         except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
             logger.exception("Crystallizer health computation failed for tenant %s", tenant_id)
             health = {"error": True}
@@ -422,7 +427,7 @@ async def _execute_crystallization(
         usage: dict = {}
         checks_total += 1
         try:
-            usage = await _compute_usage(tenant_id, fleet_id)
+            usage = await _compute_usage(tenant_id, fleet_id, reads=reads)
         except (SQLAlchemyError, httpx.HTTPError, ValueError, RuntimeError):
             logger.exception("Crystallizer usage computation failed for tenant %s", tenant_id)
             usage = {"error": True}
@@ -1163,12 +1168,35 @@ async def _check_near_duplicates(
         await sc.mark_dedup_checked(to_stamp, tenant_id)
 
     pairs_list = [{"id1": k[0], "id2": k[1], "similarity": v} for k, v in pairs.items()]
-    return {"count": len(pairs_list), "pairs": pairs_list}
+    # L-28: the ids and the threshold the report's NEAR_DUPLICATES issue quotes.
+    affected = list(dict.fromkeys(mid for p in pairs_list for mid in (p["id1"], p["id2"])))
+    return {
+        "count": len(pairs_list),
+        "pairs": pairs_list,
+        "affected_ids": affected[:MAX_AFFECTED_IDS],
+        "threshold": threshold,
+    }
+
+
+async def _read_once(reads: dict | None, key: str, fetch: Callable[[], Awaitable[Any]]) -> Any:
+    """One storage read per run for an input several sections share (L-180).
+
+    ``reads`` is the run's store; ``None`` reads straight through, for direct
+    callers. Only a success is kept, so a failed read is retried by the next
+    section that needs it and each section still fails on its own.
+    """
+    if reads is None:
+        return await fetch()
+    if key not in reads:
+        reads[key] = await fetch()
+    return reads[key]
 
 
 async def _check_missing_embeddings(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     """Memories with no embedding vector.
 
@@ -1186,13 +1214,17 @@ async def _check_missing_embeddings(
     starts consuming them.
     """
     sc = get_storage_client()
-    coverage = await sc.get_embedding_coverage(tenant_id, fleet_id)
+    coverage = await _read_once(
+        reads, "embedding_coverage", lambda: sc.get_embedding_coverage(tenant_id, fleet_id)
+    )
     return {"count": coverage.get("missing_embeddings", 0)}
 
 
 async def _check_expired_still_active(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     """Memories past their validity window but still marked active.
 
@@ -1204,7 +1236,9 @@ async def _check_expired_still_active(
     had something to report, and nothing at all when it didn't.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    candidates = await _read_once(
+        reads, "lifecycle_candidates", lambda: sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    )
     expired = candidates.get("expired_still_active", [])
     return {"count": len(expired), "affected_ids": [str(r) for r in expired][:MAX_AFFECTED_IDS]}
 
@@ -1212,6 +1246,8 @@ async def _check_expired_still_active(
 async def _check_stale_memories(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     """Old memories never recalled and with low weight.
 
@@ -1220,7 +1256,9 @@ async def _check_stale_memories(
     Values are bare UUID strings — see ``_check_expired_still_active``.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    candidates = await _read_once(
+        reads, "lifecycle_candidates", lambda: sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    )
     stale = candidates.get("stale_low_weight", [])
     return {"count": len(stale), "affected_ids": [str(r) for r in stale][:MAX_AFFECTED_IDS]}
 
@@ -1228,6 +1266,8 @@ async def _check_stale_memories(
 async def _check_short_content(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     """Memories with very short content (likely low value).
 
@@ -1237,7 +1277,9 @@ async def _check_short_content(
     ``_check_expired_still_active``.
     """
     sc = get_storage_client()
-    candidates = await sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    candidates = await _read_once(
+        reads, "lifecycle_candidates", lambda: sc.get_lifecycle_candidates(tenant_id, fleet_id)
+    )
     short = candidates.get("short_content", [])
     return {"count": len(short), "affected_ids": [str(r) for r in short][:MAX_AFFECTED_IDS]}
 
@@ -1261,16 +1303,21 @@ async def _check_broken_entity_links(
 async def _compute_health(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     sc = get_storage_client()
     # The three storage reads are independent — fetch them concurrently rather
     # than paying three serial HTTP round-trips. (Entity coverage runs a
-    # cross-table join that lives in the storage API now.)
-    health, coverage, with_entities = await asyncio.gather(
-        sc.get_memory_stats(tenant_id, fleet_id),
-        sc.get_embedding_coverage(tenant_id, fleet_id),
+    # cross-table join that lives in the storage API now.) Stats and coverage
+    # are shared with other sections of the run (L-180).
+    stats, coverage, with_entities = await asyncio.gather(
+        _read_once(reads, "memory_stats", lambda: sc.get_memory_stats(tenant_id, fleet_id)),
+        _read_once(reads, "embedding_coverage", lambda: sc.get_embedding_coverage(tenant_id, fleet_id)),
         sc.get_entity_coverage(tenant_id, fleet_id),
     )
+    # A copy: the shared stats must not carry this section's additions.
+    health = dict(stats)
     total = health.get("total_memories", 0)
     health["embedding_coverage_pct"] = coverage.get("coverage_pct", 0.0)
     health["entity_coverage_pct"] = round(with_entities / total * 100, 1) if total > 0 else 0.0
@@ -1286,12 +1333,14 @@ async def _compute_health(
 async def _compute_usage(
     tenant_id: str,
     fleet_id: str | None,
+    *,
+    reads: dict | None = None,
 ) -> dict:
     sc = get_storage_client()
     # Memory-table stats, type distribution, and audit usage are independent
     # storage reads — fetch them concurrently rather than serially.
     stats, type_dist, audit = await asyncio.gather(
-        sc.get_memory_stats(tenant_id, fleet_id),
+        _read_once(reads, "memory_stats", lambda: sc.get_memory_stats(tenant_id, fleet_id)),
         sc.get_type_distribution(tenant_id, fleet_id),
         sc.get_audit_usage(tenant_id),
     )
@@ -1352,7 +1401,8 @@ def _generate_issues(hygiene: dict, health: dict, usage: dict) -> list[dict]:
             "hygiene",
             "NEAR_DUPLICATES",
             "Near-duplicate memories detected",
-            f"{dup['count']} memory pair(s) exceed {CRYSTALLIZER_DEDUP_THRESHOLD} cosine similarity.",
+            f"{dup['count']} memory pair(s) at or above "
+            f"{dup.get('threshold', CRYSTALLIZER_DEDUP_THRESHOLD)} cosine similarity.",
             count=dup["count"],
             affected_ids=dup.get("affected_ids"),
         )
