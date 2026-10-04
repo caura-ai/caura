@@ -40,6 +40,9 @@ _ENV_KEYS = (
     "CAURA_AGENT_ID",
     "CAURA_FLEET_ID",
     "CAURA_INTERVIEWER_PROJECTS",
+    # The plain-HTTP opt-in (L-66): without it here, a schedule installed against
+    # an http:// LAN host would refuse to run, since cron does not inherit it.
+    "CAURA_ALLOW_INSECURE_HTTP",
 )
 
 _INTERVAL_RE = re.compile(r"^(\d+)\s*([mh])$", re.IGNORECASE)

@@ -39,6 +39,13 @@ Self-hosted? Pass `baseUrl`:
 const mc = new Caura("standalone", { tenantId: "default", baseUrl: "http://localhost:8000" });
 ```
 
+Plain `http://` sends the API key in clear, so the client allows it only to a
+loopback host (`localhost`, `127.0.0.0/8`, `::1`) and otherwise throws, naming
+the host. Use `https://`, or pass `allowInsecureHttp: true` (or set
+`CAURA_ALLOW_INSECURE_HTTP=true`) to accept the risk, e.g. on a trusted private
+network. Requests refuse redirects, so the key is never re-sent elsewhere: point
+`baseUrl` at the final URL.
+
 ## API
 
 | Method | Endpoint | Returns |

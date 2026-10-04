@@ -4,6 +4,7 @@ Config precedence: flags > env > defaults. Env vars:
   CAURA_API_KEY (required)      CAURA_TENANT_ID (required)
   CAURA_BASE_URL                CAURA_AGENT_ID (default user@host)
   CAURA_FLEET_ID                CAURA_INTERVIEWER_PROJECTS (comma-sep globs)
+  CAURA_ALLOW_INSECURE_HTTP (true: allow a plain http:// CAURA_BASE_URL off this machine)
 
 Exit codes: 0 success / nothing to do; 1 every attempted file failed;
 2 configuration or authorization error. ``hook`` ALWAYS exits 0 — a
@@ -435,6 +436,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
         "CAURA_TENANT_ID": args.tenant_id,
         "CAURA_AGENT_ID": args.agent_id,
         "CAURA_FLEET_ID": args.fleet_id or "",
+        "CAURA_ALLOW_INSECURE_HTTP": os.environ.get("CAURA_ALLOW_INSECURE_HTTP", ""),
     }
     if not args.all_projects:
         env["CAURA_INTERVIEWER_PROJECTS"] = ",".join(allow)

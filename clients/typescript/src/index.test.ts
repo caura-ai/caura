@@ -401,3 +401,93 @@ test("transport mapping does not wrap invalid JSON", async () => {
   const client = makeClient(() => new Response("not json"));
   await assert.rejects(client.health(), SyntaxError);
 });
+
+// L-66: the key never crosses the network in cleartext unless the caller opts in.
+
+function clientFor(baseUrl: string, options: Record<string, unknown> = {}): Caura {
+  return makeClient(() => jsonResponse(200, { status: "ok" }), { baseUrl, ...options });
+}
+
+function withEnvOptIn<T>(value: string | undefined, run: () => T): T {
+  const saved = process.env.CAURA_ALLOW_INSECURE_HTTP;
+  if (value === undefined) delete process.env.CAURA_ALLOW_INSECURE_HTTP;
+  else process.env.CAURA_ALLOW_INSECURE_HTTP = value;
+  try {
+    return run();
+  } finally {
+    if (saved === undefined) delete process.env.CAURA_ALLOW_INSECURE_HTTP;
+    else process.env.CAURA_ALLOW_INSECURE_HTTP = saved;
+  }
+}
+
+test("plain http to a remote host is refused", () => {
+  withEnvOptIn(undefined, () => {
+    assert.throws(
+      () => clientFor("http://caura.example"),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /caura\.example/);
+        assert.match(err.message, /allowInsecureHttp/);
+        assert.match(err.message, /CAURA_ALLOW_INSECURE_HTTP/);
+        return true;
+      },
+    );
+  });
+});
+
+for (const scheme of ["ftp", "ws", "file"]) {
+  test(`a ${scheme}:// base URL is refused`, () => {
+    withEnvOptIn(undefined, () => {
+      assert.throws(() => clientFor(`${scheme}://caura.example`), /https:\/\//);
+    });
+  });
+}
+
+for (const baseUrl of [
+  "https://caura.example",
+  "http://localhost:8000",
+  "http://LOCALHOST:8000",
+  "http://api.localhost",
+  "http://127.0.0.1:8000",
+  "http://127.8.9.10",
+  "http://[::1]:8000",
+]) {
+  test(`${baseUrl} is allowed`, async () => {
+    const client = withEnvOptIn(undefined, () => clientFor(baseUrl));
+    assert.deepEqual(await client.health(), { status: "ok" });
+  });
+}
+
+test("allowInsecureHttp allows plain http", () => {
+  withEnvOptIn(undefined, () => clientFor("http://caura.example", { allowInsecureHttp: true }));
+});
+
+for (const value of ["true", "1"]) {
+  test(`CAURA_ALLOW_INSECURE_HTTP=${value} allows plain http`, () => {
+    withEnvOptIn(value, () => clientFor("http://caura.example"));
+  });
+}
+
+for (const value of ["", "false", "0", "yes"]) {
+  test(`CAURA_ALLOW_INSECURE_HTTP=${JSON.stringify(value)} does not opt in`, () => {
+    withEnvOptIn(value, () => {
+      assert.throws(() => clientFor("http://caura.example"));
+    });
+  });
+}
+
+test("an explicit allowInsecureHttp: false beats the env opt-in", () => {
+  withEnvOptIn("true", () => {
+    assert.throws(() => clientFor("http://caura.example", { allowInsecureHttp: false }));
+  });
+});
+
+test("requests refuse redirects, so the key is never re-sent to a redirect target", async () => {
+  let redirect: RequestRedirect | undefined;
+  const client = makeClient((_url, init) => {
+    redirect = init.redirect;
+    return jsonResponse(200, { status: "ok" });
+  });
+  await client.health();
+  assert.equal(redirect, "error");
+});
