@@ -721,13 +721,16 @@ def test_embed_backfill_inflight_cap_rejects_zero() -> None:
 
 
 @pytest.mark.asyncio
-async def test_embed_backfill_sweeps_even_if_in_progress_update_fails() -> None:
-    """Bookkeeping must not decide whether the work happens.
+async def test_embed_backfill_nacks_when_its_claim_cannot_be_written() -> None:
+    """A claim that could not be written is not a claim (L-04).
 
-    ``_run_action`` marks ``in_progress`` best-effort for this reason: letting
-    it raise would nack before the sweep started, skipping an op the operator
-    asked for because a status write failed. The sweep is idempotent, so
-    running it against a stale row beats not running it.
+    This used to sweep anyway, on the grounds that ``_run_action`` marked
+    ``in_progress`` best-effort too. Both now nack instead. A 404 (pruned row)
+    already arrives as ``{}`` and still sweeps; what raises here is a transport
+    or server error after the client's own retries. Sweeping then bypasses the
+    claim, and a concurrent delivery republishes an embed request for every row
+    still queued, doubling provider calls for the backlog. The nack retries the
+    claim once storage answers.
     """
     from core_worker import consumer
 
@@ -740,10 +743,11 @@ async def test_embed_backfill_sweeps_even_if_in_progress_update_fails() -> None:
         patch.object(
             consumer,
             "update_lifecycle_audit_row",
-            # in_progress raises; the finalising call succeeds.
+            # in_progress raises; a finalising call would succeed.
             AsyncMock(side_effect=[RuntimeError("status write blip"), None]),
         ),
     ):
-        await consumer.handle_embed_backfill_request(_backfill_event())
+        with pytest.raises(RuntimeError, match="status write blip"):
+            await consumer.handle_embed_backfill_request(_backfill_event())
 
-    swept.assert_awaited_once(), "a failed status write must not skip the sweep"
+    swept.assert_not_awaited()

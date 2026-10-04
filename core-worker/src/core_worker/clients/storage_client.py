@@ -28,7 +28,7 @@ from uuid import UUID
 import httpx
 
 from common.constants import LIFECYCLE_STALE_ARCHIVE_WEIGHT
-from common.http_retry import with_connect_phase_retry
+from common.http_retry import with_connect_phase_retry, with_retry
 from common.storage_auth import is_storage_shared_secret_rejection
 from core_worker.clients.identity_token import evict as _evict_id_token
 from core_worker.clients.identity_token import fetch_auth_header
@@ -78,6 +78,7 @@ async def close_storage_client() -> None:
 async def _signed_call(
     fn: Callable[..., Awaitable[httpx.Response]],
     *args: Any,
+    retry: Callable[..., Awaitable[httpx.Response]] = with_connect_phase_retry,
     **kwargs: Any,
 ) -> httpx.Response:
     """Issue ``fn(*args, **kwargs)`` with storage and Cloud Run credentials.
@@ -108,6 +109,10 @@ async def _signed_call(
     failures are the exception because each one otherwise burns a
     Pub/Sub delivery attempt against the DLQ budget for a request
     that never even reached storage (the 2026-06-11 incident shape).
+
+    ``retry=with_retry`` opts one request into the full transient set. Only for
+    an endpoint whose replay storage recognises, where the nack is the costlier
+    path: see ``update_lifecycle_audit_row``.
     """
     global _storage_shared_secret
     headers = dict(kwargs.pop("headers", None) or {})
@@ -120,7 +125,7 @@ async def _signed_call(
     method = getattr(fn, "__name__", "?").upper()
     path = args[0] if args else ""
     label = f"{method} {path}".rstrip()
-    resp = await with_connect_phase_retry(lambda: fn(*args, headers=headers, **kwargs), label=label)
+    resp = await retry(lambda: fn(*args, headers=headers, **kwargs), label=label)
     if resp.status_code == 401 and _audience is not None and not is_storage_shared_secret_rejection(resp):
         _evict_id_token(_audience)
         # Rebind to a NEW dict rather than ``.update()`` in place — the
@@ -130,7 +135,7 @@ async def _signed_call(
         # otherwise see the rotated token retro-fitted into the first
         # call's record).
         fresh_headers = {**headers, **await fetch_auth_header(_audience)}
-        resp = await with_connect_phase_retry(lambda: fn(*args, headers=fresh_headers, **kwargs), label=label)
+        resp = await retry(lambda: fn(*args, headers=fresh_headers, **kwargs), label=label)
     return resp
 
 
@@ -476,6 +481,12 @@ async def update_lifecycle_audit_row(
     ``in_progress`` request lost the claim to a live consumer and the caller
     must not run the primitive. ``{}`` when the row is gone or the body is
     unreadable, so a caller reading one key cannot mistake either for a claim.
+
+    Retries ReadTimeout and 5xx in place, as core-api's client does (L-04).
+    Storage recognises a re-sent claim or terminal write by its ``claim_token``,
+    so a replay is never mistaken for a competitor; and the nack it replaces is
+    worse here: a failed claim nacks the delivery, and a failed success write
+    re-runs work that already finished.
     """
     body: dict[str, Any] = {"org_id": org_id, "status": status}
     if stats is not None:
@@ -487,6 +498,7 @@ async def update_lifecycle_audit_row(
     resp = await _signed_call(
         client.patch,
         f"{_PREFIX}/lifecycle-audit/{audit_id}",
+        retry=with_retry,
         json=body,
     )
     if resp.status_code == 404:

@@ -164,6 +164,159 @@ _CANCEL_RELEASE_TIMEOUT_SECONDS = 2.0
 # carries no runtime risk.
 _OpFn = Callable[..., Awaitable[int]]
 
+#: Any adapter's ``update_lifecycle_audit_row``, or core-worker's module-level
+#: one with its client bound, so both handlers share the claim protocol below.
+_AuditWrite = Callable[..., Awaitable[dict | None]]
+
+#: Waits between in-place attempts at the terminal success write, after the
+#: storage client's own retries (L-05). The op has run and only its record is
+#: missing; a nack re-runs the op end to end once the claim lease lapses, which
+#: for crystallize or insights is a second LLM bill. Bounded, so a sustained
+#: outage still nacks as before.
+_SUCCESS_WRITE_RETRY_DELAYS_SECONDS = (1.0, 5.0, 15.0)
+
+
+async def claim_audit_row(
+    write: _AuditWrite,
+    audit_id: int,
+    *,
+    org_id: str,
+    action: str,
+    claim_token: str,
+) -> bool:
+    """Move the audit row to ``in_progress`` under ``claim_token``.
+
+    True: run the op. That includes a row that is gone: the adapters turn a 404
+    into ``{}``, and a row pruned between fanout and consume must not skip an op
+    the operator asked for. False: the row already succeeded, so ack without
+    running. Raises, so the bus nacks, when another consumer holds a live claim
+    or when the claim write itself failed (L-04).
+
+    ``claim_token`` is minted once per INVOCATION, not per HTTP request. The
+    storage clients retry this PATCH on ReadTimeout and 5xx, so a claim that
+    succeeded server-side but lost its response is re-sent with the same token
+    and the compare-and-swap recognises it rather than reporting a conflict
+    against ourselves. A genuine second delivery mints a different token, so it
+    still loses the race.
+    """
+    try:
+        claim = await write(
+            audit_id, org_id=org_id, status="in_progress", claim_token=claim_token
+        )
+    except Exception:
+        # Not "the row is missing" -- that arrives as ``{}``. This is storage
+        # failing after the client's retries, and running now would bypass the
+        # claim: a concurrent delivery could run the same op at the same time.
+        # A nack retries the claim once storage answers.
+        logger.warning(
+            "lifecycle audit claim write failed; nacking rather than running "
+            "unclaimed",
+            exc_info=True,
+            extra={"audit_id": audit_id, "action": action},
+        )
+        raise
+    if not isinstance(claim, dict):
+        claim = {}
+
+    if claim.get("noop"):
+        # The row is already at ``success``: this delivery is a redelivery of a
+        # message whose work completed. Running the primitive again is the
+        # duplicate this path exists to avoid, and it is also what would make
+        # the terminal write look like a lost claim -- the winner's token is on
+        # the row and ours is not -- turning a routine redelivery into a
+        # reported duplicate run. Ack and stop: there is nothing left to do and
+        # the sticky-success gate has already preserved the original result.
+        logger.info(
+            "lifecycle %s already succeeded; skipping redelivered work",
+            action,
+            extra={"audit_id": audit_id, "org_id": org_id, "action": action},
+        )
+        return False
+
+    if claim.get("claim_conflict"):
+        # Another consumer holds a live claim on this row. Two deliveries of
+        # one audit_id are reachable two ways: the reconcile sweep republished
+        # a message whose original was only slow (subscriptions here retain
+        # for seven days, so no age threshold separates "lost" from "queued"),
+        # or Pub/Sub redelivered while the first attempt is still running.
+        # Either way the primitive must not run twice — for crystallize or
+        # insights that is duplicate LLM spend and duplicate records.
+        #
+        # Raise rather than ack-and-skip. Acking drops this delivery for good,
+        # and if the holder then dies the row sits at in_progress, where the
+        # reconcile sweep deliberately does not look — trading a duplicate run
+        # for a silently stranded row, which is the failure this whole path
+        # exists to end. A nack retries: by then the holder has either
+        # finished, making the retry a sticky-success no-op, or its claim has
+        # gone stale and the retry takes the row legitimately. "By then"
+        # relies on the Pub/Sub bus nacking with a growing redelivery delay
+        # (``pubsub._nack_delay_seconds``), not with deadline 0 — at 0 this
+        # delivery would come straight back for the holder's whole run.
+        logger.info(
+            "lifecycle audit row is claimed by another consumer; nacking",
+            extra={"audit_id": audit_id, "action": action, "org_id": org_id},
+        )
+        raise RuntimeError(
+            f"lifecycle {action} audit row {audit_id} is claimed by another consumer"
+        )
+    return True
+
+
+async def write_success(
+    write: _AuditWrite,
+    audit_id: int,
+    *,
+    org_id: str,
+    action: str,
+    stats: dict,
+    claim_token: str,
+) -> None:
+    """Record the op's success under its claim, retrying in place (L-05).
+
+    The work is done; a nack here would re-run all of it once the claim lease
+    lapses. So a failed write is retried with the same token, which storage
+    accepts as the holder's own, before giving up to the nack.
+    """
+    delays = iter(_SUCCESS_WRITE_RETRY_DELAYS_SECONDS)
+    while True:
+        try:
+            finalize = await write(
+                audit_id,
+                org_id=org_id,
+                status="success",
+                stats=stats,
+                claim_token=claim_token,
+            )
+            break
+        except Exception:
+            delay = next(delays, None)
+            if delay is None:
+                raise
+            logger.warning(
+                "lifecycle audit success write failed; retrying in %ss",
+                delay,
+                exc_info=True,
+                extra={"audit_id": audit_id, "action": action},
+            )
+            await asyncio.sleep(delay)
+
+    if isinstance(finalize, dict) and finalize.get("claim_lost"):
+        # Our claim was taken over by another delivery while this run was
+        # still going, so the primitive ran twice and the holder's result is
+        # what the row now records. Nothing to retry -- the work is done, and
+        # done more than once. Log at error: for crystallize or insights this
+        # is duplicate LLM spend, and it is otherwise invisible.
+        logger.error(
+            "lifecycle %s finished without its claim; the row was finalized by "
+            "another consumer and this run was a duplicate",
+            action,
+            extra={
+                "audit_id": audit_id,
+                "org_id": org_id,
+                "action": action,
+            },
+        )
+
 
 async def _run_action(
     event: Event,
@@ -273,79 +426,16 @@ async def _run_action(
             )
             return
 
-    # Best-effort in_progress mark: 404 means the audit row was pruned
-    # between fanout and consume. Continue anyway so the primitive
-    # still runs — dropping would silently skip an op the operator
-    # asked for. That tolerance is for a MISSING row; a row held by
-    # another consumer is handled separately below, because "the row is
-    # gone" and "someone else is already doing this work" call for
-    # opposite responses.
-    # One token per INVOCATION, not per HTTP request. The storage client
-    # retries a PATCH on ReadTimeout and 5xx, so a claim that succeeded
-    # server-side but lost its response is re-sent with this same token and
-    # the compare-and-swap recognises it rather than reporting a conflict
-    # against ourselves. A genuine second delivery re-enters this function
-    # and mints a different token, so it still loses the race.
+    # One token per INVOCATION, not per HTTP request: see ``claim_audit_row``.
     claim_token = uuid.uuid4().hex
-    claim: dict = {}
-    try:
-        claim = (
-            await adapter.update_lifecycle_audit_row(
-                audit_id,
-                org_id=org_id,
-                status="in_progress",
-                claim_token=claim_token,
-            )
-            or {}
-        )
-    except Exception:
-        logger.warning(
-            "lifecycle audit in_progress update failed; continuing",
-            exc_info=True,
-            extra={"audit_id": audit_id, "action": action},
-        )
-
-    if claim.get("noop"):
-        # The row is already at ``success``: this delivery is a redelivery of a
-        # message whose work completed. Running the primitive again is the
-        # duplicate this path exists to avoid, and it is also what would make
-        # the terminal write below look like a lost claim -- the winner's token
-        # is on the row and ours is not -- turning a routine redelivery into a
-        # reported duplicate run. Ack and stop: there is nothing left to do and
-        # the sticky-success gate has already preserved the original result.
-        logger.info(
-            "lifecycle %s already succeeded; skipping redelivered work",
-            action,
-            extra={"audit_id": audit_id, "org_id": org_id, "action": action},
-        )
+    if not await claim_audit_row(
+        adapter.update_lifecycle_audit_row,
+        audit_id,
+        org_id=org_id,
+        action=action,
+        claim_token=claim_token,
+    ):
         return
-
-    if claim.get("claim_conflict"):
-        # Another consumer holds a live claim on this row. Two deliveries of
-        # one audit_id are reachable two ways: the reconcile sweep republished
-        # a message whose original was only slow (subscriptions here retain
-        # for seven days, so no age threshold separates "lost" from "queued"),
-        # or Pub/Sub redelivered while the first attempt is still running.
-        # Either way the primitive must not run twice — for crystallize or
-        # insights that is duplicate LLM spend and duplicate records.
-        #
-        # Raise rather than ack-and-skip. Acking drops this delivery for good,
-        # and if the holder then dies the row sits at in_progress, where the
-        # reconcile sweep deliberately does not look — trading a duplicate run
-        # for a silently stranded row, which is the failure this whole path
-        # exists to end. A nack retries: by then the holder has either
-        # finished, making the retry a sticky-success no-op, or its claim has
-        # gone stale and the retry takes the row legitimately. "By then"
-        # relies on the Pub/Sub bus nacking with a growing redelivery delay
-        # (``pubsub._nack_delay_seconds``), not with deadline 0 — at 0 this
-        # delivery would come straight back for the holder's whole run.
-        logger.info(
-            "lifecycle audit row is claimed by another consumer; nacking",
-            extra={"audit_id": audit_id, "action": action, "org_id": org_id},
-        )
-        raise RuntimeError(
-            f"lifecycle {action} audit row {audit_id} is claimed by another consumer"
-        )
 
     try:
         count = await run_op(request)
@@ -452,32 +542,14 @@ async def _run_action(
         # the durable record (when the update succeeded).
         raise
 
-    finalize = (
-        await adapter.update_lifecycle_audit_row(
-            audit_id,
-            org_id=org_id,
-            status="success",
-            stats={stats_key: count},
-            claim_token=claim_token,
-        )
-        or {}
+    await write_success(
+        adapter.update_lifecycle_audit_row,
+        audit_id,
+        org_id=org_id,
+        action=action,
+        stats={stats_key: count},
+        claim_token=claim_token,
     )
-    if finalize.get("claim_lost"):
-        # Our claim was taken over by another delivery while this run was
-        # still going, so the primitive ran twice and the holder's result is
-        # what the row now records. Nothing to retry -- the work is done, and
-        # done more than once. Log at error: for crystallize or insights this
-        # is duplicate LLM spend, and it is otherwise invisible.
-        logger.error(
-            "lifecycle %s finished without its claim; the row was finalized by "
-            "another consumer and this run was a duplicate",
-            action,
-            extra={
-                "audit_id": audit_id,
-                "org_id": org_id,
-                "action": action,
-            },
-        )
 
     logger.info(
         "lifecycle %s processed",

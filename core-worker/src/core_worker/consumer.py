@@ -43,8 +43,10 @@ Failure modes:
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from types import SimpleNamespace
 
 import httpx
@@ -55,6 +57,7 @@ from common.enrichment import EnrichmentResult, enrich_memory
 from common.events.base import Event
 from common.events.factory import get_event_bus
 from common.events.lifecycle_archive_request import LifecycleArchiveRequest
+from common.events.lifecycle_handlers import claim_audit_row, write_success
 from common.events.memory_embed_request import MemoryEmbedRequest
 from common.events.memory_embedded_publisher import publish_memory_embedded
 from common.events.memory_enrich_request import MemoryEnrichRequest
@@ -874,29 +877,24 @@ async def handle_embed_backfill_request(event: Event) -> None:
         )
         return
 
-    # Mark the row in_progress before the sweep, as the shared ``_run_action``
-    # does. A per-org sweep can run for a while, and without this an operator
-    # inspecting the row mid-run cannot tell "actively sweeping" from "message
-    # not picked up yet" — both read as the fanout's initial ``pending``.
-    #
-    # Best-effort, matching ``_run_action``: bookkeeping must not decide whether
-    # the work happens. Letting this raise would nack before the sweep even
-    # started, skipping an op the operator asked for because a status write
-    # failed — and the sweep is idempotent, so doing it with a stale row is
-    # strictly better than not doing it.
-    try:
-        await update_lifecycle_audit_row(
-            get_storage_client(),
-            request.audit_id,
-            org_id=request.org_id,
-            status="in_progress",
-        )
-    except Exception:
-        logger.warning(
-            "embed-backfill audit in_progress update failed; continuing",
-            exc_info=True,
-            extra={"org_id": request.org_id, "audit_id": request.audit_id},
-        )
+    # Claim the row before the sweep, through the same claim as the shared
+    # ``_run_action`` (L-05). Mid-run the row reads ``in_progress``, so an
+    # operator can tell "actively sweeping" from "message not picked up yet".
+    # And a second delivery does not sweep alongside this one: the sweep is
+    # idempotent over rows, but each run publishes an embed request for every
+    # row still NULL, so two at once double the provider calls for the backlog.
+    # A redelivery of a finished sweep is acked; a live conflict or a failed
+    # claim write nacks.
+    audit_write = partial(update_lifecycle_audit_row, get_storage_client())
+    claim_token = uuid.uuid4().hex
+    if not await claim_audit_row(
+        audit_write,
+        request.audit_id,
+        org_id=request.org_id,
+        action="embed-backfill",
+        claim_token=claim_token,
+    ):
+        return
 
     try:
         report = await run_embedding_backfill(
@@ -920,12 +918,12 @@ async def handle_embed_backfill_request(event: Event) -> None:
         # still leaving the row unfinalised. The original failure is the one
         # worth propagating, so a bookkeeping failure only gets logged.
         try:
-            await update_lifecycle_audit_row(
-                get_storage_client(),
+            await audit_write(
                 request.audit_id,
                 org_id=request.org_id,
                 status="failure",
                 error_message=str(exc)[:500],
+                claim_token=claim_token,
             )
         except Exception:
             logger.exception(
@@ -936,17 +934,19 @@ async def handle_embed_backfill_request(event: Event) -> None:
 
     # The count nobody could get before: "how many rows were unembedded" was
     # only answerable by querying AlloyDB directly, because the coverage
-    # endpoint is internal-ingress and no metric carried it.
-    await update_lifecycle_audit_row(
-        get_storage_client(),
+    # endpoint is internal-ingress and no metric carried it. Retried in place
+    # under the claim, since a nack would re-run the whole sweep.
+    await write_success(
+        audit_write,
         request.audit_id,
         org_id=request.org_id,
-        status="success",
+        action="embed-backfill",
         stats={
             "scanned": report.scanned,
             "published": report.published,
             "skipped_missing": report.skipped_missing,
         },
+        claim_token=claim_token,
     )
     logger.info(
         "embed-backfill sweep processed",
