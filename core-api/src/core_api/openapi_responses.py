@@ -94,9 +94,15 @@ class MemoryContradictionsResponse(BaseModel):
     memory_id: str
     status: str | None
     superseded_by: SupersessionPeer | None = Field(
-        description="The newer memory that superseded this one; null when none is live."
+        description=(
+            "The older memory this one superseded (via supersedes_id); null when there is none or "
+            "it was deleted. The field name is kept for back-compat; newer memories that superseded "
+            "this one are in superseded_memories and in contradictions with direction superseded_by."
+        )
     )
-    superseded_memories: list[SupersessionPeer]
+    superseded_memories: list[SupersessionPeer] = Field(
+        description="Newer memories that superseded this one, each with supersedes_id pointing here."
+    )
     detection_status: str = Field(description="completed or pending.")
     contradictions: list[ContradictionEntry]
 
