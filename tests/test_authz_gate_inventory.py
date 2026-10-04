@@ -449,6 +449,10 @@ SELF_GATE_ALLOWLIST: dict[str, str] = {
         "filter: narrows a digest on a surface that is cross-agent by design — "
         "GET /reports builds a per_agent breakdown of the tenant"
     ),
+    "GET /api/v1/audit-log": (
+        "filter: narrows the tenant's audit log, which the same enforce_tenant "
+        "already lets the caller read unfiltered"
+    ),
     # READS of the agent row itself. Tenant-readable by design, and gating one
     # spelling would leave the identical payload one hop away: both call
     # sc.get_agent and return the same AgentOut under the same enforce_tenant.

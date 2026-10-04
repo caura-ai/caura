@@ -13129,7 +13129,11 @@ class PostgresService:
         offset: int = 0,
         action: str | None = None,
         resource_type: str | None = None,
+        agent_id: str | None = None,
+        resource_id: UUID | None = None,
         since: datetime | None = None,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
     ) -> list[AuditLog]:
         """One page of a tenant's audit log, newest first.
 
@@ -13143,10 +13147,15 @@ class PostgresService:
         empty for every tenant, always, so the endpoint could not paginate at
         all.
 
-        ``(created_at DESC, id)`` rather than ``created_at`` alone: the column
-        is not unique, and a stable tiebreak is what makes OFFSET paging
+        ``(created_at DESC, id DESC)`` rather than ``created_at`` alone: the
+        column is not unique, and a stable tiebreak is what makes paging
         coherent — without it two rows sharing a timestamp can swap between
-        pages and be served twice or skipped.
+        pages and be served twice or skipped. The tiebreak runs in the same
+        direction as the timestamp because the keyset cursor is the row value
+        ``(created_at, id) < (cursor_ts, cursor_id)``, which means "after the
+        cursor" under exactly this order and no other (the same contract as the
+        memory list; see ``core_api.pagination``). Both halves of the cursor are
+        required; one alone is ignored.
         """
         async with get_session() as session:
             # Filters first, then order/offset/limit. SQLAlchemy builds the same
@@ -13160,7 +13169,13 @@ class PostgresService:
                 q = q.where(AuditLog.action == action)
             if resource_type:
                 q = q.where(AuditLog.resource_type == resource_type)
-            q = q.order_by(AuditLog.created_at.desc(), AuditLog.id).offset(offset).limit(limit)
+            if agent_id:
+                q = q.where(AuditLog.agent_id == agent_id)
+            if resource_id:
+                q = q.where(AuditLog.resource_id == resource_id)
+            if cursor_ts is not None and cursor_id is not None:
+                q = q.where(tuple_(AuditLog.created_at, AuditLog.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+            q = q.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).offset(offset).limit(limit)
             result = await session.execute(q)
             return list(result.scalars().all())
 

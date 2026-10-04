@@ -3087,6 +3087,10 @@ class CoreStorageClient:
         action: str | None = None,
         resource_type: str | None = None,
         since: datetime | None = None,
+        agent_id: str | None = None,
+        resource_id: UUID | None = None,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
     ) -> list[dict]:
         params: dict[str, Any] = {
             "tenant_id": tenant_id,
@@ -3097,10 +3101,17 @@ class CoreStorageClient:
             params["action"] = action
         if resource_type is not None:
             params["resource_type"] = resource_type
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+        if resource_id is not None:
+            params["resource_id"] = str(resource_id)
         if since is not None:
             # OSS 08/14 M-11 — forwarded as ISO-8601; the storage route parses
             # it back to a datetime and the filter runs in SQL.
             params["since"] = since.isoformat()
+        if cursor_ts is not None and cursor_id is not None:
+            params["cursor_ts"] = cursor_ts.isoformat()
+            params["cursor_id"] = str(cursor_id)
         return await self._get_list("/audit-logs", **params)
 
     async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000, start_seq: int = 1) -> dict:

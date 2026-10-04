@@ -946,6 +946,9 @@ DEFAULT_LIST_LIMIT = 50
 MAX_LIST_LIMIT = 500
 DEFAULT_AUDIT_LIMIT = 50
 MAX_AUDIT_LIMIT = 200
+# GET /audit-log answers a bare list, so its keyset cursor travels in a
+# response header: a body envelope would break every existing caller.
+AUDIT_NEXT_CURSOR_HEADER = "X-Next-Cursor"
 DEFAULT_ENTITY_LIMIT = 100
 
 # ── Tier limits ──

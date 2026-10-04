@@ -212,7 +212,11 @@ async def list_audit_logs(
     offset: int = 0,
     action: str | None = None,
     resource_type: str | None = None,
+    agent_id: str | None = None,
+    resource_id: UUID | None = None,
     since: datetime | None = None,
+    cursor_ts: datetime | None = None,
+    cursor_id: UUID | None = None,
 ) -> list[dict]:
     # EVERY parameter filters in SQL. ``since`` already did (OSS 08/14 M-11);
     # ``action`` / ``resource_type`` / ``offset`` were applied here, in Python,
@@ -226,6 +230,10 @@ async def list_audit_logs(
         offset=offset,
         action=action,
         resource_type=resource_type,
+        agent_id=agent_id,
+        resource_id=resource_id,
         since=since,
+        cursor_ts=cursor_ts,
+        cursor_id=cursor_id,
     )
     return [orm_to_dict(log, AUDIT_LOG_FIELDS) for log in logs]
