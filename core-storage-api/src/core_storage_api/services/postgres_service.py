@@ -5363,13 +5363,17 @@ class PostgresService:
         ``deleted_at IS NULL`` alone was never the filter that mattered:
         soft-deletion is not the state crystallization puts its sources into.
 
-        The trailing ``c.id`` / ``nb.id`` sort keys make an order Postgres never
-        promised deterministic rather than changing one it did. Candidates tie
-        on ``created_at`` and neighbours tie on distance; under a tie the old
-        loop's visit order — and therefore which pairs survive
-        ``CRYSTALLIZER_MAX_DEDUP_PAIRS`` — was whatever the executor happened to
-        emit. Similarity is symmetric, so a tie never changed a pair's recorded
-        score, only which pairs made the cap.
+        The ``id`` tie-breakers make an order Postgres never promised
+        deterministic rather than changing one it did. Candidates tie on
+        ``created_at`` (a bulk insert shares one transaction's clock) and
+        neighbours tie on distance. The candidate page needs its own: the outer
+        ``c.id`` key only orders rows already selected, so with ``created_at``
+        alone under ``LIMIT``/``OFFSET`` a page boundary inside a tie could offer
+        one row twice and skip another until a later sweep (L-44). ``created_at
+        DESC, id DESC`` is the order ``ix_memories_tenant_created_active`` keeps.
+        Under a neighbour tie, which pairs survive ``CRYSTALLIZER_MAX_DEDUP_PAIRS``
+        was whatever the executor happened to emit. Similarity is symmetric, so a
+        tie never changed a pair's recorded score, only which pairs made the cap.
 
         Only team- and org-visible rows take part, and a pair never spans
         fleets. The crystal that a cluster becomes is written as a team-visible
@@ -5394,7 +5398,7 @@ class PostgresService:
                       AND m.status = ANY(:live_statuses)
                       AND m.visibility = ANY(:shared_visibilities)
                       AND m.last_dedup_checked_at IS NULL
-                    ORDER BY m.created_at DESC
+                    ORDER BY m.created_at DESC, m.id DESC
                     LIMIT :batch_size OFFSET :batch_offset
                 )
                 SELECT c.id AS candidate_id,
@@ -5416,7 +5420,7 @@ class PostgresService:
                     ORDER BY n.embedding <=> c.embedding
                     LIMIT :k
                 ) nb ON TRUE
-                ORDER BY c.created_at DESC, c.id, nb.similarity DESC NULLS LAST, nb.id
+                ORDER BY c.created_at DESC, c.id DESC, nb.similarity DESC NULLS LAST, nb.id
             """),
                 {
                     **params,
@@ -11602,6 +11606,11 @@ class PostgresService:
         leaves the comparison to the caller — mirroring
         ``insights_activity_gate``, which likewise returns two timestamps rather
         than a verdict so the decision stays readable in core-api.
+
+        No ``fleet_id`` means the whole tenant, and only a tenant-wide sweep
+        (``fleet_id IS NULL``) covers that, as in ``report_find_running``. A
+        fleet-scoped run never swept the other fleets, so letting it answer here
+        skipped them until the next write (L-52).
         """
         mem_filter = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
         report_filter = [
@@ -11611,6 +11620,8 @@ class PostgresService:
         if fleet_id:
             mem_filter.append(Memory.fleet_id == fleet_id)
             report_filter.append(CrystallizationReport.fleet_id == fleet_id)
+        else:
+            report_filter.append(CrystallizationReport.fleet_id.is_(None))
         async with get_read_session() as session:
             latest_memory = await session.scalar(select(func.max(Memory.created_at)).where(*mem_filter))
             last_sweep = await session.scalar(
