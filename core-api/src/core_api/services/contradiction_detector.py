@@ -251,6 +251,51 @@ def _log_batch_status_result(result: dict | None, *, path: str, memory_id) -> No
         )
 
 
+def _unlinked_pairs(
+    new_memory: dict, pairs: list[tuple[dict, str, float | None]], updates: dict[str, dict]
+) -> list[tuple[dict, str, float | None]]:
+    """The confirmed pairs whose loser no chain edge in ``updates`` points at (M-34).
+
+    ``supersedes_id`` is one column, so each loop wires ``new_memory`` to its first
+    canonical loser only, and to none when it already supersedes a row; a flipped
+    winner that already supersedes a row keeps that edge. Every such loser is
+    demoted all the same, and with nothing pointing at it ``find_successors``
+    cannot say what replaced it and retraction cannot reach it.
+    """
+    linked = {u["supersedes_id"] for u in updates.values() if u.get("supersedes_id")}
+    return [p for p in pairs if str(_pick_older(p[0], new_memory).get("id")) not in linked]
+
+
+async def _record_conflicts(
+    new_memory: dict,
+    pairs: list[tuple[dict, str, float | None]],
+    unlinked: list[tuple[dict, str, float | None]],
+    *,
+    tenant_id: str,
+    tenant_config,
+) -> None:
+    """Write the ``memory_conflicts`` records a detection loop owes, after its flush.
+
+    A55 1d records every confirmed pair when ``contradiction_write_conflict_record``
+    is on (off by default). An unlinked loser (M-34) is recorded whatever the flag:
+    its record is all that still names the memory that replaced it. ``unlinked`` is
+    drawn from ``pairs``, so no pair is written twice.
+    """
+    to_record = pairs if settings.contradiction_write_conflict_record else unlinked
+    if not to_record:
+        return
+    # Not a top-level import: the resolver's relationship module imports this one.
+    from core_api.services.contradiction.resolver import record_detected_conflicts
+
+    await record_detected_conflicts(
+        new_memory,
+        to_record,
+        tenant_id=tenant_id,
+        fleet_id=new_memory.get("fleet_id"),
+        tenant_config=tenant_config,
+    )
+
+
 # ---------------------------------------------------------------------------
 # A19 — process-wide admission gate for detection passes.
 # ---------------------------------------------------------------------------
@@ -371,6 +416,8 @@ class _RdfPassResult(NamedTuple):
     record_pairs: list[tuple[dict, str, float | None]]
     supersedes_id: Any
     ran: bool
+    # M-34 — the record_pairs whose loser no edge from this pass points at.
+    unlinked_pairs: list[tuple[dict, str, float | None]]
 
 
 async def _rdf_conflict_pass(
@@ -391,6 +438,7 @@ async def _rdf_conflict_pass(
     object_value = new_memory.get("object_value")
     contradictions: list[ContradictionInfo] = []
     _record_pairs: list[tuple[dict, str, float | None]] = []
+    unlinked: list[tuple[dict, str, float | None]] = []
     ran = bool(
         subject_entity_id and predicate and object_value and predicate.lower() in SINGLE_VALUE_PREDICATES
     )
@@ -571,8 +619,9 @@ async def _rdf_conflict_pass(
                 {"updates": list(rdf_updates.values())}, tenant_id=tenant_id
             )
             _log_batch_status_result(rdf_result, path="RDF path", memory_id=memory_id)
+        unlinked = _unlinked_pairs(new_memory, _record_pairs, rdf_updates)
 
-    return _RdfPassResult(contradictions, _record_pairs, supersedes_id, ran)
+    return _RdfPassResult(contradictions, _record_pairs, supersedes_id, ran, unlinked)
 
 
 #: oss-0927-m-03 — one name for both paths, so "this memory was never checked
@@ -923,8 +972,11 @@ async def _detect(
     sc = get_storage_client()
     contradictions: list[ContradictionInfo] = []
     # A55 1d — (candidate_row, kind, confidence) pairs to persist as
-    # memory_conflicts records after the effect is applied (flag-gated below).
+    # memory_conflicts records after the effect is applied (flag-gated; see
+    # ``_record_conflicts``).
     _record_pairs: list[tuple[dict, str, float | None]] = []
+    # M-34 — those whose loser no chain edge points at, recorded whatever the flag.
+    _unlinked: list[tuple[dict, str, float | None]] = []
 
     memory_id = new_memory.get("id")
     # A40 — the triple is read inside ``_rdf_conflict_pass`` now, not here. It
@@ -950,6 +1002,7 @@ async def _detect(
     )
     contradictions.extend(_rdf.contradictions)
     _record_pairs.extend(_rdf.record_pairs)
+    _unlinked.extend(_rdf.unlinked_pairs)
     supersedes_id = _rdf.supersedes_id
 
     # --- Path 2: Semantic contradiction (vector similarity + batch LLM check) ---
@@ -1122,22 +1175,15 @@ async def _detect(
                     {"updates": list(updates.values())}, tenant_id=tenant_id
                 )
                 _log_batch_status_result(sem_result, path="semantic path", memory_id=memory_id)
+            # ``_record_pairs`` holds only semantic pairs here: this path runs
+            # only when the RDF pass found nothing.
+            _unlinked.extend(_unlinked_pairs(new_memory, _record_pairs, updates))
 
-    # A55 1d — additionally persist a memory_conflicts classification record for
-    # each confirmed conflict. Flag-gated (default off); never touches the
-    # status/supersedes effect above, so retrieval behaviour is unchanged.
-    if _record_pairs and settings.contradiction_write_conflict_record:
-        from core_api.services.contradiction.resolver import (
-            record_detected_conflicts,
-        )
-
-        await record_detected_conflicts(
-            new_memory,
-            _record_pairs,
-            tenant_id=tenant_id,
-            fleet_id=new_memory.get("fleet_id"),
-            tenant_config=tenant_config,
-        )
+    # A55 1d / M-34 — the memory_conflicts records; see ``_record_conflicts``.
+    # Never touches the status/supersedes effect above.
+    await _record_conflicts(
+        new_memory, _record_pairs, _unlinked, tenant_id=tenant_id, tenant_config=tenant_config
+    )
 
     return contradictions
 
@@ -2965,18 +3011,13 @@ async def detect_contradictions_by_entities_async(
         )
         if rdf.contradictions:
             n_conflicts += len(rdf.contradictions)
-            if rdf.record_pairs and settings.contradiction_write_conflict_record:
-                from core_api.services.contradiction.resolver import (
-                    record_detected_conflicts,
-                )
-
-                await record_detected_conflicts(
-                    new_memory,
-                    rdf.record_pairs,
-                    tenant_id=tenant_id,
-                    fleet_id=new_memory.get("fleet_id"),
-                    tenant_config=tenant_config,
-                )
+            await _record_conflicts(
+                new_memory,
+                rdf.record_pairs,
+                rdf.unlinked_pairs,
+                tenant_id=tenant_id,
+                tenant_config=tenant_config,
+            )
             concluded = True
             return
 
@@ -3380,6 +3421,7 @@ async def detect_contradictions_by_entities_async(
         # ``memory_id`` so a mixed canonical/flipped run produces one
         # merged row per memory; see ``_merge_status_update``.
         updates: dict[str, dict] = {}
+        record_pairs: list[tuple[dict, str, float | None]] = []
         for idx, (candidate, result) in enumerate(zip(candidates, results, strict=False)):
             if isinstance(result, Exception):
                 logger.warning(
@@ -3460,6 +3502,7 @@ async def detect_contradictions_by_entities_async(
                             },
                         )
                 n_conflicts += 1
+                record_pairs.append((candidate, "entity", _confidence))
                 logger.info(
                     "Entity-based contradiction: %s conflicted by %s direction=%s",
                     older_id,
@@ -3472,6 +3515,13 @@ async def detect_contradictions_by_entities_async(
                 {"updates": list(updates.values())}, tenant_id=tenant_id
             )
             _log_batch_status_result(entity_result, path="Path C entity-overlap", memory_id=memory_id)
+        await _record_conflicts(
+            new_memory,
+            record_pairs,
+            _unlinked_pairs(new_memory, record_pairs, updates),
+            tenant_id=tenant_id,
+            tenant_config=tenant_config,
+        )
         concluded = True
 
         # A58 — Path D (basis invalidation) SHADOW. Fires HERE, not in Path A:

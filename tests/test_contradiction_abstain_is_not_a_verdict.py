@@ -70,7 +70,7 @@ def _env(stack: ExitStack, sc: MagicMock, monkeypatch) -> tuple[AsyncMock, Magic
         patch.object(
             cd,
             "_rdf_conflict_pass",
-            AsyncMock(return_value=cd._RdfPassResult([], [], None, False)),
+            AsyncMock(return_value=cd._RdfPassResult([], [], None, False, [])),
         )
     )
     log_sc = MagicMock()
