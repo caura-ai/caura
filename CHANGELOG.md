@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.5](https://github.com/caura-ai/caura/compare/backend-v3.21.4...backend-v3.21.5) (2026-10-04)
+
+
+### Bug Fixes
+
+* **core-api:** refuse org members on settings and agent trust, fleet and delete ([#1805](https://github.com/caura-ai/caura/issues/1805)) ([abf91f9](https://github.com/caura-ai/caura/commit/abf91f90232c7bec4f80a55b5a90de1e6b5457e4))
+* **storage:** make the pg_locks debug route opt-in and scope it to storage's sessions ([#1804](https://github.com/caura-ai/caura/issues/1804)) ([9dee7d6](https://github.com/caura-ai/caura/commit/9dee7d67c26727b416b12d9d0c19bda294799346))
+* **telemetry:** preview reads the deployment identity without creating it ([#1801](https://github.com/caura-ai/caura/issues/1801)) ([05d44d5](https://github.com/caura-ai/caura/commit/05d44d522925bbd00440940ae80a2c3dd1e70bf6))
+
 ## [3.21.4](https://github.com/caura-ai/caura/compare/backend-v3.21.3...backend-v3.21.4) (2026-10-03)
 
 
