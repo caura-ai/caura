@@ -21,6 +21,10 @@ from core_api.schemas import (
 logger = logging.getLogger(__name__)
 
 
+class AmbiguousEntityName(Exception):
+    """An untyped exact lookup found the name under more than one entity type."""
+
+
 async def upsert_entity(
     data: EntityUpsert,
     *,
@@ -159,14 +163,32 @@ async def find_entity_by_exact_name(
     Returns the id rather than an ``EntityOut``: the only caller needs the
     foreign key, and returning less keeps this from drifting into a second
     read path for entity content.
+
+    Matches case-insensitively, as the entity natural key does, and with no
+    ``entity_type`` matches any type (M-25): the caller has a name and nothing
+    else, and extraction never writes the old default type. It looks in
+    ``fleet_id`` first and then among tenant-shared (NULL-fleet) entities, which
+    every fleet reads. Raises :class:`AmbiguousEntityName` when the name belongs
+    to more than one type in the scope that matched, so the caller can skip
+    rather than guess.
     """
     sc = get_storage_client()
-    row = await sc.find_exact_entity(
-        tenant_id=tenant_id,
-        name=canonical_name,
-        fleet_id=fleet_id,
-        entity_type=entity_type,
-    )
+    scopes = [fleet_id, None] if fleet_id else [None]
+    row = None
+    for scope in scopes:
+        try:
+            row = await sc.find_exact_entity(
+                tenant_id=tenant_id,
+                name=canonical_name,
+                fleet_id=scope,
+                entity_type=entity_type,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                raise AmbiguousEntityName(canonical_name) from exc
+            raise
+        if row:
+            break
     if not row:
         return None
     raw = row.get("id")

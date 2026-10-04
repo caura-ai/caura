@@ -7152,23 +7152,48 @@ class PostgresService:
         canonical_name: str,
         fleet_id: str | None = None,
     ) -> Entity | None:
-        """Phase 1 entity resolution: exact match on tenant + fleet + type + name."""
+        """Phase 1 entity resolution: exact match on the natural key.
+
+        The key is ``uq_entities_tenant_type_name_fleet``'s: tenant, type,
+        ``lower(canonical_name)`` and ``COALESCE(fleet_id, '')``. Both sides are
+        lowered in Postgres, so the casing rule is the index's own (M-40); a
+        case-sensitive match missed a case variant the index then rejected. The
+        fleet predicate is ``_fleet_scope`` (L-47): ``''`` and NULL are one key.
+        """
         async with get_session() as session:
             stmt = select(Entity).where(
                 Entity.tenant_id == tenant_id,
                 Entity.entity_type == entity_type,
-                Entity.canonical_name == canonical_name,
+                func.lower(Entity.canonical_name) == func.lower(canonical_name),
+                _fleet_scope(Entity.fleet_id, fleet_id),
             )
-            # ``is not None`` rather than truthy so an empty-string
-            # ``fleet_id`` matches an empty-string column value instead
-            # of silently routing to the IS NULL branch.
-            if fleet_id is not None:
-                stmt = stmt.where(Entity.fleet_id == fleet_id)
-            else:
-                stmt = stmt.where(Entity.fleet_id.is_(None))
-
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
+
+    async def entity_find_exact_any_type(
+        self,
+        tenant_id: str,
+        canonical_name: str,
+        fleet_id: str | None = None,
+    ) -> list[Entity]:
+        """``entity_find_exact`` without the type, for a caller that has only a
+        name (M-25). The type is part of the key, so one name can match several
+        rows; at most two are returned, which is enough to say it is ambiguous.
+        On the read session: its caller resolves a subject it may skip, so a
+        lagging replica only defers it.
+        """
+        async with get_read_session() as session:
+            stmt = (
+                select(Entity)
+                .where(
+                    Entity.tenant_id == tenant_id,
+                    func.lower(Entity.canonical_name) == func.lower(canonical_name),
+                    _fleet_scope(Entity.fleet_id, fleet_id),
+                )
+                .order_by(Entity.id)
+                .limit(2)
+            )
+            return list((await session.execute(stmt)).scalars().all())
 
     async def entity_find_by_embedding_similarity(
         self,
@@ -7247,41 +7272,32 @@ class PostgresService:
             # fleet_id) includes a nullable column, so build an OR-of-ANDs
             # of the input tuples. Single round-trip, single plan.
 
-            # Group items by their (canonical_name, entity_type, fleet_id)
+            # Group items by their (canonical_name, entity_type, fleet key)
             # so a duplicate tuple in the input batch only triggers one
-            # comparison; map back to input idxs at the end.
-            tuple_to_idxs: dict[tuple[str, str, str | None], list[int]] = {}
+            # comparison; map back to input idxs at the end. The fleet key is
+            # ``fleet_id or ""`` because the natural-key index groups on
+            # ``COALESCE(fleet_id, '')``: ``''`` and NULL are one fleet (L-47),
+            # and comparing the coalesced column also sidesteps ``tuple_``'s
+            # NULL inequality in a single query.
+            tuple_to_idxs: dict[tuple[str, str, str], list[int]] = {}
             for it in items:
                 key = (
                     it["canonical_name"],
                     it["entity_type"],
-                    it.get("fleet_id"),
+                    it.get("fleet_id") or "",
                 )
                 tuple_to_idxs.setdefault(key, []).append(it["input_idx"])
 
-            # SQLAlchemy ``tuple_(...).in_(...)`` doesn't honor NULL
-            # equality, so split into the with-fleet and no-fleet halves.
-            with_fleet = [k for k in tuple_to_idxs if k[2] is not None]
-            no_fleet = [k for k in tuple_to_idxs if k[2] is None]
-
-            exact_rows: list[Entity] = []
-            if with_fleet:
-                stmt = select(Entity).where(
-                    Entity.tenant_id == tenant_id,
-                    tuple_(Entity.canonical_name, Entity.entity_type, Entity.fleet_id).in_(with_fleet),
-                )
-                exact_rows.extend((await session.execute(stmt)).scalars().all())
-            if no_fleet:
-                stmt = select(Entity).where(
-                    Entity.tenant_id == tenant_id,
-                    Entity.fleet_id.is_(None),
-                    tuple_(Entity.canonical_name, Entity.entity_type).in_([(k[0], k[1]) for k in no_fleet]),
-                )
-                exact_rows.extend((await session.execute(stmt)).scalars().all())
+            fleet_key = func.coalesce(Entity.fleet_id, "")
+            stmt = select(Entity).where(
+                Entity.tenant_id == tenant_id,
+                tuple_(Entity.canonical_name, Entity.entity_type, fleet_key).in_(list(tuple_to_idxs)),
+            )
+            exact_rows: list[Entity] = list((await session.execute(stmt)).scalars().all())
 
             matched_idxs: set[int] = set()
             for row in exact_rows:
-                key = (row.canonical_name, row.entity_type, row.fleet_id)
+                key = (row.canonical_name, row.entity_type, row.fleet_id or "")
                 for idx in tuple_to_idxs.get(key, []):
                     out[idx] = {
                         "entity_id": str(row.id),
@@ -7338,10 +7354,7 @@ class PostgresService:
                     .order_by(Entity.id)
                     .limit(50)
                 )
-                if it.get("fleet_id") is not None:
-                    cand_stmt = cand_stmt.where(Entity.fleet_id == it["fleet_id"])
-                else:
-                    cand_stmt = cand_stmt.where(Entity.fleet_id.is_(None))
+                cand_stmt = cand_stmt.where(_fleet_scope(Entity.fleet_id, it.get("fleet_id")))
 
                 candidates = (await session.execute(cand_stmt)).scalars().all()
                 verified = [e for e in candidates if canonical_match_key(e.canonical_name) == match_key]
@@ -7385,12 +7398,8 @@ class PostgresService:
                     .order_by(distance)
                     .limit(candidate_limit)
                 )
-                # Mirror Phase 1's None-vs-value semantics so an empty-
-                # string ``fleet_id`` doesn't silently route to IS NULL.
-                if it.get("fleet_id") is not None:
-                    stmt = stmt.where(Entity.fleet_id == it["fleet_id"])
-                else:
-                    stmt = stmt.where(Entity.fleet_id.is_(None))
+                # Phase 1's fleet key: ``''`` and NULL are one fleet (L-47).
+                stmt = stmt.where(_fleet_scope(Entity.fleet_id, it.get("fleet_id")))
 
                 rows = (await session.execute(stmt)).all()
                 for entity, sim in rows:
@@ -7549,10 +7558,9 @@ class PostgresService:
                         Entity.entity_type == item["entity_type"],
                         func.lower(Entity.canonical_name) == item["canonical_name"].lower(),
                     )
-                    if item.get("fleet_id") is not None:
-                        sel = sel.where(Entity.fleet_id == item["fleet_id"])
-                    else:
-                        sel = sel.where(Entity.fleet_id.is_(None))
+                    # The index's own fleet key, or a '' vs NULL collision
+                    # would re-select nothing (L-47).
+                    sel = sel.where(_fleet_scope(Entity.fleet_id, item.get("fleet_id")))
                     racy_existing = (await session.execute(sel)).scalar_one_or_none()
 
                     if racy_existing is None:

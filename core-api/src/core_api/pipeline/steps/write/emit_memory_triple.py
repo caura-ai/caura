@@ -27,7 +27,7 @@ from common.constants import SINGLE_VALUE_PREDICATES
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
 from core_api.schemas import EntityUpsert
-from core_api.services.entity_service import find_entity_by_exact_name, upsert_entity
+from core_api.services.entity_service import AmbiguousEntityName, find_entity_by_exact_name, upsert_entity
 
 logger = logging.getLogger(__name__)
 
@@ -681,6 +681,13 @@ class EmitMemoryTriple:
                         tenant_id=data.tenant_id,
                         fleet_id=data.fleet_id,
                         canonical_name=proper_noun,
+                    )
+                except AmbiguousEntityName:
+                    # The name is held by more than one entity type (M-25):
+                    # skip-on-doubt, as for two caller-supplied subjects.
+                    return StepResult(
+                        outcome=StepOutcome.SKIPPED,
+                        detail={"reason": "ambiguous_subject", "subject_candidate": proper_noun},
                     )
                 except Exception as exc:
                     logger.warning("Proper-noun subject lookup failed for %r: %s", proper_noun, exc)

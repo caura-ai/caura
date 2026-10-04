@@ -142,13 +142,27 @@ async def get_entities_by_ids(request: Request) -> dict:
 async def find_exact_entity(
     tenant_id: str,
     name: str,
-    entity_type: str = "default",
+    entity_type: str | None = None,
     fleet_id: str | None = None,
 ) -> dict:
-    entity = await _svc.entity_find_exact(tenant_id, entity_type, name, fleet_id)
-    if entity is None:
+    """Exact match on the natural key; an omitted ``entity_type`` matches any.
+
+    Untyped, one name can belong to several entities, so more than one match
+    is a 409 rather than an arbitrary pick (M-25). It used to default to type
+    ``"default"``, which nothing writes, so an untyped lookup never matched.
+    """
+    if entity_type is not None:
+        entity = await _svc.entity_find_exact(tenant_id, entity_type, name, fleet_id)
+        matches = [entity] if entity is not None else []
+    else:
+        matches = await _svc.entity_find_exact_any_type(tenant_id, name, fleet_id)
+    if not matches:
         raise HTTPException(status_code=404, detail="Entity not found")
-    return orm_to_dict(entity, ENTITY_FIELDS)
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409, detail="ambiguous: entities of more than one type share this name"
+        )
+    return orm_to_dict(matches[0], ENTITY_FIELDS)
 
 
 # ------------------------------------------------------------------
