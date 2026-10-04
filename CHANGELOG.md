@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.6](https://github.com/caura-ai/caura/compare/backend-v3.21.5...backend-v3.21.6) (2026-10-04)
+
+
+### Bug Fixes
+
+* **clients:** refuse to send the API key over plain HTTP to another host ([#1807](https://github.com/caura-ai/caura/issues/1807)) ([41a4acc](https://github.com/caura-ai/caura/commit/41a4acc676d99296c368fbe507fb2d7305aaa3e0))
+* **core-api:** rate-limit by what auth verified, never a raw key header ([#1803](https://github.com/caura-ai/caura/issues/1803)) ([25cab70](https://github.com/caura-ai/caura/commit/25cab700f7973210641a05c9cdda2669a28fc5db))
+
 ## [3.21.5](https://github.com/caura-ai/caura/compare/backend-v3.21.4...backend-v3.21.5) (2026-10-04)
 
 
