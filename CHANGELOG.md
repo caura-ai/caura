@@ -10,6 +10,16 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.9](https://github.com/caura-ai/caura/compare/backend-v3.21.8...backend-v3.21.9) (2026-10-04)
+
+
+### Bug Fixes
+
+* **conflicts:** dismissing a conflict undoes detection's change to the pair ([#1814](https://github.com/caura-ai/caura/issues/1814)) ([78fc742](https://github.com/caura-ai/caura/commit/78fc7426176bc4562baf710e477e22f74c08d98c))
+* **crystallizer:** hold agent credentials to their fleet below trust 3 ([#1817](https://github.com/caura-ai/caura/issues/1817)) ([cc37c9e](https://github.com/caura-ai/caura/commit/cc37c9e381e780709242b2f3f08f629fae340c75))
+* **crystallizer:** name the near-duplicates and their threshold in the report, and read each shared input once per run ([#1819](https://github.com/caura-ai/caura/issues/1819)) ([0820f7d](https://github.com/caura-ai/caura/commit/0820f7dcc52281a51311a01bfc554a219675da07))
+* **storage:** page the dedup sweep in a total order and scope the tenant-wide sweep gate ([#1816](https://github.com/caura-ai/caura/issues/1816)) ([fcf5102](https://github.com/caura-ai/caura/commit/fcf51029cef6c070eb3eaccaef270b0a48b13d54))
+
 ## [3.21.8](https://github.com/caura-ai/caura/compare/backend-v3.21.7...backend-v3.21.8) (2026-10-04)
 
 
