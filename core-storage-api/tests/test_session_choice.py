@@ -284,11 +284,14 @@ def test_the_writer_session_population_is_pinned() -> None:
     143 -> 144 (pure unchanged at 65): ``memory_reset_dedup_checked`` is new
     (M-38). It clears the crystallizer's dedup stamps with ``sql_update``, a
     write.
+
+    144 -> 145 (pure unchanged at 65): ``entity_merge`` is new (L-46). It locks
+    the entity ``with_for_update`` and assigns the merged attributes, a write.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 144, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 145, f"{len(methods)} methods open a writer session"
     assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 

@@ -746,6 +746,28 @@ async def update_entity(entity_id: UUID, request: Request) -> dict:
     return orm_to_dict(entity, ENTITY_FIELDS)
 
 
+@router.post("/{entity_id}/merge")
+async def merge_entity(entity_id: UUID, request: Request) -> dict:
+    """An upsert's write into an existing entity (L-46): merge, never replace.
+
+    ``attributes`` are what the upsert adds: a key it names takes its value,
+    every other stored key stays, and ``_aliases`` is the union. An optional
+    ``name_embedding`` only fills a row that has none. ``PATCH`` above is the
+    replacing edit; this is what the REST upsert uses instead of PATCHing back
+    a snapshot it merged itself, which lost a concurrent writer's keys. Same
+    tenant guard and 404 as ``PATCH``. Returns the merged row.
+    """
+    body: dict = await request.json()
+    tenant_id = _require(body, "tenant_id")
+    attributes = body.get("attributes") or {}
+    if not isinstance(attributes, dict):
+        raise HTTPException(status_code=422, detail="'attributes' must be an object")
+    entity = await _svc.entity_merge(entity_id, tenant_id, attributes, body.get("name_embedding"))
+    if entity is None:
+        raise HTTPException(status_code=404, detail="Entity not found")
+    return orm_to_dict(entity, ENTITY_FIELDS)
+
+
 @router.get("/{entity_id}/with-memories")
 async def get_entity_with_linked_memories(
     entity_id: UUID,

@@ -1723,6 +1723,26 @@ class CoreStorageClient:
         # The explicit arg wins over any ``tenant_id`` in ``data``.
         return await self._patch(f"/entities/{entity_id}", {**data, "tenant_id": tenant_id})
 
+    async def merge_entity(
+        self,
+        entity_id: str,
+        tenant_id: str,
+        attributes: dict,
+        name_embedding: list[float] | None = None,
+    ) -> dict | None:
+        """Merge an upsert's attributes into an existing entity (L-46).
+
+        Storage merges under a row lock and returns the merged row, read from
+        the writer: a key ``attributes`` names takes its value, every other
+        stored key stays, ``_aliases`` is the union, and ``name_embedding`` only
+        fills a row that has none. ``None`` when the entity is gone or is
+        another tenant's. ``update_entity`` is the replacing edit.
+        """
+        body: dict[str, Any] = {"tenant_id": tenant_id, "attributes": attributes}
+        if name_embedding is not None:
+            body["name_embedding"] = name_embedding
+        return await self._post_optional(f"/entities/{entity_id}/merge", body)
+
     async def find_exact_entity(
         self,
         tenant_id: str,

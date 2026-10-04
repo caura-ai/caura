@@ -76,44 +76,30 @@ async def upsert_entity(
                 break
 
     if entity:
-        # Merge into existing entity via storage client update
-        entity_id = entity.get("id")
-        existing_attrs = entity.get("attributes") or {}
-        merged_attrs = dict(existing_attrs)
-        if data.attributes:
-            merged_attrs.update(data.attributes)
-
-        # Track alias in attributes
-        aliases = list(merged_attrs.get("_aliases", []))
-        existing_name = entity.get("canonical_name", "")
-        if existing_name not in aliases:
-            aliases.append(existing_name)
-        if data.canonical_name not in aliases:
-            aliases.append(data.canonical_name)
-        merged_attrs["_aliases"] = aliases
-
-        # First-seen wins (A5 #3). The previous "promote longer name as
-        # canonical" rule actively turned hallucinated suffixes into the
-        # canonical row — e.g., the LLM returns ``globex industries`` for
-        # content that says only ``Globex``, embedding similarity merges
-        # the two, and the canonical permanently becomes ``globex
-        # industries``. Cross-link discovery then surfaces false overlaps
-        # against every other ``Globex`` mention. Alternative surface
-        # forms are still preserved via the ``_aliases`` list above so
-        # they remain searchable / discoverable.
-        new_canonical = existing_name
-
-        update_data: dict = {
-            "entity_type": data.entity_type,
-            "canonical_name": new_canonical,
-            "attributes": merged_attrs,
-        }
-        if name_embedding is not None:
-            update_data["name_embedding"] = name_embedding
-
-        updated = await sc.update_entity(str(entity_id), data.tenant_id, update_data)
-        entity = updated or entity
-    else:
+        # Merge into the existing entity. Storage merges under a row lock
+        # (L-46): this sends only what the upsert adds, never a copy of the row
+        # it read, which used to PATCH back over any key another writer added
+        # since. A key named here takes its value, every other key stays, and
+        # ``_aliases`` is the union.
+        #
+        # First-seen wins (A5 #3): the stored canonical name stays, and storage
+        # no longer rewrites it. The previous "promote longer name as canonical"
+        # rule actively turned hallucinated suffixes into the canonical row —
+        # e.g., the LLM returns ``globex industries`` for content that says only
+        # ``Globex``, embedding similarity merges the two, and the canonical
+        # permanently becomes ``globex industries``. Cross-link discovery then
+        # surfaces false overlaps against every other ``Globex`` mention.
+        # Alternative surface forms are still preserved via ``_aliases`` so they
+        # remain searchable / discoverable.
+        added = dict(data.attributes or {})
+        aliases = list(added.get("_aliases") or [])
+        for name in (entity.get("canonical_name") or "", data.canonical_name):
+            if name and name not in aliases:
+                aliases.append(name)
+        added["_aliases"] = aliases
+        # ``None`` when the row vanished since the lookup: create it below.
+        entity = await sc.merge_entity(str(entity.get("id")), data.tenant_id, added, name_embedding)
+    if not entity:
         # Create new entity. Coerce ``attributes=None`` to ``{}`` so
         # the persisted row matches what the update branch (line ~80)
         # already does on its merge — ``None``-typed JSONB columns

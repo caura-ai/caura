@@ -774,6 +774,31 @@ def _withhold_caller_owned_keys(metadata_patch: dict | None, stored: dict | None
 # ``_MEMORY_UPDATABLE_FIELDS`` above follows.
 _ENTITY_UPDATABLE_FIELDS = frozenset({"canonical_name", "entity_type", "attributes", "name_embedding"})
 
+
+def _merge_entity_attributes(stored: Any, incoming: Any) -> dict:
+    """What an upsert does to an entity's ``attributes``: add, never remove (L-46).
+
+    A key ``incoming`` names takes its value and every other stored key stays.
+    ``_aliases`` is the union, stored order first: two writers' aliases are both
+    true, and the last one to write no longer erases the other's. Both sides
+    are read defensively, since ``stored`` is whatever the JSONB column holds.
+    """
+    merged = dict(stored) if isinstance(stored, dict) else {}
+    added = incoming if isinstance(incoming, dict) else {}
+    stored_aliases = merged.get("_aliases")
+    aliases = list(stored_aliases) if isinstance(stored_aliases, list) else []
+    for key, value in added.items():
+        if key != "_aliases":
+            merged[key] = value
+    new_aliases = added.get("_aliases")
+    for alias in new_aliases if isinstance(new_aliases, list) else []:
+        if alias not in aliases:
+            aliases.append(alias)
+    if aliases:
+        merged["_aliases"] = aliases
+    return merged
+
+
 # The one answer ``entity_add_entity_link`` gives for every way a link can be
 # refused: either endpoint absent, either endpoint owned by another tenant, or
 # the pair already linked. A constant rather than the string repeated at each
@@ -7453,11 +7478,12 @@ class PostgresService:
         up the prior row; same outcome as today's IntegrityError recovery
         in ``entity_add``).
 
-        Caller pre-computed the merged attributes from ``bulk_resolve_entities``
-        output — server side does not re-merge. Concurrent writers between
-        resolve and upsert have the same lost-update window as today's
-        serial path (find_exact → update_entity); see crystallizer
-        cluster-locking notes for the full race story.
+        An update, and a create that finds its row already there, merges
+        into the stored row under a lock (``entity_merge``, L-46): the
+        item's ``attributes`` are what it adds, not a replacement, and its
+        ``name_embedding`` only fills a row that has none (L-181). It used to
+        assign the attributes the caller had merged from its resolve snapshot,
+        so concurrent writers to one entity lost each other's aliases.
         """
         if not items:
             return []
@@ -7479,31 +7505,20 @@ class PostgresService:
             eid = item["entity_id"]
             if not isinstance(eid, UUID):
                 eid = UUID(eid)
-            values: dict[str, Any] = {
-                "entity_type": item["entity_type"],
-                "canonical_name": item["canonical_name"],
-                "attributes": item["attributes"],
+            # ``tenant_id`` scopes the locked read, so a cross-tenant
+            # ``entity_id`` (caller bug or hostile input) is treated as
+            # "missing" rather than silently updating someone else's row.
+            merged = await self.entity_merge(
+                eid, item["tenant_id"], item["attributes"], item.get("name_embedding")
+            )
+            # None means the entity_id no longer exists, was deleted, or
+            # belongs to a different tenant. All three surface as
+            # ``missing`` so the caller can disambiguate from ``updated``.
+            results[item["input_idx"]] = {
+                "input_idx": item["input_idx"],
+                "entity_id": str(eid),
+                "action": "missing" if merged is None else "updated",
             }
-            if item.get("name_embedding") is not None:
-                values["name_embedding"] = item["name_embedding"]
-            async with get_session() as session:
-                # ``tenant_id`` in the WHERE so a cross-tenant ``entity_id``
-                # (caller bug or hostile input) is treated as "missing"
-                # rather than silently updating someone else's row.
-                upd = await session.execute(
-                    sql_update(Entity)
-                    .where(Entity.id == eid, Entity.tenant_id == item["tenant_id"])
-                    .values(**values)
-                )
-                # rowcount==0 means the entity_id no longer exists, was
-                # deleted, or belongs to a different tenant. All three
-                # surface as ``missing`` so the caller can disambiguate
-                # from ``updated``.
-                results[item["input_idx"]] = {
-                    "input_idx": item["input_idx"],
-                    "entity_id": str(eid),
-                    "action": "missing" if (upd.rowcount or 0) == 0 else "updated",  # type: ignore[attr-defined]
-                }
 
         for item in creates:
             # The natural-key unique index is functional (``lower(canonical_name)``,
@@ -7522,21 +7537,19 @@ class PostgresService:
                 fleet_id=item.get("fleet_id"),
             )
 
-            merge_values: dict[str, Any] = {"attributes": item["attributes"]}
-            if item.get("name_embedding") is not None:
-                merge_values["name_embedding"] = item["name_embedding"]
-
             if existed_before is not None:
-                # Pre-existing → apply caller's merged attributes. If the
-                # row got deleted between our SELECT and UPDATE (a narrow
-                # but real window), ``entity_update`` returns None — surface
-                # as "missing" rather than reporting a "merged" that didn't
+                # Pre-existing → merge the caller's attributes into it. If the
+                # row got deleted between our SELECT and the merge (a narrow
+                # but real window), the merge returns None — surface as
+                # "missing" rather than reporting a "merged" that didn't
                 # actually happen.
-                updated = await self.entity_update(existed_before.id, item["tenant_id"], merge_values)
+                merged = await self.entity_merge(
+                    existed_before.id, item["tenant_id"], item["attributes"], item.get("name_embedding")
+                )
                 results[item["input_idx"]] = {
                     "input_idx": item["input_idx"],
                     "entity_id": str(existed_before.id),
-                    "action": "missing" if updated is None else "merged",
+                    "action": "missing" if merged is None else "merged",
                 }
                 continue
 
@@ -7568,7 +7581,7 @@ class PostgresService:
                     "action": "created",
                 }
             except IntegrityError:
-                # TOCTOU recovery — SELECT + UPDATE in one writer session.
+                # TOCTOU recovery — SELECT + merge in one writer session.
                 logger.info(
                     "Entity bulk-upsert race: '%s' created concurrently, re-selecting",
                     item["canonical_name"],
@@ -7596,28 +7609,25 @@ class PostgresService:
                         }
                     else:
                         # Defence-in-depth ``tenant_id`` guard on the
-                        # recovery UPDATE — the SELECT above already
-                        # filters by tenant, but pinning the UPDATE
-                        # WHERE too keeps the invariant local to the
-                        # write statement (a future refactor of the
-                        # SELECT can't accidentally let a cross-tenant
-                        # row slip through).
-                        upd = await session.execute(
-                            sql_update(Entity)
-                            .where(
-                                Entity.id == racy_existing.id,
-                                Entity.tenant_id == item["tenant_id"],
-                            )
-                            .values(**merge_values)
+                        # recovery merge — the SELECT above already
+                        # filters by tenant, but the merge's own locked
+                        # read pins it too, so a future refactor of the
+                        # SELECT can't let a cross-tenant row slip through.
+                        merged = await self.entity_merge(
+                            racy_existing.id,
+                            item["tenant_id"],
+                            item["attributes"],
+                            item.get("name_embedding"),
+                            session=session,
                         )
-                        # rowcount==0 here means the row was deleted
-                        # between our SELECT and UPDATE inside the SAME
-                        # session — vanishingly unlikely but report
-                        # consistently as "missing".
+                        # None here means the row was deleted between our
+                        # SELECT and the merge inside the SAME session —
+                        # vanishingly unlikely but report consistently as
+                        # "missing".
                         results[item["input_idx"]] = {
                             "input_idx": item["input_idx"],
                             "entity_id": str(racy_existing.id),
-                            "action": "missing" if (upd.rowcount or 0) == 0 else "merged",  # type: ignore[attr-defined]
+                            "action": "missing" if merged is None else "merged",
                         }
 
         # All slots filled (we partitioned over all items); filter for mypy.
@@ -7758,6 +7768,53 @@ class PostgresService:
                     f"Entity '{data.get('canonical_name')}' conflict but re-select returned nothing"
                 )
             return winner
+
+    async def entity_merge(
+        self,
+        entity_id: UUID,
+        tenant_id: str,
+        attributes: Any,
+        name_embedding: list[float] | None = None,
+        *,
+        session: AsyncSession | None = None,
+    ) -> Entity | None:
+        """An upsert's write into an existing entity, under a row lock (L-46, L-181).
+
+        Both upsert paths used to assign attributes they had merged from their
+        own snapshot of the row: ``entity_bulk_upsert`` with a plain UPDATE, and
+        the REST ``upsert_entity`` through ``entity_update``. Two writers
+        resolving to one entity each wrote their own alias list and the last one
+        won, and a key another writer added after the snapshot was deleted.
+        ``FOR UPDATE`` serialises the writers, and each merges into what the row
+        holds now (``_merge_entity_attributes``).
+
+        ``name_embedding`` is set only when the row has none (L-181). The stored
+        vector is the first surface form's; overwriting it on every mention
+        drifted it toward the latest alias and cost a non-HOT update plus an
+        HNSW insert.
+
+        The canonical name and type are left alone. Both upsert callers send the
+        stored ones (first-seen wins), so writing them back only risked undoing
+        a concurrent rename. ``entity_update`` is the path that replaces.
+
+        Returns the merged row, so the REST upsert answers with what the row now
+        holds rather than re-reading it from a replica that may lag. ``None`` for
+        a missing or foreign entity, as ``entity_update``. ``session``: run
+        inside the caller's transaction (the bulk upsert's race recovery).
+        """
+        if session is None:
+            async with get_session() as own:
+                return await self.entity_merge(entity_id, tenant_id, attributes, name_embedding, session=own)
+        entity = await session.scalar(
+            select(Entity).where(Entity.id == entity_id, Entity.tenant_id == tenant_id).with_for_update()
+        )
+        if entity is None:
+            return None
+        entity.attributes = _merge_entity_attributes(entity.attributes, attributes)
+        if entity.name_embedding is None and name_embedding is not None:
+            entity.name_embedding = name_embedding
+        await session.flush()
+        return entity
 
     async def entity_update(self, entity_id: UUID, tenant_id: str, data: dict) -> Entity | None:
         """Update an existing entity by ID, scoped to its home tenant.

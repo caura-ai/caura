@@ -599,19 +599,20 @@ async def process_entity_extraction(
                     item["name_embedding"] = emb
 
                 if match:
-                    # Existing row found — merge into it.
-                    existing_attrs = match.get("attributes") or {}
-                    merged_attrs = dict(existing_attrs)
+                    # Existing row found — merge into it. Storage merges the
+                    # item's ``attributes`` into the locked row (L-46), so the
+                    # item carries only what this extraction adds: its aliases.
+                    # A copy of the row's other attributes from the resolve
+                    # snapshot would write stale values back over a key another
+                    # writer changed in between.
+                    #
                     # NOTE: ``ExtractedEntity`` currently emits no extra
                     # attributes (only ``canonical_name`` / ``entity_type``
                     # / ``role`` come back from the LLM). If the
                     # extraction schema later grows attribute fields,
-                    # add ``merged_attrs.update(<new fields>)`` here to
-                    # match ``entity_service.upsert_entity`` (line 79:
-                    # ``if data.attributes: merged_attrs.update(data.attributes)``)
-                    # and keep the bulk path's merge semantics
-                    # equivalent to the single-row serial path.
-                    aliases = list(merged_attrs.get("_aliases") or [])
+                    # add them to ``added_attrs`` here, as
+                    # ``entity_service.upsert_entity`` sends its caller's.
+                    #
                     # Defensive fallback: storage-side ``bulk_resolve_entities``
                     # SHOULD always carry a non-empty ``canonical_name`` on a
                     # match (the row had to exist for a match to fire). An
@@ -628,11 +629,7 @@ async def process_entity_extraction(
                             name,
                         )
                         existing_name = name
-                    if existing_name and existing_name not in aliases:
-                        aliases.append(existing_name)
-                    if name not in aliases:
-                        aliases.append(name)
-                    merged_attrs["_aliases"] = aliases
+                    added_attrs = {"_aliases": list(dict.fromkeys((existing_name, name)))}
                     # Defensive guard mirroring the ``canonical_name``
                     # fallback above: a malformed resolve match without
                     # ``entity_id`` would otherwise crash with KeyError
@@ -668,11 +665,17 @@ async def process_entity_extraction(
                         # looked like a race and never got chased.
                         #
                         # Fixed by coalescing here rather than storage-side,
-                        # because the merge contract is the caller's: this is the
+                        # because the merge contract was the caller's: this is the
                         # same "dedupe at the write site" the link batch below
                         # already does for the same cause, and the same
                         # first-seen-wins rule applies to everything except the
                         # alias list, which accumulates.
+                        #
+                        # Storage now merges each item into the locked row
+                        # (L-46), which also covers this case and two
+                        # extractions racing across batches. Coalescing stays:
+                        # one item per row is what keeps ``upsert_names`` mapping
+                        # every surface form to its id.
                         #
                         # Only the UPDATE path can collide. Two creates cannot
                         # name the same row: the natural key is
@@ -687,7 +690,7 @@ async def process_entity_extraction(
                         item["action"] = "update"
                         item["entity_id"] = match_entity_id
                         item["canonical_name"] = existing_name  # first-seen wins
-                        item["attributes"] = merged_attrs
+                        item["attributes"] = added_attrs
                         entity_id_to_item[str(match_entity_id)] = len(upsert_items)
                 else:
                     # No match — create.
@@ -732,6 +735,20 @@ async def process_entity_extraction(
             created_entity_ids: list[str] = []
             for r in upserted:
                 if not r.get("entity_id"):
+                    continue
+                # L-29. ``missing``: the entity was deleted between resolve and
+                # upsert (a content-edit reset, a governance purge or the
+                # nightly merge). Its id names nothing, so mapping it would link,
+                # relate and subject-write this memory to a row that does not
+                # exist, and count it in the audit. Left out instead: the memory
+                # simply lacks that entity, as it did, minus the dangling writes.
+                if r.get("action") == "missing":
+                    logger.warning(
+                        "entity extraction: entity %s for memory %s was deleted between resolve "
+                        "and upsert; leaving it out of this memory's graph",
+                        r["entity_id"],
+                        memory_id,
+                    )
                     continue
                 idx = r["input_idx"]
                 if idx >= len(upsert_names):

@@ -190,9 +190,9 @@ async def test_upsert_preserves_canonical_when_longer_alternative_arrives() -> N
     sc.find_by_embedding_similarity = AsyncMock(
         return_value=[{**existing_entity, "similarity": 0.95}]
     )
-    sc.update_entity = AsyncMock(
-        side_effect=lambda eid, tenant_id, data: {**existing_entity, **data}
-    )
+    # Storage merges into the row and keeps its canonical name (L-46): the merge
+    # carries no name at all, so the row it returns is the stored one.
+    sc.merge_entity = AsyncMock(return_value=existing_entity)
     sc.create_entity = AsyncMock()
 
     with patch("core_api.services.entity_service.get_storage_client", return_value=sc):
@@ -201,20 +201,19 @@ async def test_upsert_preserves_canonical_when_longer_alternative_arrives() -> N
             name_embedding=[0.1] * 1536,
         )
 
-    sc.update_entity.assert_called_once()
-    _, update_tenant, update_data = sc.update_entity.call_args.args
+    sc.merge_entity.assert_awaited_once()
+    _, merge_tenant, attributes, _ = sc.merge_entity.call_args.args
     # The merge is scoped to the caller's tenant (#1081): storage rejects a
-    # by-id PATCH that doesn't name the row's home tenant.
-    assert update_tenant == "t-a5"
-    assert update_data["canonical_name"] == "globex", (
+    # by-id write that doesn't name the row's home tenant.
+    assert merge_tenant == "t-a5"
+    assert result.canonical_name == "globex", (
         f"First-seen canonical must be preserved; the longer 'globex industries' "
-        f"was promoted, producing {update_data['canonical_name']!r}"
+        f"was promoted, producing {result.canonical_name!r}"
     )
-    assert result.canonical_name == "globex"
 
     # Alias list must include both surface forms so the longer one
     # remains searchable / discoverable.
-    aliases = set(update_data["attributes"].get("_aliases", []))
+    aliases = set(attributes.get("_aliases", []))
     assert {"globex", "globex industries"}.issubset(aliases), (
         f"Both surface forms must be tracked as aliases; got {aliases}"
     )
@@ -245,19 +244,17 @@ async def test_upsert_preserves_canonical_when_shorter_alternative_arrives() -> 
     sc.find_by_embedding_similarity = AsyncMock(
         return_value=[{**existing_entity, "similarity": 0.95}]
     )
-    sc.update_entity = AsyncMock(
-        side_effect=lambda eid, tenant_id, data: {**existing_entity, **data}
-    )
+    sc.merge_entity = AsyncMock(return_value=existing_entity)
     sc.create_entity = AsyncMock()
 
     with patch("core_api.services.entity_service.get_storage_client", return_value=sc):
-        await upsert_entity(
+        result = await upsert_entity(
             await _make_entity_upsert("globex"),
             name_embedding=[0.1] * 1536,
         )
 
-    _, update_tenant, update_data = sc.update_entity.call_args.args
-    assert update_tenant == "t-a5"
-    assert update_data["canonical_name"] == "globex industries", (
+    _, merge_tenant, _, _ = sc.merge_entity.call_args.args
+    assert merge_tenant == "t-a5"
+    assert result.canonical_name == "globex industries", (
         "Symmetric case: first-seen 'globex industries' must remain canonical"
     )
