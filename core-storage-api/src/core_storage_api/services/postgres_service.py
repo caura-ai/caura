@@ -2259,7 +2259,7 @@ class PostgresService:
         return True
 
     async def memory_set_subject_entity_if_null(
-        self, memory_id: UUID, tenant_id: str, subject_entity_id: UUID
+        self, memory_id: UUID, tenant_id: str, subject_entity_id: UUID, content: str | None = None
     ) -> bool:
         """A63 — write-back of the extraction-derived subject entity.
 
@@ -2270,33 +2270,47 @@ class PostgresService:
         async write-back must never clobber it. The guard also makes
         concurrent deliveries race-safe without a read-modify-write.
 
+        ``content``, when given, is the text the subject was extracted from,
+        and the row must still hold it (M-39). A content edit clears the
+        subject, and an extraction of the old text that finishes after the edit
+        must not put it back. A check before this call cannot close that
+        window, so the condition is part of the UPDATE.
+
         Returns ``True`` when the row was updated; ``False`` when the row
-        is absent, soft-deleted, belongs to another tenant, or already
-        carries a subject — callers log the distinction but treat all
-        ``False`` cases as a benign skip.
+        is absent, soft-deleted, belongs to another tenant, already
+        carries a subject, or no longer holds ``content`` — callers log the
+        distinction but treat all ``False`` cases as a benign skip.
         """
         # The entity must be one of ``tenant_id``'s — a condition of the UPDATE,
         # not a refusal: an unknown id used to be an FK violation (500) and
         # another tenant's id was written, and "not written" is already this
         # method's answer for everything else that should not happen.
-        async with get_session() as session:
-            result = await session.execute(
-                sql_update(Memory)
-                .where(
-                    Memory.id == memory_id,
-                    Memory.tenant_id == tenant_id,
-                    Memory.deleted_at.is_(None),
-                    Memory.subject_entity_id.is_(None),
-                    select(Entity.id)
-                    .where(Entity.id == subject_entity_id, Entity.tenant_id == tenant_id)
-                    .exists(),
-                )
-                .values(subject_entity_id=subject_entity_id)
+        stmt = (
+            sql_update(Memory)
+            .where(
+                Memory.id == memory_id,
+                Memory.tenant_id == tenant_id,
+                Memory.deleted_at.is_(None),
+                Memory.subject_entity_id.is_(None),
+                select(Entity.id)
+                .where(Entity.id == subject_entity_id, Entity.tenant_id == tenant_id)
+                .exists(),
             )
+            .values(subject_entity_id=subject_entity_id)
+        )
+        if content is not None:
+            stmt = stmt.where(Memory.content == content)
+        async with get_session() as session:
+            result = await session.execute(stmt)
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def memory_set_predicate_if_null(
-        self, memory_id: UUID, tenant_id: str, predicate: str, object_value: str
+        self,
+        memory_id: UUID,
+        tenant_id: str,
+        predicate: str,
+        object_value: str,
+        content: str | None = None,
     ) -> bool:
         """A65 — write-back of the extraction-derived predicate and object.
 
@@ -2319,21 +2333,28 @@ class PostgresService:
         attribute with no value, which the RDF comparison reads as a claim that
         nothing can conflict with — worse than leaving the row untouched.
 
+        ``content`` is the subject write-back's condition, for the same reason
+        (M-39): when given, the row must still hold the text the predicate was
+        extracted from.
+
         Returns ``True`` when the row was updated; ``False`` when it is absent,
-        soft-deleted, foreign-tenant, or already carries a predicate — all of
-        which callers treat as a benign skip.
+        soft-deleted, foreign-tenant, already carries a predicate, or no longer
+        holds ``content`` — all of which callers treat as a benign skip.
         """
-        async with get_session() as session:
-            result = await session.execute(
-                sql_update(Memory)
-                .where(
-                    Memory.id == memory_id,
-                    Memory.tenant_id == tenant_id,
-                    Memory.deleted_at.is_(None),
-                    Memory.predicate.is_(None),
-                )
-                .values(predicate=predicate, object_value=object_value)
+        stmt = (
+            sql_update(Memory)
+            .where(
+                Memory.id == memory_id,
+                Memory.tenant_id == tenant_id,
+                Memory.deleted_at.is_(None),
+                Memory.predicate.is_(None),
             )
+            .values(predicate=predicate, object_value=object_value)
+        )
+        if content is not None:
+            stmt = stmt.where(Memory.content == content)
+        async with get_session() as session:
+            result = await session.execute(stmt)
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
 
     async def memory_update_status(

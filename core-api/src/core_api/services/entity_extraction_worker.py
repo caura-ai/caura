@@ -168,10 +168,59 @@ async def _discover_cross_links_for_memory(
         )
 
 
-async def _purge_written_artifacts_if_dropped(
-    sc: Any, memory_id: UUID, tenant_id: str
-) -> Literal["live", "dropped", "unknown"]:
-    """Undo our own graph writes when the memory died while we were making them.
+def _content_changed(row: dict, content: str) -> bool:
+    """M-39: does the row hold different text from the text this run extracted?
+
+    Only a string that differs counts. A row without a readable ``content``
+    proves nothing, and the answer to "changed" is a reset, so it has to be
+    earned.
+    """
+    stored = row.get("content")
+    return isinstance(stored, str) and stored != content
+
+
+async def _reset_and_re_extract(sc: Any, memory_id: UUID, tenant_id: str, row: dict) -> None:
+    """M-39: replace the graph this run wrote for text the row no longer holds.
+
+    The edit that changed the text ran its own reset before these rows existed,
+    so it found nothing to clear. This is the same reset, run again now that
+    there is something to clear. It also removes rows the edit's own
+    re-extraction may already have written, which is why the current text is
+    re-extracted here rather than left to that run.
+
+    Inline, in this tracked task, rather than scheduled: the edit already
+    scheduled one extraction, and a failure here is recorded against the same
+    memory. Bounded by the edits themselves: the re-extraction is handed the
+    text it just read, so it only comes back here if another edit lands.
+    """
+    try:
+        await sc.reset_entity_artifacts(tenant_id, str(memory_id))
+    except Exception:
+        logger.exception(
+            "entity extraction: memory %s was edited while its old text was being "
+            "extracted, and the rows written for the old text could NOT be reset; "
+            "they stay beside the new text's",
+            memory_id,
+        )
+    logger.warning(
+        "entity extraction: memory %s was edited while its old text was being "
+        "extracted; reset its extraction rows and re-extracting the current text",
+        memory_id,
+    )
+    await process_entity_extraction(
+        memory_id,
+        tenant_id,
+        row.get("fleet_id"),
+        row.get("agent_id"),
+        row["content"],
+        row.get("memory_type"),
+    )
+
+
+async def _recheck_row_after_writes(
+    sc: Any, memory_id: UUID, tenant_id: str, content: str
+) -> Literal["live", "dropped", "edited", "unknown"]:
+    """Undo our own graph writes when the memory died or changed while we made them.
 
     Reports WHAT IT FOUND and leaves the policy to the caller, because the two
     call sites want different things from the same answer. An earlier revision
@@ -184,8 +233,14 @@ async def _purge_written_artifacts_if_dropped(
     ``dropped``
         The row is gone or soft-deleted, and its graph rows have been purged
         (or the purge failed, loudly — either way it is not coming back).
+    ``edited``
+        M-39. The row is live but holds different text from ``content``: it was
+        edited mid-extraction. Its extraction rows have been reset and the
+        current text re-extracted (``_reset_and_re_extract``), so nothing more
+        of this run's may be written.
     ``live``
-        The row is there. Nothing was purged and nothing should stop.
+        The row is there, holding ``content``. Nothing was purged and nothing
+        should stop.
     ``unknown``
         The read itself failed. Nothing is known and nothing was purged.
 
@@ -240,6 +295,13 @@ async def _purge_written_artifacts_if_dropped(
     A failed PURGE still reports ``dropped``: the memory is gone whether or not
     the cleanup worked, and the caller's decision does not change. Only a failed
     READ is ``unknown``.
+
+    M-39 is the same race with an edit in place of a drop, and the same
+    argument closes it: the edit's reset runs before or after our writes, and
+    this check sees the new text in every ordering where the reset ran first.
+    The subject and predicate write-backs are columns the reset does not clear,
+    so they carry the extracted text and storage applies them only while the row
+    still holds it.
     """
     try:
         live = await sc.get_memory(str(memory_id), tenant_id, read=False)
@@ -253,7 +315,10 @@ async def _purge_written_artifacts_if_dropped(
         return "unknown"
 
     if live is not None and live.get("deleted_at") is None:
-        return "live"
+        if not _content_changed(live, content):
+            return "live"
+        await _reset_and_re_extract(sc, memory_id, tenant_id, live)
+        return "edited"
 
     try:
         counts = await sc.purge_entity_artifacts(tenant_id, str(memory_id))
@@ -348,7 +413,7 @@ async def process_entity_extraction(
         #
         # This check alone does NOT close the window, and it is not claimed to:
         # the writes below are several round-trips away, so a drop can land after
-        # it passes. ``_purge_written_artifacts_if_dropped`` at the end of the
+        # it passes. ``_recheck_row_after_writes`` at the end of the
         # persistence block is what closes that; this one is here to avoid doing
         # the work at all in the common case where the row is already gone.
         live = await sc.get_memory(str(memory_id), tenant_id, read=False)
@@ -357,6 +422,17 @@ async def process_entity_extraction(
                 "entity extraction: memory %s is gone by the time extraction finished; "
                 "discarding %d extracted entit(ies) rather than writing them to a "
                 "dropped row's graph",
+                memory_id,
+                len(graph.entities),
+            )
+            return
+        # M-39: the same check for an edit. Nothing is written yet, so there is
+        # nothing to reset, and the edit scheduled its own extraction of the new
+        # text.
+        if _content_changed(live, content):
+            logger.info(
+                "entity extraction: memory %s was edited while its old text was being "
+                "extracted; discarding %d entit(ies) for text it no longer holds",
                 memory_id,
                 len(graph.entities),
             )
@@ -779,7 +855,12 @@ async def process_entity_extraction(
                 # likely fail again — but the failure is a bounded leak that
                 # governance's purge can still reach, and the alternative was
                 # destroying an audit record nothing rebuilds.
-                if await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id) == "dropped":
+                #
+                # ``edited`` stops too (M-39): by the time it returns, the rows
+                # are reset and the current text re-extracted, and everything
+                # below would write the old text's graph back.
+                recheck = await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
+                if recheck in ("dropped", "edited"):
                     return
                 # Surface any FK violations from the per-item path
                 # (storage-side reports ``error="fk_violation"`` for rows
@@ -818,10 +899,13 @@ async def process_entity_extraction(
             if len(subject_ids) == 1:
                 subject_id = next(iter(subject_ids))
                 try:
+                    # ``content``: storage writes it only while the row still
+                    # holds the text it was extracted from (M-39).
                     updated = await sc.set_subject_entity_if_null(
                         memory_id=str(memory_id),
                         tenant_id=tenant_id,
                         subject_entity_id=subject_id,
+                        content=content,
                     )
                     logger.info(
                         "subject_writeback memory=%s subject_entity_id=%s outcome=%s",
@@ -1001,6 +1085,7 @@ async def process_entity_extraction(
                         tenant_id=tenant_id,
                         predicate=pred,
                         object_value=str(obj),
+                        content=content,
                     )
                     logger.info(
                         "predicate_writeback memory=%s predicate=%s outcome=%s",
@@ -1113,9 +1198,10 @@ async def process_entity_extraction(
         #
         # The result is not branched on: nothing follows this, so ``live`` and
         # ``unknown`` are the same instruction — do nothing — and ``dropped`` has
-        # already purged by the time it returns.
+        # already purged by the time it returns, as ``edited`` has reset and
+        # re-extracted.
         if wrote_graph_rows:
-            await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
+            await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
 
     except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
@@ -1157,11 +1243,12 @@ async def process_entity_extraction(
         # have to gate a ``finally`` anyway, so all ``finally`` buys is one fewer
         # call site.
         #
-        # Nothing is branched on. ``dropped`` has purged by the time it returns;
-        # ``live`` and ``unknown`` both mean leave it alone. ``unknown`` is the
+        # Nothing is branched on. ``dropped`` has purged by the time it returns,
+        # and ``edited`` has reset and re-extracted (M-39); ``live`` and
+        # ``unknown`` both mean leave it alone. ``unknown`` is the
         # likely answer when the storage failure that landed us here is still
         # going, and the rows do leak in that case — bounded to what was written
         # before the raise, and reachable by governance's own purge later. The
         # alternative was losing the audit record outright.
         if wrote_graph_rows:
-            await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
+            await _recheck_row_after_writes(sc, memory_id, tenant_id, content)

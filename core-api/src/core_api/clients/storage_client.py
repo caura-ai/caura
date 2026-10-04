@@ -788,38 +788,41 @@ class CoreStorageClient:
         return await self._delete(f"/memories/{memory_id}", tenant_id=tenant_id)
 
     async def set_subject_entity_if_null(
-        self, memory_id: str, tenant_id: str, subject_entity_id: str
+        self, memory_id: str, tenant_id: str, subject_entity_id: str, *, content: str | None = None
     ) -> bool:
         """A63 — conditional subject write-back from the extraction worker.
 
         Storage-side single UPDATE guarded by ``subject_entity_id IS
-        NULL`` (the write-time triple path's value wins). Returns whether
-        the row was actually updated; ``False`` is a benign skip."""
-        result = await self._post(
-            f"/memories/{memory_id}/subject-entity",
-            {"tenant_id": tenant_id, "subject_entity_id": subject_entity_id},
-            read=False,
-        )
+        NULL`` (the write-time triple path's value wins), and, with
+        ``content``, by the row still holding the text the subject was
+        extracted from (M-39). Returns whether the row was actually
+        updated; ``False`` is a benign skip."""
+        body = {"tenant_id": tenant_id, "subject_entity_id": subject_entity_id}
+        if content is not None:
+            body["content"] = content
+        result = await self._post(f"/memories/{memory_id}/subject-entity", body, read=False)
         return bool(result and result.get("updated"))
 
     async def set_predicate_if_null(
-        self, memory_id: str, tenant_id: str, predicate: str, object_value: str
+        self,
+        memory_id: str,
+        tenant_id: str,
+        predicate: str,
+        object_value: str,
+        *,
+        content: str | None = None,
     ) -> bool:
         """A65 — conditional predicate/object write-back from the extraction worker.
 
         Sibling of ``set_subject_entity_if_null``. Storage-side single UPDATE
         guarded by ``predicate IS NULL`` (the write-time triple path's value
-        wins). Returns whether the row was actually updated; ``False`` is a
+        wins), and, with ``content``, by the row still holding that text
+        (M-39). Returns whether the row was actually updated; ``False`` is a
         benign skip."""
-        result = await self._post(
-            f"/memories/{memory_id}/predicate",
-            {
-                "tenant_id": tenant_id,
-                "predicate": predicate,
-                "object_value": object_value,
-            },
-            read=False,
-        )
+        body = {"tenant_id": tenant_id, "predicate": predicate, "object_value": object_value}
+        if content is not None:
+            body["content"] = content
+        result = await self._post(f"/memories/{memory_id}/predicate", body, read=False)
         return bool((result or {}).get("updated"))
 
     async def update_memory_status(

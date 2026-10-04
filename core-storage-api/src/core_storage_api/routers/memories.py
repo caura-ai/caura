@@ -653,15 +653,18 @@ async def set_subject_entity_if_null(memory_id: UUID, request: Request) -> dict:
     """A63 — conditional write-back of the extraction-derived subject.
 
     Sets ``memories.subject_entity_id`` ONLY when it is currently NULL —
-    the write-time triple path's value always wins. Returns
-    ``{"updated": bool}``; ``false`` covers absent / deleted /
-    foreign-tenant / already-set rows alike (callers treat it as a skip).
+    the write-time triple path's value always wins. An optional ``content``
+    also requires the row to still hold the text the subject was extracted
+    from (M-39). Returns ``{"updated": bool}``; ``false`` covers absent /
+    deleted / foreign-tenant / already-set / edited rows alike (callers treat
+    it as a skip).
     """
     body: dict = await request.json()
     updated = await _svc.memory_set_subject_entity_if_null(
         memory_id=memory_id,
         tenant_id=body["tenant_id"],
         subject_entity_id=UUID(body["subject_entity_id"]),
+        content=body.get("content"),
     )
     return {"updated": updated}
 
@@ -672,8 +675,9 @@ async def set_predicate_if_null(memory_id: UUID, request: Request) -> dict:
 
     Sibling of ``/subject-entity`` (A63). Sets ``predicate`` and
     ``object_value`` ONLY when ``predicate`` is currently NULL — the write-time
-    triple path's value always wins. Returns ``{"updated": bool}``; ``false``
-    covers absent / deleted / foreign-tenant / already-set rows alike.
+    triple path's value always wins, and an optional ``content`` must still be
+    the row's text (M-39). Returns ``{"updated": bool}``; ``false`` covers
+    absent / deleted / foreign-tenant / already-set / edited rows alike.
     """
     body: dict = await request.json()
     updated = await _svc.memory_set_predicate_if_null(
@@ -681,6 +685,7 @@ async def set_predicate_if_null(memory_id: UUID, request: Request) -> dict:
         tenant_id=body["tenant_id"],
         predicate=body["predicate"],
         object_value=body["object_value"],
+        content=body.get("content"),
     )
     return {"updated": updated}
 

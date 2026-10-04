@@ -126,7 +126,10 @@ async def test_single_subject_written_back() -> None:
     )
 
     sc.set_subject_entity_if_null.assert_awaited_once_with(
-        memory_id=str(memory_id), tenant_id="t1", subject_entity_id=subject_id
+        memory_id=str(memory_id),
+        tenant_id="t1",
+        subject_entity_id=subject_id,
+        content="test content",
     )
 
 
