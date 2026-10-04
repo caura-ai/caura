@@ -17,7 +17,7 @@ You need these on your machine:
 git clone https://github.com/caura-ai/caura.git
 cd caura
 
-# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
+# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API, lifecycle scheduler)
 docker compose up -d
 
 # 3. Wait for healthy (usually ~15 seconds)
@@ -107,6 +107,10 @@ Use `my-long-random-admin-key` as `X-API-Key`. You pass `tenant_id`
 explicitly in request bodies / query params. Admin/system keys are
 intentionally rejected by MCP; use standalone mode, a tenant-scoped key, or
 Path 3 for MCP.
+
+With `ADMIN_API_KEY` blank, the Docker stack generates an admin key for its own
+lifecycle scheduler (`admin-key-init`) and keeps it inside the stack. Setting
+`ADMIN_API_KEY` replaces it, for the scheduler too.
 
 **Path 3 — Gate the API with a shared key.** Set `CAURA_API_KEY` in your
 `.env`. REST and MCP clients send that key via `X-API-Key` plus `X-Tenant-ID`

@@ -115,7 +115,7 @@ wins.
 
 - If the image is cached, `docker compose up -d --pull never` starts without a registry request.
 - If no image is cached, `docker compose up --build --pull never` builds from source.
-- For a strict no-network guarantee, add a `docker-compose.override.yml` that sets `pull_policy: never` for both application services. Compose then fails fast when an image is absent.
+- For a strict no-network guarantee, add a `docker-compose.override.yml` that sets `pull_policy: never` for the three application services. Compose then fails fast when an image is absent.
 
 ### Service URLs
 
@@ -130,8 +130,8 @@ network; it has no host URL.
 
 ### What the stack contains
 
-`docker compose up` starts four long-running containers and a one-shot
-`storage-secret-init` container:
+`docker compose up` starts five long-running containers and two one-shot
+containers, `storage-secret-init` and `admin-key-init`:
 
 | Container | Role |
 |---|---|
@@ -139,6 +139,15 @@ network; it has no host URL.
 | `redis` | Cache and rate limiting |
 | `core-storage-api` | Storage service (SQL + vector search) |
 | `core-api` | REST + MCP surface; embedding and enrichment run in-process (`deployment_mode=inline`) |
+| `core-operations` | Lifecycle scheduler: nightly expiry, stale archival, purge, crystallization, entity linking and insights, plus hourly reconciliation (02:00 UTC by default) |
+
+`core-operations` calls core-api's admin-only endpoints. When `ADMIN_API_KEY`
+is blank, `admin-key-init` generates a key into a private volume that only
+`core-api` and `core-operations` mount, so the schedule works on a bare
+`docker compose up`. An `ADMIN_API_KEY` set in `.env` replaces it for both. To
+stop the schedule, stop the `core-operations` service or set
+`IS_STANDALONE: "true"` in its `environment`; nothing expires, archives or is
+purged without it.
 
 The optional `tei` service starts only with `--profile embed-local`.
 `core-worker`, platform-tier services, and the Google Pub/Sub event bus are

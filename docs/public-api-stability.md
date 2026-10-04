@@ -84,11 +84,11 @@ These mirror the [configuration reference](api-reference.md#configuration).
 | Group | Vars |
 |---|---|
 | Database | Storage service: `DATABASE_URL`, `READ_DATABASE_URL` or a complete `ALLOYDB_*` connection set; migration/dev helpers: `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` (stock Compose hardcodes its container connection values) |
-| Auth | `ADMIN_API_KEY`, `CAURA_API_KEY`, `GATEWAY_SHARED_SECRET`, `JWT_SECRET`, `CORE_STORAGE_SHARED_SECRET`, `CORE_STORAGE_SHARED_SECRET_FILE`, `IS_STANDALONE` |
+| Auth | `ADMIN_API_KEY`, `ADMIN_API_KEY_FILE`, `CAURA_API_KEY`, `GATEWAY_SHARED_SECRET`, `JWT_SECRET`, `CORE_STORAGE_SHARED_SECRET`, `CORE_STORAGE_SHARED_SECRET_FILE`, `IS_STANDALONE` |
 | Providers | `EMBEDDING_PROVIDER`, `ENTITY_EXTRACTION_PROVIDER`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `USE_LLM_FOR_MEMORY_CREATION` |
 | Runtime | `CORS_ORIGINS`, `ENVIRONMENT`, `SETTINGS_ENCRYPTION_KEY`, `REDIS_URL` |
 
-Production startup requires `ADMIN_API_KEY`, a non-default `JWT_SECRET`,
+Production startup requires `ADMIN_API_KEY` (or `ADMIN_API_KEY_FILE`), a non-default `JWT_SECRET`,
 `SETTINGS_ENCRYPTION_KEY`, and either `GATEWAY_SHARED_SECRET` or
 `CAURA_API_KEY`; `IS_STANDALONE=true` is not allowed.
 

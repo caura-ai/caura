@@ -768,6 +768,20 @@ jobs:
           )"
           docker tag core-storage-api-readmetest "$compose_image"
 
+      # M-109: the stock stack runs the lifecycle scheduler. ``--no-build`` below
+      # needs its image too, under the name Compose resolves for it.
+      - name: Build core-operations image for README quickstart
+        run: |
+          docker build --platform linux/amd64 --target runtime \
+            -t core-operations-readmetest \
+            -f core-operations/Dockerfile .
+          compose_image="$(
+            docker compose --env-file /dev/null --file docker-compose.yml \
+              --project-name "$README_COMPOSE_PROJECT" config --format json |
+              python3 -c 'import json, sys; print(json.load(sys.stdin)["services"]["core-operations"]["image"])'
+          )"
+          docker tag core-operations-readmetest "$compose_image"
+
       - name: Start the documented keyless stack
         run: |
           if [ ! -f .env.example ] || [ -L .env.example ]; then
@@ -783,6 +797,27 @@ jobs:
 
       - name: Run README write-and-search curl block
         run: python3 scripts/check_readme_quickstart.py
+
+      # M-109: every scheduler tick calls an admin-only core-api endpoint with the
+      # key admin-key-init generated. If the two services resolved different keys,
+      # every tick would 403 while both containers report healthy, so call one
+      # read-only admin endpoint from inside the scheduler's container, with the
+      # key its own settings resolved.
+      - name: Assert the bundled scheduler reaches core-api's admin plane
+        run: |
+          docker compose --env-file /dev/null --file docker-compose.yml \
+            --project-name "$README_COMPOSE_PROJECT" \
+            exec -T core-operations python -c '
+          import httpx
+          from core_operations.config import settings
+          resp = httpx.get(
+              f"{settings.core_api_url}/api/v1/admin/lifecycle/embedding-coverage",
+              headers={"X-API-Key": settings.core_api_admin_api_key},
+              timeout=30,
+          )
+          print(resp.status_code, resp.text[:200])
+          resp.raise_for_status()
+          '
 
       - name: Show README quickstart logs on failure
         if: failure()

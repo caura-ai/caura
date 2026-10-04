@@ -60,7 +60,7 @@ The fastest way to see Caura work. Standalone mode runs single-tenant with auth 
 git clone https://github.com/caura-ai/caura.git
 cd caura
 cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
-docker compose up -d --wait                                 # Postgres + pgvector + Redis + API (~30s)
+docker compose up -d --wait                                 # Postgres + pgvector + Redis + API + scheduler (~30s)
 ```
 
 <!-- readme-quickstart-ci:start -->
@@ -155,9 +155,10 @@ tool call; the gateway rejects the reserved `mcp-agent` default on that path.
 
 ### Self-Hosted (Open Source)
 
-Docker Compose starts PostgreSQL + pgvector, Redis, the storage service, and the
-REST/MCP API. The keyless example above is the shortest path; add a provider for
-semantic recall.
+Docker Compose starts PostgreSQL + pgvector, Redis, the storage service, the
+REST/MCP API, and the `core-operations` lifecycle scheduler (nightly expiry,
+archival, purge and crystallization). The keyless example above is the shortest
+path; add a provider for semantic recall.
 
 <a id="prerequisites"></a>
 <a id="1-clone-and-configure"></a>
@@ -597,7 +598,12 @@ Each release publishes multi-arch (linux/amd64, linux/arm64) images to [GitHub C
 ```
 ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0 # legacy-name-floor: published GHCR repository name
 ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0 # legacy-name-floor: published GHCR repository name
+ghcr.io/caura-ai/caura-core-operations:v2.5.0
 ```
+
+`caura-core-operations`, the lifecycle scheduler, is newer than the other two and
+is published under the new name, so releases before it joined the stack have no
+image for it.
 
 Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:latest` for the latest stable release. Pull them in your own compose file or Kubernetes manifests instead of building from source.
 

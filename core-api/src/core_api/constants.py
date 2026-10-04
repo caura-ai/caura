@@ -142,14 +142,17 @@ MEMORY_TYPES_FILTER_DESCRIPTION = (
 
 # Shown on every WRITE field that accepts it. States the guarantee exactly,
 # because the guarantee is weaker than the field name suggests: the lifecycle
-# sweep archives the row, so it stays readable until the next tick. A caller
-# needing it to disappear AT the timestamp is asking for a read-time filter,
-# which this is not (caura#1637).
+# sweep moves the row to ``outdated``, so it stays readable until the next tick. A
+# caller needing it to disappear AT the timestamp is asking for a read-time
+# filter, which this is not (caura#1637). ``outdated``, not ``archived``: that is
+# what the archive-expired job sets, and a retention audit filtering on
+# ``archived`` would find nothing (L-99).
 EXPIRES_AT_DESCRIPTION = (
-    "Optional retention hint. Once this time passes, the row is archived on the "
-    "next lifecycle tick and stops being returned by reads. Not a hard cutoff: "
-    "the row remains readable until that tick runs. Distinct from ts_valid_end, "
-    "which closes a temporal-validity interval rather than expressing retention."
+    "Optional retention hint. Once this time passes, the row moves to status "
+    "outdated on the next lifecycle tick and drops out of default search results. "
+    "Not a hard cutoff: the row remains readable until that tick runs. Distinct "
+    "from ts_valid_end, which closes a temporal-validity interval rather than "
+    "expressing retention."
 )
 
 # oss-0814-l-08. The C25 caller/platform metadata boundary, stated on the surface

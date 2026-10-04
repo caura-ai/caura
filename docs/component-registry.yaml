@@ -18,7 +18,7 @@ services:
     purpose: storage service — SQL + vector search over Postgres/pgvector
     path: core-storage-api/
   - name: core-operations
-    purpose: cron/scheduled background jobs host (no business HTTP surface, /healthz only)
+    purpose: cron/scheduled background jobs host (no business HTTP surface, /healthz only); runs in the shipped OSS compose stack against core-api's admin endpoints
     path: core-operations/
   - name: core-worker
     purpose: event consumers for managed/deferred-mode deployments (deployment_mode=deferred); not part of the shipped OSS compose stack

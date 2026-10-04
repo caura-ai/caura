@@ -667,13 +667,15 @@ Content exceeding 2,000 characters is automatically split into atomic facts via 
 
 ### Lifecycle automation
 
-Background scheduler runs every 24 hours and automatically:
+The `core-operations` scheduler, which the stock `docker compose` stack runs, fires these ticks nightly (02:00 UTC by default, each movable in its settings):
 
-1. **Expires** — active memories past `ts_valid_end` → status `outdated`
-2. **Archives** — memories older than 180 days with weight ≤ 0.3 and zero recalls → status `archived`
-3. **Crystallizes** — triggers crystallization when active memory count exceeds 1,000
+1. **Expires** — active memories past `ts_valid_end` or `expires_at` → status `outdated`, which default search excludes
+2. **Archives** — active memories older than 90 days with weight below 0.3 and no recalls → status `archived`
+3. **Purges** — soft-deleted memories past the tenant's retention window are removed
+4. **Crystallizes** — merges near-duplicate clusters for tenants with `crystallizer.auto_crystallize` on and more than 1,000 active memories, when something was written since the last run
+5. **Links entities** and **discovers insights** — for tenants that enable `entity_linking.auto_entity_linking_enabled` and `insights.auto_insights_enabled`
 
-Togglable per tenant via `lifecycle_automation_enabled` setting.
+Expiry and archival are togglable per tenant via the `lifecycle.lifecycle_automation_enabled` setting. A deployment that does not run `core-operations` runs none of these.
 
 ### Temporal validity
 

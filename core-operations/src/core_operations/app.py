@@ -11,8 +11,9 @@ third-party loggers once they're all imported.
 Lifespan ordering:
 1. Re-route third-party loggers (uvicorn / scheduler) onto the JSON handler.
 2. If ``settings.is_standalone``: skip scheduler entirely. The service runs
-   as a no-op; OSS standalone deployments should not deploy this image
-   at all, but the flag is a defensive short-circuit.
+   as a no-op. This is an off switch, not a deployment rule: the stock compose
+   stack runs this service against its standalone core-api (M-109), and an
+   operator who drives the admin endpoints some other way sets it here.
 3. Otherwise: register cron jobs via ``scheduler.register(...)`` and call
    ``scheduler.start()``. Eleven jobs are registered unconditionally: six daily
    lifecycle ticks (``lifecycle-archive-expired``, ``lifecycle-archive-stale``,
@@ -242,12 +243,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     if settings.is_standalone:
-        # OSS standalone deployments shouldn't deploy this image at all.
-        # If we're here it's a misconfiguration — escalate so it shows up
-        # in alerts rather than silently consuming a Cloud Run slot.
+        # The off switch. The stock compose stack runs this service against a
+        # standalone core-api and leaves it unset (M-109); set on THIS service
+        # it disables every tick. Warned rather than logged at info, so a value
+        # inherited from a shared env file (env.dev and .env.example both set
+        # it) does not silently stop the nightly lifecycle.
         logger.warning(
-            "Standalone mode — scheduler disabled. core-operations is a no-op; "
-            "this image should not be deployed in standalone."
+            "IS_STANDALONE is set — scheduler disabled. core-operations is a no-op "
+            "and no lifecycle tick will fire."
         )
         yield
         logger.info("Shutting down core-operations (standalone)")
@@ -258,8 +261,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # immediately, not after the first cron tick fires and 401s
         # against core-api hours later.
         logger.warning(
-            "CORE_API_ADMIN_API_KEY is unset; every fanout POST will be "
-            "unauthorised. Set the env var before the next cron interval.",
+            "CORE_API_ADMIN_API_KEY is unset and CORE_API_ADMIN_API_KEY_FILE names no "
+            "key; every fanout POST will be unauthorised. Set one before the next "
+            "cron interval.",
         )
 
     _register_scheduled_tasks()

@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # ``db_pool_*`` settings + ``database_url`` were removed with the engine.
     api_key: str | None = None  # legacy, deprecated
     admin_api_key: str | None = None
+    # A file holding the admin key, read only when ``admin_api_key`` is unset or
+    # blank (M-109): the compose stack generates one so its bundled scheduler can
+    # reach the admin endpoints. An operator's ADMIN_API_KEY wins.
+    admin_api_key_file: str = ""
     # Optional: when set, all non-admin requests must present this key. Both
     # spellings are accepted as INPUTS; ``_prefer_the_new_api_key_name`` below
     # collapses them onto the second field, the only one downstream code reads —
@@ -505,6 +509,15 @@ class Settings(BaseSettings):
         if not self.core_storage_shared_secret.get_secret_value():
             self.core_storage_shared_secret = SecretStr(
                 read_shared_secret_file(self.core_storage_shared_secret_file)
+            )
+        return self
+
+    @model_validator(mode="after")
+    def resolve_admin_api_key(self) -> Self:
+        # Blank as well as unset: .env.example ships ``ADMIN_API_KEY=``.
+        if not self.admin_api_key and self.admin_api_key_file:
+            self.admin_api_key = read_shared_secret_file(
+                self.admin_api_key_file, env_name="ADMIN_API_KEY_FILE"
             )
         return self
 
