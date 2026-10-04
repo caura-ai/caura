@@ -1,6 +1,6 @@
 {
   "name": "@caura/plugin",
-  "version": "2.23.4",
+  "version": "2.23.5",
   "description": "OpenClaw plugin for Caura central memory",
   "license": "Apache-2.0",
   "private": true,

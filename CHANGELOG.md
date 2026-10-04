@@ -10,6 +10,26 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.21.8](https://github.com/caura-ai/caura/compare/backend-v3.21.7...backend-v3.21.8) (2026-10-04)
+
+
+### Bug Fixes
+
+* **contradiction:** keep Path C's judge fallback and leave RDF verdicts to the RDF pass ([#1812](https://github.com/caura-ai/caura/issues/1812)) ([2b3770c](https://github.com/caura-ai/caura/commit/2b3770c7817b0831f90198d28b27e67fd9880856))
+* **contradiction:** record every loser no chain edge points at ([#1815](https://github.com/caura-ai/caura/issues/1815)) ([e7b779a](https://github.com/caura-ai/caura/commit/e7b779acba5be2f6a77276bd36d2986c496f5e49))
+* **plugin:** accept no server-pushed code or instructions over plain HTTP ([#1808](https://github.com/caura-ai/caura/issues/1808)) ([6c4bc6b](https://github.com/caura-ai/caura/commit/6c4bc6b9addaf06b9cd61a1b7fc5a41b722e0a58))
+
+
+### Dependencies
+
+* **actions:** bump the actions group across 1 directory with 2 updates ([#1754](https://github.com/caura-ai/caura/issues/1754)) ([d66b27d](https://github.com/caura-ai/caura/commit/d66b27df6e1bcaf1e72e35d6cf3c9925ec16547d))
+* update google-cloud-aiplatform requirement from &lt;3,&gt;=2.1.3 to &gt;=2.2.0,&lt;3 ([#1753](https://github.com/caura-ai/caura/issues/1753)) ([360ee02](https://github.com/caura-ai/caura/commit/360ee021ce9c75dd068452b709b82f268c381cb9))
+
+
+### Documentation
+
+* **api:** say superseded_by is the older memory this one replaced ([#1813](https://github.com/caura-ai/caura/issues/1813)) ([ae56d23](https://github.com/caura-ai/caura/commit/ae56d23658830b2698d2f606852c3914fd130328))
+
 ## [3.21.7](https://github.com/caura-ai/caura/compare/backend-v3.21.6...backend-v3.21.7) (2026-10-04)
 
 
