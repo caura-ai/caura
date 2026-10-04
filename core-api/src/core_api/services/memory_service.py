@@ -4428,6 +4428,19 @@ async def update_memory(
         # ``fields_set`` would be defending against a state that cannot occur.
         if mem.get("subject_entity_id") is not None:
             patch["subject_entity_id"] = None
+        # L-221: the rest of that triple, mined from the same old text. Left in
+        # place, it outlived every edit: EmitMemoryTriple does not run on this
+        # path, and extraction's predicate write-back fills only a NULL
+        # predicate, so the row paired the new text's subject with the old
+        # text's predicate and object.
+        #
+        # Unlike the subject, a field the caller names is left out here rather
+        # than overwritten below: a predicate is a plain string on both sides,
+        # so ``simple_fields`` skips one equal to the stored value and could not
+        # write a re-asserted predicate back over the clear.
+        for column in ("predicate", "object_value"):
+            if mem.get(column) is not None and column not in fields_set:
+                patch[column] = None
 
     # Apply simple field updates
     simple_fields = {

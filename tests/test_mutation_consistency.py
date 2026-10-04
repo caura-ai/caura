@@ -284,6 +284,57 @@ async def test_an_explicit_subject_beats_the_content_auto_clear(monkeypatch):
     )
 
 
+async def test_content_change_clears_the_old_predicate_and_object(monkeypatch):
+    """L-221. ``predicate`` and ``object_value`` are the rest of the triple the
+    cleared subject belonged to, mined from the same old text.
+
+    Left in place, they outlived every edit: EmitMemoryTriple does not run on
+    the update path, and extraction's predicate write-back fills only a NULL
+    predicate. The row went on carrying the new text's subject beside the old
+    text's predicate and object, which the RDF contradiction path and
+    DetectNearDuplicate's same-claim test read as one authoritative claim.
+    """
+    client = await _run_update(
+        monkeypatch,
+        content="a new body for this memory",
+        mem_extra={"predicate": "status", "object_value": "open"},
+    )
+
+    patch = client.patches[0]
+    assert "predicate" in patch and patch["predicate"] is None, patch
+    assert "object_value" in patch and patch["object_value"] is None, patch
+
+
+async def test_an_explicit_predicate_beats_the_content_auto_clear(monkeypatch):
+    """A predicate the caller names survives the clear, even re-asserted unchanged.
+
+    Unlike the subject, a predicate is a plain string on both sides, so the
+    ``simple_fields`` loop skips one equal to the stored value and could not
+    write it back over the clear. The clear has to stand aside instead.
+    """
+    client = await _run_update(
+        monkeypatch,
+        content="a new body for this memory",
+        mem_extra={"predicate": "status", "object_value": "open"},
+        extra_fields={"predicate": "status", "object_value": "open"},
+    )
+
+    patch = client.patches[0]
+    assert patch.get("predicate", "status") == "status", patch
+    assert patch.get("object_value", "open") == "open", patch
+
+
+async def test_a_metadata_only_edit_leaves_the_predicate_alone(monkeypatch):
+    client = await _run_update(
+        monkeypatch,
+        title="just a new title",
+        mem_extra={"predicate": "status", "object_value": "open"},
+    )
+
+    assert "predicate" not in client.patches[0], client.patches[0]
+    assert "object_value" not in client.patches[0], client.patches[0]
+
+
 async def test_a_content_edit_naming_no_links_writes_none(monkeypatch):
     """The guard on the re-apply: it must not invent a write of its own.
 
@@ -456,6 +507,7 @@ async def _run_update(
     reset_raises: bool = False,
     links_refused: bool = False,
     scheduled: list | None = None,
+    extra_fields: dict | None = None,
 ):
     """Drive ``update_memory`` against a recording client and return it."""
     from core_api.schemas import MemoryUpdate
@@ -544,6 +596,7 @@ async def _run_update(
         fields["entity_links"] = entity_links
     if subject_entity_id is not None:
         fields["subject_entity_id"] = subject_entity_id
+    fields.update(extra_fields or {})
     await memory_service.update_memory(memory_id, "t1", MemoryUpdate(**fields))
     return client
 
