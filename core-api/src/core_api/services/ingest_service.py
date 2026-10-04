@@ -1301,6 +1301,9 @@ async def _write_parent_ingest_document(
     payload: dict = {
         "tenant_id": request.tenant_id,
         "fleet_id": request.fleet_id,
+        # L-132: the author column, as the REST document route sets it. Inside
+        # ``data`` alone it left documents.agent_id NULL for every batch.
+        "agent_id": request.agent_id,
         "collection": INGEST_DOCUMENTS_COLLECTION,
         "doc_id": run_id,
         "data": data,
@@ -1381,27 +1384,26 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
 
     Three correctness/quality moves over the original loop:
 
-    1. **Strong write_mode** (P1.3). Each ``MemoryCreate`` carries
-       ``write_mode="strong"``, forcing the inline enrichment path so
-       title/tags/weight are populated synchronously. Previously these
-       went out via the fast path's deferred-enrichment queue, which
-       isn't consumed in some deployments — leaving memories with
-       ``title=null`` indefinitely.
+    1. **Strong write_mode** (P1.3, L-133). Each bulk item carries
+       ``write_mode="strong"``, so ``create_memories_bulk`` embeds it inline
+       and an ingested fact is vector-searchable once commit returns, even
+       in deployments that otherwise defer embedding (there a failed batch
+       embed falls back to the backfill instead of failing). Enrichment (title,
+       tags, weight) follows the deployment mode on this path: inline where
+       ``inline_enrichment`` is on, otherwise the deferred queue, which
+       strong mode does not change.
 
-    2. **Pre-loop content-hash dedup** (P1.4). Before any enrichment
-       LLM call, batch-query existing content hashes for this tenant.
-       Facts whose hash already exists short-circuit straight into
-       ``skipped_duplicates``. Without this gate, every duplicate
-       paid a full strong-mode LLM round-trip before being rejected
-       with a 409 inside ``create_memory`` — pure waste on overlap-
-       heavy batches (the common re-ingest case).
+    2. **Pre-loop content-hash dedup** (P1.4). Before any embed or
+       enrichment call, batch-query existing content hashes for this
+       tenant, fleet and agent. Facts whose hash already exists
+       short-circuit straight into ``skipped_duplicates``, so overlap-heavy
+       batches (the common re-ingest case) pay nothing for them.
 
-    3. **Bounded-parallel writes** (P1.3). Survivors go through
-       ``create_memory`` concurrently with ``Semaphore(_COMMIT_CONCURRENCY)``
-       Strong-mode runs a real OpenAI enrichment per fact (~2s); without
-       parallelism, 10 facts is 20s+. ``tenant_config`` is pre-warmed
-       once so the per-fact pipeline reuses the cache instead of racing
-       on the shared session.
+    3. **Bulk writes** (audit finding #28). Survivors go through
+       ``create_memories_bulk`` in chunks of ``BULK_MAX_ITEMS``: one batched
+       embedding call per chunk and semaphored enrichment, rather than one
+       ``create_memory`` per fact. ``tenant_config`` is pre-warmed once so
+       the writes reuse the cache instead of racing on the shared session.
     """
     run_id = request.run_id or str(uuid.uuid4())
     # Caller-supplied url wins (dashboard back-compat). When the caller
@@ -1579,6 +1581,9 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                     source_uri=effective_source,
                     run_id=run_id,
                     metadata=metadata,
+                    # L-133: the docstring's promise. Without it, a deferred
+                    # deployment returned these facts before any was embedded.
+                    write_mode="strong",
                 )
             )
         # H-07: chunked, because ``BulkMemoryCreate.items`` carries
