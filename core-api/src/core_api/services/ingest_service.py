@@ -414,13 +414,24 @@ def _is_blocked_ip(addr: str) -> bool:
     Covers RFC1918 private ranges, loopback, link-local (incl. AWS/GCP/Azure
     metadata IPs), multicast, and reserved. IPv6 unique-local fc00::/7 is
     classified as private by the ipaddress module.
+
+    L-73: and anything else that is not globally reachable. RFC 6598 shared
+    address space, 100.64.0.0/10 (carrier-grade NAT, Tailscale's tailnet range,
+    overlay pod networks), carries none of the flags below and was fetched.
+    ``not is_global`` is added to the flags rather than replacing them: it
+    counts IPv4 multicast and unallocated IPv6 (``is_reserved``) as global.
     """
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
+    # How the flags treat ``::ffff:a.b.c.d`` depends on the Python patch
+    # release, so judge the IPv4 address it maps to.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     return (
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_multicast
@@ -863,11 +874,13 @@ async def _walk_redirects_and_fetch(url: str) -> str:
 
                 # MIME allowlist on the final response, not the initial request.
                 content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-                if content_type and content_type not in ALLOWED_INGEST_MIME_TYPES:
+                # L-131: a missing or empty type is off the list too. Skipping
+                # the check for it decoded a PDF or zip as text for the LLM.
+                if content_type not in ALLOWED_INGEST_MIME_TYPES:
                     raise HTTPException(
                         status_code=422,
                         detail=(
-                            f"Unsupported content type: {content_type}. "
+                            f"Unsupported content type: {content_type or '(none)'}. "
                             f"Allowed: {sorted(ALLOWED_INGEST_MIME_TYPES)}"
                         ),
                     )
