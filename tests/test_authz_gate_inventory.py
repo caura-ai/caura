@@ -294,7 +294,10 @@ NON_ADMIN_PLANE_ROUTERS: dict[str, str] = {
     "evolve": "agent-plane: agents report their own outcomes",
     "insights": "agent-plane: generated for the calling agent",
     "reports": "agent-plane for the digest trigger; the admin run is enforce_admin",
-    "crystallizer": "agent-plane trigger; the all-tenants sweep is enforce_admin",
+    "crystallizer": (
+        "trust-plane trigger: below trust 3 an agent runs only its own fleet; "
+        "the all-tenants sweep is enforce_admin"
+    ),
     "interview": "agent-plane submit; the scheduler run is enforce_admin",
     "plugin": "bootstrap: unauthenticated install-script rendering, no auth context",
     # TRUST-plane, not admin-plane, and the distinction is the whole design.
