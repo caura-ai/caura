@@ -683,3 +683,44 @@ async def test_daily_crystallize_tick_sends_no_window(monkeypatch: pytest.Monkey
     async with _patch_client(monkeypatch, response=_StubResponse(200, {"published": 1})) as stub:
         await tasks.run_crystallize_tick()
     assert stub.params == [None]
+
+
+# ---------------------------------------------------------------------------
+# L-36: the reconcile tick survives a 2xx it cannot read
+# ---------------------------------------------------------------------------
+
+_UNREADABLE_RECONCILE = "lifecycle reconcile returned an unreadable 2xx; the sweep ran, its counts are lost"
+
+
+@pytest.mark.parametrize("body", ["<html>200 OK</html>", ["not", "a", "dict"]], ids=["html", "json-list"])
+async def test_reconcile_tick_survives_an_unreadable_2xx(monkeypatch, caplog, body):
+    """``_fire_fanout`` guards ``resp.json()``; the reconcile tick called it bare.
+
+    A 2xx means the sweep already ran in core-api. Raising out of the tick for
+    an unreadable body logged it as a failed tick, and the stranded/ineffective
+    counts, the only sign that a publish was lost, went unlogged for the hour.
+    """
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)) as stub:
+        await tasks.run_lifecycle_reconcile_tick()
+
+    assert stub.calls, "the reconcile POST did not happen"
+    assert len(_records(caplog, _UNREADABLE_RECONCILE)) == 1
+
+
+async def test_reconcile_tick_still_reports_what_it_swept(monkeypatch, caplog):
+    """Guard: a readable answer is logged with its counts, as before."""
+    settings.core_api_url = "http://core-api"
+    settings.core_api_admin_api_key = "admin-key-xyz"
+
+    caplog.set_level("INFO", logger=tasks.logger.name)
+    body = {"stranded": 2, "republish_attempted": 2, "failed": 0, "unknown_action": 0, "ineffective": 0}
+    async with _patch_client(monkeypatch, response=_StubResponse(200, body)):
+        await tasks.run_lifecycle_reconcile_tick()
+
+    swept = _records(caplog, "lifecycle reconcile swept stranded rows")
+    assert len(swept) == 1 and swept[0].stranded == 2
+    assert _records(caplog, _UNREADABLE_RECONCILE) == []

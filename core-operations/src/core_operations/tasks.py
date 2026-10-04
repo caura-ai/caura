@@ -137,7 +137,19 @@ async def run_lifecycle_reconcile_tick() -> None:
             extra={"status_code": resp.status_code, "body": resp.text[:500]},
         )
         return
-    body = resp.json()
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        # A 2xx: the sweep ALREADY RAN in core-api (L-36). Raising here would
+        # log a failed tick for a sweep that worked, as ``_fire_fanout``
+        # explains. Only this hour's counts are lost, and the log says so.
+        logger.error(
+            "lifecycle reconcile returned an unreadable 2xx; the sweep ran, its counts are lost",
+            extra={"status_code": resp.status_code, "body": resp.text[:500]},
+        )
+        return
     stranded = body.get("stranded") or 0
     if not stranded:
         # The steady state. Debug, so an hourly no-op does not bury the
