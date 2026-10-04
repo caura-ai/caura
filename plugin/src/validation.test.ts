@@ -206,5 +206,9 @@ describe("keyTransportPolicy — API key never crosses the network in cleartext"
     reportKeyTransportPolicy("http://10.0.0.5:8000", "k", "send-insecure");
     assert.equal(warns.length, 1);
     assert.match(warns[0], /CAURA_ALLOW_INSECURE_HTTP/);
+    // L-80: the channel carries commands, plugin code and skills, not only the key.
+    assert.match(warns[0], /deploy/);
+    assert.match(warns[0], /educate/);
+    assert.match(warns[0], /skills/);
   });
 });

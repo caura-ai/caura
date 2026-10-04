@@ -57,7 +57,7 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 |---|---|
 | `CAURA_API_URL` | Final base URL of the core-api server. Credential-bearing plugin requests reject redirects; configure the destination directly. Use `https://` for any non-loopback host — see `CAURA_ALLOW_INSECURE_HTTP`. |
 | `CAURA_API_KEY` | Tenant or admin API key sent in `X-API-Key`. |
-| `CAURA_ALLOW_INSECURE_HTTP` | `true` to send `CAURA_API_KEY` over plain `http://` to a non-loopback host (e.g. a trusted private network). Unset (default): the plugin refuses such calls with an error naming the host. Loopback (`localhost`, `127.0.0.0/8`, `::1`) never needs it. |
+| `CAURA_ALLOW_INSECURE_HTTP` | `true` to send `CAURA_API_KEY` over plain `http://` to a non-loopback host (e.g. a trusted private network). Unset (default): the plugin refuses such calls with an error naming the host. Loopback (`localhost`, `127.0.0.0/8`, `::1`) never needs it. Plain HTTP to a non-loopback host also carries fleet commands, plugin source and the skills catalog, so there the plugin rejects `deploy`, `update_plugin` and `educate` commands and does not sync skills (installed skills are kept), with or without this opt-in and with or without `CAURA_API_KEY`: anyone on the path could otherwise push code or agent instructions to the node. |
 | `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
 | `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
 | `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |

@@ -95,7 +95,9 @@ export function reportKeyTransportPolicy(
   } else if (policy === "send-insecure") {
     console.warn(
       "[caura] WARNING: CAURA_ALLOW_INSECURE_HTTP is set — CAURA_API_KEY will be sent in " +
-        "cleartext over plain HTTP to a non-loopback host. Use https:// where possible.",
+        "cleartext over plain HTTP to a non-loopback host, so anyone on the path can read it and " +
+        "forge what the server sends; deploy, update_plugin and educate commands are refused and " +
+        "skills are not synced in this mode. Use https:// where possible.",
     );
   }
 }

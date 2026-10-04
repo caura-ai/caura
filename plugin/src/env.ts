@@ -154,6 +154,10 @@ export const CAURA_ALLOW_INSECURE_HTTP = ["true", "1"].includes(
   readEnv(["CAURA_ALLOW_INSECURE_HTTP"]) ?? "",
 );
 export const CAURA_KEY_TRANSPORT = keyTransportPolicy(CAURA_API_URL, CAURA_ALLOW_INSECURE_HTTP);
+// The channel to CAURA_API_URL is cleartext to another machine, opted in or not
+// (L-80). "refuse" only stops the KEY: a node with no CAURA_API_KEY still talks
+// to that host in the clear, so it gates what the plugin accepts from it.
+export const CAURA_CLEARTEXT_REMOTE = CAURA_KEY_TRANSPORT !== "send";
 
 // Report once at import: error when the key will be refused, warning when opted in.
 reportKeyTransportPolicy(CAURA_API_URL, CAURA_API_KEY, CAURA_KEY_TRANSPORT);
