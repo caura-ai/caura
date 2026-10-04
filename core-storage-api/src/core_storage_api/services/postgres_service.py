@@ -7907,10 +7907,13 @@ class PostgresService:
         API handles upsert (create-or-update) internally" — the comment
         was aspirational; this method now actually delivers it.
 
-        On conflict, refresh ``weight`` (latest write wins) and
-        ``evidence_memory_id`` (latest non-NULL write wins; a caller
-        that omits/NULLs the field does NOT wipe an existing evidence
-        link). Every non-NULL evidence memory is also recorded in
+        On conflict, refresh ``weight`` only when the caller names one
+        (latest named write wins) and ``evidence_memory_id`` (latest
+        non-NULL write wins; a caller that omits/NULLs the field does NOT
+        wipe an existing evidence link). L-49: an omitted weight used to
+        arrive as core-api's 1.0 default and overwrite the graded weight
+        ``entity_infer_relations`` builds; now a new relation starts at 1.0
+        and an existing one keeps its weight. Every non-NULL evidence memory is also recorded in
         ``relation_evidence`` so removal can retain an independently
         asserted edge. ``fleet_id`` is **first-writer-wins**: it is not part of
         the unique constraint and is intentionally NOT touched by the
@@ -7959,22 +7962,22 @@ class PostgresService:
             # boundary. Checked after the endpoints so a bad endpoint keeps its
             # established 409 answer.
             await self._assert_pointers_in_tenant(session, data["tenant_id"], [data])
-            insert_stmt = pg_insert(Relation).values(**data)
-            upsert_stmt = insert_stmt.on_conflict_do_update(
-                constraint="uq_relations_natural_key",
-                set_={
-                    "weight": insert_stmt.excluded.weight,
-                    # COALESCE so a caller that omits ``evidence_memory_id``
-                    # (or passes ``None``) does NOT wipe an existing evidence
-                    # link — common in the entity-extraction path where a
-                    # follow-up memory mentioning the same entities arrives
-                    # without a fresh evidence pointer. Latest non-NULL wins.
-                    "evidence_memory_id": func.coalesce(
-                        insert_stmt.excluded.evidence_memory_id,
-                        Relation.evidence_memory_id,
-                    ),
-                },
-            )
+            weight = data.get("weight")
+            insert_stmt = pg_insert(Relation).values(**{**data, "weight": 1.0 if weight is None else weight})
+            set_: dict[str, Any] = {
+                # COALESCE so a caller that omits ``evidence_memory_id``
+                # (or passes ``None``) does NOT wipe an existing evidence
+                # link — common in the entity-extraction path where a
+                # follow-up memory mentioning the same entities arrives
+                # without a fresh evidence pointer. Latest non-NULL wins.
+                "evidence_memory_id": func.coalesce(
+                    insert_stmt.excluded.evidence_memory_id,
+                    Relation.evidence_memory_id,
+                ),
+            }
+            if weight is not None:
+                set_["weight"] = insert_stmt.excluded.weight
+            upsert_stmt = insert_stmt.on_conflict_do_update(constraint="uq_relations_natural_key", set_=set_)
             await session.execute(upsert_stmt)
 
             # Re-fetch through the session so the caller gets a fully

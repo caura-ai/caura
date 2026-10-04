@@ -1189,7 +1189,11 @@ class RelationUpsert(TenantScopedBody):
     from_entity_id: UUID
     relation_type: str
     to_entity_id: UUID
-    weight: float = Field(default=1.0, ge=0.0, le=1.0)
+    # L-49. Optional: omitted, a new relation starts at 1.0 and an existing one
+    # keeps the weight it has. A 1.0 default meant every re-upsert, including
+    # every extraction, overwrote the graded weight ``entity_infer_relations``
+    # had built up.
+    weight: float | None = Field(default=None, ge=0.0, le=1.0)
     evidence_memory_id: UUID | None = None
 
 
