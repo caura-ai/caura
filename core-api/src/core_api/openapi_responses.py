@@ -542,8 +542,23 @@ class IngestPreviewResponse(BaseModel):
     content_length: int
     facts: list[IngestFact]
     chunk_ms: int
-    doc_hash: str | None = Field(default=None, description="Absent on cache-hit and too-short branches.")
-    sections: int | None = Field(default=None, description="Absent on cache-hit and too-short branches.")
+    doc_hash: str | None = Field(
+        default=None,
+        description=(
+            "Echo to commit to cache this extraction. Null when sections_failed is non-zero, so a "
+            "partial extraction is never cached; absent on the too-short branch."
+        ),
+    )
+    sections: int | None = Field(
+        default=None, description="Absent on the too-short branch; 0 on a cache hit."
+    )
+    sections_failed: int | None = Field(
+        default=None,
+        description=(
+            "Sections whose LLM extraction failed; present on the extraction path. A preview that "
+            "lost every section is a 502 instead."
+        ),
+    )
     cached: bool | None = Field(default=None, description="Only on a doc-hash cache hit.")
     run_id: str | None = Field(default=None, description="Only on a cache hit: the prior run's id.")
     skipped_reason: str | None = Field(default=None, description="Only when skipped (content_too_short).")

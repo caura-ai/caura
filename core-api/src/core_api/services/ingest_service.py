@@ -18,6 +18,7 @@ from fastapi import HTTPException
 
 from common.embedding import get_embedding
 from common.enrichment.constants import DEFAULT_MEMORY_TYPE
+from common.provider_names import ProviderName
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES, MEMORY_TYPES_WRITE
@@ -292,6 +293,19 @@ def _fake_ingest() -> list:
     return []
 
 
+class IngestExtractionFailed(RuntimeError):
+    """M-48: no configured LLM provider produced an extraction for a section.
+
+    A ``RuntimeError`` so auto-chunk, which catches that and falls back to a
+    single memory, behaves as it did when an outage looked like no facts.
+    """
+
+
+def _no_extraction() -> list:
+    """``call_with_fallback``'s last resort once a real provider has failed."""
+    raise IngestExtractionFailed("no LLM provider produced an extraction")
+
+
 async def _chunk_content(
     text: str,
     focus: str | None = None,
@@ -335,10 +349,13 @@ async def _chunk_content(
     async def _do_chunk(llm):
         return await llm.complete_json(prompt)
 
+    # M-48: the stub's "no facts" only where the operator chose it. Reached after
+    # a real provider failed, it passed an outage off as an empty section.
+    chose_stub = provider_name in (ProviderName.FAKE, ProviderName.NONE)
     raw = await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_chunk,
-        fake_fn=_fake_ingest,
+        fake_fn=_fake_ingest if chose_stub else _no_extraction,
         tenant_config=tenant_config,
         service_label="ingest",
     )
@@ -1169,7 +1186,8 @@ async def ingest_preview(request: IngestRequest) -> dict:
     t0 = time.perf_counter()
     sem = asyncio.Semaphore(_PREVIEW_CONCURRENCY)
 
-    async def _extract_section(sec) -> list[dict]:
+    async def _extract_section(sec) -> list[dict] | None:
+        """The section's facts, or None when its extraction failed (M-48)."""
         async with sem:
             try:
                 return await _chunk_content(
@@ -1179,29 +1197,37 @@ async def ingest_preview(request: IngestRequest) -> dict:
                     breadcrumb=sec.breadcrumb or None,
                 )
             except Exception:
-                # Per-section failure shouldn't tank the whole preview.
-                # Log and return empty so other sections still contribute.
+                # Per-section failure shouldn't tank the whole preview, so the
+                # other sections still contribute. It is counted, though: the
+                # caller is told, and the run is not cacheable.
                 logger.exception(
                     "ingest_preview: section extraction failed (breadcrumb=%r tokens=%d)",
                     sec.breadcrumb,
                     sec.token_count,
                 )
-                return []
+                return None
 
     section_results = await asyncio.gather(*(_extract_section(s) for s in sections))
+    sections_failed = sum(1 for sec_facts in section_results if sec_facts is None)
+    if sections_failed == len(sections):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Fact extraction failed for all {len(sections)} section(s); retry later",
+        )
     facts: list[dict] = []
     for sec, sec_facts in zip(sections, section_results):
         # Stamp the section's breadcrumb into each fact's metadata-like
         # field so the commit path can persist provenance at the
         # section level later (Tier 2 follow-up may surface it on memory).
-        for f in sec_facts:
+        for f in sec_facts or []:
             f.setdefault("source_uri", source_uri_default)
-        facts.extend(sec_facts)
+            facts.append(f)
     chunk_ms = int((time.perf_counter() - t0) * 1000)
 
     logger.info(
-        "ingest_preview: chunked %d sections (total %d tokens) into %d facts in %dms",
+        "ingest_preview: chunked %d sections (%d failed, total %d tokens) into %d facts in %dms",
         len(sections),
+        sections_failed,
         total_tokens,
         len(facts),
         chunk_ms,
@@ -1212,8 +1238,11 @@ async def ingest_preview(request: IngestRequest) -> dict:
         "content_length": len(content),
         "facts": facts,
         "chunk_ms": chunk_ms,
-        "doc_hash": doc_hash,  # A2: caller echoes this to commit for future cache hits
+        # A2: caller echoes this to commit for future cache hits. M-48: never for
+        # a partial run, which would then be served as the whole document.
+        "doc_hash": None if sections_failed else doc_hash,
         "sections": len(sections),  # A4: diagnostic — how many LLM calls did this run?
+        "sections_failed": sections_failed,
     }
 
 
