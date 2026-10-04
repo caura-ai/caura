@@ -15,6 +15,7 @@ Multi-provider support:
 import asyncio
 import hashlib
 import logging
+import re
 import time
 import traceback
 import uuid as _uuid
@@ -23,6 +24,7 @@ from datetime import datetime
 from typing import Any, NamedTuple
 from uuid import UUID
 
+from common.constants import predicate_cluster
 from core_api.cache import cache_delete_if, cache_set_nx
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
@@ -2572,6 +2574,51 @@ async def _llm_entity_aware_contradiction_check_batch(
 RETRACTION_CONFIDENCE_THRESHOLD = _CONF_CLEAN
 
 
+def _rdf_object_key(value: Any) -> str:
+    """``_normalized_object_sql`` in Python: case, whitespace and thousands
+    separators only, so "7,500 RPM" and "7500 rpm" are one value."""
+    return re.sub(r"[\s,]", "", str(value)).lower()
+
+
+#: ``memory_find_rdf_conflicts`` considers only rows in these states.
+_RDF_LIVE_STATUSES = ("active", "confirmed", "pending")
+
+
+def _rdf_pass_would_mark(new_memory: dict, other: dict, *, other_is_loser: bool) -> bool:
+    """Whether ``_rdf_conflict_pass`` for ``new_memory`` would mark ``other``.
+
+    One subject, one single-value attribute (a ``predicate_cluster``), two
+    different values. Mirrors the pass's gate and ``memory_find_rdf_conflicts``
+    term by term, each side normalised as its source does: the gate lower-cases
+    ``new_memory``'s predicate and ``predicate_cluster`` strips and lower-cases it
+    for the query, while the query only lower-cases ``other``'s stored predicate.
+    The query's scope (live status, fleet, visibility, owning agent) is mirrored
+    too: a verdict joined the pair inside it, but either row can have moved since.
+    A loser is exempt from the status term, because retraction reverts it to
+    ``active`` before the pass runs. Returning True for a pair the pass would skip
+    would block a retraction that nothing else would undo.
+    """
+    subject, predicate = new_memory.get("subject_entity_id"), new_memory.get("predicate")
+    value, other_value = new_memory.get("object_value"), other.get("object_value")
+    if not (subject and predicate and value) or predicate.lower() not in SINGLE_VALUE_PREDICATES:
+        return False
+    if other.get("deleted_at") is not None or str(other.get("subject_entity_id")) != str(subject):
+        return False
+    if not other_is_loser and other.get("status") not in _RDF_LIVE_STATUSES:
+        return False
+    if (other.get("predicate") or "").lower() not in predicate_cluster(predicate):
+        return False
+    if (other.get("fleet_id") or "") != (new_memory.get("fleet_id") or ""):
+        return False
+    visibility = new_memory.get("visibility", "scope_team")
+    if visibility and other.get("visibility") != visibility:
+        return False
+    agent_id = new_memory.get("agent_id")
+    if visibility == "scope_agent" and agent_id and other.get("agent_id") != agent_id:
+        return False
+    return other_value is not None and _rdf_object_key(value) != _rdf_object_key(other_value)
+
+
 async def _attempt_entity_retraction(
     sc,
     new_memory: dict,
@@ -2694,6 +2741,17 @@ async def _attempt_entity_retraction(
     # whether X contradicts X, which it always answers "no" with full confidence.
     if str(edge_owner.get("id")) == str(candidate.get("id")):
         return False
+    # L-27: a verdict the deterministic RDF pass would reach is not the judge's
+    # to revisit. If the judge disagreed, the RDF pass that runs right after this
+    # in the same Path C call re-applies it, so a retraction only churns writes.
+    # The pass runs for ``new_memory``: the winner in a canonical verdict, the
+    # loser in a flipped one.
+    if edge_owner is new_memory:
+        rdf_would_mark = _rdf_pass_would_mark(new_memory, candidate, other_is_loser=True)
+    else:
+        rdf_would_mark = _rdf_pass_would_mark(new_memory, edge_owner, other_is_loser=False)
+    if rdf_would_mark:
+        return False
 
     # Judge the PAIR the chain describes: the edge owner (the verdict's winner)
     # against the row it superseded. In the canonical direction the owner is
@@ -2765,14 +2823,14 @@ async def _attempt_entity_retraction(
         )
         return False
 
+    # No outer ``wait_for`` (L-179): ``call_with_fallback`` bounds each attempt,
+    # and a 10 s cut here cancelled a hanging primary before its retry or the
+    # fallback provider could run.
     try:
-        verdict, confidence = await asyncio.wait_for(
-            _llm_entity_aware_contradiction_check(
-                new_content, old_content, new_entities, old_entities, tenant_config
-            ),
-            timeout=10.0,
+        verdict, confidence = await _llm_entity_aware_contradiction_check(
+            new_content, old_content, new_entities, old_entities, tenant_config
         )
-    except (TimeoutError, Exception) as e:
+    except Exception as e:
         # CAURA-134 — include the exception class name and use the
         # grep-friendly ``PATH_C_RETRACTION judge_failed`` prefix.
         # str(e) is empty for ``asyncio.TimeoutError``, which was the
@@ -3340,19 +3398,18 @@ async def detect_contradictions_by_entities_async(
         results: list = [None] * len(candidates)
         if len(candidates) == 1:
             c = candidates[0]
+            # Awaited directly, like the batched branch and Path A (L-179):
+            # ``call_with_fallback`` bounds each attempt, and an outer 10 s cut
+            # cancelled a hanging primary before its retry or the fallback ran.
             try:
                 if judge_kinds[0] == "entity_aware":
                     cand_ctx = contexts.get(str(c.get("id")), [])
-                    results[0] = await asyncio.wait_for(
-                        _llm_entity_aware_contradiction_check(
-                            new_content, c.get("content", ""), new_ctx, cand_ctx, tenant_config
-                        ),
-                        timeout=10.0,
+                    results[0] = await _llm_entity_aware_contradiction_check(
+                        new_content, c.get("content", ""), new_ctx, cand_ctx, tenant_config
                     )
                 else:
-                    results[0] = await asyncio.wait_for(
-                        _llm_contradiction_check(new_content, c.get("content", ""), tenant_config),
-                        timeout=10.0,
+                    results[0] = await _llm_contradiction_check(
+                        new_content, c.get("content", ""), tenant_config
                     )
             except Exception as e:  # mirror gather(return_exceptions=True)
                 results[0] = e
