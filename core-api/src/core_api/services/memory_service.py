@@ -3315,10 +3315,11 @@ async def fan_out_atomic_facts(
     """Create one child memory per extracted atomic fact.
 
     Lifted verbatim out of ``_enrich_memory_background`` so the ASYNC path can
-    reuse it (A70). The synchronous path was the only caller, which is why a
-    fast-mode write of multi-claim content produced fewer memories than the same
-    content in strong mode — the worker had no way to run this without a second
-    implementation of it.
+    reuse it (A70): the worker had no way to run this without a second
+    implementation of it. One caller per place an enrichment finishes:
+    ``_enrich_memory_background`` (fast mode, inline), the ``ENRICHED`` consumer
+    (deferred), and ``ScheduleBackgroundTasks`` after a write whose enrichment
+    ran on the request path, as a strong write's does (L-117).
 
     Every guarantee in here was paid for by an incident, so it is shared rather
     than reimplemented: #808 (derived rows inherit the parent's governance

@@ -284,6 +284,25 @@ def _enrich_fanout(stack: ExitStack):
     return coro, fault
 
 
+def _fanout_lookup(stack: ExitStack):
+    sc = _storage()
+    sc.bulk_find_by_content_hashes = AsyncMock(side_effect=_boom())
+    coro = memory_service.fan_out_atomic_facts(
+        sc,
+        atomic_facts=[AtomicFact(content="a"), AtomicFact(content="b")],
+        memory_id=uuid.uuid4(),
+        tenant_id=TENANT,
+        fleet_id="f1",
+        agent_id="a",
+        parent_metadata={},
+        parent_visibility="scope_team",
+        parent_weight=0.5,
+        parent_ts_start=None,
+        tenant_config=_config(),
+    )
+    return coro, sc.bulk_find_by_content_hashes
+
+
 def _enrich_publish(stack: ExitStack):
     _memsvc_env(stack, mode="deferred", storage=_storage())
     fault = _fault(
@@ -473,6 +492,14 @@ ROSTER: dict[str, dict[str, Any]] = {
                 _enrich_fanout,
             ),
             Scenario("enrich-publish", "enrich_or_publish", _enrich_publish),
+        ],
+    },
+    "fan_out_atomic_facts": {
+        # Wrapped directly after a strong write (L-117). The fast path reaches
+        # it inside ``_schedule_enrich_or_inline``: ``enrich-fanout`` above.
+        "wraps": {"fan_out_atomic_facts"},
+        "scenarios": [
+            Scenario("fanout-dedup-lookup", "atomic_fact_fanout", _fanout_lookup)
         ],
     },
     "process_entity_extraction": {
