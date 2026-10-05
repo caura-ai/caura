@@ -7313,7 +7313,15 @@ class PostgresService:
     # Entity CRUD
     # ------------------------------------------------------------------
 
-    async def entity_get_by_id(self, entity_id: UUID, tenant_id: str) -> Entity | None:
+    async def entity_get_by_id(
+        self,
+        entity_id: UUID,
+        tenant_id: str,
+        *,
+        caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
+        caller_fleet_ids: Sequence[str] | None = None,
+    ) -> Entity | None:
         """Fetch one entity, bound to the tenant that asked for it.
 
         ``session.get`` addressed the row by primary key alone, which is the
@@ -7326,11 +7334,18 @@ class PostgresService:
         missing id already returned. That is deliberate: rejecting with a 403
         would confirm the row exists in someone else's tenant, so filtering
         leaks strictly less than refusing.
+
+        With ``caller_agent_id``, an entity :meth:`entity_list` hides from that
+        agent is ``None`` too (M-83): a by-id read must not show what the list
+        withholds.
         """
-        async with get_session() as session:
-            return await session.scalar(
-                select(Entity).where(Entity.id == entity_id, Entity.tenant_id == tenant_id)
+        stmt = select(Entity).where(Entity.id == entity_id, Entity.tenant_id == tenant_id)
+        if caller_agent_id:
+            stmt = stmt.where(
+                _entity_visible_to_agent(tenant_id, caller_agent_id, caller_tenant_id, caller_fleet_ids)
             )
+        async with get_session() as session:
+            return await session.scalar(stmt)
 
     async def entity_get_by_ids(
         self,

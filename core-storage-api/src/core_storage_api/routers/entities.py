@@ -727,12 +727,26 @@ async def set_embeddings(request: Request) -> dict:
 
 
 @router.get("/{entity_id}")
-async def get_entity(entity_id: UUID, tenant_id: str) -> dict:
+async def get_entity(
+    entity_id: UUID,
+    tenant_id: str,
+    caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
+    caller_fleet_ids: list[str] | None = Query(default=None),
+    caller_fleet_bound: bool = False,
+) -> dict:
     # Read guard, the mirror of ``PATCH /entities/{entity_id}`` above: the route
     # took a bare UUID and returned the whole row, so knowing an id was enough to
     # read another tenant's entity. ``tenant_id`` is a required query parameter —
-    # omitting it is a 422, not a fetch by primary key.
-    entity = await _svc.entity_get_by_id(entity_id, tenant_id)
+    # omitting it is a 422, not a fetch by primary key. An agent reader also gets
+    # the 404 for an entity the list hides from it (M-83).
+    entity = await _svc.entity_get_by_id(
+        entity_id,
+        tenant_id,
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
+        caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
+    )
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
     return orm_to_dict(entity, ENTITY_FIELDS)
@@ -780,13 +794,24 @@ async def merge_entity(entity_id: UUID, request: Request) -> dict:
 async def get_entity_with_linked_memories(
     entity_id: UUID,
     tenant_id: str,
+    caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
+    caller_fleet_ids: list[str] | None = Query(default=None),
+    caller_fleet_bound: bool = False,
 ) -> dict:
     # ``tenant_id`` was optional and fell back to ``entity.tenant_id`` — the
     # tenant of the row being addressed. That is not a check: it is satisfied by
     # construction for any id, and an attacker closes it by simply omitting the
     # parameter. The allowlist note calling it "self-authorizing" is retired
     # with it. Required now; the downstream link read was already scoped.
-    entity = await _svc.entity_get_by_id(entity_id, tenant_id)
+    # An agent reader gets the 404 for an entity the list hides from it (M-83).
+    entity = await _svc.entity_get_by_id(
+        entity_id,
+        tenant_id,
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
+        caller_fleet_ids=_reader_fleets(caller_fleet_ids, caller_fleet_bound),
+    )
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
     rows = await _svc.entity_get_linked_memories(entity_id, tenant_id)

@@ -223,7 +223,27 @@ async def upsert_entity_route(
     # the non-atomicity is visible at the seam rather than hidden
     # inside ``upsert_entity`` (where the param was historically
     # accepted-and-ignored).
-    return await upsert_entity(data=body)
+    entity = await upsert_entity(data=body)
+    # M-83 (owner decision 2026-10-05): an upsert that lands on an entity hidden
+    # from this agent still merges, but answers with only what it sent, not the
+    # stored attributes and ``_aliases`` behind a name it guessed. That hides
+    # what the entity holds, not that it exists: the write lands in it by
+    # design, and the answer carries its id, which a by-id read then answers
+    # 404. The check reads back the row just written, so it goes to the
+    # writer: a lagging replica would read a visible entity as hidden.
+    reader = await entity_reader_scope(body.tenant_id, auth.agent_id, auth.tenant_id)
+    if reader and not await get_storage_client().get_entity(
+        str(entity.id), body.tenant_id, reader, read=False
+    ):
+        return EntityOut(
+            id=entity.id,
+            tenant_id=body.tenant_id,
+            fleet_id=body.fleet_id,
+            entity_type=body.entity_type,
+            canonical_name=body.canonical_name,
+            attributes=body.attributes or {},
+        )
+    return entity
 
 
 @router.get("/entities/{entity_id}", response_model=EntityOut)

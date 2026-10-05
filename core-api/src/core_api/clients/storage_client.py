@@ -1711,10 +1711,17 @@ class CoreStorageClient:
     async def create_entity(self, data: dict) -> dict:
         return await self._post("/entities", data)  # type: ignore[return-value]
 
-    async def get_entity(self, entity_id: str, tenant_id: str) -> dict | None:
+    async def get_entity(
+        self, entity_id: str, tenant_id: str, reader: dict | None = None, *, read: bool = True
+    ) -> dict | None:
         # Same contract as ``get_memory``: the row is addressed by a bare UUID,
-        # so the tenant has to travel with it or storage has no predicate.
-        return await self._get(f"/entities/{entity_id}", tenant_id=tenant_id)
+        # so the tenant has to travel with it or storage has no predicate. An
+        # agent ``reader`` (``entity_reader_scope``) gets ``None`` for an entity
+        # the list hides from it. ``read=False`` routes to the WRITER, for a
+        # read-your-write of an entity this request just upserted.
+        return await self._get(
+            f"/entities/{entity_id}", read=read, tenant_id=tenant_id, **_entity_reader_params(reader)
+        )
 
     async def get_entities_by_ids(self, entity_ids: list[str], tenant_id: str) -> dict:
         """Batch form of ``get_entity``: ``{entity_id: row}`` for one tenant.
@@ -1879,8 +1886,12 @@ class CoreStorageClient:
             read=True,
         )
 
-    async def get_entity_with_linked_memories(self, entity_id: str, tenant_id: str) -> dict | None:
-        return await self._get(f"/entities/{entity_id}/with-memories", tenant_id=tenant_id)
+    async def get_entity_with_linked_memories(
+        self, entity_id: str, tenant_id: str, reader: dict | None = None
+    ) -> dict | None:
+        return await self._get(
+            f"/entities/{entity_id}/with-memories", tenant_id=tenant_id, **_entity_reader_params(reader)
+        )
 
     async def get_outgoing_relations(self, entity_id: str, tenant_id: str) -> list[dict]:
         # ``tenant_id`` was optional here and storage fell back to the addressed

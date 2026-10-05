@@ -218,6 +218,11 @@ async def entity_reader_scope(
     from core_api.services.agent_service import lookup_agent
 
     agent = await lookup_agent(tenant_id, caller_agent_id)
+    return _reader_for(agent, caller_agent_id, caller_tenant_id)
+
+
+def _reader_for(agent: dict | None, caller_agent_id: str, caller_tenant_id: str | None) -> dict:
+    """:func:`entity_reader_scope` from an agent row the caller already holds."""
     fleets: list[str] | None = None
     if agent and agent.get("trust_level", 0) < 2:
         fleets = [agent["fleet_id"]] if agent.get("fleet_id") else []
@@ -327,9 +332,21 @@ async def get_entity(
 ) -> EntityOut | None:
     """``caller_tenant_id`` is the caller's HOME tenant, for the ``scope_agent``
     pairing on the linked memories and relations (M-94); required, so no caller
-    can leave it out."""
+    can leave it out.
+
+    For an agent, an entity :func:`entity_reader_scope` hides from its lists is
+    ``None``, as a missing id is (M-83)."""
+    from core_api.services.agent_service import lookup_agent, memory_access_allowed_for_agent
+
     sc = get_storage_client()
-    result = await sc.get_entity_with_linked_memories(str(entity_id), tenant_id)
+    # Resolve the caller's agent row ONCE: it scopes the entity read, the
+    # linked-memory filter below and the relation filter after it.
+    caller_agent: dict | None = None
+    reader: dict | None = None
+    if caller_agent_id:
+        caller_agent = await lookup_agent(tenant_id, caller_agent_id)
+        reader = _reader_for(caller_agent, caller_agent_id, caller_tenant_id)
+    result = await sc.get_entity_with_linked_memories(str(entity_id), tenant_id, reader)
     if not result:
         return None
 
@@ -350,17 +367,7 @@ async def get_entity(
     # GET /memories/{id} and search). Without this the entity is a side-door
     # that returns a peer agent's scope_agent secret / cross-fleet content by
     # entity id. No-op for tenant/user/admin credentials (caller_agent_id None).
-    caller_agent: dict | None = None
     if caller_agent_id:
-        from core_api.services.agent_service import (
-            lookup_agent,
-            memory_access_allowed_for_agent,
-        )
-
-        # Resolve the caller's agent row ONCE — the per-memory loop used to
-        # issue an identical lookup_agent round-trip for every scope_team
-        # row (N+1 over the entity's linked memories).
-        caller_agent = await lookup_agent(tenant_id, caller_agent_id)
         linked_memories_raw = [
             mem
             for mem in linked_memories_raw

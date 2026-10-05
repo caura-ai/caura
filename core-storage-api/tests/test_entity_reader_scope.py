@@ -6,7 +6,8 @@ memories an agent may not read; the list, graph and count readers did not, so
 an agent could list ``zenith acquisition`` mined from a peer's ``scope_agent``
 note and watch its count grow. With ``caller_agent_id`` these readers now keep
 only entities linked to a memory the agent may read, and count only those.
-Without one (tenant / user / admin credentials) nothing changes.
+The by-id reads take the same reader and answer 404 for an entity the list
+hides. Without one (tenant / user / admin credentials) nothing changes.
 """
 
 from __future__ import annotations
@@ -137,6 +138,31 @@ class TestEntityReaderScope:
 
         full = await client.get(f"{PREFIX}/entities/full-graph", params={"tenant_id": graph["tenant"]})
         assert len(full.json()["relations"]) == 1
+
+    @pytest.mark.parametrize("path", ["", "/with-memories"])
+    async def test_a_read_by_id_hides_what_the_list_hides(
+        self, client: AsyncClient, graph: dict, path: str
+    ) -> None:
+        """M-83 (owner decision 2026-10-05): the by-id reads took no reader, so
+        an id the list withholds still returned the entity's name and
+        attributes. A hidden entity is now a 404, as a missing id is."""
+        tenant = graph["tenant"]
+        loose = await _entity(client, tenant, f"hand made {uuid.uuid4().hex[:6]}")
+
+        async def status(entity: str, **reader: object) -> int:
+            resp = await client.get(
+                f"{PREFIX}/entities/{entity}{path}", params={"tenant_id": tenant, **reader}
+            )
+            return resp.status_code
+
+        assert await status(graph["secret"], caller_agent_id="a") == 404
+        assert await status(graph["shared"], caller_agent_id="a") == 200
+        assert await status(loose, caller_agent_id="a") == 200  # mined from no memory
+        assert await status(graph["secret"], caller_agent_id="b") == 200  # its author
+        assert await status(graph["secret"]) == 200  # a tenant credential
+        bound = {"caller_agent_id": "a", "caller_fleet_bound": "true", "caller_fleet_ids": ["fleet-x"]}
+        assert await status(graph["other_fleet"], **bound) == 404
+        assert await status(graph["shared"], **bound) == 200
 
 
 class TestLinklessEntities:
