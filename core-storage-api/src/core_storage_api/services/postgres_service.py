@@ -10072,7 +10072,17 @@ class PostgresService:
             return list(result.scalars().all())
 
     async def agent_add(self, data: dict) -> Agent:
-        """Create new agent — handle race with concurrent registrations.
+        agent, _ = await self._agent_add(data, create_only=False)
+        return agent
+
+    async def agent_create_only(self, tenant_id: str, data: dict) -> tuple[Agent, bool]:
+        """Return the tenant-bound Agent and whether this call inserted it."""
+        if not tenant_id or data.get("tenant_id") != tenant_id:
+            raise ValueError("Agent tenant_id does not match the requested tenant")
+        return await self._agent_add(data, create_only=True)
+
+    async def _agent_add(self, data: dict, *, create_only: bool) -> tuple[Agent, bool]:
+        """Insert an agent, optionally preserving every field on conflict.
 
         Uses ``INSERT ... ON CONFLICT (tenant_id, agent_id) DO NOTHING
         RETURNING ...`` paired with a same-session re-SELECT for the
@@ -10082,7 +10092,9 @@ class PostgresService:
         mid-session rollback, which is brittle (the rollback aborts any
         other pending writes in the same session) and forced
         ``test_concurrent_same_key_returns_same_id`` to pre-create the
-        agent row to dodge the failure mode.
+        agent row to dodge the failure mode. ``create_only`` is for credential
+        provisioning: a concurrent registration must never overwrite an
+        existing agent's trust, fleet or name after a preceding GET missed it.
         """
         async with get_session() as session:
             stmt = (
@@ -10108,7 +10120,7 @@ class PostgresService:
                     raise ValueError(
                         f"Agent row {inserted_id} vanished after INSERT — concurrent delete during agent_add"
                     )
-                return agent
+                return agent, True
 
             # Conflict: another caller (or a prior attempt) already
             # created the row. Re-SELECT and apply any new fields the
@@ -10144,6 +10156,10 @@ class PostgresService:
                 # so the caller sees the inconsistent state rather than
                 # an opaque ``None`` returned from a "create" call.
                 raise ValueError(f"Agent '{data.get('agent_id')}' conflict but re-select returned nothing")
+            if create_only:
+                # ON CONFLICT is the atomic decision. A prior GET in the
+                # caller cannot close a concurrent insert/upsert race.
+                return agent, False
             # Track whether any field actually changed so we don't
             # bump ``updated_at`` (or burn an UPDATE roundtrip) when
             # the caller's data has nothing to backfill — e.g. a
@@ -10170,7 +10186,7 @@ class PostgresService:
             if changed:
                 agent.updated_at = datetime.now(UTC)
                 await session.flush()
-            return agent
+            return agent, False
 
     async def agent_delete(self, agent_id: str, tenant_id: str) -> None:
         async with get_session() as session:
