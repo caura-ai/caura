@@ -309,6 +309,59 @@ def derived_rows_where(tenant_id: str, parent_ids: Any) -> list[ColumnElement[bo
     ]
 
 
+async def _change_derived_rows(
+    session: AsyncSession, tenant_id: str, parent_id: str, derived: dict
+) -> list[dict]:
+    """Carry a parent PATCH to the live rows derived from it (B25, M-53).
+
+    Runs inside ``memory_update``'s transaction, under the parent's row lock,
+    so the children change exactly when the parent does. ``derived`` holds any
+    of three changes:
+
+    - ``soft_delete_children``: a content edit removes every child live when
+      it lands, and the rows derived from those go with them, as on every
+      delete. Returns the children it took (``id``, ``agent_id``) for core-api
+      to audit. Not a list core-api read earlier: a child committed after that
+      read, such as a late fan-out of the old text, would have survived, and a
+      child another request deleted meanwhile would have been audited here.
+    - ``visibility`` with ``wider``, the values wider than it: a child holding
+      one of those is narrowed. The caller owns that order, and widening never
+      cascades.
+    - ``mirror_expires_at`` with ``expires_at``: every child gets the parent's
+      ``expires_at``, ``None`` included.
+
+    ``parent_id`` is compared as the string the children store, as in
+    ``memory_find_children_by_parent_id``.
+    """
+    children = derived_rows_where(tenant_id, [parent_id])
+    deleted: list[dict] = []
+    if derived.get("soft_delete_children"):
+        gone = {"deleted_at": datetime.now(UTC), "status": "deleted"}
+        taken = await session.execute(
+            sql_update(Memory).where(*children).values(**gone).returning(Memory.id, Memory.agent_id)
+        )
+        deleted = [{"id": str(row.id), "agent_id": row.agent_id} for row in taken]
+        if deleted:
+            taken_ids = [child["id"] for child in deleted]
+            await session.execute(
+                sql_update(Memory).where(*derived_rows_where(tenant_id, taken_ids)).values(**gone)
+            )
+    if derived.get("visibility") is not None and derived.get("wider"):
+        await session.execute(
+            sql_update(Memory)
+            .where(*children, Memory.visibility.in_(list(derived["wider"])))
+            .values(visibility=derived["visibility"])
+        )
+    if derived.get("mirror_expires_at"):
+        expires_at = derived.get("expires_at")
+        await session.execute(
+            sql_update(Memory)
+            .where(*children, Memory.expires_at.is_distinct_from(expires_at))
+            .values(expires_at=expires_at)
+        )
+    return deleted
+
+
 def _fleet_scope_clause(
     model,
     fleet_ids: Sequence[str],
@@ -2162,7 +2215,9 @@ class PostgresService:
                 out.append({"client_request_id": crid, "id": None, "was_inserted": False})
         return out
 
-    async def memory_update(self, memory_id: UUID, tenant_id: str, patch: dict) -> bool:
+    async def memory_update(
+        self, memory_id: UUID, tenant_id: str, patch: dict, *, derived_deleted: list[dict] | None = None
+    ) -> bool:
         """Apply arbitrary field updates to a memory.
 
         Two patch shapes are supported in the same request:
@@ -2175,6 +2230,13 @@ class PostgresService:
           async-enrich worker (CAURA-595) to add ``summary`` / ``tags`` /
           ``contains_pii`` / ``pii_types`` / ``retrieval_hint`` /
           ``llm_ms`` without clobbering keys an earlier write set.
+
+        * The synthetic key ``derived`` — the same PATCH carried to the
+          rows derived from this one (B25, M-53; see
+          ``_change_derived_rows``). It runs under this row's lock, in this
+          transaction, so the parent and its children change together or not
+          at all. The children it deletes are appended to ``derived_deleted``
+          when the caller passes a list.
 
         Other top-level keys whose names don't match a ``Memory`` column
         are silently dropped — callers validate upstream.
@@ -2195,6 +2257,9 @@ class PostgresService:
         wasn't enough on its own under READ COMMITTED.
         """
         metadata_patch = patch.get("metadata_patch") if isinstance(patch, dict) else None
+        derived = patch.get("derived") if isinstance(patch, dict) else None
+        if not isinstance(derived, dict):
+            derived = None
         # Map JSON keys to model columns. ``_MEMORY_UPDATABLE_FIELDS`` rather
         # than ``hasattr(Memory, key)``, which was true of ``id`` — see the
         # constant. The synthetic ``metadata_patch`` key needs no explicit
@@ -2279,6 +2344,10 @@ class PostgresService:
             # After the existence check, so a patch on an absent row stays a 404
             # rather than being judged on its pointers.
             await self._assert_pointers_in_tenant(session, tenant_id, [values])
+            if derived:
+                deleted = await _change_derived_rows(session, tenant_id, str(memory_id), derived)
+                if derived_deleted is not None:
+                    derived_deleted.extend(deleted)
 
             metadata_patch = _withhold_caller_owned_keys(metadata_patch, row.metadata_)
 

@@ -8,7 +8,8 @@ so ``contains_pii`` and ``business_relevance`` described text that was gone.
 Owner decision (2026-10-05): an edit is re-enriched the way a fast-mode create
 is, with remediation, and returns before the verdict lands. ``memory_type`` and
 ``weight`` stay as they are, because the row does not record whether its caller
-set them, and an edit derives no atomic-fact children (B25 owns those).
+set them, and so does a title or date already on the row. The edit's old
+children are soft-deleted (M-53) and its re-enrichment derives new atomic facts.
 
 M-118 is on the same lines: a ``flag`` verdict on an edit replaced the patch's
 ``_system`` with the flag's, dropping ``caller_owned`` and ``embedding_pending``.
@@ -41,7 +42,7 @@ STALE = {
     "pii_flagged_by": "governance.deterministic",
     "business_relevance": "personal",
 }
-EDIT_PINS = ["atomic_facts", "memory_type", "weight"]
+EDIT_PINS = ["memory_type", "weight"]
 
 
 def _tenant() -> str:
@@ -200,15 +201,17 @@ async def test_an_edit_that_clears_metadata_in_replace_mode_is_not_a_500():
 
 
 @pytest.mark.parametrize(
-    ("pins", "fans_out", "title"),
+    ("pins", "title"),
     [
-        # What an edit sends: no children, and the title the PATCH named stays.
-        ([*EDIT_PINS, "title"], False, "Caller title"),
-        # Control: a create's enrichment, which fans out and titles the row.
-        (None, True, "Enriched title"),
+        # What an edit sends: the title already on the row stays.
+        ([*EDIT_PINS, "title"], "Caller title"),
+        # Control: a create's enrichment, which titles the row.
+        (None, "Enriched title"),
     ],
 )
-async def test_an_edits_inline_enrichment_derives_no_children(pins, fans_out, title):
+async def test_an_edits_inline_enrichment_derives_children_and_keeps_its_title(
+    pins, title
+):
     tenant = _tenant()
     memory_id = await _memory(tenant, title="Caller title")
     enrichment = SimpleNamespace(
@@ -250,7 +253,8 @@ async def test_an_edits_inline_enrichment_derives_no_children(pins, fans_out, ti
             agent_provided_fields=pins,
         )
 
-    assert fan_out.await_count == (1 if fans_out else 0)
+    # M-53: the edit soft-deleted the old children; these are the new text's.
+    assert fan_out.await_count == 1
     row = await _stored(tenant, memory_id)
     assert row["title"] == title
     assert row["metadata_"]["business_relevance"] == "business"

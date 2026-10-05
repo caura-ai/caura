@@ -76,6 +76,7 @@ from core_api.constants import (
     MAX_CONTENT_LENGTH,
     MEMORY_STATUSES,
     MEMORY_TYPES,
+    MEMORY_VISIBILITIES,
     MIN_SEARCH_SIMILARITY,
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
@@ -3781,8 +3782,7 @@ async def _enrich_memory_background(
     from ``model_fields_set``); those are left untouched. It is the same list
     the deferred/worker path already receives via
     ``publish_memory_enrich_request``. An edit (``update_memory``, H-07) also
-    pins ``atomic_facts``, and ``title`` and the dates when the row holds one or
-    the PATCH names one.
+    pins ``title`` and the dates when the row holds one or the PATCH names one.
 
     ``current_content_only`` is an edit's: the run does nothing once the row no
     longer holds ``content``, because a later edit has scheduled its own.
@@ -4063,9 +4063,7 @@ async def _enrich_memory_background(
         # ``fact_content`` (not hint-prefixed) to keep the same write/query
         # surface as the search side — see CAURA-222. Failures here are
         # non-fatal to the parent.
-        # H-07: an edit pins ``atomic_facts`` — its re-enrichment derives no
-        # children, as core-worker's ``_build_patch`` skips the pinned field.
-        atomic_facts = [] if "atomic_facts" in pinned else getattr(enrichment, "atomic_facts", None) or []
+        atomic_facts = getattr(enrichment, "atomic_facts", None) or []
         if atomic_facts:
             # L-34: the value this enrichment just wrote, when it wrote one —
             # ``mem`` was read before the PATCH, as for the weight below.
@@ -4244,8 +4242,9 @@ _TEXT_VERDICT_KEYS: tuple[str, ...] = (
 #: H-07 — what an edit's re-enrichment leaves alone (owner decision, 2026-10-05).
 #: ``memory_type`` and ``weight``: the row does not record whether its caller set
 #: them at create, so recomputing them could overwrite the caller's choice.
-#: ``atomic_facts``: an edit derives no children; B25 owns an edited row's.
-_EDIT_PINNED_ENRICHMENT_FIELDS: frozenset[str] = frozenset({"atomic_facts", "memory_type", "weight"})
+#: ``atomic_facts`` is not pinned: the edit soft-deletes the old children (M-53)
+#: and its re-enrichment derives the new text's, as a create does.
+_EDIT_PINNED_ENRICHMENT_FIELDS: frozenset[str] = frozenset({"memory_type", "weight"})
 
 #: Enrichment output an edit keeps when the row already holds a value or the
 #: PATCH names the field; re-enrichment only fills an empty one. The same reason
@@ -4674,8 +4673,8 @@ async def update_memory(
             for key in _TEXT_VERDICT_KEYS:
                 set_system_value(system_patch, key, None)
             # The claims the worker persisted from the OLD text. The ENRICHED
-            # consumer fans out whatever this holds, and the edit pins
-            # ``atomic_facts``, so the worker would never replace it. Top level,
+            # consumer fans out whatever this holds, and a re-enrichment that
+            # falls back to the heuristic writes none to replace it. Top level,
             # where the consumer reads and clears it.
             system_patch["atomic_facts"] = None
         set_system_value(system_patch, "embedding_pending", new_embedding is None)
@@ -4735,9 +4734,41 @@ async def update_memory(
             "mode": "add",
         }
 
-    # Apply the patch via storage client
-    if patch:
-        await sc.update_memory(str(memory_id), tenant_id, patch)
+    # B25 (M-53): rows derived from this one carry its text, so the PATCH
+    # reaches them too. ``derived`` rides in the parent's own storage write,
+    # which applies it under the parent's row lock and in its transaction: the
+    # parent and its children change together or not at all, and a failed write
+    # leaves the whole family for the caller's retry to edit. Visibility and
+    # expiry act on the value NAMED, not only a changed one, so that retry also
+    # repairs children an earlier attempt missed.
+    derived: dict = {}
+    if content_changed:
+        # They describe text that is gone (owner decision). The re-enrichment
+        # scheduled below derives atomic facts from the new text. Storage takes
+        # every child live when the write lands, and names them for the audit
+        # below; a list read here first would miss a child committed after it,
+        # such as a late fan-out of the old text.
+        derived["soft_delete_children"] = True
+    else:
+        if "visibility" in fields_set and data.visibility in MEMORY_VISIBILITIES:
+            # Narrowing only: widening stays a separate publish decision, made
+            # row by row. ``MEMORY_VISIBILITIES`` runs narrowest to widest.
+            wider = MEMORY_VISIBILITIES[MEMORY_VISIBILITIES.index(data.visibility) + 1 :]
+            if wider:
+                derived.update(visibility=data.visibility, wider=list(wider))
+        if "expires_at" in fields_set:
+            expires_at = data.expires_at.isoformat() if data.expires_at else None
+            derived.update(mirror_expires_at=True, expires_at=expires_at)
+
+    # Apply the patch via storage client. ``derived`` stays out of ``patch``,
+    # which also decides below whether this request changed the row itself.
+    deleted_children: list[dict] = []
+    if patch or derived:
+        body = {**patch, "derived": derived} if derived else patch
+        landed = await sc.update_memory(str(memory_id), tenant_id, body)
+        # The children storage deleted, and only those: none when the row went
+        # before the write (``None``) or a concurrent request took them first.
+        deleted_children = (landed or {}).get("derived_deleted") or []
 
     # Audit log — only fire when something actually changed. The
     # ``elif data.metadata`` guard above already prevents falsy
@@ -4760,6 +4791,20 @@ async def update_memory(
             )
         except Exception:
             logger.warning("Audit hook failed (non-critical)", exc_info=True)
+    # B25 (M-53): each derived row the content edit removed, recorded as the
+    # delete path records it.
+    if _hooks.audit_log:
+        for child in deleted_children:
+            try:
+                await _hooks.audit_log(
+                    tenant_id=tenant_id,
+                    agent_id=child.get("agent_id"),
+                    action="soft_delete",
+                    resource_type="memory",
+                    resource_id=child["id"],
+                )
+            except Exception:
+                logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
     # Re-fetch updated memory
     # ``read=False`` for the same reason, one step further: this is the row the
