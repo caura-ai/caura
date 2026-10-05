@@ -1042,13 +1042,24 @@ def _entity_reader_memory_clause(
 
 
 def _entity_has_readable_memory(memory_clause: ColumnElement[bool]) -> ColumnElement[bool]:
-    """``Entity`` has at least one link to a memory matching ``memory_clause``."""
-    return (
+    """``Entity`` has a memory matching ``memory_clause`` behind it: one linked to
+    it, or one naming it as its subject.
+
+    M-83: ``memories.subject_entity_id`` names an entity without a link. The
+    write path sets it for an identifier subject (``CreatePendingSubject``) and
+    writes none, and extraction, which might add one, is off with no provider.
+    Judged by links alone, such an entity had no memory behind it and was listed
+    for every agent, whatever that memory's visibility.
+    ``ix_memories_subject_entity`` serves the subject lookup.
+    """
+    linked = (
         select(MemoryEntityLink.memory_id)
         .join(Memory, Memory.id == MemoryEntityLink.memory_id)
         .where(MemoryEntityLink.entity_id == Entity.id, memory_clause)
         .exists()
     )
+    subject = select(Memory.id).where(Memory.subject_entity_id == Entity.id, memory_clause).exists()
+    return or_(linked, subject)
 
 
 def _entity_visible_to_agent(
@@ -1059,14 +1070,15 @@ def _entity_visible_to_agent(
 ) -> ColumnElement[bool]:
     """``Entity`` is listable for an agent reader.
 
-    Visible when it has NO memory links in the tenant at all, or at least one
-    link to a memory the reader may read (``_entity_reader_memory_clause``).
-    Hidden only when it has links and none is readable. A link-less entity —
+    Visible when it has NO memory behind it in the tenant at all, or at least
+    one the reader may read (``_entity_reader_memory_clause``); a memory is
+    behind it when linked to it or naming it as its subject (M-83). Hidden only
+    when it has memories behind it and none is readable. An entity with none —
     a manual ``/entities/upsert``, say — was mined from no memory, so there is
     nothing private behind its name, and agents that build graphs by hand
-    depend on seeing it. A link to a soft-deleted memory still counts as a
-    link (and is never readable), so an entity mined only from deleted
-    content stays hidden.
+    depend on seeing it. A soft-deleted memory still counts as one behind it
+    (and is never readable), so an entity mined only from deleted content
+    stays hidden.
     """
     return or_(
         ~_entity_has_readable_memory(Memory.tenant_id == tenant_id),
@@ -1080,7 +1092,7 @@ def _entity_visible_to_tenant(tenant_id: str) -> ColumnElement[bool]:
     """``Entity`` is listable for a tenant / user / admin reader (M-92).
 
     ``_entity_visible_to_agent`` with every live memory readable: visible with
-    no memory links, or with a link to a memory that is not soft-deleted. An
+    no memory behind it, or with one that is not soft-deleted. An
     entity mined only from deleted content is hidden for the undo window, as it
     already was for agents, and comes back if the delete is undone; the
     retention purge then removes it with the memory.
