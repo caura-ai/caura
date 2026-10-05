@@ -215,7 +215,17 @@ async def _run_background(caller_owned, *, row_metadata):
         for arg in list(call.args) + list(call.kwargs.values()):
             if isinstance(arg, dict):
                 applied.update(arg)
-    return applied.get("metadata_", {})
+    # The task sends a ``metadata_patch`` (L-33), so what the row holds is that
+    # patch merged over ``row_metadata`` the way storage merges it: top level,
+    # then ``_system`` one level deep.
+    sent = applied.get("metadata_patch", {})
+    merged = {**row_metadata, **sent}
+    if SYSTEM_NAMESPACE in sent:
+        merged[SYSTEM_NAMESPACE] = {
+            **(row_metadata.get(SYSTEM_NAMESPACE) or {}),
+            **sent[SYSTEM_NAMESPACE],
+        }
+    return merged
 
 
 @pytest.mark.unit

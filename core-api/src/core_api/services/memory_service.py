@@ -122,6 +122,7 @@ from core_api.services.hooks import get_hooks
 from core_api.services.organization_settings import validate_search_profile
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
+    SYSTEM_NAMESPACE,
     caller_owned_keys,
     extract_system_metadata,
     mark_caller_owned,
@@ -3704,6 +3705,23 @@ async def _record_enrich_stranded(
     )
 
 
+def _merged_metadata(stored: dict, metadata_patch: dict) -> dict:
+    """``metadata_patch`` over ``stored``, merged the way storage merges it.
+
+    Top-level keys replace, then the ``_system`` namespace merges one level deep
+    (``postgres_service.memory_update``), so a reader that must not re-read the
+    row sees what the row now holds.
+    """
+    merged = {**stored, **metadata_patch}
+    if isinstance(metadata_patch.get(SYSTEM_NAMESPACE), dict):
+        nested = stored.get(SYSTEM_NAMESPACE)
+        merged[SYSTEM_NAMESPACE] = {
+            **(nested if isinstance(nested, dict) else {}),
+            **metadata_patch[SYSTEM_NAMESPACE],
+        }
+    return merged
+
+
 async def _enrich_memory_background(
     memory_id: UUID,
     content: str,
@@ -3868,9 +3886,16 @@ async def _enrich_memory_background(
         # See ``_dict_to_memory_out`` for the falsy-``{}`` trap.
         raw_meta = mem.get("metadata_")
         existing = raw_meta if raw_meta is not None else mem.get("metadata")
-        meta = dict(existing) if existing is not None else {}
+        stored_meta = dict(existing) if existing is not None else {}
+        # L-33 — a PATCH, merged by storage under its row lock (top level, then
+        # ``_system`` one level deep), not the copy read above sent back as
+        # ``metadata_``. Storage assigns that column wholesale, so anything
+        # committed between the read (which can route to a replica) and this
+        # write was reverted. A merge cannot delete a key, so the pending flag
+        # is cleared as False in both homes, as core-worker's patch clears it.
+        meta_patch: dict = {"enrichment_pending": False, SYSTEM_NAMESPACE: {"enrichment_pending": False}}
         # C25 — route the caller-ownable keys through the same boundary the
-        # synchronous path uses. ``meta`` here is the row's MERGED metadata, so
+        # synchronous path uses. ``stored_meta`` is the row's MERGED metadata, so
         # a caller's ``summary`` and a platform-written one are indistinguishable
         # by inspection; the key set has to come from the write, which is why
         # ``_schedule_enrich_or_inline`` forwards it. Without it this path wrote
@@ -3886,17 +3911,17 @@ async def _enrich_memory_background(
         # made it. The row's marker is the surface-independent answer; the
         # forwarded set stays because a row is not re-read between the snapshot
         # and here, and dropping it would trust a marker this very write wrote.
-        caller_keys = frozenset(caller_owned_metadata_keys or ()) | caller_owned_keys(meta)
+        caller_keys = frozenset(caller_owned_metadata_keys or ()) | caller_owned_keys(stored_meta)
         if enrichment.summary:
-            set_system_value(meta, "summary", enrichment.summary, caller_keys=caller_keys)
+            set_system_value(meta_patch, "summary", enrichment.summary, caller_keys=caller_keys)
         if enrichment.tags:
-            set_system_value(meta, "tags", enrichment.tags, caller_keys=caller_keys)
+            set_system_value(meta_patch, "tags", enrichment.tags, caller_keys=caller_keys)
         if enrichment.llm_ms:
-            set_system_value(meta, "llm_ms", enrichment.llm_ms, caller_keys=caller_keys)
+            set_system_value(meta_patch, "llm_ms", enrichment.llm_ms, caller_keys=caller_keys)
         if enrichment.contains_pii:
-            meta["contains_pii"] = True
+            meta_patch["contains_pii"] = True
             if enrichment.pii_types:
-                meta["pii_types"] = enrichment.pii_types
+                meta_patch["pii_types"] = enrichment.pii_types
         # H-18: this was MISSING here, and wiring up the verdict is not enough
         # without it. ``remediate_after_enrichment`` keys its non-business branch
         # on ``md["business_relevance"] == "personal"``, so while the field went
@@ -3906,11 +3931,11 @@ async def _enrich_memory_background(
         # path and core-worker both persist it, so the modes also disagreed about
         # what an enriched row contains. ``getattr`` defaults to the schema's own
         # "business", as ``GovernanceDecision`` does for this field.
-        meta["business_relevance"] = getattr(enrichment, "business_relevance", "business")
+        meta_patch["business_relevance"] = getattr(enrichment, "business_relevance", "business")
         if enrichment.retrieval_hint:
             # Persisted for debugging / auditability only; no longer used
             # to shape the embedding (see CAURA-222).
-            meta["retrieval_hint"] = enrichment.retrieval_hint
+            meta_patch["retrieval_hint"] = enrichment.retrieval_hint
         # Temporal resolution. ``None`` is not a settable value, so the legacy
         # is-None check cannot suffer the pin-to-default problem — but route it
         # through the same gate so all five override fields behave uniformly.
@@ -3928,12 +3953,10 @@ async def _enrich_memory_background(
         # the meantime. core-worker's ``_ENRICHMENT_UNROUTED_FIELDS`` makes the
         # same call for the deferred path.
 
-        meta.pop("enrichment_pending", None)
-        # B7 x C25 — this path REPLACES metadata wholesale, so clear the
-        # namespaced copy too or the C25 read view stays pending forever.
-        if isinstance(meta.get("_system"), dict):
-            meta["_system"].pop("enrichment_pending", None)
-        patch["metadata_"] = meta
+        patch["metadata_patch"] = meta_patch
+        # What the row holds once storage merges the patch, for governance and
+        # the fan-out below, which deliberately do not re-read the row.
+        meta = _merged_metadata(stored_meta, meta_patch)
 
         # Apply patch via storage client (metadata, type, weight, etc.)
         if patch:
@@ -4022,7 +4045,9 @@ async def _enrich_memory_background(
         # non-fatal to the parent.
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
         if atomic_facts:
-            parent_ts_start = mem.get("ts_valid_start")
+            # L-34: the value this enrichment just wrote, when it wrote one —
+            # ``mem`` was read before the PATCH, as for the weight below.
+            parent_ts_start = patch.get("ts_valid_start", mem.get("ts_valid_start"))
             # ``effective_visibility`` when remediation downgraded the parent:
             # ``mem`` was read before the PATCH and still holds the pre-policy
             # value, so reading it here would hand the children the visibility
