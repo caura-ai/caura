@@ -276,3 +276,19 @@ class Memory(Base):
             postgresql_where=text(f"deleted_at IS NULL AND {PENDING_WORK_SQL}"),
         ),
     )
+
+
+# Backs the derived-row lookup every memory delete runs (B25: M-52, M-53).
+# Auto-chunk and atomic-fact children link to their parent only through
+# ``metadata.parent_memory_id``; partial on live rows that have one, so it holds
+# derived rows only. Created CONCURRENTLY in migration 058 with the same key and
+# predicate. Declared after the class rather than in ``__table_args__`` because
+# its key is a JSON operator on ``Memory.metadata_``, which has to exist first.
+Index(
+    "ix_memories_parent_memory_id",
+    Memory.tenant_id,
+    Memory.metadata_["parent_memory_id"].astext,
+    postgresql_where=text(
+        "deleted_at IS NULL AND (metadata ->> 'parent_memory_id') IS NOT NULL"
+    ),
+)

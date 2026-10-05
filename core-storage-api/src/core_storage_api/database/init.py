@@ -22,24 +22,20 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # its own it would certify 020 onwards over a database that may have stopped
 # anywhere after 019 — a selective restore, or an operator who dropped
 # ``alembic_version`` to clear a wedged upgrade. The probe is an object the head
-# migration creates; 057 only replaces a trigger function, so its trace is the
-# comment it sets on ``entities_search_vector_update()``. An index probe must check the index
-# is VALID, since an interrupted CONCURRENTLY build leaves an invalid one. The
-# probe need not be migration-only — the sentinel already rules out a
-# ``create_all`` schema — but it must not exist before head. It is checked
-# against the script head at boot, so a stale entry refuses rather than stamps.
-# Each new migration updates both values;
+# migration creates; for 058 that is ``ix_memories_parent_memory_id``. An index
+# probe must check the index is VALID, since an interrupted CONCURRENTLY build
+# leaves an invalid one. The probe need not be migration-only — the sentinel
+# already rules out a ``create_all`` schema — but it must not exist before head.
+# It is checked against the script head at boot, so a stale entry refuses rather
+# than stamps. Each new migration updates both values;
 # ``test_the_head_fingerprint_names_the_current_head`` fails until it does. A
 # head with no object of its own may set the probe to ``None``, which makes the
 # stamp branch refuse — the safe answer when there is nothing to check.
-_HEAD_FINGERPRINT_REVISION = "057"
-# ``to_regprocedure`` rather than a ``::regprocedure`` cast: this probe also runs
-# on an empty database, where the cast would raise instead of reading as no
-# evidence.
+_HEAD_FINGERPRINT_REVISION = "058"
 _HEAD_FINGERPRINT_SQL: str | None = (
-    "SELECT COALESCE(obj_description("
-    "to_regprocedure('public.entities_search_vector_update()'), 'pg_proc'), '') "
-    "LIKE '%(migration 057,%'"
+    "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "WHERE n.nspname = 'public' AND c.relname = 'ix_memories_parent_memory_id' AND i.indisvalid)"
 )
 
 _engine: AsyncEngine | None = None

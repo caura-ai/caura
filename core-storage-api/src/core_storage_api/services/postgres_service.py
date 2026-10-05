@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict, defaultdict
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -290,6 +290,23 @@ def pending_work_count_stmt(filters: list[ColumnElement[bool]]) -> Select:
         func.count().filter(text(PENDING_ENRICHMENT_SQL)),
         func.count().filter(text(PENDING_FANOUT_SQL)),
     ).where(*filters, text(PENDING_WORK_SQL))
+
+
+def derived_rows_where(tenant_id: str, parent_ids: Any) -> list[ColumnElement[bool]]:
+    """Live rows of ``tenant_id`` derived from ``parent_ids``.
+
+    B25 (M-52, M-53). Auto-chunk and atomic-fact children link to their parent
+    only through ``metadata.parent_memory_id``. ``parent_ids`` is a list of id
+    strings or a subquery selecting them. Implies the predicate of the partial
+    index ``ix_memories_parent_memory_id`` (migration 058), keyed on the same
+    expression, so the lookup reads derived rows only. Module-level so the plan
+    can be checked against the exact predicate the service runs.
+    """
+    return [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        Memory.metadata_["parent_memory_id"].astext.in_(parent_ids),
+    ]
 
 
 def _fleet_scope_clause(
@@ -4281,7 +4298,8 @@ class PostgresService:
         Filtered on the JSON key rather than a column because that is where the
         link lives — ``parent_memory_id`` has only ever been written into child
         metadata. A column would be better and is not what production rows
-        carry, so the fix has to read what is actually there.
+        carry, so the fix has to read what is actually there. Migration 058
+        indexes the key (``derived_rows_where``).
 
         Tenant-scoped, which is the filter that is a boundary rather than a
         preference; ``deleted_at IS NULL`` because a row already gone needs no
@@ -4290,11 +4308,7 @@ class PostgresService:
         ``memory_find_by_supersedes_id`` above records for retraction.
         """
         async with get_session() as session:
-            stmt = select(Memory).where(
-                Memory.tenant_id == tenant_id,
-                Memory.metadata_["parent_memory_id"].astext == parent_id,
-                Memory.deleted_at.is_(None),
-            )
+            stmt = select(Memory).where(*derived_rows_where(tenant_id, [parent_id]))
             return list((await session.execute(stmt)).scalars().all())
 
     async def memory_find_successors(
@@ -6350,6 +6364,53 @@ class PostgresService:
                 "older": orm_to_dict(older, MEMORY_LIST_FIELDS) if older is not None else None,
             }
 
+    async def _soft_delete(
+        self,
+        tenant_id: str,
+        where: Callable[[Any], list[ColumnElement[bool]]],
+        *,
+        exclude_ids: list[UUID] | None = None,
+        with_derived: bool = True,
+    ) -> int:
+        """Soft-delete the tenant's live rows ``where`` selects; returns count.
+
+        B25 (M-52, M-53). With ``with_derived`` the live rows derived from them
+        go too, so a bulk delete, a filter delete or an ingest undo no longer
+        leaves the deleted text live in auto-chunk and atomic-fact children.
+        ``where`` adds the caller's clauses for the entity it is given, so one
+        predicate picks the rows to delete and, through an alias, the parents
+        whose children go with them. Children first, in one transaction, and
+        counted. ``exclude_ids`` are spared, children included.
+
+        The single-row delete passes ``with_derived=False``: its callers
+        (``soft_delete_memory``, governance remediation) delete and audit each
+        child themselves, governance auditing before it deletes.
+        """
+
+        def selected(m: Any) -> list[ColumnElement[bool]]:
+            clauses = [m.tenant_id == tenant_id, m.deleted_at.is_(None), *where(m)]
+            if exclude_ids:
+                clauses.append(m.id.notin_(exclude_ids))
+            return clauses
+
+        now = datetime.now(UTC)
+        deleted = 0
+        async with get_session() as session:
+            if with_derived:
+                parent = aliased(Memory)
+                parents = select(cast(parent.id, String)).where(*selected(parent))
+                children = derived_rows_where(tenant_id, parents)
+                if exclude_ids:
+                    children.append(Memory.id.notin_(exclude_ids))
+                result = await session.execute(
+                    sql_update(Memory).where(*children).values(deleted_at=now, status="deleted")
+                )
+                deleted += result.rowcount or 0  # type: ignore[attr-defined]
+            result = await session.execute(
+                sql_update(Memory).where(*selected(Memory)).values(deleted_at=now, status="deleted")
+            )
+            return deleted + (result.rowcount or 0)  # type: ignore[attr-defined]
+
     async def memory_soft_delete_by_filter(
         self,
         *,
@@ -6361,60 +6422,49 @@ class PostgresService:
         exclude_ids: list[UUID] | None = None,
         metadata_filter: dict[str, str] | None = None,
     ) -> int:
-        """Soft-delete every matching live memory for a tenant; returns count.
+        """Soft-delete every matching live memory for a tenant, and the rows
+        derived from them; returns count.
 
         The JSONB ``metadata->>'key' = 'value'`` predicates are built with
         SQLAlchemy bound params (``Memory.metadata_[key].astext == bindparam(...)``)
         — never string interpolation. Transactional (writer session).
         """
-        stmt = sql_update(Memory).where(
-            Memory.tenant_id == tenant_id,
-            Memory.deleted_at.is_(None),
-        )
-        if fleet_id:
-            stmt = stmt.where(Memory.fleet_id == fleet_id)
-        if agent_id:
-            stmt = stmt.where(Memory.agent_id == agent_id)
-        if memory_type:
-            stmt = stmt.where(Memory.memory_type == memory_type)
-        if status:
-            stmt = stmt.where(Memory.status == status)
-        if exclude_ids:
-            stmt = stmt.where(Memory.id.notin_(exclude_ids))
-        if metadata_filter:
-            for i, (key, value) in enumerate(metadata_filter.items()):
+
+        def where(m: Any) -> list[ColumnElement[bool]]:
+            clauses: list[ColumnElement[bool]] = []
+            if fleet_id:
+                clauses.append(m.fleet_id == fleet_id)
+            if agent_id:
+                clauses.append(m.agent_id == agent_id)
+            if memory_type:
+                clauses.append(m.memory_type == memory_type)
+            if status:
+                clauses.append(m.status == status)
+            for i, (key, value) in enumerate((metadata_filter or {}).items()):
                 # Distinct bindparam name per pair so multiple predicates
                 # don't collide; the KEY indexes the JSONB column (a SQL
                 # expression, not a bound value) while the VALUE is bound.
                 param: Any = bindparam(f"meta_val_{i}", value)
-                stmt = stmt.where(Memory.metadata_[str(key)].astext == param)
-        stmt = stmt.values(deleted_at=datetime.now(UTC), status="deleted")
-        async with get_session() as session:
-            result = await session.execute(stmt)
-            return result.rowcount or 0  # type: ignore[attr-defined]
+                clauses.append(m.metadata_[str(key)].astext == param)
+            return clauses
+
+        return await self._soft_delete(tenant_id, where, exclude_ids=exclude_ids)
 
     async def memory_soft_delete_by_ids(
         self,
         tenant_id: str,
         ids: list[UUID],
+        *,
+        with_derived: bool = True,
     ) -> int:
-        """Soft-delete live memories by id (tenant-scoped); returns count.
+        """Soft-delete live memories by id (tenant-scoped), and the rows derived
+        from them unless ``with_derived`` is off; returns count.
 
         Transactional (writer session). The 1-1000 cap stays in core-api.
         """
         if not ids:
             return 0
-        async with get_session() as session:
-            result = await session.execute(
-                sql_update(Memory)
-                .where(
-                    Memory.tenant_id == tenant_id,
-                    Memory.id.in_(ids),
-                    Memory.deleted_at.is_(None),
-                )
-                .values(deleted_at=datetime.now(UTC), status="deleted")
-            )
-            return result.rowcount or 0  # type: ignore[attr-defined]
+        return await self._soft_delete(tenant_id, lambda m: [m.id.in_(ids)], with_derived=with_derived)
 
     async def memory_soft_delete_by_run(
         self,
@@ -6425,21 +6475,14 @@ class PostgresService:
     ) -> int:
         """Soft-delete live memories tagged with ``run_id`` AND
         ``metadata.source = metadata_source`` (belt-and-braces so non-ingest
-        memories sharing a run_id aren't touched); returns count.
-        Transactional (writer session).
+        memories sharing a run_id aren't touched), and the rows derived from
+        them; returns count. M-52: an ingested fact's atomic-fact children carry
+        ``source = "atomic_fact_fanout"`` and, written before #1775, no run_id;
+        they go with their parent. Transactional (writer session).
         """
-        async with get_session() as session:
-            result = await session.execute(
-                sql_update(Memory)
-                .where(
-                    Memory.tenant_id == tenant_id,
-                    Memory.deleted_at.is_(None),
-                    Memory.run_id == run_id,
-                    Memory.metadata_["source"].astext == metadata_source,
-                )
-                .values(deleted_at=datetime.now(UTC), status="deleted")
-            )
-            return result.rowcount or 0  # type: ignore[attr-defined]
+        return await self._soft_delete(
+            tenant_id, lambda m: [m.run_id == run_id, m.metadata_["source"].astext == metadata_source]
+        )
 
     async def memory_redistribute(
         self,

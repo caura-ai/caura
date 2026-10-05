@@ -67,9 +67,6 @@ async def test_fanout_children_inherit_expiry_run_and_source():
         assert p["expires_at"] == "2030-01-01T00:00:00+00:00"
         assert p["run_id"] == "run-7"
         assert p["source_uri"] == "https://example.test/doc"
-    # The parent is marked so a later delete knows to look for children.
-    marker = sc.update_memory.await_args
-    assert marker.args[2] == {"metadata_patch": {"atomic_fact_children": 2}}
 
 
 @pytest.mark.integration

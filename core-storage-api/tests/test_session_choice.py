@@ -287,11 +287,17 @@ def test_the_writer_session_population_is_pinned() -> None:
 
     144 -> 145 (pure unchanged at 65): ``entity_merge`` is new (L-46). It locks
     the entity ``with_for_update`` and assigns the merged attributes, a write.
+
+    145 -> 143 (pure unchanged at 65): ``memory_soft_delete_by_ids``,
+    ``memory_soft_delete_by_filter`` and ``memory_soft_delete_by_run`` no longer
+    open a session. They share ``_soft_delete`` (M-52, M-53), which opens the
+    one writer session and soft-deletes the rows and their derived rows with
+    ``sql_update``, a write.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 145, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 143, f"{len(methods)} methods open a writer session"
     assert len(pure) == 65, f"{len(pure)} of them show no write marker"
 
 

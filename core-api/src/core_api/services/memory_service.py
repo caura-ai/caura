@@ -3600,17 +3600,6 @@ async def fan_out_atomic_facts(
             fanout_created,
             memory_id,
         )
-        # Mark the parent so a later delete knows to look for its children
-        # (``_may_have_derived_children``): the lookup is an unindexed JSON-key
-        # scan and runs only for parents that say they have some. Best-effort —
-        # the children exist either way, and failing the fan-out over a marker
-        # would cost the facts.
-        try:
-            await sc.update_memory(
-                str(memory_id), tenant_id, {"metadata_patch": {"atomic_fact_children": fanout_created}}
-            )
-        except Exception:
-            logger.warning("could not mark parent %s as having fan-out children", memory_id, exc_info=True)
     if fanout_deduped:
         # Its own line rather than a field on the created line above,
         # because it explains a discrepancy an operator would otherwise
@@ -4101,19 +4090,6 @@ async def _enrich_memory_background(
     return governed_row
 
 
-def _may_have_derived_children(metadata: dict | None) -> bool:
-    """Could rows derived from this one exist (``metadata.parent_memory_id``)?
-
-    Gates the child lookup, which filters on a JSON key with no supporting
-    index — the reason ``governance_remediation._pre_verdict_children`` gates
-    too. ``auto_chunked`` is stamped on every auto-chunk parent; ``atomic_facts``
-    is the key the async fan-out persists on a parent (left in place, nulled,
-    once consumed); ``atomic_fact_children`` is stamped by the fan-out itself.
-    """
-    md = metadata or {}
-    return bool(md.get("auto_chunked")) or "atomic_facts" in md or bool(md.get("atomic_fact_children"))
-
-
 async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
     """Soft-delete one memory and every row derived from it.
 
@@ -4124,18 +4100,21 @@ async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
     agent's delete now does too. Children first: if their delete fails the
     parent is still live and the caller's retry repeats the whole operation,
     rather than leaving children nothing points back to.
+
+    The lookup is indexed (migration 058), so it runs for every delete rather
+    than only for parents carrying a marker: parents fanned out before the
+    markers existed have none, and their children survived (B25). The set
+    deletes take derived rows inside storage; this one-row path looks them up
+    itself so each gets its own audit entry.
     """
     sc = get_storage_client()
     mem = await sc.get_memory(str(memory_id), tenant_id)
     if not mem:
         raise HTTPException(status_code=404, detail="Memory not found")
 
-    md = mem.get("metadata_") if mem.get("metadata_") is not None else mem.get("metadata")
-    children: list[dict] = []
-    if _may_have_derived_children(md):
-        children = [c for c in await sc.find_children_by_parent_id(tenant_id, str(memory_id)) if c.get("id")]
-        if children:
-            await sc.soft_delete_by_ids(tenant_id, [str(c["id"]) for c in children])
+    children = [c for c in await sc.find_children_by_parent_id(tenant_id, str(memory_id)) if c.get("id")]
+    if children:
+        await sc.soft_delete_by_ids(tenant_id, [str(c["id"]) for c in children])
 
     await sc.soft_delete_memory(str(memory_id), tenant_id)
 

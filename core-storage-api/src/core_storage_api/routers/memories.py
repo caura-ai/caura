@@ -447,15 +447,17 @@ async def find_by_supersedes_id(tenant_id: str, supersedes_id: str) -> list[dict
 
 @router.get("/by-parent-id")
 async def find_children_by_parent_id(tenant_id: str, parent_id: str) -> list[dict]:
-    """H-10 — live rows derived from a parent, for governance cascade.
+    """H-10 — live rows derived from a parent, for governance cascade and, since
+    B25, every single delete.
 
     ``parent_id`` is matched against child ``metadata.parent_memory_id`` and is
     NOT parsed as a UUID here: it is compared as the string the writer stored,
     so a malformed value matches nothing instead of 500ing the remediation that
-    is trying to enforce a drop.
+    is trying to enforce a drop. ``MEMORY_LIST_FIELDS``: both callers read the
+    id, agent, content and visibility, never the vectors.
     """
     memories = await _svc.memory_find_children_by_parent_id(tenant_id=tenant_id, parent_id=parent_id)
-    return [orm_to_dict(m, MEMORY_FIELDS) for m in memories]
+    return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 
 
 @router.post("/reset-entity-artifacts")
@@ -1815,7 +1817,8 @@ async def quality_metrics(request: Request) -> dict:
 
 @router.post("/soft-delete-by-filter")
 async def soft_delete_by_filter(request: Request) -> dict:
-    """Soft-delete every matching live memory for a tenant.
+    """Soft-delete every matching live memory for a tenant, and the rows
+    derived from them (``deleted`` counts both).
 
     Body: ``{tenant_id, fleet_id?, agent_id?, memory_type?, status?,
     exclude_ids?[], metadata_filter?{k:v}}``. The ≤20-pair + string-value
@@ -1847,8 +1850,9 @@ async def soft_delete_by_filter(request: Request) -> dict:
 
 @router.post("/soft-delete-by-ids")
 async def soft_delete_by_ids(request: Request) -> dict:
-    """Soft-delete live memories by id (tenant-scoped). Body: ``{tenant_id,
-    ids[]}``. The 1-1000 cap stays in core-api."""
+    """Soft-delete live memories by id (tenant-scoped), and the rows derived
+    from them (``deleted`` counts both). Body: ``{tenant_id, ids[]}``. The
+    1-1000 cap stays in core-api."""
     body: dict = await request.json()
     tenant_id = body.get("tenant_id")
     if not tenant_id:
@@ -1864,8 +1868,8 @@ async def soft_delete_by_ids(request: Request) -> dict:
 @router.post("/soft-delete-by-run")
 async def soft_delete_by_run(request: Request) -> dict:
     """Soft-delete live memories tagged with ``run_id`` AND
-    ``metadata.source = metadata_source``. Body: ``{tenant_id, run_id,
-    metadata_source}``."""
+    ``metadata.source = metadata_source``, and the rows derived from them
+    (``deleted`` counts both). Body: ``{tenant_id, run_id, metadata_source}``."""
     body: dict = await request.json()
     tenant_id = body.get("tenant_id")
     run_id = body.get("run_id")
@@ -2330,8 +2334,12 @@ async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> dict:
     is what let this one drift. It also filters ``deleted_at IS NULL``, so
     deleting an already-deleted memory is a 404 rather than a silent re-stamp
     that moved the retention clock forward.
+
+    The one delete that does NOT take the memory's derived rows with it (B25):
+    both callers delete and audit each child themselves — ``soft_delete_memory``
+    and governance remediation, which must audit a child before deleting it.
     """
-    deleted = await _svc.memory_soft_delete_by_ids(tenant_id, [memory_id])
+    deleted = await _svc.memory_soft_delete_by_ids(tenant_id, [memory_id], with_derived=False)
     if not deleted:
         raise HTTPException(status_code=404, detail="Memory not found")
     return {"ok": True}
