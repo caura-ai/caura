@@ -20,6 +20,12 @@ name per awaited provider call. Names that fail every night came back first
 every night and could stall the rows behind them. The scan is now ordered and
 resumable, and the step pages past failures with one provider call per page.
 
+M-122. The nightly entity-link fan-out passes no fleet, and duplicate resolution
+added its fleet clause only when one was passed, so the nightly pass merged
+same-named entities of different fleets, and a fleet's entity into a fleet-less
+one. The write path resolves within one fleet (or among fleet-less entities), so
+the pair-find now keeps both sides of a pair in the same fleet.
+
 Real storage through the in-process bridge, except the step test.
 """
 
@@ -166,6 +172,42 @@ async def test_a_cluster_that_fails_part_way_reports_the_merges_it_kept(sc):
     assert out["merge_count"] == len(out["merged_entity_ids"]) == 1
     assert (out["clusters"], out["cluster_errors"]) == (1, 1)
     assert len(await sc.list_entities(tenant)) == 2
+
+
+# ── M-122: a run with no fleet merges within each fleet ───────────────────
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_run_with_no_fleet_merges_within_a_fleet_and_never_across(sc):
+    tenant = _tenant()
+    # Same name, three scopes: two fleets and the fleet-less one.
+    await _entity(sc, tenant, "globex", fleet_id=FLEET, embedding=_unit(0))
+    await _entity(sc, tenant, "globex corp", fleet_id="fleet-b", embedding=_unit(0))
+    await _entity(sc, tenant, "globex company", embedding=_unit(0))
+    # Controls: a pair inside one fleet, and a fleet-less pair, still merge.
+    await _entity(sc, tenant, "initech", fleet_id=FLEET, embedding=_unit(1))
+    await _entity(sc, tenant, "initech corp", fleet_id=FLEET, embedding=_unit(1))
+    await _entity(sc, tenant, "umbrella", embedding=_unit(2))
+    await _entity(sc, tenant, "umbrella corp", embedding=_unit(2))
+
+    out = await sc.resolve_entities(
+        tenant_id=tenant,
+        fleet_id=None,
+        batch_size=10,
+        threshold=0.9,
+        candidate_limit=10,
+    )
+
+    assert out["merge_count"] == 2, out
+    names = {e["canonical_name"] for e in await sc.list_entities(tenant)}
+    assert names == {
+        "globex",
+        "globex corp",
+        "globex company",
+        "initech corp",
+        "umbrella corp",
+    }
 
 
 # ── L-174: an ordered, resumable scan and a step that pages past failures ─

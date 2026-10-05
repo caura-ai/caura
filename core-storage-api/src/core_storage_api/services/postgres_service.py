@@ -9286,9 +9286,15 @@ class PostgresService:
             fleet_clause = "AND fleet_id = :fleet_id"
             params["fleet_id"] = fleet_id
 
+        # M-122: a pair's two sides share a fleet, as the write-path resolver
+        # requires (``entity_find_by_embedding_similarity``), and fleet-less
+        # entities pair only with each other. The nightly fan-out passes no
+        # fleet, so without this its run merged entities of different fleets.
+        # Union-find joins only these pairs, so every cluster is one fleet's. A
+        # run given a fleet filters the batch, and the pairs follow it.
         pair_sql = text(f"""
             WITH batch AS (
-                SELECT id, canonical_name, entity_type, name_embedding
+                SELECT id, canonical_name, entity_type, fleet_id, name_embedding
                 FROM entities
                 WHERE tenant_id = :tenant_id
                   AND name_embedding IS NOT NULL
@@ -9309,7 +9315,7 @@ class PostgresService:
                   AND e.name_embedding IS NOT NULL
                   AND e.id > b.id
                   AND e.entity_type = b.entity_type
-                  {fleet_clause}
+                  AND e.fleet_id IS NOT DISTINCT FROM b.fleet_id
                   AND (1 - (e.name_embedding <=> b.name_embedding)) >= :threshold
                 ORDER BY e.name_embedding <=> b.name_embedding
                 LIMIT :candidate_limit
