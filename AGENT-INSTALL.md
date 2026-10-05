@@ -292,14 +292,24 @@ Then restart the server (`docker compose restart core-api` or re-run uvicorn).
 
 ## Performance Expectations
 
-On our reference benchmarks (warm cache, single tenant):
+Current approved benchmark evidence:
 
-- **Search latency:** 23 ms p50, 27 ms p95
-- **Recall accuracy:** 77.6% (LoCoMo, 2026-04-19) / 92.2% (LongMemEval, 2026-09-15,
-  the benchmark's reference judge; 90.2% under a stricter second judge)
-- **Token savings vs full context:** 79% (LongMemEval) to 97% (LoCoMo)
+<!-- BEGIN GENERATED: evidence-benchmarks -->
+- **LoCoMo accuracy:** Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.
+- **LongMemEval reference judge:** Caura answered 461 of 500 LongMemEval_S questions correctly (92.2%) under the benchmark's GPT-4o reference judge.
+- **LongMemEval secondary judge:** The same 500 frozen LongMemEval_S answers scored 90.2% (451/500) under the secondary Gemini 3.5 Flash-Lite judge.
+- **LongMemEval token efficiency:** On LongMemEval_S, the median compact retrieved context was 22,410 tokens versus a 107,706-token full haystack: 79.2% context-only savings; counting every reader call yields 75.4%.
 
-If you see search latency materially above ~50 ms p50 after warm-up, the pgvector index is likely cold or your embedding-provider roundtrip is the bottleneck — see [`docs/performance.md`](docs/performance.md) for the methodology and the operator-scale notes.
+Only active, approved claims appear here. Control, withdrawn, and withheld
+records remain in the evidence registry and are excluded from promotional copy.
+See [`evidence/claims.json`](evidence/claims.json) and
+[`EVIDENCE.md`](EVIDENCE.md). Do not hand-edit this block.
+<!-- END GENERATED: evidence-benchmarks -->
+
+If search latency is materially above your warmed baseline, the pgvector index
+may be cold or your embedding-provider roundtrip may be the bottleneck — see
+[`docs/performance.md`](docs/performance.md) for measurement guidance and
+operator-scale notes.
 
 ## Full Reference
 
