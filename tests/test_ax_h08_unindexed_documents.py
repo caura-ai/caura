@@ -114,12 +114,16 @@ def test_the_note_names_the_field_that_makes_a_doc_searchable():
 
 def test_the_counter_mirrors_the_search_predicates():
     """A count taken over a different scope than the search would answer a
-    question the caller did not ask."""
+    question the caller did not ask. Both take the fleet scope from
+    ``_document_fleet_clause``, which lets tenant-wide skills in (H-06)."""
     from core_storage_api.services.postgres_service import PostgresService
 
     count_src = inspect.getsource(PostgresService.document_count_unindexed)
-    for predicate in ("tenant_pred", "Document.collection", "Document.fleet_id"):
+    for predicate in ("tenant_pred", "Document.collection"):
         assert predicate in count_src
+    fleet = "_document_fleet_clause(collection, fleet_id)"
+    assert fleet in count_src
+    assert fleet in inspect.getsource(PostgresService.document_search)
 
 
 def test_the_counter_selects_exactly_the_rows_search_skips():

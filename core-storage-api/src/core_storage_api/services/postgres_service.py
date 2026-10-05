@@ -457,9 +457,19 @@ def _document_fleet_clause(collection: str | None, fleet_id: str) -> ColumnEleme
     ``CAURA_FLEET_ID`` must still receive them (the same NULL-is-tenant-wide
     rule ``_fleet_scope_clause`` applies to memories). Other collections keep
     exact fleet matching; widening them is a separate decision.
+
+    ``collection=None`` is a read that spans collections (a collection-less
+    search, the collections listing): the caller's fleet, plus skills with no
+    fleet. H-06: every fleet-filtered document read goes through here, so a
+    tenant-wide skill is seen, and counted, on all of them.
     """
     if collection == "skills":
         return or_(Document.fleet_id == fleet_id, Document.fleet_id.is_(None))
+    if collection is None:
+        return or_(
+            Document.fleet_id == fleet_id,
+            and_(Document.collection == "skills", Document.fleet_id.is_(None)),
+        )
     return Document.fleet_id == fleet_id
 
 
@@ -10506,7 +10516,7 @@ class PostgresService:
             .order_by(Document.collection)
         )
         if fleet_id:
-            stmt = stmt.where(Document.fleet_id == fleet_id)
+            stmt = stmt.where(_document_fleet_clause(None, fleet_id))
         async with get_read_session() as session:
             result = await session.execute(stmt)
             # Positional access: ``row.count`` resolves to ``Row.count()`` (the
@@ -10541,7 +10551,7 @@ class PostgresService:
         if status is not None:
             stmt = stmt.where(Document.data["status"].astext == status)
         if fleet_id:
-            stmt = stmt.where(Document.fleet_id == fleet_id)
+            stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
         async with get_read_session() as session:
             return int((await session.execute(stmt)).scalar_one())
 
@@ -10690,7 +10700,7 @@ class PostgresService:
         if collection is not None:
             stmt = stmt.where(Document.collection == collection)
         if fleet_id:
-            stmt = stmt.where(Document.fleet_id == fleet_id)
+            stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
         async with get_read_session() as session:
             return int((await session.execute(stmt)).scalar_one() or 0)
 
@@ -10759,7 +10769,7 @@ class PostgresService:
                 Document.collection == collection,
             )
             if fleet_id:
-                stmt = stmt.where(Document.fleet_id == fleet_id)
+                stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
             stmt = stmt.order_by(Document.updated_at.desc()).offset(offset).limit(limit)
             result = await session.execute(stmt)
             return list(result.scalars().all())
