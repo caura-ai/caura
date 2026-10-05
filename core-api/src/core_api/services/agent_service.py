@@ -658,26 +658,19 @@ async def authorize_memory_access(
     """
     if not caller_agent_id:
         return True
-    if visibility == "scope_agent" and caller_tenant_id and tenant_id != caller_tenant_id:
-        return False
-    if visibility in ("scope_agent", "scope_org"):
-        # No agent row needed for these branches.
-        return memory_access_allowed_for_agent(
-            None,
-            caller_agent_id,
-            visibility=visibility,
-            owner_agent_id=owner_agent_id,
-            fleet_id=fleet_id,
-            write=write,
-        )
-    # scope_team / unknown visibility: fleet-gated by the trust ladder.
-    agent = await lookup_agent(tenant_id, caller_agent_id)
+    # scope_team / unknown visibility is fleet-gated by the trust ladder, which
+    # needs the caller's agent row; the other two branches need none.
+    agent: dict | None = None
+    if visibility not in ("scope_agent", "scope_org"):
+        agent = await lookup_agent(tenant_id, caller_agent_id)
     return memory_access_allowed_for_agent(
         agent,
         caller_agent_id,
         visibility=visibility,
         owner_agent_id=owner_agent_id,
         fleet_id=fleet_id,
+        row_tenant_id=tenant_id,
+        caller_tenant_id=caller_tenant_id,
         write=write,
     )
 
@@ -689,6 +682,8 @@ def memory_access_allowed_for_agent(
     visibility: str | None,
     owner_agent_id: str | None,
     fleet_id: str | None,
+    row_tenant_id: str,
+    caller_tenant_id: str | None,
     write: bool = False,
 ) -> bool:
     """Pure predicate behind :func:`authorize_memory_access`.
@@ -700,8 +695,17 @@ def memory_access_allowed_for_agent(
     ``enforce_fleet_read``'s allow-on-unknown (registration happens on
     writes; reads of an unregistered identity are not the isolation
     boundary this helper guards).
+
+    ``scope_agent`` is the caller's own row only in its home tenant: the row's
+    tenant (``row_tenant_id``) must be ``caller_tenant_id``. Agent ids are
+    unique per tenant, so a same-named agent in a sibling tenant the caller may
+    read is a different author (M-94). Both are required, so no caller can
+    leave the pairing out; ``caller_tenant_id=None`` pairs nothing, for a caller
+    with no home tenant.
     """
     if visibility == "scope_agent":
+        if caller_tenant_id and row_tenant_id != caller_tenant_id:
+            return False
         return bool(owner_agent_id and owner_agent_id == canonical_service_agent_id(caller_agent_id))
     if visibility == "scope_org":
         return True

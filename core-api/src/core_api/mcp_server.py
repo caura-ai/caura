@@ -2409,7 +2409,10 @@ async def caura_entity_get(
     # isolation is carried by the explicit ``tenant_id`` + ``caller_agent_id``
     # the service already forwards to the storage client.
     try:
-        result = await get_entity(uid, _get_tenant(), caller_agent_id=_get_agent_id())
+        # The home tenant on both sides: this tool reads no sibling.
+        result = await get_entity(
+            uid, _get_tenant(), caller_agent_id=_get_agent_id(), caller_tenant_id=_get_tenant()
+        )
     except HTTPException as e:
         return _with_latency(
             _error_response(_detail_code(e.detail, e.status_code), _detail_text(e.detail)), t0

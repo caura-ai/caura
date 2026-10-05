@@ -129,7 +129,9 @@ def patch_lookup(monkeypatch):
 async def _get(caller_agent_id):
     from core_api.services.entity_service import get_entity
 
-    return await get_entity(uuid.uuid4(), "t", caller_agent_id=caller_agent_id)
+    return await get_entity(
+        uuid.uuid4(), "t", caller_agent_id=caller_agent_id, caller_tenant_id="t"
+    )
 
 
 async def test_relations_filtered_for_agent_credential(fake_storage, patch_lookup):
@@ -236,7 +238,11 @@ async def _filter(relations, caller_agent_id, **kwargs):
     )
 
     return await filter_relations_by_evidence_visibility(
-        relations, tenant_id="t", caller_agent_id=caller_agent_id, **kwargs
+        relations,
+        tenant_id="t",
+        caller_agent_id=caller_agent_id,
+        caller_tenant_id="t",
+        **kwargs,
     )
 
 

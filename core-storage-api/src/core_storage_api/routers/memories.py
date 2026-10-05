@@ -1224,6 +1224,7 @@ async def count_active_memories(
     status: str | None = None,
     exclude_scope_agent: bool = False,
     caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
 ) -> dict:
     """Count live memories (``LIVE_MEMORY_STATUSES``), not just literal ``active``.
 
@@ -1241,6 +1242,7 @@ async def count_active_memories(
         status=status,
         exclude_scope_agent=exclude_scope_agent,
         caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
     )
     return {"count": count}
 
@@ -1735,6 +1737,7 @@ async def stats_breakdown(request: Request) -> dict:
         include_scope_agent=bool(body.get("include_scope_agent", False)),
         readable_tenant_ids=body.get("readable_tenant_ids"),
         include_pending=bool(body.get("include_pending", False)),
+        caller_tenant_id=body.get("caller_tenant_id"),
     )
 
 

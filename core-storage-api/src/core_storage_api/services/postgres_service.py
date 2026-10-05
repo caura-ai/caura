@@ -4995,6 +4995,7 @@ class PostgresService:
         status: str | None = None,
         exclude_scope_agent: bool = False,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
     ) -> int:
         """Count live (non-deleted) memories for a tenant, optionally a fleet.
 
@@ -5007,6 +5008,9 @@ class PostgresService:
         ``exclude_scope_agent`` turns on visibility scoping and
         ``caller_agent_id`` is the identity applied within it — together,
         ``_visibility_scope_clause``, the same predicate the list route builds.
+        ``caller_tenant_id`` is the identity's home tenant (M-94): on a count of
+        a sibling tenant, the sibling's same-named agent's private rows are not
+        the caller's. It defaults to ``tenant_id``, as on the list route.
 
         TWO parameters rather than one, because this counter has three states
         where the list route has two: unscoped is real here (the
@@ -5033,7 +5037,7 @@ class PostgresService:
             if fleet_id:
                 stmt = stmt.where(Memory.fleet_id == fleet_id)
             if exclude_scope_agent:
-                stmt = stmt.where(_visibility_scope_clause(caller_agent_id, tenant_id))
+                stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
             result = await session.execute(stmt)
             return result.scalar() or 0
 
@@ -6833,6 +6837,7 @@ class PostgresService:
         include_scope_agent: bool = False,
         readable_tenant_ids: list[str] | None = None,
         include_pending: bool = False,
+        caller_tenant_id: str | None = None,
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
         ``by_tenant`` / ``deleted`` / ``total_including_deleted`` /
@@ -6887,10 +6892,12 @@ class PostgresService:
             )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
-            # Private rows count for the named agent in ``tenant_id`` (the
-            # binding/home tenant) only — under ``readable_tenant_ids`` a
-            # sibling tenant's same-named agent is a different agent.
-            scope_filters.append(_visibility_scope_clause(agent_id, tenant_id))
+            # Private rows count for the named agent in its home tenant only —
+            # under ``readable_tenant_ids``, or on a read pinned to a sibling, a
+            # sibling tenant's same-named agent is a different agent (M-94).
+            # ``caller_tenant_id`` names that home; ``tenant_id`` is it for every
+            # caller that does not pin a sibling.
+            scope_filters.append(_visibility_scope_clause(agent_id, caller_tenant_id or tenant_id))
         elif not include_scope_agent:
             scope_filters.append(_visibility_scope_clause(None))
         if memory_type:

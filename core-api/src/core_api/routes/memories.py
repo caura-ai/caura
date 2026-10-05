@@ -799,6 +799,9 @@ async def memory_stats(
                 if auth.is_cross_tenant_read and not tenant_id_explicit and scope != "agent"
                 else None
             ),
+            # M-94: the agent's own private rows are those in its home tenant,
+            # which ``tenant_id`` is not on a read pinned to a sibling.
+            "caller_tenant_id": auth.tenant_id,
         }
     )
 
@@ -850,13 +853,15 @@ async def memory_count(
     # the list it can see.
     #
     # This route takes no ``agent_id`` param, so there is nothing to forge: the
-    # identity is the authenticated one or nothing.
+    # identity is the authenticated one or nothing. Its own rows are those in
+    # its home tenant, which ``tenant_id`` is not on a count of a sibling (M-94).
     count = await get_storage_client().count_active(
         tenant_id,
         fleet_id,
         status=status,
         exclude_scope_agent=True,
         caller_agent_id=caller_agent_id,
+        caller_tenant_id=auth.tenant_id,
     )
     return {"count": count}
 

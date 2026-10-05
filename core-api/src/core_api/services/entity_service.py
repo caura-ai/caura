@@ -233,6 +233,7 @@ async def filter_relations_by_evidence_visibility(
     *,
     tenant_id: str,
     caller_agent_id: str | None,
+    caller_tenant_id: str | None,
     caller_agent: dict | None = None,
     pre_authorized_memory_ids: set[str] | None = None,
 ) -> list[dict]:
@@ -257,6 +258,9 @@ async def filter_relations_by_evidence_visibility(
 
     Args:
         relations: dicts carrying ``evidence_memory_id`` (other keys ignored).
+        caller_tenant_id: the caller's HOME tenant, which ``tenant_id`` is not
+            on a pinned read of a sibling. A sibling's ``scope_agent`` evidence
+            written under the caller's agent name is not the caller's (M-94).
         caller_agent: the caller's pre-fetched agent row, when the calling code
             already resolved it. Resolved here once if not supplied — never
             per-edge, which would be N+1 over the graph.
@@ -311,12 +315,19 @@ async def filter_relations_by_evidence_visibility(
             visibility=row.get("visibility"),
             owner_agent_id=row.get("agent_id"),
             fleet_id=row.get("fleet_id"),
+            row_tenant_id=tenant_id,
+            caller_tenant_id=caller_tenant_id,
         )
 
     return [rel for rel in relations if _visible(rel)]
 
 
-async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | None = None) -> EntityOut | None:
+async def get_entity(
+    entity_id: UUID, tenant_id: str, caller_agent_id: str | None = None, *, caller_tenant_id: str | None
+) -> EntityOut | None:
+    """``caller_tenant_id`` is the caller's HOME tenant, for the ``scope_agent``
+    pairing on the linked memories and relations (M-94); required, so no caller
+    can leave it out."""
     sc = get_storage_client()
     result = await sc.get_entity_with_linked_memories(str(entity_id), tenant_id)
     if not result:
@@ -359,6 +370,8 @@ async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | Non
                 visibility=mem.get("visibility"),
                 owner_agent_id=mem.get("agent_id"),
                 fleet_id=mem.get("fleet_id"),
+                row_tenant_id=tenant_id,
+                caller_tenant_id=caller_tenant_id,
             )
         ]
     linked_memories = []
@@ -436,6 +449,7 @@ async def get_entity(entity_id: UUID, tenant_id: str, caller_agent_id: str | Non
         relations_raw,
         tenant_id=tenant_id,
         caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
         caller_agent=caller_agent,
         pre_authorized_memory_ids={str(mem.get("id")) for mem in linked_memories_raw if mem.get("id")},
     )
