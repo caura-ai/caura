@@ -379,6 +379,8 @@ async def run_forge_cron_tick(
             freshness_window_days=cfg.freshness_window_days,
             now=now,
             auto_promote_clean=auto_promote_clean,
+            body_max_bytes=cfg.body_max_bytes,
+            description_max_bytes=cfg.description_max_bytes,
         )
     except Exception as exc:
         logger.exception(
