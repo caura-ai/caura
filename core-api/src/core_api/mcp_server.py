@@ -2752,6 +2752,15 @@ async def caura_doc(
                 # checker to narrow through. Rebind so the derivation helpers
                 # below take a plain ``str``.
                 write_collection: str = collection or ""
+                # M-79: the broker ownership boundary before anything acts on
+                # ``agent_id``. The skills validator below binds a staged draft
+                # to its author and stamps ``data.origin.agent_id``, and it ran
+                # on the claimed id, so an install naming another install's
+                # agent passed that agent's draft check and was recorded as it.
+                # Read-only here; ``resolve_write_agent`` further down applies
+                # the gate again (a no-op on the degraded id) and stamps the owner.
+                if _is_install_credential():
+                    agent_id = await broker_owned_agent_id(agent_id, _get_install_uuid(), tenant_id)
                 # Skills slug rule — doc_id becomes a filesystem directory
                 # on the plugin side, so it must be filesystem-safe.
                 if collection == SKILLS_COLLECTION and not _SKILL_SLUG_RE.fullmatch(doc_id):

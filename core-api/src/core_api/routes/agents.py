@@ -4,7 +4,7 @@ from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.schemas import AgentOut, AgentTrustUpdate, SearchProfileUpdate
-from core_api.services.agent_service import lookup_agent, update_trust_level
+from core_api.services.agent_service import enforce_broker_agent_ownership, lookup_agent, update_trust_level
 from core_api.services.audit_service import log_action
 from core_api.services.organization_settings import validate_search_profile
 
@@ -179,6 +179,15 @@ async def patch_agent_tune(
     # An agent may tune ITS OWN profile (also exposed via MCP caura_tune), but
     # not a peer's — block cross-agent tamper while leaving self-tune + admin keys.
     auth.enforce_self_agent(agent_id, message="Agents can only tune their own search profile.")
+    # M-123: that check passes a credential with no agent identity, and an
+    # install credential has none on the wire. The install must already own the
+    # agent: an unclaimed, missing or foreign one is refused (403, without saying
+    # which). Not the write gate's first-touch leniency: MCP ``caura_tune`` gets
+    # that through ``resolve_write_agent``, which claims the agent, but this
+    # route claims nothing, so an unclaimed agent would stay tunable by every
+    # install. Not degraded either: the agent is the resource this URL names.
+    if auth.is_install_credential:
+        await enforce_broker_agent_ownership(tenant_id, agent_id, auth.install_uuid)
     sc = get_storage_client()
     # ``read=False``: this row is not just inspected, it is MERGED INTO below —
     # ``current`` starts as the stored profile and only the supplied fields are

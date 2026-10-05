@@ -24,6 +24,7 @@ from core_api.middleware.idempotency import (
 from core_api.middleware.rate_limit import write_limit
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.agent_service import (
+    broker_owned_agent_id,
     enforce_delete,
     enforce_document_overwrite,
     enforce_fleet_write,
@@ -449,6 +450,15 @@ async def upsert_document(
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()
     auth.enforce_usage_limits()
+    # M-123: an install credential has no identity for the check above to bind,
+    # so its ``agent_id`` is a claim. Held to the broker ownership boundary the
+    # other REST writes apply: a name another install owns becomes this
+    # install's own ``broker:`` identity, as the document's author and in the
+    # skills write context. The memory minted from the document is attributed
+    # to ``auth.agent_id`` instead (the doc indexer, for a credential with no
+    # identity), so it never carried the claim.
+    if auth.is_install_credential and author is not None:
+        author = await broker_owned_agent_id(author, auth.install_uuid, body.tenant_id)
     # Agent credentials get the trust ladder every other agent write gets.
     # Tenant keys / sessions carry no trust level and keep their tenant-wide
     # authority (the same split ``DELETE /documents/{doc_id}`` draws).

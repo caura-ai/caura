@@ -137,6 +137,46 @@ async def test_doc_write_mint_is_attributed_to_the_install_owned_identity(
     assert mint.await_args.kwargs["agent_id"] == "broker:install-A"
 
 
+async def test_doc_write_skills_context_is_the_install_owned_identity(
+    ctx, sc, monkeypatch
+):
+    """M-79: the skills validator ran on the claimed ``agent_id``.
+
+    It binds a staged draft to its author and stamps ``data.origin.agent_id``,
+    so an install naming another install's agent passed that agent's draft
+    ownership check and was recorded as it.
+    """
+    tenant, arm = ctx
+    await _seed_agent(sc, tenant, "victim", 1, owner_install_uuid="install-B")
+    arm(install_uuid="install-A")
+    monkeypatch.setattr(
+        mcp_server,
+        "get_settings_for_display",
+        AsyncMock(return_value={"skills_factory": {"enabled": True}}),
+    )
+
+    out = await mcp_server.caura_doc(
+        op="write",
+        collection="skills",
+        doc_id="forge-x",
+        data={
+            "name": "Forge X",
+            "slug": "forge-x",
+            "description": "what this skill does",
+            "domain": "ops",
+            "kind": "create",
+            "source": "agent",
+            "content": "# Forge X\n\nDo the thing safely.",
+            "summary": "Use when doing the thing in ops.",
+        },
+        agent_id="victim",
+    )
+
+    assert not is_error_envelope(out), out
+    stored = await sc.get_document(tenant, "skills", "forge-x", read=False)
+    assert stored["data"]["origin"]["agent_id"] == "broker:install-A"
+
+
 # ---------------------------------------------------------------------------
 # caura_doc op=write — overwriting another agent's document needs trust 3
 # ---------------------------------------------------------------------------

@@ -882,3 +882,65 @@ async def test_a_tenant_credential_continues_any_adapter_stream(
     )
     assert resp.status_code == 200, resp.text
     assert await interview_service.read_watermark(tenant, stream) == 5
+
+
+# ---------------------------------------------------------------------------
+# M-123 — install credentials on PATCH /agents/{id}/tune and POST /documents
+# ---------------------------------------------------------------------------
+#
+# An install (broker) credential carries no agent identity, so
+# ``enforce_self_agent`` passes it, and these two routes trusted the agent it
+# named. Their MCP twins and the other REST writes hold it to the broker
+# ownership boundary: an agent another install owns is not its to act as.
+# Tune is stricter: it claims nothing, so an unclaimed agent is refused too.
+
+
+@pytest.mark.parametrize("owner", ["install-b", None])
+async def test_an_install_cannot_tune_an_agent_it_does_not_own(
+    client, as_auth, sc, owner
+):
+    """``None`` is an agent no install has claimed. Tune does not claim it, so
+    a lenient gate would leave it tunable by every install in the tenant."""
+    tenant = new_tenant_id()
+    await get_or_create_agent(tenant, "victim", owner_install_uuid=owner)
+    as_auth(tenant, is_install_credential=True, install_uuid="install-a")
+
+    resp = await client.patch(
+        f"/api/v1/agents/victim/tune?tenant_id={tenant}", json={"top_k": 3}
+    )
+
+    assert resp.status_code == 403, resp.text
+    victim = await sc.get_agent("victim", tenant, read=False)
+    assert not (victim.get("search_profile") or {}).get("top_k")
+
+
+async def test_an_install_still_tunes_an_agent_it_owns(client, as_auth, sc):
+    tenant = new_tenant_id()
+    await get_or_create_agent(tenant, "mine", owner_install_uuid="install-a")
+    as_auth(tenant, is_install_credential=True, install_uuid="install-a")
+
+    resp = await client.patch(
+        f"/api/v1/agents/mine/tune?tenant_id={tenant}", json={"top_k": 3}
+    )
+
+    assert resp.status_code == 200, resp.text
+    mine = await sc.get_agent("mine", tenant, read=False)
+    assert mine["search_profile"]["top_k"] == 3
+
+
+@pytest.mark.parametrize(
+    ("owner", "author"),
+    [("install-b", "broker:install-a"), ("install-a", "named")],
+)
+async def test_an_install_writes_a_document_only_as_an_agent_it_owns(
+    client, as_auth, sc, owner, author
+):
+    tenant = new_tenant_id()
+    await get_or_create_agent(tenant, "named", owner_install_uuid=owner)
+    as_auth(tenant, is_install_credential=True, install_uuid="install-a")
+    doc_id = f"doc-{_uid()}"
+
+    resp = await _write_doc(client, tenant, doc_id, {"steps": "x"}, agent_id="named")
+
+    assert resp.status_code == 200, resp.text
+    assert (await _stored_doc(sc, tenant, doc_id))["agent_id"] == author

@@ -107,6 +107,8 @@ def _auth():
     class _Auth:
         tenant_id = "t1"
         agent_id = "agent-a"
+        is_install_credential = False
+        install_uuid = None
 
         def enforce_tenant(self, _t):
             return None
