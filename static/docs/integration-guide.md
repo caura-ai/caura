@@ -230,9 +230,11 @@ CAURA_NODE_NAME=my-gateway                              # friendly name shown in
 The plugin loads this `.env` file automatically. Both `CAURA_*` and `MEMCLAW_*` keys are read — and only those, so a `.env` cannot set `PATH` or `NODE_OPTIONS`. The pre-rename `MEMCLAW_*` spelling of every name above keeps working; where both are set the first **non-empty** one wins, so a half-filled template cannot blank out a working value. If you use systemd, also add the vars to a drop-in file (`.env` values don't override existing process env). <!-- legacy-name-floor: rule 3 dual-read alias -->
 
 Automatic conversation writes include user messages from `ingest`, assistant
-turn summaries and compaction summaries, stored as episode memories with the
-server's default `scope_team` visibility. Set `CAURA_AUTO_WRITE_TURNS=false` and
-restart the plugin to disable all three. Local message buffering, recall,
+turn summaries, compaction summaries, and the session summary that OpenClaw's
+pre-compaction memory-flush turn asks the agent to write, all stored as episode
+memories with the server's default `scope_team` visibility. Set
+`CAURA_AUTO_WRITE_TURNS=false` and restart the plugin to disable all four;
+OpenClaw then runs no memory-flush turn. Local message buffering, recall,
 explicit memory tools and runtime compaction continue to work. This does not
 delete existing memories or disable the separately enabled Interviewer
 (`CAURA_INTERVIEWER`).

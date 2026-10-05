@@ -32,19 +32,23 @@ import { hasPluginEnvPrefix } from "./env.js";
 describe("automatic conversation-write opt-out", () => {
   // env.ts resolves flags at module load. Separate processes exercise the real
   // environment boundary without leaking state into the rest of this suite.
-  for (const setting of [undefined, "true", "false"]) {
-    test(`all automatic write paths honor ${setting ?? "the default"}`, () => {
-      const env: NodeJS.ProcessEnv = Object.fromEntries(
-        Object.entries(process.env).filter(([key]) => !hasPluginEnvPrefix(key)),
-      );
-      env.CAURA_TENANT_ID = "auto-write-fixture";
-      env.CAURA_INTERVIEWER = "false";
-      if (setting !== undefined) env.CAURA_AUTO_WRITE_TURNS = setting;
-      execFileSync(process.execPath, [
-        fileURLToPath(new URL("./context-engine-auto-write.fixture.js", import.meta.url)),
-        setting === "false" ? "disabled" : "enabled",
-      ], { env, timeout: 15_000, stdio: "pipe" });
-    });
+  // The context-engine fixture covers ingest, afterTurn and compact; the
+  // memory-flush fixture covers the pre-compaction flush turn (M-106).
+  for (const fixture of ["context-engine-auto-write", "memory-flush-auto-write"]) {
+    for (const setting of [undefined, "true", "false"]) {
+      test(`${fixture} honors ${setting ?? "the default"}`, () => {
+        const env: NodeJS.ProcessEnv = Object.fromEntries(
+          Object.entries(process.env).filter(([key]) => !hasPluginEnvPrefix(key)),
+        );
+        env.CAURA_TENANT_ID = "auto-write-fixture";
+        env.CAURA_INTERVIEWER = "false";
+        if (setting !== undefined) env.CAURA_AUTO_WRITE_TURNS = setting;
+        execFileSync(process.execPath, [
+          fileURLToPath(new URL(`./${fixture}.fixture.js`, import.meta.url)),
+          setting === "false" ? "disabled" : "enabled",
+        ], { env, timeout: 15_000, stdio: "pipe" });
+      });
+    }
   }
 });
 

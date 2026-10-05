@@ -61,7 +61,7 @@ Read by the OpenClaw plugin. The plugin's published name (`memclaw`) and these v
 | `CAURA_TENANT_ID` | Optional pre-resolved tenant id; bypasses lookup. |
 | `CAURA_FLEET_ID` | Default fleet id for writes/heartbeat. |
 | `CAURA_NODE_NAME` | Fleet node identifier reported on heartbeat. |
-| `CAURA_AUTO_WRITE_TURNS` | Automatic conversation-memory writes (default `true`): user messages from `ingest`, assistant turn summaries and compaction summaries. Set `false` to disable all three. |
+| `CAURA_AUTO_WRITE_TURNS` | Automatic conversation-memory writes (default `true`): user messages from `ingest`, assistant turn summaries, compaction summaries, and the session summary that OpenClaw's pre-compaction memory-flush turn asks the agent to write. Set `false` to disable all four; OpenClaw then runs no memory-flush turn. |
 
 The automatic writes create episode memories using the server's default
 visibility (`scope_team`). Ingest saves user messages of at least 100 characters,

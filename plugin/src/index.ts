@@ -27,6 +27,7 @@ import { getOpenClawBaseDir, getPluginEnvPath } from "./paths.js";
 import {
   CAURA_API_URL,
   CAURA_API_KEY,
+  CAURA_AUTO_WRITE_TURNS,
   CAURA_FLEET_ID,
   CAURA_TENANT_ID,
   CAURA_NODE_NAME,
@@ -571,6 +572,10 @@ const cauraPlugin = {
       if (typeof api.registerMemoryFlushPlan === "function") {
         api.registerMemoryFlushPlan(
           (params?: { cfg?: unknown; nowMs?: number } | null) => {
+            // M-106: the flush turn asks the agent to caura_write a session
+            // summary, an automatic write like the three the context engine
+            // gates on this flag. OpenClaw runs no flush turn for a null plan.
+            if (!CAURA_AUTO_WRITE_TURNS) return null;
             try {
               const candidate = params?.nowMs;
               // Number.isFinite(-1) === true, so a negative nowMs
