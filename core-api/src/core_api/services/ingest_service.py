@@ -1246,7 +1246,7 @@ async def ingest_preview(request: IngestRequest) -> dict:
     }
 
 
-def _summarize_batch_for_embedding(survivors: list, cap: int = _PARENT_DOC_SUMMARY_CAP) -> str | None:
+def _summarize_batch_for_embedding(facts: list, cap: int = _PARENT_DOC_SUMMARY_CAP) -> str | None:
     """Build a short, embeddable summary from the first few facts of an ingest batch.
 
     Returned string goes into the parent Document's ``data["summary"]`` field
@@ -1262,7 +1262,7 @@ def _summarize_batch_for_embedding(survivors: list, cap: int = _PARENT_DOC_SUMMA
     """
     parts: list[str] = []
     total = 0
-    for f in survivors:
+    for f in facts:
         text = (getattr(f, "content", None) or "").strip()
         if not text:
             continue
@@ -1283,6 +1283,7 @@ async def _write_parent_ingest_document(
     request: IngestCommitRequest,
     run_id: str,
     survivors: list,
+    governed: list,
     created: int,
     errored: int,
     skipped: int,
@@ -1295,8 +1296,10 @@ async def _write_parent_ingest_document(
     NOT roll back the memories the commit just wrote; we log and continue.
 
     The Document's ``data["summary"]`` is populated from the first ~500 chars
-    of fact contents so the storage layer embeds it (free semantic search
-    over uploaded files). Other fields are pure provenance metadata.
+    of the ``governed`` items' contents, so the storage layer embeds it (free
+    semantic search over uploaded files). Those are the bulk items as the PII
+    gate left them, never the raw ``survivors`` (M-121). Other fields are pure
+    provenance metadata.
 
     Skipped entirely when ``created == 0`` — a batch that produced no new
     memories doesn't need a parent record (it was a full dedup hit; the
@@ -1326,7 +1329,7 @@ async def _write_parent_ingest_document(
         "ingest_ms": ingest_ms,
         "agent_id": request.agent_id,
     }
-    summary = _summarize_batch_for_embedding(survivors)
+    summary = _summarize_batch_for_embedding(governed)
     payload: dict = {
         "tenant_id": request.tenant_id,
         "fleet_id": request.fleet_id,
@@ -1581,6 +1584,14 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
     # only — the latency win outweighs the loss. Verbatim re-ingest of
     # the same content is still caught by the content-hash dedup at the
     # top of this function and inside ``create_memories_bulk``.
+    #
+    # M-121: the items each bulk call did not refuse, for the parent summary.
+    # The bulk PII gate masks an item's ``content`` in place and refuses an
+    # item as a per-item error, so these hold the text that was stored. The
+    # summary was built from ``survivors``, the facts as extracted, which put a
+    # refused fact, or a masked one unmasked, into a document any credential in
+    # the tenant can read.
+    governed: list[BulkMemoryItem] = []
     if survivors:
         bulk_items: list[BulkMemoryItem] = []
         for fact in survivors:
@@ -1668,7 +1679,7 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                 errored += bulk_response.errors
                 # Surface per-item error reasons in the logs so the cleanup
                 # message at the bottom of this function still points at the
-                # offending facts.
+                # offending facts. Every other item goes to the summary.
                 for item in bulk_response.results:
                     if item.status == "error":
                         # Mirror the legacy "fact[N]" log format the
@@ -1683,6 +1694,8 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                             run_id,
                             item.error,
                         )
+                    else:
+                        governed.append(bulk_data.items[item.index])
             except HTTPException as e:
                 # A 4xx/5xx from the bulk endpoint aborts this batch (e.g. 504
                 # from the bulk-embedding timeout). Stop rather than carry on:
@@ -1748,6 +1761,7 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
         request=request,
         run_id=run_id,
         survivors=survivors,
+        governed=governed,
         created=created,
         errored=errored,
         skipped=skipped,

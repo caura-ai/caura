@@ -31,7 +31,15 @@ from sqlalchemy import text
 import core_api.services.organization_settings as ts_svc
 from common.enrichment.schema import EnrichmentResult
 from core_api.clients.storage_client import get_storage_client
-from core_api.schemas import BulkMemoryCreate, BulkMemoryItem, MemoryCreate, MemoryOut
+from core_api.schemas import (
+    BulkMemoryCreate,
+    BulkMemoryItem,
+    IngestCommitRequest,
+    IngestFact,
+    MemoryCreate,
+    MemoryOut,
+)
+from core_api.services.ingest_service import INGEST_DOCUMENTS_COLLECTION, ingest_commit
 from core_api.services.memory_service import create_memories_bulk, create_memory
 from core_api.services.organization_settings import invalidate_cache, update_settings
 from core_storage_api.services.postgres_service import PostgresService, get_session
@@ -411,6 +419,50 @@ async def test_bulk_flag_marks_stored_metadata():
     assert any(
         r["action"] == "pii_flag" and r["detail"]["write_mode"] == "bulk" for r in rows
     ), rows
+
+
+# ── Ingest commit's parent summary (M-121) ───────────────────────────────────
+#
+# ``ingest_commit`` writes one parent document per batch, and its
+# ``data["summary"]`` is built from the batch's facts and embedded. It was built
+# from the facts as extracted, so a fact the bulk gate above refused, or one it
+# masked, reached that document raw, readable through /documents by any
+# credential in the tenant.
+
+
+async def _commit_and_read_summary(tenant: str, contents: list[str]) -> str:
+    result = await ingest_commit(
+        IngestCommitRequest(
+            tenant_id=tenant,
+            fleet_id="test-fleet",
+            agent_id="test-agent",
+            facts=[IngestFact(content=c) for c in contents],
+        )
+    )
+    assert result["memories_created"] >= 1, result
+    doc = await get_storage_client().get_document(
+        tenant, INGEST_DOCUMENTS_COLLECTION, result["run_id"], read=False
+    )
+    return doc["data"]["summary"]
+
+
+async def test_ingest_summary_leaves_out_a_dropped_fact():
+    tenant = _tenant()
+    await _seed_governance(tenant, pii={"enabled": True, "action": "drop"})
+    clean = f"Quarterly planning notes for the team.{_PADDING}"
+    dirty = f"Customer card 4111 1111 1111 1111 is on file.{_PADDING}"
+    summary = await _commit_and_read_summary(tenant, [clean, dirty])
+    assert "Quarterly planning notes" in summary
+    assert "4111" not in summary
+
+
+async def test_ingest_summary_carries_a_masked_fact_masked():
+    tenant = _tenant()
+    await _seed_governance(tenant, pii={"enabled": True, "action": "mask"})
+    dirty = f"Reach me at jane.roe@example.com about the deal.{_PADDING}"
+    summary = await _commit_and_read_summary(tenant, [dirty])
+    assert "about the deal" in summary
+    assert "jane.roe@example.com" not in summary
 
 
 # ── PII deterministic gate on CONTENT EDITS (update_memory) ──────────────────
