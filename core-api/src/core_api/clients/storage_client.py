@@ -660,7 +660,17 @@ class CoreStorageClient:
         resp.raise_for_status()
         return True
 
-    async def _post_optional(self, path: str, data: Any = None, *, read: bool = False) -> dict | None:
+    async def _post_optional(
+        self,
+        path: str,
+        data: Any = None,
+        *,
+        read: bool = False,
+        retry: Callable[..., Awaitable[httpx.Response]] = with_connect_phase_retry,
+    ) -> dict | None:
+        """POST that answers ``None`` on a 404. ``retry`` defaults to the POST
+        policy; a caller whose POST only names what to read or delete (the
+        body-addressed document routes) passes the GET or DELETE policy."""
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
 
@@ -672,7 +682,7 @@ class CoreStorageClient:
                 headers=headers,
             )
 
-        resp = await self._execute(_do, retry=with_connect_phase_retry, label=f"POST {path}")
+        resp = await self._execute(_do, retry=retry, label=f"POST {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=read)
@@ -2165,14 +2175,14 @@ class CoreStorageClient:
         # (e.g. immediately after an upsert) so replication lag can't yield None.
         # ``readable_tenant_ids`` widens the tenant predicate to ANY($readable)
         # for cross-tenant credentials (omit ⇒ home-tenant only).
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        # M-14: both names travel in the body. In the path, a ``/`` in the
+        # collection, a ``?``, ``#``, ``%XX`` or dot segment in either, reached
+        # a different document or route, and storage decodes the path before
+        # routing it, so escaping cannot fix the ``/``.
+        body: dict[str, Any] = {"tenant_id": tenant_id, "collection": collection, "doc_id": doc_id}
         if readable_tenant_ids is not None:
-            params["readable_tenant_ids"] = readable_tenant_ids
-        return await self._get(
-            f"/documents/{collection}/{doc_id}",
-            read=read,
-            **params,
-        )
+            body["readable_tenant_ids"] = readable_tenant_ids
+        return await self._post_optional("/documents/get", body, read=read, retry=_read_retry)
 
     async def count_unindexed_documents(self, data: dict) -> int:
         """Documents in scope that vector search cannot see (ax-0917-h-08)."""
@@ -2248,10 +2258,17 @@ class CoreStorageClient:
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
-        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
+        # Body-addressed, as ``get_document`` is (M-14).
+        body: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "collection": collection,
+            "limit": limit,
+            "offset": offset,
+        }
         if fleet_id is not None:
-            params["fleet_id"] = fleet_id
-        return await self._get_list(f"/documents/{collection}", **params)
+            body["fleet_id"] = fleet_id
+        docs = await self._post_optional("/documents/list", body, read=True, retry=_read_retry)
+        return docs or []  # type: ignore[return-value]
 
     async def delete_document(
         self,
@@ -2265,13 +2282,12 @@ class CoreStorageClient:
         # DELETE atomically (the MCP skills active-only gate): a non-matching /
         # missing row deletes nothing and returns False, indistinguishable from
         # a missing one. Home-tenant scoped (deletes never span readable tenants).
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        # Body-addressed, as ``get_document`` is (M-14), with the DELETE retry
+        # policy: a replay after a committed delete 404s, as a DELETE's does.
+        body: dict[str, Any] = {"tenant_id": tenant_id, "collection": collection, "doc_id": doc_id}
         if require_status is not None:
-            params["require_status"] = require_status
-        return await self._delete(
-            f"/documents/{collection}/{doc_id}",
-            **params,
-        )
+            body["require_status"] = require_status
+        return await self._post_optional("/documents/delete", body, retry=with_retry) is not None
 
     # =====================================================================
     # Skill factory pipeline (Fix 2 Ph5a)
