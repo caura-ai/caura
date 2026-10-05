@@ -2699,6 +2699,7 @@ async def _schedule_enrich_or_inline(
     caller_owned_metadata_keys: list[str] | None = None,
     reference_datetime: datetime | None = None,
     run_governance_remediation: bool = False,
+    current_content_only: bool = False,
 ) -> None:
     """Enrichment counterpart of :func:`_schedule_embed_or_reembed`.
 
@@ -2746,6 +2747,7 @@ async def _schedule_enrich_or_inline(
             caller_owned_metadata_keys=caller_owned_metadata_keys,
             governance_config=tenant_config,
             run_governance_remediation=run_governance_remediation,
+            current_content_only=current_content_only,
         )
         # H-18 governance (the LLM verdict) is applied INSIDE
         # ``_enrich_memory_background``, not here.
@@ -3733,6 +3735,7 @@ async def _enrich_memory_background(
     caller_owned_metadata_keys: list[str] | None = None,
     governance_config: object | None = None,
     run_governance_remediation: bool = False,
+    current_content_only: bool = False,
 ) -> dict | None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
@@ -3777,7 +3780,12 @@ async def _enrich_memory_background(
     EXPLICITLY at write time (computed by ``_agent_provided_enrichment_fields``
     from ``model_fields_set``); those are left untouched. It is the same list
     the deferred/worker path already receives via
-    ``publish_memory_enrich_request``.
+    ``publish_memory_enrich_request``. An edit (``update_memory``, H-07) also
+    pins ``atomic_facts``, and ``title`` and the dates when the row holds one or
+    the PATCH names one.
+
+    ``current_content_only`` is an edit's: the run does nothing once the row no
+    longer holds ``content``, because a later edit has scheduled its own.
 
     CAURA-716: this parameter previously did not exist, and the inline path
     instead inferred caller intent by comparing the row's current value against
@@ -3855,8 +3863,18 @@ async def _enrich_memory_background(
 
     try:
         sc = get_storage_client()
-        mem = await sc.get_memory(str(memory_id), tenant_id)
+        mem = await sc.get_memory(str(memory_id), tenant_id, read=not current_content_only)
         if mem is None or mem.get("deleted_at") is not None:
+            return None
+        # H-07: an edit's run is stale once a later edit replaced the text it
+        # judged. That edit scheduled its own run; this one would write the old
+        # text's verdicts over the new and remediate on text the row no longer
+        # holds. Read from the writer for this, or replica lag could make the
+        # NEWEST run look stale and skip it.
+        if current_content_only and mem.get("content") != content:
+            logger.info(
+                "Background enrichment of memory %s skipped: a later edit changed its content", memory_id
+            )
             return None
 
         # Build update patch.
@@ -3880,7 +3898,9 @@ async def _enrich_memory_background(
             patch["memory_type"] = enrichment.memory_type
         if not _agent_pinned("weight", mem.get("weight") == 0.5) and enrichment.weight is not None:
             patch["weight"] = enrichment.weight
-        if enrichment.title:
+        # ``in pinned`` rather than ``_agent_pinned``: only an edit pins ``title``
+        # (H-07), and with no list there is nothing to protect.
+        if enrichment.title and "title" not in pinned:
             patch["title"] = enrichment.title
 
         # See ``_dict_to_memory_out`` for the falsy-``{}`` trap.
@@ -4043,7 +4063,9 @@ async def _enrich_memory_background(
         # ``fact_content`` (not hint-prefixed) to keep the same write/query
         # surface as the search side — see CAURA-222. Failures here are
         # non-fatal to the parent.
-        atomic_facts = getattr(enrichment, "atomic_facts", None) or []
+        # H-07: an edit pins ``atomic_facts`` — its re-enrichment derives no
+        # children, as core-worker's ``_build_patch`` skips the pinned field.
+        atomic_facts = [] if "atomic_facts" in pinned else getattr(enrichment, "atomic_facts", None) or []
         if atomic_facts:
             # L-34: the value this enrichment just wrote, when it wrote one —
             # ``mem`` was read before the PATCH, as for the weight below.
@@ -4208,6 +4230,31 @@ async def _revert_superseded_row(sc, tenant_id: str, superseded_id: str, editor_
         logger.warning("supersession retract: could not revert %s to active", superseded_id, exc_info=True)
 
 
+#: H-07 — what enrichment and governance concluded about a row's TEXT. A content
+#: edit makes each one a claim about text that is gone, so the edit clears them
+#: and the re-enrichment it schedules judges the new text.
+_TEXT_VERDICT_KEYS: tuple[str, ...] = (
+    "contains_pii",
+    "pii_types",
+    "pii_flagged_by",
+    "business_relevance",
+    "governance_llm_uncertain",
+)
+
+#: H-07 — what an edit's re-enrichment leaves alone (owner decision, 2026-10-05).
+#: ``memory_type`` and ``weight``: the row does not record whether its caller set
+#: them at create, so recomputing them could overwrite the caller's choice.
+#: ``atomic_facts``: an edit derives no children; B25 owns an edited row's.
+_EDIT_PINNED_ENRICHMENT_FIELDS: frozenset[str] = frozenset({"atomic_facts", "memory_type", "weight"})
+
+#: Enrichment output an edit keeps when the row already holds a value or the
+#: PATCH names the field; re-enrichment only fills an empty one. The same reason
+#: as type and weight (owner decision after the #1858 review): the row cannot say
+#: whether its caller set the value, and in deferred mode the worker clears dates
+#: the new text does not mention.
+_EDIT_KEPT_IF_SET_FIELDS: frozenset[str] = frozenset({"title", "ts_valid_start", "ts_valid_end"})
+
+
 async def update_memory(
     memory_id: UUID,
     tenant_id: str,
@@ -4292,9 +4339,12 @@ async def update_memory(
 
     new_embedding = None
     pii_flags: dict = {}
+    reenrich = False
     # Content change: re-embed, re-hash, check dedup
     if content_changed:
         tenant_config = await resolve_config(tenant_id)
+        # H-07: the same test the fast create path schedules enrichment on.
+        reenrich = tenant_config.enrichment_enabled and tenant_config.enrichment_provider != "none"
         # The tenant's PII policy applies to an edit exactly as to a create, and
         # before anything below sees the text (embedding, hash, audit diff).
         from core_api.services.pii_update_gate import apply_pii_policy_to_update
@@ -4611,19 +4661,32 @@ async def update_memory(
     # (``core_worker.clients.storage_client``), but a successful INLINE re-embed
     # schedules no worker task, so nothing else was ever going to.
     if content_changed:
-        pending = new_embedding is None
         if "metadata_" in patch:
-            set_system_value(patch["metadata_"], "embedding_pending", pending)
+            # Replace mode. ``metadata: null`` clears the column, so the platform
+            # values below go into the empty dict that leaves; written onto
+            # ``None`` they were an AttributeError and a 500.
+            system_patch = patch["metadata_"] = dict(patch["metadata_"] or {})
         else:
-            pending_patch = dict(patch.get("metadata_patch") or {})
-            set_system_value(pending_patch, "embedding_pending", pending)
-            patch["metadata_patch"] = pending_patch
-        if pii_flags:
-            # ``flag`` action: the same markers a create would set.
-            if "metadata_" in patch:
-                patch["metadata_"].update(pii_flags)
-            else:
-                patch["metadata_patch"] = {**(patch.get("metadata_patch") or {}), **pii_flags}
+            system_patch = patch["metadata_patch"] = dict(patch.get("metadata_patch") or {})
+            # H-07: the old text's verdicts. A merge cannot delete a key, so they
+            # are cleared as null; a replace-mode dict never holds them, because
+            # caller metadata is sanitised.
+            for key in _TEXT_VERDICT_KEYS:
+                set_system_value(system_patch, key, None)
+            # The claims the worker persisted from the OLD text. The ENRICHED
+            # consumer fans out whatever this holds, and the edit pins
+            # ``atomic_facts``, so the worker would never replace it. Top level,
+            # where the consumer reads and clears it.
+            system_patch["atomic_facts"] = None
+        set_system_value(system_patch, "embedding_pending", new_embedding is None)
+        if reenrich:
+            set_system_value(system_patch, "enrichment_pending", True)
+        # ``flag`` action: the same markers a create would set. Key by key: the
+        # flag dict carries its own ``_system``, and merging it whole replaced the
+        # patch's, ``caller_owned`` and ``embedding_pending`` included (M-118).
+        for key, value in pii_flags.items():
+            if key != SYSTEM_NAMESPACE:
+                set_system_value(system_patch, key, value)
 
     # Entity links: ADD the named links when explicitly provided. Never a
     # replace — see the ``changes`` entry below for what the storage call does
@@ -4785,6 +4848,45 @@ async def update_memory(
                         is_failure_fallback=True,
                     ),
                     "embed_or_publish",
+                    memory_id,
+                    tenant_id,
+                )
+            )
+        # H-07: the new text gets the LLM governance a create's text gets. Only
+        # the deterministic gate above had seen it, so the LLM's PII verdict, the
+        # business/personal disposition and their remediation (drop, keep
+        # private) never applied to an edit. Fast-mode semantics, by owner
+        # decision: this PATCH has returned before the verdict lands, inline in
+        # the background or through the worker.
+        #
+        # ``run_governance_remediation=True``, per ``_schedule_enrich_or_inline``'s
+        # rule for a new call site: no synchronous ``GovernanceDecision`` ran for
+        # this text. The pins are what the edit keeps (see
+        # ``_EDIT_PINNED_ENRICHMENT_FIELDS``); the caller-owned keys are read off
+        # the row as committed, because a deferred worker sees nothing else.
+        if reenrich:
+            row_meta = updated.get("metadata_")
+            if row_meta is None:
+                row_meta = updated.get("metadata")
+            kept = {f for f in _EDIT_KEPT_IF_SET_FIELDS if f in fields_set or mem.get(f) is not None}
+            pins = _EDIT_PINNED_ENRICHMENT_FIELDS | kept
+            track_task(
+                tracked_task(
+                    _schedule_enrich_or_inline(
+                        memory_id,
+                        updated.get("content"),
+                        tenant_id,
+                        updated.get("fleet_id"),
+                        updated.get("agent_id"),
+                        tenant_config,
+                        agent_provided_fields=sorted(pins),
+                        caller_owned_metadata_keys=sorted(caller_owned_keys(row_meta)),
+                        run_governance_remediation=True,
+                        # Inline only: the deferred worker receives no such
+                        # check, so a superseded run can still land there.
+                        current_content_only=True,
+                    ),
+                    "background_enrichment",
                     memory_id,
                     tenant_id,
                 )

@@ -561,6 +561,10 @@ async def _run_update(
     class _Config:
         semantic_dedup_enabled = False
         entity_extraction_enabled = False
+        # H-07: a content edit re-enriches when the tenant enriches. Off here, so
+        # these tests see only the edit itself; test_h07_edit_reenrichment covers it.
+        enrichment_enabled = False
+        enrichment_provider = "none"
 
     async def _resolve_config(_tenant):
         return _Config()
