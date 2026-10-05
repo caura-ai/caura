@@ -1124,6 +1124,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         build_fast_persist_pipeline,
         build_persist_pipeline,
     )
+    from core_api.pipeline.steps.write.write_memory_row import write_entity_links
     from core_api.services.ingest_service import _chunk_content
 
     # #852: apply the LLM's free-form verdict, which this branch had computed
@@ -1253,6 +1254,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             set_system_value(parent_metadata, "embedding_pending", True)
         if defer_enrichment:
             set_system_value(parent_metadata, "enrichment_pending", True)
+        # L-32: server-set, as ``WriteMemoryRow`` sets it. The children copy the
+        # parent's flag: they are cut out of the same row.
+        is_inferred = bool(ctx.data.get("is_inferred", False))
 
         # Auto-chunk parent insert — wrapped in the storage bulkhead
         # like the regular single-write path. Auto-chunk fires two
@@ -1297,10 +1301,15 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     else None,
                     "status": fields["status"],
                     "visibility": data.visibility or "scope_team",
+                    "is_inferred": is_inferred,
                 }
             )
 
         parent_id = parent.get("id")
+        # M-51: the caller's links go on the parent only (owner decision
+        # 2026-10-05), written and degraded as the single write's are, and the
+        # answer echoes the ones that persisted.
+        linked, _ = await write_entity_links(sc, data.entity_links, parent_id, data.tenant_id)
 
         _hooks = get_hooks()
         if _hooks.audit_log:
@@ -1362,6 +1371,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "expires_at": data.expires_at.isoformat() if data.expires_at else None,
                     "status": fields["status"],
                     "visibility": data.visibility or "scope_team",
+                    "is_inferred": is_inferred,
                 }
             )
         # Auto-chunk children — second storage roundtrip in this request after
@@ -1468,7 +1478,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                 )
             )
 
-        return _dict_to_memory_out(parent)
+        return _dict_to_memory_out(
+            parent, entity_links=[EntityLinkOut(entity_id=link.entity_id, role=link.role) for link in linked]
+        )
 
     # Chunking produced 0-1 facts: fall through to persist pipeline. Governed
     # by the gate at the top of this function — neither persist pipeline has a

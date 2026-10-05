@@ -401,9 +401,12 @@ async def _chunk_content(
             dropped_low_salience += 1
             continue
 
-        st = item.get("suggested_type", "fact")
-        if st not in MEMORY_TYPES:
-            st = "fact"
+        # L-135: only a type a caller may write, as ``ingest_commit`` coerces
+        # (M-42), so the preview, auto-chunk and commit agree. A reserved type
+        # (``outcome``, ``rule``) used to reach an auto-chunk child row as is.
+        st = item.get("suggested_type", DEFAULT_MEMORY_TYPE)
+        if st not in MEMORY_TYPES_WRITE:
+            st = DEFAULT_MEMORY_TYPE
 
         fact_out: dict = {"content": body, "suggested_type": st}
         # Surface salience on the returned fact when present, so the
