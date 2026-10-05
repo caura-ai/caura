@@ -22,10 +22,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import httpx
-
 from ..client import Caura
-from ..exceptions import AuthError, CauraAPIError, NotFoundError
+from ..exceptions import AuthError, CauraAPIError, NotFoundError, TransportError
 from .discovery import HARNESS_CLAUDE_CODE, HARNESS_CURSOR, Transcript
 from .parser import count_lines, scan_events
 from .windows import Window, build_windows, window_is_worth_interviewing
@@ -190,7 +188,7 @@ def run_file(mc: Caura, transcript: Transcript, cfg: RunConfig, windows_budget: 
             result.error = f"window [{window.cursor_from}..{window.cursor_to}]: {exc}"
             _log(cfg, f"{transcript.path.name}: {result.error} - skipping file")
             break
-        except httpx.TransportError as exc:
+        except TransportError as exc:
             result.error = f"transport: {exc}"
             _log(cfg, f"{transcript.path.name}: {result.error} - skipping file")
             break
@@ -215,7 +213,7 @@ def _try_submit(mc: Caura, cfg: RunConfig, node_id: str, window: Window) -> dict
             _log(cfg, f"504 on [{window.cursor_from}..{window.cursor_to}], one dedup-safe retry")
             return _submit_window(mc, cfg, node_id, window)
         raise
-    except httpx.TransportError:
+    except TransportError:
         _log(cfg, f"transport error on [{window.cursor_from}..{window.cursor_to}], one dedup-safe retry")
         return _submit_window(mc, cfg, node_id, window)
 
