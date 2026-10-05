@@ -8,6 +8,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.constants import (
     ENTITY_RESOLUTION_THRESHOLD,
 )
+from core_api.errors import AUTH_FLEET_SCOPE_FORBIDDEN, coded_detail
 from core_api.schemas import (
     EntityLinkOut,
     EntityOut,
@@ -495,7 +496,10 @@ async def get_entity(
     )
 
 
-async def upsert_relation(data: RelationUpsert) -> RelationUpsertOut:
+async def upsert_relation(data: RelationUpsert, *, fleet_scope: dict | None = None) -> RelationUpsertOut:
+    """``fleet_scope`` (M-84): ``{"fleet_id": ...}`` for an agent credential below
+    trust 3, so storage refuses a relation whose endpoints, evidence or existing
+    edge are outside that fleet. ``None`` for every other caller."""
     sc = get_storage_client()
 
     # Storage API does an actual UPSERT (``ON CONFLICT DO UPDATE`` on
@@ -512,9 +516,21 @@ async def upsert_relation(data: RelationUpsert) -> RelationUpsertOut:
                 "to_entity_id": str(data.to_entity_id),
                 "weight": data.weight,
                 "evidence_memory_id": str(data.evidence_memory_id) if data.evidence_memory_id else None,
+                **({"fleet_scope": fleet_scope} if fleet_scope is not None else {}),
             }
         )
     except httpx.HTTPStatusError as exc:
+        # Storage's fleet check refuses with 403, and runs only when this call
+        # sent a ``fleet_scope``. Any other 403 is unexpected and propagates,
+        # as other upstream statuses do (M-42).
+        if exc.response.status_code == 403 and fleet_scope is not None:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_FLEET_SCOPE_FORBIDDEN,
+                    "fleet-scope policy: the relation reaches a fleet this agent may not write.",
+                ),
+            ) from exc
         if exc.response.status_code != 409:
             raise
         # Storage refuses foreign and missing endpoints identically. Preserve

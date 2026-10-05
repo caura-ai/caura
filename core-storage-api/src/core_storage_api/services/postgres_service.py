@@ -934,6 +934,9 @@ _LINK_REJECTED = "entity link rejected: memory_id or entity_id does not exist, o
 # no request, so a distinguishable refusal turns the route into an existence
 # oracle over the whole entity id space (GHSA-wgvw-28pq-jc36).
 _RELATION_REJECTED = "relation rejected: from_entity_id or to_entity_id does not exist"
+# M-84. One message for every cause, as ``_RELATION_REJECTED`` is: which end, the
+# evidence or the existing edge is not the caller's to know.
+_RELATION_FLEET_REJECTED = "relation rejected: it reaches a fleet this writer may not write"
 
 
 # Migration 037 added ``embedded_content_hash`` on 2026-08-16, and every writer
@@ -8108,6 +8111,39 @@ class PostgresService:
     # Relations
     # ------------------------------------------------------------------
 
+    async def _assert_relation_in_fleet(
+        self, session: AsyncSession, data: dict, from_id: UUID, to_id: UUID, fleet_id: str | None
+    ) -> None:
+        """Refuse a relation that reaches outside ``fleet_id`` (M-84).
+
+        The route checks the body's ``fleet_id``, but a relation reaches fleets
+        through its ids too. Its endpoints and its evidence memory may be
+        ``fleet_id``'s or tenant-wide (no fleet). An existing edge must be
+        ``fleet_id``'s own: the natural key leaves fleet out, so the upsert below
+        would rewrite that edge's weight and evidence wherever it lives, and a
+        tenant-wide edge is read by every fleet's graph expansion.
+
+        Raises ``PermissionError``, which the router maps to 403.
+        """
+        tenant_id = data["tenant_id"]
+        ends = select(Entity.fleet_id).where(Entity.tenant_id == tenant_id, Entity.id.in_({from_id, to_id}))
+        reached = set((await session.execute(ends)).scalars())
+        if evidence_id := data.get("evidence_memory_id"):
+            evidence = select(Memory.fleet_id).where(
+                Memory.tenant_id == tenant_id, Memory.id == UUID(str(evidence_id))
+            )
+            reached.update((await session.execute(evidence)).scalars())
+        edge = select(Relation.fleet_id).where(
+            Relation.tenant_id == tenant_id,
+            Relation.from_entity_id == from_id,
+            Relation.relation_type == data["relation_type"],
+            Relation.to_entity_id == to_id,
+        )
+        edge_fleets = (await session.execute(edge)).scalars()
+        if reached - {None, fleet_id} or any(existing != fleet_id for existing in edge_fleets):
+            logger.info("Relation rejected for %s → %s: outside fleet %s", from_id, to_id, fleet_id)
+            raise PermissionError(_RELATION_FLEET_REJECTED)
+
     async def relation_add(self, data: dict) -> Relation:
         """Idempotent UPSERT keyed on the natural key
         ``(tenant_id, from_entity_id, relation_type, to_entity_id)``.
@@ -8156,6 +8192,10 @@ class PostgresService:
         message whichever end is at fault, and the same message a nonexistent id
         gets. See ``_RELATION_REJECTED``.
         """
+        # M-84: the fleet an agent credential below trust 3 may write, set by
+        # core-api's route, absent for every other caller. Popped before the
+        # insert, since it is not a column.
+        fleet_scope = data.pop("fleet_scope", None)
         async with get_session() as session:
             from_id, to_id = data["from_entity_id"], data["to_entity_id"]
             if not isinstance(from_id, UUID):
@@ -8178,6 +8218,9 @@ class PostgresService:
             # boundary. Checked after the endpoints so a bad endpoint keeps its
             # established 409 answer.
             await self._assert_pointers_in_tenant(session, data["tenant_id"], [data])
+            if fleet_scope is not None:
+                fleet_id = fleet_scope.get("fleet_id")
+                await self._assert_relation_in_fleet(session, data, from_id, to_id, fleet_id)
             weight = data.get("weight")
             insert_stmt = pg_insert(Relation).values(**{**data, "weight": 1.0 if weight is None else weight})
             set_: dict[str, Any] = {

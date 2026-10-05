@@ -8,6 +8,7 @@ from core_api import openapi_responses as _oar
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_ENTITY_LIMIT, MAX_LIST_LIMIT
+from core_api.errors import AUTH_AGENT_TRUST_TOO_LOW, coded_detail
 from core_api.schemas import (
     EntityOut,
     EntityUpsert,
@@ -28,6 +29,35 @@ from core_api.services.usage_service import check_and_increment_by_tenant as che
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Knowledge Graph"])
+
+
+async def _graph_write_scope(body: EntityUpsert | RelationUpsert, auth: AuthContext) -> dict | None:
+    """The memory write's gates for a graph write by an agent credential (M-84).
+
+    As on ``POST /documents``: another fleet needs trust >= 3 (this also
+    registers the agent on first contact), an agent awaiting approval (trust 0)
+    is refused, and an omitted ``fleet_id`` becomes the agent's home fleet (a
+    fleet-less node or edge is read by every fleet). Returns the fleet a
+    relation's endpoints, evidence and existing edge must stay in, for storage
+    to check, or ``None`` when the caller may reach any fleet: a tenant
+    credential, or an agent at trust >= 3.
+    """
+    if not (auth.tenant_id and auth.agent_id):
+        return None
+    agent = await enforce_fleet_write(body.tenant_id, auth.agent_id, body.fleet_id)
+    if agent.get("trust_level", 0) == 0:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{auth.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            ),
+        )
+    if not body.fleet_id and agent.get("fleet_id"):
+        body.fleet_id = agent["fleet_id"]
+    if agent.get("trust_level", 0) >= 3:
+        return None
+    return {"fleet_id": agent.get("fleet_id")}
 
 
 @router.get("/entities", responses={200: {"model": list[_oar.EntityListItem]}})
@@ -210,11 +240,9 @@ async def upsert_entity_route(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
-    # Same fleet policy as a memory write: an agent credential writing graph
-    # nodes into a fleet other than its home fleet needs trust >= 3. Tenant
-    # keys carry no trust level and are unaffected.
-    if auth.tenant_id and auth.agent_id:
-        await enforce_fleet_write(body.tenant_id, auth.agent_id, body.fleet_id)
+    # The memory write's gates. Tenant keys carry no trust level and are
+    # unaffected.
+    await _graph_write_scope(body, auth)
     if auth.tenant_id:
         await check_and_increment(body.tenant_id, "write")
     # NOTE: entity upsert uses its own connection (storage-api HTTP
@@ -280,9 +308,9 @@ async def upsert_relation_route(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
-    # Fleet policy, as on ``POST /entities/upsert`` above.
-    if auth.tenant_id and auth.agent_id:
-        await enforce_fleet_write(body.tenant_id, auth.agent_id, body.fleet_id)
+    # As on ``POST /entities/upsert`` above, and storage holds the relation's
+    # endpoints, evidence and existing edge to the same fleet.
+    fleet_scope = await _graph_write_scope(body, auth)
     if auth.tenant_id:
         await check_and_increment(body.tenant_id, "write")
-    return await upsert_relation(body)
+    return await upsert_relation(body, fleet_scope=fleet_scope)

@@ -434,6 +434,10 @@ async def create_relation(request: Request) -> dict:
         # already resolved as 409. A caller naming an entity it does not own is
         # a client error.
         raise HTTPException(status_code=409, detail=str(e))
+    except PermissionError as e:
+        # M-84: an agent's relation reaching outside its fleet. Nothing else
+        # here answers 403, so core-api can tell it from the 409 above.
+        raise HTTPException(status_code=403, detail=str(e))
     return orm_to_dict(relation, RELATION_FIELDS)
 
 

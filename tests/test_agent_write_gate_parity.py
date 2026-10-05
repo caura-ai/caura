@@ -5,7 +5,9 @@ Each route here held an agent-scoped credential to less than its neighbours:
 - ``POST /documents`` — no fleet policy (``enforce_fleet_write``), and an
   upsert could replace or ``force``-blank a document another agent authored,
   while ``DELETE /documents/{doc_id}`` needs trust >= 3.
-- ``POST /entities/upsert`` / ``POST /relations/upsert`` — no fleet policy.
+- ``POST /entities/upsert`` / ``POST /relations/upsert`` — no fleet policy;
+  then (M-84) no trust-0 refusal, an omitted fleet written fleet-less, and a
+  relation reaching another fleet's entities, evidence or edge by id.
 - ``POST /ingest/commit`` — none of the ``/memories/bulk`` identity chain
   (binding, registration, fleet policy).
 - ``POST /ingest/undo/{run_id}`` — no ``enforce_delete``.
@@ -299,6 +301,152 @@ async def test_agent_relation_upsert_into_another_fleet_is_refused(client, as_au
         },
     )
     assert resp.status_code == 403, resp.text
+
+
+# M-84: the memory write's other gates, and the fleets a relation reaches
+# through its ids rather than its body's label.
+
+
+async def _relation(client, tenant: str, a: str, b: str, **extra):
+    return await client.post(
+        "/api/v1/relations/upsert",
+        json={
+            "tenant_id": tenant,
+            "from_entity_id": a,
+            "relation_type": "depends_on",
+            "to_entity_id": b,
+            **extra,
+        },
+    )
+
+
+async def _entities(client, as_auth, tenant: str, *fleets: str | None) -> list[str]:
+    """One entity per fleet in ``fleets``, created by a tenant key."""
+    as_auth(tenant)
+    return [
+        (await _entity(client, tenant, f"e-{_uid()}", fleet)).json()["id"]
+        for fleet in fleets
+    ]
+
+
+async def _memory(sc, tenant: str, fleet_id: str | None) -> str:
+    row = await sc.create_memory(
+        {
+            "tenant_id": tenant,
+            "fleet_id": fleet_id,
+            "agent_id": "author",
+            "memory_type": "fact",
+            "content": f"evidence {_uid()}",
+            "status": "active",
+            "visibility": "scope_team",
+        }
+    )
+    return str(row["id"])
+
+
+async def test_agent_awaiting_approval_cannot_write_the_graph(client, as_auth, sc):
+    """``POST /memories`` refuses an agent at trust 0; the graph routes did not."""
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "pending", 0, "home-fleet")
+    a, b = await _entities(client, as_auth, tenant, "home-fleet", "home-fleet")
+
+    as_auth(tenant, agent_id="pending")
+    entity = await _entity(client, tenant, f"x-{_uid()}", "home-fleet")
+    assert entity.status_code == 403, entity.text
+    relation = await _relation(client, tenant, a, b, fleet_id="home-fleet")
+    assert relation.status_code == 403, relation.text
+
+
+async def test_agent_graph_write_without_fleet_lands_in_its_home_fleet(
+    client, as_auth, sc
+):
+    """As on ``POST /memories``. A fleet-less node or edge is read by every
+    fleet, so an omitted ``fleet_id`` reached all of them."""
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "low", 1, "home-fleet")
+    a, b = await _entities(client, as_auth, tenant, None, None)
+
+    as_auth(tenant, agent_id="low")
+    entity = await _entity(client, tenant, f"x-{_uid()}", None)
+    assert entity.status_code == 200, entity.text
+    assert entity.json()["fleet_id"] == "home-fleet"
+    relation = await _relation(client, tenant, a, b)
+    assert relation.status_code == 200, relation.text
+    assert relation.json()["fleet_id"] == "home-fleet"
+
+
+@pytest.mark.parametrize("foreign_end", ["from", "to"])
+async def test_agent_cannot_link_another_fleets_entity(
+    client, as_auth, sc, foreign_end
+):
+    """The body names the agent's own fleet; an endpoint is another fleet's."""
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "low", 1, "home-fleet")
+    own, other = await _entities(client, as_auth, tenant, "home-fleet", "other-fleet")
+    a, b = (other, own) if foreign_end == "from" else (own, other)
+
+    as_auth(tenant, agent_id="low")
+    resp = await _relation(client, tenant, a, b, fleet_id="home-fleet")
+    assert resp.status_code == 403, resp.text
+
+
+async def test_agent_cannot_cite_another_fleets_memory_as_evidence(client, as_auth, sc):
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "low", 1, "home-fleet")
+    a, b = await _entities(client, as_auth, tenant, "home-fleet", None)
+    evidence = await _memory(sc, tenant, "other-fleet")
+
+    as_auth(tenant, agent_id="low")
+    resp = await _relation(client, tenant, a, b, evidence_memory_id=evidence)
+    assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.parametrize("edge_fleet", ["other-fleet", None])
+async def test_agent_cannot_rewrite_an_edge_outside_its_fleet(
+    client, as_auth, sc, edge_fleet
+):
+    """A relation's natural key leaves its fleet out, so an upsert of an existing
+    edge rewrote that edge's weight and evidence wherever it lived. A fleet-less
+    edge is read by every fleet's graph expansion."""
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "low", 1, "home-fleet")
+    a, b = await _entities(client, as_auth, tenant, None, None)
+    first = await _relation(client, tenant, a, b, fleet_id=edge_fleet, weight=0.9)
+    assert first.status_code == 200, first.text
+
+    as_auth(tenant, agent_id="low")
+    resp = await _relation(client, tenant, a, b, weight=0.1)
+    assert resp.status_code == 403, resp.text
+    [edge] = await sc.get_outgoing_relations(a, tenant)
+    assert edge["relation"]["weight"] == pytest.approx(0.9)
+
+
+async def test_agent_still_links_and_rewrites_within_its_fleet(client, as_auth, sc):
+    """Control: its own fleet's entities, fleet-less ones and its own fleet's
+    evidence, and a second upsert of the edge it made."""
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "low", 1, "home-fleet")
+    own, shared = await _entities(client, as_auth, tenant, "home-fleet", None)
+    evidence = await _memory(sc, tenant, "home-fleet")
+
+    as_auth(tenant, agent_id="low")
+    created = await _relation(
+        client, tenant, own, shared, evidence_memory_id=evidence, weight=0.4
+    )
+    assert created.status_code == 200, created.text
+    again = await _relation(client, tenant, own, shared, weight=0.6)
+    assert again.status_code == 200, again.text
+    assert again.json()["weight"] == pytest.approx(0.6)
+
+
+async def test_trust_3_agent_still_links_across_fleets(client, as_auth, sc):
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "boss", 3, "home-fleet")
+    a, b = await _entities(client, as_auth, tenant, "other-fleet", "other-fleet")
+
+    as_auth(tenant, agent_id="boss")
+    resp = await _relation(client, tenant, a, b, fleet_id="other-fleet")
+    assert resp.status_code == 200, resp.text
 
 
 # ---------------------------------------------------------------------------
