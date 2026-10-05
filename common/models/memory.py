@@ -292,3 +292,16 @@ Index(
         "deleted_at IS NULL AND (metadata ->> 'parent_memory_id') IS NOT NULL"
     ),
 )
+
+
+# Backs the ingest doc-hash lookup every preview runs (L-193): live ingest rows,
+# keyed on the document's content hash. Created CONCURRENTLY in migration 059
+# with the same key and predicate. Declared after the class rather than in
+# ``__table_args__`` because its key is a JSON operator on ``Memory.metadata_``,
+# which has to exist first.
+Index(
+    "ix_memories_ingest_doc_hash",
+    Memory.tenant_id,
+    Memory.metadata_["doc_hash"].astext,
+    postgresql_where=text("deleted_at IS NULL AND (metadata ->> 'source') = 'ingest'"),
+)

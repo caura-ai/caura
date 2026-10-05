@@ -825,6 +825,29 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def prior_ingest_where(
+    tenant_id: str, doc_hash: str, *, fleet_id: str | None, agent_id: str
+) -> list[ColumnElement[bool]]:
+    """Live rows from the caller's prior ingests of content hashing to ``doc_hash``.
+
+    The predicate of ``find_prior_ingest_by_doc_hash``. L-193: it implies the
+    predicate of the partial index ``ix_memories_ingest_doc_hash`` (migration
+    059) and matches its key, ``(tenant_id, metadata ->> 'doc_hash')``, so a
+    preview reads that document's rows instead of filtering the tenant's.
+    Module-level so the plan can be checked against the exact predicate the
+    service runs.
+    """
+    fleet_match = Memory.fleet_id.is_(None) if fleet_id is None else Memory.fleet_id == fleet_id
+    return [
+        Memory.tenant_id == tenant_id,
+        fleet_match,
+        Memory.agent_id == agent_id,
+        Memory.metadata_["doc_hash"].astext == doc_hash,
+        Memory.metadata_["source"].astext == "ingest",
+        Memory.deleted_at.is_(None),
+    ]
+
+
 # L-129. An entity whose ``attributes._aliases`` holds an alias matching
 # ``:alias_pattern``. ``attributes`` is ``json``, and a value that is not an
 # array is read as no aliases, as the search_vector trigger (migration 057) reads
@@ -5852,20 +5875,16 @@ class PostgresService:
         a write-path idempotency gate — replica lag would miss a just-committed
         prior ingest and re-ingest the same document. ``metadata_->>'key'`` text
         extraction matches the source's ``.astext`` filter.
+
+        L-193: ``ix_memories_ingest_doc_hash`` serves the lookup (see
+        ``prior_ingest_where``). Before it, every preview filtered all of the
+        tenant's live rows on the primary.
         """
-        fleet_match = Memory.fleet_id.is_(None) if fleet_id is None else Memory.fleet_id == fleet_id
         async with get_session() as session:
             stmt = (
                 select(Memory)
                 .options(defer(Memory.embedding), defer(Memory.search_vector))
-                .where(
-                    Memory.tenant_id == tenant_id,
-                    fleet_match,
-                    Memory.agent_id == agent_id,
-                    Memory.metadata_["doc_hash"].astext == doc_hash,
-                    Memory.metadata_["source"].astext == "ingest",
-                    Memory.deleted_at.is_(None),
-                )
+                .where(*prior_ingest_where(tenant_id, doc_hash, fleet_id=fleet_id, agent_id=agent_id))
                 .order_by(Memory.created_at.desc())
             )
             rows: list[Memory] = list((await session.execute(stmt)).scalars().all())
