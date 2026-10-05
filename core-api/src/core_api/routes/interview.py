@@ -41,6 +41,7 @@ from core_api.constants import (
     INTERVIEW_MAX_EVENTS_PER_SUBMIT,
 )
 from core_api.errors import (
+    AUTH_AGENT_TRUST_TOO_LOW,
     AUTH_FEATURE_DISABLED,
     AUTH_INTERVIEW_REQUEST_REQUIRED,
     REQUEST_BUDGET_EXCEEDED,
@@ -167,12 +168,13 @@ async def submit_interview(
     one job).
 
     ``agent_id`` resolves like a memory write (an agent-scoped credential
-    writes as itself; install credentials get the broker ownership boundary).
-    A UUID ``node_id`` must be a fleet node of the tenant (404 otherwise); any
-    other ``node_id`` is an adapter stream, which an agent-bound credential may
-    continue only if its own agent last advanced it (409 otherwise). And
-    ``cursor_to`` may run at most ``INTERVIEW_MAX_CURSOR_ADVANCE`` past the
-    stream's committed watermark (422 otherwise).
+    writes as itself; install credentials get the broker ownership boundary),
+    and an agent awaiting approval is refused (403). A UUID ``node_id`` must
+    be a fleet node of the tenant (404 otherwise); any other ``node_id`` is an
+    adapter stream, which an agent-bound credential may continue only if its
+    own agent last advanced it (409 otherwise). And ``cursor_to`` may run at
+    most ``INTERVIEW_MAX_CURSOR_ADVANCE`` past the stream's committed
+    watermark (422 otherwise).
 
     An agent or install credential's window for a fleet node must also cite an
     unused ``interview_request`` that was delivered to that node (403
@@ -223,6 +225,17 @@ async def submit_interview(
         is_install_credential=auth.is_install_credential,
         install_uuid=auth.install_uuid,
     )
+    # M-89: the report lands as memories attributed to this agent, so one
+    # awaiting approval is refused, as on ``POST /memories``. The watermark has
+    # not moved, so the window can be resubmitted once the agent is approved.
+    if agent.get("trust_level", 0) == 0:
+        raise HTTPException(
+            status_code=403,
+            detail=coded_detail(
+                AUTH_AGENT_TRUST_TOO_LOW,
+                f"Agent '{body.agent_id}' is not approved. Contact tenant admin to set trust_level >= 1.",
+            ),
+        )
     if not body.fleet_id and agent.get("fleet_id"):
         body.fleet_id = agent["fleet_id"]
     if auth.tenant_id:  # skip enforcement for admin

@@ -102,6 +102,7 @@ _SPEC = ToolSpec(
         ),
     ),
     error_codes=(
+        "AGENT_NOT_APPROVED",
         "FORBIDDEN",
         "INTERNAL_ERROR",
         "INVALID_ARGUMENTS",

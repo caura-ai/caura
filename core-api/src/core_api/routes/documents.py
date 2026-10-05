@@ -15,6 +15,7 @@ from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.constants import DEFAULT_DOC_SEARCH_TOP_K, MAX_DOC_SEARCH_TOP_K
+from core_api.errors import AUTH_AGENT_TRUST_TOO_LOW, coded_detail
 from core_api.middleware.idempotency import (
     IDEMPOTENCY_HEADER,
     IdempotencyGuard,
@@ -30,6 +31,7 @@ from core_api.services.agent_service import (
     enforce_fleet_write,
 )
 from core_api.services.audit_service import log_action, log_cross_tenant_read
+from core_api.services.interview_service import refuse_system_collection
 
 # Skill Factory SF-002 — imported at module scope (rather than lazily
 # inside the handler) so a broken import surfaces at server startup
@@ -429,11 +431,13 @@ async def upsert_document(
     for one over the memory size limit. ``DELETE /documents/{doc_id}``
     un-mints it. Never fails the write.
 
-    Agent-scoped credentials are held to the agent trust ladder: a cross-fleet
-    ``fleet_id`` needs trust >= 3 (an omitted one resolves to the agent's home
-    fleet), and so does replacing a document whose stored author is a
-    different agent, or sending ``force=true``. A document with no recorded
-    author is unowned and stays writable. Tenant keys are unaffected.
+    Agent-scoped credentials are held to the agent trust ladder: an agent
+    awaiting approval (trust 0) is refused, a cross-fleet ``fleet_id`` needs
+    trust >= 3 (an omitted one resolves to the agent's home fleet), and so
+    does replacing a document whose stored author is a different agent, or
+    sending ``force=true``. A document with no recorded author is unowned and
+    stays writable. Tenant keys are unaffected. The interview service's own
+    collections are refused to every credential.
     """
     # ax-0917-m-14 — a caller must not write a document under a name that is
     # not its own. REFUSE rather than silently substitute: an agent credential
@@ -450,6 +454,7 @@ async def upsert_document(
     auth.enforce_tenant(body.tenant_id)
     auth.enforce_read_only()
     auth.enforce_usage_limits()
+    refuse_system_collection(body.collection)
     # M-123: an install credential has no identity for the check above to bind,
     # so its ``agent_id`` is a claim. Held to the broker ownership boundary the
     # other REST writes apply: a name another install owns becomes this
@@ -469,6 +474,16 @@ async def upsert_document(
         # home fleet, so the document (and the memory minted from it) scopes
         # like an MCP write instead of landing fleet-less.
         write_agent = await enforce_fleet_write(body.tenant_id, author, body.fleet_id)
+        # M-89: an agent awaiting approval reaches no store, as on
+        # ``POST /memories``; the write would also mint a memory as it.
+        if write_agent.get("trust_level", 0) == 0:
+            raise HTTPException(
+                status_code=403,
+                detail=coded_detail(
+                    AUTH_AGENT_TRUST_TOO_LOW,
+                    f"Agent '{author}' is not approved. Contact tenant admin to set trust_level >= 1.",
+                ),
+            )
         if not body.fleet_id and write_agent.get("fleet_id"):
             body.fleet_id = write_agent["fleet_id"]
         # Replacing a document a different agent authored, or forcing past
@@ -939,6 +954,7 @@ async def delete_document(
     """
     auth.enforce_tenant(tenant_id)
     auth.enforce_read_only()
+    refuse_system_collection(collection)
     # Bulk/destructive parity with memory deletes: an agent credential needs
     # admin-trust (>= 3) to delete documents (which carry customer records /
     # configs). Tenant/user credentials (no X-Agent-ID) are unaffected.

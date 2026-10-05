@@ -88,6 +88,7 @@ from core_api.services.agent_service import resolve_read_fleet_gate as _resolve_
 from core_api.services.audit_service import log_action, log_cross_tenant_read
 from core_api.services.capability_usage import record_usage
 from core_api.services.entity_service import get_entity
+from core_api.services.interview_service import refuse_system_collection
 from core_api.services.memory_service import (
     _memory_to_out,
     create_memories_bulk,
@@ -2755,15 +2756,64 @@ async def caura_doc(
                 # checker to narrow through. Rebind so the derivation helpers
                 # below take a plain ``str``.
                 write_collection: str = collection or ""
+                refuse_system_collection(write_collection)
                 # M-79: the broker ownership boundary before anything acts on
                 # ``agent_id``. The skills validator below binds a staged draft
                 # to its author and stamps ``data.origin.agent_id``, and it ran
                 # on the claimed id, so an install naming another install's
                 # agent passed that agent's draft check and was recorded as it.
-                # Read-only here; ``resolve_write_agent`` further down applies
-                # the gate again (a no-op on the degraded id) and stamps the owner.
+                # Read-only here; ``resolve_write_agent`` just below applies the
+                # gate again (a no-op on the degraded id) and stamps the owner.
                 if _is_install_credential():
                     agent_id = await broker_owned_agent_id(agent_id, _get_install_uuid(), tenant_id)
+                # Mirror caura_write's agent registration so a doc upsert
+                # via MCP creates the Agent row on first contact and enforces
+                # cross-fleet trust gating. WRITE → home tenant only. Ahead of
+                # the skills validator and the embedding call, as on REST, so a
+                # refused caller spends no provider quota.
+                #
+                # Broker ownership boundary first (parity with caura_write): an
+                # install credential's ``agent_id`` is a claim, so a doc — and
+                # the memory minted from it below — must not land under an
+                # agent another install owns.
+                _, agent_id = await resolve_write_agent(
+                    agent_id,
+                    tenant_id,
+                    fleet_id,
+                    is_install_credential=_is_install_credential(),
+                    install_uuid=_get_install_uuid(),
+                )
+                write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
+                # M-89: an agent awaiting approval writes nothing, as in
+                # caura_write; the write would also mint a memory as it.
+                if write_agent.get("trust_level", 0) == 0:
+                    return _with_latency(
+                        _error_response(
+                            "AGENT_NOT_APPROVED",
+                            f"Agent '{agent_id}' is not approved. Contact the tenant "
+                            "admin to set trust_level >= 1.",
+                        ),
+                        t0,
+                    )
+                # Replacing a document a different agent authored needs the
+                # trust op=delete needs (parity with REST POST /documents); an
+                # unowned, author-less doc does not. Agent credentials only —
+                # keyed on the authenticated identity, never on the
+                # ``agent_id`` argument, like the delete gate.
+                if caller_agent_id is not None:
+                    await enforce_document_overwrite(
+                        tenant_id,
+                        agent_id,
+                        collection=write_collection,
+                        doc_id=doc_id,
+                        force=False,
+                    )
+                # Same home-fleet resolution as caura_write: keep an omitted
+                # fleet_id from publishing a fleet_id=NULL doc/skill row that
+                # fleet-scoped teammates can't discover. No-op when the agent
+                # has no home fleet.
+                if not fleet_id and write_agent.get("fleet_id"):
+                    fleet_id = write_agent["fleet_id"]
                 # Skills slug rule — doc_id becomes a filesystem directory
                 # on the plugin side, so it must be filesystem-safe.
                 if collection == SKILLS_COLLECTION and not _SKILL_SLUG_RE.fullmatch(doc_id):
@@ -2969,41 +3019,6 @@ async def caura_doc(
                             ),
                             t0,
                         )
-                # Mirror caura_write's agent registration so a doc upsert
-                # via MCP creates the Agent row on first contact and enforces
-                # cross-fleet trust gating. WRITE → home tenant only.
-                #
-                # Broker ownership boundary first (parity with caura_write): an
-                # install credential's ``agent_id`` is a claim, so a doc — and
-                # the memory minted from it below — must not land under an
-                # agent another install owns.
-                _, agent_id = await resolve_write_agent(
-                    agent_id,
-                    tenant_id,
-                    fleet_id,
-                    is_install_credential=_is_install_credential(),
-                    install_uuid=_get_install_uuid(),
-                )
-                write_agent = await enforce_fleet_write(tenant_id, agent_id, fleet_id)
-                # Replacing a document a different agent authored needs the
-                # trust op=delete needs (parity with REST POST /documents); an
-                # unowned, author-less doc does not. Agent credentials only —
-                # keyed on the authenticated identity, never on the
-                # ``agent_id`` argument, like the delete gate.
-                if caller_agent_id is not None:
-                    await enforce_document_overwrite(
-                        tenant_id,
-                        agent_id,
-                        collection=write_collection,
-                        doc_id=doc_id,
-                        force=False,
-                    )
-                # Same home-fleet resolution as caura_write: keep an omitted
-                # fleet_id from publishing a fleet_id=NULL doc/skill row that
-                # fleet-scoped teammates can't discover. No-op when the agent
-                # has no home fleet.
-                if not fleet_id and write_agent.get("fleet_id"):
-                    fleet_id = write_agent["fleet_id"]
                 await check_and_increment(tenant_id, "write")
                 row = await sc.upsert_document_xmax(
                     {
@@ -3319,6 +3334,7 @@ async def caura_doc(
             # op == "delete"
             if not doc_id:
                 return _with_latency(_error_response("INVALID_ARGUMENTS", "op=delete requires 'doc_id'."), t0)
+            refuse_system_collection(collection)  # type: ignore[arg-type]  # guaranteed by the op guard above
             # Admin-trust (>= 3) gate for agent credentials, parity with memory
             # deletes — a routine trust-1 agent must not destroy tenant documents.
             # "for agent credentials" is the whole scope of the gate: a

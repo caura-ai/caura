@@ -10,6 +10,10 @@ as ``caura_write`` and their REST twins.
   document someone else wrote (parity with REST ``POST /documents`` and with
   ``op=delete``) — a document with no recorded author stays writable — and
   records the writer so its own documents stay its own.
+- ``caura_doc op=write`` refuses an agent awaiting approval (trust 0), as
+  ``caura_write`` does (M-89).
+- ``caura_doc`` cannot write or delete the interview service's own
+  collections, for any credential (M-86).
 
 Real in-process storage (the conftest bridge); only the request context —
 tenant, credential kind, install uuid, verified agent id — is stubbed.
@@ -23,6 +27,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core_api import mcp_server
+from core_api.services.interview_service import JOBS_COLLECTION, WATERMARK_COLLECTION
 from tests._mcp_test_helpers import is_error_envelope, parse_envelope
 from tests.conftest import new_tenant_id
 
@@ -248,3 +253,93 @@ async def test_doc_write_may_still_update_an_unowned_document(ctx, sc):
     assert not is_error_envelope(out), out
     stored = await sc.get_document(tenant, "notes", doc_id, read=False)
     assert stored["data"] == {"body": "edited"}
+
+
+# ---------------------------------------------------------------------------
+# caura_doc op=write — an agent awaiting approval writes nothing (M-89)
+# ---------------------------------------------------------------------------
+
+
+async def test_doc_write_refuses_an_agent_awaiting_approval(ctx, sc):
+    """``caura_write`` refuses trust 0; this wrote, and minted a memory from
+    the document."""
+    tenant, arm = ctx
+    await _seed_agent(sc, tenant, "pending", 0)
+    arm(agent_header="pending")
+    doc_id = f"d-{_uid()}"
+
+    out = await mcp_server.caura_doc(
+        op="write", collection="notes", doc_id=doc_id, data={"body": "x"}
+    )
+
+    assert parse_envelope(out)["error"]["code"] == "AGENT_NOT_APPROVED"
+    assert await sc.get_document(tenant, "notes", doc_id, read=False) is None
+
+
+async def test_doc_write_refuses_an_agent_awaiting_approval_before_embedding(
+    ctx, sc, monkeypatch
+):
+    """Review of caura PR #1865: the refusal ran after the synchronous embedding
+    call, so an agent awaiting approval still spent provider quota."""
+    tenant, arm = ctx
+    await _seed_agent(sc, tenant, "pending", 0)
+    arm(agent_header="pending")
+    embed = AsyncMock(return_value=[0.0] * 8)
+    monkeypatch.setattr("common.embedding.get_embedding", embed)
+
+    out = await mcp_server.caura_doc(
+        op="write",
+        collection="notes",
+        doc_id=f"d-{_uid()}",
+        data={"body": "x", "summary": "A note worth indexing."},
+    )
+
+    assert parse_envelope(out)["error"]["code"] == "AGENT_NOT_APPROVED"
+    embed.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# caura_doc — the interview service's own collections (M-86)
+# ---------------------------------------------------------------------------
+#
+# Server state written with no author, so the overwrite gate let any caller
+# replace it. Refused to every credential, as storage refuses a ``_``-prefixed
+# collection; a tenant credential is the widest, so it is the one tested.
+
+
+@pytest.mark.parametrize("collection", [WATERMARK_COLLECTION, JOBS_COLLECTION])
+async def test_doc_write_cannot_reach_the_interview_collections(ctx, sc, collection):
+    tenant, _arm = ctx
+    doc_id = f"d-{_uid()}"
+
+    out = await mcp_server.caura_doc(
+        op="write",
+        collection=collection,
+        doc_id=doc_id,
+        data={"last_seq": 10**9},
+        agent_id="ops",
+    )
+
+    assert is_error_envelope(out)
+    assert await sc.get_document(tenant, collection, doc_id, read=False) is None
+
+
+@pytest.mark.parametrize("collection", [WATERMARK_COLLECTION, JOBS_COLLECTION])
+async def test_doc_delete_cannot_reach_the_interview_collections(ctx, sc, collection):
+    tenant, _arm = ctx
+    doc_id = f"d-{_uid()}"
+    await sc.upsert_document(
+        {
+            "tenant_id": tenant,
+            "collection": collection,
+            "doc_id": doc_id,
+            "data": {"last_seq": 5},
+        }
+    )
+
+    out = await mcp_server.caura_doc(
+        op="delete", collection=collection, doc_id=doc_id, agent_id="ops"
+    )
+
+    assert is_error_envelope(out)
+    assert await sc.get_document(tenant, collection, doc_id, read=False) is not None

@@ -17,6 +17,10 @@ Each route here held an agent-scoped credential to less than its neighbours:
   unbounded ``cursor_to``.
 - ``get_or_create_agent`` — first-touch registration from read paths ignored
   the tenant's ``require_agent_approval``.
+- ``POST /documents`` and ``POST /interview/submit`` — an agent awaiting
+  approval (trust 0) wrote, where ``POST /memories`` refuses it (M-89).
+- ``POST /documents`` / ``DELETE /documents/{doc_id}`` — reached the interview
+  service's own collections (M-86).
 
 Tenant credentials (no agent identity) keep their tenant-wide authority on
 every one of these routes; each group pins that alongside the new gate.
@@ -944,3 +948,157 @@ async def test_an_install_writes_a_document_only_as_an_agent_it_owns(
 
     assert resp.status_code == 200, resp.text
     assert (await _stored_doc(sc, tenant, doc_id))["agent_id"] == author
+
+
+# ---------------------------------------------------------------------------
+# M-89 — an agent awaiting approval writes no document and no interview window
+# ---------------------------------------------------------------------------
+#
+# ``POST /memories``, ``caura_write`` and STM refuse a trust-0 agent. These two
+# doors registered it on first contact and let it write: a document write mints
+# a memory from the document, and an interview window's report lands as
+# memories attributed to the submitting agent.
+
+
+async def test_an_agent_awaiting_approval_cannot_write_a_document(client, as_auth, sc):
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "pending", 0)
+    as_auth(tenant, agent_id="pending")
+    doc_id = f"doc-{_uid()}"
+
+    resp = await _write_doc(client, tenant, doc_id, {"steps": "x"})
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_AGENT_TRUST_TOO_LOW
+    assert await _stored_doc(sc, tenant, doc_id) is None
+
+
+async def test_first_contact_under_approval_cannot_write_a_document(
+    client, as_auth, sc
+):
+    tenant = new_tenant_id()
+    await _require_approval(client, as_auth, tenant)
+    as_auth(tenant, agent_id="newbie")
+    doc_id = f"doc-{_uid()}"
+
+    resp = await _write_doc(client, tenant, doc_id, {"steps": "x"})
+
+    assert resp.status_code == 403, resp.text
+    assert await _stored_doc(sc, tenant, doc_id) is None
+    assert (await sc.get_agent("newbie", tenant, read=False))["trust_level"] == 0
+
+
+async def test_an_approved_agent_still_writes_a_document(client, as_auth, sc):
+    tenant = new_tenant_id()
+    await _require_approval(client, as_auth, tenant)
+    await _seed_agent(sc, tenant, "approved", 1)
+    as_auth(tenant, agent_id="approved")
+    doc_id = f"doc-{_uid()}"
+
+    resp = await _write_doc(client, tenant, doc_id, {"steps": "x"})
+
+    assert resp.status_code == 200, resp.text
+    assert (await _stored_doc(sc, tenant, doc_id))["agent_id"] == "approved"
+
+
+async def test_an_agent_awaiting_approval_cannot_submit_an_interview_window(
+    client, as_auth, sc, interview_tenant
+):
+    tenant, _node = interview_tenant
+    await _seed_agent(sc, tenant, "pending", 0)
+    as_auth(tenant, agent_id="pending")
+    stream = _adapter_stream()
+
+    resp = await client.post(
+        "/api/v1/interview/submit", json=_submit(tenant, stream, "pending")
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["error"]["code"] == errors.AUTH_AGENT_TRUST_TOO_LOW
+    assert await interview_service.read_watermark(tenant, stream) == -1
+
+
+# ---------------------------------------------------------------------------
+# M-86 — the interview service's own collections are not public documents
+# ---------------------------------------------------------------------------
+#
+# Both hold author-less server state, and the overwrite gate lets anyone
+# replace an author-less document: a watermark moved ahead stops a node's
+# interviews, and a planted pending job's events are written as memories under
+# the agent it names. Storage refuses a ``_``-prefixed collection to every
+# credential; these two predate that convention, so the routes refuse them.
+
+_INTERVIEW_COLLECTIONS = [
+    interview_service.WATERMARK_COLLECTION,
+    interview_service.JOBS_COLLECTION,
+]
+
+
+async def _seed_interview_doc(sc, tenant: str, collection: str, doc_id: str) -> None:
+    await sc.upsert_document(
+        {
+            "tenant_id": tenant,
+            "collection": collection,
+            "doc_id": doc_id,
+            "data": {"last_seq": 5},
+        }
+    )
+
+
+@pytest.mark.parametrize("collection", _INTERVIEW_COLLECTIONS)
+@pytest.mark.parametrize("agent_id", [None, "worker"])
+async def test_a_document_write_cannot_reach_the_interview_collections(
+    client, as_auth, sc, collection, agent_id
+):
+    tenant = new_tenant_id()
+    await _seed_agent(sc, tenant, "worker", 1)
+    as_auth(tenant, agent_id=agent_id)
+    doc_id = f"doc-{_uid()}"
+
+    resp = await client.post(
+        "/api/v1/documents",
+        json={
+            "tenant_id": tenant,
+            "collection": collection,
+            "doc_id": doc_id,
+            "data": {"last_seq": 10**9},
+        },
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert await sc.get_document(tenant, collection, doc_id, read=False) is None
+
+
+@pytest.mark.parametrize("collection", _INTERVIEW_COLLECTIONS)
+async def test_a_document_delete_cannot_reach_the_interview_collections(
+    client, as_auth, sc, collection
+):
+    tenant = new_tenant_id()
+    doc_id = f"doc-{_uid()}"
+    await _seed_interview_doc(sc, tenant, collection, doc_id)
+    as_auth(tenant)
+
+    resp = await client.delete(
+        f"/api/v1/documents/{doc_id}",
+        params={"tenant_id": tenant, "collection": collection},
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert await sc.get_document(tenant, collection, doc_id, read=False) is not None
+
+
+async def test_the_interview_watermark_stays_readable(client, as_auth, sc):
+    """``caura-interviewer`` reads its stream's watermark through this route."""
+    tenant = new_tenant_id()
+    doc_id = f"doc-{_uid()}"
+    collection = interview_service.WATERMARK_COLLECTION
+    await _seed_interview_doc(sc, tenant, collection, doc_id)
+    as_auth(tenant)
+
+    resp = await client.get(
+        f"/api/v1/documents/{doc_id}",
+        params={"tenant_id": tenant, "collection": collection},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"] == {"last_seq": 5}

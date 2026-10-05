@@ -29,6 +29,8 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from fastapi import HTTPException
+
 from common.governance import mask, scan
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings as app_settings
@@ -53,6 +55,25 @@ WATERMARK_COLLECTION = "interview_watermarks"
 # Durable async-submit job queue (#665): one doc per (node, window),
 # holding the MASKED event window until synthesis commits.
 JOBS_COLLECTION = "interview_jobs"
+# M-86: this service's own state, written with no author, which the overwrite
+# gate lets any caller replace. A watermark moved ahead stops a node's
+# interviews; a planted pending job's events are written as memories under the
+# agent it names. Storage refuses only ``_``-prefixed collections, and these
+# predate that convention, so the public document routes refuse them.
+SYSTEM_COLLECTIONS = frozenset({WATERMARK_COLLECTION, JOBS_COLLECTION})
+
+
+def refuse_system_collection(collection: str) -> None:
+    """Refuse a public document write or delete aimed at :data:`SYSTEM_COLLECTIONS`.
+
+    Every credential is refused, with the 400 storage gives a ``_``-prefixed
+    collection. Reads stay open: ``caura-interviewer`` reads its watermark.
+    """
+    if collection in SYSTEM_COLLECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Collection '{collection}' is system-managed; the interview service writes it.",
+        )
 
 
 class InterviewJobPermanentlyFailedError(RuntimeError):
