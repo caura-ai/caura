@@ -6,6 +6,7 @@ import re
 from typing import Any, Final, Literal
 from uuid import UUID
 
+from common import entity_naming as _entity_naming
 from common.constants import SINGLE_VALUE_PREDICATES
 from common.embedding import get_embedding
 from common.entity_naming import canonical_match_key
@@ -25,6 +26,14 @@ from core_api.services.entity_service import upsert_relation
 from core_api.services.task_tracker import record_task_failure
 
 logger = logging.getLogger(__name__)
+
+# 09/02 L-37. Relation upserts are one HTTP POST each and run concurrently;
+# this bounds the fan-out so a memory with a large graph cannot open dozens of
+# simultaneous connections to core-storage-api. Matches the order of magnitude
+# of the other per-item caps in this codebase (ingest preview 4, A19 admission
+# 16) — high enough that the serial round-trips stop dominating, low enough
+# that one memory's extraction is not a load event.
+_RELATION_UPSERT_CONCURRENCY = 8
 
 # A65 — map the extractor's free-form ``relation_type`` onto the canonical
 # predicate vocabulary, so two rows that state the same attribute in different
@@ -87,47 +96,11 @@ _LITERAL_OR_ATTR_RE = re.compile(
 )
 
 
-# A42 — parenthetical qualifiers, e.g. the "(delaware)" in "acme (delaware)".
-# Matches the discriminator vocabulary ``_reattach_subject_discriminators``
-# already established ("#NNNN" and parentheticals); deliberately NOT any
-# trailing word, because unbracketed tokens are usually harmless surface
-# variation ("acme" / "acme corp") rather than a distinguisher.
-_QUALIFIER_RE = re.compile(r"[(\[]([^)\]]{1,64})[)\]]")
-
-
-def _qualifier_signature(name: str) -> frozenset[str]:
-    """Bracketed qualifiers in ``name``, normalised for comparison."""
-    return frozenset(" ".join(m.strip().lower().split()) for m in _QUALIFIER_RE.findall(name) if m.strip())
-
-
-def _same_identifier_signature(a: str, b: str) -> bool:
-    """Two names may only merge if nothing in them says they are different things.
-
-    CAURA graph-build fix (B): same set of digit-bearing identifier tokens.
-    Synthetic suffix-distinct names like 'comet #0002' vs 'comet #0012' embed
-    near-identically and trip the 0.85 similarity merge, collapsing distinct
-    entities into one contaminated mega-node.
-
-    A42 (A33 mechanism ②): digits alone are too narrow. Two genuinely distinct
-    entities distinguished by a NON-digit qualifier — 'acme (delaware)' vs
-    'acme (ohio)' — both yield an empty digit set, compare equal, and merge.
-    Downstream that reads as same_subject=true and produces a false
-    contradiction between two different things.
-
-    Asymmetry is deliberate: a name with NO qualifier merges freely with a
-    qualified one ('acme' vs 'acme (ohio)' -> allowed). An absent qualifier
-    means "unspecified", not "different", and blocking it would strand every
-    qualified mention from its own plain surface form. The chosen failure
-    direction favours coalescence — an over-merge is visible and recoverable,
-    whereas an entity that never coalesces fragments the graph silently.
-    """
-    ta = set(re.findall(r"\d[\w.\-]*", a.lower()))
-    tb = set(re.findall(r"\d[\w.\-]*", b.lower()))
-    if ta != tb:
-        return False
-    qa, qb = _qualifier_signature(a), _qualifier_signature(b)
-    # Only a CONFLICT between two present qualifiers blocks the merge.
-    return not qa or not qb or qa == qb
+# A42 / graph-build fix (B): the identifier guard lives in ``common.entity_naming``
+# so the nightly duplicate resolver in core-storage-api applies the same rule.
+_QUALIFIER_RE = _entity_naming.QUALIFIER_RE
+_qualifier_signature = _entity_naming.qualifier_signature
+_same_identifier_signature = _entity_naming.same_identifier_signature
 
 
 def _is_valid_entity(name: str, blocklist: frozenset[str] | None = None) -> bool:
@@ -141,6 +114,28 @@ def _is_valid_entity(name: str, blocklist: frozenset[str] | None = None) -> bool
     if _LITERAL_OR_ATTR_RE.match(name.strip()):
         return False
     return True
+
+
+def _merge_alias_into(item: dict, *names: str) -> None:
+    """Fold ``names`` into an already-built upsert item's ``_aliases``.
+
+    L-32. The second surface form that lands on a row already claimed by this
+    batch contributes its alias to the FIRST item rather than becoming a second
+    item for the same ``entity_id``. Everything else about the row is
+    first-seen-wins — ``canonical_name``, ``entity_type``, ``name_embedding`` —
+    so the alias list is the only field that has to accumulate, and it is
+    exactly the field the lost update was destroying.
+
+    Order-preserving and idempotent: appended in the order the extraction named
+    them, and a name already present is not repeated. The ``_aliases`` value is
+    read defensively because it comes from a storage response.
+    """
+    attrs = item.setdefault("attributes", {})
+    aliases = list(attrs.get("_aliases") or [])
+    for name in names:
+        if name and name not in aliases:
+            aliases.append(name)
+    attrs["_aliases"] = aliases
 
 
 async def _discover_cross_links_for_memory(
@@ -173,10 +168,59 @@ async def _discover_cross_links_for_memory(
         )
 
 
-async def _purge_written_artifacts_if_dropped(
-    sc: Any, memory_id: UUID, tenant_id: str
-) -> Literal["live", "dropped", "unknown"]:
-    """Undo our own graph writes when the memory died while we were making them.
+def _content_changed(row: dict, content: str) -> bool:
+    """M-39: does the row hold different text from the text this run extracted?
+
+    Only a string that differs counts. A row without a readable ``content``
+    proves nothing, and the answer to "changed" is a reset, so it has to be
+    earned.
+    """
+    stored = row.get("content")
+    return isinstance(stored, str) and stored != content
+
+
+async def _reset_and_re_extract(sc: Any, memory_id: UUID, tenant_id: str, row: dict) -> None:
+    """M-39: replace the graph this run wrote for text the row no longer holds.
+
+    The edit that changed the text ran its own reset before these rows existed,
+    so it found nothing to clear. This is the same reset, run again now that
+    there is something to clear. It also removes rows the edit's own
+    re-extraction may already have written, which is why the current text is
+    re-extracted here rather than left to that run.
+
+    Inline, in this tracked task, rather than scheduled: the edit already
+    scheduled one extraction, and a failure here is recorded against the same
+    memory. Bounded by the edits themselves: the re-extraction is handed the
+    text it just read, so it only comes back here if another edit lands.
+    """
+    try:
+        await sc.reset_entity_artifacts(tenant_id, str(memory_id))
+    except Exception:
+        logger.exception(
+            "entity extraction: memory %s was edited while its old text was being "
+            "extracted, and the rows written for the old text could NOT be reset; "
+            "they stay beside the new text's",
+            memory_id,
+        )
+    logger.warning(
+        "entity extraction: memory %s was edited while its old text was being "
+        "extracted; reset its extraction rows and re-extracting the current text",
+        memory_id,
+    )
+    await process_entity_extraction(
+        memory_id,
+        tenant_id,
+        row.get("fleet_id"),
+        row.get("agent_id"),
+        row["content"],
+        row.get("memory_type"),
+    )
+
+
+async def _recheck_row_after_writes(
+    sc: Any, memory_id: UUID, tenant_id: str, content: str
+) -> Literal["live", "dropped", "edited", "unknown"]:
+    """Undo our own graph writes when the memory died or changed while we made them.
 
     Reports WHAT IT FOUND and leaves the policy to the caller, because the two
     call sites want different things from the same answer. An earlier revision
@@ -189,8 +233,14 @@ async def _purge_written_artifacts_if_dropped(
     ``dropped``
         The row is gone or soft-deleted, and its graph rows have been purged
         (or the purge failed, loudly — either way it is not coming back).
+    ``edited``
+        M-39. The row is live but holds different text from ``content``: it was
+        edited mid-extraction. Its extraction rows have been reset and the
+        current text re-extracted (``_reset_and_re_extract``), so nothing more
+        of this run's may be written.
     ``live``
-        The row is there. Nothing was purged and nothing should stop.
+        The row is there, holding ``content``. Nothing was purged and nothing
+        should stop.
     ``unknown``
         The read itself failed. Nothing is known and nothing was purged.
 
@@ -245,6 +295,13 @@ async def _purge_written_artifacts_if_dropped(
     A failed PURGE still reports ``dropped``: the memory is gone whether or not
     the cleanup worked, and the caller's decision does not change. Only a failed
     READ is ``unknown``.
+
+    M-39 is the same race with an edit in place of a drop, and the same
+    argument closes it: the edit's reset runs before or after our writes, and
+    this check sees the new text in every ordering where the reset ran first.
+    The subject and predicate write-backs are columns the reset does not clear,
+    so they carry the extracted text and storage applies them only while the row
+    still holds it.
     """
     try:
         live = await sc.get_memory(str(memory_id), tenant_id, read=False)
@@ -258,7 +315,10 @@ async def _purge_written_artifacts_if_dropped(
         return "unknown"
 
     if live is not None and live.get("deleted_at") is None:
-        return "live"
+        if not _content_changed(live, content):
+            return "live"
+        await _reset_and_re_extract(sc, memory_id, tenant_id, live)
+        return "edited"
 
     try:
         counts = await sc.purge_entity_artifacts(tenant_id, str(memory_id))
@@ -353,7 +413,7 @@ async def process_entity_extraction(
         #
         # This check alone does NOT close the window, and it is not claimed to:
         # the writes below are several round-trips away, so a drop can land after
-        # it passes. ``_purge_written_artifacts_if_dropped`` at the end of the
+        # it passes. ``_recheck_row_after_writes`` at the end of the
         # persistence block is what closes that; this one is here to avoid doing
         # the work at all in the common case where the row is already gone.
         live = await sc.get_memory(str(memory_id), tenant_id, read=False)
@@ -362,6 +422,17 @@ async def process_entity_extraction(
                 "entity extraction: memory %s is gone by the time extraction finished; "
                 "discarding %d extracted entit(ies) rather than writing them to a "
                 "dropped row's graph",
+                memory_id,
+                len(graph.entities),
+            )
+            return
+        # M-39: the same check for an edit. Nothing is written yet, so there is
+        # nothing to reset, and the edit scheduled its own extraction of the new
+        # text.
+        if _content_changed(live, content):
+            logger.info(
+                "entity extraction: memory %s was edited while its old text was being "
+                "extracted; discarding %d entit(ies) for text it no longer holds",
                 memory_id,
                 len(graph.entities),
             )
@@ -499,7 +570,13 @@ async def process_entity_extraction(
             # about the prior "longest-wins" regression that turned LLM
             # hallucinations into canonical rows — this preservation is
             # the audit P1 fix's correctness gate.
+            # L-32. ``upsert_names[j]`` is every surface form that item ``j``
+            # stands for — usually one, more when two of them resolved to the
+            # same existing row. See the coalescing branch below for why the
+            # items cannot simply be 1:1 with ``filtered`` any more.
             upsert_items: list[dict] = []
+            upsert_names: list[list[str]] = []
+            entity_id_to_item: dict[str, int] = {}
             for i, (name, entity_type, _role) in enumerate(filtered):
                 match = resolved[i] if i < len(resolved) else None
                 # CAURA graph-build fix (B): reject a similarity-merge when the two
@@ -508,7 +585,11 @@ async def process_entity_extraction(
                 if match and not _same_identifier_signature(name, match.get("canonical_name") or ""):
                     match = None
                 item: dict = {
-                    "input_idx": i,
+                    # Index into ``upsert_items``, NOT into ``filtered`` — the
+                    # two stop being the same list the moment anything
+                    # coalesces, and storage validates that these tile
+                    # ``[0, len(items))`` contiguously.
+                    "input_idx": len(upsert_items),
                     "tenant_id": tenant_id,
                     "fleet_id": fleet_id,
                     "entity_type": entity_type,
@@ -518,19 +599,20 @@ async def process_entity_extraction(
                     item["name_embedding"] = emb
 
                 if match:
-                    # Existing row found — merge into it.
-                    existing_attrs = match.get("attributes") or {}
-                    merged_attrs = dict(existing_attrs)
+                    # Existing row found — merge into it. Storage merges the
+                    # item's ``attributes`` into the locked row (L-46), so the
+                    # item carries only what this extraction adds: its aliases.
+                    # A copy of the row's other attributes from the resolve
+                    # snapshot would write stale values back over a key another
+                    # writer changed in between.
+                    #
                     # NOTE: ``ExtractedEntity`` currently emits no extra
                     # attributes (only ``canonical_name`` / ``entity_type``
                     # / ``role`` come back from the LLM). If the
                     # extraction schema later grows attribute fields,
-                    # add ``merged_attrs.update(<new fields>)`` here to
-                    # match ``entity_service.upsert_entity`` (line 79:
-                    # ``if data.attributes: merged_attrs.update(data.attributes)``)
-                    # and keep the bulk path's merge semantics
-                    # equivalent to the single-row serial path.
-                    aliases = list(merged_attrs.get("_aliases") or [])
+                    # add them to ``added_attrs`` here, as
+                    # ``entity_service.upsert_entity`` sends its caller's.
+                    #
                     # Defensive fallback: storage-side ``bulk_resolve_entities``
                     # SHOULD always carry a non-empty ``canonical_name`` on a
                     # match (the row had to exist for a match to fire). An
@@ -547,11 +629,7 @@ async def process_entity_extraction(
                             name,
                         )
                         existing_name = name
-                    if existing_name and existing_name not in aliases:
-                        aliases.append(existing_name)
-                    if name not in aliases:
-                        aliases.append(name)
-                    merged_attrs["_aliases"] = aliases
+                    added_attrs = {"_aliases": list(dict.fromkeys((existing_name, name)))}
                     # Defensive guard mirroring the ``canonical_name``
                     # fallback above: a malformed resolve match without
                     # ``entity_id`` would otherwise crash with KeyError
@@ -569,16 +647,58 @@ async def process_entity_extraction(
                         item["canonical_name"] = name
                         item["attributes"] = {}
                     else:
+                        # L-32: intra-batch alias lost-update.
+                        #
+                        # Two surface forms in ONE extraction can resolve to the
+                        # SAME existing row — "IBM" exact-matches it while
+                        # "I.B.M." reaches it by embedding similarity, and the
+                        # WT-2 dedupe above does not collapse them because their
+                        # ``canonical_match_key``s genuinely differ. Both then
+                        # built ``merged_attrs`` from the SAME resolve snapshot,
+                        # so neither payload contained the other's alias, and
+                        # storage applies ``attributes`` wholesale per item in
+                        # list order (``entity_bulk_upsert``: "caller
+                        # pre-computed the merged attributes — server side does
+                        # not re-merge"). Last item won; the first surface form's
+                        # alias was written and then overwritten in the same
+                        # batch. Deterministic, not racy — which is why it never
+                        # looked like a race and never got chased.
+                        #
+                        # Fixed by coalescing here rather than storage-side,
+                        # because the merge contract was the caller's: this is the
+                        # same "dedupe at the write site" the link batch below
+                        # already does for the same cause, and the same
+                        # first-seen-wins rule applies to everything except the
+                        # alias list, which accumulates.
+                        #
+                        # Storage now merges each item into the locked row
+                        # (L-46), which also covers this case and two
+                        # extractions racing across batches. Coalescing stays:
+                        # one item per row is what keeps ``upsert_names`` mapping
+                        # every surface form to its id.
+                        #
+                        # Only the UPDATE path can collide. Two creates cannot
+                        # name the same row: the natural key is
+                        # ``lower(canonical_name)``, and two names that differ
+                        # only in case share a ``canonical_match_key`` and were
+                        # already deduped.
+                        prior = entity_id_to_item.get(str(match_entity_id))
+                        if prior is not None:
+                            _merge_alias_into(upsert_items[prior], name, existing_name)
+                            upsert_names[prior].append(name)
+                            continue
                         item["action"] = "update"
                         item["entity_id"] = match_entity_id
                         item["canonical_name"] = existing_name  # first-seen wins
-                        item["attributes"] = merged_attrs
+                        item["attributes"] = added_attrs
+                        entity_id_to_item[str(match_entity_id)] = len(upsert_items)
                 else:
                     # No match — create.
                     item["action"] = "create"
                     item["canonical_name"] = name
                     item["attributes"] = {}
                 upsert_items.append(item)
+                upsert_names.append([name])
 
             # ---- Step 2c: bulk upsert ----
             #
@@ -616,15 +736,34 @@ async def process_entity_extraction(
             for r in upserted:
                 if not r.get("entity_id"):
                     continue
-                idx = r["input_idx"]
-                if idx >= len(filtered):
+                # L-29. ``missing``: the entity was deleted between resolve and
+                # upsert (a content-edit reset, a governance purge or the
+                # nightly merge). Its id names nothing, so mapping it would link,
+                # relate and subject-write this memory to a row that does not
+                # exist, and count it in the audit. Left out instead: the memory
+                # simply lacks that entity, as it did, minus the dangling writes.
+                if r.get("action") == "missing":
                     logger.warning(
-                        "bulk_upsert_entities returned out-of-range input_idx %d (filtered len=%d); skipping",
-                        idx,
-                        len(filtered),
+                        "entity extraction: entity %s for memory %s was deleted between resolve "
+                        "and upsert; leaving it out of this memory's graph",
+                        r["entity_id"],
+                        memory_id,
                     )
                     continue
-                name_to_id[filtered[idx][0]] = UUID(r["entity_id"])
+                idx = r["input_idx"]
+                if idx >= len(upsert_names):
+                    logger.warning(
+                        "bulk_upsert_entities returned out-of-range input_idx %d (items len=%d); skipping",
+                        idx,
+                        len(upsert_names),
+                    )
+                    continue
+                # L-32: one item can stand for several surface forms. Every one
+                # of them has to reach ``name_to_id``, or the relation loop
+                # below cannot resolve an endpoint the extractor named by the
+                # coalesced form and silently drops that edge.
+                for nm in upsert_names[idx]:
+                    name_to_id[nm] = UUID(r["entity_id"])
                 if r.get("action") == "created":
                     created_entity_ids.append(str(r["entity_id"]))
 
@@ -733,7 +872,12 @@ async def process_entity_extraction(
                 # likely fail again — but the failure is a bounded leak that
                 # governance's purge can still reach, and the alternative was
                 # destroying an audit record nothing rebuilds.
-                if await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id) == "dropped":
+                #
+                # ``edited`` stops too (M-39): by the time it returns, the rows
+                # are reset and the current text re-extracted, and everything
+                # below would write the old text's graph back.
+                recheck = await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
+                if recheck in ("dropped", "edited"):
                     return
                 # Surface any FK violations from the per-item path
                 # (storage-side reports ``error="fk_violation"`` for rows
@@ -772,10 +916,13 @@ async def process_entity_extraction(
             if len(subject_ids) == 1:
                 subject_id = next(iter(subject_ids))
                 try:
+                    # ``content``: storage writes it only while the row still
+                    # holds the text it was extracted from (M-39).
                     updated = await sc.set_subject_entity_if_null(
                         memory_id=str(memory_id),
                         tenant_id=tenant_id,
                         subject_entity_id=subject_id,
+                        content=content,
                     )
                     logger.info(
                         "subject_writeback memory=%s subject_entity_id=%s outcome=%s",
@@ -822,26 +969,57 @@ async def process_entity_extraction(
         # service`` deduped under ``new analytics service``), and a relation
         # that names the collapsed form must still land on the merged row.
         key_to_id: dict[str, UUID] = {canonical_match_key(n): i for n, i in name_to_id.items()}
-        rel_count = 0
-        rel_failed = 0
-        for rel in graph.relations:
+        # 09/02 L-37: the upserts below run CONCURRENTLY under a bounded
+        # semaphore. Everything else this worker does is already batched —
+        # ``bulk_upsert_entities``, ``bulk_upsert_entity_links`` — and then
+        # relations went back to one sequential HTTP POST each, so a memory
+        # with a dozen relations paid a dozen serial round-trips while the rest
+        # of the extraction had been reduced to two.
+        #
+        # Concurrency rather than a bulk endpoint, deliberately. There is no
+        # bulk relations route, and adding one means a router, a service method
+        # and a client method — plus PER-ITEM result reporting, because the
+        # per-relation guard below is load-bearing (see its comment: one failed
+        # upsert used to skip the A65 predicate write-back and the
+        # ``Trigger.ENTITY`` fire that is the only thing running A40's RDF
+        # pass). A single bulk call that succeeds-or-fails as a unit would
+        # throw that isolation away to save round-trips. This keeps every
+        # relation's own request and its own ``try``, and only stops them
+        # queueing behind each other.
+        #
+        # Safe to gather here because ``upsert_relation`` goes through the
+        # storage HTTP client, not a shared ``AsyncSession`` — gathering two
+        # ``db.execute`` calls on one session is what is unsafe.
+        rel_sem = asyncio.Semaphore(_RELATION_UPSERT_CONCURRENCY)
+
+        async def _upsert_one(rel) -> bool | None:
+            """True = landed, False = failed, None = endpoints unresolvable.
+
+            Never raises: the caller counts outcomes, and one relation's
+            failure must not cost the others (or the stages after this loop).
+            """
             from_id = name_to_id.get(rel.from_entity) or key_to_id.get(canonical_match_key(rel.from_entity))
             to_id = name_to_id.get(rel.to_entity) or key_to_id.get(canonical_match_key(rel.to_entity))
-            if from_id and to_id:
-                # Guarded PER RELATION, matching ``subject_writeback`` /
-                # ``predicate_writeback`` below. Unguarded, ONE failing upsert
-                # threw out of this whole function into the outer "(non-fatal)"
-                # handler — and everything after this loop is what actually
-                # feeds the deterministic contradiction path: the A65 predicate
-                # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY
-                # thing that runs A40's RDF pass. So a single transient storage
-                # error on one relation out of dozens left that memory with a
-                # NULL predicate forever and no Path C detection at all, and
-                # said "non-fatal" while doing it. Nothing retries.
-                #
-                # Observed, not hypothesised: a storage 500 on
-                # ``POST /entities/relations`` produced exactly this — every
-                # later stage skipped, one warning line, predicate never set.
+            if not (from_id and to_id):
+                # Unresolvable endpoints are not a failure — the same silent
+                # skip the sequential loop did, counted in neither bucket.
+                return None
+
+            # Guarded PER RELATION, matching ``subject_writeback`` /
+            # ``predicate_writeback`` below. Unguarded, ONE failing upsert
+            # threw out of this whole function into the outer "(non-fatal)"
+            # handler — and everything after this loop is what actually
+            # feeds the deterministic contradiction path: the A65 predicate
+            # write-back, and the ``Trigger.ENTITY`` fire that is the ONLY
+            # thing that runs A40's RDF pass. So a single transient storage
+            # error on one relation out of dozens left that memory with a
+            # NULL predicate forever and no Path C detection at all, and
+            # said "non-fatal" while doing it. Nothing retries.
+            #
+            # Observed, not hypothesised: a storage 500 on
+            # ``POST /entities/relations`` produced exactly this — every
+            # later stage skipped, one warning line, predicate never set.
+            async with rel_sem:
                 try:
                     await upsert_relation(
                         RelationUpsert(
@@ -853,9 +1031,8 @@ async def process_entity_extraction(
                             evidence_memory_id=memory_id,
                         ),
                     )
-                    rel_count += 1
+                    return True
                 except Exception:
-                    rel_failed += 1
                     logger.warning(
                         "relation_upsert failed for memory %s (%s -[%s]-> %s) (non-fatal)",
                         memory_id,
@@ -864,6 +1041,21 @@ async def process_entity_extraction(
                         rel.to_entity,
                         exc_info=True,
                     )
+                    return False
+
+        # ``return_exceptions=True`` as a backstop: ``_upsert_one`` already
+        # swallows everything, but a bug in the resolution above it would
+        # otherwise cancel the siblings mid-flight and lose relations that had
+        # already succeeded.
+        outcomes = await asyncio.gather(
+            *(_upsert_one(rel) for rel in graph.relations), return_exceptions=True
+        )
+        # Counted from the outcomes themselves rather than by re-deriving which
+        # relations were resolvable — one source of truth, and the two cannot
+        # drift. A ``BaseException`` in the list means the backstop fired and
+        # is counted as a failure, which is what it is.
+        rel_count = sum(1 for o in outcomes if o is True)
+        rel_failed = sum(1 for o in outcomes if o is not True and o is not None)
         if rel_failed:
             # Surfaced as its own line so a partial graph is visible as a
             # COUNT rather than N scattered warnings — a spike here means the
@@ -910,6 +1102,7 @@ async def process_entity_extraction(
                         tenant_id=tenant_id,
                         predicate=pred,
                         object_value=str(obj),
+                        content=content,
                     )
                     logger.info(
                         "predicate_writeback memory=%s predicate=%s outcome=%s",
@@ -1022,9 +1215,10 @@ async def process_entity_extraction(
         #
         # The result is not branched on: nothing follows this, so ``live`` and
         # ``unknown`` are the same instruction — do nothing — and ``dropped`` has
-        # already purged by the time it returns.
+        # already purged by the time it returns, as ``edited`` has reset and
+        # re-extracted.
         if wrote_graph_rows:
-            await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
+            await _recheck_row_after_writes(sc, memory_id, tenant_id, content)
 
     except Exception as exc:
         logger.exception("Entity extraction failed for memory %s (non-fatal)", memory_id)
@@ -1066,11 +1260,12 @@ async def process_entity_extraction(
         # have to gate a ``finally`` anyway, so all ``finally`` buys is one fewer
         # call site.
         #
-        # Nothing is branched on. ``dropped`` has purged by the time it returns;
-        # ``live`` and ``unknown`` both mean leave it alone. ``unknown`` is the
+        # Nothing is branched on. ``dropped`` has purged by the time it returns,
+        # and ``edited`` has reset and re-extracted (M-39); ``live`` and
+        # ``unknown`` both mean leave it alone. ``unknown`` is the
         # likely answer when the storage failure that landed us here is still
         # going, and the rows do leak in that case — bounded to what was written
         # before the raise, and reachable by governance's own purge later. The
         # alternative was losing the audit record outright.
         if wrote_graph_rows:
-            await _purge_written_artifacts_if_dropped(sc, memory_id, tenant_id)
+            await _recheck_row_after_writes(sc, memory_id, tenant_id, content)

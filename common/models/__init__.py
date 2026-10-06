@@ -8,7 +8,7 @@ from common.models.base import Base
 from common.models.capability_usage import CapabilityUsage
 from common.models.dedup_review import DedupReview
 from common.models.document import Document
-from common.models.entity import Entity, MemoryEntityLink, Relation
+from common.models.entity import Entity, MemoryEntityLink, Relation, RelationEvidence
 from common.models.fleet import FleetCommand, FleetNode
 from common.models.idempotency import IdempotencyResponse
 from common.models.lifecycle_audit import LifecycleAudit
@@ -49,6 +49,7 @@ __all__ = [
     "RecallCandidate",
     "RecallEvent",
     "Relation",
+    "RelationEvidence",
     "SessionTrace",
     "TenantUsageCounter",
 ]

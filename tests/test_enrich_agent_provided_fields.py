@@ -177,7 +177,10 @@ async def test_unpinned_fields_are_still_enriched():
     applied, statuses = await _run([])
     assert applied.get("memory_type") == "decision"
     assert applied.get("weight") == 0.9
-    assert statuses == ["confirmed"]
+    # Status is the exception: a lifecycle field enrichment never writes, pinned
+    # or not (see ``test_heuristic_enrichment_lifecycle_fields``).
+    assert statuses == []
+    assert "status" not in applied
 
 
 async def test_title_is_always_enriched_regardless_of_pins():
@@ -195,7 +198,7 @@ async def test_no_list_falls_back_to_default_comparison_and_enriches():
     applied, statuses = await _run(_SENTINEL)
     assert applied.get("memory_type") == "decision"
     assert applied.get("weight") == 0.9
-    assert statuses == ["confirmed"]
+    assert statuses == []  # enrichment never writes status
 
 
 async def test_no_list_still_respects_a_non_default_row_value():
@@ -213,7 +216,7 @@ async def test_explicit_none_behaves_like_no_list():
     """``None`` means "no information" — same legacy path, not "pin nothing"."""
     applied, statuses = await _run(None)
     assert applied.get("memory_type") == "decision"
-    assert statuses == ["confirmed"]
+    assert statuses == []  # enrichment never writes status
 
 
 # ── Timestamps route through the same gate ───────────────────────────────────

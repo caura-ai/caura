@@ -67,16 +67,23 @@ class TestSingleValuePredicatesConstants:
             )
 
     def test_known_multi_value_predicates_absent(self):
-        """Core multi-value predicates must NOT be in the set."""
+        """Core multi-value predicates must NOT be in the set.
+
+        A77 removed ``created_by`` and ``belongs_to`` from this list. They were
+        listed here by assumption, never by measurement; the corpus count that
+        motivated A77 shows both are genuinely single-valued in the direction
+        the extractor emits them — one creator, one owner — and they now live in
+        the set's "Provenance & containment" block. The inverses (``owns``,
+        ``manages``, ``leads``) stay listed here, because THAT direction really
+        is multi-valued and is the distinction this guard exists to hold.
+        """
         multi_value = {
             "works_on",
             "uses",
-            "created_by",
             "authored_by",
             "manages",
             "depends_on",
             "contains",
-            "belongs_to",
             "mentions",
             "leads",
             "owns",
@@ -409,6 +416,12 @@ class TestPredicateClassification:
             "phone",
             "employed_by",
             "married_to",
+            # A77 — provenance & containment. One creator, one owner, one
+            # parent; same attribute-of-subject direction as ``owned_by``.
+            "belongs_to",
+            "part_of",
+            "created_by",
+            "written_by",
         ],
     )
     def test_single_value(self, predicate):
@@ -419,12 +432,9 @@ class TestPredicateClassification:
         [
             "works_on",
             "uses",
-            "created_by",
             "authored_by",
             "manages",
             "depends_on",
-            "belongs_to",
-            "part_of",
             "contains",
             "mentions",
             "related_to",

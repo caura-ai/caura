@@ -4,7 +4,8 @@
 CAURA-686 toolkit. The endpoint is on the writer's private VPC IP, so
 this script assumes a local proxy is forwarding it — typically::
 
-    gcloud run services proxy staging-memclaw-core-storage-writer \\
+    SERVICE=staging-memclaw-core-storage-writer  # legacy-name-floor: deployed Cloud Run service name used by this pasteable command
+    gcloud run services proxy "$SERVICE" \\
         --port 8080 --region us-central1
 
 Then::
@@ -21,7 +22,10 @@ each containing a timestamp + the endpoint payload. Post-process with
 
 The endpoint is intentionally separate from the gateway so it's
 reachable only via this proxy or from inside the VPC; the script is a
-thin polling loop on top of it, not a permanent surface.
+thin polling loop on top of it, not a permanent surface. It is also off
+by default: set ``CORE_STORAGE_DEBUG_ENDPOINTS=true`` on the target
+core-storage-api for the capture, and unset it afterwards. It lists only
+core-storage-api's own database sessions.
 """
 
 from __future__ import annotations

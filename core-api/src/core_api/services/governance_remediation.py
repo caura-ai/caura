@@ -63,10 +63,11 @@ async def _pre_verdict_children(sc: Any, memory_id: str, tenant_id: str, md: dic
     committed immediately. The verdict arrives here minutes later, naming only
     the parent.
 
-    Gated on ``auto_chunked`` rather than querying unconditionally. The lookup
-    filters on a JSON key with no supporting index, and a tenant configured
-    ``drop`` remediates constantly — so an ungated query would tax every
-    ordinary drop to serve the rare chunked one. The marker is safe to gate on
+    Gated on ``auto_chunked`` rather than querying unconditionally: auto-chunk is
+    the only path that commits children before a verdict exists (above), and a
+    tenant configured ``drop`` remediates constantly — so an ungated lookup would
+    add a round trip to every ordinary drop to serve the rare chunked one. (The
+    lookup itself is indexed since migration 058.) The marker is safe to gate on
     because it is stamped on the parent unconditionally, in the same function
     that builds the children, and it is already present on the production rows
     this fix has to reach — a NEW marker would only ever appear on rows written

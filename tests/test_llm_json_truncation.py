@@ -200,7 +200,10 @@ class TestVertexCompleteJson:
         captured.clear()
         p2 = VertexLLMProvider(project_id="p", location="global", model="m")
         p2._get_client()
-        assert "http_options" not in captured
+        # Global/regional keep the SDK's own endpoint (no pinned base_url);
+        # http_options is still passed, for the request timeout.
+        assert captured["http_options"].base_url is None
+        assert captured["http_options"].timeout
 
     def test_client_is_lazy_and_cached(self, monkeypatch):
         calls = []

@@ -58,6 +58,15 @@ class TestBlockedIPClassification:
             "fc00::1",  # IPv6 unique-local
             "fe80::1",  # IPv6 link-local
             "0.0.0.0",  # unspecified
+            "224.0.0.1",  # multicast
+            "ff02::1",  # IPv6 multicast
+            # L-73: RFC 6598 shared address space (carrier-grade NAT, Tailscale's
+            # tailnet range, overlay pod networks) is neither private nor global,
+            # so the flag enumeration let it through.
+            "100.64.0.1",
+            "100.127.255.254",
+            "::ffff:100.64.0.1",  # IPv4-mapped
+            "::ffff:10.0.0.5",  # IPv4-mapped RFC1918
         ],
     )
     def test_blocked_ranges_are_rejected(self, addr: str) -> None:
@@ -358,6 +367,28 @@ class TestFetchUrlText:
         )
         with pytest.raises(Exception) as exc:
             await _fetch_url_text("https://example.com/data")
+        assert exc.value.status_code == 422
+
+    @pytest.mark.parametrize("headers", [{}, {"content-type": ""}])
+    async def test_no_content_type_rejected_422(self, monkeypatch, headers) -> None:
+        """L-131: no Content-Type (or an empty one) is not on the allowlist either.
+
+        It used to skip the check and decode the body as text, so a small PDF or
+        zip reached the LLM as replacement characters."""
+        monkeypatch.setattr(
+            "core_api.services.ingest_service._resolve_and_vet",
+            lambda url: [_TEST_PUBLIC_ADDR],
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, headers=headers, content=b"%PDF-1.7\x00\xff")
+
+        monkeypatch.setattr(
+            "core_api.services.ingest_service.httpx.AsyncClient",
+            lambda **kw: _make_client(handler),
+        )
+        with pytest.raises(HTTPException) as exc:
+            await _fetch_url_text("https://example.com/report")
         assert exc.value.status_code == 422
 
     async def test_content_length_precheck_413(self, monkeypatch) -> None:

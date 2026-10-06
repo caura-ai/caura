@@ -36,6 +36,10 @@ OPENROUTER_CHAT_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_MODEL = os.environ.get(
     "OPENROUTER_DEFAULT_MODEL", "openai/gpt-5.4-nano"
 )
+ATLASCLOUD_CHAT_BASE_URL = "https://api.atlascloud.ai/v1"
+ATLASCLOUD_DEFAULT_MODEL = os.environ.get(
+    "ATLASCLOUD_DEFAULT_MODEL", "openai/gpt-4.1-mini"
+)
 
 # ── Retry policy ─────────────────────────────────────────────────────
 
@@ -192,6 +196,14 @@ LLM_FALLBACK_MODEL_OPENAI = os.environ.get("LLM_FALLBACK_MODEL_OPENAI", "gpt-5.4
 # ATTEMPT up to three of them — 75 s, past the 35 s inline ceiling on the
 # first attempt, so the budget for a retry never existed.
 OPENAI_REQUEST_TIMEOUT_SECONDS = _read_float_env("OPENAI_REQUEST_TIMEOUT_SECONDS", 25.0)
+
+# The same per-request bound for the google-genai SDK (Vertex and Gemini).
+# Its default is no timeout at all, and the providers run the SDK in
+# ``asyncio.to_thread``: one stalled upstream call held a worker's enrich loop
+# and a core-api executor thread until Google's side gave up, if ever.
+GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS = _read_float_env(
+    "GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS", 25.0
+)
 
 
 # Hard ceiling on the *whole* business/personal pre-gate classification —

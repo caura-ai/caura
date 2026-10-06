@@ -22,9 +22,9 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories/{id}/status` | PATCH | Update lifecycle status |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
 | `/memories` | DELETE | Bulk soft-delete |
-| `/memories/stats` | GET | Counts by type, agent, and status |
+| `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself) |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
-| `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under both `memories` and `items` |
+| `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under `memories` (also mirrored to `items` for /search-shaped consumers — **`items` is deprecated and scheduled for removal in v4.0.0**; send `items_alias: false` to drop that copy now and halve the response, and read `memories`. The MCP recall brief already omits it by default). `top_k` is the result count — `limit` is accepted as an alias for it |
 | `/ingest/preview` | POST | Extract 5-20 atomic facts from a URL or text (no writes) |
 | `/ingest/commit` | POST | Write previewed facts as memories |
 
@@ -79,19 +79,21 @@ See also the [public API stability contract](public-api-stability.md) and the
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/documents` | POST | Store or update a structured JSON document |
+| `/documents` | POST | Store or update a structured JSON document. Also mints a memory carrying the document's `data`, so the body is reachable by recall — the doc row embeds only `data["summary"]`. Independent of the summary: a doc without one is invisible to `/documents/search` and still mints. Not minted for `collection="skills"`, `_`-prefixed collections, an empty `data`, or a payload over the memory size limit |
 | `/documents/{id}` | GET | Retrieve document by ID |
 | `/documents/query` | POST | Query by field equality filters |
-| `/documents/{id}` | DELETE | Delete a document |
+| `/documents/{id}` | DELETE | Delete a document, and un-mint the memory its write minted |
 
 **Fleet**
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/fleet/heartbeat` | POST | Plugin heartbeat — upserts node status, returns pending commands |
+| `/fleet/heartbeat` | POST | Plugin heartbeat — upserts node status, returns pending commands. A node is bound to the credential that heartbeats it: an agent or install credential acts only as nodes bound to it, while a tenant credential acts as any node of its tenant and takes back one bound to a narrower credential |
 | `/fleet/nodes` | GET | List fleet nodes with status (online/stale/offline) |
+| `/fleet/nodes/{node_id}/release` | POST | Release a node from its credential, for example after rotating its key (tenant credential). With `bind_agent_id` or `bind_install_uuid` the node is bound to that credential at once; without either, its next heartbeat binds it to whichever credential sends it first. A node with no binding yet, including every node from before binding existed, is claimed the same way |
 | `/fleet/commands` | POST | Queue a command for a node |
-| `/fleet/commands` | GET | List command history |
+| `/fleet/commands` | GET | List command history; an agent or install credential sees only its own nodes' commands |
+| `/fleet/commands/{command_id}/result` | POST | Report a command's result; an agent or install credential reports only on its own nodes' commands |
 
 **Admin + System**
 
@@ -121,6 +123,7 @@ routes expose generic software or identity-probe data, not tenant data.
 | `X-Agent-ID` | Scopes the request to this agent |
 | `X-Org-Read-Only: true` | Plan-limit read-only mode — creates and other writes that grow the store return 403 `PLAN_LIMIT_READ_ONLY`. Deletes, memory status transitions, agent trust changes and `PUT /settings` stay allowed so an over-limit org can get back under its plan |
 | `X-Tenant-ID` | Tenant identity when using the shared `CAURA_API_KEY` gate |
+| `X-User-ID` | The person behind a dashboard session or JWT; the gateway sends none for an API key. Recorded in the audit trail only (see **Audit attribution** below), and read only when `GATEWAY_SHARED_SECRET` is set |
 
 The identity headers are trusted on the gateway-header auth path. Set
 `GATEWAY_SHARED_SECRET` so that path also requires a matching
@@ -133,6 +136,50 @@ auth middleware rather than a route behind `get_auth_context`, so "authenticates
 first" is a property each surface has to implement for itself. When the key is
 set, send it as `X-API-Key` (or a Bearer token) on MCP calls too; without it the
 request is refused `401` before any identity header is consulted.
+
+**Audit attribution**
+
+A client says which Caura client it is with `X-Caura-Surface`. The value is the
+client's own claim: it labels audit rows and metrics, and no authorization
+decision reads it. The set is closed. Case and surrounding whitespace are
+ignored. A value outside the set is dropped and recorded as `null`, and the
+request goes ahead as normal (no 4xx).
+
+| `X-Caura-Surface` | Client |
+|---|---|
+| `dashboard` | The enterprise web app, outside `/prism` |
+| `prism` | The enterprise web app, on `/prism` |
+| `broker` | caura-daemon, including the `caura` CLI and `caura mcp-server`, which reach core-api through it |
+| `openclaw_plugin` | The OpenClaw plugin |
+
+Calls to `/mcp` are recorded as `mcp`, from the transport. They take no header
+for it, and a REST call cannot claim it.
+
+The writes below record two keys in the audit row's `detail`:
+
+- `user_id`: the person the gateway vouched for (`X-User-ID`, above).
+- `surface`: the allow-listed `X-Caura-Surface`, or `mcp`.
+
+Both keys are always present on these rows, set to `null` when unknown. A
+`null` `user_id` means nobody vouched for a person: an API key of any kind, a
+call that did not come through the gateway, or a deployment without
+`GATEWAY_SHARED_SECRET`. A row without the keys was written before they existed.
+`user_id` is not `author_user_id` on keystone rows: that one is copied from the
+request body.
+
+| `action` | `resource_type` | REST | MCP |
+|---|---|---|---|
+| `delete` | `memory` | `DELETE /memories/{id}` | `caura_manage op=delete` |
+| `bulk_delete` | `memory` | `DELETE /memories`, `POST /memories/bulk-delete` | `caura_manage op=bulk_delete` |
+| `conflict.review` | `memory_conflict` | `PATCH /conflicts/{id}/resolve` | — |
+| `crystallize` | `crystallization_report` | `POST /crystallize` | — |
+| `ingest_commit` | `memory` | `POST /ingest/commit` | — |
+| `ingest_undo` | `memory` | `POST /ingest/undo/{run_id}` | — |
+| `agent_tune` | `agent` | `PATCH /agents/{id}/tune` | `caura_tune` |
+| `agent_trust_update` | `agent` | `PATCH /agents/{id}/trust` | — |
+| `agent_fleet_update` | `agent` | `PATCH /agents/{id}/fleet` | — |
+| `keystone.set` | `keystone` | `POST /keystones` | `caura_keystones_set op=set` |
+| `keystone.delete` | `keystone` | `DELETE /keystones/{doc_id}` | `caura_keystones_set op=delete` |
 
 **Rate limiting (managed platform)**
 
@@ -147,6 +194,8 @@ These limits apply to the managed platform at `caura.ai`. A self-hosted deployme
 | Global DDoS floor | 1000 req/min per IP |
 
 Exceeded limits return HTTP 429 with a `Retry-After` header. Rate-limited routes also carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` on **successful** responses, so a client can back off before it is throttled rather than after.
+
+Those three headers describe the throttle only. The per-period plan quota is reported separately as `X-Usage-Limit` / `X-Usage-Remaining` on `POST /memories`, `POST /memories/bulk` and `POST /search`, and only where a usage meter is wired — a deployment without one (OSS standalone) omits them rather than reporting a placeholder.
 
 </details>
 
@@ -169,12 +218,13 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `DATABASE_URL` | local PostgreSQL URL | Storage-service primary connection URL; set directly outside the stock Compose deployment |
 | `READ_DATABASE_URL` | *(empty)* | Optional storage-service read-replica URL |
 | `ADMIN_API_KEY` | *(empty)* | Admin API key — bypasses tenant enforcement |
+| `ADMIN_API_KEY_FILE` | *(empty)* | File holding the admin key, read only while `ADMIN_API_KEY` is blank. Docker Compose sets it to a key `admin-key-init` generates for the bundled scheduler |
 | `CAURA_API_KEY` | *(empty)* | Shared perimeter key for a network-exposed OSS deployment |
 | `GATEWAY_SHARED_SECRET` | *(empty)* | Secret required in `X-Gateway-Secret` before gateway identity headers are trusted |
 | `JWT_SECRET` | `change-me-in-production` | JWT signing secret; must be changed in production |
 | `EMBEDDING_PROVIDER` | `openai` | `openai`, `local`, or `fake` |
-| `ENTITY_EXTRACTION_PROVIDER` | `openai` | `openai`, `gemini`, `anthropic`, `openrouter`, `fake`, or `none` |
-| `ENTITY_EXTRACTION_MODEL` | `gpt-5.4-nano` | LLM model for enrichment and entity extraction |
+| `ENTITY_EXTRACTION_PROVIDER` | `openai` | `openai`, `gemini`, `openrouter`, `fake`, or `none` (`anthropic` is refused at startup — no structured-output support) |
+| `ENTITY_EXTRACTION_MODEL` | `gpt-5.4-nano` | LLM model for enrichment and entity extraction; ignored (with a warning) for a provider whose model family it does not belong to, which then uses its own default |
 | `OPENAI_API_KEY` | — | Required for OpenAI embeddings and enrichment |
 | `USE_LLM_FOR_MEMORY_CREATION` | `true` | LLM auto-classifies type, weight, title, summary on write |
 | `ANTHROPIC_API_KEY` | — | Required for Anthropic |
@@ -182,7 +232,8 @@ directly. A complete `ALLOYDB_HOST`, `ALLOYDB_USER`, `ALLOYDB_PASSWORD`, and
 | `GEMINI_API_KEY` | — | Required for Gemini (Developer API, from AI Studio) |
 | `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed CORS origins |
 | `ENVIRONMENT` | `development` | `development` or `production` |
-| `SETTINGS_ENCRYPTION_KEY` | — | Fernet key for encrypting tenant settings. Required in production |
+| `SETTINGS_ENCRYPTION_KEY` | — | Fernet key that encrypts tenant provider keys (`api_keys.*`) at rest. Required in production. Without it (dev, standalone) keys are stored as submitted; keys saved before encryption existed are encrypted on the tenant's next save |
+| `INSTALLER_ALLOWED_API_URLS` | *(empty)* | Comma-separated extra origins that `/install-plugin` and `/install-skill` accept as `api_url`. The serving origin is always accepted; set this only when a proxy hides the public host from core-api |
 | `PLATFORM_LLM_PROVIDER` | *(empty)* | Platform-default LLM: `openai`, `vertex`, or empty to disable |
 | `PLATFORM_LLM_MODEL` | *(empty)* | Model override (e.g. `gpt-5.4-nano`, `gemini-3.1-flash-lite-preview`) |
 | `PLATFORM_LLM_API_KEY` | — | OpenAI API key for the platform LLM singleton |

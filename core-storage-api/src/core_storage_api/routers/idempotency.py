@@ -75,6 +75,23 @@ async def claim_idempotency(body: IdempotencyClaimRequest, response: Response) -
     return orm_to_dict(row, IDEMPOTENCY_RESPONSE_FIELDS)
 
 
+@router.delete("/claim", status_code=204, responses={404: {"description": "No pending claim"}})
+async def release_idempotency_claim(tenant_id: str, idempotency_key: str, request_hash: str) -> Response:
+    """Release a still-pending claim whose handler failed before recording.
+
+    Completed rows are never touched; 404 when there is no pending claim
+    for this ``(tenant_id, idempotency_key, request_hash)``.
+    """
+    released = await _svc.idempotency_release(
+        tenant_id=tenant_id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+    if not released:
+        raise HTTPException(status_code=404, detail="no pending idempotency claim")
+    return Response(status_code=204)
+
+
 @router.post("")
 async def upsert_idempotency(body: IdempotencyUpsertRequest) -> dict:
     # If a prior ``claim`` inserted a pending row, this UPDATEs it in

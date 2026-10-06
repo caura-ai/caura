@@ -278,32 +278,50 @@ class HeartbeatSender:
             return clients.snapshot()
         return self._shared.aggregate()
 
-    async def _read_storage(self) -> tuple[identity.DeploymentIdentity, Counts]:
-        """Identity and counts from storage; the one place the sender does I/O besides the POST."""
+    async def _read_storage(
+        self, *, create: bool = True
+    ) -> tuple[identity.DeploymentIdentity | None, Counts]:
+        """Identity and counts from storage; the one place the sender does I/O besides the POST.
+
+        ``create=False`` reads the identity without generating one, so a preview
+        never writes the deployment row (L-127).
+        """
         from core_api.clients.storage_client import get_storage_client
 
         sc = get_storage_client()
-        ident = await identity.load_or_create(sc)
+        ident = await identity.load_or_create(sc) if create else await identity.load(sc)
         counts = await collect_counts(sc, standalone_tenant_id=self._standalone_tenant())
         return ident, counts
 
-    async def build(self) -> tuple[identity.DeploymentIdentity, dict[str, Any]]:
-        """Resolve identity, read counts and assemble the payload for one send."""
-        ident, counts = await self._read_storage()
-        self.deployment_id = ident.deployment_id
-        payload = build_payload(
+    def _payload(self, deployment_id: str | None, counts: Counts) -> dict[str, Any]:
+        return build_payload(
             settings=self._settings,
-            deployment_id=ident.deployment_id,
+            deployment_id=deployment_id,
             counts=counts,
             client_counts=self.client_counts(),
             version=self._version,
         )
-        return ident, payload
+
+    async def build(self) -> tuple[identity.DeploymentIdentity, dict[str, Any]]:
+        """Resolve identity, read counts and assemble the payload for one send."""
+        ident, counts = await self._read_storage()
+        if ident is None:
+            raise RuntimeError("no deployment identity to send under")
+        self.deployment_id = ident.deployment_id
+        return ident, self._payload(ident.deployment_id, counts)
 
     async def preview(self) -> dict[str, Any]:
-        """Exactly what the next send would contain (for ``GET /telemetry``)."""
-        _ident, payload = await self.build()
-        return payload
+        """What the next send would contain (for ``GET /telemetry``).
+
+        Reads the identity but never creates it: the first send does, as
+        docs/telemetry.md says, so inspecting the endpoint writes nothing, and
+        until then the preview's ``deployment_id`` is null (L-127).
+        """
+        ident, counts = await self._read_storage(create=False)
+        if ident is None:
+            return self._payload(None, counts)
+        self.deployment_id = ident.deployment_id
+        return self._payload(ident.deployment_id, counts)
 
     # -- status ------------------------------------------------------------
 

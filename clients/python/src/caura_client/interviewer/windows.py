@@ -19,8 +19,8 @@ headroom; 400 events stays under the 500 hard cap.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Iterator
 
 from .parser import ParsedEvent
 

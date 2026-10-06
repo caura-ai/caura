@@ -53,6 +53,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Resp
 from pydantic import Field
 
 from core_api import openapi_responses as _oar
+from core_api.agent_ids import canonical_service_agent_id
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.config import settings as app_settings
@@ -166,14 +167,33 @@ async def _enforce_author_trust(
 def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple[str, bool]:
     """Return ``(caller_agent_id, verified)`` for the request.
 
-    ``verified=True`` means the gateway cryptographically established
-    the caller's agent identity (an agent-scoped credential whose
-    ``kind=agent_key`` populated ``auth.agent_id``). ``verified=False``
-    means the identity
-    is asserted via the ``X-Agent-ID`` header alone — which is what
-    happens when a non-agent-scoped (admin / tenant) key is in use.
-    Unverified identities are still accepted but with stricter trust
-    gating downstream — see ``_effective_min_for_caller``.
+    ``verified=True`` means the gateway established the caller's agent
+    identity (an agent-scoped credential whose ``kind=agent_key`` had
+    ``X-Agent-ID`` injected behind the gateway perimeter). ``verified=False``
+    means the identity is asserted by the caller — which is what happens when
+    a non-agent-scoped (admin / tenant / shared) key is in use. Unverified
+    identities are still accepted but with stricter trust gating downstream —
+    see ``_effective_min_for_caller``.
+
+    PROVENANCE, NOT PRESENCE, and the distinction is the whole gate
+    (oss-0922-m-03). This used to read ``auth.agent_id`` alone, which answers
+    "did the caller name an agent" — but ``auth.py`` builds that attribute
+    from the raw ``X-Agent-ID`` header on the shared-``CAURA_API_KEY`` path
+    (Path 2) exactly as it does on the gateway path (Path 4), so a shared-key
+    holder's own assertion read as proof and the floor bump below was skipped
+    for it. Measured end-to-end: the admin key was refused at floor 2 on a
+    trust-1 victim while the shared key wrote the rule in that victim's name —
+    the WEAKER credential facing the LOOSER gate, and a plant the bump exists
+    to stop. ``AuthContext.agent_id_verified`` is set only where the identity
+    was established, so this asks the right question. See
+    ``docs/plans/rest-mcp-agent-identity-asymmetry.md``.
+
+    The defect was reachable only through the real route with a real
+    credential — the helpers agree with each other in isolation — so the
+    regression guard is an end-to-end test
+    (``tests/test_keystone_identity_provenance.py``), not a unit call on this
+    function. A trust-floor change is semantic with no schema movement, so
+    oasdiff cannot catch this class at all.
 
     Mismatch rejection: when both signals are present and disagree,
     the caller is treated as a spoofing attempt and rejected outright
@@ -194,7 +214,14 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
     the gateway — and this path needs stricter anti-spoof handling (X-Agent-ID
     mismatch rejection + the verified-floor bump) than that resolver provides.
     """
-    verified_id = getattr(auth, "agent_id", None)
+    # ``agent_id_verified`` gates the READ of ``agent_id`` rather than being
+    # ANDed into the returned flag, so an asserted identity keeps flowing to
+    # the ``x_agent_id`` branch below and still resolves to a caller — it just
+    # resolves as unverified. Collapsing both to ``(None, False)`` would drop
+    # the caller to the ``rest-admin`` sentinel and turn every Path-2 keystone
+    # write into an unregistered-agent 403, which is a different (and much
+    # larger) behaviour change than the floor bump this fix is.
+    verified_id = getattr(auth, "agent_id", None) if getattr(auth, "agent_id_verified", False) else None
     # The self plane, asked of a header rather than a body or query parameter:
     # ``AuthContext.enforce_self_agent`` owns that question for the whole REST
     # surface. ``or None`` keeps an empty ``X-Agent-ID:`` an omission here — the
@@ -209,9 +236,9 @@ def _resolve_caller_identity(auth: AuthContext, x_agent_id: str | None) -> tuple
         ),
     )
     if verified_id:
-        return verified_id, True
+        return canonical_service_agent_id(verified_id), True
     if x_agent_id:
-        return x_agent_id, False
+        return canonical_service_agent_id(x_agent_id), False
     return "rest-admin", False
 
 
@@ -295,6 +322,8 @@ async def list_keystones(
     tenant for scope clarity.
     """
     auth.enforce_readable_tenant(tenant_id)
+    if agent_id is not None:
+        agent_id = canonical_service_agent_id(agent_id)
     sc = get_storage_client()
     # Drop ``agent_id`` when there's no ``fleet_id`` — agent-scope rows
     # are keyed on the (fleet_id, agent_id) pair, so an agent-only filter
@@ -343,6 +372,8 @@ async def upsert_keystone(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     caller_agent_id, caller_verified = _resolve_caller_identity(auth, x_agent_id)
+    if body.agent_id is not None:
+        body.agent_id = canonical_service_agent_id(body.agent_id)
     standalone_admin = _is_standalone_admin(auth, x_agent_id)
 
     # Early registration check — anti-probing parity with delete. Without
@@ -452,8 +483,10 @@ async def upsert_keystone(
             "fleet_id": body.fleet_id,
             "agent_id": body.agent_id,
             "weight": body.weight,
+            # The body's claim. ``user_id`` below is the one the gateway vouched for.
             "author_user_id": body.author_user_id,
             "via": "rest",
+            **auth.audit_actor(),
         },
     )
     return doc
@@ -573,6 +606,6 @@ async def delete_keystone(
         action="keystone.delete",
         resource_type="keystone",
         resource_id=None,
-        detail={"doc_id": doc_id, "via": "rest"},
+        detail={"doc_id": doc_id, "via": "rest", **auth.audit_actor()},
     )
     return {"deleted": True, "doc_id": doc_id}

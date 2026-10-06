@@ -33,9 +33,14 @@ _INDEX_NAME = "ix_memories_status_changed_at"
 
 
 def upgrade() -> None:
+    # ``if_not_exists``: entering the autocommit block below COMMITS this add
+    # before the CONCURRENTLY build, while alembic_version moves only once
+    # upgrade() returns. A build interrupted there leaves the column behind,
+    # and a plain ADD COLUMN would fail every retry with DuplicateColumn.
     op.add_column(
         "memories",
         sa.Column("status_changed_at", sa.DateTime(timezone=True), nullable=True),
+        if_not_exists=True,
     )
     # ``CONCURRENTLY`` cannot run inside a transaction, hence the autocommit
     # block — same shape as 040/041. The DROP first clears an INVALID index
