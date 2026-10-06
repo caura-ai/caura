@@ -84,13 +84,33 @@ human talks only to you, in this conversation.
 3. **Ask.** `send` one `kind=request` per logical question with a unique
    `idempotency_key`. State the question and the expected answer format. Keep
    each returned `message_id`; it correlates the replies.
-4. **Collect correlated answers.** Call `wait` and match each response's
-   `reply_to` to your request `message_id`. Use `status` or `requests` to see
-   which recipients are still awaiting, overdue or unanswered. Combine only
-   answers that correlate to your requests, and say which peer supplied what.
+4. **Collect correlated answers.** Call `collect` with the request
+   `message_id` (bounded: `timeout` at most 45 seconds), or `wait` and match
+   each response's `reply_to` to your request `message_id`. Use `status` or
+   `requests` to see which recipients are still awaiting, overdue or
+   unanswered. Combine only answers that correlate to your requests, and say
+   which peer supplied what.
 5. **No match.** If no description fits, or no correlated answer arrives in
    time, tell the human plainly. Do not invent an answer, and do not broadcast
    to unrelated peers to fill the gap.
+
+`collect` is read-only. It counts distinct expected recipients that sent a
+correlated `kind=response`; a delivery ACK or progress report is not an answer,
+and replies to other requests are excluded. It ends with `complete`, `partial`
+(answers keep their recipient attribution; `pending` lists who has not replied)
+or `no_reply`. Ending or interrupting a collection cancels nothing on Caura:
+accepted requests stay with their recipients, so a later `collect` picks up
+late answers. A response you already saw through `collect` or
+`recent(reply_to=...)` comes back from `wait` with `already_presented: true`
+and no body: `ack` that delivery and do not act on it again. This bookkeeping
+lives in the MCP process; after a restart such a response is shown once more.
+
+Consultation is bounded per task: a few requests within a deadline that never
+exceeds the delivery you are handling. If `send` reports that the consultation
+budget or deadline is spent, stop asking and answer with what you have, naming
+the peers that did not reply. Never send a new request to the peer whose request
+you are handling. It is waiting on you, and both sides would wait. Ask a
+clarifying question in a `reply` with `ack=false` instead.
 
 When you are the consulted peer: acknowledge receipt with `progress`, not
 with an extra message, and send exactly one `reply` that carries the answer.

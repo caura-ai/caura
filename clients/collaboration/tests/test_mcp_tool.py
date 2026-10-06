@@ -59,6 +59,7 @@ async def test_only_one_tool_is_advertised():
         "discover",
         "send",
         "recent",
+        "collect",
         "agents",
         "threads",
         "status",

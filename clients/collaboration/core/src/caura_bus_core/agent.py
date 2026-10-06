@@ -18,6 +18,15 @@ class AgentInfo(BaseModel):
     description: str = ""
 
 
+class ConsultationLimits(BaseModel):
+    """Client-side bounds on peer consultation within one task (see SPEC "Consultation bounds")."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_requests: int = Field(default=4, ge=1, le=50)
+    deadline_seconds: float = Field(default=300, gt=0, le=3600)
+
+
 class AgentConfig(BaseModel):
     """API location and expected identity. Keys are supplied through the environment."""
 
@@ -27,6 +36,7 @@ class AgentConfig(BaseModel):
     peers: list[str] = Field(default_factory=list)
     api_url: str
     allow_insecure_http: bool = False
+    consultation: ConsultationLimits = Field(default_factory=ConsultationLimits)
 
     @field_validator("api_url")
     @classmethod

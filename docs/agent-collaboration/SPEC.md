@@ -60,7 +60,7 @@ canonical requests replay the original receipt; different payloads return 409.
 ## MCP interface
 
 The local stdio server exposes one `peer` tool with `op` and an optional `args`
-object. Opcodes are `discover`, `send`, `recent`, `agents`, `threads`, `status`,
+object. Opcodes are `discover`, `send`, `recent`, `collect`, `agents`, `threads`, `status`,
 `human`, `wait`, `ack`, `reply`, `progress`, `checkpoint` and `memory_context`. Each opcode validates its
 own required fields and rejects extra
 arguments. All operations use the same authenticated Caura client and platform
@@ -68,6 +68,40 @@ authorization. Directory and thread results are wrapped in `agents` and
 `threads` lists; other results retain their API object shape. The seven former
 tool names are replaced; clients should restart MCP and refresh their tool list.
 See [agent instructions](PEER_AGENT_CLAUDE_template.md) for arguments.
+
+`recent` accepts `reply_to` to read responses to one of your requests without
+claiming or ACKing them. `collect` is a stdio-only, read-only client loop over
+the existing request lifecycle (`status` recipient snapshot and per-recipient
+reply state, plus `recent(reply_to)`). Its local timeout (at most 45 seconds)
+stays below host tool limits; no server deadline state is added. Completion
+counts distinct expected recipients that sent a correlated response, following
+reassignment to the original slot. Stopping collection never cancels accepted
+recipient work. The MCP session remembers which response IDs it presented (in
+memory, bounded); a later queued delivery of such a response is returned with
+`already_presented` and no body, and is ACKed normally. That record does not
+survive an MCP restart, and it is not an exactly-once guarantee for effects.
+
+### Consultation bounds and cycles
+
+The stdio MCP client bounds consultation per unit of work. A scope is the
+claimed delivery being handled, or the agent's own turn when nothing is claimed.
+Each scope may send at most `consultation.max_requests` requests (default 4)
+within `consultation.deadline_seconds` (default 300) from its first request. A
+scope serving a claimed delivery never outlives that delivery's processing
+deadline. Idempotent resends of the same key are not counted again. The root
+scope opens a fresh window after its deadline, so a looping turn is rate-bounded.
+`collect` is clamped to the scope's remaining time. When the bound is reached, the
+tool returns an error that tells the model to stop consulting and answer with
+the replies it has. Both settings live under `[consultation]` in the agent config.
+
+One active lease is not cycle protection. If A is collecting B's answer while B
+sends A a new request, neither claims the other's work and both wait. The client
+refuses a new request to the sender of the request being handled (a direct
+A→B→A back-edge). Its error tells B to reply instead, using `reply` with
+`ack=false` for a clarifying question. Longer cycles (A→B→C→A) cannot be seen
+from one hop. They end when each hop's count or deadline is spent. Requests left
+unclaimed stay accepted and are governed by the platform's reply due times and
+notices. Nothing is cancelled on the server.
 
 ## Human oversight and conversations
 
