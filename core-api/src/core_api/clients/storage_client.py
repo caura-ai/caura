@@ -769,7 +769,9 @@ class CoreStorageClient:
                 _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
             ) from exc
 
-    async def get_memory(self, memory_id: str, tenant_id: str, *, read: bool = True) -> dict | None:
+    async def get_memory(
+        self, memory_id: str, tenant_id: str, *, read: bool = True, include_held: bool = False
+    ) -> dict | None:
         """Fetch one memory by id, within ``tenant_id``.
 
         ``tenant_id`` is required. This method used to take an id alone, and
@@ -783,7 +785,14 @@ class CoreStorageClient:
         read-back of a row this request (or an event's producer) just wrote,
         where replica lag would make the row or the freshly-PATCHed column
         invisible. Same reasoning as the write-path dedup gate below.
+
+        A held memory (``QUARANTINED_MEMORY_STATUS``) comes back as None unless
+        ``include_held``, which only a person reviewing it may be given.
         """
+        if include_held:
+            return await self._get(
+                f"/memories/{memory_id}", tenant_id=tenant_id, read=read, include_held=True
+            )
         return await self._get(f"/memories/{memory_id}", tenant_id=tenant_id, read=read)
 
     async def update_memory(self, memory_id: str, tenant_id: str, data: dict) -> dict | None:
@@ -850,6 +859,7 @@ class CoreStorageClient:
         tenant_id: str,
         unset_supersedes: bool = False,
         expected_supersedes_id: str | None = None,
+        release_hold: bool = False,
     ) -> dict | None:
         """Update status and optionally set or clear ``supersedes_id``.
 
@@ -868,6 +878,11 @@ class CoreStorageClient:
             current value to either match the expected uuid or already be
             NULL. A current pointer to *a different* uuid yields a 409 so
             the caller knows another writer took the row.
+
+        Release path:
+            ``release_hold=True`` moves a held memory to ``active`` or
+            ``cancelled`` and does nothing else. Without it storage never
+            moves a held memory, so this is the only way out of quarantine.
 
         Raises
         ------
@@ -895,6 +910,8 @@ class CoreStorageClient:
         if unset_supersedes:
             payload["unset_supersedes"] = True
             payload["expected_supersedes_id"] = expected_supersedes_id
+        if release_hold:
+            payload["release_hold"] = True
         return await self._patch(f"/memories/{memory_id}/status", payload)
 
     async def find_by_content_hash(
@@ -1542,12 +1559,16 @@ class CoreStorageClient:
             params["tenant_id"] = tenant_id
         return await self._get_list("/memories/fleet-distribution", **params)
 
-    async def get_memory_detail(self, tenant_id: str, memory_id: str) -> dict | None:
+    async def get_memory_detail(
+        self, tenant_id: str, memory_id: str, *, include_held: bool = False
+    ) -> dict | None:
         """Full memory row + entity links + server-computed embedding stats.
 
-        Returns None on 404 (absent / soft-deleted / cross-tenant) — the
-        caller raises its own 404.
+        Returns None on 404 (absent / soft-deleted / cross-tenant, or held
+        unless ``include_held``) — the caller raises its own 404.
         """
+        if include_held:
+            return await self._get(f"/memories/{memory_id}/detail", tenant_id=tenant_id, include_held=True)
         return await self._get(f"/memories/{memory_id}/detail", tenant_id=tenant_id)
 
     async def get_memory_contradictions(self, tenant_id: str, memory_id: str) -> dict | None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from common.constants import QUARANTINED_MEMORY_STATUS
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.pipeline.context import PipelineContext
@@ -41,13 +42,25 @@ async def _merge_near_duplicate(new_id: str, candidate_id: str, tenant_id: str) 
     """
     sc = get_storage_client()
     try:
-        await sc.update_memory_status(new_id, "active", supersedes_id=candidate_id, tenant_id=tenant_id)
+        linked = await sc.update_memory_status(
+            new_id, "active", supersedes_id=candidate_id, tenant_id=tenant_id
+        )
     except Exception:
         logger.warning(
             "near-duplicate merge: could not link %s -> %s; leaving both rows live",
             new_id,
             candidate_id,
             exc_info=True,
+        )
+        return
+    if linked is None:
+        # Storage matched no row: the new one was deleted since, or it is held
+        # for review, which nothing but a person's release moves. Either way
+        # nothing stands in the candidate's place, so it stays current.
+        logger.info(
+            "near-duplicate merge: %s is gone or held; leaving %s current",
+            new_id,
+            candidate_id,
         )
         return
     try:
@@ -267,8 +280,15 @@ class ScheduleBackgroundTasks:
         # from the row as written, as the consumer does: governance gave its
         # verdict before the write, so the row's visibility is the one the
         # children must inherit (#808).
+        # A held memory gets no children: they would be live rows carrying its
+        # unreviewed claims. The fan-out does not read its parent back, unlike
+        # the passes below, which skip a held row.
+        # TODO(release replay): release only changes the status, so a released
+        # memory gets none of this work, and these facts are gone with the
+        # request. The path that first holds writes decides what a release
+        # replays; nothing holds them yet.
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
-        if atomic_facts:
+        if atomic_facts and memory.get("status") != QUARANTINED_MEMORY_STATUS:
             from core_api.services.memory_service import _resolve_parent_weight, fan_out_atomic_facts
 
             track_task(

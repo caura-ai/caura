@@ -24,6 +24,19 @@ from common.env_utils import read_float_env, read_int_env
 # explicitly instead.
 LIVE_MEMORY_STATUSES = ("active", "confirmed", "pending")
 
+# A memory held for a person's review: written, but not live until a person
+# releases it (back to ``active``) or rejects it (``cancelled``). Nothing else
+# moves it, and nothing moves a written memory into it. Outside
+# ``LIVE_MEMORY_STATUSES``, so recall and the list defaults already leave it
+# out, and the reads that filter only on ``deleted_at IS NULL`` exclude it
+# explicitly: no agent, search, count, graph or background pass sees a held
+# memory, only a person reviewing it. Raw SQL in core-storage-api spells the
+# value out as ``'quarantined'``.
+QUARANTINED_MEMORY_STATUS = "quarantined"
+# What a held memory may become: released (``active``) or rejected
+# (``cancelled``).
+QUARANTINE_EXITS = ("active", "cancelled")
+
 # ── Embeddings ──
 # Native dim of the default embedder (BAAI/bge-m3, see local-embedder docs).
 # Schema upgrade lives in alembic migration 012_vector_dim_1024.py — keep

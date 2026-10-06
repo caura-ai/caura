@@ -13,6 +13,8 @@ from common.constants import (
     CONTRADICTION_CANDIDATE_WINDOW,
     CONTRADICTION_SIMILARITY_THRESHOLD,
     CRYSTALLIZER_SHORT_CONTENT_CHARS,
+    QUARANTINE_EXITS,
+    QUARANTINED_MEMORY_STATUS,
     SQL_SCORING_REQUIRED_KEYS,
 )
 from common.events.lifecycle_purge_request import (
@@ -2036,14 +2038,15 @@ async def prior_ingest_by_doc_hash(request: Request) -> dict:
 
 
 @router.get("/{memory_id}/detail")
-async def get_memory_detail(memory_id: UUID, tenant_id: str) -> dict:
+async def get_memory_detail(memory_id: UUID, tenant_id: str, include_held: bool = False) -> dict:
     """Full memory row + entity links + server-computed embedding stats.
 
     The raw pgvector is never returned — only a first-20 preview and
     {dimensions,min,max,mean,non_zero}. 404 when the row is absent,
-    soft-deleted, or belongs to another tenant.
+    soft-deleted, or belongs to another tenant, and when it is held unless
+    ``include_held`` (core-api passes it for a person reviewing one).
     """
-    detail = await _svc.memory_get_detail(memory_id, tenant_id)
+    detail = await _svc.memory_get_detail(memory_id, tenant_id, include_held=include_held)
     if detail is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return detail
@@ -2064,7 +2067,7 @@ async def get_memory_contradictions(memory_id: UUID, tenant_id: str) -> dict:
 
 
 @router.get("/{memory_id}")
-async def get_memory(memory_id: UUID, tenant_id: str) -> dict:
+async def get_memory(memory_id: UUID, tenant_id: str, include_held: bool = False) -> dict:
     """Fetch one memory by id, within ``tenant_id``.
 
     ``tenant_id`` is a **required** query parameter. It used to default to
@@ -2076,7 +2079,8 @@ async def get_memory(memory_id: UUID, tenant_id: str) -> dict:
     "mirroring" this endpoint.
 
     404 covers "no such memory" and "not yours" alike, so this does not become
-    an existence oracle for memory UUIDs.
+    an existence oracle for memory UUIDs. A held memory is a 404 too, unless
+    ``include_held``: core-api passes it for a person reviewing one.
     """
     t_start = time.perf_counter()
     db_timer = None
@@ -2084,7 +2088,7 @@ async def get_memory(memory_id: UUID, tenant_id: str) -> dict:
     success = True
     try:
         with bind_timer() as db_timer:
-            memory = await _svc.memory_get_by_id_for_tenant(memory_id, tenant_id)
+            memory = await _svc.memory_get_by_id_for_tenant(memory_id, tenant_id, include_held=include_held)
     except Exception:
         success = False
         raise
@@ -2154,6 +2158,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
     supersedes_id = body.get("supersedes_id")
     unset_supersedes = bool(body.get("unset_supersedes", False))
     expected_supersedes_id = body.get("expected_supersedes_id")
+    release_hold = bool(body.get("release_hold", False))
 
     # ``tenant_id`` scopes every write path in this route (the CAS retraction,
     # the ``memory_update_status`` status flip, and the set-supersedes update)
@@ -2175,6 +2180,17 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         raise HTTPException(
             status_code=422,
             detail="unset_supersedes=True requires expected_supersedes_id",
+        )
+    # A memory is held when it is written, never by an update; a held one
+    # leaves only by release or reject, which changes its status alone.
+    if status == QUARANTINED_MEMORY_STATUS:
+        raise HTTPException(
+            status_code=422, detail="a memory is held when it is written, never by a status update"
+        )
+    if release_hold and (status not in QUARANTINE_EXITS or supersedes_id is not None or unset_supersedes):
+        raise HTTPException(
+            status_code=422,
+            detail=f"release_hold sets the status to one of {', '.join(QUARANTINE_EXITS)} and nothing else",
         )
 
     if unset_supersedes:
@@ -2204,6 +2220,8 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                     # retraction must not rewrite the pointer of a row that has
                     # been soft-deleted out from under the caller.
                     Memory.deleted_at.is_(None),
+                    # Nor of a held one, which only release or reject moves.
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                     or_(
                         Memory.supersedes_id == expected_uuid,
                         Memory.supersedes_id.is_(None),
@@ -2244,6 +2262,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
                         Memory.id == memory_id,
                         Memory.tenant_id == tenant_id,
                         Memory.deleted_at.is_(None),
+                        Memory.status != QUARANTINED_MEMORY_STATUS,
                     )
                 )
                 if live is None:
@@ -2265,7 +2284,7 @@ async def update_memory_status(memory_id: UUID, request: Request) -> dict:
         # Before the status flip, so a pointer this tenant does not own (422)
         # refuses the whole request instead of landing after the flip.
         await _svc.memory_assert_pointers_in_tenant(tenant_id, [{"supersedes_id": supersedes_id}])
-    ok = await _svc.memory_update_status(memory_id, status, tenant_id=tenant_id)
+    ok = await _svc.memory_update_status(memory_id, status, tenant_id=tenant_id, release_hold=release_hold)
     if not ok:
         raise HTTPException(status_code=404, detail=f"memory {memory_id} not found")
 

@@ -18,10 +18,10 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories` | GET | List memories (filter by type, status, agent; paginate) |
 | `/memories/{id}` | GET | Full memory detail (embedding stats, entity links, RDF triple, temporal bounds) |
 | `/memories/{id}` | PATCH | Update content or metadata. Re-embeds if content changes |
-| `/memories/{id}` | DELETE | Soft delete (sets status to `deleted`) |
-| `/memories/{id}/status` | PATCH | Update lifecycle status |
+| `/memories/{id}` | DELETE | Soft delete (sets status to `deleted`). A held memory (`quarantined`) is a 404 here: a person rejects it, and after that it deletes like any other |
+| `/memories/{id}/status` | PATCH | Update lifecycle status. A memory held for review (`quarantined`) is moved only here, by a person: `active` releases it, `cancelled` rejects it |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
-| `/memories` | DELETE | Bulk soft-delete |
+| `/memories` | DELETE | Bulk soft-delete. Skips held memories (`quarantined`), as every delete does, because a person decides on those. A fleet or tenant purge still removes them |
 | `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself) |
 | `/search` | POST | Hybrid semantic + keyword search with graph-enhanced retrieval |
 | `/recall` | POST | Search + LLM synthesis — `summary` is the answer to the query (the model reasons step by step internally; only its final answer is surfaced), alongside the source memories under `memories` (also mirrored to `items` for /search-shaped consumers — **`items` is deprecated and scheduled for removal in v4.0.0**; send `items_alias: false` to drop that copy now and halve the response, and read `memories`. The MCP recall brief already omits it by default). `top_k` is the result count — `limit` is accepted as an alias for it |
@@ -180,6 +180,8 @@ request body.
 | `agent_fleet_update` | `agent` | `PATCH /agents/{id}/fleet` | — |
 | `keystone.set` | `keystone` | `POST /keystones` | `caura_keystones_set op=set` |
 | `keystone.delete` | `keystone` | `DELETE /keystones/{doc_id}` | `caura_keystones_set op=delete` |
+| `quarantine.release` | `memory` | `PATCH /memories/{id}/status` to `active`, on a held memory | — |
+| `quarantine.reject` | `memory` | `PATCH /memories/{id}/status` to `cancelled`, on a held memory | — |
 
 **Rate limiting (managed platform)**
 
