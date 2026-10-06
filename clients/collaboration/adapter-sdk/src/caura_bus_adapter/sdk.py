@@ -22,7 +22,7 @@ from caura_bus_core import (
     Bus,
     Envelope,
 )
-from caura_bus_core.bus import HumanRequired, PlatformError
+from caura_bus_core.bus import RESYNC_EVENT, HumanRequired, PlatformError
 from caura_bus_core.collaboration import Checkpoint, Presence
 from caura_bus_core.retry import Backoff, transient_status
 
@@ -97,7 +97,11 @@ async def process_delivery(bus, adapter, claim, *, lease_seconds=30):
 
     async def control():
         async for event in bus.events(after=claim.event_cursor):
-            if (
+            if event["event_type"] == RESYNC_EVENT:
+                # An interrupt may be among the removed events. The lease is
+                # the authority: a paused or lost delivery fails this renewal.
+                await bus.settle(claim, "renew")
+            elif (
                 event["event_type"] == "delivery.interrupt"
                 and event["payload"].get("delivery_id") == claim.delivery_id
             ):
@@ -256,7 +260,7 @@ async def run_adapter(config: AgentConfig, adapter: Adapter) -> None:
 
         async def notifications():
             async for event in bus.events():
-                if event["event_type"] in {"message.available", "human.decided"}:
+                if event["event_type"] in {"message.available", "human.decided", RESYNC_EVENT}:
                     wake.set()
 
         async def consume():

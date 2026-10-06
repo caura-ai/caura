@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
-from caura_bus_core import Bus, PlatformError
+from caura_bus_core import RESYNC_EVENT, Bus, PlatformError
 from caura_bus_core.collaboration import Presence
 
 WAKE_TEXT = (
@@ -28,6 +28,8 @@ WAKE_EVENTS = {
     "request.cancelled",
     "message.available",
     "delivery.available",
+    # Retention removed history after our cursor: reconcile from REST state.
+    RESYNC_EVENT,
     "human.decided",
     "delivery.interrupt",
     "delivery.acked",
