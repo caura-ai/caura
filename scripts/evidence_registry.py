@@ -21,7 +21,7 @@ SCHEMA_PATH = ROOT / "evidence" / "claims.schema.json"
 BEGIN = "<!-- BEGIN GENERATED: evidence-benchmarks -->"
 END = "<!-- END GENERATED: evidence-benchmarks -->"
 
-CURRENT_SURFACES = (
+GENERATED_BLOCK_SURFACES = (
     ROOT / "README.md",
     ROOT / "BENCHMARKS.md",
     ROOT / "docs" / "performance.md",
@@ -31,6 +31,15 @@ PUBLIC_DOC_ROOTS = (
     ROOT / "README.md",
     ROOT / "AGENT-INSTALL.md",
     ROOT / "BENCHMARKS.md",
+)
+PUBLIC_TEXT_TREES = (
+    ROOT / "clients",
+    ROOT / "plugin",
+    ROOT / "static" / "docs",
+)
+PUBLIC_TEXT_FILES = (
+    ROOT / "plugin" / "package.json",
+    ROOT / "clients" / "typescript" / "package.json",
 )
 
 # Current promotional surfaces fail closed on known stale, control-only, withheld,
@@ -226,6 +235,44 @@ def validate_registry(registry: dict[str, Any], schema: dict[str, Any]) -> None:
                         f"{claim_id}: approved_wording must include "
                         f"{measurement['display']}"
                     )
+            if claim["metric"] == "token_savings":
+                measurements = {
+                    measurement["label"]: measurement
+                    for measurement in claim["measurements"]
+                }
+                required_labels = (
+                    "Median retrieved context",
+                    "Median all-reader-call total",
+                    "Median full haystack",
+                    "Context token savings",
+                    "All-reader-call token savings",
+                )
+                missing = [
+                    label for label in required_labels if label not in measurements
+                ]
+                if missing:
+                    raise RegistryError(
+                        f"{claim_id}: active token_savings claim is missing "
+                        + ", ".join(missing)
+                    )
+                haystack = measurements["Median full haystack"]["value"]
+                for token_label, percent_label in (
+                    ("Median retrieved context", "Context token savings"),
+                    (
+                        "Median all-reader-call total",
+                        "All-reader-call token savings",
+                    ),
+                ):
+                    tokens = measurements[token_label]["value"]
+                    published = measurements[percent_label]["value"]
+                    decimals = len(str(published).partition(".")[2])
+                    tolerance = 0.5 * 10 ** (-decimals)
+                    computed = 100 * (1 - tokens / haystack)
+                    if abs(computed - published) > tolerance:
+                        raise RegistryError(
+                            f"{claim_id}: {published}% {percent_label} disagrees "
+                            f"with {tokens}/{haystack} tokens ({computed:.4f}%)"
+                        )
         else:
             if not claim["methodology_url"] and claim["metric"] != "adoption":
                 raise RegistryError(
@@ -381,12 +428,12 @@ def replace_block(current: str, block: str, path: Path) -> str:
 
 def expected_files(registry: dict[str, Any]) -> dict[Path, str]:
     blocks = {
-        ROOT / "README.md": render_public_block(registry),
-        ROOT / "BENCHMARKS.md": render_public_block(registry),
-        ROOT / "docs" / "performance.md": render_public_block(
+        GENERATED_BLOCK_SURFACES[0]: render_public_block(registry),
+        GENERATED_BLOCK_SURFACES[1]: render_public_block(registry),
+        GENERATED_BLOCK_SURFACES[2]: render_public_block(
             registry, relative_prefix="../"
         ),
-        ROOT / "AGENT-INSTALL.md": render_agent_install_block(registry),
+        GENERATED_BLOCK_SURFACES[3]: render_agent_install_block(registry),
     }
     expected = {ROOT / "EVIDENCE.md": render_evidence(registry)}
     for path, block in blocks.items():
@@ -395,9 +442,15 @@ def expected_files(registry: dict[str, Any]) -> dict[Path, str]:
 
 
 def _public_docs() -> list[Path]:
-    docs = list(PUBLIC_DOC_ROOTS)
-    docs.extend(sorted((ROOT / "docs").rglob("*.md")))
-    return docs
+    docs = set(PUBLIC_DOC_ROOTS)
+    docs.update(ROOT.glob("*.md"))
+    docs.discard(ROOT / "EVIDENCE.md")
+    docs.update((ROOT / "docs").rglob("*.md"))
+    for tree in PUBLIC_TEXT_TREES:
+        docs.update(tree.rglob("*.md"))
+        docs.update(tree.rglob("*.txt"))
+    docs.update(path for path in PUBLIC_TEXT_FILES if path.is_file())
+    return sorted(docs)
 
 
 def validate_public_surfaces(expected: dict[Path, str]) -> None:
@@ -412,6 +465,11 @@ def validate_public_surfaces(expected: dict[Path, str]) -> None:
             if match:
                 line = content.count("\n", 0, match.start()) + 1
                 failures.append(f"{path.relative_to(ROOT)}:{line}: {reason}")
+        if path.name == "CHANGELOG.md":
+            # Release history may quote an active result from the release that
+            # introduced it. Withheld/withdrawn values remain denied above,
+            # but current-value generation is not expected in changelogs.
+            continue
         ungoverned_content = generated_pattern.sub("", content)
         for pattern, label in GOVERNED_CURRENT_PATTERNS.items():
             match = re.search(pattern, ungoverned_content, flags=re.IGNORECASE)

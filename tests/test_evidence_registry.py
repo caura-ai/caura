@@ -136,6 +136,64 @@ def test_active_percentage_must_appear_in_approved_wording() -> None:
         _validate(broken)
 
 
+@pytest.mark.parametrize(
+    ("label", "value", "expected"),
+    [
+        ("Median retrieved context", 30_000, "Context token savings disagrees"),
+        (
+            "All-reader-call token savings",
+            88.8,
+            "All-reader-call token savings disagrees",
+        ),
+    ],
+)
+def test_token_savings_must_match_token_counts(
+    label: str, value: float, expected: str
+) -> None:
+    broken = copy.deepcopy(_registry())
+    claim = next(
+        item
+        for item in broken["claims"]
+        if item["id"] == "longmemeval_token_savings_2026_09_15"
+    )
+    measurement = next(item for item in claim["measurements"] if item["label"] == label)
+    measurement["value"] = value
+    if measurement["unit"] == "percent":
+        measurement["display"] = f"{value}%"
+        claim["approved_wording"] = claim["approved_wording"].replace(
+            "75.4%", f"{value}%"
+        )
+
+    with pytest.raises(ValueError, match=expected):
+        _validate(broken)
+
+
+def test_active_token_savings_requires_all_inputs() -> None:
+    broken = copy.deepcopy(_registry())
+    claim = next(
+        item
+        for item in broken["claims"]
+        if item["id"] == "longmemeval_token_savings_2026_09_15"
+    )
+    claim["measurements"] = [
+        item
+        for item in claim["measurements"]
+        if item["label"] != "Median full haystack"
+    ]
+
+    with pytest.raises(ValueError, match="missing Median full haystack"):
+        _validate(broken)
+
+
+def test_public_surface_inventory_covers_package_docs() -> None:
+    surfaces = set(SCRIPT_API["_public_docs"]())
+    assert ROOT / "CHANGELOG.md" in surfaces
+    assert ROOT / "plugin" / "CHANGELOG.md" in surfaces
+    assert ROOT / "clients" / "typescript" / "README.md" in surfaces
+    assert ROOT / "plugin" / "package.json" in surfaces
+    assert ROOT / "EVIDENCE.md" not in surfaces
+
+
 def test_active_methodology_url_must_pin_code_commit() -> None:
     broken = copy.deepcopy(_registry())
     claim = next(
