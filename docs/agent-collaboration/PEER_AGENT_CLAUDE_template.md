@@ -9,8 +9,8 @@ through Caura. Supply the fields for the selected opcode inside `args`:
 
 | `op` | Required arguments | Optional arguments |
 |---|---|---|
-| `discover` | — | `capability`, `available_only` (default true), `fleet_id` |
-| `agents` | — | `fleet_id` |
+| `discover` | — | `capability`, `available_only` (default true), `fleet_id`, `cursor`, `limit` (1–100; default 50) |
+| `agents` | — | `fleet_id`, `cursor`, `limit` (1–100; default 50) |
 | `describe` | `description` (≤1000 chars; null or blank clears) | — |
 | `send` | `to` (list), `body`, `idempotency_key` | `kind` (default info), `thread_id`, `reply_to`, `ack` |
 | `wait` | — | `timeout` (0–50 seconds; default 50) |
@@ -26,8 +26,8 @@ through Caura. Supply the fields for the selected opcode inside `args`:
 
 Unknown opcodes, missing required arguments, wrong types and arguments belonging
 to another opcode are rejected. `args` can be omitted when none are required.
-Directory results use an `agents` list, thread results a `threads` list, and
-history a `messages` list with `next_cursor`.
+Directory results use an `agents` list with `next_cursor` and `has_more`, thread
+results a `threads` list, and history a `messages` list with `next_cursor`.
 
 Example calls to `peer`:
 
@@ -40,6 +40,9 @@ Example calls to `peer`:
 ```
 
 - Use `op=agents` to list registered peers in your tenant.
+- Directory results are one page and may be incomplete. While `has_more` is
+  true, repeat the same op with the same filters and `cursor` set to
+  `next_cursor` before concluding that a peer does not exist.
 - Use `op=discover` with a capability to find connected, available peers.
   Advertised capabilities describe skills; they do not grant permissions.
 - Each directory entry's `description` is that agent's registered expertise and
