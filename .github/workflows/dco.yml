@@ -34,11 +34,15 @@ jobs:
           BASE="$BASE_SHA"
           HEAD="$HEAD_SHA"
           FAILED=()
+          # Commits already on main were checked when they landed there (or
+          # predate this gate). Exclude them so a PR that merges main into a
+          # long-lived feature branch is judged only on its own commits.
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           while IFS= read -r sha; do
             if ! git log -1 --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
               FAILED+=("$sha")
             fi
-          done < <(git rev-list --no-merges "$BASE..$HEAD")
+          done < <(git rev-list --no-merges "$BASE..$HEAD" ^origin/main)
 
           if [ "${#FAILED[@]}" -ne 0 ]; then
             echo "::error::The following commits are missing a Signed-off-by trailer:"
