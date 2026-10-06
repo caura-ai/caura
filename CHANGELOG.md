@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.22.1](https://github.com/caura-ai/caura/compare/backend-v3.22.0...backend-v3.22.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **sentinel:** scan what a skill ships and quarantine only what is dangerous ([#1864](https://github.com/caura-ai/caura/issues/1864)) ([0c6befc](https://github.com/caura-ai/caura/commit/0c6befceae2d57bdebd5f41a295a080dfde86bab))
+* **skills-inbox:** a skill an agent staged can be rejected ([#1875](https://github.com/caura-ai/caura/issues/1875)) ([d14b41b](https://github.com/caura-ai/caura/commit/d14b41b6839f10cae4c9d5e5591bb45ed60a2fcb))
+
 ## [3.22.0](https://github.com/caura-ai/caura/compare/backend-v3.21.9...backend-v3.22.0) (2026-10-06)
 
 
