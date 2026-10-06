@@ -182,7 +182,9 @@ string, `null` after a success), the one-line disable hint and
 way, with the client counts summed over every worker. Every worker of a
 container gives the same answer. When the heartbeat is off the preview is
 `null`: a disabled install does no work, not even to show you what it would
-have sent.
+have sent. Until the first send there is no deployment identity yet, so
+`deployment_id` is `null` in the response and in the preview; inspecting the
+endpoint never creates one.
 
 ```json
 {

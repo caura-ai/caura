@@ -17,7 +17,7 @@ You need these on your machine:
 git clone https://github.com/caura-ai/caura.git
 cd caura
 
-# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
+# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API, lifecycle scheduler)
 docker compose up -d
 
 # 3. Wait for healthy (usually ~15 seconds)
@@ -108,6 +108,10 @@ explicitly in request bodies / query params. Admin/system keys are
 intentionally rejected by MCP; use standalone mode, a tenant-scoped key, or
 Path 3 for MCP.
 
+With `ADMIN_API_KEY` blank, the Docker stack generates an admin key for its own
+lifecycle scheduler (`admin-key-init`) and keeps it inside the stack. Setting
+`ADMIN_API_KEY` replaces it, for the scheduler too.
+
 **Path 3 — Gate the API with a shared key.** Set `CAURA_API_KEY` in your
 `.env`. REST and MCP clients send that key via `X-API-Key` plus `X-Tenant-ID`
 to pick a tenant. Use this when the OSS API is network-exposed.
@@ -161,7 +165,7 @@ curl -sf -H "X-API-Key: $CAURA_KEY" "$CAURA_URL/api/v1/install-plugin?fleet_id=$
 openclaw gateway restart    # or: systemctl --user restart openclaw-gateway
 ```
 
-This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP.
+This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP. <!-- legacy-name-floor: the installer still writes the frozen plugin directory -->
 
 **MCP vs Plugin — which to use:**
 
@@ -288,14 +292,24 @@ Then restart the server (`docker compose restart core-api` or re-run uvicorn).
 
 ## Performance Expectations
 
-On our reference benchmarks (warm cache, single tenant):
+Current approved benchmark evidence:
 
-- **Search latency:** 23 ms p50, 27 ms p95
-- **Recall accuracy:** 77.6% (LoCoMo, 2026-04-19) / 92.2% (LongMemEval, 2026-09-15,
-  the benchmark's reference judge; 90.2% under a stricter second judge)
-- **Token savings vs full context:** 79% (LongMemEval) to 97% (LoCoMo)
+<!-- BEGIN GENERATED: evidence-benchmarks -->
+- **LoCoMo accuracy:** Caura scored 77.9% (1,199/1,540) under its documented LoCoMo semantic-judge protocol using the retrieval-augmented agentic-v1 pipeline.
+- **LongMemEval reference judge:** Caura answered 461 of 500 LongMemEval_S questions correctly (92.2%) under the benchmark's GPT-4o reference judge.
+- **LongMemEval secondary judge:** The same 500 frozen LongMemEval_S answers scored 90.2% (451/500) under the secondary Gemini 3.5 Flash-Lite judge.
+- **LongMemEval token efficiency:** On LongMemEval_S, the median compact retrieved context was 22,410 tokens versus a 107,706-token full haystack: 79.2% context-only savings; counting every reader call yields 75.4%.
 
-If you see search latency materially above ~50 ms p50 after warm-up, the pgvector index is likely cold or your embedding-provider roundtrip is the bottleneck — see [`docs/performance.md`](docs/performance.md) for the methodology and the operator-scale notes.
+Only active, approved claims appear here. Control, withdrawn, and withheld
+records remain in the evidence registry and are excluded from promotional copy.
+See [`evidence/claims.json`](evidence/claims.json) and
+[`EVIDENCE.md`](EVIDENCE.md). Do not hand-edit this block.
+<!-- END GENERATED: evidence-benchmarks -->
+
+If search latency is materially above your warmed baseline, the pgvector index
+may be cold or your embedding-provider roundtrip may be the bottleneck — see
+[`docs/performance.md`](docs/performance.md) for measurement guidance and
+operator-scale notes.
 
 ## Full Reference
 

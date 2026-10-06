@@ -2,8 +2,8 @@
 
 Per-route opt-in: handlers call :func:`idempotency_for` after auth
 has enforced the tenant, get back a :class:`IdempotencyGuard`, check
-``guard.cached_replay`` for a cached response, and call
-``guard.record(...)`` after running the work.
+``guard.cached_replay`` for a cached response, run the work inside
+:func:`release_claim_on_error`, and call ``guard.record(...)`` after it.
 
 Not a middleware — slowapi + FastAPI already handle the request/response
 pipeline, and per-handler wiring keeps the replay contract explicit at
@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -95,11 +97,16 @@ class IdempotencyGuard:
         key: str,
         request_hash: str,
         cached: dict | None,
+        *,
+        claimed: bool = False,
     ) -> None:
         self.tenant_id = tenant_id
         self.key = key
         self.request_hash = request_hash
         self._cached = cached
+        # True only when THIS request inserted the pending claim — the one
+        # case where a failed handler leaves a row that blocks its retries.
+        self._claimed = claimed
 
     @property
     def cached_replay(self) -> tuple[Any, int] | None:
@@ -108,6 +115,29 @@ class IdempotencyGuard:
         if self._cached is None:
             return None
         return self._cached["response_body"], self._cached["status_code"]
+
+    async def release(self) -> None:
+        """Drop this request's pending claim after the handler failed.
+
+        A claim left pending answers every retry with 409 "still in
+        progress" until ``idempotency_pending_ttl_seconds`` lapses, so a
+        deterministic 403/404/422 — or a 429 from the per-tenant slot taken
+        after the claim — is masked for the whole window. Releasing lets the
+        retry run afresh and see the real outcome. Only the still-pending row
+        with this request's hash is deleted, so a recorded response survives.
+        Failures are logged, not raised: the pending TTL remains the backstop.
+        """
+        if not self._claimed:
+            return
+        self._claimed = False
+        try:
+            await get_storage_client().release_idempotency_claim(
+                tenant_id=self.tenant_id,
+                idempotency_key=self.key,
+                request_hash=self.request_hash,
+            )
+        except Exception:
+            logger.warning("Idempotency claim release failed (non-critical)", exc_info=True)
 
     async def record(self, response_body: Any, status_code: int = 200) -> None:
         """Cache the response body under this key.
@@ -157,6 +187,24 @@ class IdempotencyGuard:
             raise
         except Exception:
             logger.warning("Idempotency record failed (non-critical)", exc_info=True)
+
+
+@asynccontextmanager
+async def release_claim_on_error(guard: IdempotencyGuard | None) -> AsyncIterator[None]:
+    """Release ``guard``'s pending claim if the wrapped work raises.
+
+    Wrap everything between :func:`idempotency_for` and ``guard.record()``,
+    including the per-tenant slot acquisition. ``Exception`` only, on
+    purpose: a ``CancelledError`` means the client went away while the work
+    may already have committed (ax-0917-h-09), and the pending claim is what
+    keeps an immediate retry from running it a second time.
+    """
+    try:
+        yield
+    except Exception:
+        if guard is not None:
+            await guard.release()
+        raise
 
 
 def _log_record_outcome(task: asyncio.Task) -> None:
@@ -298,7 +346,7 @@ async def idempotency_for(
         return IdempotencyGuard(tenant_id, namespaced_key, request_hash, cached=None)
 
     if claimed:
-        return IdempotencyGuard(tenant_id, namespaced_key, request_hash, cached=None)
+        return IdempotencyGuard(tenant_id, namespaced_key, request_hash, cached=None, claimed=True)
 
     if existing and existing["request_hash"] != request_hash:
         raise HTTPException(

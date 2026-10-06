@@ -13,7 +13,10 @@ from .agent import AgentConfig
 from .collaboration import Checkpoint, Presence
 from .config import require_api_key
 from .protocol import Claim, Receipt, SendMessage
-from .retry import Backoff, transient_status
+from .retry import Backoff, retry_after_seconds, transient_status
+
+# Sent instead of a gap when retention removed history after the stream cursor.
+RESYNC_EVENT = "stream.resync_required"
 
 
 class HumanRequired(RuntimeError):
@@ -82,6 +85,7 @@ class Bus:
         kwargs["headers"] = headers
         # Only operations with durable idempotency retry ambiguous responses.
         for attempt in range(3):
+            hinted = None
             try:
                 response = await self._http.request(method, path, **kwargs)
             except httpx.TransportError:
@@ -96,7 +100,13 @@ class Bus:
                     except ValueError:
                         detail = "gateway rejected request"
                     raise PlatformError(response.status_code, detail)
-            await asyncio.sleep(0.25 * (2**attempt) + secrets.randbelow(100) / 1000)
+                # A shed or overloaded service says when to come back; honour it
+                # (capped) instead of returning on the fixed backoff alone.
+                hinted = retry_after_seconds(response)
+            delay = 0.25 * (2**attempt)
+            if hinted is not None:
+                delay = max(delay, hinted)
+            await asyncio.sleep(delay + secrets.randbelow(100) / 1000)
         raise AssertionError("unreachable")
 
     async def send(self, message: SendMessage, *, idempotency_key: str) -> Receipt:
@@ -212,12 +222,14 @@ class Bus:
         peer_agent_id: str | None = None,
         limit: int = 20,
         before: str | None = None,
+        reply_to: str | None = None,
     ):
         params = {
             "limit": limit,
             "thread_id": thread_id,
             "peer_agent_id": peer_agent_id,
             "before": before,
+            "reply_to": reply_to,
         }
         return await self.request(
             "GET", "messages", params={k: v for k, v in params.items() if v is not None}
@@ -262,8 +274,22 @@ class Bus:
             "POST", "interventions", json={"delivery_id": delivery_id, "reason": reason}
         )
 
+    async def resync(self):
+        """Reload durable inbox state over REST after the stream lost history.
+
+        A read, so transient failures are retried like other safe calls.
+        """
+        return await self.request("GET", "inbox/state", retry_safe=True)
+
     async def events(self, after=0):
-        """Resume a live stream by durable cursor; reconnect revalidates credentials."""
+        """Resume a live stream by durable cursor; reconnect revalidates credentials.
+
+        When retention removed events after the cursor, Caura sends
+        ``stream.resync_required`` instead of skipping them. That event is
+        yielded with ``state`` holding a fresh REST snapshot (``resync()``),
+        and the stream continues from the event's ``resume_after``. Consumers
+        must treat it as "anything may have changed", never as unknown noise.
+        """
         cursor = after
         backoff = Backoff(maximum=15)
         while True:
@@ -281,7 +307,20 @@ class Bus:
                         async for line in response.aiter_lines():
                             if line.startswith("data: "):
                                 event = json.loads(line[6:])
-                                cursor = event["seq"]
+                                if event.get("event_type") == RESYNC_EVENT:
+                                    # Advance only after the reload succeeds;
+                                    # a failed reload reconnects and resyncs again.
+                                    try:
+                                        state = await self.resync()
+                                    except PlatformError as exc:
+                                        if not transient_status(exc.status):
+                                            raise
+                                        break
+                                    event = {**event, "state": state}
+                                    payload = event.get("payload") or {}
+                                    cursor = int(payload.get("resume_after", event["seq"]))
+                                else:
+                                    cursor = event["seq"]
                                 backoff.reset()
                                 yield event
             except httpx.TransportError:

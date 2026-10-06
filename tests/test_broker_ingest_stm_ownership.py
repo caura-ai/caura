@@ -5,9 +5,10 @@ Both routes attribute a memory under a caller-supplied ``agent_id`` (via
 so, like evolve/insights, an install-credential (broker) caller could name
 another install's agent. The route handlers degrade a foreign / reserved
 ``broker:`` id to the caller's own ``broker:<install>`` fallback via
-``broker_owned_agent_id`` before the write. Gate-only: these paths never
-first-touch an agent, so there's no owner stamp (the gate function itself is
-unit-tested in ``test_broker_owned_agent_id.py``).
+``broker_owned_agent_id`` before the write. Both now reach it through
+``resolve_write_agent`` (parity with ``POST /memories`` / ``/memories/bulk``),
+which also registers the agent and stamps ownership on first touch (the gate
+function itself is unit-tested in ``test_broker_owned_agent_id.py``).
 
 Not broker-reachable by the current plugin client — this is defense-in-depth
 completing the boundary across every broker-reachable memory-write surface.
@@ -21,6 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import Response
 
+from core_api.agent_ids import DOC_INDEXER_AGENT_ID
 from core_api.auth import AuthContext
 from core_api.routes import memories, stm
 from core_api.schemas import IngestCommitRequest, IngestFact
@@ -44,7 +46,17 @@ def _broker_auth(
 
 async def _drive_ingest(monkeypatch, *, agent_id, auth):
     gate = AsyncMock(return_value="broker:install-1")
-    monkeypatch.setattr(memories, "broker_owned_agent_id", gate)
+    # Patched on ``agent_service`` for the same reason as ``_drive_stm`` below:
+    # the commit route goes through ``resolve_write_agent``, which calls the
+    # real gate one level down. Registration and the fleet gate are stubbed —
+    # no storage in a unit test.
+    monkeypatch.setattr(agent_service, "broker_owned_agent_id", gate)
+
+    async def _get_or_create(tenant_id, agent_id, fleet_id=None, **_kw):
+        return {"agent_id": agent_id, "fleet_id": None, "trust_level": 1}
+
+    monkeypatch.setattr(agent_service, "get_or_create_agent", _get_or_create)
+    monkeypatch.setattr(memories, "enforce_fleet_write", AsyncMock(return_value={}))
     monkeypatch.setattr(memories, "check_and_increment", AsyncMock(return_value=None))
     captured: dict[str, str] = {}
 
@@ -77,6 +89,16 @@ async def test_ingest_commit_non_broker_not_degraded(monkeypatch):
         monkeypatch, agent_id="dash-agent", auth=_broker_auth(None, is_install=False)
     )
     assert agent_id == "dash-agent"
+    gate.assert_not_awaited()
+
+
+async def test_ingest_commit_normalizes_retired_input(monkeypatch):
+    agent_id, gate = await _drive_ingest(
+        monkeypatch,
+        agent_id="memclaw-doc-indexer",  # legacy-name-ok: supported client input alias
+        auth=_broker_auth(None, is_install=False),
+    )
+    assert agent_id == DOC_INDEXER_AGENT_ID
     gate.assert_not_awaited()
 
 

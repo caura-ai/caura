@@ -14,7 +14,7 @@ process.env.CAURA_API_KEY = "mc_test_key_for_env_tests";
 // Clear tenant id so resolveTenantId actually attempts a fetch.
 delete process.env.CAURA_TENANT_ID;
 
-const { resolveTenantId, readEnv, isPluginEnvKey, hasPluginEnvPrefix } = await import("./env.js");
+const { resolveTenantId, fetchToolDescriptions, readEnv, isPluginEnvKey, hasPluginEnvPrefix } = await import("./env.js");
 const { USER_AGENT } = await import("./user-agent.js");
 
 interface MockCall {
@@ -81,6 +81,7 @@ describe("resolveTenantId — network failure handling", () => {
     assert.equal(headers["X-API-Key"], process.env.CAURA_API_KEY);
     assert.equal(calls[0].url, "http://localhost:8000/api/v1/whoami");
     assert.equal(calls[0].init?.method, "GET");
+    assert.equal(calls[0].init?.redirect, "error");
     assert.equal(calls[0].init?.body, undefined);
     assert.ok(elapsed < 500, `should short-circuit fast, took ${elapsed}ms`);
     assert.equal(
@@ -91,6 +92,17 @@ describe("resolveTenantId — network failure handling", () => {
     assert.match(warnLines[0], /tenant_id resolution skipped/);
     assert.match(warnLines[0], /standalone mode/);
     assert.equal(errorLines.length, 0, "no error-level output for network failures");
+  });
+
+  test("tool-description fetch refuses redirects with the tenant key", async () => {
+    globalThis.fetch = (async (input, init) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify({}), { status: 200 });
+    }) as typeof fetch;
+    await fetchToolDescriptions();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].init?.redirect, "error");
+    assert.equal((calls[0].init?.headers as Record<string, string>)["X-API-Key"], process.env.CAURA_API_KEY);
   });
 
   test("passes an AbortSignal to fetch on every attempt (bounds per-attempt latency — CAURA-000)", async () => {

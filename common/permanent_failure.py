@@ -38,10 +38,17 @@ PERMANENT_WRITE_FAILURE_CODE = "PERMANENT_WRITE_FAILURE"
 # asked is what keeps a reader from inverting it by accident.
 RETRYABLE_KEY = "retryable"
 
-# Causes. One per way a write can fail permanently; today there is one.
+# Causes. One per way a write can fail permanently.
 # ``bulk_row_shape``: the rows of a bulk batch disagreed on which columns they
 # set, so the multi-values INSERT has no single column list to compile.
 CAUSE_BULK_ROW_SHAPE = "bulk_row_shape"
+# ``pointer_not_in_tenant``: a write named a ``subject_entity_id``,
+# ``supersedes_id`` or ``evidence_memory_id`` that is not a row of the write's
+# own tenant. Absent and foreign get this one answer, so the refusal says
+# nothing about rows outside the tenant. Unlike the cause above it is the
+# CALLER's to fix, so storage answers it with a 4xx (``field`` names which
+# pointer), not a 5xx.
+CAUSE_POINTER_NOT_IN_TENANT = "pointer_not_in_tenant"
 
 
 class PermanentWriteFailure(Exception):

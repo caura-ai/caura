@@ -469,6 +469,62 @@ async def test_recent_context_respects_agent_top_k(mock_get_sc):
 
 @pytest.mark.asyncio
 @patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_recent_context_explicit_top_k_is_not_capped(mock_get_sc):
+    """SIDE-57 — a caller that NAMED top_k=150 gets 150, not RECENT_CONTEXT's 5.
+
+    The LongMemEval run hit this on 8/500 questions ("what did I ...", "most
+    recent ..."), 3 of which lost the answer to the silent cut.
+    """
+    mock_get_sc.return_value = _mock_sc()
+    ctx = _make_ctx("what did I buy most recently", top_k=150, top_k_explicit=True)
+
+    await ClassifyQuery().execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.RECENT_CONTEXT
+    # No top_k override at all, so ExecuteScoredSearch keeps the resolved 150.
+    assert "top_k" not in plan.search_param_overrides
+    # Freshness overrides are unchanged by the fix.
+    assert plan.search_param_overrides["freshness_decay_days"] == 7
+    assert plan.search_param_overrides["freshness_floor"] == 0.2
+    assert "strategy_top_k_cap" not in ctx.data
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_recent_context_default_top_k_keeps_cap(mock_get_sc):
+    """SIDE-57 — a budget the caller did NOT name (profile / tenant default) is still capped.
+
+    The cut is recorded in ``strategy_top_k_cap`` so /search can report it
+    (SIDE-59) instead of leaving it invisible.
+    """
+    mock_get_sc.return_value = _mock_sc()
+    ctx = _make_ctx("what did I buy most recently", top_k=150)
+
+    await ClassifyQuery().execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.strategy == RetrievalStrategy.RECENT_CONTEXT
+    assert plan.search_param_overrides["top_k"] == 5
+    assert ctx.data["strategy_top_k_cap"] == 5
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
+async def test_recent_context_small_budget_records_no_cap(mock_get_sc):
+    """A budget already at or under the cap is not reported as capped."""
+    mock_get_sc.return_value = _mock_sc()
+    ctx = _make_ctx("my latest updates", top_k=3)
+
+    await ClassifyQuery().execute(ctx)
+
+    plan: RetrievalPlan = ctx.data["retrieval_plan"]
+    assert plan.search_param_overrides["top_k"] == 3
+    assert "strategy_top_k_cap" not in ctx.data
+
+
+@pytest.mark.asyncio
+@patch("core_api.pipeline.steps.search.classify_query.get_storage_client")
 async def test_recent_context_no_match_falls_through(mock_get_sc):
     """Query without recency keywords falls through to SEMANTIC_SEARCH."""
     mock_get_sc.return_value = _mock_sc()

@@ -34,7 +34,10 @@ from __future__ import annotations
 
 import pytest
 
-pytestmark = pytest.mark.unit
+# No module-level ``pytestmark = pytest.mark.unit``: it would also land on the
+# ``integration`` tests below, which need Postgres, so every DB-less
+# ``-m unit`` run went red on them (oss-0909-l-04). Markers are per test; CI
+# runs both classes (``-m "not benchmark"``).
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +45,7 @@ pytestmark = pytest.mark.unit
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_two_char_acronyms_kept():
     """Common 2-char acronym entities reach FTS."""
     from core_api.services.entity_tokens import extract_entity_tokens
@@ -50,18 +54,21 @@ def test_two_char_acronyms_kept():
     assert "ai" in out, out
 
 
+@pytest.mark.unit
 def test_two_char_acronym_ml_kept():
     from core_api.services.entity_tokens import extract_entity_tokens
 
     assert "ml" in extract_entity_tokens("ML pipeline ownership")
 
 
+@pytest.mark.unit
 def test_two_char_acronym_pr_kept():
     from core_api.services.entity_tokens import extract_entity_tokens
 
     assert "pr" in extract_entity_tokens("PR review queue")
 
 
+@pytest.mark.unit
 def test_two_char_country_codes_kept():
     from core_api.services.entity_tokens import extract_entity_tokens
 
@@ -70,6 +77,7 @@ def test_two_char_country_codes_kept():
     assert "uk" in out
 
 
+@pytest.mark.unit
 def test_single_char_still_dropped():
     """``X``, ``A`` etc. are below the new floor of 2 → still dropped.
     Keeps the tokenizer from emitting single-letter noise."""
@@ -80,6 +88,7 @@ def test_single_char_still_dropped():
     assert "pr" in out  # acronym retention check
 
 
+@pytest.mark.unit
 def test_two_char_english_stopwords_still_dropped():
     """Common 2-char English words remain in the stopword list and
     are dropped even with the new min-length floor."""
@@ -91,6 +100,7 @@ def test_two_char_english_stopwords_still_dropped():
     assert out == ["ai", "news", "tv"], out
 
 
+@pytest.mark.unit
 def test_motivating_acronym_queries_now_yield_tokens():
     """Real-world entity queries that previously emitted ZERO tokens
     (because all surviving content was 2-char acronyms) now emit

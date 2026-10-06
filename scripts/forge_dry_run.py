@@ -24,8 +24,18 @@ The script reads Caura connection params from the standard env
 
 This is NOT a production-grade scheduler. The real Forge run flows
 through the ``<brand>.lifecycle.forge-distill-requested`` event
-(SF-007); the scheduled-tick worker handler lands in Phase 1's
-final wiring step alongside the public lifecycle endpoint.
+(SF-007), and that path is WIRED: #311 landed the scheduled-tick
+handler (``core_api.services.forge.cron_handler``) alongside the
+public lifecycle endpoint. This paragraph claimed the wiring was
+still pending for three months after it shipped, and a reader who
+believed it concluded the event path was harmless (oss-0926-m-02).
+
+Note what the event path cannot do: the tick always runs
+``promote_pending_candidates`` after mining, so it has no dry-run
+mode, and its consumer refuses a ``dry_run=True`` event outright
+rather than running for real. The dry run is THIS script, and it is
+a dry run because it calls the Forge pipeline directly and never
+promotes — not because it passes a flag.
 """
 
 from __future__ import annotations
@@ -80,7 +90,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-writes-per-run",
         type=int,
         default=20,
-        help="Cap candidates written per run (default: 20).",
+        help="Cap candidates WRITTEN per run (default: 20). Skipped clusters do not spend it.",
+    )
+    p.add_argument(
+        "--max-clusters-per-run",
+        type=int,
+        default=0,
+        help=(
+            "Cap clusters ATTEMPTED per run — one distill LLM call each, written "
+            "or not. 0 (default) derives it from --max-writes-per-run."
+        ),
     )
     p.add_argument(
         "--json",
@@ -337,6 +356,7 @@ async def _run(args: argparse.Namespace) -> int:
         min_cluster_size=args.min_cluster_size,
         min_distinct_agents=args.min_distinct_agents,
         max_writes_per_run=args.max_writes_per_run,
+        max_clusters_per_run=args.max_clusters_per_run,
     )
 
     # No positional argument: ``run_forge_distill`` is keyword-only and
@@ -369,6 +389,7 @@ async def _run(args: argparse.Namespace) -> int:
             "labeled_traces": result.labeled_traces,
             "clusters_total": result.clusters_total,
             "clusters_eligible": result.clusters_eligible,
+            "clusters_attempted": result.clusters_attempted,
             "candidates_written": result.candidates_written,
             "candidates_skipped_poisoned": result.candidates_skipped_poisoned,
             "candidates_skipped_sentinel": result.candidates_skipped_sentinel,
@@ -389,7 +410,8 @@ async def _run(args: argparse.Namespace) -> int:
             f"  traces:      total={result.total_traces} labeled={result.labeled_traces}"
         )
         print(
-            f"  clusters:    total={result.clusters_total} eligible={result.clusters_eligible}"
+            f"  clusters:    total={result.clusters_total} "
+            f"eligible={result.clusters_eligible} attempted={result.clusters_attempted}"
         )
         print(
             f"  candidates:  written={result.candidates_written} "

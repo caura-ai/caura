@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp as ASGIApplication
 from starlette.types import Receive, Scope, Send
 
@@ -33,8 +34,13 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from common import permanent_failure
+from common.events.base import EventBus
 from common.events.factory import get_event_bus
-from core_api.clients.storage_client import PermanentStorageWriteError, get_storage_client
+from core_api.clients.storage_client import (
+    PermanentStorageWriteError,
+    StoragePointerRejectedError,
+    get_storage_client,
+)
 from core_api.constants import STM_WRITE_ROUTE_NOTE, VERSION, is_mcp_path
 from core_api.consumer import register_consumers
 from core_api.mcp_server import get_mcp_app, mcp_lifespan
@@ -71,6 +77,7 @@ from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
 from core_api.routes.stm import router as stm_router
 from core_api.routes.telemetry import router as telemetry_router
+from core_api.tasks import cancel_all_tasks
 
 # CAURA-631: sentinel bucket for audit events that arrive without a
 # ``tenant_id`` field. Routed through the per-tenant flusher's
@@ -162,16 +169,71 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
     entire job is to prevent unsafe production boots had no tests of its own.
 
     Storage authentication is required in every environment because the storage
-    service enforces it unconditionally. The remaining guards are production-only.
+    service enforces it unconditionally. Standalone mode and a missing perimeter
+    are refused in every hosted environment, ``sandbox`` included. The remaining
+    guards are production-only.
     """
     if _blank_secret(app_settings.core_storage_shared_secret):
         raise RuntimeError("CORE_STORAGE_SHARED_SECRET is required for core-api")
-    if app_settings.environment != "production":
+    if app_settings.environment == "development":
         return
+    # Hosted from here: production, and ``sandbox``, which staging and every
+    # sandbox deployment run as (M-78). Both are reachable like production, so
+    # both refuse the two settings that leave the service open to anyone.
     if app_settings.is_standalone:
         raise RuntimeError(
-            "IS_STANDALONE=true is not allowed in production. "
-            "Set IS_STANDALONE=false for production deployments."
+            f"IS_STANDALONE=true is not allowed when ENVIRONMENT={app_settings.environment}. "
+            "Set IS_STANDALONE=false for hosted deployments."
+        )
+    no_gateway_secret = _blank_secret(app_settings.gateway_shared_secret)
+    no_compat_key = _blank_secret(app_settings.memclaw_api_key)  # legacy-name-ok: compat alias field
+    if no_gateway_secret and no_compat_key:
+        # What production actually requires is A PERIMETER — not specifically the
+        # gateway one. ``CAURA_API_KEY`` is the other way to have one: when it
+        # is set, auth.py's "Path 2" either authenticates the request against
+        # that key or raises 401 for everything else, so "Path 4" below it is
+        # UNREACHABLE and there is no header-trust surface left to protect. That
+        # is the documented network-exposed OSS pattern, and such a deployment
+        # legitimately sets ENVIRONMENT=production for JSON logging and Sentry.
+        # Demanding a gateway secret it has no gateway for would be a boot
+        # failure with no security value.
+        #
+        # The X-Tenant-ID auth path (auth.py "Path 4") carries NO credential of
+        # its own — it trusts the gateway to have authenticated the caller and
+        # injected the identity headers. Its perimeter check reads
+        # ``if gw_secret and not compare_digest(...)``, which is a NO-OP when the
+        # secret is unset. So an unset secret does not weaken that path, it
+        # DISABLES it: anyone able to reach this service directly (its public
+        # run.app URL, a sidecar, anything inside the VPC) becomes any tenant by
+        # setting a header.
+        #
+        # Refusing to boot is deliberately louder than 401ing the path per
+        # request. A silently-open perimeter is indistinguishable from a working
+        # one from the outside — which is how it would reach production
+        # unnoticed in the first place — whereas a service that will not start
+        # gets caught at deploy.
+        raise RuntimeError(
+            "GATEWAY_SHARED_SECRET (or CAURA_API_KEY, legacy: MEMCLAW_API_KEY) "  # legacy-name-ok: taught as legacy alias
+            f"must be set when ENVIRONMENT={app_settings.environment}. With neither, the "
+            "X-Tenant-ID header-trust auth path accepts caller-supplied identity "
+            "headers from anyone who can reach this service directly. Set "
+            "GATEWAY_SHARED_SECRET to the same value the gateway injects as "
+            "X-Gateway-Secret, or set CAURA_API_KEY if this deployment is not "
+            "fronted by the gateway."
+        )
+    if app_settings.environment != "production":
+        # JWT_SECRET, ADMIN_API_KEY and SETTINGS_ENCRYPTION_KEY stay
+        # production-only, by decision: whether staging and the sandboxes set
+        # them lives in their Cloud Run state, outside this repo, and a guard
+        # that fails there takes the deployment down rather than warning.
+        return
+    if _os.getenv("TESTING") == "1":
+        # TESTING=1 registers the test-only ``/testing`` routes (time-warp
+        # rewrites memory timestamps), and the same variable is their runtime
+        # check, so one inherited from a CI image would leave them live (L-68).
+        raise RuntimeError(
+            "TESTING=1 is not allowed when ENVIRONMENT=production: it registers the test-only "
+            "/testing routes. Unset TESTING for production deployments."
         )
     if _blank_secret(app_settings.settings_encryption_key):
         raise RuntimeError(
@@ -202,42 +264,138 @@ def _validate_startup_settings(app_settings) -> None:  # type: ignore[no-untyped
             raise RuntimeError(f"{var.upper()} must be changed from default for production")
     if _blank_secret(app_settings.admin_api_key):
         raise RuntimeError("ADMIN_API_KEY must be set for production")
-    no_gateway_secret = _blank_secret(app_settings.gateway_shared_secret)
-    no_compat_key = _blank_secret(app_settings.memclaw_api_key)  # legacy-name-ok: compat alias field
-    if no_gateway_secret and no_compat_key:
-        # What production actually requires is A PERIMETER — not specifically the
-        # gateway one. ``CAURA_API_KEY`` is the other way to have one: when it
-        # is set, auth.py's "Path 2" either authenticates the request against
-        # that key or raises 401 for everything else, so "Path 4" below it is
-        # UNREACHABLE and there is no header-trust surface left to protect. That
-        # is the documented network-exposed OSS pattern, and such a deployment
-        # legitimately sets ENVIRONMENT=production for JSON logging and Sentry.
-        # Demanding a gateway secret it has no gateway for would be a boot
-        # failure with no security value.
-        #
-        # The X-Tenant-ID auth path (auth.py "Path 4") carries NO credential of
-        # its own — it trusts the gateway to have authenticated the caller and
-        # injected the identity headers. Its perimeter check reads
-        # ``if gw_secret and not compare_digest(...)``, which is a NO-OP when the
-        # secret is unset. So an unset secret does not weaken that path, it
-        # DISABLES it: anyone able to reach this service directly (its public
-        # run.app URL, a sidecar, anything inside the VPC) becomes any tenant by
-        # setting a header.
-        #
-        # Refusing to boot is deliberately louder than 401ing the path per
-        # request. A silently-open perimeter is indistinguishable from a working
-        # one from the outside — which is how it would reach production
-        # unnoticed in the first place — whereas a service that will not start
-        # gets caught at deploy.
-        raise RuntimeError(
-            "GATEWAY_SHARED_SECRET (or CAURA_API_KEY, legacy: MEMCLAW_API_KEY) "  # legacy-name-ok: taught as legacy alias
-            "must be set when ENVIRONMENT=production. With neither, the "
-            "X-Tenant-ID header-trust auth path accepts caller-supplied identity "
-            "headers from anyone who can reach this service directly. Set "
-            "GATEWAY_SHARED_SECRET to the same value the gateway injects as "
-            "X-Gateway-Secret, or set CAURA_API_KEY if this deployment is not "
-            "fronted by the gateway."
+
+
+async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
+    """Write one tenant's slice of an audit batch — the flusher's only
+    ``per_tenant_storage_slot`` caller.
+
+    The flusher is a background loop, so no request budget is armed over
+    this acquire, and the slot queues unboundedly by design. Without a
+    budget of its own a tenant whose ``storage_write`` slots are saturated
+    parks here, and because ``_flush_audit_batch`` gathers every tenant of
+    the chunk, the WHOLE flush cycle waits with it: nothing drains, and
+    once ``audit_queue_max_size`` fills every tenant's events are dropped
+    at enqueue (oss-0927-m-04). ``audit_flush_slot_timeout_seconds`` caps
+    the acquire only; once the slot is held the budget is disarmed and the
+    POST is bounded by the storage client's own timeouts, so a write that
+    is already in flight is never cancelled into a double-counted loss.
+
+    The caller separates the sentinel bucket out before scheduling this
+    over real tenants only, so ``tid`` is always a real tenant ID.
+    """
+    budget = app_settings.audit_flush_slot_timeout_seconds
+    try:
+        async with asyncio.timeout(budget) as acquire_budget:
+            async with per_tenant_storage_slot("storage_write", tid):
+                acquire_budget.reschedule(None)
+                await get_storage_client().create_audit_logs_bulk(tevs)
+    except TimeoutError:
+        # Only the acquire can raise this here: the budget is disarmed the
+        # moment the slot is held, and a storage-client timeout surfaces as
+        # an httpx error, not ``TimeoutError``.
+        logger.error(
+            "audit batch flush for tenant=%s (events=%d) could not acquire a "
+            "storage_write slot within %ss; events lost from this tenant's "
+            "slice so the other tenants' flush is not held behind it",
+            tid,
+            len(tevs),
+            budget,
         )
+        raise
+    except Exception:
+        logger.exception(
+            "audit batch flush failed for tenant=%s (events=%d); events lost from this tenant's slice",
+            tid,
+            len(tevs),
+        )
+        raise
+
+
+async def _shut_down(event_bus: EventBus, *, audit_queue, capability_usage_agg, usage_meter) -> None:
+    """core-api's shutdown steps, in order. Out of ``lifespan`` so the order
+    can be tested."""
+    # Each shutdown step is independent — a failure in one (a
+    # bus pull-loop close that raises, a tracked task whose
+    # cancellation hits a CancelledError swallow somewhere,
+    # an httpx pool already closed) must not skip the rest, or
+    # we leak the resources the later steps would have freed.
+    # Wrap each in its own try/except and continue; the
+    # executor.shutdown at the end always runs.
+    #
+    # Order matters: drain the audit queue BEFORE closing the
+    # storage client — the final flush goes through that client.
+    # Bus stop also happens before storage-client close because
+    # the bus's pull-loops may still be issuing storage calls
+    # mid-cancel.
+    # FIRST, ahead of every flush below: hand back this process's ephemeral
+    # broadcast subscriptions.
+    #
+    # Cloud Run allows 10s between SIGTERM and SIGKILL. The steps below are
+    # awaited SEQUENTIALLY and the first three carry 5s timeouts each, so on
+    # any shutdown where a queue has work the budget is gone before
+    # event_bus.stop() — which is where the delete used to live — is even
+    # reached. The process is killed, the subscription survives, and its
+    # expiration_policy holds project quota for a full day.
+    #
+    # That is not theory. core-api accumulated 6,571 orphaned subscriptions
+    # in staging against a live instance count in the low tens, exhausted
+    # the 10,000 subscriptions-per-project cap — which is shared with prod —
+    # and prod core-api then began failing to create its own subscription
+    # and degrading cross-process cache invalidation to the TTL.
+    # platform-auth-api, same library and same TTL, awaits its bus stop
+    # early and holds 2-6.
+    #
+    # This step needs nothing that the flushes below need, so it is cheap
+    # and cannot be starved by them. event_bus.stop() still calls it; this
+    # is an idempotent hoist, not a move.
+    shutdown_steps: list = [event_bus.release_broadcast_subscriptions()]
+    # The bus stops taking deliveries and settles the handlers in flight
+    # (M-09). core-api hosts the lifecycle pipeline consumers, and its pull
+    # loops used to take new runs until ``event_bus.stop()``, the sixth step.
+    # A run still going when the SIGKILL lands is never cancelled, so its audit
+    # row stays claimed for the 60-minute lease. Started now, before anything is
+    # awaited, so it settles alongside the release above and the task drain
+    # below rather than after them. Awaited before the flushes: handlers are
+    # producers too, and what they log must reach the audit queue.
+    consuming = asyncio.create_task(event_bus.stop_consuming())
+    # Background tasks drain BEFORE the queues that collect what they
+    # produce. They are producers: ``process_entity_extraction`` calls
+    # ``log_action`` (entity_extraction_worker.py) which enqueues onto the
+    # audit queue, and metered work calls ``usage_meter.record``. Draining
+    # them after those flushes meant a task that finished handed its audit
+    # event to a flusher that ``stop()`` had already set to None, and its
+    # counters to a buffer nothing would flush again — saving the work and
+    # dropping its trail.
+    #
+    # This also puts the drain where there is budget left to spend. The
+    # three 5s flushes below already over-run Cloud Run's 10s window on any
+    # shutdown with queued work, so as the last-but-one step this was
+    # reached with nothing remaining on exactly the shutdowns that motivated
+    # giving it a grace at all.
+    shutdown_steps.extend([cancel_all_tasks(), consuming])
+    if audit_queue is not None:
+        shutdown_steps.append(audit_queue.stop(timeout=5.0))
+    if capability_usage_agg is not None:
+        # Final flush before the storage client closes — same ordering
+        # rationale as the audit queue (the flush writes via the DB
+        # session, which must still be live).
+        shutdown_steps.append(capability_usage_agg.stop(timeout=5.0))
+    # Same ordering rationale: the final flush writes through the storage
+    # client, so it has to run before that client closes below. Without it
+    # a clean shutdown would discard up to one flush interval of counts.
+    shutdown_steps.append(usage_meter.stop(timeout=5.0))
+    shutdown_steps.extend(
+        [
+            event_bus.stop(),
+            get_storage_client().close(),
+        ]
+    )
+    for coro in shutdown_steps:
+        try:
+            await coro
+        except Exception:
+            logger.exception("error during shutdown step")
 
 
 @asynccontextmanager
@@ -348,22 +506,6 @@ async def lifespan(app):
                 AuditEventQueue,
                 set_audit_queue,
             )
-
-            async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
-                # Caller separates the sentinel bucket out before scheduling
-                # ``_flush_one_tenant`` over real tenants only, so ``tid`` is
-                # always a real tenant ID here — no sentinel branch needed.
-                try:
-                    async with per_tenant_storage_slot("storage_write", tid):
-                        await get_storage_client().create_audit_logs_bulk(tevs)
-                except Exception:
-                    logger.exception(
-                        "audit batch flush failed for tenant=%s (events=%d); "
-                        "events lost from this tenant's slice",
-                        tid,
-                        len(tevs),
-                    )
-                    raise
 
             async def _flush_audit_batch(events: list[dict]) -> None:
                 # Group by tenant + flush concurrently with per-tenant storage
@@ -516,8 +658,6 @@ async def lifespan(app):
             set_aggregator(capability_usage_agg)
             await capability_usage_agg.start()
 
-        from core_api.tasks import cancel_all_tasks
-
         # ``register_consumers`` must run before ``bus.start`` — the
         # Pub/Sub backend spawns pull loops from the handler registry
         # snapshot taken at start time, so a late ``subscribe`` would
@@ -552,78 +692,12 @@ async def lifespan(app):
 
         yield
 
-        # Each shutdown step is independent — a failure in one (a
-        # bus pull-loop close that raises, a tracked task whose
-        # cancellation hits a CancelledError swallow somewhere,
-        # an httpx pool already closed) must not skip the rest, or
-        # we leak the resources the later steps would have freed.
-        # Wrap each in its own try/except and continue; the
-        # executor.shutdown at the end always runs.
-        #
-        # Order matters: drain the audit queue BEFORE closing the
-        # storage client — the final flush goes through that client.
-        # Bus stop also happens before storage-client close because
-        # the bus's pull-loops may still be issuing storage calls
-        # mid-cancel.
-        # FIRST, ahead of every flush below: hand back this process's ephemeral
-        # broadcast subscriptions.
-        #
-        # Cloud Run allows 10s between SIGTERM and SIGKILL. The steps below are
-        # awaited SEQUENTIALLY and the first three carry 5s timeouts each, so on
-        # any shutdown where a queue has work the budget is gone before
-        # event_bus.stop() — which is where the delete used to live — is even
-        # reached. The process is killed, the subscription survives, and its
-        # expiration_policy holds project quota for a full day.
-        #
-        # That is not theory. core-api accumulated 6,571 orphaned subscriptions
-        # in staging against a live instance count in the low tens, exhausted
-        # the 10,000 subscriptions-per-project cap — which is shared with prod —
-        # and prod core-api then began failing to create its own subscription
-        # and degrading cross-process cache invalidation to the TTL.
-        # platform-auth-api, same library and same TTL, awaits its bus stop
-        # early and holds 2-6.
-        #
-        # This step needs nothing that the flushes below need, so it is cheap
-        # and cannot be starved by them. event_bus.stop() still calls it; this
-        # is an idempotent hoist, not a move.
-        shutdown_steps: list = [event_bus.release_broadcast_subscriptions()]
-        # Background tasks drain BEFORE the queues that collect what they
-        # produce. They are producers: ``process_entity_extraction`` calls
-        # ``log_action`` (entity_extraction_worker.py) which enqueues onto the
-        # audit queue, and metered work calls ``usage_meter.record``. Draining
-        # them after those flushes meant a task that finished handed its audit
-        # event to a flusher that ``stop()`` had already set to None, and its
-        # counters to a buffer nothing would flush again — saving the work and
-        # dropping its trail.
-        #
-        # This also puts the drain where there is budget left to spend. The
-        # three 5s flushes below already over-run Cloud Run's 10s window on any
-        # shutdown with queued work, so as the last-but-one step this was
-        # reached with nothing remaining on exactly the shutdowns that motivated
-        # giving it a grace at all.
-        shutdown_steps.append(cancel_all_tasks())
-        if audit_queue is not None:
-            shutdown_steps.append(audit_queue.stop(timeout=5.0))
-        if capability_usage_agg is not None:
-            # Final flush before the storage client closes — same ordering
-            # rationale as the audit queue (the flush writes via the DB
-            # session, which must still be live).
-            shutdown_steps.append(capability_usage_agg.stop(timeout=5.0))
-        # Same ordering rationale: the final flush writes through the storage
-        # client, so it has to run before that client closes below. Without it
-        # a clean shutdown would discard up to one flush interval of counts.
-        shutdown_steps.append(usage_meter.stop(timeout=5.0))
-        shutdown_steps.extend(
-            [
-                event_bus.stop(),
-                get_storage_client().close(),
-            ]
+        await _shut_down(
+            event_bus,
+            audit_queue=audit_queue,
+            capability_usage_agg=capability_usage_agg,
+            usage_meter=usage_meter,
         )
-        for coro in shutdown_steps:
-            try:
-                await coro
-            except Exception:
-                logger.exception("error during shutdown step")
         executor.shutdown(wait=False)
 
 
@@ -862,6 +936,52 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     return JSONResponse(body, status_code=exc.status_code, headers=exc.headers)
 
 
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    """Give the router's own 404 the envelope every other error already has.
+
+    The handler above covers ``fastapi.HTTPException`` — everything a route
+    raises. It does not cover the 404 Starlette's router raises for a path that
+    matched no route at all, which is a different class and so arrived at the
+    caller as a bare ``{"detail": "Not Found"}``: no code, and a shape nothing
+    else on this surface uses. A client branching on ``error.code`` got nothing
+    from the one response it is most likely to meet while finding its way
+    around (ax-0917-m-13 hit it guessing ``/documents/{collection}/{doc_id}``).
+
+    A 404 here also means something specific — "no such route", not "no such
+    row" — so it carries ``NO_SUCH_ROUTE`` rather than ``NOT_FOUND``. A caller
+    that cannot tell those apart retries against a path that will never exist,
+    or concludes its data is gone when only its URL was wrong.
+
+    And since the server knows every route it serves, the response names the
+    nearest ones. The guess is the question; an unadorned 404 answers only
+    "not that" and leaves the caller to guess again.
+    """
+    from core_api.errors import make_error_payload
+    from core_api.route_suggestions import route_table, suggest_routes
+
+    if exc.status_code != 404 or request.scope.get("route") is not None:
+        # Anything the router raised that is not an unmatched path keeps the
+        # generic mapping; only the unmatched case has a route to suggest.
+        return await http_exception_handler(request, exc)  # type: ignore[arg-type]
+
+    path = request.scope.get("path", "")
+    details: dict = {"path": path, "method": request.method}
+    suggestions = suggest_routes(path, route_table(app))
+    if suggestions:
+        details["did_you_mean"] = suggestions
+
+    message = f"No route matches {request.method} {path}."
+    if suggestions:
+        message += " Closest registered routes are in details.did_you_mean."
+
+    body = {
+        "detail": exc.detail,  # back-compat: the old bare shape is preserved
+        **make_error_payload("NO_SUCH_ROUTE", message, details),
+    }
+    return JSONResponse(body, status_code=404, headers=getattr(exc, "headers", None))
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Replace FastAPI's default 422 body with our envelope.
@@ -960,23 +1080,44 @@ app.add_middleware(
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch-all for non-HTTPException failures. Returns 500 with both
     the back-compat ``detail`` field AND the canonical ``error`` envelope.
-    Includes ``path`` and ``error_type`` outside production for debugging.
+    Includes the exception's message and ``error_type`` only in development:
+    a hosted ``sandbox`` is reachable like production, and the message can
+    carry internal hostnames or URLs (M-78). The log keeps the full exception.
     """
     from core_api.errors import make_error_payload
 
     logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
-    detail = str(exc) if app_settings.environment != "production" else "Internal Server Error"
+    expose = app_settings.environment == "development"
+    detail = str(exc) if expose else "Internal Server Error"
     details: dict = {"path": request.url.path}
-    if app_settings.environment != "production":
+    if expose:
         details["error_type"] = type(exc).__name__
     content: dict = {
         "detail": detail,
         "path": request.url.path,
         **make_error_payload("INTERNAL_ERROR", detail, details=details),
     }
-    if app_settings.environment != "production":
+    if expose:
         content["error_type"] = type(exc).__name__
     return JSONResponse(status_code=500, content=content)
+
+
+@app.exception_handler(StoragePointerRejectedError)
+async def storage_pointer_rejected_handler(
+    request: Request, exc: StoragePointerRejectedError
+) -> JSONResponse:
+    """A write named a ``subject_entity_id`` / ``supersedes_id`` /
+    ``evidence_memory_id`` that is not a row of the caller's tenant: 422.
+
+    The caller supplied the id, so this is a request it can correct — unlike
+    the permanent refusal below, which is ours. Storage refuses absent and
+    foreign ids with the same answer, and so does this.
+    """
+    from core_api.errors import code_for_status, make_error_payload
+
+    message = str(exc)
+    body = {"detail": message, **make_error_payload(code_for_status(422), message, exc.fields or None)}
+    return JSONResponse(status_code=422, content=body)
 
 
 @app.exception_handler(PermanentStorageWriteError)
@@ -1067,7 +1208,7 @@ app.include_router(reports_router, prefix="/api/v1")
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
 # Rename compatibility (2026-08-14): the keystones REST surface
-# shipped as /api/v1/memclaw/keystones and customer scripts call it. The
+# shipped under the old brand prefix and customer scripts call it. The
 # canonical path is now the brand-neutral /api/v1/keystones (matching every
 # other route); the old prefix remains accepted, hidden from the schema.
 app.include_router(

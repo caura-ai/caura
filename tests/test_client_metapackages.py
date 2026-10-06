@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -142,6 +144,48 @@ def test_python_metapackages_depend_on_the_real_client(directory: str) -> None:
     """A metapackage that installs nothing is a stub — the thing we said these are not."""
     deps = _pyproject(directory)["project"]["dependencies"]
     assert any(d.startswith("caura-client") for d in deps), deps
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("directory", "import_package"),
+    (("caura-meta", "caura"), ("caura-sdk-meta", "caura_sdk")),
+)
+def test_python_metapackages_publish_typing_markers(
+    directory: str, import_package: str, tmp_path: Path
+) -> None:
+    """Re-export packages remain typed instead of degrading imports to ``Any``."""
+    package_root = CLIENTS / directory / "src" / import_package
+    assert (package_root / "py.typed").is_file()
+    package_data = _pyproject(directory)["tool"]["setuptools"]["package-data"]
+    assert package_data[import_package] == ["py.typed"]
+
+    source_copy = tmp_path / directory
+    wheel_dir = tmp_path / "wheel"
+    shutil.copytree(
+        CLIENTS / directory,
+        source_copy,
+        ignore=shutil.ignore_patterns("*.egg-info", "build", "dist"),
+    )
+    wheel_dir.mkdir()
+    result = subprocess.run(
+        [
+            "uv",
+            "build",
+            "--wheel",
+            str(source_copy),
+            "--out-dir",
+            str(wheel_dir),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    wheels = list(wheel_dir.glob("*.whl"))
+    assert len(wheels) == 1, wheels
+    with zipfile.ZipFile(wheels[0]) as wheel:
+        assert f"{import_package}/py.typed" in wheel.namelist()
 
 
 @pytest.mark.unit

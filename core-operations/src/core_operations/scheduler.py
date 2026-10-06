@@ -73,6 +73,36 @@ def seconds_until_next_utc_top_of_hour(*, now: datetime | None = None) -> float:
     return (target - current).total_seconds()
 
 
+def seconds_until_next_utc_hour_multiple(
+    every_hours: int, *, anchor_hour: int = 0, now: datetime | None = None
+) -> float:
+    """Seconds from ``now`` until the next :00 UTC that is ``every_hours`` apart
+    from ``anchor_hour``.
+
+    For an "every N hours" cadence. :func:`seconds_until_next_utc_top_of_hour`
+    is the wrong provider for that: an aligned task sleeps only what its
+    provider returns, so pairing it with an N-hour period still fires every
+    hour. Here the slots are counted in whole hours since the epoch, so they
+    stay exactly N hours apart across midnight even when N does not divide 24;
+    when it does, ``anchor_hour`` is one of the slots every day (N=6 with
+    anchor 2 fires at 02, 08, 14 and 20).
+
+    Same strict-future guarantee as the helpers above: always positive, at
+    most ``every_hours``.
+    """
+    if not 1 <= every_hours <= 24:
+        raise ValueError(f"every_hours must be in 1..24, got {every_hours}")
+    if not 0 <= anchor_hour <= 23:
+        raise ValueError(f"anchor_hour must be in 0..23, got {anchor_hour}")
+    current = now or datetime.now(UTC)
+    top = current.replace(minute=0, second=0, microsecond=0)
+    epoch_hour = int(top.timestamp()) // 3600
+    target = top + timedelta(hours=(anchor_hour - epoch_hour) % every_hours)
+    if target <= current:
+        target += timedelta(hours=every_hours)
+    return (target - current).total_seconds()
+
+
 def seconds_until_next_utc_half_past(*, now: datetime | None = None) -> float:
     """Seconds from ``now`` until the next :30 UTC of any hour.
 

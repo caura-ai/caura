@@ -17,6 +17,7 @@ from core_storage_api.config import settings
 from core_storage_api.services.postgres_service import (
     BulkRowShapeError,
     DuplicateContentHashError,
+    PointerNotInTenantError,
 )
 
 # Must run before any other module-level import emits a log record —
@@ -33,6 +34,7 @@ configure_logging(
 from sqlalchemy import text
 
 from core_storage_api.database.init import get_engine, init_database
+from core_storage_api.database.migration_postconditions import MIGRATION_POSTCONDITIONS
 from core_storage_api.middleware import (
     RejectWritesOnReaderMiddleware,
     RequireStorageSharedSecretMiddleware,
@@ -76,9 +78,6 @@ _INVALID_INDEXES = text(
     ORDER BY c.relname
     """
 )
-_COSINE_DISTANCE_COST = text(
-    "SELECT procost FROM pg_proc WHERE oid = to_regprocedure('cosine_distance(vector, vector)')"
-)
 
 
 async def report_schema_drift() -> None:
@@ -89,23 +88,63 @@ async def report_schema_drift() -> None:
     try:
         async with get_engine().connect() as connection:
             invalid_indexes = (await connection.execute(_INVALID_INDEXES)).scalars().all()
-            cosine_distance_cost = await connection.scalar(_COSINE_DISTANCE_COST)
+            if invalid_indexes:
+                logger.error(
+                    "Invalid PostgreSQL indexes detected: %s. Repair with DROP INDEX CONCURRENTLY, "
+                    "then CREATE INDEX CONCURRENTLY, from a session that will not be killed mid-build.",
+                    ", ".join(invalid_indexes),
+                )
+
+            for postcondition in MIGRATION_POSTCONDITIONS:
+                try:
+                    async with connection.begin_nested():
+                        effect_is_present = await connection.scalar(text(postcondition.predicate))
+                except Exception:
+                    logger.exception(
+                        "Schema drift post-condition probe failed [%s/%s]; startup will continue",
+                        postcondition.revision,
+                        postcondition.name,
+                    )
+                    continue
+                if effect_is_present is not True:
+                    # A soft-failing migration promises "apply this if allowed
+                    # to", so an unmet post-condition on a deployment that was
+                    # never allowed is the documented outcome, not a defect.
+                    # Report it once at INFO rather than warning on every boot
+                    # forever: an unactionable warning that cannot be cleared is
+                    # how the genuine case gets lost. A probe that itself fails
+                    # says nothing either way, so the condition stays a warning.
+                    expected_here = False
+                    if postcondition.expected_when is not None:
+                        try:
+                            async with connection.begin_nested():
+                                expected_here = (
+                                    await connection.scalar(text(postcondition.expected_when))
+                                ) is True
+                        except Exception:
+                            logger.exception(
+                                "Post-condition expectation probe failed [%s/%s]; "
+                                "treating the condition as unexpected",
+                                postcondition.revision,
+                                postcondition.name,
+                            )
+                    if expected_here:
+                        logger.info(
+                            "Migration post-condition not met but expected here [%s/%s]; "
+                            "this deployment could not have applied it",
+                            postcondition.revision,
+                            postcondition.name,
+                        )
+                        continue
+                    logger.log(
+                        logging.ERROR if postcondition.severity == "error" else logging.WARNING,
+                        "Migration post-condition failed [%s/%s]: %s",
+                        postcondition.revision,
+                        postcondition.name,
+                        postcondition.message,
+                    )
     except Exception:
         logger.exception("Schema drift report failed; startup will continue")
-        return
-
-    if invalid_indexes:
-        logger.error(
-            "Invalid PostgreSQL indexes detected: %s. Repair with DROP INDEX CONCURRENTLY, "
-            "then CREATE INDEX CONCURRENTLY, from a session that will not be killed mid-build.",
-            ", ".join(invalid_indexes),
-        )
-
-    if cosine_distance_cost == 1:
-        logger.warning(
-            "cosine_distance procost is still 1: migration 044 did not apply and the planner "
-            "is under-pricing <=> by ~100x"
-        )
 
 
 @contextlib.asynccontextmanager
@@ -191,6 +230,25 @@ def create_app() -> FastAPI:
             content={
                 "detail": permanent_failure.permanent_detail(
                     cause=permanent_failure.CAUSE_BULK_ROW_SHAPE,
+                    message=str(exc),
+                    **exc.fields,
+                )
+            },
+        )
+
+    @app.exception_handler(PointerNotInTenantError)
+    async def _pointer_not_in_tenant_handler(request: Request, exc: PointerNotInTenantError) -> JSONResponse:
+        # App-wide for the reason the two handlers above are: every memory
+        # writer and the relation upsert raise it, and the answer must be the
+        # same on all of them. 422 — the caller named the row, so the caller
+        # can fix it — and marked not retryable, because it fails identically
+        # on every attempt. One answer for "no such row" and "another tenant's
+        # row": only ``field`` says which pointer, never why.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": permanent_failure.permanent_detail(
+                    cause=permanent_failure.CAUSE_POINTER_NOT_IN_TENANT,
                     message=str(exc),
                     **exc.fields,
                 )
@@ -287,8 +345,9 @@ def create_app() -> FastAPI:
     app.include_router(tenant_suppression_router, prefix=prefix)
     # CAURA-686: ``GET /api/v1/storage/_debug/pg_locks`` for live
     # pg_locks / pg_stat_activity snapshots during contention triage.
-    # Behind the same private-VPC posture as everything else here —
-    # not exposed via the gateway.
+    # Answers 404 unless CORE_STORAGE_DEBUG_ENDPOINTS is on (L-75), and
+    # needs the storage shared secret like every route here; not exposed
+    # via the gateway.
     app.include_router(debug_router, prefix=prefix)
     # Fix 2 final-cleanup (PR1): adoption-counter flush, moved off core-api's
     # direct DB pool. Intentionally cross-tenant / RLS-free (migration 023) —

@@ -78,3 +78,22 @@ class FakeEmbeddingProvider:
     # The query path falls back to :meth:`embed` via the
     # ``hasattr(provider, "embed_query")`` check in
     # :func:`common.embedding._service.get_query_embedding`.
+
+
+class UnconfiguredEmbeddingProvider(FakeEmbeddingProvider):
+    """Stand-in for a REAL provider that has no credential to run with.
+
+    Returned by the registry when e.g. ``EMBEDDING_PROVIDER=openai`` (the
+    default) has no tenant key, no ``OPENAI_API_KEY`` and no platform
+    embedder. It still answers like the fake provider so a keyless deployment
+    can run interactive queries, but its vectors must never be STORED: a
+    hash vector persisted as a row's embedding is indistinguishable from a
+    real one, so once a key is added the row stays invisible to semantic
+    search and no backfill can select it. The persisting entry points in
+    ``common.embedding._service`` check for this class and return ``None``
+    instead, which leaves the row ``embedding=NULL`` — the state the FTS
+    admission guard and the embedding backfill already handle.
+
+    ``EMBEDDING_PROVIDER=fake`` is the explicit opt-in and is unaffected: it
+    returns the plain :class:`FakeEmbeddingProvider`.
+    """

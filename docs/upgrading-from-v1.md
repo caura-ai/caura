@@ -33,7 +33,7 @@
 
    ```bash
    docker compose up -d db    # bring just the DB back
-   docker exec <container> pg_dump -U memclaw memclaw > backup-pre-v2.sql
+   docker exec <container> pg_dump -U memclaw memclaw > backup-pre-v2.sql # legacy-name-floor: historical v1 database role and name required by this migration command
    docker compose down
    ```
 

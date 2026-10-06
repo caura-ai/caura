@@ -18,12 +18,16 @@ in caura-ai/caura-daemon:
     GET    /api/v1/memories/{memory_id}      (memory_recall)
     PATCH  /api/v1/memories/{memory_id}      (memory_update)
     DELETE /api/v1/memories/{memory_id}      (memory_delete)
+    GET    /api/v1/keystones                 (the hook agent's rules, g1.1)
 
-The last four were added once the broker's MCP dispatcher was wired to serve
-``memory_list`` / ``memory_recall`` / ``memory_update`` / ``memory_delete``.
-The tools shipped; the contract baseline was not widened with them, so a
-breaking change to those operations passed this gate. That is the same
-undeclared-contract failure mode as the #723-#736 series, one layer out.
+The four operations from ``GET /api/v1/memories`` on were added once the
+broker's MCP dispatcher was wired to serve ``memory_list`` / ``memory_recall`` /
+``memory_update`` / ``memory_delete``. The tools shipped; the contract baseline
+was not widened with them, so a breaking change to those operations passed this
+gate. That is the same undeclared-contract failure mode as the #723-#736 series,
+one layer out. The keystones list repeated it: the broker started calling it for
+the hook agent's rules (g1.1) with no row here, and it joined with the rule-set
+hash it now carries (g1.10).
 
 ``info`` is normalized to a fixed contract identity (``CONTRACT_VERSION``)
 rather than core-api's rolling package version, so the baseline only changes
@@ -74,6 +78,7 @@ from pathlib import Path
 #   /memories/{memory_id} GET     cloud.Client.GetMemory      (memory_recall)
 #                         PATCH   cloud.Client.UpdateMemory   (memory_update)
 #                         DELETE  cloud.Client.DeleteMemory   (memory_delete)
+#   /keystones            GET     cloud.Client.ListKeystones  (hook agent's rules)
 BROKER_OPERATIONS: dict[str, tuple[str, ...]] = {
     "/api/v1/memories/bulk": ("post",),
     "/api/v1/search": ("post",),
@@ -81,6 +86,7 @@ BROKER_OPERATIONS: dict[str, tuple[str, ...]] = {
     "/api/v1/version": ("get",),
     "/api/v1/memories": ("get",),
     "/api/v1/memories/{memory_id}": ("get", "patch", "delete"),
+    "/api/v1/keystones": ("get",),
 }
 
 # Path-item keys that are not operations and must survive filtering.

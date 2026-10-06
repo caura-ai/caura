@@ -210,7 +210,7 @@ def test_install_writes_cron_and_env_then_uninstall_removes(monkeypatch, tmp_pat
     assert stat.S_IMODE(os.stat(tmp_path / "cfg" / "env").st_mode) == 0o600
 
     # re-install (hourly) replaces, does not duplicate
-    rc = main(["install", "--interval", "1h", "--base-url", "u", "--api-key", "k", "--tenant-id", "t", "--all-projects"])
+    rc = main(["install", "--interval", "1h", "--base-url", "https://caura.example", "--api-key", "k", "--tenant-id", "t", "--all-projects"])
     assert rc == 0
     assert cron.table.count(CRON_MARKER) == 1
     assert "--all-projects" in cron.table and "0 * * * *" in cron.table
@@ -263,7 +263,7 @@ def test_install_cleans_up_on_crontab_oserror(monkeypatch, tmp_path, capsys):
         raise PermissionError("crontab: permission denied")
     monkeypatch.setattr(installer, "write_crontab", boom)
 
-    rc = main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
+    rc = main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "https://caura.example"])
     assert rc == 1
     assert not (tmp_path / "cfg" / "env").exists()  # secret cleaned up
     assert "failed to update crontab" in capsys.readouterr().err
@@ -280,7 +280,7 @@ def test_install_removes_orphaned_env_file_on_crontab_failure(monkeypatch, tmp_p
         raise RuntimeError("crontab -l failed (exit 1): host busy")
     monkeypatch.setattr(installer, "write_crontab", boom)
 
-    rc = main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
+    rc = main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "https://caura.example"])
     assert rc == 1
     assert not (tmp_path / "cfg" / "env").exists()  # cleaned up, no stray secret
     err = capsys.readouterr().err
@@ -292,7 +292,7 @@ def test_uninstall_survives_unremovable_env_file(monkeypatch, tmp_path, capsys):
     from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
-    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
+    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "https://caura.example"])
 
     import pathlib
     real_unlink = pathlib.Path.unlink
@@ -319,7 +319,7 @@ def test_install_env_file_write_failure_is_clean(monkeypatch, tmp_path, capsys):
         raise OSError("disk full")
     monkeypatch.setattr(installer, "write_env_file", boom)
 
-    rc = main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
+    rc = main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "https://caura.example"])
     assert rc == 1
     assert cron.table == ""  # crontab never touched
     assert "failed to write env file" in capsys.readouterr().err
@@ -329,7 +329,7 @@ def test_install_refuses_without_allowlist(monkeypatch, tmp_path, capsys):
     from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
-    rc = main(["install", "--base-url", "u", "--api-key", "k", "--tenant-id", "t"])
+    rc = main(["install", "--base-url", "https://caura.example", "--api-key", "k", "--tenant-id", "t"])
     assert rc == 2  # default-deny: would schedule a no-op
     assert cron.table == ""  # nothing written
 
@@ -356,7 +356,7 @@ def test_uninstall_keep_env(monkeypatch, tmp_path, capsys):
     from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
-    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
+    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "https://caura.example"])
     assert (tmp_path / "cfg" / "env").exists()
     rc = main(["uninstall", "--keep-env"])
     assert rc == 0
@@ -371,7 +371,7 @@ def test_install_locks_config_dir_to_0700(monkeypatch, tmp_path):
     from caura_client.interviewer.cli import main
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
-    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
+    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "https://caura.example"])
     mode = stat.S_IMODE(os.stat(tmp_path / "cfg").st_mode)
     assert mode == 0o700, oct(mode)
 
@@ -386,7 +386,7 @@ def test_install_tightens_preexisting_loose_config_dir(monkeypatch, tmp_path):
     assert stat.S_IMODE(os.stat(cfg).st_mode) == 0o755
     cron = _FakeCron()
     _patch(monkeypatch, tmp_path, cron)
-    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
+    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "https://caura.example"])
     assert stat.S_IMODE(os.stat(cfg).st_mode) == 0o700
 
 
@@ -416,6 +416,6 @@ def test_uninstall_reports_deleted_only_when_a_file_existed(monkeypatch, tmp_pat
     assert "env file deleted" not in out and "env file kept" not in out
 
     # After a real install, uninstall reports the actual deletion.
-    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "u"])
+    main(["install", "--all-projects", "--api-key", "k", "--tenant-id", "t", "--base-url", "https://caura.example"])
     main(["uninstall"])
     assert "env file deleted" in capsys.readouterr().out

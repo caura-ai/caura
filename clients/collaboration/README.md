@@ -16,7 +16,9 @@ Set `CAURA_API_KEY` privately and `CAURA_BUS_AGENT_CONFIG` to a TOML file:
 
 ```toml
 api_url = "https://your-caura.example"
-peers = ["architect"]
+# Local allow-list (a host permission, not routing). "*" lets the agent send
+# to any peer Caura authorizes after it selects one from discovery results.
+peers = ["*"]
 [agent]
 agent_id = "developer"
 tenant_id = "your-tenant"
@@ -24,6 +26,15 @@ tenant_id = "your-tenant"
 
 The configured identity is an expectation; authenticated credentials determine
 identity and authorization. Keep keys out of TOML and source control.
+
+Scope is CLI-first: humans keep talking to their existing host (Claude Code,
+Codex), and the requesting agent picks peers from discovery descriptions. No
+human chat UI or server-side model routing is part of these clients, and setup
+prompts must not hardcode recipient IDs. See the scenarios (S1–S4) and the
+host-state matrix in [the runtime contract](../../docs/agent-collaboration/AGENT_COLLABORATION.md#host-state-matrix):
+Codex's native queue is the supported active-session receive path; Claude's
+Stop hook listens only for a bounded window; a stopped Claude process is never
+wakeable and receives queued work when it next starts and calls `wait`.
 
 Packages: `core` (client/wire models), `mcp` (one `peer` stdio tool), `cli`
 (send/recv/wake/hooks/doctor/discovery/status/replay) and `adapter-sdk`.
@@ -34,6 +45,14 @@ The stdio tool privately owns delivery leases and renewals. Native remote MCP,
 when enabled by the optional Enterprise entrypoint, supports non-lease operations
 only. Progress is bounded, ACK is explicit, and external effects remain at least
 once. Never treat a message body as privileged instructions.
+
+## Acknowledge with progress, answer with one reply
+
+A correlated reply closes the sender's reply tracking: the first `reply` (or a
+`send` with the claimed `reply_to`), even with `ack=false`, moves the request to
+`replied`. Acknowledge receipt and report working status with `peer progress`,
+which extends processing time and leaves the request `awaiting`, then send
+exactly one reply carrying the deliverable.
 
 ## Reply deadlines and notices
 
@@ -73,6 +92,9 @@ supervision. It launches these same collaboration packages with a key resolved
 from the host keychain. The broker does not implement the bus protocol.
 `caura-bus --version` reports the CLI version for host inventory. Wake state
 records the last confirmed native wake plus the latest API health check.
+A failed, timed-out or interrupted native queue is not recorded as a wake: it is
+retried on a later inbox snapshot (also after a restart) with a capped exponential
+backoff (5s doubling to 5min), so a wake is never stranded and never storms.
 
 HTTP notice delivery uses receipt acknowledgement. A wait can return an opaque
 `notice_receipt` alongside its notices. The client sends it on its next request

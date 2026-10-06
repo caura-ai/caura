@@ -16,7 +16,10 @@ import json
 import logging
 import time
 
-from common.llm.constants import LLM_JSON_MAX_OUTPUT_TOKENS
+from common.llm.constants import (
+    GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS,
+    LLM_JSON_MAX_OUTPUT_TOKENS,
+)
 from common.llm.providers._json_shape import unwrap_singleton_array
 from common.llm.providers._shape_error import ProviderResponseShapeError
 from common.llm.providers._truncation import raise_if_truncated
@@ -54,7 +57,15 @@ class GeminiLLMProvider:
         self._model = model
         # Build the SDK client once — reuse the underlying HTTP session
         # across calls instead of reconstructing it per request.
-        self._client = genai.Client(api_key=self._api_key)
+        from google.genai import types
+
+        # ``HttpOptions.timeout`` is in MILLISECONDS; the SDK default is none.
+        self._client = genai.Client(
+            api_key=self._api_key,
+            http_options=types.HttpOptions(
+                timeout=int(GOOGLE_GENAI_REQUEST_TIMEOUT_SECONDS * 1000)
+            ),
+        )
 
     @property
     def provider_name(self) -> str:
