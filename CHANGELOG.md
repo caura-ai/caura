@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.25.0](https://github.com/caura-ai/caura/compare/backend-v3.24.1...backend-v3.25.0) (2026-10-06)
+
+
+### Features
+
+* **memories:** a signed-in person sees every memory scope ([#1943](https://github.com/caura-ai/caura/issues/1943)) ([5508199](https://github.com/caura-ai/caura/commit/5508199c73b654ea34bfaa6447fcbc1172c19633))
+* **plugin:** label requests with the openclaw_plugin audit surface ([#1945](https://github.com/caura-ai/caura/issues/1945)) ([8230464](https://github.com/caura-ai/caura/commit/8230464dbd8e5a3af6d875be0433582df8eb724f))
+
+
+### Bug Fixes
+
+* **config:** bridge the embedding settings and document env-only knobs ([#1942](https://github.com/caura-ai/caura/issues/1942)) ([bab9cce](https://github.com/caura-ai/caura/commit/bab9cce4251360a21bc4756d1b9f221fff7b5bc8))
+
 ## [3.24.1](https://github.com/caura-ai/caura/compare/backend-v3.24.0...backend-v3.24.1) (2026-10-06)
 
 

@@ -4,6 +4,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.24.0](https://github.com/caura-ai/caura/compare/plugin-v2.23.7...plugin-v2.24.0) (2026-10-06)
+
+
+### Features
+
+* **plugin:** label requests with the openclaw_plugin audit surface ([#1945](https://github.com/caura-ai/caura/issues/1945)) ([8230464](https://github.com/caura-ai/caura/commit/8230464dbd8e5a3af6d875be0433582df8eb724f))
+
 ## [2.23.7](https://github.com/caura-ai/caura/compare/plugin-v2.23.6...plugin-v2.23.7) (2026-10-06)
 
 
