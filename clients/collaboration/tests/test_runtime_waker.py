@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import shlex
 from datetime import datetime
@@ -45,8 +46,16 @@ async def test_real_fake_queue_captures_fixed_argv_no_credential_and_coalesces(t
     assert not await state.notify({"pending": False, "wait_generation": 6}, queue)
 
 
-async def test_ambiguous_runtime_failure_does_not_queue_again(tmp_path):
-    state = runtime.WakeState(tmp_path / "state.json")
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+async def test_ambiguous_runtime_failure_is_not_retried_inside_backoff(tmp_path):
+    state = runtime.WakeState(tmp_path / "state.json", clock=Clock())
     calls = 0
 
     async def failed():
@@ -60,6 +69,128 @@ async def test_ambiguous_runtime_failure_does_not_queue_again(tmp_path):
     assert not await state.notify(snapshot, failed)
     assert calls == 1
     assert "last_wake_at" not in state.load()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("Codex queue failed"), TimeoutError(), FileNotFoundError()])
+async def test_failed_queue_is_retried_on_a_later_snapshot_and_delivered_once(tmp_path, failure):
+    clock = Clock()
+    state = runtime.WakeState(tmp_path / "state.json", clock=clock)
+    queued, failing = [], [True]
+
+    async def emit(message=runtime.WAKE_TEXT):
+        if failing[0]:
+            raise failure
+        queued.append(message)
+
+    snapshot = {"pending": True, "wait_generation": 3, "drain_generation": 2}
+    with pytest.raises(type(failure)):
+        await state.notify(snapshot, emit)
+    # The burst is not recorded as woken, so the failure cannot strand it.
+    assert "drain_generation" not in state.load() and "last_wake_at" not in state.load()
+    failing[0] = False
+    assert not await state.notify(snapshot, emit)  # Still inside the backoff.
+    clock.now += runtime.WAKE_RETRY_BASE_SECONDS
+    assert await state.notify(snapshot, emit)
+    assert queued == [runtime.WAKE_TEXT]
+    assert "wake_attempt" not in state.load() and state.load()["drain_generation"] == 2
+    clock.now += runtime.WAKE_RETRY_MAX_SECONDS
+    assert not await state.notify(snapshot, emit)
+    assert not await state.notify({**snapshot, "wait_generation": 9}, emit)
+    assert queued == [runtime.WAKE_TEXT]
+
+
+async def test_repeated_queue_failures_back_off_exponentially_without_a_storm(tmp_path):
+    clock = Clock()
+    state = runtime.WakeState(tmp_path / "state.json", clock=clock)
+    calls = []
+
+    async def failed():
+        calls.append(clock.now)
+        raise RuntimeError("Codex queue failed")
+
+    snapshot = {"pending": True, "wait_generation": 0, "drain_generation": 0}
+    started = clock.now
+    for _ in range(4000):  # One snapshot per second for over an hour.
+        with contextlib.suppress(RuntimeError):
+            await state.notify(snapshot, failed)
+        clock.now += 1
+    gaps = [later - earlier for earlier, later in zip(calls, calls[1:], strict=False)]
+    assert gaps[:6] == [5, 10, 20, 40, 80, 160]
+    assert set(gaps[6:]) == {runtime.WAKE_RETRY_MAX_SECONDS}
+    assert len(calls) <= 7 + (clock.now - started) / runtime.WAKE_RETRY_MAX_SECONDS
+    # A new burst while the runtime is still down shares the same backoff.
+    clock.now = calls[-1] + 1
+    assert not await state.notify({**snapshot, "wait_generation": 1, "drain_generation": 1}, failed)
+
+
+async def test_restart_after_failure_retries_and_restart_after_success_does_not(tmp_path):
+    clock = Clock()
+    path = tmp_path / "state.json"
+    queued = []
+
+    async def failed():
+        raise RuntimeError("Codex queue failed")
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    snapshot = {"pending": True, "wait_generation": 1, "drain_generation": 0, "recovery_key": "resume:case-1"}
+    with pytest.raises(RuntimeError):
+        await runtime.WakeState(path, clock=clock).notify(snapshot, failed)
+    # A restarted waker honours the persisted backoff, then retries.
+    assert not await runtime.WakeState(path, clock=clock).notify(snapshot, emit)
+    clock.now += runtime.WAKE_RETRY_BASE_SECONDS
+    assert await runtime.WakeState(path, clock=clock).notify(snapshot, emit)
+    assert runtime.WakeState(path).load()["recovery_key"] == "resume:case-1"
+    # A restart after the confirmed queue never re-wakes the same burst/recovery.
+    clock.now += runtime.WAKE_RETRY_MAX_SECONDS
+    assert not await runtime.WakeState(path, clock=clock).notify(snapshot, emit)
+    assert queued == [runtime.WAKE_TEXT]
+
+
+async def test_crash_while_queueing_is_retried_after_restart(tmp_path):
+    clock = Clock()
+    path = tmp_path / "state.json"
+    queued = []
+
+    async def crashed():
+        raise asyncio.CancelledError()
+
+    async def emit(message=runtime.WAKE_TEXT):
+        queued.append(message)
+
+    snapshot = {"pending": True, "wait_generation": 0, "drain_generation": 0}
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.WakeState(path, clock=clock).notify(snapshot, crashed)
+    assert not await runtime.WakeState(path, clock=clock).notify(snapshot, emit)
+    clock.now += runtime.WAKE_RETRY_BASE_SECONDS
+    assert await runtime.WakeState(path, clock=clock).notify(snapshot, emit)
+    assert queued == [runtime.WAKE_TEXT]
+
+
+async def test_real_fake_codex_queue_failure_is_retried_until_queued(tmp_path, monkeypatch):
+    capture, fake, fail = tmp_path / "capture.txt", tmp_path / "codex", tmp_path / "fail"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport os,sys\n"
+        "open(os.environ['WAKE_TEST_CAPTURE'],'a').write('call\\n')\n"
+        "sys.exit(1 if os.path.exists(os.environ['WAKE_TEST_FAIL']) else 0)\n"
+    )
+    fake.chmod(0o700)
+    fail.touch()
+    monkeypatch.setenv("WAKE_TEST_CAPTURE", str(capture))
+    monkeypatch.setenv("WAKE_TEST_FAIL", str(fail))
+    clock = Clock()
+    state = runtime.WakeState(tmp_path / "state.json", clock=clock)
+    queue = runtime.CodexQueue("thread", str(fake))
+    snapshot = {"pending": True, "wait_generation": 4, "drain_generation": 0}
+    with pytest.raises(RuntimeError):
+        await state.notify(snapshot, queue)
+    fail.unlink()
+    clock.now += runtime.WAKE_RETRY_BASE_SECONDS
+    assert await state.notify(snapshot, queue)
+    clock.now += runtime.WAKE_RETRY_MAX_SECONDS
+    assert not await runtime.WakeState(state.path, clock=clock).notify(snapshot, queue)
+    assert capture.read_text().splitlines() == ["call", "call"]
 
 
 async def test_retry_exponential_backoff_and_immediate_revocation():
@@ -194,6 +325,40 @@ async def test_event_waker_queues_once_and_stops_on_revocation(tmp_path, monkeyp
     assert sent == [runtime.WAKE_TEXT]
     assert bus.profiles[0].status == "ready"
     assert all(not p.supports_interrupt for p in bus.profiles)
+
+
+async def test_event_waker_survives_queue_failure_and_retries(tmp_path, monkeypatch):
+    bus = FakeBus(config())
+    bus.snapshots[0]["pending"] = True
+    events_seen = asyncio.Event()
+
+    async def events(after):
+        for seq in range(3, 6):
+            yield {"seq": seq, "event_type": "message.available"}
+            await asyncio.sleep(0.01)
+        events_seen.set()
+        await asyncio.Event().wait()
+
+    bus.events = events
+    monkeypatch.setattr(runtime, "Bus", lambda _: bus)
+    monkeypatch.setattr(runtime, "WAKE_RETRY_BASE_SECONDS", 0.0)
+    calls = []
+
+    async def emit():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("Codex queue failed")
+
+    state = runtime.WakeState(tmp_path / "state")
+    task = asyncio.create_task(runtime.run_waker(config(), "codex", state, emit))
+    await asyncio.wait_for(events_seen.wait(), 2)
+    await asyncio.sleep(0.02)
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(calls) == 2
+    assert state.load()["last_wake_at"] and "wake_attempt" not in state.load()
 
 
 async def test_waker_shutdown_advertises_offline(tmp_path, monkeypatch):

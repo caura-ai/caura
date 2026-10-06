@@ -84,6 +84,9 @@ supervision. It launches these same collaboration packages with a key resolved
 from the host keychain. The broker does not implement the bus protocol.
 `caura-bus --version` reports the CLI version for host inventory. Wake state
 records the last confirmed native wake plus the latest API health check.
+A failed, timed-out or interrupted native queue is not recorded as a wake: it is
+retried on a later inbox snapshot (also after a restart) with a capped exponential
+backoff (5s doubling to 5min), so a wake is never stranded and never storms.
 
 HTTP notice delivery uses receipt acknowledgement. A wait can return an opaque
 `notice_receipt` alongside its notices. The client sends it on its next request
