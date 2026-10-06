@@ -3,6 +3,7 @@ import json
 import shlex
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -11,6 +12,14 @@ from caura_bus_cli.hooks import install_hooks
 from caura_bus_cli.main import app
 from caura_bus_core import AgentConfig, PlatformError
 from typer.testing import CliRunner
+
+
+def freeze_clock(monkeypatch):
+    # The listener budgets its window with time.monotonic(); the fake sleeps
+    # below never advance it, so freeze it too. Otherwise real elapsed time
+    # on a slow runner leaks into the recorded delays and can even close the
+    # shortened window before the second sleep is reached.
+    monkeypatch.setattr(runtime, "time", SimpleNamespace(monotonic=lambda: 1000.0))
 
 
 def config():
@@ -274,11 +283,12 @@ async def test_listener_uses_full_cap_only_for_unanswered_requests(
         raise TimeoutError()
 
     monkeypatch.setattr(runtime.asyncio, "sleep", sleep)
+    freeze_clock(monkeypatch)
     result = await runtime.receive(
         config(), runtime.WakeState(tmp_path / "state"), "Stop", wait=0.08, idle_listen_seconds=0.02
     )
     assert result == "" and bus.closed
-    assert len(sleeps) == 1 and sleeps[0] == pytest.approx(expected_delay, abs=0.005)
+    assert len(sleeps) == 1 and sleeps[0] == pytest.approx(expected_delay)
     assert bus.profiles[-1].status == "offline"
 
 
@@ -295,10 +305,11 @@ async def test_listener_shortens_window_when_request_is_answered(tmp_path, monke
             raise TimeoutError()
 
     monkeypatch.setattr(runtime.asyncio, "sleep", sleep)
+    freeze_clock(monkeypatch)
     await runtime.receive(
         config(), runtime.WakeState(tmp_path / "state"), "Stop", wait=0.08, idle_listen_seconds=0.02
     )
-    assert sleeps == pytest.approx([0.08, 0.02], abs=0.005)
+    assert sleeps == pytest.approx([0.08, 0.02])
 
 
 async def test_sender_notices_share_a_hint_until_inbox_is_drained(tmp_path):
