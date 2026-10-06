@@ -10,6 +10,13 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.22.2](https://github.com/caura-ai/caura/compare/backend-v3.22.1...backend-v3.22.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **entities:** the nightly merge keeps the first-seen name, evidence and keys ([#1876](https://github.com/caura-ai/caura/issues/1876)) ([a96e901](https://github.com/caura-ai/caura/commit/a96e90177bd889985d3d75041b249a70f8040c17))
+
 ## [3.22.1](https://github.com/caura-ai/caura/compare/backend-v3.22.0...backend-v3.22.1) (2026-10-06)
 
 
