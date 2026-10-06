@@ -949,9 +949,16 @@ async def reject(
     tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
-    """Reject ``staged → rejected``. For a Forge candidate, also write its
-    cluster fingerprint to ``forge_rejected_fingerprints`` so the next
-    Forge run skips that cluster for ``cooloff_days``.
+    """Reject a skill under review (``staged``, ``candidate`` or
+    ``quarantined``), or roll back an ``active`` one. For a Forge skill,
+    also write its cluster fingerprint to ``forge_rejected_fingerprints``
+    so the next Forge run skips that cluster for ``cooloff_days``.
+
+    Rolling back an active skill is what ``auto_promote_clean`` relies on
+    (M-105, docs/operator-forge-cron.md): the poison row stops Forge
+    deriving the skill again, and agents drop it on their next sync
+    because it is no longer active. Deleting the document instead writes
+    no poison row, so the next Forge tick mints the same slug again.
 
     A skill an agent wrote through the documents API has no fingerprint:
     Forge did not derive it from a cluster and will not propose it again,
@@ -981,11 +988,20 @@ async def reject(
 
     doc = await _load_doc_or_404(tenant_id=tenant_id, slug=slug)
     data = doc.get("data") or {}
-    if data.get("status") not in {"staged", "candidate", "quarantined"}:
+    under_review = {"staged", "candidate", "quarantined"}
+    if data.get("status") not in under_review | {"active"}:
         raise HTTPException(
             status_code=409,
-            detail=f"skill {slug!r} status={data.get('status')!r}; can only reject from staged/candidate/quarantined",
+            detail=(
+                f"skill {slug!r} status={data.get('status')!r}; "
+                "can only reject from staged/candidate/quarantined/active"
+            ),
         )
+    # The reloads below must find the skill where the reviewer saw it: still
+    # active, or still under review. A concurrent Approve of a staged skill
+    # therefore still stops this reject instead of rolling back what it just
+    # shipped.
+    rejectable = {"active"} if data.get("status") == "active" else under_review
     fingerprint = data.get("cluster_fingerprint")
     if not isinstance(fingerprint, str) or not fingerprint:
         # Only a Forge candidate has a cluster to poison. Any other skill,
@@ -1015,7 +1031,7 @@ async def reject(
     doc = await _reload_and_assert_status(
         tenant_id=tenant_id,
         slug=slug,
-        expected_statuses={"staged", "candidate", "quarantined"},
+        expected_statuses=rejectable,
     )
     if fingerprint is not None:
         # Re-derive fingerprint from the FRESH doc — an Edit may have
@@ -1033,7 +1049,7 @@ async def reject(
         doc = await _reload_and_assert_status(
             tenant_id=tenant_id,
             slug=slug,
-            expected_statuses={"staged", "candidate", "quarantined"},
+            expected_statuses=rejectable,
         )
 
         try:

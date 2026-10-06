@@ -266,10 +266,10 @@ stays `staged` with a fresh `content_hash`.
 
 Body: `{ "reason" }` (required). Parks the skill for security review.
 Reversible — quarantine does **not** write to the Forge cooloff
-ledger; a security admin can still reject or (via the lifecycle)
-restore it.
+ledger; a security admin can still reject it, or approve it with
+`override_quarantine`.
 
-### `reject` — staged, candidate, or quarantined → rejected
+### `reject` — staged, candidate, quarantined, or active → rejected
 
 Body: `{ "reason" }` (required), plus optional `cooloff_days` (1–365).
 **Permanent.** For a Forge candidate, rejecting also writes its cluster
@@ -283,6 +283,12 @@ fingerprint, so there is nothing to put on cooloff. It is rejected
 without the ledger write, and `cooloff_days` is ignored if given; the
 response's `detail` says so. The agent can't stage it again under the
 same slug: a non-admin write to a rejected slug is refused.
+
+Rejecting an `active` skill rolls it back: agents drop it on their
+next sync, and for a Forge skill the cooloff ledger stops Forge
+deriving it again. That is the rollback `auto_promote_clean` relies
+on. Deleting the document instead writes no ledger row, so the next
+Forge tick mints the same slug again.
 
 ```bash
 curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
@@ -298,7 +304,8 @@ curl -X POST "$BASE/api/v1/skills-inbox/forge/abc-123/reject" \
 | `staged` | ✅ → `active` | ✅ stays `staged` (marked deferred) | ✅ stays `staged` (or → `quarantined` if the rescan trips) | ✅ → `quarantined` | ✅ → `rejected` |
 | `candidate` | ❌ 409 | ❌ 409 | ❌ 409 | ✅ → `quarantined` | ✅ → `rejected` |
 | `quarantined` | ✅ → `active` with `override_quarantine`, else ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 | ✅ → `rejected` |
-| `active` / `rejected` / other | ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 |
+| `active` | ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 | ✅ → `rejected` |
+| `rejected` / other | ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 | ❌ 409 |
 
 ## Typical operator workflow
 
