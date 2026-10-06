@@ -10,6 +10,21 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.25.1](https://github.com/caura-ai/caura/compare/backend-v3.25.0...backend-v3.25.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **ci:** compare boolean workflow inputs as booleans (M-03) ([#1947](https://github.com/caura-ai/caura/issues/1947)) ([fe8fbd7](https://github.com/caura-ai/caura/commit/fe8fbd744b8e73714b1bcf5f7aa9d420a15d1869))
+* **forge:** rank a cluster's entities by mentions before the top-5 cut (M-45) ([#1949](https://github.com/caura-ai/caura/issues/1949)) ([1a4cb6c](https://github.com/caura-ai/caura/commit/1a4cb6c30f0d5ac6b5e395f9c872e9fca1c10830))
+* **forge:** skip a cluster the model marked undistillable (M-44) ([#1948](https://github.com/caura-ai/caura/issues/1948)) ([194a204](https://github.com/caura-ai/caura/commit/194a204e22f88ae03cd234f0cf44d63ad14fce6c))
+* **settings:** drop seven SECURITY_AUDIT_* settings nothing read (M-116) ([#1946](https://github.com/caura-ai/caura/issues/1946)) ([622c509](https://github.com/caura-ai/caura/commit/622c50916ac703f8eafd1c3b1517cbb07df0a533))
+
+
+### Dependencies
+
+* **docker:** bump datadog/serverless-init from `f494334` to `161423d` in /core-worker ([#1852](https://github.com/caura-ai/caura/issues/1852)) ([f441cd8](https://github.com/caura-ai/caura/commit/f441cd876a71bb1b627a9511c7fb79ceee345b0c))
+
 ## [3.25.0](https://github.com/caura-ai/caura/compare/backend-v3.24.1...backend-v3.25.0) (2026-10-06)
 
 
