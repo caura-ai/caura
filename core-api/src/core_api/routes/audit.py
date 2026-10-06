@@ -21,6 +21,9 @@ class AuditEntry(BaseModel):
     resource_id: UUID | None
     detail: dict | None
     created_at: datetime
+    # The row's place in the tenant's hash chain, which names a broken row by
+    # ``seq``. Null for a row written before the chain existed (M-27).
+    seq: int | None = None
 
     model_config = {"from_attributes": True}
 
@@ -49,6 +52,7 @@ async def list_audit_log(
     since: datetime | None = Query(default=None),
     agent_id: str | None = Query(default=None),
     action: str | None = Query(default=None),
+    resource_type: str | None = Query(default=None),
     resource_id: UUID | None = Query(default=None),
     cursor: str | None = Query(
         default=None,
@@ -78,6 +82,7 @@ async def list_audit_log(
         since=since,
         agent_id=agent_id,
         action=action,
+        resource_type=resource_type,
         resource_id=resource_id,
         cursor_ts=cursor_ts,
         cursor_id=cursor_id,
