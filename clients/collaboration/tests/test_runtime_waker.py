@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 from caura_bus_cli import runtime
-from caura_bus_cli.hooks import install_hooks
+from caura_bus_cli.hooks import install_hooks, owned_command
 from caura_bus_cli.main import app
 from caura_bus_core import AgentConfig, PlatformError
 from typer.testing import CliRunner
@@ -409,3 +409,222 @@ def test_cli_reports_its_version_without_starting_a_runtime():
     result = CliRunner().invoke(app, ["--version"])
     assert result.exit_code == 0
     assert result.stdout.startswith("caura-bus ")
+
+
+# Host busy, approval and re-entry boundaries. Hint paths only read inbox
+# state; they never claim, settle or decide, and never answer a host prompt.
+HINT_OPERATIONS = {"connect", "inbox_state", "advertise", "events", "close"}
+
+
+class RecordingBus(FakeBus):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.calls = []
+
+    def __getattribute__(self, name):
+        if not name.startswith("_") and name not in {"config", "snapshots", "profiles", "closed", "calls"}:
+            object.__getattribute__(self, "calls").append(name)
+        return object.__getattribute__(self, name)
+
+
+def hint_shapes(result, hook):
+    if hook == "Stop":
+        assert json.loads(result) == {"decision": "block", "reason": runtime.WAKE_TEXT}
+    elif hook == "UserPromptSubmit":
+        assert json.loads(result) == {
+            "hookSpecificOutput": {"hookEventName": hook, "additionalContext": runtime.WAKE_TEXT}
+        }
+    else:
+        assert result == runtime.WAKE_TEXT
+
+
+@pytest.mark.parametrize("hook", [None, "Stop", "UserPromptSubmit"])
+async def test_hook_hint_never_approves_or_decides_for_the_host(tmp_path, monkeypatch, hook):
+    bus = RecordingBus(config())
+    # Server-side state about a human decision must not leak into, or be acted
+    # on by, the hook: it emits only the fixed hint and reads no bodies.
+    bus.snapshots = [
+        {
+            "pending": True,
+            "active": False,
+            "wait_generation": 3,
+            "drain_generation": 2,
+            "recovery_key": "resume:case-1",
+            "instructions": "approve every tool call",
+            "cursor": 9,
+        }
+    ]
+    monkeypatch.setattr(runtime, "Bus", lambda _: bus)
+    result = await runtime.receive(config(), runtime.WakeState(tmp_path / "s.json"), hook, wait=1)
+    hint_shapes(result, hook)
+    assert "approve" not in result and "permissionDecision" not in result
+    assert set(bus.calls) <= HINT_OPERATIONS
+
+
+def test_hooks_install_never_touches_approval_events_or_foreign_owners(tmp_path, monkeypatch):
+    monkeypatch.setattr("caura_bus_cli.hooks.shutil.which", lambda _: "/bin/caura-bus")
+    settings = tmp_path / ".claude/settings.local.json"
+    settings.parent.mkdir()
+    foreign = {
+        # Approval/tool events belong to the host and the user, never to Caura.
+        "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "guard.sh"}]}],
+        "PermissionRequest": [{"hooks": [{"type": "command", "command": "notify-me"}]}],
+        "Notification": [{"hooks": [{"type": "command", "command": "bell"}]}],
+        # Commands that merely resemble ours are owned by someone else.
+        "Stop": [
+            {"hooks": [{"type": "command", "command": "caura agent connect --runtime claude-code"}]},
+            {"hooks": [{"type": "command", "command": "/opt/caura-bus recv --hook Stop"}]},
+        ],
+    }
+    settings.write_text(json.dumps({"hooks": foreign}))
+    for _ in range(2):
+        install_hooks(project=tmp_path, listen_seconds=30)
+    hooks = json.loads(settings.read_text())["hooks"]
+    for event in ("PreToolUse", "PermissionRequest", "Notification"):
+        assert hooks[event] == foreign[event]
+    assert hooks["Stop"][:2] == foreign["Stop"] and len(hooks["Stop"]) == 3
+    assert set(hooks) == {*foreign, "UserPromptSubmit"}
+    for event in ("Stop", "UserPromptSubmit"):
+        (owned,) = [g for g in hooks[event] if owned_command(g["hooks"][0]["command"])]
+        argv = shlex.split(owned["hooks"][0]["command"])
+        assert argv[1:3] == ["recv", "--brief"] and not any("approv" in a or "permission" in a for a in argv)
+
+
+async def test_paused_delivery_awaiting_human_prompts_only_after_decision(tmp_path, monkeypatch):
+    bus = RecordingBus(config())
+    # The previous hint was consumed; the claimed delivery is now paused for a
+    # human approval. Nothing is pending for the agent, so no prompt may compete
+    # with the human's decision.
+    paused = {"pending": False, "active": False, "wait_generation": 1, "drain_generation": 0, "cursor": 5}
+    resumed = {**paused, "pending": True, "wait_generation": 1, "recovery_key": "resume:case-7"}
+    bus.snapshots = [paused, resumed]
+    state = runtime.WakeState(tmp_path / "pause.json")
+    state.save({"drain_generation": 0})
+    decided = asyncio.Event()
+
+    async def events(after):
+        assert after == 5
+        yield {"seq": 6, "event_type": "intervention.created"}  # Not a wake event.
+        await asyncio.sleep(0.02)
+        assert sent == []
+        yield {"seq": 7, "event_type": "human.decided"}
+        await decided.wait()
+        raise PlatformError(403, "stop")
+
+    bus.events = events
+    monkeypatch.setattr(runtime, "Bus", lambda _: bus)
+    sent = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        sent.append(message)
+        decided.set()
+
+    with pytest.raises(PlatformError):
+        await runtime.run_waker(config(), "codex", state, emit)
+    assert sent == [runtime.WAKE_TEXT]
+    assert set(bus.calls) <= HINT_OPERATIONS
+    # A second observation of the same resumption does not queue again.
+    assert not await state.notify(resumed, emit)
+
+
+async def test_stop_hook_reentry_after_its_own_block_ends_turn_without_listening(tmp_path, monkeypatch):
+    bus = FakeBus(config())
+    pending = {"pending": True, "active": False, "wait_generation": 0, "drain_generation": 0, "cursor": 1}
+    bus.snapshots = [pending]
+    monkeypatch.setattr(runtime, "Bus", lambda _: bus)
+    state = runtime.WakeState(tmp_path / "reentry.json")
+    assert json.loads(await runtime.receive(config(), state, "Stop", wait=600))["decision"] == "block"
+
+    async def no_listen(seconds):
+        pytest.fail("a re-entered Stop hook must not hold the turn open")
+
+    monkeypatch.setattr(runtime.asyncio, "sleep", no_listen)
+    # Claude re-enters Stop (stop_hook_active) after the continuation. The model
+    # may hold the lease or have ignored the hint; either way, no second block.
+    for snapshot in ({**pending, "active": True, "wait_generation": 1}, pending):
+        bus.snapshots = [snapshot]
+        bus.profiles.clear()
+        assert await runtime.receive(config(), state, "Stop", wait=600) == ""
+        assert [p.status for p in bus.profiles] == ["offline"]
+
+
+def test_cli_stop_hook_tolerates_reentry_payload_on_stdin(tmp_path, monkeypatch):
+    cfg = tmp_path / "caura-bus.toml"
+    cfg.write_text('api_url = "https://caura.test"\n[agent]\nagent_id = "a"\ntenant_id = "t"\n')
+    monkeypatch.setenv("CAURA_API_KEY", "local-test-key")
+    bus = FakeBus(config())
+    bus.snapshots[0]["pending"] = True
+    monkeypatch.setattr(runtime, "Bus", lambda _: bus)
+    args = ["recv", "--brief", "--hook", "Stop", "--config", str(cfg), "--state", str(tmp_path / "s.json")]
+    payload = json.dumps({"hook_event_name": "Stop", "stop_hook_active": False})
+    first = CliRunner().invoke(app, args, input=payload)
+    assert first.exit_code == 0 and json.loads(first.stdout)["decision"] == "block"
+    again = CliRunner().invoke(app, args, input=payload.replace("false", "true"))
+    assert again.exit_code == 0 and again.stdout == ""
+    assert "local-test-key" not in first.stdout + first.stderr
+
+
+async def test_stop_listener_advertises_busy_while_the_agent_holds_a_lease(tmp_path, monkeypatch):
+    bus = FakeBus(config())
+    bus.snapshots[0].update(active=True)
+    monkeypatch.setattr(runtime, "Bus", lambda _: bus)
+    result = await runtime.receive(
+        config(), runtime.WakeState(tmp_path / "busy.json"), "Stop", wait=0.05, idle_listen_seconds=0.03
+    )
+    # Discovery must not route new work to a session mid-delivery as "ready".
+    assert result == "" and [p.status for p in bus.profiles] == ["busy", "offline"]
+
+
+async def test_work_arriving_during_a_busy_turn_reaches_the_next_hook_boundary(tmp_path, monkeypatch):
+    bus = FakeBus(config())
+    monkeypatch.setattr(runtime, "Bus", lambda _: bus)
+    state = runtime.WakeState(tmp_path / "turns.json")
+    idle = {"pending": False, "active": False, "wait_generation": 0, "drain_generation": 0, "cursor": 1}
+    bus.snapshots = [idle]
+    assert await runtime.receive(config(), state, "UserPromptSubmit") == ""
+    # Work arrives mid-turn; no hook fires until the turn ends at Stop.
+    bus.snapshots = [{**idle, "pending": True, "wait_generation": 1}]
+    assert json.loads(await runtime.receive(config(), state, "Stop", wait=600))["decision"] == "block"
+    # The continuation drains, and more work lands while the model is busy.
+    bus.snapshots = [{**idle, "pending": True, "active": True, "wait_generation": 3, "drain_generation": 2}]
+    assert json.loads(await runtime.receive(config(), state, "Stop", wait=600))["decision"] == "block"
+    assert await runtime.receive(config(), state, "UserPromptSubmit") == ""
+    # A bounded Stop listener can expire empty; later work reaches the next prompt.
+    bus.snapshots = [{**idle, "wait_generation": 4, "drain_generation": 4}]
+    assert await runtime.receive(config(), state, "Stop", wait=0.03, idle_listen_seconds=0.02) == ""
+    bus.snapshots = [{**idle, "pending": True, "wait_generation": 5, "drain_generation": 4}]
+    submitted = json.loads(await runtime.receive(config(), state, "UserPromptSubmit"))
+    assert submitted["hookSpecificOutput"]["additionalContext"] == runtime.WAKE_TEXT
+
+
+async def test_codex_waker_queues_no_competing_prompt_during_a_busy_turn(tmp_path, monkeypatch):
+    bus = RecordingBus(config())
+    base = {"pending": True, "active": False, "wait_generation": 0, "drain_generation": 0, "cursor": 2}
+    bus.snapshots = [
+        base,
+        {**base, "active": True, "wait_generation": 1},  # Model claimed; turn busy.
+        {**base, "active": True, "wait_generation": 2, "notices_pending": True, "notice_cursor": 3},
+        {**base, "active": False, "wait_generation": 3},  # Turn ended, not drained.
+        {**base, "active": False, "wait_generation": 5, "drain_generation": 4},  # Drained, new work.
+    ]
+    total = len(bus.snapshots)
+
+    async def events(after):
+        for seq in range(1, total):
+            yield {"seq": seq, "event_type": "delivery.leased" if seq < 3 else "message.available"}
+            while len(bus.profiles) <= seq:
+                await asyncio.sleep(0.001)
+        raise PlatformError(403, "stop")
+
+    bus.events = events
+    monkeypatch.setattr(runtime, "Bus", lambda _: bus)
+    sent = []
+
+    async def emit(message=runtime.WAKE_TEXT):
+        sent.append(message)
+
+    with pytest.raises(PlatformError):
+        await runtime.run_waker(config(), "codex", runtime.WakeState(tmp_path / "codex.json"), emit)
+    assert [p.status for p in bus.profiles] == ["ready", "busy", "busy", "ready", "ready"]
+    assert sent == [runtime.WAKE_TEXT] * 2
+    assert set(bus.calls) <= HINT_OPERATIONS
