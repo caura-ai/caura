@@ -487,6 +487,13 @@ Returns the researcher's finding. Graph-enhanced retrieval expands through entit
 
 Returns both the fact and the decision — full context without agents needing to talk to each other.
 
+Shared memory suits knowledge the whole fleet should find later. When an agent
+needs an answer from a specific peer now, use the optional agent collaboration
+extension instead: the agent discovers the peer by its expertise description,
+sends a direct request and collects the correlated reply. See
+[agent collaboration](https://github.com/caura-ai/caura/blob/main/docs/agent-collaboration/AGENT_COLLABORATION.md)
+for the current beta scope and supported hosts.
+
 ### Example: Batch write (after processing a document)
 
 **Scenario:** Agent has extracted several findings and stores them all at once via the batch form of `caura_write`.

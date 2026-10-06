@@ -232,8 +232,13 @@ interruption levels, operator recovery, and honest client wake limitations.
 
 ## GA release gates still outstanding
 
-Native upstream integration and upgrade/rollback contracts; credential lifecycle
-tests and peer policies; durable runtime acceptance and execution deduplication;
-bounded backlog, retention, rate limits and dead-letter operations; centralized
-audit export, metrics and alerting; load/soak/chaos testing; signed distributions
-and licensing review. The detailed sequence is in CAURA_BUS_GA_PLAN.md.
+Native upstream integration and upgrade/rollback contracts; peer policies;
+real-host runtime acceptance and execution deduplication; dead-letter
+operations; centralized audit export; load/soak/chaos testing; backup and
+restore; signed distributions and licensing review. Several earlier gates now
+have implementations on the collaboration branches or in review: credential
+lifecycle bounds, payload/fan-out and backlog quotas, opt-in retention with
+replay resync, tenant deletion, directory pagination, deterministic S1–S3
+acceptance with a CI gate, and client package publishing. The
+[capability status](AGENT_COLLABORATION.md#capability-status) table tracks
+which of these are merged. The detailed sequence is in CAURA_BUS_GA_PLAN.md.
