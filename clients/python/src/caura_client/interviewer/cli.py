@@ -24,7 +24,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from ..client import Caura
+from ..client import Caura, _check_key_transport
 from ..exceptions import AuthError
 from . import installer
 from .discovery import (
@@ -185,6 +185,18 @@ def _require_config(args: argparse.Namespace) -> str | None:
     return None
 
 
+def _transport_error(args: argparse.Namespace) -> str | None:
+    """The client's own refusal of ``--base-url``, checked before any client is
+    built (L-232). ``Caura()`` raises it, which crashed ``run`` and ``status``
+    with a traceback, and ``install`` scheduled a job that raised it every tick.
+    The message names the ``CAURA_ALLOW_INSECURE_HTTP`` opt-in."""
+    try:
+        _check_key_transport(args.base_url, None)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 def _deny_guidance(args: argparse.Namespace) -> str:
     projects = list_project_dirs(_projects_root(args))
     lines = [
@@ -259,7 +271,7 @@ def _make_config(args: argparse.Namespace, *, flush: bool = False, dry_run: bool
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    if error := _require_config(args):
+    if error := _require_config(args) or _transport_error(args):
         print(f"[interviewer] {error}", file=sys.stderr)
         return 2
     allow = _resolve_allowlist(args)
@@ -326,7 +338,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    if error := _require_config(args):
+    if error := _require_config(args) or _transport_error(args):
         print(f"[interviewer] {error}", file=sys.stderr)
         return 2
     allow = _resolve_allowlist(args)
@@ -416,6 +428,11 @@ def _cmd_install(args: argparse.Namespace) -> int:
         return 2
     if error := _require_config(args):
         print(f"[interviewer] {error} — needed so the scheduled job can authenticate", file=sys.stderr)
+        return 2
+    # Checked under the CAURA_ALLOW_INSECURE_HTTP the job will run with: it is
+    # copied into the env file below.
+    if error := _transport_error(args):
+        print(f"[interviewer] {error}", file=sys.stderr)
         return 2
     allow = _resolve_allowlist(args)
     if not allow and not args.all_projects:
