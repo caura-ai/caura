@@ -34,5 +34,7 @@ tables intact. This does not undo accepted messages or external agent effects.
 Back up storage before enabling migrations; schema downgrade/removal requires
 the extension's reviewed migration procedure. Delivery is at least once and
 does not promise exactly-once external effects. Runtime wake support is
-qualified separately: Cursor is unsupported and Claude's idle hook only
-listens within its configured window.
+qualified separately: Cursor is unsupported, Claude's idle hook only listens
+within its configured window, and a stopped Claude process is never wakeable.
+See the host-state matrix in
+[the runtime contract](agent-collaboration/AGENT_COLLABORATION.md#host-state-matrix).
