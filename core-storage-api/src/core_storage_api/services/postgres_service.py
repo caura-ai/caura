@@ -629,7 +629,8 @@ _ANN_EF_SEARCH_FLOOR = 100
 # the mechanism that lets a filtered ANN arm keep scanning until the LIMIT
 # is satisfied instead of post-filtering a fixed ef_search batch. Below this
 # version the GUC does not exist (SET fails), so the ANN pool declines
-# entirely and the statement keeps its pre-pool shape.
+# entirely and the statement keeps its pre-pool shape, and the filtered
+# lookups skip the SET (``_scan_past_other_tenants``).
 _PGVECTOR_ITERATIVE_MIN = (0, 8)
 # Process-wide probe cache: extversion cannot change under a running service
 # (ALTER EXTENSION requires a restart window in every deployment shape we
@@ -659,16 +660,17 @@ def _get_probe_lock() -> asyncio.Lock:
     return _probe_lock
 
 
-async def _ann_pool_available() -> bool:
-    """True when the ANN candidate pool may run: pgvector >= 0.8 on this DB.
+async def _iterative_scan_available() -> bool:
+    """True when this DB's pgvector (>= 0.8) has ``hnsw.iterative_scan``.
 
-    Called only when ``ann_pool_size`` > 0, so the default path never pays
-    the probe. The first caller runs one ``pg_extension`` lookup on a read
-    session and caches the parsed version; concurrent first callers coalesce
-    on the probe lock instead of each issuing their own lookup. The fallback
-    decision is logged once, at WARNING, because a tenant explicitly asked
-    for the pool and is silently getting the full scan instead — on-call
-    should be able to grep why.
+    Gates the ANN candidate pool (asked only when ``ann_pool_size`` > 0) and
+    the filtered nearest-neighbour lookups (``_scan_past_other_tenants``).
+    The first caller runs one ``pg_extension`` lookup on a read session and
+    caches the parsed version; concurrent first callers coalesce on the probe
+    lock instead of each issuing their own lookup. An old pgvector is logged
+    once, at WARNING: a tenant that asked for the pool silently gets the full
+    scan instead, and a filtered lookup can come back short — on-call should
+    be able to grep why.
 
     A probe FAILURE deliberately caches nothing (a transient read error must
     not stick the process on the fallback path), so callers queued behind a
@@ -690,8 +692,9 @@ async def _ann_pool_available() -> bool:
                 ).scalar()
         except Exception:
             logger.warning(
-                "ann_pool: pgvector version probe failed; falling back to the "
-                "full-scan candidate window for this call (will re-probe)",
+                "pgvector version probe failed; no iterative scans for this call, "
+                "so the ANN pool falls back to the full-scan candidate window "
+                "(will re-probe)",
                 exc_info=True,
             )
             return False
@@ -702,15 +705,42 @@ async def _ann_pool_available() -> bool:
             parts.append(int(piece))
         _pgvector_version = tuple(parts) or (0,)
         if _pgvector_version >= _PGVECTOR_ITERATIVE_MIN:
-            logger.info("ann_pool: pgvector %s supports iterative scans; ANN pool enabled", raw)
+            logger.info("pgvector %s supports iterative scans; ANN pool and filtered lookups use them", raw)
         else:
             logger.warning(
-                "ann_pool: pgvector %s < 0.8 (no hnsw.iterative_scan); ann_pool_size "
-                "is set but the statement keeps the full-scan candidate window. "
-                "ALTER EXTENSION vector UPDATE to enable the two-stage path.",
+                "pgvector %s < 0.8 (no hnsw.iterative_scan): ann_pool_size keeps the "
+                "full-scan candidate window, and a filtered ANN lookup can return "
+                "fewer rows than its LIMIT. ALTER EXTENSION vector UPDATE to enable "
+                "iterative scans.",
                 raw,
             )
     return _pgvector_version >= _PGVECTOR_ITERATIVE_MIN
+
+
+async def _scan_past_other_tenants(session: AsyncSession) -> None:
+    """Let this transaction's filtered HNSW lookups scan until their LIMIT is met.
+
+    Each HNSW index (memories, entities, documents) spans every tenant. A scan
+    hands back one ``hnsw.ef_search`` batch, 40 rows by default, and the
+    tenant, fleet and status filters run on that batch alone, so a caller
+    whose rows sit behind 40 nearer rows of other tenants got fewer rows than
+    the LIMIT, or none, and no error (M-61, 2026-10-01 audit).
+    ``hnsw.iterative_scan`` keeps scanning until the LIMIT is met, bounded by
+    ``hnsw.max_scan_tuples`` (20k by default); ``ef_search`` keeps its default.
+
+    Callers keep their similarity threshold OUTSIDE the LIMITed scan. An
+    iterative scan stops only once enough rows pass its WHERE clause, so with
+    the threshold inside, a lookup with nothing above it (dedup's usual
+    answer) would walk ``max_scan_tuples`` rows on every call.
+    ``relaxed_order`` can return rows slightly out of distance order, so
+    callers also re-sort what the scan returns.
+
+    ``set_config(..., is_local => true)`` is SET LOCAL: it lasts until the
+    session's transaction ends, so call this on the session that runs the
+    lookup. Below pgvector 0.8 the GUC does not exist, and this does nothing.
+    """
+    if await _iterative_scan_available():
+        await session.execute(select(func.set_config("hnsw.iterative_scan", "relaxed_order", True)))
 
 
 def _saturate_rank(scaled_rank: Any) -> Any:
@@ -2946,17 +2976,14 @@ class PostgresService:
         threshold = min_similarity if min_similarity is not None else SEMANTIC_DEDUP_THRESHOLD
         async with get_session() as session:
             distance = Memory.embedding.cosine_distance(embedding)
-            similarity = (1.0 - distance).label("similarity")
-
-            stmt = (
-                select(Memory, similarity)
+            nearest = (
+                select(Memory.id, distance.label("distance"))
                 .where(
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
                     Memory.status.in_(("active", "confirmed", "pending")),
                     Memory.embedding.is_not(None),
                 )
-                .where((1.0 - distance) >= threshold)
                 .order_by(distance)
                 .limit(SEMANTIC_DEDUP_CANDIDATE_LIMIT)
             )
@@ -2965,11 +2992,11 @@ class PostgresService:
             # stored with ``fleet_id = ''`` matched neither ``== ''`` (never
             # asked) nor ``IS NULL``, so a paraphrase of it was admitted while
             # an identical write 409'd. See ``_content_hash_fleet_scope``.
-            stmt = stmt.where(_fleet_scope(Memory.fleet_id, fleet_id))
+            nearest = nearest.where(_fleet_scope(Memory.fleet_id, fleet_id))
             if visibility:
-                stmt = stmt.where(Memory.visibility == visibility)
+                nearest = nearest.where(Memory.visibility == visibility)
             if exclude_id is not None:
-                stmt = stmt.where(Memory.id != exclude_id)
+                nearest = nearest.where(Memory.id != exclude_id)
             # CAURA-721. Plain equality, not ``_content_hash_fleet_scope``'s
             # COALESCE dance: ``Memory.agent_id`` is ``nullable=False``, so
             # there is no NULL-vs-empty-string group to reconcile the way
@@ -2977,8 +3004,19 @@ class PostgresService:
             # matches every other optional predicate here — an unowned write
             # has no owner to pin.
             if agent_id:
-                stmt = stmt.where(Memory.agent_id == agent_id)
+                nearest = nearest.where(Memory.agent_id == agent_id)
 
+            # The threshold applies to the nearest rows, outside the scan; see
+            # ``_scan_past_other_tenants``.
+            found = nearest.subquery()
+            similarity = (1.0 - found.c.distance).label("similarity")
+            stmt = (
+                select(Memory, similarity)
+                .join(found, Memory.id == found.c.id)
+                .where((1.0 - found.c.distance) >= threshold)
+                .order_by(found.c.distance)
+            )
+            await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
             row = result.first()
             if row is None:
@@ -3415,7 +3453,7 @@ class PostgresService:
             ref_ts = valid_at_ts
         else:
             ref_ts = func.now()
-        use_ann_pool = _ann_pool_size > 0 and await _ann_pool_available()
+        use_ann_pool = _ann_pool_size > 0 and await _iterative_scan_available()
         if use_ann_pool and _candidate_pool_size > 0:
             # The two pool selectors are mutually exclusive by design —
             # core-api's profile validation rejects the combination up front;
@@ -4681,10 +4719,8 @@ class PostgresService:
     ) -> list[Memory]:
         async with get_session() as session:
             distance = Memory.embedding.cosine_distance(embedding)
-            similarity = (1.0 - distance).label("similarity")
-
-            stmt = (
-                select(Memory, similarity)
+            nearest = (
+                select(Memory.id, distance.label("distance"))
                 .where(
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
@@ -4692,25 +4728,34 @@ class PostgresService:
                     Memory.embedding.is_not(None),
                     Memory.id != memory_id,
                 )
-                .where((1.0 - distance) >= threshold)
                 .order_by(distance)
                 .limit(limit)
             )
 
             # Same fleet grouping as ``memory_find_rdf_conflicts`` above.
-            stmt = stmt.where(_fleet_scope(Memory.fleet_id, fleet_id))
+            nearest = nearest.where(_fleet_scope(Memory.fleet_id, fleet_id))
 
-            stmt = stmt.where(Memory.visibility == visibility)
+            nearest = nearest.where(Memory.visibility == visibility)
             # A54 — ``scope_agent`` means "private to SOME agent", not "private
             # to THIS agent": the tier predicate alone still matches a DIFFERENT
             # agent's private rows, which contradiction then marks
             # outdated/conflicted — a status write into a row the writer cannot
             # read. Wet-proven, not theoretical. Pin the owner for that tier.
             if visibility == "scope_agent" and agent_id:
-                stmt = stmt.where(Memory.agent_id == agent_id)
+                nearest = nearest.where(Memory.agent_id == agent_id)
 
+            # The threshold applies to the nearest rows, outside the scan; see
+            # ``_scan_past_other_tenants``.
+            found = nearest.subquery()
+            stmt = (
+                select(Memory)
+                .join(found, Memory.id == found.c.id)
+                .where((1.0 - found.c.distance) >= threshold)
+                .order_by(found.c.distance)
+            )
+            await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
-            return [row.Memory for row in result.all()]
+            return list(result.scalars().all())
 
     # ------------------------------------------------------------------
     # E) Lifecycle batch
@@ -5606,6 +5651,10 @@ class PostgresService:
         async with get_session() as session:
             cand_scope, params = _scope_sql(tenant_id, fleet_id)
             nb_scope, _ = _scope_sql(tenant_id, fleet_id, table="n")
+            # The threshold applies to each candidate's nearest neighbours,
+            # outside the scan: Postgres never pushes a WHERE into a subquery
+            # with a LIMIT. See ``_scan_past_other_tenants``.
+            await _scan_past_other_tenants(session)
             result = await session.execute(
                 text(f"""
                 WITH candidates AS (
@@ -5625,19 +5674,22 @@ class PostgresService:
                        nb.similarity AS similarity
                 FROM candidates c
                 LEFT JOIN LATERAL (
-                    SELECT n.id AS id,
-                           1 - (n.embedding <=> c.embedding) AS similarity
-                    FROM memories n
-                    WHERE {nb_scope}
-                      AND n.embedding IS NOT NULL
-                      AND n.deleted_at IS NULL
-                      AND n.status = ANY(:live_statuses)
-                      AND n.visibility = ANY(:shared_visibilities)
-                      AND n.fleet_id IS NOT DISTINCT FROM c.fleet_id
-                      AND n.id != c.id
-                      AND 1 - (n.embedding <=> c.embedding) >= :threshold
-                    ORDER BY n.embedding <=> c.embedding
-                    LIMIT :k
+                    SELECT nearest.id, nearest.similarity
+                    FROM (
+                        SELECT n.id AS id,
+                               1 - (n.embedding <=> c.embedding) AS similarity
+                        FROM memories n
+                        WHERE {nb_scope}
+                          AND n.embedding IS NOT NULL
+                          AND n.deleted_at IS NULL
+                          AND n.status = ANY(:live_statuses)
+                          AND n.visibility = ANY(:shared_visibilities)
+                          AND n.fleet_id IS NOT DISTINCT FROM c.fleet_id
+                          AND n.id != c.id
+                        ORDER BY n.embedding <=> c.embedding
+                        LIMIT :k
+                    ) nearest
+                    WHERE nearest.similarity >= :threshold
                 ) nb ON TRUE
                 ORDER BY c.created_at DESC, c.id DESC, nb.similarity DESC NULLS LAST, nb.id
             """),
