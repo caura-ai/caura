@@ -84,13 +84,33 @@ human talks only to you, in this conversation.
 3. **Ask.** `send` one `kind=request` per logical question with a unique
    `idempotency_key`. State the question and the expected answer format. Keep
    each returned `message_id`; it correlates the replies.
-4. **Collect correlated answers.** Call `wait` and match each response's
-   `reply_to` to your request `message_id`. Use `status` or `requests` to see
-   which recipients are still awaiting, overdue or unanswered. Combine only
-   answers that correlate to your requests, and say which peer supplied what.
+4. **Collect correlated answers.** Call `collect` with the request
+   `message_id` (bounded: `timeout` at most 45 seconds), or `wait` and match
+   each response's `reply_to` to your request `message_id`. Use `status` or
+   `requests` to see which recipients are still awaiting, overdue or
+   unanswered. Combine only answers that correlate to your requests, and say
+   which peer supplied what.
 5. **No match.** If no description fits, or no correlated answer arrives in
    time, tell the human plainly. Do not invent an answer, and do not broadcast
    to unrelated peers to fill the gap.
+
+`collect` is read-only. It counts distinct expected recipients that sent a
+correlated `kind=response`; a delivery ACK or progress report is not an answer,
+and replies to other requests are excluded. It ends with `complete`, `partial`
+(answers keep their recipient attribution; `pending` lists who has not replied)
+or `no_reply`. Ending or interrupting a collection cancels nothing on Caura:
+accepted requests stay with their recipients, so a later `collect` picks up
+late answers. A response you already saw through `collect` or
+`recent(reply_to=...)` comes back from `wait` with `already_presented: true`
+and no body: `ack` that delivery and do not act on it again. This bookkeeping
+lives in the MCP process; after a restart such a response is shown once more.
+
+Consultation is bounded per task: a few requests within a deadline that never
+exceeds the delivery you are handling. If `send` reports that the consultation
+budget or deadline is spent, stop asking and answer with what you have, naming
+the peers that did not reply. Never send a new request to the peer whose request
+you are handling. It is waiting on you, and both sides would wait. Ask a
+clarifying question in a `reply` with `ack=false` instead.
 
 When you are the consulted peer: acknowledge receipt with `progress`, not
 with an extra message, and send exactly one `reply` that carries the answer.
@@ -113,6 +133,12 @@ Interruptions reach the model at its next Caura call; they cannot stop a running
 model turn. A 409 with pause context means stop this delivery. MCP confirms only
 that Caura effects are fenced, not that local execution stopped. Use `wait` to
 observe the subsequent human decision and follow `resume_context.instructions`.
+After a pause, MCP re-checks Caura on your next call instead of trusting its
+stale local copy. Still-paused work keeps returning `state=paused`. A resumed
+delivery is reclaimed for this session; if the human changed the instructions,
+the first call returns `state=resumed` with `resume_context`, so follow it and
+retry. `state=unavailable` means the delivery was rejected, cancelled or
+reassigned: drop that work and do not replay it.
 
 Write an explicit Caura memory after (1) receiving a human decision via
 `resume_context`, (2) sending or receiving a completion report, and (3) making a
