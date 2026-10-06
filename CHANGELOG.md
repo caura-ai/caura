@@ -10,6 +10,20 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.24.0](https://github.com/caura-ai/caura/compare/backend-v3.23.1...backend-v3.24.0) (2026-10-06)
+
+
+### Features
+
+* **keystones:** version every keystone change, per tenant (g1.12) ([#1934](https://github.com/caura-ai/caura/issues/1934)) ([6297d8f](https://github.com/caura-ai/caura/commit/6297d8fa248d50960ef6494d6485eed6d02593b2))
+
+
+### Bug Fixes
+
+* **insights:** accept a related_memory_ids that is not a list ([#1936](https://github.com/caura-ai/caura/issues/1936)) ([de0b54f](https://github.com/caura-ai/caura/commit/de0b54f84c2c9ce2a34d273debeba8d554dcf777))
+* **keystones:** refuse text Postgres can't read back, so one rule can't fail the list ([#1935](https://github.com/caura-ai/caura/issues/1935)) ([2439a76](https://github.com/caura-ai/caura/commit/2439a765ac15ac8a9d3c548fce472aecf3dfe9eb))
+* **llm:** cache the Gemini provider per configuration, like OpenAI ([#1937](https://github.com/caura-ai/caura/issues/1937)) ([e09e08e](https://github.com/caura-ai/caura/commit/e09e08e929476795a19b15855b5ca453fd371b35))
+
 ## [3.23.1](https://github.com/caura-ai/caura/compare/backend-v3.23.0...backend-v3.23.1) (2026-10-06)
 
 
