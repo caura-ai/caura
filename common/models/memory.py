@@ -305,3 +305,27 @@ Index(
     Memory.metadata_["doc_hash"].astext,
     postgresql_where=text("deleted_at IS NULL AND (metadata ->> 'source') = 'ingest'"),
 )
+
+
+# Backs session rollback and a session's held writes (g2.9): the broker stamps
+# each memory it writes with ``metadata.session_id``. Partial on live rows that
+# have one. Created CONCURRENTLY in migration 062 with the same key and
+# predicate; declared after the class for the reason the two above give.
+Index(
+    "ix_memories_session",
+    Memory.tenant_id,
+    Memory.metadata_["session_id"].astext,
+    postgresql_where=text("deleted_at IS NULL AND (metadata ->> 'session_id') IS NOT NULL"),
+)
+
+
+# Backs the review queue of held memories and its count (g2.9). Held rows only,
+# so the queue costs what it holds, not what the tenant holds. Created
+# CONCURRENTLY in migration 062 with the same key and predicate.
+Index(
+    "ix_memories_held",
+    Memory.tenant_id,
+    Memory.created_at,
+    Memory.id,
+    postgresql_where=text("deleted_at IS NULL AND status = 'quarantined'"),
+)

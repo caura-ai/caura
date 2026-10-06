@@ -298,11 +298,15 @@ def test_the_writer_session_population_is_pinned() -> None:
     session. Both upserts pass it theirs, so the shrink check and the write
     share one transaction, the one a keystone write records its version in
     (g1.12). It was an internal helper, so the convertible count stays at 56.
+
+    142 -> 143 (pure unchanged at 64): ``memory_rollback_session`` is new (g2.9).
+    It outdates a session's rows and rejects its held ones with ``sql_update``,
+    a write. Its sibling ``memory_list_held`` reads on the replica.
     """
     methods = _writer_session_methods()
     pure = {name for name, marks in methods.items() if not marks}
 
-    assert len(methods) == 142, f"{len(methods)} methods open a writer session"
+    assert len(methods) == 143, f"{len(methods)} methods open a writer session"
     assert len(pure) == 64, f"{len(pure)} of them show no write marker"
 
 

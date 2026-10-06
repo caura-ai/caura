@@ -20,6 +20,8 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories/{id}` | PATCH | Update content or metadata. Re-embeds if content changes |
 | `/memories/{id}` | DELETE | Soft delete (sets status to `deleted`) |
 | `/memories/{id}/status` | PATCH | Update lifecycle status. A memory held for review (`quarantined`) is moved only here, by a person: `active` releases it, `cancelled` rejects it |
+| `/memories/held` | GET | The memories held for review, newest first, with `total`; `session_id` narrows to one broker session. A person only |
+| `/memories/rollback-session` | POST | Undo a broker session's writes (`{"session_id"}`): its live memories and the rows derived from them become `outdated`, its held ones `cancelled`. A person only |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
 | `/memories` | DELETE | Bulk soft-delete |
 | `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself) |
@@ -182,6 +184,7 @@ request body.
 | `keystone.delete` | `keystone` | `DELETE /keystones/{doc_id}` | `caura_keystones_set op=delete` |
 | `quarantine.release` | `memory` | `PATCH /memories/{id}/status` to `active`, on a held memory | — |
 | `quarantine.reject` | `memory` | `PATCH /memories/{id}/status` to `cancelled`, on a held memory | — |
+| `session.rollback` | `memory` | `POST /memories/rollback-session`, one row per memory it changed | — |
 
 **Rate limiting (managed platform)**
 

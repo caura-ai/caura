@@ -311,6 +311,37 @@ def derived_rows_where(tenant_id: str, parent_ids: Any) -> list[ColumnElement[bo
     ]
 
 
+def session_rows_where(tenant_id: str, session_id: str) -> list[ColumnElement[bool]]:
+    """Rows of ``tenant_id`` the broker wrote in ``session_id`` and hasn't deleted.
+
+    g2.9. The broker stamps each memory it writes with ``metadata.session_id``;
+    the rows derived from one carry only ``metadata.parent_memory_id``
+    (``derived_rows_where``). Implies the predicate of the partial index
+    ``ix_memories_session`` (migration 062), keyed on the same expression.
+    Module-level so the plan can be checked against the exact predicate the
+    service runs.
+    """
+    return [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        Memory.metadata_["session_id"].astext == session_id,
+    ]
+
+
+def held_rows_where(tenant_id: str) -> list[ColumnElement[bool]]:
+    """The held memories of ``tenant_id``: the review queue (g2.9).
+
+    Implies the predicate of the partial index ``ix_memories_held`` (migration
+    062), keyed on ``(tenant_id, created_at, id)``, so the queue and its count
+    read held rows only. Module-level for the same plan check.
+    """
+    return [
+        Memory.tenant_id == tenant_id,
+        Memory.deleted_at.is_(None),
+        Memory.status == QUARANTINED_MEMORY_STATUS,
+    ]
+
+
 async def _change_derived_rows(
     session: AsyncSession, tenant_id: str, parent_id: str, derived: dict
 ) -> list[dict]:
@@ -2691,6 +2722,79 @@ class PostgresService:
             stmt = stmt.values(**values)
             result = await session.execute(stmt)
             return (result.rowcount or 0) > 0  # type: ignore[attr-defined]
+
+    async def memory_list_held(
+        self,
+        tenant_id: str,
+        *,
+        session_id: str | None = None,
+        limit: int = 50,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
+    ) -> tuple[list[Memory], int]:
+        """The held memories of ``tenant_id``, newest first, and how many (g2.9).
+
+        The review queue, and the one read that returns held rows in bulk: every
+        other read leaves them out, so only a person reviewing them sees them.
+        ``session_id`` narrows both to what one broker session had held. Returns
+        up to ``limit`` rows (the caller widens it by one to find the next page)
+        after the ``(created_at, id)`` cursor; the count ignores the cursor.
+        Read-only (reader replica).
+        """
+        where = held_rows_where(tenant_id)
+        if session_id is not None:
+            where.append(Memory.metadata_["session_id"].astext == session_id)
+        page = select(Memory).where(*where)
+        if cursor_ts is not None and cursor_id is not None:
+            page = page.where(tuple_(Memory.created_at, Memory.id) < tuple_(cursor_ts, cursor_id))  # type: ignore[arg-type]
+        page = page.order_by(Memory.created_at.desc(), Memory.id.desc()).limit(limit)
+        async with get_read_session() as session:
+            rows = list((await session.execute(page)).scalars().all())
+            total = (
+                await session.execute(select(func.count()).select_from(Memory).where(*where))
+            ).scalar_one()
+        return rows, total
+
+    async def memory_rollback_session(self, tenant_id: str, session_id: str) -> dict[str, list[str]]:
+        """Undo what the broker wrote in one session (g2.9). Returns the ids changed.
+
+        - Its live memories become ``outdated``, and so do the live rows derived
+          from them (atomic facts, auto-chunks, and theirs), which carry no
+          session id of their own.
+        - Its held memories become ``cancelled``: a held memory leaves
+          quarantine only as ``active`` or ``cancelled`` (g2.7), and a
+          rolled-back session's write is not released.
+        - What it wrote that is already out of play (outdated, cancelled,
+          archived, deleted) stays as it is, so a second rollback changes
+          nothing.
+
+        One transaction: a rollback lands whole or not at all.
+        """
+        now = datetime.now(UTC)
+        live = Memory.status.in_(LIVE_MEMORY_STATUSES)
+        async with get_session() as session:
+
+            async def retire(where: list[ColumnElement[bool]], status: str) -> list[str]:
+                result = await session.execute(
+                    sql_update(Memory)
+                    .where(*where)
+                    .values(status=status, status_changed_at=now)
+                    .returning(Memory.id)
+                )
+                return [str(memory_id) for memory_id in result.scalars().all()]
+
+            outdated = await retire([*session_rows_where(tenant_id, session_id), live], "outdated")
+            parents = outdated
+            # Each pass takes the live rows derived from the last, and a row
+            # changes once, so this ends at the deepest generation.
+            while parents:
+                parents = await retire([*derived_rows_where(tenant_id, parents), live], "outdated")
+                outdated.extend(parents)
+            cancelled = await retire(
+                [*session_rows_where(tenant_id, session_id), Memory.status == QUARANTINED_MEMORY_STATUS],
+                "cancelled",
+            )
+        return {"outdated": outdated, "cancelled": cancelled}
 
     async def memory_set_supersedes_if_null(
         self,
