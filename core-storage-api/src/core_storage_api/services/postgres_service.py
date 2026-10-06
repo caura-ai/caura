@@ -411,7 +411,10 @@ def _visibility_scope_clause(
 
     With an identity: ``scope_org``/``scope_team`` always, plus the caller's OWN
     ``scope_agent`` rows. Without one, every ``scope_agent`` row is dropped —
-    a credential that authenticates no agent is entitled to none of them.
+    a credential that authenticates no agent is entitled to none of them. The
+    one exception is a signed-in person, who sees every scope: the readers
+    that serve one skip this predicate (``include_scope_agent``, or
+    ``exclude_scope_agent=False``) rather than pass it an identity.
 
     "Own" means the caller's agent id IN THE CALLER'S HOME TENANT
     (``caller_tenant_id``). ``agent_id`` is unique only per tenant
@@ -6322,7 +6325,8 @@ class PostgresService:
 
         Serves both the tenant-facing ``/fleets`` (``exclude_scope_agent``
         True — no caller identity to legitimately see ``scope_agent`` rows,
-        so they're excluded the same way ``list_by_filters`` does) and the
+        so they're excluded the same way ``list_by_filters`` does; False for a
+        signed-in person, who sees every scope) and the
         admin ``/admin/fleets`` (``exclude_scope_agent`` False, cross-tenant
         when ``tenant_id`` is None). Read-only (reader replica).
         """
@@ -6814,6 +6818,7 @@ class PostgresService:
         cursor_id: UUID | None = None,
         readable_tenant_ids: list[str] | None = None,
         visibility: str | None = None,
+        include_scope_agent: bool = False,
     ) -> list[Memory]:
         """Filter, sort, paginate memories WITH visibility scoping.
 
@@ -6826,7 +6831,11 @@ class PostgresService:
         **Visibility:** when ``caller_agent_id`` is set, ``scope_agent`` rows
         are visible only to the authoring agent in its home tenant
         (``caller_tenant_id``, defaulting to ``tenant_id``); team/org always
-        visible. When unset, all ``scope_agent`` rows are excluded.
+        visible. When unset, all ``scope_agent`` rows are excluded, unless
+        ``include_scope_agent`` asks for every row whatever its visibility:
+        core-api sets it for a signed-in person, who sees every scope.
+        ``include_scope_agent`` is ignored when ``caller_agent_id`` is set, as
+        in ``memory_stats_breakdown``.
         **Cross-tenant widening:**
         a non-empty ``readable_tenant_ids`` expands ``tenant_id = $1`` to
         ``tenant_id = ANY($1)``; ``tenant_id`` stays the binding/home tenant.
@@ -6840,7 +6849,8 @@ class PostgresService:
             stmt = base.where(Memory.tenant_id == tenant_id)
 
         # Visibility predicate (critical: prevents scope_agent leaks).
-        stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
+        if caller_agent_id or not include_scope_agent:
+            stmt = stmt.where(_visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id))
 
         if fleet_id:
             # Same predicate as the bare ``Memory.fleet_id == fleet_id`` this
@@ -6984,8 +6994,10 @@ class PostgresService:
         a pure COUNT — no memory content is returned — so private rows can be
         tallied without leaking their contents; the report uses it so
         ``durable_memories_written`` reflects everything an agent wrote, not just
-        what it shared. Ignored when an identity is set (``caller_agent_id`` or
-        ``agent_id``), which already scopes visibility to that agent.
+        what it shared. ``GET /memories/stats`` sets it for a signed-in person,
+        whose list shows every scope. Ignored when an identity is set
+        (``caller_agent_id`` or ``agent_id``), which already scopes visibility
+        to that agent.
         """
         scope_filters: list[ColumnElement[bool]] = []
         if readable_tenant_ids:

@@ -62,10 +62,23 @@ class AuthContext:
         # Back-compat alias — older callers still pass ``scopes``.
         scopes: set[str] | None = None,
         surface: str | None = None,
+        is_person: bool = False,
     ):
         self.tenant_id = tenant_id
         self.is_demo = is_demo
         self.is_admin = is_admin
+        # A signed-in person, not an agent or a machine key. Only Path 4 sets
+        # it: the gateway stamped ``X-Org-Role``, which it does for a session or
+        # JWT and never for an API key of any kind, and named no agent. The
+        # standalone paths give every caller ``org_role="admin"``, agents
+        # included, so ``org_role`` alone can't tell a person apart; this can.
+        # A person sees every memory scope in a tenant they can read (the Prism
+        # decision record, §3), so the list reads in ``routes/memories`` skip
+        # the ``scope_agent`` filter for one. Without a gateway secret the
+        # header is the caller's claim, as ``X-Tenant-ID`` is there, and that
+        # reaches no new row: a credential that names no agent can already
+        # list any agent's private rows by passing that agent's id.
+        self.is_person = is_person
         # The person the gateway vouched for (``X-User-ID``), set on Path 4
         # behind the gateway secret only; None everywhere else. For the audit
         # trail: see ``core_api.audit_actor``.
@@ -830,6 +843,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
             tenant_id=tenant_id,
             user_id=user_id,
             org_role=org_role,
+            is_person=org_role is not None and agent_id is None,
             agent_id=agent_id,
             # The only path that may claim it: the gateway resolved the
             # credential and injected ``X-Agent-ID`` itself, behind the

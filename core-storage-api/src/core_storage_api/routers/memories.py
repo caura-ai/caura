@@ -1625,11 +1625,15 @@ async def list_by_filters(request: Request) -> list[dict]:
     Body: ``{tenant_id, caller_agent_id?, caller_tenant_id?, fleet_id?,
     written_by?, memory_type?, status?, run_id?, weight_min?, weight_max?,
     created_after?, created_before?, include_deleted, sort, order, limit, offset,
-    cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?}``.
+    cursor_ts?, cursor_id?, readable_tenant_ids?, visibility?,
+    include_scope_agent?}``.
     ``caller_tenant_id`` is the caller's home tenant: its own ``scope_agent``
-    rows are matched there only (defaults to ``tenant_id``). ``limit`` is the caller's desired page size; this
-    endpoint over-fetches ``limit+1`` rows internally for has_more detection and
-    the caller slices to ``limit`` / builds the next cursor. Distinct from
+    rows are matched there only (defaults to ``tenant_id``).
+    ``include_scope_agent`` lists every visibility for a caller with no
+    ``caller_agent_id`` (a signed-in person), as ``/stats-breakdown`` counts
+    them. ``limit`` is the caller's desired page size; this endpoint
+    over-fetches ``limit+1`` rows internally for has_more detection and the
+    caller slices to ``limit`` / builds the next cursor. Distinct from
     ``/admin-list`` which has NO visibility scoping.
     """
     body: dict = await request.json()
@@ -1693,6 +1697,7 @@ async def list_by_filters(request: Request) -> list[dict]:
         cursor_id=cursor_id,
         readable_tenant_ids=body.get("readable_tenant_ids"),
         visibility=body.get("visibility"),
+        include_scope_agent=bool(body.get("include_scope_agent", False)),
     )
     return [orm_to_dict(m, MEMORY_LIST_FIELDS) for m in memories]
 

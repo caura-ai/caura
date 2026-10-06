@@ -333,8 +333,11 @@ async def list_fleets(
     # way ``memory_repository.list_by_filters`` and ``/memories/stats`` do, so
     # the counts don't overstate what ``GET /api/v1/memories?fleet_id=X`` would
     # actually return. The storage endpoint applies this exclusion server-side
-    # when ``exclude_scope_agent=True``.
-    return await get_storage_client().memory_fleet_distribution(tenant_id, exclude_scope_agent=True)
+    # when ``exclude_scope_agent=True``. A person sees every scope there, so
+    # their counts keep them (``AuthContext.is_person``).
+    return await get_storage_client().memory_fleet_distribution(
+        tenant_id, exclude_scope_agent=not auth.is_person
+    )
 
 
 async def _gate_fleet_read(
@@ -520,7 +523,9 @@ async def list_memories(
     memories. When ``agent_id`` is omitted, ``scope_agent`` memories are hidden
     (safe default). This means memory types like ``insight`` that are typically
     created with agent-scoped visibility will only appear when ``agent_id`` is
-    passed.
+    passed. A signed-in person (a dashboard session or JWT through the gateway)
+    sees every scope, whatever ``agent_id`` says, as ``GET /memories/{id}``
+    already lets them open any row.
 
     **Author filter:** ``written_by`` selects the authoring agent. It is separate
     from ``agent_id`` (the visibility identity) so a caller can ask for a peer's
@@ -608,6 +613,9 @@ async def list_memories(
     # hidden (safe default — fixes the scope_agent visibility gap).
     # ``written_by`` splits the two apart when a caller needs a different
     # author than itself; ``author_filter`` above holds the resolved value.
+    # A person has no visibility identity and keeps every scope_agent row
+    # (``AuthContext.is_person``); ``caller_agent_id`` still drives the fleet
+    # gate and the scope ladder above.
     # Cross-tenant widening: when the caller's credential carries a
     # readable set wider than home AND didn't pin tenant_id, storage
     # widens to ``tenant_id = ANY($readable)``. Pinning to one tenant
@@ -616,7 +624,9 @@ async def list_memories(
     # + readable-set widening the MCP list path uses).
     list_payload: dict = {
         "tenant_id": tenant_id or "",
-        "caller_agent_id": caller_agent_id,  # visibility scoping (authenticated identity)
+        # visibility scoping (authenticated identity); none for a person
+        "caller_agent_id": None if auth.is_person else caller_agent_id,
+        "include_scope_agent": auth.is_person,
         "caller_tenant_id": auth.tenant_id,  # ...matched in the caller's home tenant only
         "fleet_id": fleet_id,
         "written_by": author_filter,  # author filter (written_by, else agent_id)
@@ -783,7 +793,9 @@ async def memory_stats(
             "tenant_id": tenant_id,
             "fleet_id": fleet_id,
             "agent_id": effective_agent_id,
-            "caller_agent_id": caller_agent_id,
+            # A person counts every scope, as GET /memories lists them.
+            "caller_agent_id": None if auth.is_person else caller_agent_id,
+            "include_scope_agent": auth.is_person,
             "memory_type": memory_type,
             "status": status,
             "include_deleted": await _effective_include_deleted(auth, include_deleted),
@@ -854,11 +866,12 @@ async def memory_count(
     # This route takes no ``agent_id`` param, so there is nothing to forge: the
     # identity is the authenticated one or nothing. Its own rows are those in
     # its home tenant, which ``tenant_id`` is not on a count of a sibling (M-94).
+    # A person's count keeps every scope, as their list does.
     count = await get_storage_client().count_active(
         tenant_id,
         fleet_id,
         status=status,
-        exclude_scope_agent=True,
+        exclude_scope_agent=not auth.is_person,
         caller_agent_id=caller_agent_id,
         caller_tenant_id=auth.tenant_id,
     )
