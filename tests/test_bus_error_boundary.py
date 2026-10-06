@@ -12,12 +12,39 @@ import pytest
 from fastapi import APIRouter, FastAPI, HTTPException
 
 pytestmark = pytest.mark.unit
-SUPPRESSION_PATH = Path(__file__).resolve().parents[1] / "core-api/src/core_api/suppression.py"
+# caura_bus_platform ships with Enterprise only; OSS CI stubs it per test.
+HAS_PLATFORM = importlib.util.find_spec("caura_bus_platform") is not None
+
+
+class OfflineSuppressionCache:
+    """Stand-in when the Enterprise package is absent: never suppressed."""
+
+    def __init__(self, lookup):
+        self.lookup = lookup
+
+    async def check(self, tenant, *, liveness=False):
+        return False
+
+    async def close(self):
+        pass
+
+
+class OfflineSendQuota:
+    async def close(self):
+        pass
+
+
+SUPPRESSION_PATH = (
+    Path(__file__).resolve().parents[1] / "core-api/src/core_api/suppression.py"
+)
 
 
 @pytest.fixture
 def entry(monkeypatch):
-    from caura_bus_platform.liveness import SuppressionCache
+    if HAS_PLATFORM:
+        from caura_bus_platform.liveness import SuppressionCache
+    else:
+        SuppressionCache = OfflineSuppressionCache
 
     class AuthContext:
         pass
@@ -26,6 +53,7 @@ def entry(monkeypatch):
         "caura_bus_platform": {},
         "caura_bus_platform.wake": {"WakeHub": SimpleNamespace},
         "caura_bus_platform.liveness": {"SuppressionCache": SuppressionCache},
+        "caura_bus_platform.quota": {"SendQuota": OfflineSendQuota},
         "core_api.suppression": {
             "use_suppression_lookup": lambda lookup: nullcontext()
         },
@@ -36,7 +64,9 @@ def entry(monkeypatch):
         "caura_bus_platform.runtime": {
             "AdmissionMiddleware": SimpleNamespace,
             "send_deadline": ContextVar("test_send_deadline", default=None),
-            "Runtime": lambda *_args: SimpleNamespace(install=lambda app: None),
+            "Runtime": lambda *_args, **_kwargs: SimpleNamespace(
+                install=lambda app: None
+            ),
             "shutdown_signals": lambda *_args: None,
             "stop_task": lambda *_args: None,
         },
@@ -55,11 +85,11 @@ def entry(monkeypatch):
         "caura_bus_platform.routes": {
             "Operation": SimpleNamespace,
             "Principal": SimpleNamespace,
-            "public_router": lambda *_args: APIRouter(),
+            "public_router": lambda *_args, **_kwargs: APIRouter(),
         },
         "caura_bus_platform.collaboration_routes": {
             "HumanPrincipal": SimpleNamespace,
-            "human_router": lambda *_args: APIRouter(),
+            "human_router": lambda *_args, **_kwargs: APIRouter(),
         },
         "core_api": {},
         "core_api.app": {"app": FastAPI()},
@@ -238,6 +268,9 @@ async def test_presence_routes_to_its_reserved_client(entry, monkeypatch):
     assert result == {"ttl_seconds": 45}
 
 
+@pytest.mark.skipif(
+    not HAS_PLATFORM, reason="needs the Enterprise caura_bus_platform SuppressionCache"
+)
 async def test_cold_suppression_and_presence_use_reserved_pool_under_real_tcp_saturation(
     entry, monkeypatch
 ):
@@ -246,7 +279,9 @@ async def test_cold_suppression_and_presence_use_reserved_pool_under_real_tcp_sa
     from starlette.requests import Request
 
     # Load the real suppression boundary with the fixture's storage getter.
-    spec = importlib.util.spec_from_file_location("scoped_suppression_test", SUPPRESSION_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "scoped_suppression_test", SUPPRESSION_PATH
+    )
     suppression = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(suppression)
     monkeypatch.setattr(
