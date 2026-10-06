@@ -19,6 +19,7 @@ better to retry until the row lands or DLQs to on-call.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from pydantic import ValidationError
 
@@ -41,8 +42,20 @@ class SuppressionStorageAdapter:
     """
 
     async def set_tenant_suppression(
-        self, *, tenant_id: str, action: str, updated_by: str | None
+        self,
+        *,
+        tenant_id: str,
+        action: str,
+        updated_by: str | None,
+        occurred_at: datetime | None = None,
     ) -> None:
+        """Upsert one tenant's mirror row.
+
+        ``occurred_at`` is the event's own time. Implementations MUST pass
+        it to storage, which applies the upsert only if it is not older
+        than the stored one — see the ordering note in
+        :func:`_handle_suppression_changed`.
+        """
         raise NotImplementedError
 
 
@@ -82,12 +95,22 @@ async def _handle_suppression_changed(
     # platform-admin-api request that triggered the publish.
     updated_by = event.correlation_id or "core-worker"
 
+    # Ordering. Delivery is at-least-once and unordered, and a failed
+    # tenant below re-raises so the WHOLE event is redelivered — possibly
+    # after a newer event for the same org has landed, or much later from
+    # a dead-letter replay. Applying in arrival order let a stale
+    # ``restore`` un-suppress a re-suppressed org. The envelope's
+    # ``occurred_at`` travels with every upsert and storage keeps the
+    # newest by event time, so a late arrival is a no-op instead.
+    occurred_at = event.occurred_at
+
     for tenant_id in payload.tenant_ids:
         try:
             await adapter.set_tenant_suppression(
                 tenant_id=tenant_id,
                 action=payload.action,
                 updated_by=updated_by,
+                occurred_at=occurred_at,
             )
         except Exception:
             logger.exception(

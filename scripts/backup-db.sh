@@ -18,8 +18,8 @@ fi
 
 DB_HOST="${ALLOYDB_HOST:-127.0.0.1}"
 DB_PORT="${ALLOYDB_PORT:-5432}"
-DB_USER="${ALLOYDB_USER:-memclaw}"
-DB_NAME="${ALLOYDB_DATABASE:-memclaw}"
+DB_USER="${ALLOYDB_USER:-memclaw}"  # legacy-name-ok: preserve the established fallback for existing deployments
+DB_NAME="${ALLOYDB_DATABASE:-memclaw}"  # legacy-name-ok: preserve the established fallback for existing deployments
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # ``.dump``, not ``.sql.gz``. ``-Fc`` is pg_dump's custom format: already
 # compressed, and NOT SQL. The old name promised something ``gunzip | psql``

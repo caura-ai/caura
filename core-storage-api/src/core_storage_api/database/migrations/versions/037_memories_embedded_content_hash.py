@@ -72,9 +72,14 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     # Metadata-only on PG11+: a nullable ADD COLUMN with no default rewrites
     # nothing, so this is safe in-transaction on a large table.
+    # ``if_not_exists``: entering the autocommit block below COMMITS this add
+    # before the CONCURRENTLY build, while alembic_version moves only once
+    # upgrade() returns. A build interrupted there leaves the column behind,
+    # and a plain ADD COLUMN would fail every retry with DuplicateColumn.
     op.add_column(
         "memories",
         sa.Column("embedded_content_hash", sa.Text(), nullable=True),
+        if_not_exists=True,
     )
     # CONCURRENTLY, in an autocommit block — ``memories`` is one of the known
     # large tables. A plain in-transaction CREATE INDEX takes an AccessExclusive

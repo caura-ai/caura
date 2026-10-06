@@ -23,6 +23,8 @@ async def upsert_document(request: Request) -> dict:
             doc_id=body["doc_id"],
             data=body["data"],
             fleet_id=body.get("fleet_id"),
+            # ax-0917-m-14 — who wrote this version.
+            agent_id=body.get("agent_id"),
             # C34 — explicit opt-out of the catastrophic-shrink guard.
             force=bool(body.get("force")),
         )
@@ -47,6 +49,8 @@ async def upsert_document_xmax(request: Request) -> dict:
             doc_id=body["doc_id"],
             data=body["data"],
             fleet_id=body.get("fleet_id"),
+            # ax-0917-m-14 — who wrote this version.
+            agent_id=body.get("agent_id"),
             # C34 — explicit opt-out of the catastrophic-shrink guard.
             force=bool(body.get("force")),
             embedding=body.get("embedding"),
@@ -203,6 +207,12 @@ async def get_document(
     tenant_id: str,
     readable_tenant_ids: list[str] | None = Query(default=None),
 ) -> dict:
+    return await _get_document(tenant_id, collection, doc_id, readable_tenant_ids)
+
+
+async def _get_document(
+    tenant_id: str, collection: str, doc_id: str, readable_tenant_ids: list[str] | None
+) -> dict:
     doc = await _svc.document_get_by_doc_id(
         tenant_id=tenant_id,
         collection=collection,
@@ -269,6 +279,10 @@ async def delete_document(
     ``data->>'status' = :status`` guard into the DELETE atomically — a
     non-matching/missing row deletes zero rows and 404s, indistinguishable
     from a missing one (the MCP skills active-only delete gate)."""
+    return await _delete_document(tenant_id, collection, doc_id, require_status)
+
+
+async def _delete_document(tenant_id: str, collection: str, doc_id: str, require_status: str | None) -> dict:
     try:
         deleted_id = await _svc.document_delete_by_doc_id(
             tenant_id=tenant_id,
@@ -281,3 +295,39 @@ async def delete_document(
     if deleted_id is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return {"deleted_id": str(deleted_id)}
+
+
+# M-14: the routes above take ``collection`` and ``doc_id`` from the path, so a
+# name holding a ``/``, ``?``, ``#``, ``%XX`` or dot segment reached a different
+# document or route — and percent-encoding cannot rescue the ``/`` case, since
+# the path is decoded before it is routed. These twins take both names from the
+# JSON body, exactly as given. core-api's storage client uses only these; the
+# path routes stay for other callers. No POST route here is a catch-all, so
+# these literals shadow no collection name.
+@router.post("/get")
+async def get_document_by_body(request: Request) -> dict:
+    body: dict = await request.json()
+    return await _get_document(
+        body["tenant_id"], body["collection"], str(body["doc_id"]), body.get("readable_tenant_ids")
+    )
+
+
+@router.post("/list")
+async def list_documents_by_body(request: Request) -> list[dict]:
+    body: dict = await request.json()
+    docs = await _svc.document_list_by_collection(
+        tenant_id=body["tenant_id"],
+        collection=body["collection"],
+        fleet_id=body.get("fleet_id"),
+        limit=body.get("limit", 50),
+        offset=body.get("offset", 0),
+    )
+    return [orm_to_dict(d, DOCUMENT_FIELDS) for d in docs]
+
+
+@router.post("/delete")
+async def delete_document_by_body(request: Request) -> dict:
+    body: dict = await request.json()
+    return await _delete_document(
+        body["tenant_id"], body["collection"], str(body["doc_id"]), body.get("require_status")
+    )

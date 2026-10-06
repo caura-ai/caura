@@ -68,6 +68,31 @@ services:
     volumes:
       - storage_secret:/run/caura-storage
 
+  # One-shot: the admin key core-operations' scheduler presents to core-api's
+  # admin-only endpoints (M-109). The stock stack sets no ADMIN_API_KEY, and
+  # without one every nightly tick would 403. Same pattern, and the same
+  # already-published image, as storage-secret-init above, so nothing new is
+  # pulled for it. core-api and core-operations read the file only when their
+  # own key is blank: an ADMIN_API_KEY set in .env still wins for both.
+  admin-key-init:
+    image: ghcr.io/caura-ai/caura-memclaw-core-storage-api:${CAURA_VERSION:-${MEMCLAW_VERSION:-latest}}  # legacy-name-ok: rule 3 dual-read alias
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: core-storage-api/Dockerfile
+    user: "0:0"
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        from pathlib import Path
+        import secrets
+        path = Path("/run/caura-admin/admin-key")
+        if not path.exists() or not path.read_text().strip():
+            path.write_text(secrets.token_urlsafe(48))
+        path.chmod(0o444)
+    volumes:
+      - admin_key:/run/caura-admin
+
   core-storage-api:
     # Pulls the published multi-arch image from ghcr.io.
     #
@@ -155,6 +180,8 @@ services:
       CORE_STORAGE_API_URL: http://core-storage-api:8002
       CORE_STORAGE_SHARED_SECRET: "${CORE_STORAGE_SHARED_SECRET:-}"
       CORE_STORAGE_SHARED_SECRET_FILE: /run/caura-storage/shared-secret
+      # Used only while ADMIN_API_KEY is blank — see admin-key-init.
+      ADMIN_API_KEY_FILE: /run/caura-admin/admin-key
       REDIS_URL: redis://redis:6379/0
       # Anonymous daily heartbeat (docs/telemetry.md). Uncomment to disable.
       # CAURA_TELEMETRY: "off"
@@ -175,6 +202,8 @@ services:
       # users set it to "false" in .env without the passthrough overriding them
       # (which previously tripped the base_url + send_dimensions hard-fail).
     depends_on:
+      admin-key-init:
+        condition: service_completed_successfully
       core-storage-api:
         condition: service_healthy
       redis:
@@ -184,6 +213,7 @@ services:
         required: false  # only enforced when --profile embed-local is active
     volumes:
       - storage_secret:/run/caura-storage:ro
+      - admin_key:/run/caura-admin:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 15s
@@ -195,6 +225,49 @@ services:
       timeout: 15s
       retries: 3
       start_period: 15s
+
+  # ── Core Operations (the lifecycle scheduler) ───────────────────
+  #
+  # Fires the nightly lifecycle ticks — expiry, stale archival, purge,
+  # crystallization, entity linking, insights and agent digests — by POSTing
+  # core-api's admin fanout, which publishes to the consumers core-api runs
+  # in-process (M-109). Without it none of them happen: expired memories stay
+  # active and keep surfacing in recall. Ticks fire at 02:00 UTC by default; to
+  # move one, add its ``*_RUN_AT_HOUR`` setting from
+  # ``core-operations/src/core_operations/config.py`` to ``environment`` below.
+  #
+  # No ``env_file``: env.dev and .env both set IS_STANDALONE=true, which is this
+  # service's off switch. To turn the schedule off, set IS_STANDALONE: "true"
+  # here or stop the service.
+  #
+  # The admin key: an ADMIN_API_KEY in .env reaches this service through the
+  # interpolation below (core-api reads the same .env), and otherwise both read
+  # the key admin-key-init generated. One caveat from the core-api block above
+  # applies: a value exported in your shell outranks .env here but not in
+  # core-api, so set it in .env, not in the shell.
+  core-operations:
+    image: ghcr.io/caura-ai/caura-core-operations:${CAURA_VERSION:-${MEMCLAW_VERSION:-latest}}  # legacy-name-ok: rule 3 dual-read alias
+    pull_policy: missing
+    build:
+      context: .
+      dockerfile: core-operations/Dockerfile
+    environment:
+      CORE_API_URL: http://core-api:8000
+      CORE_API_ADMIN_API_KEY: "${ADMIN_API_KEY:-}"
+      CORE_API_ADMIN_API_KEY_FILE: /run/caura-admin/admin-key
+    volumes:
+      - admin_key:/run/caura-admin:ro
+    depends_on:
+      admin-key-init:
+        condition: service_completed_successfully
+      core-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   # ── Local Embedder (opt-in via ``--profile embed-local``) ───────
   #
@@ -244,4 +317,5 @@ volumes:
   pgdata:
   redis_data:
   storage_secret:
+  admin_key:
   tei_cache:

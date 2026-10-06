@@ -19,11 +19,11 @@
 #   EXTRA_PROMPT      repo context, prepended to the review prompt
 #   REVIEW_PROMPT     review instructions + output format
 # Optional env:
-#   MODEL             model id (default: claude-sonnet-5)
+#   MODEL             model id (default: claude-sonnet-5-5)
 #   MAX_BUDGET_USD    per-review spend ceiling, passed to --max-budget-usd (default 10.00)
 set -euo pipefail
 
-MODEL="${MODEL:-claude-sonnet-5}"
+MODEL="${MODEL:-claude-sonnet-5-5}"
 
 # A ceiling so one runaway review cannot bill without bound. The reviewer reads the repo
 # across turns to judge a diff, which is what makes it useful and also what makes an
@@ -37,6 +37,9 @@ MODEL="${MODEL:-claude-sonnet-5}"
 # expensive reviews are the ones that find real defects, so capping near the average would
 # truncate exactly the runs worth paying for.
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-10.00}"
+# Independent host-side proxy ceilings: selected model only, 64 requests,
+# 128 MiB total request bodies, 65,536 output tokens per message, 15 minutes.
+# These bound a compromised CLI's exposure; they are not an exact USD budget.
 # Shape, then value. Shape does not require a leading digit, so `.50` is accepted the way the
 # CLI accepts it, while `.`, `1.`, `10,00`, `$10`, `-1` and `1e3` are rejected. Value is
 # checked arithmetically rather than with a second pattern: a zero ceiling is accepted by the
@@ -157,56 +160,80 @@ ${GUIDANCE_SECTION}${REVIEW_PROMPT}
 Review the PR diff provided on stdin. Review ONLY the changed lines. If after a careful review you find no real issues, reply with exactly this single line and nothing else:
 **Claude Code Review** :white_check_mark: No issues found."
 
-# No 2>&1: claude's stderr (warnings/progress) must not contaminate the JSON on
-# stdout, or jq would parse garbage and yield an empty review. A non-zero exit is
-# still caught below; stderr goes to the workflow log for debugging.
-# --tools is the security half, and it matters more here than anywhere: this repo is PUBLIC.
-# The threat is concrete — a prompt injection in the diff reaching a CLI whose environment holds
-# GH_TOKEN with pull-requests:write. Restricting the reviewer to read-only tools leaves the
-# injection nothing to act through. Reviewing a diff needs Read, Grep and Glob and nothing else.
-#
-# --bare closes two paths the allow-list provably does not reach, so it is load-bearing rather
-# than belt-and-braces. --tools names tools from the BUILT-IN set, so it does nothing about
-# MCP-provided ones: a pull request adding an .mcp.json would otherwise hand the reviewer tools
-# outside the allow-list entirely. --bare also skips CLAUDE.md auto-discovery, so a reviewed
-# tree's own CLAUDE.md cannot quietly steer the review of that same tree.
-#
-# Both flags exist in the pinned 2.1.159 installed above. Verify them again when bumping the pin
-# — a build that dropped either would review in a writable mode without saying so.
-RESULT=$(printf '%s' "$DIFF" | claude --print --model "$MODEL" --output-format json \
-  --bare \
-  --tools "Read,Grep,Glob" \
-  --max-budget-usd "$MAX_BUDGET_USD" \
-  "$PROMPT") || {
-  CLAUDE_EXIT=$?
-  # `VAR=$(cmd)` keeps cmd's stdout even when cmd fails, and claude reports several failures
-  # (auth, quota, and budget exhaustion) there rather than on stderr. This branch used to
-  # discard it and post "check workflow logs" above a log that held nothing — which would have
-  # made a ceiling hit the least diagnosable outcome in the script.
-  echo "Claude exited ${CLAUDE_EXIT}. First 2000 chars of its stdout:" >&2
-  printf '%s\n' "${RESULT:0:2000}" >&2
-  # Budget exhaustion is an EXPECTED outcome carrying a machine-readable marker, and it exits
-  # 1 exactly like a crash, so without this branch the ceiling would surface as a bare exit
-  # code and read as a broken pipeline. `jq -e` rather than `grep -q`: grep stops reading on
-  # match, the upstream printf takes SIGPIPE, and pipefail then turns a MATCH into a non-zero
-  # pipeline. jq drains stdin.
+# Read-only model tools are not a filesystem boundary: /proc/self/environ and
+# host credential files would still be readable. Run them in an isolated source
+# snapshot, with a private process view and no real credentials. Keep --bare to disable repository
+# hooks, MCP configuration and automatic CLAUDE.md discovery as well.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+umask 077
+ulimit -c 0
+OUTPUT_DIR=$(mktemp -d)
+PROXY_PID=""
+cleanup() {
+  if [ -n "$PROXY_PID" ]; then
+    kill "$PROXY_PID" 2>/dev/null || true
+    wait "$PROXY_PID" 2>/dev/null || true
+  fi
+  rm -rf -- "$OUTPUT_DIR"
+}
+trap cleanup EXIT
+# The native runtime needs /proc, so keep its provider key in a separate host
+# process. Only a short-lived token for this loopback proxy enters the sandbox.
+REVIEW_PROXY_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+export REVIEW_PROXY_TOKEN
+env -i PATH="$PATH" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:?Provider key required}" \
+  python3 "$SCRIPT_DIR/claude_review_proxy.py" "$OUTPUT_DIR/proxy-port" "$REVIEW_PROXY_TOKEN" "$MODEL" \
+  >"$OUTPUT_DIR/proxy-log" 2>&1 &
+PROXY_PID=$!
+for _ in {1..50}; do
+  [ -s "$OUTPUT_DIR/proxy-port" ] && break
+  kill -0 "$PROXY_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if [ ! -s "$OUTPUT_DIR/proxy-port" ]; then
+  echo "::error::Reviewer transport failed to start" >&2
+  post "⚠️ Claude Code review failed: transport unavailable."
+  exit 1
+fi
+REVIEW_PROXY_URL="http://127.0.0.1:$(cat "$OUTPUT_DIR/proxy-port")"
+export REVIEW_PROXY_URL
+CLAUDE_EXIT=0
+printf '%s' "$DIFF" | bash "$SCRIPT_DIR/claude_review_sandbox.sh" \
+  --print --model "$MODEL" --output-format json \
+  --bare --no-session-persistence --tools "Read,Grep,Glob" \
+  --max-budget-usd "$MAX_BUDGET_USD" "$PROMPT" \
+  >"$OUTPUT_DIR/result" 2>"$OUTPUT_DIR/stderr" || CLAUDE_EXIT=$?
+
+# Scan stdout AND stderr, including JSON-decoded strings, before any response
+# fields reach a comment, log or job summary. This is defense in depth, not a
+# substitute for isolation (arbitrarily transformed secrets cannot be detected).
+# Raw model/CLI output is never logged, including on parse/CLI failures.
+if ! python3 "$SCRIPT_DIR/claude_review_output.py" "$OUTPUT_DIR/result" "$OUTPUT_DIR/stderr"; then
+  echo "::error::Reviewer output withheld by credential guard" >&2
+  post "⚠️ Claude Code review failed: output withheld by credential guard."
+  exit 1
+fi
+RESULT=$(cat "$OUTPUT_DIR/result")
+
+# Only numeric telemetry may be published. Treat arbitrary strings in these
+# fields as absent, including on the budget-exhaustion path.
+number_field() {
+  printf '%s' "$RESULT" | jq -r "$1 | select(type == \"number\" and . >= 0)" 2>/dev/null || true
+}
+COST=$(number_field '.total_cost_usd')
+if [ "$CLAUDE_EXIT" -ne 0 ]; then
+  echo "::error::Reviewer sandbox or CLI exited ${CLAUDE_EXIT}; raw output withheld" >&2
   if printf '%s' "$RESULT" | jq -e '.subtype == "error_max_budget_usd"' >/dev/null 2>&1; then
-    SPENT=$(printf '%s' "$RESULT" | jq -r '.total_cost_usd // "unknown"' 2>/dev/null || echo unknown)
-    post "⚠️ Claude Code review reached the \$${MAX_BUDGET_USD} spend ceiling after \$${SPENT} without finishing. Split the PR, or raise \`MAX_BUDGET_USD\` on the workflow step."
+    post "⚠️ Claude Code review reached the \$${MAX_BUDGET_USD} spend ceiling after \$${COST:-unknown} without finishing. Split the PR, or raise \`MAX_BUDGET_USD\` on the workflow step."
     exit 1
   fi
-  post "⚠️ Claude Code review failed: exit ${CLAUDE_EXIT} (see workflow logs)."
+  post "⚠️ Claude Code review failed: sandbox or CLI exit ${CLAUDE_EXIT}. Raw output was withheld."
   exit 1
-}
+fi
 
-# jq runs under `set -e`; a parse failure (claude returned non-JSON — a warning
-# banner, rate-limit HTML) must not silently kill the script before we post an
-# error. On failure, log the raw response so the workflow log actually has
-# something to check, then post a visible error.
-REVIEW=$(printf '%s' "$RESULT" | jq -r '.result // empty' 2>/dev/null) || {
-  echo "Claude returned non-JSON output. First 2000 chars of the raw response:" >&2
-  printf '%s\n' "${RESULT:0:2000}" >&2
-  post "⚠️ Claude Code review failed: response was not valid JSON (see workflow logs)."
+REVIEW=$(printf '%s' "$RESULT" | jq -er '.result | select(type == "string")' 2>/dev/null) || {
+  echo "::error::Reviewer returned an invalid result; raw output withheld" >&2
+  post "⚠️ Claude Code review failed: response was not a valid JSON review."
   exit 1
 }
 
@@ -217,13 +244,12 @@ if [ -z "$REVIEW" ]; then
   exit 1
 fi
 
-COST=$(printf '%s' "$RESULT" | jq -r '.total_cost_usd // empty' 2>/dev/null || echo "unknown")
 echo "::notice::Claude review cost: \$${COST:-unknown} (model ${MODEL}, PR #${PR_NUMBER})"
 
 # Cost + token table in the Actions job summary (when running in a workflow).
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -n "$COST" ] && [ "$COST" != "unknown" ]; then
-  TOKENS_IN=$(printf '%s' "$RESULT" | jq -r '.usage.input_tokens // empty' 2>/dev/null || true)
-  TOKENS_OUT=$(printf '%s' "$RESULT" | jq -r '.usage.output_tokens // empty' 2>/dev/null || true)
+  TOKENS_IN=$(number_field '.usage.input_tokens')
+  TOKENS_OUT=$(number_field '.usage.output_tokens')
   {
     echo "### Claude Code Review Cost"
     echo "| Metric | Value |"

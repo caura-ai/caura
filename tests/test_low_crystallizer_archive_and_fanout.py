@@ -36,13 +36,17 @@ def _archive_block() -> str:
 
 def test_archive_is_gated_on_a_replacement_existing():
     b = _archive_block()
-    assert "if not new_ids:" in b, "the archive step is unconditional again"
+    assert "if not new_ids or failed_facts:" in b, (
+        "the archive step is unconditional again"
+    )
 
 
 def test_gate_is_new_ids_not_absence_of_duplicates():
     """What licenses retiring the sources is that a replacement EXISTS — not
     that nothing was rejected. A cluster that created one fact and skipped two
-    duplicates is still safe to archive; one that created none never is.
+    duplicates is still safe to archive; one that created none never is. A
+    FAILED fact (not a duplicate) does block it: its content exists nowhere, so
+    retiring the sources would drop it from recall.
 
     Comments are stripped first: the code comment names the rejected condition
     in prose to explain why it is wrong, and matching that would fail on the
@@ -53,13 +57,12 @@ def test_gate_is_new_ids_not_absence_of_duplicates():
         if not line.lstrip().startswith("#")
     )
     assert "duplicate_facts == 0" not in code
-    assert "failed_facts == 0" not in code
-    assert "if not new_ids:" in code
+    assert "if not new_ids or failed_facts:" in code
 
 
 def test_nothing_created_means_nothing_is_queued_for_archive():
     b = _archive_block()
-    i = b.index("if not new_ids:")
+    i = b.index("if not new_ids or failed_facts:")
     assert "cluster_ids_to_archive = []" in b[i : b.index("else:", i)]
 
 

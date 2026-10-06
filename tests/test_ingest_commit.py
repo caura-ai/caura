@@ -142,11 +142,10 @@ def captured(monkeypatch):
                     source_uri=item.source_uri,
                     run_id=item.run_id,
                     metadata=item.metadata,
-                    # ``write_mode`` doesn't exist on ``BulkMemoryItem``
-                    # (the bulk path is implicitly strong-mode for
-                    # ingest), so surface "strong" to keep the legacy
-                    # assertion contract.
-                    write_mode="strong",
+                    # L-133: what the item actually carries. This used to be
+                    # hardcoded to "strong", so the strong-mode test below
+                    # checked the fake while commit sent no write_mode at all.
+                    write_mode=item.write_mode,
                 )
             )
             h = ch_fn(data.tenant_id, data.fleet_id, item.content)
@@ -362,6 +361,20 @@ async def test_parent_document_written_once_per_batch(captured):
     assert isinstance(data["summary"], str) and data["summary"]
     # Carries the source_uri marker (text-input here since we didn't set url)
     assert data["source_uri"] == "text-input"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_parent_document_names_the_committing_agent(captured):
+    """L-132: the parent is attributed to its author like any other document.
+
+    The agent sat only inside ``data``, so every ingest batch's ``agent_id``
+    column was NULL: DocOut reported no author, and "what has this agent
+    written" could not find it."""
+    req = _request("t1", "fact one", agent_id="agent-a")
+    await ingest_service.ingest_commit(request=req)
+
+    assert captured.parent_doc_writes[0]["agent_id"] == "agent-a"
 
 
 @pytest.mark.unit

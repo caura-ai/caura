@@ -219,10 +219,22 @@ def _driving(sc: AsyncMock):
     this PR widens, and a TypeError there wedged the report exactly the same way
     before the guard existed. The guard is what makes it survivable.
 
-    The hygiene checks are deliberately NOT stubbed — they fail against the mock
-    and are caught by their own handler, which is the realistic shape and keeps
-    the tests honest about what the guard is and is not responsible for.
+    Hygiene checks still execute, with explicit storage failures caught by their
+    own handlers. Bare AsyncMock results make synchronous dict.get calls create
+    unawaited coroutines, which can surface during a later test's collection.
     """
+    for name in (
+        "find_orphaned_entities",
+        "check_near_duplicates",
+        "get_embedding_coverage",
+        "get_lifecycle_candidates",
+        "find_broken_entity_links",
+    ):
+        setattr(
+            sc,
+            name,
+            AsyncMock(side_effect=RuntimeError("synthetic storage failure")),
+        )
     with (
         patch(
             "core_api.services.crystallizer_service.get_storage_client", return_value=sc
@@ -403,10 +415,7 @@ async def test_a_clean_run_still_completes_normally() -> None:
 
     with (
         _driving(sc),
-        # Stubbed only here: the hygiene checks run against a mock, so a
-        # non-awaited stub value reaches ``_generate_issues`` and TypeErrors on a
-        # comparison. That is a mock artefact, not the behaviour under test —
-        # this test is about the guard leaving the happy path alone.
+        # This test is about the outer guard leaving a completed run alone.
         patch(
             "core_api.services.crystallizer_service._generate_issues",
             MagicMock(return_value=[]),
@@ -419,9 +428,8 @@ async def test_a_clean_run_still_completes_normally() -> None:
         "completed",
         "failed",
     }
-    # 'failed' is legitimate here — the hygiene checks run against an AsyncMock
-    # storage client, so they may all report errors. What matters is that the row
-    # reached a TERMINAL status rather than staying 'running'.
+    # 'failed' is legitimate here — the hygiene storage calls explicitly fail.
+    # The row must reach a terminal status rather than stay 'running'.
 
 
 @pytest.mark.asyncio
@@ -497,6 +505,7 @@ async def test_the_reserved_report_is_executed_not_re_reserved() -> None:
     sc = AsyncMock()
     sc.find_running_report = AsyncMock()
     sc.create_report = AsyncMock()
+    sc.get_report = AsyncMock(return_value={"id": report_id, "status": "running"})
     execute = AsyncMock()
 
     with (
@@ -813,3 +822,66 @@ async def test_the_idempotency_check_reads_the_writer_not_the_replica() -> None:
     assert sc.get_report.await_args.kwargs.get("read") is False, (
         "the idempotency check read the replica, so lag can re-run a finished report"
     )
+
+
+# ---------------------------------------------------------------------------
+# Where the crystal lives: its sources' fleet and visibility, never private
+# ---------------------------------------------------------------------------
+
+
+async def _crystal_kwargs(memories: list[dict], *, fleet_id=None) -> list:
+    a, b, c = (m["id"] for m in memories)
+    hygiene = {"near_duplicates": {"pairs": [_pair(a, b), _pair(b, c), _pair(a, c)]}}
+    sc = _storage_mock(memories)
+    created = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+    with (
+        patch(
+            "core_api.services.crystallizer_service.get_storage_client", return_value=sc
+        ),
+        patch(
+            "core_api.services.organization_settings.resolve_config",
+            _stub_resolve_config,
+        ),
+        patch(
+            "core_api.services.crystallizer_service._crystallize_cluster",
+            AsyncMock(
+                return_value=[
+                    {"content": "crystal", "memory_type": "fact", "weight": 0.8}
+                ]
+            ),
+        ),
+        patch("core_api.services.memory_service.create_memory", created),
+    ):
+        await _run_crystallization(tenant_id="t1", fleet_id=fleet_id, hygiene=hygiene)
+    return [call.args[0] for call in created.await_args_list]
+
+
+@pytest.mark.asyncio
+async def test_the_crystal_takes_its_sources_fleet_on_the_nightly_run() -> None:
+    rows = [
+        {**_memory_row(uuid4()), "fleet_id": "f1", "visibility": "scope_team"}
+        for _ in range(3)
+    ]
+    (crystal,) = await _crystal_kwargs(rows, fleet_id=None)
+    assert crystal.fleet_id == "f1"
+    assert crystal.visibility == "scope_team"
+
+
+@pytest.mark.asyncio
+async def test_an_all_org_cluster_stays_org_visible() -> None:
+    rows = [
+        {**_memory_row(uuid4()), "fleet_id": None, "visibility": "scope_org"}
+        for _ in range(3)
+    ]
+    (crystal,) = await _crystal_kwargs(rows)
+    assert crystal.visibility == "scope_org"
+
+
+@pytest.mark.asyncio
+async def test_private_rows_never_reach_a_crystal() -> None:
+    """Defence in depth behind the storage pair query."""
+    rows = [
+        {**_memory_row(uuid4()), "fleet_id": "f1", "visibility": "scope_agent"}
+        for _ in range(3)
+    ]
+    assert await _crystal_kwargs(rows) == []

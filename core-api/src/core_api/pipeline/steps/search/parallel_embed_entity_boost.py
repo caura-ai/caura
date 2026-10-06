@@ -53,6 +53,8 @@ async def _entity_boost_via_storage(
     sc = get_storage_client()
     boosted_memory_ids: set[UUID] = set()
     memory_boost_factor: dict[UUID, float] = {}
+    # Names the sub-call in flight, so the catch-all below can say which failed.
+    stage = "entity FTS"
 
     try:
         if precomputed_hops is not None:
@@ -83,11 +85,24 @@ async def _entity_boost_via_storage(
                     "max_hops": graph_max_hops,
                     "use_union": use_union,
                 }
-                raw_hops = await sc.expand_graph(expand_data)
-                entity_hops = {
-                    UUID(eid_str): (hop_weight["hop"], hop_weight["weight"])
-                    for eid_str, hop_weight in raw_hops.items()
-                }
+                # oss-0909-l-03: expansion failure degrades to the hop-0 seeds,
+                # as ClassifyQuery._expand_per_fleet does since #1444. Letting
+                # it reach the outer except discarded the already-resolved FTS
+                # matches along with the (unavailable) neighbourhood, so one
+                # storage hiccup zeroed all hop-boost for the request.
+                try:
+                    raw_hops = await sc.expand_graph(expand_data)
+                    entity_hops = {
+                        UUID(eid_str): (hop_weight["hop"], hop_weight["weight"])
+                        for eid_str, hop_weight in raw_hops.items()
+                    }
+                except Exception:
+                    logger.warning(
+                        "Entity boost: expand_graph failed; falling back to %d hop-0 seed(s)",
+                        len(matched_entity_ids),
+                        exc_info=True,
+                    )
+                    entity_hops = dict.fromkeys(matched_entity_ids, (0, 1.0))
             else:
                 entity_hops = dict.fromkeys(matched_entity_ids, (0, 1.0))
 
@@ -115,6 +130,7 @@ async def _entity_boost_via_storage(
                     len(entity_hops) - GRAPH_MAX_EXPANDED_ENTITIES,
                 )
 
+            stage = "memory-link lookup"
             raw_links = await sc.get_memory_ids_by_entity_ids(
                 [str(eid) for eid in all_entity_ids],
                 tenant_id,
@@ -160,7 +176,9 @@ async def _entity_boost_via_storage(
 
             boosted_memory_ids = set(memory_boost_factor.keys())
     except Exception:
-        logger.exception("Entity/graph boost lookup failed (falling back to pure vector search)")
+        # expand_graph has its own degrade above; what lands here is the entity
+        # FTS or the memory-link lookup, and no boost survives either.
+        logger.exception("Entity boost: %s failed; falling back to pure vector search", stage)
 
     return boosted_memory_ids, memory_boost_factor
 
@@ -195,7 +213,7 @@ class ParallelEmbedAndEntityBoost:
         # Kept as distinct log reasons so ops can tell a deliberate org-level
         # disable from the precision heuristic firing.
         if not data.get("entity_retrieval", True):
-            ent_skip_reason = "disabled by org setting search.entity_retrieval"
+            ent_skip_reason = "disabled by org setting search.entity_retrieval or request entity_boost=false"
         elif data.get("entity_match_declined"):
             ent_skip_reason = "entity match declined as over-broad in classify_query"
         else:

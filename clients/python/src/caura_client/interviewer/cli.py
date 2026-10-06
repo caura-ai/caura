@@ -4,6 +4,7 @@ Config precedence: flags > env > defaults. Env vars:
   CAURA_API_KEY (required)      CAURA_TENANT_ID (required)
   CAURA_BASE_URL                CAURA_AGENT_ID (default user@host)
   CAURA_FLEET_ID                CAURA_INTERVIEWER_PROJECTS (comma-sep globs)
+  CAURA_ALLOW_INSECURE_HTTP (true: allow a plain http:// CAURA_BASE_URL off this machine)
 
 Exit codes: 0 success / nothing to do; 1 every attempted file failed;
 2 configuration or authorization error. ``hook`` ALWAYS exits 0 — a
@@ -22,10 +23,10 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional
 
-from ..client import Caura
+from ..client import Caura, _check_key_transport
 from ..exceptions import AuthError
+from . import installer
 from .discovery import (
     DEFAULT_CURSOR_PROJECTS_ROOT,
     DEFAULT_PROJECTS_ROOT,
@@ -36,7 +37,6 @@ from .discovery import (
     project_allowed,
     transcript_from_path,
 )
-from . import installer
 from .machine import machine_id_short
 from .parser import count_lines
 from .runner import RunConfig, node_id_for, read_watermark, run_all
@@ -177,11 +177,23 @@ def _resolve_allowlist(args: argparse.Namespace) -> list[str]:
     return [g.strip() for g in env.split(",") if g.strip()]
 
 
-def _require_config(args: argparse.Namespace) -> Optional[str]:
+def _require_config(args: argparse.Namespace) -> str | None:
     if not args.api_key:
         return "CAURA_API_KEY (or --api-key) is required"
     if not args.tenant_id:
         return "CAURA_TENANT_ID (or --tenant-id) is required"
+    return None
+
+
+def _transport_error(args: argparse.Namespace) -> str | None:
+    """The client's own refusal of ``--base-url``, checked before any client is
+    built (L-232). ``Caura()`` raises it, which crashed ``run`` and ``status``
+    with a traceback, and ``install`` scheduled a job that raised it every tick.
+    The message names the ``CAURA_ALLOW_INSECURE_HTTP`` opt-in."""
+    try:
+        _check_key_transport(args.base_url, None)
+    except ValueError as exc:
+        return str(exc)
     return None
 
 
@@ -199,7 +211,7 @@ def _deny_guidance(args: argparse.Namespace) -> str:
     return "\n".join(lines)
 
 
-def _acquire_lock() -> Optional[object]:
+def _acquire_lock() -> object | None:
     """Best-effort cross-invocation guard (cron + hook overlap).
 
     The REAL safety is the server's deterministic attempt-id dedup; this
@@ -219,7 +231,7 @@ def _acquire_lock() -> Optional[object]:
     lock_path = Path(tempfile.gettempdir()) / f"memclaw-interviewer-{getpass.getuser()}.lock"  # legacy-name-deferred: current writer needs a canonical lock migration before removal (docs/plans/rebrand-alias-migration-notes.md)
     handle = None
     try:
-        handle = open(lock_path, "w")
+        handle = open(lock_path, "w")  # noqa: SIM115 - caller owns the lock lifetime.
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return handle
     except OSError as exc:
@@ -259,7 +271,7 @@ def _make_config(args: argparse.Namespace, *, flush: bool = False, dry_run: bool
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    if error := _require_config(args):
+    if error := _require_config(args) or _transport_error(args):
         print(f"[interviewer] {error}", file=sys.stderr)
         return 2
     allow = _resolve_allowlist(args)
@@ -326,7 +338,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    if error := _require_config(args):
+    if error := _require_config(args) or _transport_error(args):
         print(f"[interviewer] {error}", file=sys.stderr)
         return 2
     allow = _resolve_allowlist(args)
@@ -417,6 +429,11 @@ def _cmd_install(args: argparse.Namespace) -> int:
     if error := _require_config(args):
         print(f"[interviewer] {error} — needed so the scheduled job can authenticate", file=sys.stderr)
         return 2
+    # Checked under the CAURA_ALLOW_INSECURE_HTTP the job will run with: it is
+    # copied into the env file below.
+    if error := _transport_error(args):
+        print(f"[interviewer] {error}", file=sys.stderr)
+        return 2
     allow = _resolve_allowlist(args)
     if not allow and not args.all_projects:
         # Refuse to schedule a job that would just default-deny and no-op.
@@ -436,6 +453,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
         "CAURA_TENANT_ID": args.tenant_id,
         "CAURA_AGENT_ID": args.agent_id,
         "CAURA_FLEET_ID": args.fleet_id or "",
+        "CAURA_ALLOW_INSECURE_HTTP": os.environ.get("CAURA_ALLOW_INSECURE_HTTP", ""),
     }
     if not args.all_projects:
         env["CAURA_INTERVIEWER_PROJECTS"] = ",".join(allow)
@@ -516,7 +534,7 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     # argparse's choices= only validates values passed on the command line,

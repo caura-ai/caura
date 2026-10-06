@@ -19,6 +19,7 @@ import os
 from collections import OrderedDict
 
 from common.llm._credentials import (
+    model_override_for_provider,
     resolve_gemini_config,
     resolve_openai_compatible,
 )
@@ -109,7 +110,12 @@ def reset_provider_cache() -> None:
 
 _LLM_FAKE_SENTINELS = frozenset({ProviderName.FAKE, ProviderName.NONE})
 _OPENAI_COMPATIBLE = frozenset(
-    {ProviderName.OPENAI, ProviderName.ANTHROPIC, ProviderName.OPENROUTER}
+    {
+        ProviderName.OPENAI,
+        ProviderName.ANTHROPIC,
+        ProviderName.OPENROUTER,
+        ProviderName.ATLASCLOUD,
+    }
 )
 
 
@@ -229,10 +235,11 @@ def get_llm_provider(
             )
         except (TypeError, ValueError):
             request_timeout = _DEFAULT_OPENAI_TIMEOUT
+        model = model_override_for_provider(name, model_override, model)
         cache_key = (
             name,
             base_url,
-            model_override or model,
+            model,
             api_key,
             request_timeout,
         )
@@ -243,7 +250,7 @@ def get_llm_provider(
 
         provider = OpenAILLMProvider(
             api_key=api_key,
-            model=model_override or model,
+            model=model,
             base_url=base_url,
             provider_name=name,
             request_timeout_seconds=request_timeout,
@@ -275,6 +282,9 @@ def get_llm_provider(
                 "No API key for Gemini LLM provider, returning FakeLLMProvider",
             )
             return FakeLLMProvider()
-        return GeminiLLMProvider(api_key=api_key, model=model_override or model)
+        return GeminiLLMProvider(
+            api_key=api_key,
+            model=model_override_for_provider(name, model_override, model),
+        )
 
     raise ValueError(f"Unknown LLM provider: {name}")

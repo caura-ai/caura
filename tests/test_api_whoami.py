@@ -18,6 +18,18 @@ async def test_whoami_with_gateway_headers(client):
     assert data["via_gateway"] is True
 
 
+async def test_whoami_normalizes_a_retired_service_identity(client):
+    resp = await client.get(
+        "/api/v1/whoami",
+        headers={
+            "X-Tenant-ID": "probe-tenant",
+            "X-Agent-ID": "memclaw-insighter",  # legacy-name-ok: supported input alias
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agent_id"] == "caura-insighter"
+
+
 async def test_whoami_with_tenant_only(client):
     # mc_ tenant-key path: gateway sets X-Tenant-ID but no X-Agent-ID.
     resp = await client.get(

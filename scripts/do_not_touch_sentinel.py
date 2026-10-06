@@ -157,16 +157,22 @@ SENTINELS: tuple[Sentinel, ...] = (
         breaks="every issued API key stops validating; the prefix is in customers' configs",
     ),
     Sentinel(
-        path="core-api/src/core_api/agent_ids.py",
+        path="core-api/src/core_api/service_agent_ids.py",
         text="memclaw-insighter",  # legacy-name-floor: floor
         kind=LITERAL,
-        breaks="the insighter's existing rows orphan — migration 030 seeded this id",
+        breaks=(
+            "clients using the supported retired input lose canonical reads, and "
+            "writes can recreate the retired insighter identity"
+        ),
     ),
     Sentinel(
-        path="core-api/src/core_api/agent_ids.py",
+        path="core-api/src/core_api/service_agent_ids.py",
         text="memclaw-doc-indexer",  # legacy-name-floor: floor
         kind=LITERAL,
-        breaks="the doc indexer's existing rows orphan; nothing else references the literal",
+        breaks=(
+            "clients using the supported retired input lose canonical reads, and "
+            "writes can recreate the retired doc-indexer identity"
+        ),
     ),
     Sentinel(
         path="plugin/openclaw.plugin.json",

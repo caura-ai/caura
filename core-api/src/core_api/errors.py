@@ -123,6 +123,18 @@ AUTH_FEATURE_DISABLED = "FEATURE_DISABLED"
 AUTH_UNAUTHENTICATED = "UNAUTHENTICATED"
 AUTH_SKILLS_FACTORY_DISABLED = "SKILLS_FACTORY_DISABLED"
 AUTH_SKILLS_INBOX_FORBIDDEN = "SKILLS_INBOX_FORBIDDEN"
+AUTH_ORG_ADMIN_REQUIRED = "ORG_ADMIN_REQUIRED"
+
+# M-85 — a fleet node answers only to the credential it is bound to. Its own
+# code because the way out is its own: send the node's heartbeats with that
+# credential, or have a tenant credential release the node.
+AUTH_FLEET_NODE_BOUND = "FLEET_NODE_BOUND_TO_OTHER_CREDENTIAL"
+# M-85 — an install credential with no install UUID has nothing a node can be
+# bound to, so it may not act as one.
+AUTH_INSTALL_UUID_MISSING = "INSTALL_UUID_MISSING"
+# M-86 — an agent or install credential's interview window for a fleet node
+# must cite an unused interview_request that was delivered to that node.
+AUTH_INTERVIEW_REQUEST_REQUIRED = "INTERVIEW_REQUEST_REQUIRED"
 
 
 # ── Code for the request-budget deadline (ax-0917-h-01/h-02) ──────────────

@@ -258,7 +258,7 @@ async def collect_counts(sc: CoreStorageClient, *, standalone_tenant_id: str | N
 def build_payload(
     *,
     settings: Settings,
-    deployment_id: str,
+    deployment_id: str | None,
     counts: Counts,
     client_counts: dict[str, int] | None = None,
     sent_at: datetime | None = None,
@@ -266,7 +266,11 @@ def build_payload(
     uptime_seconds: float | None = None,
     env: os._Environ[str] | dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the schema-1 payload. Pure: no I/O, no clock beyond ``sent_at``."""
+    """Assemble the schema-1 payload. Pure: no I/O, no clock beyond ``sent_at``.
+
+    ``deployment_id`` is ``None`` only for a preview before the first send,
+    which creates the identity; a sent payload always carries one.
+    """
     environ = os.environ if env is None else env
     now = sent_at or datetime.now(UTC)
     up = process_uptime_seconds() if uptime_seconds is None else uptime_seconds

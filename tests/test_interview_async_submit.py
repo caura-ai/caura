@@ -29,6 +29,7 @@ from tests.test_api_interview import (
     _CANNED_REPORT,
     _enable_interviewer,
     _events,
+    _node,
     _payload,
 )
 
@@ -120,7 +121,7 @@ async def test_async_submit_accepts_with_watermark_and_masked_job(
 ):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
     events = _events()
     events[0]["content"] = "emailed ran@caura.ai about the ingest refactor"
 
@@ -149,6 +150,32 @@ async def test_async_submit_accepts_with_watermark_and_masked_job(
     await _drain_inflight()
 
 
+async def test_async_submit_persists_canonical_service_agent_id(
+    client,
+    canned_llm,
+    async_submit,
+):
+    tenant_id, headers = get_test_auth(new_tenant_id())
+    await _enable_interviewer(client, tenant_id, headers)
+    node_id = await _node(client, tenant_id, headers)
+
+    resp = await client.post(
+        "/api/v1/interview/submit",
+        json=_payload(
+            tenant_id,
+            node_id,
+            "memclaw-insighter",  # legacy-name-ok: supported client input alias
+        ),
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    doc = await _job_doc(tenant_id, interview_job_doc_id(node_id, 0, 10))
+    assert doc is not None
+    assert doc["data"]["agent_id"] == "caura-insighter"
+    await _drain_inflight()
+
+
 # ── (b) processor writes memories and marks the job done ──
 
 
@@ -157,7 +184,7 @@ async def test_processing_writes_typed_memories_and_marks_done(
 ):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
 
     resp = await client.post(
         "/api/v1/interview/submit",
@@ -191,7 +218,7 @@ async def test_processing_writes_typed_memories_and_marks_done(
 async def test_resubmit_same_window_is_idempotent(client, canned_llm, async_submit):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
     payload = _payload(tenant_id, node_id, agent_id)
 
     first = await client.post("/api/v1/interview/submit", json=payload, headers=headers)
@@ -331,7 +358,7 @@ async def test_first_submit_prior_read_failure_500s_without_advancing_watermark(
     resubmits next tick."""
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
     doc_id = interview_job_doc_id(node_id, 0, 10)
 
     sc = interview_service.get_storage_client()
@@ -718,7 +745,7 @@ async def test_schedule_sweep_processes_pending_jobs(
 ):
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
 
     # Suppress the route's immediate processing so the job stays pending
     # for the sweep — simulates the fire-and-forget task dying with the
@@ -878,7 +905,7 @@ async def test_flag_off_runs_legacy_inline_path(client, canned_llm, monkeypatch)
     monkeypatch.setattr(interview_route.app_settings, "interview_async_submit", False)
     tenant_id, headers = get_test_auth(new_tenant_id())
     await _enable_interviewer(client, tenant_id, headers)
-    node_id, agent_id = f"node-{uid()}", f"agent-{uid()}"
+    node_id, agent_id = await _node(client, tenant_id, headers), f"agent-{uid()}"
 
     resp = await client.post(
         "/api/v1/interview/submit",

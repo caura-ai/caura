@@ -16,6 +16,7 @@ from common import duplicate_memory
 from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
 from core_api.config import settings
 from core_api.middleware.per_tenant_concurrency import per_tenant_slot, per_tenant_storage_slot
+from core_api.request_phase import phase
 from core_api.services.agent_identity import ReservedAgentIdError, enforce_reserved_write_id
 from core_api.tasks import track_task
 
@@ -37,6 +38,7 @@ except ImportError:
 
 from common.constants import VECTOR_DIM
 from common.embedding import (
+    embedding_configured,
     get_embedding,
     get_embeddings_batch,
     get_query_embedding,
@@ -74,6 +76,7 @@ from core_api.constants import (
     MAX_CONTENT_LENGTH,
     MEMORY_STATUSES,
     MEMORY_TYPES,
+    MEMORY_VISIBILITIES,
     MIN_SEARCH_SIMILARITY,
     OPENAI_EMBEDDING_MODEL,
     RECALL_BOOST_CAP,
@@ -100,7 +103,12 @@ from core_api.schemas import (
     MemoryUpdate,
     ScoreParts,
 )
-from core_api.search_trim import passes_relevance_filter, trim_reserving_fts_matches
+from core_api.search_trim import (
+    is_derived_fanout_row,
+    passes_relevance_filter,
+    resolve_include_derived,
+    trim_reserving_fts_matches,
+)
 from core_api.services.entity_extraction_worker import process_entity_extraction
 from core_api.services.entity_tokens import extract_entity_tokens
 from core_api.services.governance_gate import (
@@ -115,11 +123,14 @@ from core_api.services.hooks import get_hooks
 from core_api.services.organization_settings import validate_search_profile
 from core_api.services.system_metadata import (
     CALLER_OWNABLE_KEYS,
+    SYSTEM_NAMESPACE,
+    caller_owned_keys,
     extract_system_metadata,
+    mark_caller_owned,
     sanitize_caller_metadata,
     set_system_value,
 )
-from core_api.services.task_tracker import tracked_task
+from core_api.services.task_tracker import record_task_failure, tracked_task
 
 logger = logging.getLogger(__name__)
 
@@ -1113,6 +1124,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
         build_fast_persist_pipeline,
         build_persist_pipeline,
     )
+    from core_api.pipeline.steps.write.write_memory_row import write_entity_links
     from core_api.services.ingest_service import _chunk_content
 
     # #852: apply the LLM's free-form verdict, which this branch had computed
@@ -1242,6 +1254,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
             set_system_value(parent_metadata, "embedding_pending", True)
         if defer_enrichment:
             set_system_value(parent_metadata, "enrichment_pending", True)
+        # L-32: server-set, as ``WriteMemoryRow`` sets it. The children copy the
+        # parent's flag: they are cut out of the same row.
+        is_inferred = bool(ctx.data.get("is_inferred", False))
 
         # Auto-chunk parent insert — wrapped in the storage bulkhead
         # like the regular single-write path. Auto-chunk fires two
@@ -1286,10 +1301,15 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     else None,
                     "status": fields["status"],
                     "visibility": data.visibility or "scope_team",
+                    "is_inferred": is_inferred,
                 }
             )
 
         parent_id = parent.get("id")
+        # M-51: the caller's links go on the parent only (owner decision
+        # 2026-10-05), written and degraded as the single write's are, and the
+        # answer echoes the ones that persisted.
+        linked, _ = await write_entity_links(sc, data.entity_links, parent_id, data.tenant_id)
 
         _hooks = get_hooks()
         if _hooks.audit_log:
@@ -1351,6 +1371,7 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                     "expires_at": data.expires_at.isoformat() if data.expires_at else None,
                     "status": fields["status"],
                     "visibility": data.visibility or "scope_team",
+                    "is_inferred": is_inferred,
                 }
             )
         # Auto-chunk children — second storage roundtrip in this request after
@@ -1457,7 +1478,9 @@ async def _handle_auto_chunk_from_ctx(data: MemoryCreate, ctx: object) -> Memory
                 )
             )
 
-        return _dict_to_memory_out(parent)
+        return _dict_to_memory_out(
+            parent, entity_links=[EntityLinkOut(entity_id=link.entity_id, role=link.role) for link in linked]
+        )
 
     # Chunking produced 0-1 facts: fall through to persist pipeline. Governed
     # by the gate at the top of this function — neither persist pipeline has a
@@ -1718,7 +1741,9 @@ async def create_memories_bulk(
     # item carrying that content is the one written. Scanning every index would
     # award the slot to the errored item, mark the real writer an intra-batch
     # duplicate, and skip its embedding — a vectorless row that persists,
-    # invisible to search until a backfill sweep finds it.
+    # invisible to vector search with no recovery path today (the backfill
+    # sweep is gated off by default and has never run: oss-0924-m-05,
+    # ``docs/unembedded-rows/``).
     first_writer: dict[str, int] = {}  # content hash -> index of the item that writes it
     prededuped: set[int] = set()
     for i in valid_indices:
@@ -1762,20 +1787,27 @@ async def create_memories_bulk(
             # slow provider surfaces here as a bare cancellation that names
             # nothing — and at the strong-embed budget of 8s it always would,
             # since one provider request may run 25s.
-            async with asyncio.timeout(embed_timeout):
-                valid_embeddings = await get_embeddings_batch(
-                    [items[i].content for i in embed_indices],
-                    tenant_config,
-                    budget_s=embed_timeout,
-                    # Reached only when inline_embedding is on or the item is
-                    # write_mode="strong". The caller synchronously awaits this
-                    # batch in BOTH cases, which is what makes background=False
-                    # correct. The consequence of failure differs, though: under
-                    # inline_embedding the handler below fails the request
-                    # outright, while a deferred deployment with a strong item
-                    # logs and falls through to the backfill path.
-                    background=False,
-                )
+            # ``phase`` as well as the two deadlines: this route enforces its
+            # own budget (it opts out of RequestTimeoutMiddleware), and until
+            # this hop announced itself a bulk 504 that burned its 90s here
+            # named nothing at all — the same undiagnosable failure #1707 fixed
+            # on /search. "embed" not "embed.query": this is the batch write
+            # hop, not the shared single-vector query hop.
+            with phase("embed.bulk"):
+                async with asyncio.timeout(embed_timeout):
+                    valid_embeddings = await get_embeddings_batch(
+                        [items[i].content for i in embed_indices],
+                        tenant_config,
+                        budget_s=embed_timeout,
+                        # Reached only when inline_embedding is on or the item is
+                        # write_mode="strong". The caller synchronously awaits this
+                        # batch in BOTH cases, which is what makes background=False
+                        # correct. The consequence of failure differs, though: under
+                        # inline_embedding the handler below fails the request
+                        # outright, while a deferred deployment with a strong item
+                        # logs and falls through to the backfill path.
+                        background=False,
+                    )
         except Exception as exc:
             # Inline deployments: this is the only place a row gets its vector, so
             # a failure fails the request rather than persisting vectorless rows.
@@ -1822,8 +1854,14 @@ async def create_memories_bulk(
                     logger.warning("Enrichment failed for bulk item %d", idx)
 
         try:
-            async with asyncio.timeout(BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS):
-                await asyncio.gather(*[_enrich(i) for i in valid_indices])
+            # The other half of the bulk budget that had no name. Enrichment
+            # runs SEQUENTIALLY after embed on this path, so a 504 whose
+            # completed phases hold ``embed.bulk`` and whose cancelled stack
+            # holds ``enrich.bulk`` localises the burn to the LLM fan-out
+            # rather than the provider embed that preceded it.
+            with phase("enrich.bulk"):
+                async with asyncio.timeout(BULK_ENRICHMENT_TOTAL_TIMEOUT_SECONDS):
+                    await asyncio.gather(*[_enrich(i) for i in valid_indices])
         except TimeoutError:
             logger.warning(
                 "Bulk enrichment exceeded %ss budget; proceeding with partial results",
@@ -2020,6 +2058,11 @@ async def create_memories_bulk(
         # before this point, so any ``summary`` / ``tags`` here are
         # authentically the caller's.
         caller_keys = frozenset(metadata.keys())
+        # oss-0814-l-08 — the durable half, same as ``MergeEnrichmentFields``.
+        # Bulk items bypass the pipeline, so leaving this to the single-write
+        # step would mean a batch of one carried no marker and the same payload
+        # lost its summary to a later enrichment purely for having been batched.
+        mark_caller_owned(metadata, caller_keys)
 
         if enrichment:
             if memory_type is None:
@@ -2051,11 +2094,8 @@ async def create_memories_bulk(
         if weight is None:
             weight = DEFAULT_MEMORY_WEIGHT
 
-        status = item.status
-        if not status and enrichment:
-            status = getattr(enrichment, "status", None)
-        if not status:
-            status = "active"
+        # Never from enrichment — see ``MergeEnrichmentFields``.
+        status = item.status or "active"
 
         entity_link_dicts = [
             {"entity_id": str(link.entity_id), "role": link.role} for link in item.entity_links
@@ -2081,6 +2121,17 @@ async def create_memories_bulk(
         # search comes back empty while an exact-words search does not.
         if embeddings[i] is None:
             set_system_value(metadata, "embedding_pending", True)
+        # lme-0929-m-03. The same durable signal for enrichment, on exactly the
+        # condition the post-persist loop below publishes ``ENRICH_REQUESTED``
+        # (``defer_enrich_publish``; a deferred deployment never enriches inline
+        # here, so ``enrichment is None``). The worker's PATCH writes ``false``
+        # into both homes. Absence alone is ambiguous — an inline-enriched row
+        # carries no key either — so without this a bulk-ingested store, the
+        # population with the LONGEST deferred window, could not be told apart
+        # from a settled one by reading its rows (``GET /memories/stats``
+        # ``pending.enrichment``).
+        if _enrichment_backfill_needed(enrichment, tenant_config):
+            set_system_value(metadata, "enrichment_pending", True)
 
         mem_data = {
             "tenant_id": data.tenant_id,
@@ -2102,7 +2153,7 @@ async def create_memories_bulk(
             "content_hash": ch,
             "client_request_id": item_request_id,
             "expires_at": item.expires_at.isoformat() if item.expires_at else None,
-            "subject_entity_id": item.subject_entity_id,
+            "subject_entity_id": str(item.subject_entity_id) if item.subject_entity_id else None,
             "predicate": item.predicate,
             "object_value": item.object_value,
             "ts_valid_start": ts_valid_start.isoformat() if ts_valid_start else None,
@@ -2507,6 +2558,19 @@ async def create_memories_bulk(
 _REEMBED_MAX_RETRIES = 3
 _REEMBED_BACKOFF_BASE_S = 10
 
+#: ``background_task_log.task_name`` for a memory this process has given up on
+#: embedding. One name for both terminal exits in :func:`_reembed_memory`,
+#: because the consequence an operator queries for is identical — the row is
+#: ``embedding IS NULL``, it reports ``embedding_pending: true``, and nothing in
+#: this process will try again. Which of the two exits it took is in
+#: ``error_message``.
+#:
+#: Deliberately NOT one of the ``tracked_task`` names its callers pass
+#: (``embed_or_publish``, ``reembed``, ``reembed_bulk[N]``): every embed repair
+#: in the tree funnels through this one coroutine, and the operator wants one
+#: predicate for "permanently unembedded", not three.
+_REEMBED_STRANDED_TASK = "reembed_stranded"
+
 
 async def _schedule_embed_or_reembed(
     memory_id: UUID,
@@ -2648,6 +2712,7 @@ async def _schedule_enrich_or_inline(
     caller_owned_metadata_keys: list[str] | None = None,
     reference_datetime: datetime | None = None,
     run_governance_remediation: bool = False,
+    current_content_only: bool = False,
 ) -> None:
     """Enrichment counterpart of :func:`_schedule_embed_or_reembed`.
 
@@ -2695,6 +2760,7 @@ async def _schedule_enrich_or_inline(
             caller_owned_metadata_keys=caller_owned_metadata_keys,
             governance_config=tenant_config,
             run_governance_remediation=run_governance_remediation,
+            current_content_only=current_content_only,
         )
         # H-18 governance (the LLM verdict) is applied INSIDE
         # ``_enrich_memory_background``, not here.
@@ -2747,6 +2813,65 @@ async def _schedule_enrich_or_inline(
         )
 
 
+async def _record_stranded(
+    memory_id: UUID,
+    tenant_id: str,
+    reason: str,
+    *,
+    from_except: bool = False,
+) -> None:
+    """Persist one ``background_task_log`` row for a memory left unembedded.
+
+    ``tracked_task`` writes a row only when the coroutine it wraps RAISES.
+    :func:`_reembed_memory` catches its own failures, logs, and returns
+    normally — so the wrapper saw a success, and the only table an operator
+    inspects stayed empty while the row stayed semantically unsearchable.
+    That is the shape :func:`record_task_failure` was split out for (09/02
+    M-40), and until now ``process_entity_extraction`` was its only adopter.
+
+    It matters more here than it did there, because of what does NOT catch
+    this afterwards. The daily sweep that would repair the row,
+    ``run_embed_backfill_tick``, is registered only when
+    ``embed_backfill_enabled`` is set, that setting defaults FALSE, and the
+    Pub/Sub topic it publishes into is Terraform-provisioned and has never
+    been created — so on every deployment that has not explicitly turned it on
+    (which is all of them, as far as this repository can tell) there is no
+    second chance. A deployment in exactly that state is how ~430 memories
+    were stranded in the 2026-07-27 incident this module carries a postmortem
+    for, and the reason it took an incident to notice is that this coroutine
+    reported success on its way out.
+
+    What the row buys, stated honestly and no further: ``background_task_log``
+    has one writer and no reader anywhere in the tree, so this does not repair
+    anything. It makes the loss COUNTABLE and hand-recoverable — the
+    ``(tenant_id, status)`` index is the shape such a query wants, and
+    ``memory_id`` is the id to re-embed. It is also the only thing that
+    distinguishes a row whose embed is still coming from one whose embed is
+    never coming: ``metadata.embedding_pending`` is ``True`` in both cases and
+    this change does not alter that. A reader holding only the row still
+    cannot tell the two apart.
+
+    ``reason`` is always what lands in ``error_message``, including at the
+    call site that has a real exception: the two exits differ in a way the
+    exception type alone does not say, and that difference is what decides
+    whether an operator chases the embedding provider or storage.
+
+    Never raises: :func:`record_task_failure` swallows its own storage
+    failures, and this adds nothing that can.
+    """
+    await record_task_failure(
+        _REEMBED_STRANDED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(reason),
+        # ``record_task_failure`` defaults to ``traceback.format_exc()``, which
+        # is only meaningful inside an ``except``. The exhaustion caller is not
+        # in one — nothing raised, the provider kept answering ``None`` — and
+        # would otherwise store the literal "NoneType: None" as its traceback.
+        tb=None if from_except else f"no traceback: {reason}",
+    )
+
+
 async def _reembed_memory(
     memory_id: UUID,
     content: str,
@@ -2764,6 +2889,12 @@ async def _reembed_memory(
     must pass ``is_failure_fallback=True`` to get the backoff, otherwise
     N serial retries land on the already-failing provider with zero
     delay — thundering herd.
+
+    Both ways this can end badly write a ``background_task_log`` row via
+    :func:`_record_stranded` — see there for why, and for what that row does
+    and does not buy. Returning normally is kept either way: this is
+    fire-and-forget, every caller wraps it in ``tracked_task``, and the row it
+    is repairing was committed and ACKed long ago.
     """
     from core_api.constants import EMBEDDING_REEMBED_DELAY_S
     from core_api.services.organization_settings import resolve_config
@@ -2779,6 +2910,17 @@ async def _reembed_memory(
     except Exception:
         logger.warning("Failed to resolve tenant config for re-embed (tenant=%s)", tenant_id, exc_info=True)
         tenant_config = None
+
+    # No real provider configured: retrying cannot produce a vector, so record
+    # the row as unembedded once instead of spending the retry budget on it.
+    if not embedding_configured(tenant_config):
+        await _record_stranded(
+            memory_id,
+            tenant_id,
+            "no embedding provider is configured; the row stays embedding=NULL "
+            "until one is and the row is re-embedded",
+        )
+        return
 
     embedding = None
     for attempt in range(1, _REEMBED_MAX_RETRIES + 1):
@@ -2800,6 +2942,12 @@ async def _reembed_memory(
             "Background re-embed exhausted all %d retries for memory %s",
             _REEMBED_MAX_RETRIES,
             memory_id,
+        )
+        await _record_stranded(
+            memory_id,
+            tenant_id,
+            f"embedding provider returned no vector after {_REEMBED_MAX_RETRIES} "
+            "re-embed attempts; the row stays embedding=NULL",
         )
         return
 
@@ -2848,8 +2996,20 @@ async def _reembed_memory(
             embedded_content_hash=_content_hash(tenant_id, mem.get("fleet_id"), content),
         )
         logger.info("Background re-embed succeeded for memory %s", memory_id)
-    except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background re-embed error for memory %s", memory_id)
+        # The vector was produced and then lost: this branch is reached with a
+        # good ``embedding`` in hand that never reached the row. Unlike the
+        # batch path — where the same failure calls ``_fallback`` and tries
+        # again — there is no reschedule here, deliberately, because the retry
+        # would be this same coroutine and a storage fault that persists makes
+        # it a loop. So the row is stranded, and saying so is all that is left.
+        await _record_stranded(
+            memory_id,
+            tenant_id,
+            f"embedding computed but not persisted: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return
 
     # Contradiction coverage: the write path only fires contradiction
@@ -3148,14 +3308,18 @@ async def fan_out_atomic_facts(
     parent_weight: float,
     parent_ts_start,
     tenant_config,
+    parent_expires_at=None,
+    parent_run_id: str | None = None,
+    parent_source_uri: str | None = None,
 ) -> dict[str, int]:
     """Create one child memory per extracted atomic fact.
 
     Lifted verbatim out of ``_enrich_memory_background`` so the ASYNC path can
-    reuse it (A70). The synchronous path was the only caller, which is why a
-    fast-mode write of multi-claim content produced fewer memories than the same
-    content in strong mode — the worker had no way to run this without a second
-    implementation of it.
+    reuse it (A70): the worker had no way to run this without a second
+    implementation of it. One caller per place an enrichment finishes:
+    ``_enrich_memory_background`` (fast mode, inline), the ``ENRICHED`` consumer
+    (deferred), and ``ScheduleBackgroundTasks`` after a write whose enrichment
+    ran on the request path, as a strong write's does (L-117).
 
     Every guarantee in here was paid for by an incident, so it is shared rather
     than reimplemented: #808 (derived rows inherit the parent's governance
@@ -3169,11 +3333,45 @@ async def fan_out_atomic_facts(
     the post-remediation value, because a row read before the governance PATCH
     still carries the visibility ``keep_private`` just removed (#808).
 
+    ``parent_expires_at`` / ``parent_run_id`` / ``parent_source_uri`` are copied
+    onto every child, as the auto-chunk children already get them: a child is
+    the parent's content, so it must expire with it (the expiry sweep archives
+    by ``expires_at``) and keep its provenance. Accepted as a datetime or the
+    ISO string a storage row carries.
+
     Returns ``{"created", "deduped", "unembedded"}``. Never raises for a single
     fact — each failure mode is counted and logged, so one bad fact cannot cost
     the others.
     """
     if not atomic_facts:
+        return {"created": 0, "deduped": 0, "unembedded": 0}
+    # pm-0918-c-04. Gated HERE rather than at either call site: this function is
+    # shared precisely so the synchronous and worker paths cannot drift, and a
+    # switch honoured by only one of them would be a per-write-mode difference
+    # that nobody asked for. ``getattr`` because older config objects and test
+    # doubles predate the knob, matching how ``crystallizer_min_cluster_size``
+    # is read in ``_run_crystallization``.
+    #
+    # Returns zeroed counts rather than raising so the worker path reaches its
+    # ``atomic_facts`` marker cleanup: the consumer preserves the marker on an
+    # exception (for a later retry) and clears it otherwise. Raising would not
+    # loop forever — the consumer catches and returns without nacking — but it
+    # would leave the marker set on every disabled-tenant write, so each
+    # redelivery re-enters a fan-out that is switched off.
+    #
+    # The trade this makes: clearing the marker CONSUMES those facts. Switching
+    # the fan-out back on later will not replay them without re-enrichment. That
+    # is right for "disable", and worth knowing if anyone reads it as "pause".
+    if not getattr(tenant_config, "atomic_fact_fanout_enabled", True):
+        # Logged because the zeroed counts are AMBIGUOUS downstream: the
+        # consumer reports "created=0 deduped=0 unembedded=0" at INFO, which is
+        # byte-identical to a fan-out that ran and deduplicated everything. An
+        # operator asking the obvious question — "I switched it off, why am I
+        # still seeing children?" — gets no signal either way without this.
+        logger.info(
+            "atomic-fact fan-out skipped: disabled for this tenant",
+            extra={"tenant_id": tenant_id, "memory_id": str(memory_id), "facts": len(atomic_facts)},
+        )
         return {"created": 0, "deduped": 0, "unembedded": 0}
     meta = parent_metadata
     fanout_created = 0
@@ -3293,6 +3491,13 @@ async def fan_out_atomic_facts(
                     "status": "active",
                     "visibility": parent_visibility,
                     "ts_valid_start": parent_ts_start,
+                    "expires_at": (
+                        parent_expires_at.isoformat()
+                        if isinstance(parent_expires_at, datetime)
+                        else parent_expires_at
+                    ),
+                    "run_id": parent_run_id,
+                    "source_uri": parent_source_uri,
                 }
             )
         except DuplicateMemoryError:
@@ -3337,9 +3542,27 @@ async def fan_out_atomic_facts(
             if not child_id:
                 # Loud, and NOT folded into fanout_unembedded: this
                 # row is unembedded with no repair queued, which is a
-                # strictly worse state than the counted one. The
-                # nightly sweep remains its only recovery, and only
-                # where enabled.
+                # strictly worse state than the counted one. It
+                # persists with ``embedding=NULL`` and NOTHING repairs
+                # it on its own today. This used to say the nightly
+                # sweep was its recovery; that sweep is gated on
+                # ``embed_backfill_enabled``, False by default because
+                # its Pub/Sub topic is Terraform-provisioned, and it has
+                # never run (oss-0924-m-05, findings in
+                # ``docs/unembedded-rows/``). So the log names the one
+                # repairs an operator can actually run: the standalone
+                # ``backfill_embeddings`` CLI, which walks NULL
+                # embeddings with no event bus behind it — hence the
+                # tenant id, for ``--tenant-id``. That CLI embeds with
+                # the PROCESS-level provider, so under per-tenant
+                # embedding overrides it would write wrong-model vectors,
+                # worse than NULL; the log names the override-safe path
+                # too, ``core_worker.cli backfill-embeddings``, which
+                # publishes to the live hot-path EMBED_REQUESTED topic
+                # (not the gated backfill one) and needs the pubsub bus.
+                # Provision the topic and
+                # flip ``embed_backfill_enabled`` and "the nightly sweep"
+                # becomes a true answer again.
                 # Log the response SHAPE, never the response. ``child``
                 # is the created row, so it carries the raw fact text
                 # and its metadata; interpolating it here would put
@@ -3349,10 +3572,17 @@ async def fan_out_atomic_facts(
                 # content-free.
                 logger.error(
                     "atomic-fact child persisted unembedded but create_memory "
-                    "returned no usable id (response keys: %s) for parent %s; "
-                    "NO re-embed scheduled — recovery depends on the nightly sweep",
+                    "returned no usable id (response keys: %s) for parent %s "
+                    "(tenant %s); NO re-embed scheduled and no automatic "
+                    "recovery — the row stays out of vector search until "
+                    "re-embedded: run `python -m "
+                    "core_storage_api.scripts.backfill_embeddings "
+                    "--tenant-id <tenant>` (per-tenant embedding overrides: "
+                    "use `python -m core_worker.cli backfill-embeddings` "
+                    "instead — see the script's docstring)",
                     sorted(child) if isinstance(child, dict) else type(child).__name__,
                     memory_id,
+                    tenant_id,
                 )
                 continue
             # Counted only once the repair is actually queued, so the
@@ -3418,6 +3648,96 @@ async def fan_out_atomic_facts(
     }
 
 
+#: ``background_task_log.task_name`` for a memory whose enrichment this process
+#: has given up on. One name across every terminal exit in
+#: :func:`_enrich_memory_background`, because the consequence an operator
+#: queries for is identical — the row keeps ``enrichment_pending: true`` and no
+#: title, summary or tags are coming. Which exit it took is in
+#: ``error_message``.
+#:
+#: Deliberately NOT one of the ``tracked_task`` names its callers pass
+#: (``background_enrichment``, ``enrich_or_publish``, ``enrichment``): every
+#: inline enrichment in the tree funnels through this one coroutine, and the
+#: operator wants one predicate for "permanently unenriched", not three.
+_ENRICH_STRANDED_TASK = "enrich_stranded"
+
+#: The derive phase's give-up: enrichment landed, the atomic-fact children did
+#: not. ``memory_id`` is the PARENT — the id to re-run the fan-out from.
+_FANOUT_STRANDED_TASK = "fanout_stranded"
+
+
+async def _record_enrich_stranded(
+    memory_id: UUID,
+    tenant_id: str,
+    reason: str,
+    *,
+    from_except: bool = False,
+) -> None:
+    """Persist one ``background_task_log`` row for a memory left unenriched.
+
+    ``tracked_task`` writes a row only when the coroutine it wraps RAISES.
+    :func:`_enrich_memory_background` catches its own failures, logs, and
+    returns ``None`` — so the wrapper saw a success, and the only table an
+    operator inspects stayed empty. That is the shape
+    :func:`record_task_failure` was split out for (09/02 M-40).
+
+    It matters more here than on the embed path, and the difference is the
+    whole reason this exists separately. A memory that loses its embedding at
+    least has a repair job in principle: ``run_embed_backfill_tick`` is real,
+    is gated off by default, and could be switched on once its topic is
+    provisioned. ``enrichment_pending`` has NO sweep at all — there is no job
+    to enable, nothing to provision, and no second chance even in principle.
+    ``tracked_task``'s own comment says as much: these rows "have no sweep at
+    all and stayed pending forever".
+
+    What the row buys, stated honestly and no further: ``background_task_log``
+    has one writer and no reader anywhere in the tree, so this repairs nothing.
+    It makes the loss COUNTABLE and hand-recoverable — the ``(tenant_id,
+    status)`` index is the shape such a query wants, and ``memory_id`` is the
+    id to re-enrich. It does NOT make the row self-describing:
+    ``metadata.enrichment_pending`` reads ``True`` whether enrichment is still
+    in flight or gone for good, its ABSENCE is documented as "that stage ran
+    inline", and this change alters neither. A reader holding only the row
+    still cannot tell the two apart.
+
+    ``reason`` is always what lands in ``error_message``, because the exits
+    differ in a way the exception type alone does not say — a config lookup
+    that failed before any LLM call and a PATCH that dropped a completed
+    enrichment send an operator to different places.
+
+    Never raises: :func:`record_task_failure` swallows its own storage
+    failures, and this adds nothing that can.
+    """
+    await record_task_failure(
+        _ENRICH_STRANDED_TASK,
+        memory_id,
+        tenant_id,
+        RuntimeError(reason),
+        # ``record_task_failure`` defaults to ``traceback.format_exc()``, which
+        # is only meaningful inside an ``except``. The contract-violation exit
+        # is not in one — nothing raised, ``enrich_memory`` simply answered
+        # ``None`` — and would otherwise store the literal "NoneType: None".
+        tb=None if from_except else f"no traceback: {reason}",
+    )
+
+
+def _merged_metadata(stored: dict, metadata_patch: dict) -> dict:
+    """``metadata_patch`` over ``stored``, merged the way storage merges it.
+
+    Top-level keys replace, then the ``_system`` namespace merges one level deep
+    (``postgres_service.memory_update``), so a reader that must not re-read the
+    row sees what the row now holds.
+    """
+    merged = {**stored, **metadata_patch}
+    if isinstance(metadata_patch.get(SYSTEM_NAMESPACE), dict):
+        nested = stored.get(SYSTEM_NAMESPACE)
+        merged[SYSTEM_NAMESPACE] = {
+            **(nested if isinstance(nested, dict) else {}),
+            **metadata_patch[SYSTEM_NAMESPACE],
+        }
+    return merged
+
+
 async def _enrich_memory_background(
     memory_id: UUID,
     content: str,
@@ -3429,11 +3749,21 @@ async def _enrich_memory_background(
     caller_owned_metadata_keys: list[str] | None = None,
     governance_config: object | None = None,
     run_governance_remediation: bool = False,
+    current_content_only: bool = False,
 ) -> dict | None:
     """Background task: run LLM enrichment on a fast-path memory, then patch the row.
 
     After enrichment completes, applies the patch to the row and — when
     configured — runs governance remediation and the atomic-fact fan-out.
+
+    Every way this can end with the row still unenriched writes a
+    ``background_task_log`` row via :func:`_record_enrich_stranded` — see there
+    for why, and for what that row does and does not buy. The two exits that
+    are NOT failures are deliberately silent: a tenant with enrichment disabled
+    never wanted it, and a row that has been deleted underneath us has nothing
+    left to enrich. Returning rather than raising is kept throughout: this is
+    fire-and-forget, every caller wraps it in ``tracked_task``, and the memory
+    was committed and ACKed to its writer long ago.
 
     It does NOT schedule entity extraction or contradiction detection.
     ``ScheduleBackgroundTasks`` owns both: extraction unconditionally, and Path A
@@ -3464,7 +3794,11 @@ async def _enrich_memory_background(
     EXPLICITLY at write time (computed by ``_agent_provided_enrichment_fields``
     from ``model_fields_set``); those are left untouched. It is the same list
     the deferred/worker path already receives via
-    ``publish_memory_enrich_request``.
+    ``publish_memory_enrich_request``. An edit (``update_memory``, H-07) also
+    pins ``title`` and the dates when the row holds one or the PATCH names one.
+
+    ``current_content_only`` is an edit's: the run does nothing once the row no
+    longer holds ``content``, because a later edit has scheduled its own.
 
     CAURA-716: this parameter previously did not exist, and the inline path
     instead inferred caller intent by comparing the row's current value against
@@ -3493,8 +3827,17 @@ async def _enrich_memory_background(
 
     try:
         tenant_config = await resolve_config(tenant_id)
-    except Exception:
+    except Exception as exc:
         logger.exception("Background enrichment: failed to resolve config for memory %s", memory_id)
+        # The one exit below that fires in ordinary operation: no LLM call was
+        # attempted, so nothing was spent, but the row is as unenriched as if
+        # the provider had failed and nothing will revisit it.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"tenant config could not be resolved, so enrichment never ran: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return None
 
     if not tenant_config.enrichment_enabled:
@@ -3502,11 +3845,29 @@ async def _enrich_memory_background(
 
     try:
         enrichment = await enrich_memory(content, tenant_config)
-    except (ValueError, RuntimeError, OpenAIError, GoogleAPIError):
+    except (ValueError, RuntimeError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background enrichment LLM call failed for memory %s", memory_id)
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"enrichment provider raised: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return None
 
     if enrichment is None:
+        # Defensive, and recorded as such. ``enrich_memory`` is annotated
+        # ``-> EnrichmentResult`` and its docstring says "Never raises; always
+        # returns an EnrichmentResult" — it falls back through an alternative
+        # provider to a keyword heuristic that always succeeds. So reaching
+        # here means that contract broke, which is worth a row precisely
+        # because nothing else in the tree would notice.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            "enrich_memory returned None, violating its declared "
+            "EnrichmentResult contract; the row stays unenriched",
+        )
         return None
 
     # Returned even if the fan-out below then fails: an unrelated atomic-fact or
@@ -3515,8 +3876,18 @@ async def _enrich_memory_background(
 
     try:
         sc = get_storage_client()
-        mem = await sc.get_memory(str(memory_id), tenant_id)
+        mem = await sc.get_memory(str(memory_id), tenant_id, read=not current_content_only)
         if mem is None or mem.get("deleted_at") is not None:
+            return None
+        # H-07: an edit's run is stale once a later edit replaced the text it
+        # judged. That edit scheduled its own run; this one would write the old
+        # text's verdicts over the new and remediate on text the row no longer
+        # holds. Read from the writer for this, or replica lag could make the
+        # NEWEST run look stale and skip it.
+        if current_content_only and mem.get("content") != content:
+            logger.info(
+                "Background enrichment of memory %s skipped: a later edit changed its content", memory_id
+            )
             return None
 
         # Build update patch.
@@ -3540,32 +3911,50 @@ async def _enrich_memory_background(
             patch["memory_type"] = enrichment.memory_type
         if not _agent_pinned("weight", mem.get("weight") == 0.5) and enrichment.weight is not None:
             patch["weight"] = enrichment.weight
-        if enrichment.title:
+        # ``in pinned`` rather than ``_agent_pinned``: only an edit pins ``title``
+        # (H-07), and with no list there is nothing to protect.
+        if enrichment.title and "title" not in pinned:
             patch["title"] = enrichment.title
 
         # See ``_dict_to_memory_out`` for the falsy-``{}`` trap.
         raw_meta = mem.get("metadata_")
         existing = raw_meta if raw_meta is not None else mem.get("metadata")
-        meta = dict(existing) if existing is not None else {}
+        stored_meta = dict(existing) if existing is not None else {}
+        # L-33 — a PATCH, merged by storage under its row lock (top level, then
+        # ``_system`` one level deep), not the copy read above sent back as
+        # ``metadata_``. Storage assigns that column wholesale, so anything
+        # committed between the read (which can route to a replica) and this
+        # write was reverted. A merge cannot delete a key, so the pending flag
+        # is cleared as False in both homes, as core-worker's patch clears it.
+        meta_patch: dict = {"enrichment_pending": False, SYSTEM_NAMESPACE: {"enrichment_pending": False}}
         # C25 — route the caller-ownable keys through the same boundary the
-        # synchronous path uses. ``meta`` here is the row's MERGED metadata, so
+        # synchronous path uses. ``stored_meta`` is the row's MERGED metadata, so
         # a caller's ``summary`` and a platform-written one are indistinguishable
         # by inspection; the key set has to come from the write, which is why
         # ``_schedule_enrich_or_inline`` forwards it. Without it this path wrote
         # the LLM's summary straight over the caller's, seconds after the write
         # that set it — the same clobber C25 closed for the synchronous path,
         # left open on the one that runs on every inline deployment.
-        caller_keys = frozenset(caller_owned_metadata_keys or ())
+        #
+        # oss-0814-l-08 — UNION with what the ROW records, because the forwarded
+        # set answers only for the write it was taken from. A caller who PATCHes
+        # ``metadata["summary"]`` after that write is not in it, and this task is
+        # typically still in flight when they do (fast mode defers enrichment and
+        # is the default), so the annotation was overwritten seconds after they
+        # made it. The row's marker is the surface-independent answer; the
+        # forwarded set stays because a row is not re-read between the snapshot
+        # and here, and dropping it would trust a marker this very write wrote.
+        caller_keys = frozenset(caller_owned_metadata_keys or ()) | caller_owned_keys(stored_meta)
         if enrichment.summary:
-            set_system_value(meta, "summary", enrichment.summary, caller_keys=caller_keys)
+            set_system_value(meta_patch, "summary", enrichment.summary, caller_keys=caller_keys)
         if enrichment.tags:
-            set_system_value(meta, "tags", enrichment.tags, caller_keys=caller_keys)
+            set_system_value(meta_patch, "tags", enrichment.tags, caller_keys=caller_keys)
         if enrichment.llm_ms:
-            set_system_value(meta, "llm_ms", enrichment.llm_ms, caller_keys=caller_keys)
+            set_system_value(meta_patch, "llm_ms", enrichment.llm_ms, caller_keys=caller_keys)
         if enrichment.contains_pii:
-            meta["contains_pii"] = True
+            meta_patch["contains_pii"] = True
             if enrichment.pii_types:
-                meta["pii_types"] = enrichment.pii_types
+                meta_patch["pii_types"] = enrichment.pii_types
         # H-18: this was MISSING here, and wiring up the verdict is not enough
         # without it. ``remediate_after_enrichment`` keys its non-business branch
         # on ``md["business_relevance"] == "personal"``, so while the field went
@@ -3575,11 +3964,11 @@ async def _enrich_memory_background(
         # path and core-worker both persist it, so the modes also disagreed about
         # what an enriched row contains. ``getattr`` defaults to the schema's own
         # "business", as ``GovernanceDecision`` does for this field.
-        meta["business_relevance"] = getattr(enrichment, "business_relevance", "business")
+        meta_patch["business_relevance"] = getattr(enrichment, "business_relevance", "business")
         if enrichment.retrieval_hint:
             # Persisted for debugging / auditability only; no longer used
             # to shape the embedding (see CAURA-222).
-            meta["retrieval_hint"] = enrichment.retrieval_hint
+            meta_patch["retrieval_hint"] = enrichment.retrieval_hint
         # Temporal resolution. ``None`` is not a settable value, so the legacy
         # is-None check cannot suffer the pin-to-default problem — but route it
         # through the same gate so all five override fields behave uniformly.
@@ -3590,29 +3979,21 @@ async def _enrich_memory_background(
             patch["ts_valid_start"] = enrichment.ts_valid_start
         if not _agent_pinned("ts_valid_end", mem.get("ts_valid_end") is None) and enrichment.ts_valid_end:
             patch["ts_valid_end"] = enrichment.ts_valid_end
-        # Status: enrichment may set it only when the caller did not.
-        if not _agent_pinned("status", mem.get("status") == "active") and enrichment.status:
-            patch["status"] = enrichment.status
+        # Status is NOT written here. It is a lifecycle field owned by explicit
+        # setters (transitions, contradiction detection, the crystallizer,
+        # delete), the classifier is not asked for it (CAURA-719), and this task
+        # runs after the write: patching it could revert a transition made in
+        # the meantime. core-worker's ``_ENRICHMENT_UNROUTED_FIELDS`` makes the
+        # same call for the deferred path.
 
-        meta.pop("enrichment_pending", None)
-        # B7 x C25 — this path REPLACES metadata wholesale, so clear the
-        # namespaced copy too or the C25 read view stays pending forever.
-        if isinstance(meta.get("_system"), dict):
-            meta["_system"].pop("enrichment_pending", None)
-        patch["metadata_"] = meta
+        patch["metadata_patch"] = meta_patch
+        # What the row holds once storage merges the patch, for governance and
+        # the fan-out below, which deliberately do not re-read the row.
+        meta = _merged_metadata(stored_meta, meta_patch)
 
-        # Apply patch via storage client -- use update_memory_status for status
-        # and a general patch for other fields
+        # Apply patch via storage client (metadata, type, weight, etc.)
         if patch:
-            # The storage API update_memory_status handles status changes;
-            # for other fields we need to build the right call
-            status_val = patch.pop("status", None)
-            if patch:
-                # Use a generic memory patch (metadata, type, weight, etc.)
-                # Fall back to update via scored-search patch endpoint
-                await sc.update_memory(str(memory_id), tenant_id, patch)
-            if status_val:
-                await sc.update_memory_status(str(memory_id), status_val, tenant_id=tenant_id)
+            await sc.update_memory(str(memory_id), tenant_id, patch)
 
         # The enrichment signal is persisted, so the verdict now exists. These
         # are the five keys ``remediate_after_enrichment`` reads, assembled from
@@ -3630,8 +4011,19 @@ async def _enrich_memory_background(
             "metadata_": meta,
         }
 
-    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError) as exc:
         logger.exception("Background enrichment error for memory %s", memory_id)
+        # The costly one: the LLM call above SUCCEEDED and this block is what
+        # writes the result to the row, so a failure here throws away work that
+        # was already paid for. ``governed_row`` is still ``None`` whenever the
+        # PATCH itself failed — it is assigned as the last statement of the
+        # ``try`` — so the caller cannot tell this from the cheap exits either.
+        await _record_enrich_stranded(
+            memory_id,
+            tenant_id,
+            f"enrichment completed but was not persisted: {type(exc).__name__}: {exc}",
+            from_except=True,
+        )
         return governed_row
 
     # ── Govern, between enriching and deriving ────────────────────────────────
@@ -3686,7 +4078,9 @@ async def _enrich_memory_background(
         # non-fatal to the parent.
         atomic_facts = getattr(enrichment, "atomic_facts", None) or []
         if atomic_facts:
-            parent_ts_start = mem.get("ts_valid_start")
+            # L-34: the value this enrichment just wrote, when it wrote one —
+            # ``mem`` was read before the PATCH, as for the weight below.
+            parent_ts_start = patch.get("ts_valid_start", mem.get("ts_valid_start"))
             # ``effective_visibility`` when remediation downgraded the parent:
             # ``mem`` was read before the PATCH and still holds the pre-policy
             # value, so reading it here would hand the children the visibility
@@ -3707,6 +4101,9 @@ async def _enrich_memory_background(
                 parent_weight=parent_weight,
                 parent_ts_start=parent_ts_start,
                 tenant_config=tenant_config,
+                parent_expires_at=mem.get("expires_at"),
+                parent_run_id=mem.get("run_id"),
+                parent_source_uri=mem.get("source_uri"),
             )
 
         # OSS 09/02 L-20 — the entity-extraction fan-out that stood here is
@@ -3736,35 +4133,63 @@ async def _enrich_memory_background(
         # they fire ``detect_contradictions_async`` when their
         # respective worker PATCHes land.
         logger.info("Background enrichment succeeded for memory %s", memory_id)
-    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError):
+    except (TimeoutError, ValueError, RuntimeError, SQLAlchemyError, OpenAIError, GoogleAPIError) as exc:
         # Distinct from the enrichment handler above so the two phases are
         # tellable apart in logs: by this point the row is enriched AND
         # governed, and only the derived rows failed.
         logger.exception("Background enrichment fan-out error for memory %s", memory_id)
+        # oss-0927-m-03: the atomic-fact children were never written and nothing
+        # retries them — the parent is enriched, so no enrichment-side check will
+        # ever look at this row again. Its own task name, not ``enrich_stranded``:
+        # the parent is NOT unenriched, and folding the two would make that
+        # predicate lie about it.
+        await record_task_failure(_FANOUT_STRANDED_TASK, memory_id, tenant_id, exc)
 
     return governed_row
 
 
 async def soft_delete_memory(memory_id: UUID, tenant_id: str) -> None:
+    """Soft-delete one memory and every row derived from it.
+
+    Auto-chunk and atomic-fact children carry the parent's own text, so a
+    delete that reached only the parent left the document recallable through
+    them, with ``parent_memory_id`` naming a deleted row. Governance
+    remediation already cascades a drop for the same reason; a user's or
+    agent's delete now does too. Children first: if their delete fails the
+    parent is still live and the caller's retry repeats the whole operation,
+    rather than leaving children nothing points back to.
+
+    The lookup is indexed (migration 058), so it runs for every delete rather
+    than only for parents carrying a marker: parents fanned out before the
+    markers existed have none, and their children survived (B25). The set
+    deletes take derived rows inside storage; this one-row path looks them up
+    itself so each gets its own audit entry.
+    """
     sc = get_storage_client()
     mem = await sc.get_memory(str(memory_id), tenant_id)
     if not mem:
         raise HTTPException(status_code=404, detail="Memory not found")
 
+    children = [c for c in await sc.find_children_by_parent_id(tenant_id, str(memory_id)) if c.get("id")]
+    if children:
+        await sc.soft_delete_by_ids(tenant_id, [str(c["id"]) for c in children])
+
     await sc.soft_delete_memory(str(memory_id), tenant_id)
 
     _hooks = get_hooks()
     if _hooks.audit_log:
-        try:
-            await _hooks.audit_log(
-                tenant_id=tenant_id,
-                agent_id=mem.get("agent_id"),
-                action="soft_delete",
-                resource_type="memory",
-                resource_id=memory_id,
-            )
-        except Exception:
-            logger.warning("Audit hook failed (non-critical)", exc_info=True)
+        deleted = [*((c["id"], c.get("agent_id")) for c in children), (memory_id, mem.get("agent_id"))]
+        for row_id, row_agent in deleted:
+            try:
+                await _hooks.audit_log(
+                    tenant_id=tenant_id,
+                    agent_id=row_agent,
+                    action="soft_delete",
+                    resource_type="memory",
+                    resource_id=row_id,
+                )
+            except Exception:
+                logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
 
 async def _revert_superseded_row(sc, tenant_id: str, superseded_id: str, editor_id: str) -> None:
@@ -3814,6 +4239,32 @@ async def _revert_superseded_row(sc, tenant_id: str, superseded_id: str, editor_
         await sc.update_memory_status(superseded_id, "active", tenant_id=tenant_id)
     except Exception:
         logger.warning("supersession retract: could not revert %s to active", superseded_id, exc_info=True)
+
+
+#: H-07 — what enrichment and governance concluded about a row's TEXT. A content
+#: edit makes each one a claim about text that is gone, so the edit clears them
+#: and the re-enrichment it schedules judges the new text.
+_TEXT_VERDICT_KEYS: tuple[str, ...] = (
+    "contains_pii",
+    "pii_types",
+    "pii_flagged_by",
+    "business_relevance",
+    "governance_llm_uncertain",
+)
+
+#: H-07 — what an edit's re-enrichment leaves alone (owner decision, 2026-10-05).
+#: ``memory_type`` and ``weight``: the row does not record whether its caller set
+#: them at create, so recomputing them could overwrite the caller's choice.
+#: ``atomic_facts`` is not pinned: the edit soft-deletes the old children (M-53)
+#: and its re-enrichment derives the new text's, as a create does.
+_EDIT_PINNED_ENRICHMENT_FIELDS: frozenset[str] = frozenset({"memory_type", "weight"})
+
+#: Enrichment output an edit keeps when the row already holds a value or the
+#: PATCH names the field; re-enrichment only fills an empty one. The same reason
+#: as type and weight (owner decision after the #1858 review): the row cannot say
+#: whether its caller set the value, and in deferred mode the worker clears dates
+#: the new text does not mention.
+_EDIT_KEPT_IF_SET_FIELDS: frozenset[str] = frozenset({"title", "ts_valid_start", "ts_valid_end"})
 
 
 async def update_memory(
@@ -3899,9 +4350,23 @@ async def update_memory(
     content_changed = "content" in fields_set and data.content != mem.get("content")
 
     new_embedding = None
+    pii_flags: dict = {}
+    reenrich = False
     # Content change: re-embed, re-hash, check dedup
     if content_changed:
         tenant_config = await resolve_config(tenant_id)
+        # H-07: the same test the fast create path schedules enrichment on.
+        reenrich = tenant_config.enrichment_enabled and tenant_config.enrichment_provider != "none"
+        # The tenant's PII policy applies to an edit exactly as to a create, and
+        # before anything below sees the text (embedding, hash, audit diff).
+        from core_api.services.pii_update_gate import apply_pii_policy_to_update
+
+        data.content, pii_flags = await apply_pii_policy_to_update(
+            tenant_id=tenant_id,
+            agent_id=agent_id or mem.get("agent_id"),
+            content=data.content,
+            gov=getattr(tenant_config, "governance_pii", None),
+        )
         # Synchronous update: the caller awaits the re-embed.
         new_embedding = await get_embedding(data.content, tenant_config, background=False)
         new_hash = _content_hash(tenant_id, mem.get("fleet_id"), data.content)
@@ -3977,7 +4442,13 @@ async def update_memory(
                     ),
                 )
 
-        changes["content"] = {"old": mem.get("content", "")[:200], "new": data.content[:200]}
+        changes["content"] = {
+            "old": mem.get("content", "")[:200],
+            # A flagged edit keeps its text, which contains detected PII; the
+            # audit chain refuses raw PII, and the whole update record was then
+            # dropped. Record that it changed, not what it says.
+            "new": "[content flagged as PII; not recorded]" if pii_flags else data.content[:200],
+        }
 
     # Build patch dict for storage client
     patch: dict = {}
@@ -4023,6 +4494,19 @@ async def update_memory(
         # ``fields_set`` would be defending against a state that cannot occur.
         if mem.get("subject_entity_id") is not None:
             patch["subject_entity_id"] = None
+        # L-221: the rest of that triple, mined from the same old text. Left in
+        # place, it outlived every edit: EmitMemoryTriple does not run on this
+        # path, and extraction's predicate write-back fills only a NULL
+        # predicate, so the row paired the new text's subject with the old
+        # text's predicate and object.
+        #
+        # Unlike the subject, a field the caller names is left out here rather
+        # than overwritten below: a predicate is a plain string on both sides,
+        # so ``simple_fields`` skips one equal to the stored value and could not
+        # write a re-asserted predicate back over the clear.
+        for column in ("predicate", "object_value"):
+            if mem.get(column) is not None and column not in fields_set:
+                patch[column] = None
 
     # Apply simple field updates
     simple_fields = {
@@ -4048,10 +4532,14 @@ async def update_memory(
                     "old": str(old_val)[:200] if old_val is not None else None,
                     "new": str(new_val)[:200] if new_val is not None else None,
                 }
-                # Serialize datetime fields for JSON transport
+                # Serialize datetime / UUID fields for JSON transport. A UUID
+                # (``subject_entity_id``) reached httpx's JSON encoder raw and
+                # raised TypeError, so any PATCH setting it was a 500.
                 val = new_val
                 if isinstance(val, datetime):
                     val = val.isoformat()
+                elif isinstance(val, UUID):
+                    val = str(val)
                 patch[attr_name] = val
 
     # CAURA-702: caller-supplied classifier-deprecated types (currently
@@ -4109,6 +4597,16 @@ async def update_memory(
         # corrupting the audit-log ``old`` field.
         raw_meta = mem.get("metadata_")
         old_meta = raw_meta if raw_meta is not None else mem.get("metadata")
+        # oss-0814-l-08 — PATCH is the third surface on which a caller supplies
+        # metadata, and the only one C25's write-time snapshot cannot see: that
+        # set was taken from the CREATE payload and is already on its way to (or
+        # inside) an enricher by the time this runs. So record the claim on the
+        # ROW, which every later writer can read. ``existing`` carries the prior
+        # marker forward because the storage layer replaces the ``_system``
+        # sub-object's keys wholesale — a caller who claimed ``summary`` last
+        # week and ``tags`` today must end up owning both.
+        claimed = frozenset(data.metadata or ())
+        prior_owned = caller_owned_keys(old_meta)
         if effective_mode == "replace":
             changes["metadata"] = {
                 "old": old_meta,
@@ -4116,6 +4614,12 @@ async def update_memory(
                 "mode": "replace",
             }
             patch["metadata_"] = data.metadata
+            # Replace mode discards the column, marker included, so prior claims
+            # are NOT carried over: the caller asked for this dict and nothing
+            # else. That is also the documented way to hand a key back to the
+            # platform — omit it from a replace and the next enrichment fills it.
+            if patch["metadata_"] is not None:
+                mark_caller_owned(patch["metadata_"], claimed)
         elif data.metadata is None:
             # Surface the breaking change explicitly: pre-PR
             # ``{"metadata": null}`` cleared the column. The
@@ -4139,6 +4643,13 @@ async def update_memory(
                 "mode": "merge",
             }
             patch["metadata_patch"] = data.metadata
+            # Marker goes in the SAME patch, which is also what tells the
+            # storage layer this is a CALLER write and must not be held back by
+            # the row's existing claims (see ``update_memory`` there). Audited
+            # ``changes`` is captured above, on the caller's own dict, so the
+            # bookkeeping key does not show up in the audit log as an edit the
+            # caller made.
+            mark_caller_owned(patch["metadata_patch"], claimed, existing=prior_owned)
         # else (empty dict in merge mode) → storage no-op, no audit
         # entry, no patch field.
 
@@ -4162,13 +4673,32 @@ async def update_memory(
     # (``core_worker.clients.storage_client``), but a successful INLINE re-embed
     # schedules no worker task, so nothing else was ever going to.
     if content_changed:
-        pending = new_embedding is None
         if "metadata_" in patch:
-            set_system_value(patch["metadata_"], "embedding_pending", pending)
+            # Replace mode. ``metadata: null`` clears the column, so the platform
+            # values below go into the empty dict that leaves; written onto
+            # ``None`` they were an AttributeError and a 500.
+            system_patch = patch["metadata_"] = dict(patch["metadata_"] or {})
         else:
-            pending_patch = dict(patch.get("metadata_patch") or {})
-            set_system_value(pending_patch, "embedding_pending", pending)
-            patch["metadata_patch"] = pending_patch
+            system_patch = patch["metadata_patch"] = dict(patch.get("metadata_patch") or {})
+            # H-07: the old text's verdicts. A merge cannot delete a key, so they
+            # are cleared as null; a replace-mode dict never holds them, because
+            # caller metadata is sanitised.
+            for key in _TEXT_VERDICT_KEYS:
+                set_system_value(system_patch, key, None)
+            # The claims the worker persisted from the OLD text. The ENRICHED
+            # consumer fans out whatever this holds, and a re-enrichment that
+            # falls back to the heuristic writes none to replace it. Top level,
+            # where the consumer reads and clears it.
+            system_patch["atomic_facts"] = None
+        set_system_value(system_patch, "embedding_pending", new_embedding is None)
+        if reenrich:
+            set_system_value(system_patch, "enrichment_pending", True)
+        # ``flag`` action: the same markers a create would set. Key by key: the
+        # flag dict carries its own ``_system``, and merging it whole replaced the
+        # patch's, ``caller_owned`` and ``embedding_pending`` included (M-118).
+        for key, value in pii_flags.items():
+            if key != SYSTEM_NAMESPACE:
+                set_system_value(system_patch, key, value)
 
     # Entity links: ADD the named links when explicitly provided. Never a
     # replace — see the ``changes`` entry below for what the storage call does
@@ -4217,9 +4747,41 @@ async def update_memory(
             "mode": "add",
         }
 
-    # Apply the patch via storage client
-    if patch:
-        await sc.update_memory(str(memory_id), tenant_id, patch)
+    # B25 (M-53): rows derived from this one carry its text, so the PATCH
+    # reaches them too. ``derived`` rides in the parent's own storage write,
+    # which applies it under the parent's row lock and in its transaction: the
+    # parent and its children change together or not at all, and a failed write
+    # leaves the whole family for the caller's retry to edit. Visibility and
+    # expiry act on the value NAMED, not only a changed one, so that retry also
+    # repairs children an earlier attempt missed.
+    derived: dict = {}
+    if content_changed:
+        # They describe text that is gone (owner decision). The re-enrichment
+        # scheduled below derives atomic facts from the new text. Storage takes
+        # every child live when the write lands, and names them for the audit
+        # below; a list read here first would miss a child committed after it,
+        # such as a late fan-out of the old text.
+        derived["soft_delete_children"] = True
+    else:
+        if "visibility" in fields_set and data.visibility in MEMORY_VISIBILITIES:
+            # Narrowing only: widening stays a separate publish decision, made
+            # row by row. ``MEMORY_VISIBILITIES`` runs narrowest to widest.
+            wider = MEMORY_VISIBILITIES[MEMORY_VISIBILITIES.index(data.visibility) + 1 :]
+            if wider:
+                derived.update(visibility=data.visibility, wider=list(wider))
+        if "expires_at" in fields_set:
+            expires_at = data.expires_at.isoformat() if data.expires_at else None
+            derived.update(mirror_expires_at=True, expires_at=expires_at)
+
+    # Apply the patch via storage client. ``derived`` stays out of ``patch``,
+    # which also decides below whether this request changed the row itself.
+    deleted_children: list[dict] = []
+    if patch or derived:
+        body = {**patch, "derived": derived} if derived else patch
+        landed = await sc.update_memory(str(memory_id), tenant_id, body)
+        # The children storage deleted, and only those: none when the row went
+        # before the write (``None``) or a concurrent request took them first.
+        deleted_children = (landed or {}).get("derived_deleted") or []
 
     # Audit log — only fire when something actually changed. The
     # ``elif data.metadata`` guard above already prevents falsy
@@ -4242,6 +4804,20 @@ async def update_memory(
             )
         except Exception:
             logger.warning("Audit hook failed (non-critical)", exc_info=True)
+    # B25 (M-53): each derived row the content edit removed, recorded as the
+    # delete path records it.
+    if _hooks.audit_log:
+        for child in deleted_children:
+            try:
+                await _hooks.audit_log(
+                    tenant_id=tenant_id,
+                    agent_id=child.get("agent_id"),
+                    action="soft_delete",
+                    resource_type="memory",
+                    resource_id=child["id"],
+                )
+            except Exception:
+                logger.warning("Audit hook failed (non-critical)", exc_info=True)
 
     # Re-fetch updated memory
     # ``read=False`` for the same reason, one step further: this is the row the
@@ -4330,6 +4906,45 @@ async def update_memory(
                         is_failure_fallback=True,
                     ),
                     "embed_or_publish",
+                    memory_id,
+                    tenant_id,
+                )
+            )
+        # H-07: the new text gets the LLM governance a create's text gets. Only
+        # the deterministic gate above had seen it, so the LLM's PII verdict, the
+        # business/personal disposition and their remediation (drop, keep
+        # private) never applied to an edit. Fast-mode semantics, by owner
+        # decision: this PATCH has returned before the verdict lands, inline in
+        # the background or through the worker.
+        #
+        # ``run_governance_remediation=True``, per ``_schedule_enrich_or_inline``'s
+        # rule for a new call site: no synchronous ``GovernanceDecision`` ran for
+        # this text. The pins are what the edit keeps (see
+        # ``_EDIT_PINNED_ENRICHMENT_FIELDS``); the caller-owned keys are read off
+        # the row as committed, because a deferred worker sees nothing else.
+        if reenrich:
+            row_meta = updated.get("metadata_")
+            if row_meta is None:
+                row_meta = updated.get("metadata")
+            kept = {f for f in _EDIT_KEPT_IF_SET_FIELDS if f in fields_set or mem.get(f) is not None}
+            pins = _EDIT_PINNED_ENRICHMENT_FIELDS | kept
+            track_task(
+                tracked_task(
+                    _schedule_enrich_or_inline(
+                        memory_id,
+                        updated.get("content"),
+                        tenant_id,
+                        updated.get("fleet_id"),
+                        updated.get("agent_id"),
+                        tenant_config,
+                        agent_provided_fields=sorted(pins),
+                        caller_owned_metadata_keys=sorted(caller_owned_keys(row_meta)),
+                        run_governance_remediation=True,
+                        # Inline only: the deferred worker receives no such
+                        # check, so a superseded run can still land there.
+                        current_content_only=True,
+                    ),
+                    "background_enrichment",
                     memory_id,
                     tenant_id,
                 )
@@ -4468,6 +5083,7 @@ def resolve_search_params(
     query: str,
     top_k: int,
     tenant_config=None,
+    top_k_explicit: bool = False,
 ) -> dict:
     """Resolve every search knob for one query, for both search paths.
 
@@ -4497,6 +5113,16 @@ def resolve_search_params(
     ``tenant_config`` is a ``ResolvedConfig`` on the primary search/recall paths
     (routes resolve it before calling); ``None`` is tolerated so callers that
     don't have one behave exactly as before A47.
+
+    ``top_k_explicit`` (SIDE-60) — True when the REST body named ``top_k``
+    itself. A caller-named ``top_k`` then outranks the whole ladder for this
+    one call (request → agent profile → tenant default → constant), the same
+    precedence a per-request ``min_similarity`` already gets. A profile /
+    tenant ``top_k`` stays the DEFAULT for callers that did not send one.
+    Without this a tenant ``default_profile.top_k=10`` answered ``top_k=12``
+    and ``top_k=3`` alike with 10 rows. Both sources are already bounded by
+    ``MAX_SEARCH_TOP_K`` (schema ``le=`` on the request, ``SEARCH_KNOBS``
+    bounds on the profile), so either winner respects the ceiling.
     """
     resolved = validate_search_profile(search_profile) if search_profile else {}
 
@@ -4506,7 +5132,7 @@ def resolve_search_params(
             resolved = {**tenant_default, **resolved}
 
     return {
-        "top_k": resolved.get("top_k", top_k),
+        "top_k": top_k if top_k_explicit else resolved.get("top_k", top_k),
         "min_similarity": resolved.get("min_similarity", MIN_SEARCH_SIMILARITY),
         "graph_max_hops": resolved.get("graph_max_hops", GRAPH_MAX_HOPS),
         # The one default that is not a constant: it adapts to the query unless
@@ -4665,7 +5291,14 @@ async def _get_or_cache_embedding(query: str, tenant_id: str, tenant_config):
         # propagates through the ``except`` below (future + joiners) and
         # the ``finally`` still pops the in-flight entry.
         async with per_tenant_slot("embed", tenant_id):
-            embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
+            # h-02's shape — both semantic endpoints down while CRUD stayed
+            # healthy — points at exactly this hop, because it is the one
+            # /search and /recall share and CRUD never touches. Naming it
+            # separately from ``slot_acquire.embed`` is the whole point: a
+            # stalled provider and a queue behind other tenants' embeds are
+            # different incidents with different owners.
+            with phase("embed.query"):
+                embedding = await asyncio.wait_for(get_query_embedding(query, tenant_config), timeout=10.0)
         if embedding is None:
             # Two different things arrive as ``None`` and they are not the
             # same incident. A blank query cannot be embedded by anyone, and
@@ -5016,6 +5649,9 @@ async def search_memories(
     fleet_ids: list[str] | None = None,
     filter_agent_id: str | None = None,
     caller_agent_id: str | None = None,
+    # The caller's HOME tenant — its own ``scope_agent`` rows are matched
+    # there only. ``tenant_id`` can be a sibling the caller pinned.
+    caller_tenant_id: str | None = None,
     memory_type_filter: str | None = None,
     status_filter: str | None = None,
     valid_at: datetime | None = None,
@@ -5035,6 +5671,17 @@ async def search_memories(
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
     allow_recall_bump: bool = True,
+    include_derived: bool | None = None,
+    # SIDE-57 — True when the REST body named ``top_k`` itself (vs. taking the
+    # schema default). Lets ClassifyQuery skip RECENT_CONTEXT's 5-row cap for a
+    # caller that explicitly asked for more, and (SIDE-60) makes the named
+    # value beat an agent-profile / tenant-default ``top_k`` on both search
+    # paths. Default False keeps every other caller (MCP, internal paths) on
+    # the previous behaviour.
+    top_k_explicit: bool = False,
+    # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
+    # strategy and any strategy-applied top_k cap. Pipeline path only.
+    retrieval_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     # ``allow_recall_bump`` defaults True so every existing caller — MCP
     # ``caura_recall``, the internal search paths — keeps bumping exactly as
@@ -5049,6 +5696,7 @@ async def search_memories(
             fleet_ids=fleet_ids,
             filter_agent_id=filter_agent_id,
             caller_agent_id=caller_agent_id,
+            caller_tenant_id=caller_tenant_id,
             allow_recall_bump=allow_recall_bump,
             memory_type_filter=memory_type_filter,
             status_filter=status_filter,
@@ -5066,6 +5714,9 @@ async def search_memories(
             source=source,
             min_similarity=min_similarity,
             recall_ctx=recall_ctx,
+            include_derived=include_derived,
+            top_k_explicit=top_k_explicit,
+            retrieval_ctx=retrieval_ctx,
         )
     logger.warning("legacy search path invoked; this path is deprecated and scheduled for removal")
     # The legacy path bumps recall_count unconditionally (no caller-agent gate,
@@ -5081,6 +5732,7 @@ async def search_memories(
         fleet_ids=fleet_ids,
         filter_agent_id=filter_agent_id,
         caller_agent_id=caller_agent_id,
+        caller_tenant_id=caller_tenant_id,
         memory_type_filter=memory_type_filter,
         status_filter=status_filter,
         valid_at=valid_at,
@@ -5092,6 +5744,8 @@ async def search_memories(
         search_profile=search_profile,
         min_similarity=min_similarity,
         allow_recall_bump=allow_recall_bump,
+        include_derived=include_derived,
+        top_k_explicit=top_k_explicit,
     )
     if recall_ctx is not None:
         recall_ctx["recall_tracked"] = bool(legacy_results) and allow_recall_bump
@@ -5104,6 +5758,7 @@ async def _search_memories_pipeline(
     fleet_ids: list[str] | None = None,
     filter_agent_id: str | None = None,
     caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
     allow_recall_bump: bool = True,
     memory_type_filter: str | None = None,
     status_filter: str | None = None,
@@ -5123,6 +5778,15 @@ async def _search_memories_pipeline(
     source: str = "search",
     min_similarity: float | None = None,
     recall_ctx: dict | None = None,
+    include_derived: bool | None = None,
+    # SIDE-57 — True when the REST body named ``top_k`` itself (vs. taking the
+    # schema default). Lets ClassifyQuery skip RECENT_CONTEXT's 5-row cap for a
+    # caller that explicitly asked for more. Default False keeps every other
+    # caller (MCP, internal paths) on the previous behaviour.
+    top_k_explicit: bool = False,
+    # SIDE-59 — always-on (non-diagnostic) channel for the resolved retrieval
+    # strategy and any strategy-applied top_k cap. Pipeline path only.
+    retrieval_ctx: dict | None = None,
 ) -> list[MemoryOut]:
     """Pipeline-based search_memories -- same logic, decomposed into timed steps."""
     from core_api.pipeline.compositions.search import build_search_pipeline
@@ -5135,11 +5799,13 @@ async def _search_memories_pipeline(
             "fleet_ids": fleet_ids,
             "filter_agent_id": filter_agent_id,
             "caller_agent_id": caller_agent_id,
+            "caller_tenant_id": caller_tenant_id,
             "allow_recall_bump": allow_recall_bump,
             "memory_type_filter": memory_type_filter,
             "status_filter": status_filter,
             "valid_at": valid_at,
             "top_k": top_k,
+            "top_k_explicit": top_k_explicit,
             "recall_boost_enabled": recall_boost,
             "graph_expand": graph_expand,
             # ``search.entity_retrieval`` — read by ClassifyQuery (skips the
@@ -5159,6 +5825,12 @@ async def _search_memories_pipeline(
             "min_similarity_override": min_similarity,
             "readable_tenant_ids": readable_tenant_ids,
             "source": source,
+            # pm-0918-c-03 — resolved ONCE here, not read off ``tenant_config``
+            # inside PostFilterResults, for the same reason
+            # ``strict_fleet_scoping`` above is: a step that forgot to consult
+            # the request layer would silently fall back to the tenant default,
+            # and the request flag is the layer a caller can actually see.
+            "include_derived": resolve_include_derived(include_derived, tenant_config),
         },
         tenant_config=tenant_config,
     )
@@ -5196,6 +5868,17 @@ async def _search_memories_pipeline(
         diagnostic_ctx["entity_matches"] = ctx.data.get("entity_matches")
         diagnostic_ctx["entity_match_declined"] = bool(ctx.data.get("entity_match_declined"))
 
+    if retrieval_ctx is not None:
+        plan = ctx.data.get("retrieval_plan")
+        retrieval_ctx["retrieval_strategy"] = plan.strategy.value if plan else None
+        # Present only when a strategy cut the caller's budget (today:
+        # RECENT_CONTEXT on a request that did not name ``top_k``).
+        if (cap := ctx.data.get("strategy_top_k_cap")) is not None:
+            retrieval_ctx["effective_top_k"] = cap
+        # The top_k resolved before any strategy cut: the request's when it named
+        # one, else the agent profile's or the tenant default's (M-19).
+        retrieval_ctx["resolved_top_k"] = (ctx.data.get("search_params") or {}).get("top_k")
+
     if recall_ctx is not None:
         # Written by TrackRecalls on every path it takes. Defaulting to False
         # when the key is absent keeps the honest failure direction: a caller
@@ -5229,6 +5912,7 @@ async def _search_memories_legacy(
     fleet_ids: list[str] | None = None,
     filter_agent_id: str | None = None,
     caller_agent_id: str | None = None,
+    caller_tenant_id: str | None = None,
     memory_type_filter: str | None = None,
     status_filter: str | None = None,
     valid_at: datetime | None = None,
@@ -5240,12 +5924,20 @@ async def _search_memories_legacy(
     search_profile: dict | None = None,
     min_similarity: float | None = None,
     allow_recall_bump: bool = True,
+    include_derived: bool | None = None,
+    top_k_explicit: bool = False,
 ) -> list[MemoryOut]:
     """Legacy search -- uses scored_search storage API endpoint."""
     sc = get_storage_client()
 
     # Same resolver the pipeline step uses — see ``resolve_search_params``.
-    sp = resolve_search_params(search_profile, query=query, top_k=top_k, tenant_config=tenant_config)
+    sp = resolve_search_params(
+        search_profile,
+        query=query,
+        top_k=top_k,
+        tenant_config=tenant_config,
+        top_k_explicit=top_k_explicit,
+    )
     _top_k = sp["top_k"]
     # D12 — per-request floor beats the resolved profile, same precedence as
     # ResolveSearchProfile applies on the pipeline path.
@@ -5322,6 +6014,7 @@ async def _search_memories_legacy(
         "strict_fleet_scoping": bool(getattr(tenant_config, "strict_fleet_scoping", False)),
         "filter_agent_id": filter_agent_id,
         "caller_agent_id": caller_agent_id,
+        "caller_tenant_id": caller_tenant_id,
         "memory_type_filter": memory_type_filter,
         "status_filter": status_filter,
         "valid_at": valid_at.isoformat() if valid_at else None,
@@ -5365,6 +6058,16 @@ async def _search_memories_legacy(
             allow_fts_global_floor_bypass=allow_fts_bypass,
         )
     ]
+    # pm-0918-c-03 — BEFORE the trim, deliberately, exactly as the pipeline step
+    # does it. Storage returned ``_top_k * SEARCH_OVERFETCH_FACTOR`` candidates,
+    # so dropping derived rows here still fills ``_top_k``; dropping them after
+    # the trim (or client-side) is what makes a caller asking for 50 get 36 and
+    # have to over-fetch and guess. Wired here as well as in the pipeline so the
+    # ``_USE_PIPELINE_SEARCH = False`` hotfix lever does not silently revert the
+    # filter — this file already carries two features that shipped pipeline-only
+    # for exactly that reason.
+    if not resolve_include_derived(include_derived, tenant_config):
+        rows = [r for r in rows if not is_derived_fanout_row(r.get("metadata_"))]
     rows = trim_reserving_fts_matches(
         rows,
         _top_k,

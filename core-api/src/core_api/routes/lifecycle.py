@@ -24,7 +24,7 @@ import weakref
 from collections.abc import Awaitable, Callable, MutableMapping
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from common.env_utils import read_int_env
 from common.events import (
@@ -46,6 +46,7 @@ from common.events.lifecycle_purge_request import (
 from core_api.auth import AuthContext, get_auth_context
 from core_api.clients.storage_client import get_storage_client
 from core_api.services.lifecycle_audit import audit_begin, resolve_publisher_kwargs
+from core_api.services.organization_settings import resolve_config
 from core_api.services.tenants import (
     list_active_tenant_ids,
     list_tenants_with_purgeable_memories,
@@ -57,6 +58,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Admin", "Lifecycle"])
 
 _PublisherFn = Callable[..., Awaitable[None]]
+# Pipeline ops gated by the consumer's dedup window (``lifecycle_handlers``),
+# whose publishers accept ``dedup_window_hours``.
+_DEDUP_WINDOW_ACTIONS = frozenset({"crystallize", "entity-link", "insights", "forge-distill"})
+# The scheduled transitions behind the per-tenant ``lifecycle.lifecycle_automation_enabled``
+# switch (M-115). Purge is retention, not a transition, and the pipeline ops have their
+# own switches; a manual single-org trigger is an explicit admin action and runs anyway.
+_LIFECYCLE_AUTOMATION_ACTIONS = frozenset({"archive-expired", "archive-stale"})
+
 _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     "archive-expired": publish_archive_expired_request,
     "archive-stale": publish_archive_stale_request,
@@ -72,8 +81,25 @@ _ACTION_PUBLISHERS: dict[str, _PublisherFn] = {
     # row rather than embedding inline, so the work paces through the normal
     # consumer path instead of competing with live writes at full rate.
     #
-    # PROVISION THE TOPIC BEFORE TRIGGERING THIS. ``memclaw.lifecycle.
-    # embed-backfill-requested`` is Terraform-provisioned, and
+    # PROVISION THE TOPIC BEFORE TRIGGERING THIS, under the name
+    # ``caura.lifecycle.embed-backfill-requested`` and no other. This comment
+    # used to name the pre-rebrand spelling and carried a floor marker calling
+    # it the live topic; both were wrong, and wrong in the direction that costs
+    # the most. The ``lifecycle`` family flipped 2026-08-28 and CONTRACTED
+    # 2026-09-01, so ``publish_name`` and ``subscribe_names`` — at ``dual``
+    # either way — return this one name and the bus can neither publish nor
+    # subscribe the other. No legacy-prefixed Pub/Sub resource remains for this
+    # family (``docs/plans/rebrand-sunset-plan.md``), so there was no live topic
+    # to floor. What the marker did was stop the ratchet counting the line and
+    # start a provisioner TRUSTING it: this topic has never been created, so the
+    # name written here is the name someone will type into Terraform, and typing
+    # the other one buys a sweep that publishes, reports success and moves
+    # nothing. ``common/events/events_manifest.json`` is the machine-checkable
+    # form of the same requirement — caura-enterprise's
+    # ``check_pubsub_provisioning.py`` reads it — and it lists this name for
+    # core-worker. Treat the manifest as the contract and this comment as its
+    # explanation, never the reverse.
+    #
     # ``PubSubEventBus.publish`` deliberately does not block on the publish
     # future, so a "topic not found" surfaces only in the SDK's background
     # thread. Triggering either route before infra lands therefore returns 200
@@ -246,12 +272,22 @@ async def _trigger_one(
 async def fanout_lifecycle_action(
     action: str,
     auth: AuthContext = Depends(get_auth_context),
+    dedup_window_hours: float | None = Query(
+        default=None,
+        gt=0,
+        le=168,
+        description=(
+            "Pipeline ops only: the consumer's dedup window in hours. Send a value just "
+            "under the schedule's interval when it runs more often than daily."
+        ),
+    ),
 ) -> dict:
     """Cron entry point — publish one message per active org.
 
     Caller is ``core-operations`` (``triggered_by='core-operations'``).
-    Returns ``{"action", "published", "failed"}`` — counts only, no
-    per-org id list, so the response stays bounded at scale.
+    Returns ``{"action", "published", "failed", "skipped"}`` — counts only,
+    no per-org id list, so the response stays bounded at scale. ``skipped``
+    counts orgs that turned the action's switch off (M-115).
 
     The org list is fetched up front (via core-storage-api) before the
     ``asyncio.gather`` fan-out; the fan-out itself holds no DB session, so a
@@ -259,6 +295,11 @@ async def fanout_lifecycle_action(
     """
     auth.enforce_admin()
     publisher = _resolve_publisher(action)
+    if dedup_window_hours is not None and action not in _DEDUP_WINDOW_ACTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"dedup_window_hours applies only to {sorted(_DEDUP_WINDOW_ACTIONS)}",
+        )
 
     org_ids = await _list_tenants_for_action(action)
 
@@ -269,9 +310,17 @@ async def fanout_lifecycle_action(
     # one-bad-org-must-not-abort-the-rest invariant.
     sem = _fanout_semaphore()
 
-    async def _bounded_trigger(org_id: str) -> int:
+    async def _bounded_trigger(org_id: str) -> int | None:
         async with sem:
+            # Read per org inside the budget, like the publisher kwargs. A read
+            # that fails raises, so the org counts as failed and is not run.
+            if action in _LIFECYCLE_AUTOMATION_ACTIONS:
+                config = await resolve_config(org_id)
+                if not config.lifecycle_automation_enabled:
+                    return None
             extra = await resolve_publisher_kwargs(action, org_id)
+            if dedup_window_hours is not None:
+                extra = {**(extra or {}), "dedup_window_hours": dedup_window_hours}
             return await _trigger_one(
                 action=action,
                 org_id=org_id,
@@ -287,6 +336,7 @@ async def fanout_lifecycle_action(
 
     published = 0
     failed = 0
+    skipped = 0
     for org_id, outcome in zip(org_ids, results, strict=True):
         if isinstance(outcome, BaseException):
             logger.exception(
@@ -295,6 +345,9 @@ async def fanout_lifecycle_action(
                 extra={"action": action, "org_id": org_id},
             )
             failed += 1
+            continue
+        if outcome is None:
+            skipped += 1
             continue
         published += 1
 
@@ -305,9 +358,10 @@ async def fanout_lifecycle_action(
             "org_count": len(org_ids),
             "published": published,
             "failed": failed,
+            "skipped": skipped,
         },
     )
-    return {"action": action, "published": published, "failed": failed}
+    return {"action": action, "published": published, "failed": failed, "skipped": skipped}
 
 
 # A fanout completes in about a minute in production. 30 minutes is far

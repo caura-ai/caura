@@ -58,8 +58,9 @@ async def telemetry_status(_auth: AuthContext = Depends(get_auth_context)) -> di
         body["payload_preview"] = await sender.preview()
     except Exception:
         logger.warning("telemetry preview failed", exc_info=True)
-    # ``build`` resolves the identity, so a worker that has not sent yet still
-    # knows the id after the preview.
+    # The preview reads the stored identity, so a worker that has not sent yet
+    # still reports the id once any worker has created it. Before the first
+    # send there is none, and the preview does not create one (L-127).
     body["deployment_id"] = body["deployment_id"] or sender.deployment_id
     return body
 

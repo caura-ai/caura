@@ -8,7 +8,7 @@ for releases.
 
 | Name | GitHub Handle | Role | Areas of ownership |
 |------|---------------|------|--------------------|
-| Eldad Dahan | [@Eldad-Caura](https://github.com/Eldad-Caura) | Lead maintainer | Infra & engineering |
+| Eldad Dahan | [@eldad-caura-ai](https://github.com/eldad-caura-ai) | Lead maintainer | Infra & engineering |
 | Erni Avraham | [@erni-a](https://github.com/erni-a) | Maintainer | Infra & engineering |
 | Ran Taig | [@ran-taig](https://github.com/ran-taig) | Maintainer | Logic & algorithms |
 | Arkady Mankovsky | [@arkash20](https://github.com/arkash20) | Maintainer | Logic & algorithms |

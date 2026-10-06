@@ -21,6 +21,19 @@ from fastapi.testclient import TestClient
 from core_api.routes.plugin import router
 from tests._legacy_contracts import FROZEN_PLUGIN_SLUG
 
+_TEST_ORIGINS = ("https://explicit.example.com",)
+
+
+@pytest.fixture(autouse=True)
+def _allow_test_installer_origins(monkeypatch):
+    """These tests name example API hosts on purpose. Installers now only embed
+    an ``api_url`` that is this server's own origin or operator-allowlisted
+    (``INSTALLER_ALLOWED_API_URLS``), so allowlist the hosts used here."""
+    from core_api.config import settings
+
+    monkeypatch.setattr(settings, "installer_allowed_api_urls", ",".join(_TEST_ORIGINS))
+
+
 pytestmark = pytest.mark.unit
 
 CLAUDE_SKILL_DIR = f"$HOME/.claude/skills/{FROZEN_PLUGIN_SLUG}"

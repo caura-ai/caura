@@ -145,8 +145,10 @@ def test_gate_accepts_case_insensitive_true(
     monkeypatch: pytest.MonkeyPatch,
     val: str,
 ) -> None:
-    """``MEMCLAW_RUN_DESTRUCTIVE_MIGRATIONS=TRUE`` (or ``True``) opts
-    in. Operators commonly capitalize bool envs."""
+    """The supported legacy spelling accepts mixed-case true values.
+
+    Operators commonly capitalize bool envs.
+    """
     monkeypatch.setenv(LEGACY_ENV, val)
     _patch_op(monkeypatch, existing_count=10)
     mig = _load_migration()

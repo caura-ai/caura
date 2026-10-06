@@ -54,13 +54,13 @@ Agents write plain text. Caura turns it into searchable, governed, self-improvin
 
 ### Try it locally — no API key, no signup
 
-The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (It boots with dummy embeddings so there's nothing to configure; add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
+The fastest way to see Caura work. Standalone mode runs single-tenant with auth bypassed — start Caura, write a memory, and find it again. (With no key there's nothing to configure: memories are stored without embeddings and found by keyword. Add an AI provider key for semantic search — see [Self-Hosted](#self-hosted-open-source) below.)
 
 ```bash
 git clone https://github.com/caura-ai/caura.git
 cd caura
 cp .env.example .env && echo "IS_STANDALONE=true" >> .env   # single-tenant, no API key
-docker compose up -d --wait                                 # Postgres + pgvector + Redis + API (~30s)
+docker compose up -d --wait                                 # Postgres + pgvector + Redis + API + scheduler (~30s)
 ```
 
 <!-- readme-quickstart-ci:start -->
@@ -155,9 +155,10 @@ tool call; the gateway rejects the reserved `mcp-agent` default on that path.
 
 ### Self-Hosted (Open Source)
 
-Docker Compose starts PostgreSQL + pgvector, Redis, the storage service, and the
-REST/MCP API. The keyless example above is the shortest path; add a provider for
-semantic recall.
+Docker Compose starts PostgreSQL + pgvector, Redis, the storage service, the
+REST/MCP API, and the `core-operations` lifecycle scheduler (nightly expiry,
+archival, purge and crystallization). The keyless example above is the shortest
+path; add a provider for semantic recall.
 
 <a id="prerequisites"></a>
 <a id="1-clone-and-configure"></a>
@@ -189,7 +190,10 @@ agent prompts and trust levels. Already have nodes running? Keeping them current
 The plugin talks only to the Caura server you configure (`CAURA_API_URL`) and
 identifies itself on every request with
 `User-Agent: openclaw-plugin/<version> (node/<major>)`, which the server's
-self-hosted heartbeat uses to count connected plugin installs.
+self-hosted heartbeat uses to count connected plugin installs. It will not send
+`CAURA_API_KEY` over plain `http://` to anything but loopback: point
+`CAURA_API_URL` at `https://`, or set `CAURA_ALLOW_INSECURE_HTTP=true` in the
+plugin `.env` to accept cleartext on a trusted private network.
 
 ### Python client
 
@@ -547,16 +551,16 @@ bash /tmp/install-caura-skill.sh
 
 | Query param | Effect |
 |---|---|
-| (none) | Install the **memclaw** skill for both Claude Code and Codex (default) |
+| (none) | Install the default Caura tool-reference skill for both Claude Code and Codex |
 | `?agent=claude-code` | Only Claude Code → `~/.claude/skills/<skill>/SKILL.md` |
 | `?agent=codex` | Only Codex → `~/.agents/skills/<skill>/SKILL.md` |
-| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of memclaw (see below; combine with `?agent=`) |
+| `?skill=company-brain` | Install the optional **Company Brain** posture skill instead of the default skill (see below; combine with `?agent=`) |
 
 #### Verify
 
 ```bash
-ls -la ~/.claude/skills/memclaw/SKILL.md       # Claude Code
-ls -la ~/.agents/skills/memclaw/SKILL.md       # Codex
+ls -la ~/.claude/skills/memclaw/SKILL.md       # Claude Code; legacy-name-floor: installed default-skill path
+ls -la ~/.agents/skills/memclaw/SKILL.md       # Codex; legacy-name-floor: installed default-skill path
 ```
 
 Restart your agent after installing — skills are loaded at startup.
@@ -567,10 +571,10 @@ installs; skip this step.
 
 #### Optional: the Company Brain skill
 
-`memclaw` teaches the agent the tools. **`company-brain`** is a thin,
+The default skill teaches the agent the tools. **`company-brain`** is a thin,
 concept-first *posture* skill that layers on top: it frames the agent as one
 mind in a shared **Company Brain** and defers all tool mechanics back to the
-`memclaw` skill. Install it alongside `memclaw` when you want that framing:
+tool-reference skill. Install the two together when you want that framing:
 
 ```bash
 curl -s "https://caura.ai/api/v1/install-skill?skill=company-brain" | bash
@@ -579,7 +583,7 @@ curl -s "https://caura.ai/api/v1/install-skill?skill=company-brain" | bash
 It installs to `~/.claude/skills/company-brain/SKILL.md` (Claude Code) and/or
 `~/.agents/skills/company-brain/SKILL.md` (Codex), and obeys the same
 `?agent=` filter. The default install (no `?skill=`) is unchanged — it
-installs `memclaw` only.
+installs the default tool-reference skill only.
 
 ---
 
@@ -592,9 +596,14 @@ The recommended way to run Caura is via Docker Compose (see [Quick Start](#quick
 Each release publishes multi-arch (linux/amd64, linux/arm64) images to [GitHub Container Registry](https://github.com/orgs/caura-ai/packages):
 
 ```
-ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0
-ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0
+ghcr.io/caura-ai/caura-memclaw-core-api:v2.5.0 # legacy-name-floor: published GHCR repository name
+ghcr.io/caura-ai/caura-memclaw-core-storage-api:v2.5.0 # legacy-name-floor: published GHCR repository name
+ghcr.io/caura-ai/caura-core-operations:v2.5.0
 ```
+
+`caura-core-operations`, the lifecycle scheduler, is newer than the other two and
+is published under the new name, so releases before it joined the stack have no
+image for it.
 
 Tags follow SemVer with floating aliases — `:v1`, `:v1.0`, `:v1.0.0`, plus `:latest` for the latest stable release. Pull them in your own compose file or Kubernetes manifests instead of building from source.
 
@@ -744,6 +753,11 @@ Every response from a rate-limited route carries `X-RateLimit-Limit`, `X-RateLim
 `REDIS_URL` is set — which is what makes the limit hold across replicas — and in process memory
 otherwise, so a multi-instance deployment without Redis limits each instance separately. A Redis
 outage fails open: requests pass through un-throttled rather than erroring.
+
+`X-RateLimit-*` is the per-second throttle and nothing else. A deployment with a usage meter wired
+reports the separate per-period plan quota as `X-Usage-Limit` / `X-Usage-Remaining` on
+`POST /memories`, `POST /memories/bulk` and `POST /search`; OSS standalone has no quota, so those
+headers are absent there.
 
 Add limiting at your reverse proxy (nginx, Caddy, Cloudflare) as well if you need per-IP DDoS
 floors or limits the application layer can't see.

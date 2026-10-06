@@ -285,12 +285,25 @@ def _demote_reserved_enrichment(result: EnrichmentResult) -> EnrichmentResult:
     matching guard for the keyword-heuristic fallback (:func:`fake_enrich`),
     whose primitive vocabulary still recognises rule/outcome shapes. Demoting
     here, rather than in the primitive, keeps ``fake_enrich`` reusable.
+
+    The same goes for the rest of what ``_validate_enrichment`` enforces on
+    the LLM path. The heuristic still knows the classifier-deprecated types
+    (``commitment`` / ``cancellation`` / ``intention``) and guesses a
+    lifecycle ``status`` (``pending`` for task/plan/commitment, ``confirmed``
+    for outcome). This runs on every write with no LLM key, with the fake
+    provider, and whenever the provider fails, so without this a keyless
+    deployment wrote deprecated types and rows invisible to ``status='active'``
+    queries. Deprecated types demote to the default and status is the default.
     """
-    if result.memory_type in SERVER_RESERVED_MEMORY_TYPES:
-        return result.model_copy(
-            update={"memory_type": MemoryType(DEFAULT_MEMORY_TYPE)}
-        )
-    return result
+    update: dict[str, object] = {}
+    if (
+        result.memory_type in SERVER_RESERVED_MEMORY_TYPES
+        or result.memory_type in CLASSIFIER_DEPRECATED_MEMORY_TYPES
+    ):
+        update["memory_type"] = MemoryType(DEFAULT_MEMORY_TYPE)
+    if result.status != "active":
+        update["status"] = "active"
+    return result.model_copy(update=update) if update else result
 
 
 async def enrich_memory(

@@ -17,7 +17,7 @@ You need these on your machine:
 git clone https://github.com/caura-ai/caura.git
 cd caura
 
-# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API)
+# 2. Start everything (PostgreSQL + pgvector, Redis, Caura API, lifecycle scheduler)
 docker compose up -d
 
 # 3. Wait for healthy (usually ~15 seconds)
@@ -108,6 +108,10 @@ explicitly in request bodies / query params. Admin/system keys are
 intentionally rejected by MCP; use standalone mode, a tenant-scoped key, or
 Path 3 for MCP.
 
+With `ADMIN_API_KEY` blank, the Docker stack generates an admin key for its own
+lifecycle scheduler (`admin-key-init`) and keeps it inside the stack. Setting
+`ADMIN_API_KEY` replaces it, for the scheduler too.
+
 **Path 3 — Gate the API with a shared key.** Set `CAURA_API_KEY` in your
 `.env`. REST and MCP clients send that key via `X-API-Key` plus `X-Tenant-ID`
 to pick a tenant. Use this when the OSS API is network-exposed.
@@ -161,7 +165,7 @@ curl -sf -H "X-API-Key: $CAURA_KEY" "$CAURA_URL/api/v1/install-plugin?fleet_id=$
 openclaw gateway restart    # or: systemctl --user restart openclaw-gateway
 ```
 
-This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP.
+This installs the plugin to `~/.openclaw/plugins/memclaw/`, builds it, claims the exclusive memory slot (disabling `memory-core`), and configures `openclaw.json` to allowlist the agent-facing tools. The plugin calls the local Caura API over HTTP — same tools as MCP. <!-- legacy-name-floor: the installer still writes the frozen plugin directory -->
 
 **MCP vs Plugin — which to use:**
 

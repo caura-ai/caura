@@ -46,7 +46,7 @@ HOLD = 2.5  # covers two sends (0.8 s, 2.0 s) and ends before the third (3.2 s)
 class _CannedSender(HeartbeatSender):
     """The real loop, lock, counter files and POST; storage replaced by constants."""
 
-    async def _read_storage(self):
+    async def _read_storage(self, *, create: bool = True):
         return IDENT, Counts(memories=7, agents=1, tenants=1)
 
 

@@ -49,7 +49,7 @@ def fake_tenant_config(monkeypatch):
             default_write_mode="fast",
         )
 
-    async def _fake_no_cache(tenant_id, doc_hash):
+    async def _fake_no_cache(tenant_id, doc_hash, **_scope):
         # A2: tests that don't care about caching get an unconditional miss.
         # The dedicated A2 tests below override this.
         return []
