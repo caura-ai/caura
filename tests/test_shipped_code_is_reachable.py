@@ -151,10 +151,13 @@ def _settings_fields(path: pathlib.Path) -> dict[str, int]:
 # reasons a name can land here and only one of them is acceptable, so each
 # entry states which.
 #
-# ``local_embedding_model`` is the acceptable one: it DECLARES an environment
-# variable that ``common/embedding/_registry.py`` reads from ``os.environ``
-# directly — the registry is shared with core-worker and must not import a
-# service's config. The control works; only the attribute is unread.
+# The acceptable kind DECLARES an environment variable that shared code reads
+# from ``os.environ`` directly. ``local_embedding_model`` was the one entry of
+# that kind until M-18 (2026-10-01 audit) found the control did NOT work on a
+# bare-metal run: pydantic-settings loads ``.env`` into ``Settings`` only, so a
+# ``.env``-only model never reached ``common/embedding/_registry.py``. The
+# credential bridge now exports it, which reads the attribute, so the list is
+# empty.
 #
 # The unacceptable kind is a knob that controls nothing, and this list held
 # three of them (``crystallizer_enabled``, ``_stale_days``,
@@ -167,7 +170,7 @@ def _settings_fields(path: pathlib.Path) -> dict[str, int]:
 # apart by attribute name, so it reported the one live control surface as
 # evidence that the dead one was live. It now resolves the settings singleton's
 # local aliases from each file's imports.
-_KNOWN_UNREAD_CORE_API_SETTINGS = frozenset({"local_embedding_model"})
+_KNOWN_UNREAD_CORE_API_SETTINGS: frozenset[str] = frozenset()
 
 
 def test_every_core_api_setting_is_read_by_something() -> None:

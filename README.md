@@ -617,7 +617,10 @@ The `core-api/` service is a standard FastAPI app that runs under any ASGI serve
 - PostgreSQL 16+ with the `pgvector` extension
 - Redis (optional — falls back to in-memory cache if unavailable)
 
+Export `.env` into the process environment before starting each service. The services load their own settings from `.env`, but some knobs are read from the environment only: the embedder (`OPENAI_EMBEDDING_*`, `EMBEDDING_QUERY_INSTRUCTION`), the reranker (`RANK_*`) and the provider model overrides (`*_DEFAULT_MODEL`). `.env.example` marks those blocks "env-only". Compose's `env_file:` puts them in the environment; a bare uvicorn run does not. An exported value takes precedence over `.env`, so export again after editing it. Sourcing hands every line to the shell, so wrap any value that contains spaces, quotes or shell characters such as `$`, `&`, `;` or backticks (a password, say) in single quotes. Otherwise the shell mangles it, and the mangled value overrides the one in `.env`.
+
 ```bash
+set -a; . ./.env; set +a
 uvicorn core_api.app:app --host 0.0.0.0 --port 8000 --workers 2
 ```
 

@@ -64,16 +64,14 @@ class Settings(BaseSettings):
     # MUST emit VECTOR_DIM dimensions; the provider now refuses a mismatch at
     # load rather than failing later at INSERT.
     #
-    # DECLARED, not read: ``common/embedding/_registry.py`` reads
-    # ``LOCAL_EMBEDDING_MODEL`` from ``os.environ`` directly, because that
-    # registry is shared with core-worker and must not import a service's
-    # config. This field exists so the variable appears in core-api's own
-    # settings surface; nothing consults the attribute.
+    # ``common/embedding/_registry.py`` reads ``LOCAL_EMBEDDING_MODEL`` from
+    # ``os.environ`` directly, because that registry is shared with core-worker
+    # and must not import a service's config. ``bridge_credentials_to_environ``
+    # exports this field there: on a bare-metal run nothing else puts a
+    # ``.env`` value into the environment (M-18).
     #
     # Default from the shared constant for the reason ``embedding_provider``
     # above gives: two copies of one literal is how they disagreed last time.
-    # ``test_every_core_api_setting_is_read_by_something`` names this field as
-    # the one declared-but-unread setting, with that distinction.
     local_embedding_model: str = DEFAULT_LOCAL_EMBEDDING_MODEL
     # Per-deploy control for where embedding + LLM enrichment run.
     #
@@ -1019,6 +1017,14 @@ def bridge_credentials_to_environ() -> None:
         # Default provider + model used by ``common.enrichment.service``.
         "ENTITY_EXTRACTION_PROVIDER": settings.entity_extraction_provider or "",
         "ENTITY_EXTRACTION_MODEL": settings.entity_extraction_model or "",
+        # Embedding provider and local model, read from ``os.environ`` by
+        # ``common.embedding`` (M-18): the provider by every embedder with no
+        # tenant config (the nightly entity backfill, the query-embedding cache
+        # key), the local model by the registry for every caller. Unbridged, a
+        # bare-metal ``.env`` that picked ``local`` embedded memories with it and
+        # those callers with the default provider: two vector spaces.
+        "EMBEDDING_PROVIDER": settings.embedding_provider or "",
+        "LOCAL_EMBEDDING_MODEL": settings.local_embedding_model or "",
         # OpenAI client timeout used by ``common.llm.constants``.
         "OPENAI_REQUEST_TIMEOUT_SECONDS": str(settings.openai_request_timeout_seconds),
         # Platform-tier singletons read by ``common.llm._platform``.
