@@ -187,6 +187,8 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
     wait: timeout=50 (0-50 seconds, below host timeout). Returns delivery (possibly null) and durable notices. Read notices even when delivery is null.
       On a wake hint, handle deliveries and repeat wait until delivery is null; drain notices too.
       One delivery at a time; stop if paused. Honor resume_context on human resumption.
+      After a pause, other ops re-check Caura: state=resumed shows new instructions, then retry;
+      state=unavailable means the work was withdrawn, so do not replay it.
     ack: delivery_id*. Explicit completion, idempotent even after restart.
     reply: delivery_id*, body*, idempotency_key*, reply_to, ack=true. Atomic reply+ack;
       ack=false for multi-step work. send with the claimed reply_to uses the same semantics.
@@ -222,7 +224,10 @@ async def dispatch(
         raise ValueError(f"peer {op} requires the caura-bus-mcp stdio transport")
     params = OPERATIONS[op].model_validate(args if args is not None else {})
     if leased and not isinstance(params, (Wait, MemoryContext)):
-        await app.delivery.guard()
+        target = getattr(params, "delivery_id", None)
+        if isinstance(params, Send) and params.reply_to in app.delivery.reply_deliveries:
+            target = app.delivery.reply_deliveries[params.reply_to][0]
+        await app.delivery.guard(target)
     match params:
         case MemoryContext():
             return await app.bus.memory_context(**params.model_dump())
