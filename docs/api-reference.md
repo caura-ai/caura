@@ -19,7 +19,7 @@ See also the [public API stability contract](public-api-stability.md) and the
 | `/memories/{id}` | GET | Full memory detail (embedding stats, entity links, RDF triple, temporal bounds) |
 | `/memories/{id}` | PATCH | Update content or metadata. Re-embeds if content changes |
 | `/memories/{id}` | DELETE | Soft delete (sets status to `deleted`) |
-| `/memories/{id}/status` | PATCH | Update lifecycle status |
+| `/memories/{id}/status` | PATCH | Update lifecycle status. A memory held for review (`quarantined`) is moved only here, by a person: `active` releases it, `cancelled` rejects it |
 | `/memories/{id}/contradictions` | GET | View contradiction chain |
 | `/memories` | DELETE | Bulk soft-delete |
 | `/memories/stats` | GET | Counts by type, agent, and status, plus `pending: {embedding, enrichment, fanout}` (live rows still owed background work) and `settled` (all zero). Benchmarks and other measure-after-ingest callers should poll until `settled: true` before measuring — see [BENCHMARKS.md](../BENCHMARKS.md#reproduce-it-yourself) |
@@ -180,6 +180,8 @@ request body.
 | `agent_fleet_update` | `agent` | `PATCH /agents/{id}/fleet` | — |
 | `keystone.set` | `keystone` | `POST /keystones` | `caura_keystones_set op=set` |
 | `keystone.delete` | `keystone` | `DELETE /keystones/{doc_id}` | `caura_keystones_set op=delete` |
+| `quarantine.release` | `memory` | `PATCH /memories/{id}/status` to `active`, on a held memory | — |
+| `quarantine.reject` | `memory` | `PATCH /memories/{id}/status` to `cancelled`, on a held memory | — |
 
 **Rate limiting (managed platform)**
 

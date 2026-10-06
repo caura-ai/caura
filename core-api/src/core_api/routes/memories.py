@@ -23,6 +23,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from common import permanent_failure
+from common.constants import QUARANTINE_EXITS, QUARANTINED_MEMORY_STATUS
 from common.enrichment.constants import SERVER_RESERVED_MEMORY_TYPES
 from core_api import openapi_responses as _oar
 from core_api import request_phase
@@ -1090,7 +1091,11 @@ async def get_memory(
     try:
         # Storage bundles the row + entity-link outerjoin + server-computed
         # embedding stats (raw pgvector never crosses the wire) in one call.
-        detail = await get_storage_client().get_memory_detail(tenant_id, str(memory_id))
+        # A held memory opens for a person reviewing it and is a 404 to
+        # everyone else, agents and machine keys included.
+        detail = await get_storage_client().get_memory_detail(
+            tenant_id, str(memory_id), include_held=auth.is_person
+        )
         if detail is None:
             raise HTTPException(status_code=404, detail="Memory not found")
         memory = detail["memory"]
@@ -2026,7 +2031,12 @@ async def update_memory_status(
     tenant_id: str = Query(...),
     auth: AuthContext = Depends(get_auth_context),
 ):
-    """Update memory status (e.g., active → confirmed)."""
+    """Update memory status (e.g., active → confirmed).
+
+    A memory held for review leaves quarantine here, and only here: a person
+    releases it (``active``) or rejects it (``cancelled``). To anyone else it
+    is a 404, as on every other read.
+    """
     auth.enforce_read_only()
     # Asked, not assumed. ``transition`` is not in ``PLAN_LIMIT_GATED_OPS``, so
     # this is a no-op today — deliberately written as a lookup rather than as an
@@ -2050,10 +2060,17 @@ async def update_memory_status(
         )
     sc = get_storage_client()
     # ``get_memory`` filters out soft-deleted / cross-tenant rows
-    # server-side, so a returned row is live + owned.
-    memory = await sc.get_memory(str(memory_id), tenant_id)
+    # server-side, so a returned row is live + owned. A held one comes back
+    # for a person only.
+    memory = await sc.get_memory(str(memory_id), tenant_id, include_held=auth.is_person)
     if not memory:
         raise HTTPException(status_code=404, detail="Memory not found")
+    held = memory.get("status") == QUARANTINED_MEMORY_STATUS
+    if held and status not in QUARANTINE_EXITS:
+        raise HTTPException(
+            status_code=409,
+            detail="A held memory is released (status 'active') or rejected (status 'cancelled'), nothing else.",
+        )
     # Cross-fleet / scope_agent row authorization for the authenticated agent
     # (no-op for tenant-scoped dashboard credentials, where auth.agent_id is None).
     if auth.agent_id:
@@ -2074,16 +2091,22 @@ async def update_memory_status(
                 ),
             )
     old_status = memory.get("status")
-    await sc.update_memory_status(str(memory_id), status, tenant_id=tenant_id)
+    updated = await sc.update_memory_status(str(memory_id), status, tenant_id=tenant_id, release_hold=held)
+    if held and updated is None:
+        # Another reviewer released or rejected it first.
+        raise HTTPException(status_code=409, detail="This memory is no longer held.")
 
     # Audit stays a decoupled async POST (not folded into the storage txn).
+    # A release or reject names the person who decided it.
     await log_action(
         tenant_id=tenant_id,
         agent_id=memory.get("agent_id"),
-        action="status_update",
+        action=("quarantine.release" if status == "active" else "quarantine.reject")
+        if held
+        else "status_update",
         resource_type="memory",
         resource_id=memory_id,
-        detail={"old_status": old_status, "new_status": status},
+        detail={"old_status": old_status, "new_status": status, **(auth.audit_actor() if held else {})},
     )
     return {"memory_id": str(memory_id), "old_status": old_status, "new_status": status}
 

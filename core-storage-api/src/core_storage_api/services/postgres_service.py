@@ -64,6 +64,8 @@ from common.constants import (
     GRAPH_MAX_HOPS,
     LIVE_MEMORY_STATUSES,
     NODE_PRINCIPAL_TENANT,
+    QUARANTINE_EXITS,
+    QUARANTINED_MEMORY_STATUS,
     RECALL_BOOST_SCALE,
     RELATION_TYPE_WEIGHTS,
     REPORT_RUNNING_STALE_AFTER,
@@ -1133,6 +1135,7 @@ def _entity_reader_memory_clause(
     conds = [
         Memory.tenant_id == tenant_id,
         Memory.deleted_at.is_(None),
+        Memory.status != QUARANTINED_MEMORY_STATUS,
         _visibility_scope_clause(caller_agent_id, caller_tenant_id or tenant_id),
     ]
     if caller_fleet_ids is not None:
@@ -1198,12 +1201,18 @@ def _entity_visible_to_tenant(tenant_id: str) -> ColumnElement[bool]:
     """
     return or_(
         ~_entity_has_readable_memory(Memory.tenant_id == tenant_id),
-        _entity_has_readable_memory(and_(Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None))),
+        _entity_has_readable_memory(
+            and_(
+                Memory.tenant_id == tenant_id,
+                Memory.deleted_at.is_(None),
+                Memory.status != QUARANTINED_MEMORY_STATUS,
+            )
+        ),
     )
 
 
 def _relation_has_live_evidence() -> ColumnElement[bool]:
-    """``Relation`` is not derived only from soft-deleted memories (M-92).
+    """``Relation`` is not derived only from soft-deleted or held memories (M-92).
 
     Kept when it has no evidence at all (a caller's own edge, or one whose
     evidence a pre-#1775 hard delete set to NULL, which nothing can tell apart),
@@ -1211,7 +1220,7 @@ def _relation_has_live_evidence() -> ColumnElement[bool]:
     ``relation_evidence`` row. So an edge some live memory still asserts stays,
     even when its latest evidence is the deleted one.
     """
-    live = Memory.deleted_at.is_(None)
+    live = and_(Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS)
     recorded = select(RelationEvidence.memory_id).where(RelationEvidence.relation_id == Relation.id)
     return or_(
         and_(Relation.evidence_memory_id.is_(None), ~recorded.exists()),
@@ -1779,8 +1788,14 @@ class PostgresService:
         self,
         memory_id: UUID,
         tenant_id: str,
+        *,
+        include_held: bool = False,
     ) -> Memory | None:
         """Fetch one memory by id within one tenant, or None.
+
+        A held memory (``QUARANTINED_MEMORY_STATUS``) is None too, unless
+        ``include_held``: only a person reviewing it may read one, and core-api
+        is what knows the caller is a person.
 
         There was an unscoped sibling, ``memory_get_by_id``, that took an id
         alone and returned whatever it matched. It is gone: it was the
@@ -1809,6 +1824,8 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
                 )
+                if not include_held:
+                    stmt = stmt.where(Memory.status != QUARANTINED_MEMORY_STATUS)
                 return (await session.execute(stmt)).scalar_one_or_none()
 
     @staticmethod
@@ -2581,6 +2598,7 @@ class PostgresService:
         supersedes_id: UUID | None = None,
         unset_supersedes: bool = False,
         expected_supersedes_id: UUID | None = None,
+        release_hold: bool = False,
     ) -> bool:
         """Update a memory's ``status`` and optionally (re)set ``supersedes_id``.
 
@@ -2606,13 +2624,28 @@ class PostgresService:
                 clobbered. It cannot express "expect NULL": ``None`` means
                 "no gate", so a caller whose precondition is an empty
                 pointer needs ``memory_set_supersedes_if_null`` instead.
+            release_hold: Move a held memory out of quarantine. The row must
+                be ``QUARANTINED_MEMORY_STATUS`` and ``status`` one of
+                ``QUARANTINE_EXITS``. Without it a held row never matches, so no
+                other writer (contradiction detection, the near-duplicate
+                merge, the crystallizer, a caller's transition) can move one.
 
         Returns:
             True if the row was updated, False if the ``expected_supersedes_id``
-            CAS check failed, the tenant didn't match, or the row id doesn't
-            exist. Existing callers ignore the return value — adding it is
-            backward-compatible.
+            CAS check failed, the tenant didn't match, the row id doesn't
+            exist, or the row is held and ``release_hold`` wasn't given (or
+            isn't held and it was). Existing callers ignore the return value —
+            adding it is backward-compatible.
+
+        Raises:
+            ValueError: ``status`` is the held status (a memory is held when
+                it is written, never by an update), or ``release_hold`` names a
+                status a held memory can't become.
         """
+        if status == QUARANTINED_MEMORY_STATUS:
+            raise ValueError("a memory is held when it is written, never by a status update")
+        if release_hold and status not in QUARANTINE_EXITS:
+            raise ValueError(f"a held memory becomes one of {', '.join(QUARANTINE_EXITS)}, not {status}")
         # 09/02 M-55: stamp WHEN the status changed. A contradiction is a flip
         # on an existing row, and that event previously had no timestamp — so
         # the outcome-inference window had to use ``created_at`` and dropped
@@ -2647,6 +2680,11 @@ class PostgresService:
                 # matched, updated, and returned True, so the route answered
                 # 200 for a write the caller is told is impossible.
                 Memory.deleted_at.is_(None),
+                # A held row moves only by release or reject, and only a held
+                # row moves that way.
+                (Memory.status == QUARANTINED_MEMORY_STATUS)
+                if release_hold
+                else (Memory.status != QUARANTINED_MEMORY_STATUS),
             )
             if expected_supersedes_id is not None:
                 stmt = stmt.where(Memory.supersedes_id == expected_supersedes_id)
@@ -3565,6 +3603,7 @@ class PostgresService:
                 else Memory.tenant_id == tenant_id
             ),
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
             # CAURA-594: NULL-embedding rows are admitted only if they also
             # match the FTS query — otherwise they'd rank on `Memory.weight *
             # freshness * ...` alone and could fill top_k slots with rows
@@ -4378,6 +4417,7 @@ class PostgresService:
                     if readable_tenant_ids
                     else Memory.tenant_id == tenant_id,
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
             )
             if fleet_ids:
@@ -5189,6 +5229,7 @@ class PostgresService:
                     Memory.tenant_id == tenant_id,
                     status_filter,
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
             )
             if fleet_id:
@@ -5397,6 +5438,7 @@ class PostgresService:
                           OR m.fleet_id = CAST(:fleet_id AS text)
                       )
                       AND m.deleted_at IS NULL
+                      AND m.status <> 'quarantined'
                     """
                 ),
                 params,
@@ -5463,7 +5505,9 @@ class PostgresService:
         # the number by an order of magnitude on busy environments.
         async with get_read_session() as session:
             result = await session.scalar(
-                select(func.count()).select_from(Memory).where(Memory.deleted_at.is_(None))
+                select(func.count())
+                .select_from(Memory)
+                .where(Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS)
             )
             return result or 0
 
@@ -5485,6 +5529,7 @@ class PostgresService:
                 select(func.count(func.distinct(Memory.agent_id))).where(
                     Memory.agent_id.isnot(None),
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
             )
             return result or 0
@@ -5502,6 +5547,7 @@ class PostgresService:
             result = await session.scalar(
                 select(func.count(func.distinct(Memory.tenant_id))).where(
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
             )
             return result or 0
@@ -5785,6 +5831,7 @@ class PostgresService:
     ) -> list[tuple]:
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            scope += " AND m.status <> 'quarantined'"
             params["stale_days"] = stale_days
             params["max_weight"] = max_weight
             result = await session.execute(
@@ -5810,6 +5857,7 @@ class PostgresService:
     ) -> list[tuple]:
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            scope += " AND m.status <> 'quarantined'"
             params["min_chars"] = min_chars
             result = await session.execute(
                 text(f"""
@@ -5831,6 +5879,7 @@ class PostgresService:
     ) -> dict:
         async with get_read_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            scope += " AND m.status <> 'quarantined'"
 
             r = await session.execute(
                 text(f"""
@@ -6359,6 +6408,7 @@ class PostgresService:
                 Memory.id.in_(memory_ids),
                 Memory.tenant_id == tenant_id,
                 Memory.deleted_at.is_(None),
+                Memory.status != QUARANTINED_MEMORY_STATUS,
             )
             result = await session.execute(stmt)
             return {m.id: m for m in result.scalars().all()}
@@ -6384,6 +6434,7 @@ class PostgresService:
         """
         filters: list[ColumnElement[bool]] = [
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
             Memory.fleet_id.isnot(None),
         ]
         if exclude_scope_agent:
@@ -6411,6 +6462,8 @@ class PostgresService:
         self,
         memory_id: UUID,
         tenant_id: str,
+        *,
+        include_held: bool = False,
     ) -> dict | None:
         """Bundle a single memory's full row + entity links + embedding stats.
 
@@ -6419,7 +6472,8 @@ class PostgresService:
         embedding column is stripped from the returned row dict. The memory
         row and its entity-link outerjoin are fetched in two queries in one
         session (no per-link N+1). Returns None when the row is absent, soft-
-        deleted, or belongs to another tenant. Read-only (reader replica).
+        deleted, or belongs to another tenant, and when it is held unless
+        ``include_held`` (a person reviewing it). Read-only (reader replica).
         """
         async with get_read_session() as session:
             # Fetch the memory + its agent label in one query (the agent join is
@@ -6436,6 +6490,8 @@ class PostgresService:
                 return None
             memory, agent_display_name = mem_row
             if memory.tenant_id != tenant_id or memory.deleted_at is not None:
+                return None
+            if memory.status == QUARANTINED_MEMORY_STATUS and not include_held:
                 return None
             memory.agent_display_name = agent_display_name
 
@@ -6516,7 +6572,12 @@ class PostgresService:
         """
         async with get_read_session() as session:
             memory = await session.get(Memory, memory_id)
-            if memory is None or memory.tenant_id != tenant_id or memory.deleted_at is not None:
+            if (
+                memory is None
+                or memory.tenant_id != tenant_id
+                or memory.deleted_at is not None
+                or memory.status == QUARANTINED_MEMORY_STATUS
+            ):
                 return None
 
             supersessors = (
@@ -6527,6 +6588,7 @@ class PostgresService:
                             Memory.supersedes_id == memory_id,
                             Memory.tenant_id == tenant_id,
                             Memory.deleted_at.is_(None),
+                            Memory.status != QUARANTINED_MEMORY_STATUS,
                         )
                         .order_by(Memory.created_at.desc())
                     )
@@ -6573,10 +6635,20 @@ class PostgresService:
         The single-row delete passes ``with_derived=False``: its callers
         (``soft_delete_memory``, governance remediation) delete and audit each
         child themselves, governance auditing before it deletes.
+
+        A held row (``QUARANTINED_MEMORY_STATUS``) is never selected: it leaves
+        quarantine only by a person's release or reject, so no delete, the
+        writer's own included, takes it out of the review queue. A tenant
+        purge still removes it.
         """
 
         def selected(m: Any) -> list[ColumnElement[bool]]:
-            clauses = [m.tenant_id == tenant_id, m.deleted_at.is_(None), *where(m)]
+            clauses = [
+                m.tenant_id == tenant_id,
+                m.deleted_at.is_(None),
+                m.status != QUARANTINED_MEMORY_STATUS,
+                *where(m),
+            ]
             if exclude_ids:
                 clauses.append(m.id.notin_(exclude_ids))
             return clauses
@@ -6752,6 +6824,9 @@ class PostgresService:
             stmt = stmt.where(Memory.fleet_id == fleet_id)
         if not include_deleted:
             stmt = stmt.where(Memory.deleted_at.is_(None))
+        # Held rows stay out even with the deleted ones in: a held row is never
+        # deleted, so this drops no deleted row.
+        stmt = stmt.where(Memory.status != QUARANTINED_MEMORY_STATUS)
         if agent_id:
             stmt = stmt.where(Memory.agent_id == agent_id)
         if memory_type:
@@ -6819,7 +6894,7 @@ class PostgresService:
                 memory_type, agent_id, status,
                 COUNT(*)                                         AS cnt
             FROM memories
-            WHERE deleted_at IS NULL
+            WHERE deleted_at IS NULL AND status <> 'quarantined'
               AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = CAST(:tenant_id AS text))
               AND (CAST(:fleet_id AS text) IS NULL OR fleet_id = CAST(:fleet_id AS text))
             GROUP BY GROUPING SETS ((memory_type), (agent_id), (status), ())
@@ -6961,6 +7036,9 @@ class PostgresService:
             stmt = stmt.where(Memory.created_at <= created_before)
         if not include_deleted:
             stmt = stmt.where(Memory.deleted_at.is_(None))
+        # Held rows stay out even with the deleted ones in: a held row is never
+        # deleted, so this drops no deleted row.
+        stmt = stmt.where(Memory.status != QUARANTINED_MEMORY_STATUS)
 
         if cursor_ts is not None and cursor_id is not None:
             # Cursor predicate direction must match the ORDER BY below: a desc
@@ -7105,7 +7183,7 @@ class PostgresService:
         if exclude_title_regex:
             scope_filters.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
 
-        filters = [Memory.deleted_at.is_(None), *scope_filters]
+        filters = [Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS, *scope_filters]
 
         include_by_tenant = bool(readable_tenant_ids and len(readable_tenant_ids) > 1)
 
@@ -7170,7 +7248,10 @@ class PostgresService:
             select_cols = f"{select_cols}, tenant_id"
 
         if include_deleted:
-            all_predicate, pred_params = _predicate_sql(scope_filters)
+            # A held row is never deleted, so it is out of both counts.
+            all_predicate, pred_params = _predicate_sql(
+                [*scope_filters, Memory.status != QUARANTINED_MEMORY_STATUS]
+            )
             sql = f"""
             WITH base AS (
                 SELECT memory_type, agent_id, status, tenant_id,
@@ -7290,6 +7371,7 @@ class PostgresService:
         """
         conds = [
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
             Memory.created_at >= since,
         ]
         if not include_scope_agent:
@@ -7373,7 +7455,7 @@ class PostgresService:
             scope_filters.append(Memory.agent_id.notin_(exclude_agent_ids))
         if exclude_title_regex:
             scope_filters.append(~func.coalesce(Memory.title, "").op("~*")(exclude_title_regex))
-        filters = [Memory.deleted_at.is_(None), *scope_filters]
+        filters = [Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS, *scope_filters]
 
         reused = case((Memory.recall_count > 0, 1), else_=0)
         per_type_stmt = (
@@ -8605,6 +8687,7 @@ class PostgresService:
         memory_conds: list[ColumnElement[bool]] = [
             Memory.id == MemoryEntityLink.memory_id,
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
         ]
         if caller_agent_id:
             memory_conds.append(
@@ -9030,6 +9113,7 @@ class PostgresService:
                 .where(
                     MemoryEntityLink.entity_id == entity_id,
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                     Memory.tenant_id == tenant_id,
                 )
             )
@@ -10049,6 +10133,7 @@ class PostgresService:
                           ON mem.id = a.memory_id
                           AND mem.tenant_id = :tenant_id
                           AND mem.deleted_at IS NULL
+                          AND mem.status <> 'quarantined'
                           {memory_fleet_clause}
                         WHERE a.entity_id IN (SELECT id FROM tenant_entity_ids)
                           AND b.entity_id IN (SELECT id FROM tenant_entity_ids)
@@ -11632,6 +11717,7 @@ class PostgresService:
         base = [
             Memory.tenant_id == tenant_id,
             Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
             Memory.content.notlike(PostgresService._INSIGHTS_OPAQUE_CONTENT_PREFIX),
             # The same visibility rule every read path applies: team and org
             # rows, plus the caller's own private rows. Insights put row
@@ -12165,7 +12251,11 @@ class PostgresService:
         Ports ``lifecycle_audit.insights()`` gate queries: ``MAX(created_at)``
         for non-insight vs insight memories, scoped to tenant (+ fleet).
         Returns ``{latest_non_insight: iso|null, latest_insight: iso|null}``."""
-        scope_filter = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        scope_filter = [
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
+        ]
         if fleet_id:
             scope_filter.append(Memory.fleet_id == fleet_id)
         async with get_read_session() as session:
@@ -12208,7 +12298,11 @@ class PostgresService:
         fleet-scoped run never swept the other fleets, so letting it answer here
         skipped them until the next write (L-52).
         """
-        mem_filter = [Memory.tenant_id == tenant_id, Memory.deleted_at.is_(None)]
+        mem_filter = [
+            Memory.tenant_id == tenant_id,
+            Memory.deleted_at.is_(None),
+            Memory.status != QUARANTINED_MEMORY_STATUS,
+        ]
         report_filter = [
             CrystallizationReport.tenant_id == tenant_id,
             CrystallizationReport.status == "completed",
@@ -12283,7 +12377,7 @@ class PostgresService:
             select(Memory.id)
             .where(Memory.id.in_(uuids))
             .where(Memory.tenant_id == tenant_id)
-            .where(Memory.deleted_at.is_(None))
+            .where(Memory.deleted_at.is_(None), Memory.status != QUARANTINED_MEMORY_STATUS)
             .where(_visibility_scope_clause(caller_agent_id, tenant_id))
         )
         if scope == "agent":
@@ -12451,6 +12545,7 @@ class PostgresService:
         """Per-agent memory stats + fleet summary for the Fleet UI."""
         async with get_session() as session:
             scope, params = _scope_sql(tenant_id, fleet_id)
+            scope += " AND m.status <> 'quarantined'"
             # Per-agent stats from memories
             result = await session.execute(
                 text(f"""
@@ -12635,6 +12730,7 @@ class PostgresService:
                     tenant_pred,
                     Memory.agent_id == agent_id,
                     Memory.deleted_at.is_(None),
+                    Memory.status != QUARANTINED_MEMORY_STATUS,
                 )
                 .limit(1)
             )
