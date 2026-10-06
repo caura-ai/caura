@@ -9,7 +9,8 @@ Endpoints (all under ``/v1/skills-inbox``):
 
   GET    /                       — list staged candidates
   POST   /{slug}/approve         — staged → active   (+ pre-apply rescan)
-  POST   /{slug}/reject          — staged → rejected (+ poison-table write)
+  POST   /{slug}/reject          — staged → rejected (+ poison-table write
+                                   for a Forge candidate)
   POST   /{slug}/quarantine      — staged → quarantined  (security review)
   POST   /{slug}/defer           — no-op; stamps ``deferred_at`` (Forge can revise)
   POST   /{slug}/edit            — revise content / description / summary;
@@ -321,7 +322,11 @@ class RejectRequest(BaseModel):
         default=None,
         ge=1,
         le=365,
-        description="Override poison-table cooloff. Defaults to org_settings.skills_factory.rejection_cooloff_days.",
+        description=(
+            "Override poison-table cooloff. Defaults to org_settings.skills_factory.rejection_cooloff_days. "
+            "Ignored for a skill with no cluster fingerprint, such as one an agent wrote: there is no "
+            "Forge cluster to cool off."
+        ),
     )
 
 
@@ -861,9 +866,17 @@ async def reject(
     tenant_id: str | None = Query(None),
     auth: AuthContext = Depends(get_auth_context),
 ) -> ActionResponse:
-    """Reject ``staged → rejected`` and write the cluster fingerprint
-    to ``forge_rejected_fingerprints`` so the next Forge run skips
-    that cluster for ``cooloff_days``.
+    """Reject ``staged → rejected``. For a Forge candidate, also write its
+    cluster fingerprint to ``forge_rejected_fingerprints`` so the next
+    Forge run skips that cluster for ``cooloff_days``.
+
+    A skill an agent wrote through the documents API has no fingerprint:
+    Forge did not derive it from a cluster and will not propose it again,
+    so there is nothing to cool off. It is rejected without the poison
+    write, and an explicit ``cooloff_days`` is ignored, as the response's
+    ``detail`` says. The agent cannot stage it again under the same slug:
+    a non-admin write to a rejected slug is refused
+    (``PROTECTED_LIVE_STATUSES`` in ``skill_lifecycle``).
 
     Fix 2 Ph5a: the poison write goes through core-storage-api
     (``write_rejected_fingerprint`` → ``sc.forge_write_rejected_fingerprint``)
@@ -892,10 +905,10 @@ async def reject(
         )
     fingerprint = data.get("cluster_fingerprint")
     if not isinstance(fingerprint, str) or not fingerprint:
-        raise HTTPException(
-            status_code=422,
-            detail=f"skill {slug!r} has no fingerprint; cannot poison cluster",
-        )
+        # Only a Forge candidate has a cluster to poison. Any other skill,
+        # such as one an agent staged, is rejected without the poison
+        # write; this used to answer 422, so none of them could be.
+        fingerprint = None
 
     # TOCTOU guard: re-fetch the doc and confirm it's still in a
     # rejectable status BEFORE we poison the cluster. Without this,
@@ -903,6 +916,8 @@ async def reject(
     # our initial load and this point — we'd then poison a cluster
     # that just shipped (and the next Forge run would refuse to
     # re-derive the now-deleted+re-needed skill for cooloff_days).
+    # With no cluster, it still guards the status flip, which would
+    # otherwise overwrite that Approve with ``rejected``.
     #
     # Ph5a NOTE: the poison write now commits storage-side immediately
     # (no shared SQLAlchemy transaction to roll back), so the pre-Ph5a
@@ -919,39 +934,40 @@ async def reject(
         slug=slug,
         expected_statuses={"staged", "candidate", "quarantined"},
     )
-    # Re-derive fingerprint from the FRESH doc — an Edit may have
-    # changed adjacent fields but content_hash + fingerprint stay
-    # bound to the cluster identity, so this is belt-and-suspenders.
-    data = doc.get("data") or {}
-    fingerprint = data.get("cluster_fingerprint")
-    if not isinstance(fingerprint, str) or not fingerprint:
-        raise HTTPException(
-            status_code=422,
-            detail=f"skill {slug!r} has no fingerprint after reload; cannot poison cluster",
-        )
+    if fingerprint is not None:
+        # Re-derive fingerprint from the FRESH doc — an Edit may have
+        # changed adjacent fields but content_hash + fingerprint stay
+        # bound to the cluster identity, so this is belt-and-suspenders.
+        data = doc.get("data") or {}
+        fingerprint = data.get("cluster_fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise HTTPException(
+                status_code=422,
+                detail=f"skill {slug!r} has no fingerprint after reload; cannot poison cluster",
+            )
 
-    # Second TOCTOU reload — narrows the window before the poison write.
-    doc = await _reload_and_assert_status(
-        tenant_id=tenant_id,
-        slug=slug,
-        expected_statuses={"staged", "candidate", "quarantined"},
-    )
-
-    try:
-        await write_rejected_fingerprint(
+        # Second TOCTOU reload — narrows the window before the poison write.
+        doc = await _reload_and_assert_status(
             tenant_id=tenant_id,
-            fleet_id=doc.get("fleet_id"),
-            cluster_fingerprint=fingerprint,
-            rejected_by_agent=(canonical_service_agent_id(auth.agent_id) if auth.agent_id else "unknown"),
-            reason=body.reason,
-            cooloff_days=cooloff,
+            slug=slug,
+            expected_statuses={"staged", "candidate", "quarantined"},
         )
-    except ValueError as exc:
-        # ``write_rejected_fingerprint`` raises ValueError on cooloff_days < 1
-        # or an empty fingerprint. Pydantic's ``ge=1`` on the request body
-        # catches the former, but a stale org_settings.rejection_cooloff_days
-        # could still inject 0; surface as 422 rather than 500.
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        try:
+            await write_rejected_fingerprint(
+                tenant_id=tenant_id,
+                fleet_id=doc.get("fleet_id"),
+                cluster_fingerprint=fingerprint,
+                rejected_by_agent=(canonical_service_agent_id(auth.agent_id) if auth.agent_id else "unknown"),
+                reason=body.reason,
+                cooloff_days=cooloff,
+            )
+        except ValueError as exc:
+            # ``write_rejected_fingerprint`` raises ValueError on cooloff_days < 1
+            # or an empty fingerprint. Pydantic's ``ge=1`` on the request body
+            # catches the former, but a stale org_settings.rejection_cooloff_days
+            # could still inject 0; surface as 422 rather than 500.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     try:
         prev, _ = await _persist_status_transition(
@@ -963,21 +979,22 @@ async def reject(
             extra_data_patches={"rejection_reason": body.reason},
         )
     except Exception:
-        # The poison row already committed storage-side (no shared txn to roll
-        # back). If the status flip fails HERE, the cluster is poisoned for
-        # cooloff_days while the doc still reads as a rejectable status — an
-        # inconsistent state an operator must reconcile by hand. Surface it
-        # loudly rather than letting it read as a generic 500, then re-raise.
-        logger.error(
-            "skill_inbox: reject status-flip FAILED after poison write for slug=%s — "
-            "the poison row is committed but the doc was NOT flipped to 'rejected'; "
-            "the cluster is silently blocked for %d days. Manual intervention required.",
-            slug,
-            cooloff,
-            exc_info=True,
-        )
+        if fingerprint is not None:
+            # The poison row already committed storage-side (no shared txn to
+            # roll back). If the status flip fails HERE, the cluster is poisoned
+            # for cooloff_days while the doc still reads as a rejectable status —
+            # an inconsistent state an operator must reconcile by hand. Surface
+            # it loudly rather than letting it read as a generic 500.
+            logger.error(
+                "skill_inbox: reject status-flip FAILED after poison write for slug=%s — "
+                "the poison row is committed but the doc was NOT flipped to 'rejected'; "
+                "the cluster is silently blocked for %d days. Manual intervention required.",
+                slug,
+                cooloff,
+                exc_info=True,
+            )
         raise
-    # Best-effort audit. The poison row already committed storage-side and
+    # Best-effort audit. Any poison row already committed storage-side and
     # the doc-status upsert already landed in storage; an audit-row
     # failure must not 500 a successful reject.
     try:
@@ -994,7 +1011,7 @@ async def reject(
             detail={
                 "slug": slug,
                 "previous_status": prev,
-                "cooloff_days": cooloff,
+                "cooloff_days": cooloff if fingerprint is not None else None,
                 "fingerprint": fingerprint,
             },
         )
@@ -1004,11 +1021,17 @@ async def reject(
             slug,
             exc_info=True,
         )
+    if fingerprint is not None:
+        detail = f"cluster fingerprint poisoned for {cooloff} days"
+    else:
+        detail = "no cluster fingerprint, so no cooloff was set"
+        if body.cooloff_days is not None:
+            detail += "; cooloff_days was ignored"
     return ActionResponse(
         slug=slug,
         previous_status=prev,
         new_status="rejected",
-        detail=f"cluster fingerprint poisoned for {cooloff} days",
+        detail=detail,
     )
 
 

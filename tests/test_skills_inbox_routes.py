@@ -21,6 +21,8 @@ All tests are pure unit tests — storage, settings, Sentinel, and the
 skill-write validator are patched at the module seam; no DB.
 """
 
+import logging
+
 import pytest
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
@@ -807,6 +809,9 @@ async def test_reject_happy_path_default_cooloff(storage, settings, side_effects
     (payload,) = storage.upserts
     assert payload["data"]["status"] == "rejected"
     assert payload["data"]["rejection_reason"] == "duplicate"
+    ((_, audit),) = side_effects.log.calls
+    assert audit["detail"]["fingerprint"] == "fp:v1:abc123"
+    assert audit["detail"]["cooloff_days"] == 30
 
 
 async def test_reject_custom_cooloff(storage, settings, side_effects):
@@ -845,15 +850,6 @@ async def test_reject_missing_reason_422(storage, settings, side_effects):
     assert side_effects.poison.calls == []
 
 
-async def test_reject_no_fingerprint_422(storage, settings, side_effects):
-    storage.seed(forge_doc(cluster_fingerprint=None))
-    async with make_client() as client:
-        r = await client.post(f"{BASE}/{SLUG}/reject", json={"reason": "r"})
-    assert r.status_code == 422
-    assert "fingerprint" in r.json()["detail"]
-    assert side_effects.poison.calls == []
-
-
 async def test_reject_concurrent_approve_409_before_poison(
     storage, settings, side_effects
 ):
@@ -868,6 +864,138 @@ async def test_reject_concurrent_approve_409_before_poison(
     assert r.status_code == 409
     assert side_effects.poison.calls == []
     assert storage.upserts == []
+
+
+async def test_reject_concurrent_approve_at_the_second_reload_409_before_poison(
+    storage, settings, side_effects
+):
+    """A Forge candidate still gets both reloads before the poison write: an
+    Approve that lands after the first one must still stop the reject."""
+    storage.doc_sequence = [
+        forge_doc(),  # initial load: staged
+        forge_doc(),  # first reload: staged
+        forge_doc(status="active"),  # second reload: concurrently approved
+    ]
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/reject", json={"reason": "r"})
+    assert r.status_code == 409
+    assert side_effects.poison.calls == []
+    assert storage.upserts == []
+
+
+async def test_reject_fingerprint_gone_on_reload_still_422(
+    storage, settings, side_effects
+):
+    """A Forge candidate whose fingerprint is gone on the reload is refused,
+    not rejected the way an agent's skill is: it came from a cluster, and
+    that cluster is what its reject has to poison."""
+    storage.doc_sequence = [forge_doc(), forge_doc(cluster_fingerprint=None)]
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/reject", json={"reason": "r"})
+    assert r.status_code == 422
+    assert "no fingerprint after reload" in r.json()["detail"]
+    assert side_effects.poison.calls == []
+    assert storage.upserts == []
+
+
+# A skill an agent wrote through the documents API, as the lifecycle stages it
+# when the factory is on. Forge did not derive it, so it has no cluster: no
+# ``cluster_fingerprint``, and none of a cluster's evidence.
+AGENT_SLUG = "rotate-staging-keys"
+
+
+def agent_doc(**data_overrides) -> dict:
+    doc = forge_doc(
+        slug=AGENT_SLUG,
+        source="agent",
+        origin={"agent_id": "agent-7"},
+        **data_overrides,
+    )
+    for key in ("cluster_fingerprint", "cites", "evidence", "goal"):
+        doc["data"].pop(key, None)
+    doc["doc_id"] = AGENT_SLUG
+    return doc
+
+
+@pytest.mark.parametrize("status", ["staged", "quarantined"])
+async def test_reject_without_a_fingerprint_skips_the_poison_write(
+    storage, settings, side_effects, status
+):
+    """An agent's skill has no cluster to poison. Reject used to answer 422
+    for it, so no skill an agent staged could be rejected at all."""
+    storage.seed(agent_doc(status=status))
+    async with make_client() as client:
+        r = await client.post(
+            f"{BASE}/{AGENT_SLUG}/reject", json={"reason": "not ours"}
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["previous_status"] == status
+    assert body["new_status"] == "rejected"
+    assert body["detail"] == "no cluster fingerprint, so no cooloff was set"
+    assert side_effects.poison.calls == []
+    (payload,) = storage.upserts
+    assert payload["data"]["status"] == "rejected"
+    assert payload["data"]["rejection_reason"] == "not ours"
+    # Audited as any reject is, with nothing put on cooloff.
+    ((_, audit),) = side_effects.log.calls
+    assert audit["action"] == "skill_inbox_reject"
+    assert audit["detail"]["fingerprint"] is None
+    assert audit["detail"]["cooloff_days"] is None
+
+
+async def test_reject_without_a_fingerprint_ignores_cooloff_days(
+    storage, settings, side_effects
+):
+    """With no cluster, an explicit cooloff has nothing to act on. The reject
+    goes through and says so, rather than failing over an option that would
+    change nothing."""
+    storage.seed(agent_doc())
+    async with make_client() as client:
+        r = await client.post(
+            f"{BASE}/{AGENT_SLUG}/reject", json={"reason": "r", "cooloff_days": 7}
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["detail"] == (
+        "no cluster fingerprint, so no cooloff was set; cooloff_days was ignored"
+    )
+    assert side_effects.poison.calls == []
+    ((_, audit),) = side_effects.log.calls
+    assert audit["detail"]["cooloff_days"] is None
+
+
+async def test_reject_without_a_fingerprint_409s_on_a_concurrent_approve(
+    storage, settings, side_effects
+):
+    """With no poison write to guard, the reload still guards the status flip:
+    an Approve that lands first must not be overwritten with ``rejected``."""
+    storage.doc_sequence = [
+        agent_doc(),  # initial load: staged
+        agent_doc(status="active"),  # reload: concurrently approved
+    ]
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{AGENT_SLUG}/reject", json={"reason": "r"})
+    assert r.status_code == 409
+    assert storage.upserts == []
+
+
+async def test_reject_without_a_fingerprint_failed_flip_reports_no_poison_row(
+    storage, settings, side_effects, monkeypatch, caplog
+):
+    """A failed status flip after a poison write is logged as needing manual
+    repair. No poison row was written for an agent's skill, and saying one
+    was would send an operator looking for a row that doesn't exist."""
+    storage.seed(agent_doc())
+
+    async def fail(payload):
+        raise RuntimeError("storage down")
+
+    monkeypatch.setattr(storage, "upsert_document", fail)
+    with caplog.at_level(logging.ERROR, logger=si.logger.name):
+        async with make_client() as client:
+            with pytest.raises(RuntimeError):
+                await client.post(f"{BASE}/{AGENT_SLUG}/reject", json={"reason": "r"})
+    assert "poison" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
