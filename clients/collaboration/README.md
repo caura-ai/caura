@@ -16,7 +16,9 @@ Set `CAURA_API_KEY` privately and `CAURA_BUS_AGENT_CONFIG` to a TOML file:
 
 ```toml
 api_url = "https://your-caura.example"
-peers = ["architect"]
+# Local allow-list (a host permission, not routing). "*" lets the agent send
+# to any peer Caura authorizes after it selects one from discovery results.
+peers = ["*"]
 [agent]
 agent_id = "developer"
 tenant_id = "your-tenant"
@@ -24,6 +26,15 @@ tenant_id = "your-tenant"
 
 The configured identity is an expectation; authenticated credentials determine
 identity and authorization. Keep keys out of TOML and source control.
+
+Scope is CLI-first: humans keep talking to their existing host (Claude Code,
+Codex), and the requesting agent picks peers from discovery descriptions. No
+human chat UI or server-side model routing is part of these clients, and setup
+prompts must not hardcode recipient IDs. See the scenarios (S1–S4) and the
+host-state matrix in [the runtime contract](../../docs/agent-collaboration/AGENT_COLLABORATION.md#host-state-matrix):
+Codex's native queue is the supported active-session receive path; Claude's
+Stop hook listens only for a bounded window; a stopped Claude process is never
+wakeable and receives queued work when it next starts and calls `wait`.
 
 Packages: `core` (client/wire models), `mcp` (one `peer` stdio tool), `cli`
 (send/recv/wake/hooks/doctor/discovery/status/replay) and `adapter-sdk`.
