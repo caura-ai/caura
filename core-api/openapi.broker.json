@@ -543,6 +543,150 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "KeystoneData": {
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when scope=agent.",
+            "title": "Agent Id"
+          },
+          "author_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when supplied at write time.",
+            "title": "Author User Id"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "scope": {
+            "description": "tenant, fleet, or agent.",
+            "title": "Scope",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "weight": {
+            "description": "Priority bucket 25, 50, or 100 (request labels low/med/high are converted).",
+            "title": "Weight",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "title",
+          "content",
+          "weight",
+          "scope"
+        ],
+        "title": "KeystoneData",
+        "type": "object"
+      },
+      "KeystoneDoc": {
+        "properties": {
+          "collection": {
+            "description": "Always \"_keystones\".",
+            "title": "Collection",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/KeystoneData"
+          },
+          "doc_id": {
+            "title": "Doc Id",
+            "type": "string"
+          },
+          "fleet_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null for tenant-scope rules.",
+            "title": "Fleet Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "fleet_id",
+          "collection",
+          "doc_id",
+          "data",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "KeystoneDoc",
+        "type": "object"
+      },
+      "KeystonesEnvelope": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KeystoneDoc"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "rule_set_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The rule-set hash of the rules in items: lowercase hex SHA-256, as the broker computes it for the rules it delivers. Null when a rule can't be hashed (a missing updated_at, a weight that isn't a number).",
+            "title": "Rule Set Hash"
+          }
+        },
+        "required": [
+          "count",
+          "items",
+          "rule_set_hash"
+        ],
+        "title": "KeystonesEnvelope",
+        "type": "object"
+      },
       "MemoryDetailResponse": {
         "description": "Full detail for one memory: row fields, entity links, embedding stats.",
         "properties": {
@@ -1978,6 +2122,129 @@
         "summary": "Health",
         "tags": [
           "System"
+        ]
+      }
+    },
+    "/api/v1/keystones": {
+      "get": {
+        "description": "Return scope-merged keystone rules. No trust gate — reads are\nsafe and the plugin needs this on every session start.\n\nCross-tenant credentials may inspect any tenant in their readable set\nby pinning ``tenant_id`` to it; the read is scoped to that single\ntenant's rules. Aggregate keystone view across the readable set\nisn't exposed here — agents should keep keystones explicitly per\ntenant for scope clarity.\n\nThe envelope's ``rule_set_hash`` names the rules in ``items``, so a\ncaller can tell whether a set it holds is still current.",
+        "operationId": "list_keystones_api_v1_keystones_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fleet_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fleet Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "description": "C30/D1 opt-in: return {count, items} instead of the bare array. The bare array stays the default until a separate announced deprecation wave.",
+            "in": "query",
+            "name": "envelope",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "C30/D1 opt-in: return {count, items} instead of the bare array. The bare array stays the default until a separate announced deprecation wave.",
+              "title": "Envelope",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "$ref": "#/components/schemas/KeystoneDoc"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "$ref": "#/components/schemas/KeystonesEnvelope"
+                    }
+                  ],
+                  "title": "Response 200 List Keystones Api V1 Keystones Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Keystones",
+        "tags": [
+          "Keystones"
         ]
       }
     },
