@@ -364,11 +364,12 @@ DEFAULT_SETTINGS: dict = {
         # Days a rejected cluster_fingerprint stays poison-flagged in
         # forge_rejected_fingerprints before Forge may re-propose it.
         "rejection_cooloff_days": 30,
-        # Sentinel scanner behavior. ``fail_on_critical=true`` → any
-        # critical finding flips the doc to ``status=quarantined``
-        # instead of letting it surface in the inbox.
+        # Sentinel scanner behavior. A critical finding always quarantines
+        # the doc; a reviewer releases one skill with ``override_quarantine``.
+        # A ``fail_on_critical`` key used to sit here and was read by nothing
+        # (M-114): ``false`` promised that critical findings would reach the
+        # inbox, and every such skill was quarantined all the same.
         "sentinel": {
-            "fail_on_critical": True,
             # When True, a Forge candidate that passes ALL six
             # auto-gates AND carries a clean Sentinel scan
             # (``scan.state='clean'``, ``critical=0``) is promoted
@@ -808,7 +809,6 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.body_max_bytes": int,
     "skills_factory.inbox_max_pending": int,
     "skills_factory.rejection_cooloff_days": int,
-    "skills_factory.sentinel.fail_on_critical": bool,
     "skills_factory.sentinel.auto_promote_clean": bool,
     "skills_factory.forge.cron_interval_hours": int,
     "skills_factory.forge.min_cluster_size": int,
@@ -1622,6 +1622,33 @@ def _is_display_mask(value: object) -> bool:
     return isinstance(value, str) and value.startswith(_DISPLAY_MASK)
 
 
+#: Keys a tenant could once store and nothing reads: ``fail_on_critical``
+#: (M-114) and ``llm_tokens_per_run`` (oss-0922-l-05). ``PUT`` refuses them now,
+#: but a value written before that is still in the tenant's row, and showing it
+#: would present a control that does nothing.
+_RETIRED_KEYS: tuple[tuple[str, ...], ...] = (
+    ("skills_factory", "sentinel", "fail_on_critical"),
+    ("skills_factory", "forge", "llm_tokens_per_run"),
+)
+
+
+def _without_retired(raw: dict) -> dict:
+    """``raw`` without ``_RETIRED_KEYS``, copying only the dicts on their paths."""
+    out = dict(raw)
+    for path in _RETIRED_KEYS:
+        node = out
+        for key in path[:-1]:
+            child = node.get(key)
+            if not isinstance(child, dict):
+                break
+            copied = dict(child)
+            node[key] = copied
+            node = copied
+        else:
+            node.pop(path[-1], None)
+    return out
+
+
 def _settings_display_view(settings: dict) -> dict:
     # Deliberately iterates ``items()`` and matches the section NAME as a
     # plain string instead of reading ``settings["api_keys"]``: a
@@ -1646,7 +1673,7 @@ async def get_settings_for_display(tenant_id: str) -> dict:
     keys go through ``ResolvedConfig`` / ``get_raw_settings``, never this view.
     """
     raw = await get_raw_settings(tenant_id)
-    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, raw))
+    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(raw)))
 
 
 #: The crystallizer settings a dedup stamp was settled under (M-38).
@@ -1731,7 +1758,7 @@ async def update_settings(
     merged = result["settings"]
     if not result.get("changed"):
         # Identical payload — storage wrote nothing; nothing to invalidate or broadcast.
-        return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))
+        return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(merged)))
 
     # Invalidate THIS process's cache immediately...
     invalidate_cache(tenant_id)
@@ -1767,4 +1794,4 @@ async def update_settings(
     if _SWEEP_POLICY_KEYS & set(new_settings.get("crystallizer") or {}):
         track_task(tracked_task(_reopen_dedup_sweep(tenant_id), "crystallizer_reopen_sweep", None, tenant_id))
 
-    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))
+    return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, _without_retired(merged)))
