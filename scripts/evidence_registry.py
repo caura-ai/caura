@@ -124,7 +124,8 @@ def _validate_model(claim_id: str, name: str, model: dict[str, Any]) -> None:
 def validate_registry(registry: dict[str, Any], schema: dict[str, Any]) -> None:
     """Validate schema plus cross-field and time-dependent evidence invariants."""
     _validate_schema(registry, schema)
-    _parse_date(registry["updated_at"], "updated_at")
+    registry_updated_at = _parse_date(registry["updated_at"], "updated_at")
+    latest_claim_date = date.min
 
     ids: set[str] = set()
     for claim in registry["claims"]:
@@ -135,15 +136,25 @@ def validate_registry(registry: dict[str, Any], schema: dict[str, Any]) -> None:
         status = claim["status"]
 
         if claim["measurement_at"] is not None:
-            _parse_date(claim["measurement_at"], f"{claim_id}.measurement_at")
+            latest_claim_date = max(
+                latest_claim_date,
+                _parse_date(claim["measurement_at"], f"{claim_id}.measurement_at"),
+            )
         elif status == "active":
             raise RegistryError(f"{claim_id}: active claims need measurement_at")
-        _parse_date(claim["last_verified_at"], f"{claim_id}.last_verified_at")
+        latest_claim_date = max(
+            latest_claim_date,
+            _parse_date(claim["last_verified_at"], f"{claim_id}.last_verified_at"),
+        )
         for index, measurement in enumerate(claim["measurements"]):
             measured = measurement["measurement_at"]
             if measured is not None:
-                _parse_date(
-                    measured, f"{claim_id}.measurements[{index}].measurement_at"
+                latest_claim_date = max(
+                    latest_claim_date,
+                    _parse_date(
+                        measured,
+                        f"{claim_id}.measurements[{index}].measurement_at",
+                    ),
                 )
             elif status == "active":
                 raise RegistryError(f"{claim_id}: active measurements need a date")
@@ -151,7 +162,10 @@ def validate_registry(registry: dict[str, Any], schema: dict[str, Any]) -> None:
         for disposition_name in ("withdrawal", "withholding"):
             disposition = claim[disposition_name]
             if disposition is not None:
-                _parse_date(disposition["at"], f"{claim_id}.{disposition_name}.at")
+                latest_claim_date = max(
+                    latest_claim_date,
+                    _parse_date(disposition["at"], f"{claim_id}.{disposition_name}.at"),
+                )
 
         _validate_model(claim_id, "answering_model", claim["answering_model"])
         _validate_model(claim_id, "judge", claim["judge"])
@@ -200,8 +214,18 @@ def validate_registry(registry: dict[str, Any], schema: dict[str, Any]) -> None:
                 "reproducible_harness_url",
             ):
                 url = claim[field]
-                if url and field != "methodology_url" and commit not in url:
+                if url and commit not in url:
                     raise RegistryError(f"{claim_id}.{field} must pin code_commit")
+            approved_wording = claim["approved_wording"]
+            for measurement in claim["measurements"]:
+                if (
+                    measurement["unit"] == "percent"
+                    and measurement["display"] not in approved_wording
+                ):
+                    raise RegistryError(
+                        f"{claim_id}: approved_wording must include "
+                        f"{measurement['display']}"
+                    )
         else:
             if not claim["methodology_url"] and claim["metric"] != "adoption":
                 raise RegistryError(
@@ -217,6 +241,12 @@ def validate_registry(registry: dict[str, Any], schema: dict[str, Any]) -> None:
                 raise RegistryError(
                     f"{claim_id}: null code commit needs an explicit null_reason"
                 )
+
+    if registry_updated_at < latest_claim_date:
+        raise RegistryError(
+            f"updated_at {registry_updated_at.isoformat()} predates claim metadata "
+            f"dated {latest_claim_date.isoformat()}"
+        )
 
 
 def load_registry() -> tuple[dict[str, Any], dict[str, Any]]:

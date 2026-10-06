@@ -1,7 +1,7 @@
 {
   "$schema": "./claims.schema.json",
   "registry_version": 1,
-  "updated_at": "2026-10-05",
+  "updated_at": "2026-10-06",
   "claims": [
     {
       "id": "locomo_caura_retrieval_accuracy_2026_09",
@@ -61,6 +61,7 @@
       "caveats": [
         "This is the Caura retrieval-augmented result, not the full-context control.",
         "The semantic-judge protocol is not the original LoCoMo token-F1 metric.",
+        "The answering model and semantic judge are both recorded as gemini-3.8-flash; this is not an independent-model judge result.",
         "The repository documents the summary but does not currently commit the full question-level result artifact."
       ],
       "withdrawal": null,

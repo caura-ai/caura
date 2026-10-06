@@ -21,7 +21,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned JSON Schema validator
-        run: python3 -m pip install --disable-pip-version-check jsonschema==4.25.1
+        run: python3 -m pip install --disable-pip-version-check -r scripts/requirements-evidence.txt
 
       - name: Validate claims and generated benchmark copy
         run: python3 scripts/evidence_registry.py --check
