@@ -7,9 +7,15 @@ from contextlib import suppress
 
 import httpx
 from caura_bus_core.bus import PlatformError
+from caura_bus_core.consult import PresentedResponses
 from caura_bus_core.protocol import Claim
 
 log = logging.getLogger(__name__)
+
+ALREADY_PRESENTED = (
+    "This response was already shown in this session (collect or recent). Do not act on it "
+    "again; ack this delivery_id."
+)
 
 
 class DeliverySession:
@@ -23,6 +29,10 @@ class DeliverySession:
         # (delivery_id, idempotency_key) replies sent, even if their result was lost.
         self.reply_attempts: set[tuple[str, str]] = set()
         self.reply_deliveries: dict[str, tuple[str, str, str]] = {}
+        # Responses already shown via collect/recent(reply_to) or an earlier wait.
+        self.presented = PresentedResponses()
+        # Called with a delivery ID once this session finishes it (consultation scopes).
+        self.on_finished = lambda _delivery_id: None
         # Notices returned while refreshing a stale claim; the next wait hands them over.
         self.notices: list = []
         # Human decisions whose resume_context the model has already been shown.
@@ -47,7 +57,14 @@ class DeliverySession:
             if claim and claim.resume_context:
                 self.surfaced.add(str(claim.resume_context.get("intervention_id")))
             notices, self.notices = [*self.notices, *result.get("notices", [])], []
-            return {"delivery": self.public(claim), "notices": notices}
+            delivery = self.public(claim)
+            if claim and claim.envelope.kind == "response" and not self.presented.add(claim.envelope.id):
+                # Already in this conversation: show attribution, not the body again,
+                # and leave the queued delivery for a normal ACK.
+                delivery["envelope"]["body"] = None
+                delivery["already_presented"] = True
+                delivery["note"] = ALREADY_PRESENTED
+            return {"delivery": delivery, "notices": notices}
 
     async def _adopt(self, result):
         claim = Claim.model_validate(result["delivery"]) if result["delivery"] else None
@@ -106,6 +123,7 @@ class DeliverySession:
             raise PlatformError(409, {"state": "paused", "delivery": self.public(claim)})
         if claim.state in {"acked", "cancelled"}:
             self.current = None
+            self.on_finished(claim.delivery_id)
 
     async def _refresh(self, stale, delivery_id, replay=False):
         """Re-read a paused or lease-lost claim through this session's authenticated wait.
@@ -161,6 +179,7 @@ class DeliverySession:
     def completed(self, delivery_id):
         if self.current and self.current.delivery_id == delivery_id:
             self.current = None
+        self.on_finished(delivery_id)
 
     async def _renew(self):
         while True:
