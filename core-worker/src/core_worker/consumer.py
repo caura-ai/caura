@@ -42,6 +42,7 @@ Failure modes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Callable
@@ -57,7 +58,7 @@ from common.enrichment import EnrichmentResult, enrich_memory
 from common.events.base import Event
 from common.events.factory import get_event_bus
 from common.events.lifecycle_archive_request import LifecycleArchiveRequest
-from common.events.lifecycle_handlers import claim_audit_row, write_success
+from common.events.lifecycle_handlers import claim_audit_row, release_cancelled_claim, write_success
 from common.events.memory_embed_request import MemoryEmbedRequest
 from common.events.memory_embedded_publisher import publish_memory_embedded
 from common.events.memory_enrich_request import MemoryEnrichRequest
@@ -901,6 +902,18 @@ async def handle_embed_backfill_request(event: Event) -> None:
             tenant_id=request.org_id,
             max_inflight=settings.embed_backfill_max_inflight,
         )
+    except asyncio.CancelledError:
+        # L-231: a deploy mid-sweep outlasts the bus's stop grace, and ``except
+        # Exception`` below does not see the cancel, so the row stayed claimed
+        # for the lease and its redelivery nacked on the claim until then.
+        await release_cancelled_claim(
+            audit_write,
+            request.audit_id,
+            org_id=request.org_id,
+            action="embed-backfill",
+            claim_token=claim_token,
+        )
+        raise
     except Exception as exc:
         # Finalise the audit row before re-raising. The fanout pre-creates it
         # as ``pending`` specifically so a row that never advances reads as a

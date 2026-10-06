@@ -34,6 +34,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from common import permanent_failure
+from common.events.base import EventBus
 from common.events.factory import get_event_bus
 from core_api.clients.storage_client import (
     PermanentStorageWriteError,
@@ -76,6 +77,7 @@ from core_api.routes.skills_inbox import router as skills_inbox_router
 from core_api.routes.stats import router as stats_router
 from core_api.routes.stm import router as stm_router
 from core_api.routes.telemetry import router as telemetry_router
+from core_api.tasks import cancel_all_tasks
 
 # CAURA-631: sentinel bucket for audit events that arrive without a
 # ``tenant_id`` field. Routed through the per-tenant flusher's
@@ -308,6 +310,92 @@ async def _flush_one_tenant(tid: str, tevs: list[dict]) -> None:
             len(tevs),
         )
         raise
+
+
+async def _shut_down(event_bus: EventBus, *, audit_queue, capability_usage_agg, usage_meter) -> None:
+    """core-api's shutdown steps, in order. Out of ``lifespan`` so the order
+    can be tested."""
+    # Each shutdown step is independent — a failure in one (a
+    # bus pull-loop close that raises, a tracked task whose
+    # cancellation hits a CancelledError swallow somewhere,
+    # an httpx pool already closed) must not skip the rest, or
+    # we leak the resources the later steps would have freed.
+    # Wrap each in its own try/except and continue; the
+    # executor.shutdown at the end always runs.
+    #
+    # Order matters: drain the audit queue BEFORE closing the
+    # storage client — the final flush goes through that client.
+    # Bus stop also happens before storage-client close because
+    # the bus's pull-loops may still be issuing storage calls
+    # mid-cancel.
+    # FIRST, ahead of every flush below: hand back this process's ephemeral
+    # broadcast subscriptions.
+    #
+    # Cloud Run allows 10s between SIGTERM and SIGKILL. The steps below are
+    # awaited SEQUENTIALLY and the first three carry 5s timeouts each, so on
+    # any shutdown where a queue has work the budget is gone before
+    # event_bus.stop() — which is where the delete used to live — is even
+    # reached. The process is killed, the subscription survives, and its
+    # expiration_policy holds project quota for a full day.
+    #
+    # That is not theory. core-api accumulated 6,571 orphaned subscriptions
+    # in staging against a live instance count in the low tens, exhausted
+    # the 10,000 subscriptions-per-project cap — which is shared with prod —
+    # and prod core-api then began failing to create its own subscription
+    # and degrading cross-process cache invalidation to the TTL.
+    # platform-auth-api, same library and same TTL, awaits its bus stop
+    # early and holds 2-6.
+    #
+    # This step needs nothing that the flushes below need, so it is cheap
+    # and cannot be starved by them. event_bus.stop() still calls it; this
+    # is an idempotent hoist, not a move.
+    shutdown_steps: list = [event_bus.release_broadcast_subscriptions()]
+    # The bus stops taking deliveries and settles the handlers in flight
+    # (M-09). core-api hosts the lifecycle pipeline consumers, and its pull
+    # loops used to take new runs until ``event_bus.stop()``, the sixth step.
+    # A run still going when the SIGKILL lands is never cancelled, so its audit
+    # row stays claimed for the 60-minute lease. Started now, before anything is
+    # awaited, so it settles alongside the release above and the task drain
+    # below rather than after them. Awaited before the flushes: handlers are
+    # producers too, and what they log must reach the audit queue.
+    consuming = asyncio.create_task(event_bus.stop_consuming())
+    # Background tasks drain BEFORE the queues that collect what they
+    # produce. They are producers: ``process_entity_extraction`` calls
+    # ``log_action`` (entity_extraction_worker.py) which enqueues onto the
+    # audit queue, and metered work calls ``usage_meter.record``. Draining
+    # them after those flushes meant a task that finished handed its audit
+    # event to a flusher that ``stop()`` had already set to None, and its
+    # counters to a buffer nothing would flush again — saving the work and
+    # dropping its trail.
+    #
+    # This also puts the drain where there is budget left to spend. The
+    # three 5s flushes below already over-run Cloud Run's 10s window on any
+    # shutdown with queued work, so as the last-but-one step this was
+    # reached with nothing remaining on exactly the shutdowns that motivated
+    # giving it a grace at all.
+    shutdown_steps.extend([cancel_all_tasks(), consuming])
+    if audit_queue is not None:
+        shutdown_steps.append(audit_queue.stop(timeout=5.0))
+    if capability_usage_agg is not None:
+        # Final flush before the storage client closes — same ordering
+        # rationale as the audit queue (the flush writes via the DB
+        # session, which must still be live).
+        shutdown_steps.append(capability_usage_agg.stop(timeout=5.0))
+    # Same ordering rationale: the final flush writes through the storage
+    # client, so it has to run before that client closes below. Without it
+    # a clean shutdown would discard up to one flush interval of counts.
+    shutdown_steps.append(usage_meter.stop(timeout=5.0))
+    shutdown_steps.extend(
+        [
+            event_bus.stop(),
+            get_storage_client().close(),
+        ]
+    )
+    for coro in shutdown_steps:
+        try:
+            await coro
+        except Exception:
+            logger.exception("error during shutdown step")
 
 
 @asynccontextmanager
@@ -570,8 +658,6 @@ async def lifespan(app):
             set_aggregator(capability_usage_agg)
             await capability_usage_agg.start()
 
-        from core_api.tasks import cancel_all_tasks
-
         # ``register_consumers`` must run before ``bus.start`` — the
         # Pub/Sub backend spawns pull loops from the handler registry
         # snapshot taken at start time, so a late ``subscribe`` would
@@ -606,78 +692,12 @@ async def lifespan(app):
 
         yield
 
-        # Each shutdown step is independent — a failure in one (a
-        # bus pull-loop close that raises, a tracked task whose
-        # cancellation hits a CancelledError swallow somewhere,
-        # an httpx pool already closed) must not skip the rest, or
-        # we leak the resources the later steps would have freed.
-        # Wrap each in its own try/except and continue; the
-        # executor.shutdown at the end always runs.
-        #
-        # Order matters: drain the audit queue BEFORE closing the
-        # storage client — the final flush goes through that client.
-        # Bus stop also happens before storage-client close because
-        # the bus's pull-loops may still be issuing storage calls
-        # mid-cancel.
-        # FIRST, ahead of every flush below: hand back this process's ephemeral
-        # broadcast subscriptions.
-        #
-        # Cloud Run allows 10s between SIGTERM and SIGKILL. The steps below are
-        # awaited SEQUENTIALLY and the first three carry 5s timeouts each, so on
-        # any shutdown where a queue has work the budget is gone before
-        # event_bus.stop() — which is where the delete used to live — is even
-        # reached. The process is killed, the subscription survives, and its
-        # expiration_policy holds project quota for a full day.
-        #
-        # That is not theory. core-api accumulated 6,571 orphaned subscriptions
-        # in staging against a live instance count in the low tens, exhausted
-        # the 10,000 subscriptions-per-project cap — which is shared with prod —
-        # and prod core-api then began failing to create its own subscription
-        # and degrading cross-process cache invalidation to the TTL.
-        # platform-auth-api, same library and same TTL, awaits its bus stop
-        # early and holds 2-6.
-        #
-        # This step needs nothing that the flushes below need, so it is cheap
-        # and cannot be starved by them. event_bus.stop() still calls it; this
-        # is an idempotent hoist, not a move.
-        shutdown_steps: list = [event_bus.release_broadcast_subscriptions()]
-        # Background tasks drain BEFORE the queues that collect what they
-        # produce. They are producers: ``process_entity_extraction`` calls
-        # ``log_action`` (entity_extraction_worker.py) which enqueues onto the
-        # audit queue, and metered work calls ``usage_meter.record``. Draining
-        # them after those flushes meant a task that finished handed its audit
-        # event to a flusher that ``stop()`` had already set to None, and its
-        # counters to a buffer nothing would flush again — saving the work and
-        # dropping its trail.
-        #
-        # This also puts the drain where there is budget left to spend. The
-        # three 5s flushes below already over-run Cloud Run's 10s window on any
-        # shutdown with queued work, so as the last-but-one step this was
-        # reached with nothing remaining on exactly the shutdowns that motivated
-        # giving it a grace at all.
-        shutdown_steps.append(cancel_all_tasks())
-        if audit_queue is not None:
-            shutdown_steps.append(audit_queue.stop(timeout=5.0))
-        if capability_usage_agg is not None:
-            # Final flush before the storage client closes — same ordering
-            # rationale as the audit queue (the flush writes via the DB
-            # session, which must still be live).
-            shutdown_steps.append(capability_usage_agg.stop(timeout=5.0))
-        # Same ordering rationale: the final flush writes through the storage
-        # client, so it has to run before that client closes below. Without it
-        # a clean shutdown would discard up to one flush interval of counts.
-        shutdown_steps.append(usage_meter.stop(timeout=5.0))
-        shutdown_steps.extend(
-            [
-                event_bus.stop(),
-                get_storage_client().close(),
-            ]
+        await _shut_down(
+            event_bus,
+            audit_queue=audit_queue,
+            capability_usage_agg=capability_usage_agg,
+            usage_meter=usage_meter,
         )
-        for coro in shutdown_steps:
-            try:
-                await coro
-            except Exception:
-                logger.exception("error during shutdown step")
         executor.shutdown(wait=False)
 
 
