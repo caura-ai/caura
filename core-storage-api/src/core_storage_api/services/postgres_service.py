@@ -7550,9 +7550,8 @@ class PostgresService:
         """
         async with get_session() as session:
             distance = Entity.name_embedding.cosine_distance(name_embedding)
-            similarity = (1.0 - distance).label("similarity")
-            stmt = (
-                select(Entity, similarity)
+            nearest = (
+                select(Entity.id, distance.label("distance"))
                 .where(
                     Entity.tenant_id == tenant_id,
                     Entity.entity_type == entity_type,
@@ -7565,10 +7564,18 @@ class PostgresService:
             # ``fleet_id`` matches an empty-string column value instead
             # of silently routing to the IS NULL branch.
             if fleet_id is not None:
-                stmt = stmt.where(Entity.fleet_id == fleet_id)
+                nearest = nearest.where(Entity.fleet_id == fleet_id)
             else:
-                stmt = stmt.where(Entity.fleet_id.is_(None))
+                nearest = nearest.where(Entity.fleet_id.is_(None))
 
+            # Re-sorted outside the scan; see ``_scan_past_other_tenants``.
+            found = nearest.subquery()
+            stmt = (
+                select(Entity, (1.0 - found.c.distance).label("similarity"))
+                .join(found, Entity.id == found.c.id)
+                .order_by(found.c.distance)
+            )
+            await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
             return list(result.all())  # type: ignore[arg-type]
 
@@ -7720,6 +7727,10 @@ class PostgresService:
             # session. N queries one HTTP — the win is HTTP-roundtrip
             # elimination, not query count. Items without a name_embedding
             # skip Phase 2 (mirrors ``entity_service.upsert_entity`` line 46).
+            # One SET LOCAL covers every lookup below, and each is re-sorted
+            # outside its scan, since the first match wins: see
+            # ``_scan_past_other_tenants``.
+            await _scan_past_other_tenants(session)
             for it in items:
                 idx = it["input_idx"]
                 if idx in matched_idxs:
@@ -7728,9 +7739,8 @@ class PostgresService:
                 if emb is None:
                     continue
                 distance = Entity.name_embedding.cosine_distance(emb)
-                sim_col = (1.0 - distance).label("similarity")
-                stmt = (
-                    select(Entity, sim_col)
+                nearest = (
+                    select(Entity.id, distance.label("distance"))
                     .where(
                         Entity.tenant_id == tenant_id,
                         Entity.entity_type == it["entity_type"],
@@ -7740,7 +7750,13 @@ class PostgresService:
                     .limit(candidate_limit)
                 )
                 # Phase 1's fleet key: ``''`` and NULL are one fleet (L-47).
-                stmt = stmt.where(_fleet_scope(Entity.fleet_id, it.get("fleet_id")))
+                nearest = nearest.where(_fleet_scope(Entity.fleet_id, it.get("fleet_id")))
+                found = nearest.subquery()
+                stmt = (
+                    select(Entity, (1.0 - found.c.distance).label("similarity"))
+                    .join(found, Entity.id == found.c.id)
+                    .order_by(found.c.distance)
+                )
 
                 rows = (await session.execute(stmt)).all()
                 for entity, sim in rows:
@@ -9442,21 +9458,28 @@ class PostgresService:
                    nb.sim
             FROM batch b
             JOIN LATERAL (
-                SELECT e.id, e.canonical_name,
-                       1 - (e.name_embedding <=> b.name_embedding) AS sim
-                FROM entities e
-                WHERE e.tenant_id = :tenant_id
-                  AND e.name_embedding IS NOT NULL
-                  AND e.id > b.id
-                  AND e.entity_type = b.entity_type
-                  AND e.fleet_id IS NOT DISTINCT FROM b.fleet_id
-                  AND (1 - (e.name_embedding <=> b.name_embedding)) >= :threshold
-                ORDER BY e.name_embedding <=> b.name_embedding
-                LIMIT :candidate_limit
+                SELECT nearest.id, nearest.canonical_name, nearest.sim
+                FROM (
+                    SELECT e.id, e.canonical_name,
+                           1 - (e.name_embedding <=> b.name_embedding) AS sim
+                    FROM entities e
+                    WHERE e.tenant_id = :tenant_id
+                      AND e.name_embedding IS NOT NULL
+                      AND e.id > b.id
+                      AND e.entity_type = b.entity_type
+                      AND e.fleet_id IS NOT DISTINCT FROM b.fleet_id
+                    ORDER BY e.name_embedding <=> b.name_embedding
+                    LIMIT :candidate_limit
+                ) nearest
+                WHERE nearest.sim >= :threshold
             ) nb ON true
         """)
 
         async with get_session() as session:
+            # The threshold applies to each entity's nearest neighbours, outside
+            # the scan: Postgres never pushes a WHERE into a subquery with a
+            # LIMIT. See ``_scan_past_other_tenants``.
+            await _scan_past_other_tenants(session)
             rows = (await session.execute(pair_sql, params)).all()
             # Similarity alone is not identity: 'CAURA-712' / 'CAURA-713',
             # 'v1.0.2' / 'v1.0.3' and 'acme (ohio)' / 'acme (delaware)' embed
@@ -9918,20 +9941,26 @@ class PostgresService:
                 FROM (SELECT id, embedding FROM memories
                       WHERE id = ANY(CAST(:memory_ids AS uuid[])) AND tenant_id = :tenant_id) m
                 JOIN LATERAL (
-                    SELECT e.id, e.canonical_name, e.attributes,
-                           1 - (e.name_embedding <=> m.embedding) AS sim
-                    FROM entities e
-                    WHERE e.tenant_id = :tenant_id
-                      AND e.name_embedding IS NOT NULL
-                      AND (1 - (e.name_embedding <=> m.embedding)) >= :threshold
-                      {entity_fleet_clause}
-                    ORDER BY e.name_embedding <=> m.embedding
-                    LIMIT 10
+                    SELECT nearest.id, nearest.canonical_name, nearest.attributes, nearest.sim
+                    FROM (
+                        SELECT e.id, e.canonical_name, e.attributes,
+                               1 - (e.name_embedding <=> m.embedding) AS sim
+                        FROM entities e
+                        WHERE e.tenant_id = :tenant_id
+                          AND e.name_embedding IS NOT NULL
+                          {entity_fleet_clause}
+                        ORDER BY e.name_embedding <=> m.embedding
+                        LIMIT 10
+                    ) nearest
+                    WHERE nearest.sim >= :threshold
                 ) e ON true
                 ORDER BY m.id, e.sim DESC
             """)
 
             with phases.phase("lateral"):
+                # The threshold applies to each memory's nearest entities,
+                # outside the scan; see ``_scan_past_other_tenants``.
+                await _scan_past_other_tenants(session)
                 lateral_rows = (
                     await session.execute(
                         lateral_query,
