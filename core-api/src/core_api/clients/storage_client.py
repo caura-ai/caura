@@ -686,10 +686,6 @@ class CoreStorageClient:
                 _storage_detail(exc.response), _storage_duplicate_fields(exc.response)
             ) from exc
 
-    async def get_tenant_by_tenant_id(self, tenant_id: str) -> dict | None:
-        """Return tenant settings used by collaboration admission policy."""
-        return await self._get(f"/tenants/by-tenant-id/{tenant_id}")
-
     async def get_memory(self, memory_id: str, tenant_id: str, *, read: bool = True) -> dict | None:
         """Fetch one memory by id, within ``tenant_id``.
 

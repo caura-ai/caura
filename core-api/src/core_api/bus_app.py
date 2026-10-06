@@ -2,14 +2,13 @@
 
 import asyncio
 import hmac
-import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import httpx
 from caura_bus_platform.collaboration_routes import HumanPrincipal, human_router
 from caura_bus_platform.liveness import SuppressionCache
-from caura_bus_platform.quota import QuotaPolicy, SendQuota
+from caura_bus_platform.quota import SendQuota
 from caura_bus_platform.routes import Operation, Principal, public_router
 from caura_bus_platform.runtime import (
     AdmissionMiddleware,
@@ -30,7 +29,6 @@ from core_api.config import settings
 from core_api.middleware.request_timeout import RequestTimeoutMiddleware
 from core_api.suppression import use_suppression_lookup
 
-log = logging.getLogger(__name__)
 
 
 async def _suppression_lookup(tenant):
@@ -173,22 +171,7 @@ async def _storage_call(operation):
 
 
 wake_hub = WakeHub()
-async def _quota_policy(tenant_id: str) -> QuotaPolicy | None:
-    try:
-        tenant = await get_storage_client().get_tenant_by_tenant_id(tenant_id)
-        values = ((tenant or {}).get("settings") or {}).get("collaboration_send_quota") or {}
-        if not isinstance(values, dict) or not values:
-            return None
-        return QuotaPolicy(
-            rate=int(values.get("rate_per_second", 20)),
-            burst=int(values.get("burst", 4)),
-        )
-    except Exception:
-        log.warning("collaboration quota settings lookup failed", exc_info=True)
-        return None
-
-
-quota = SendQuota(policy_loader=_quota_policy)
+quota = SendQuota()
 runtime = Runtime(wake_hub, get_storage_client, get_presence_storage_client, quota=quota)
 
 
