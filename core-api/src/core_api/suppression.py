@@ -35,10 +35,26 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from core_api.clients.storage_client import get_storage_client
 
 logger = logging.getLogger(__name__)
+
+# Dedicated workloads can supply a bounded lookup policy without changing
+# suppression enforcement or the default memory API cache.
+_scoped_lookup = ContextVar("suppression_lookup", default=None)
+
+
+@contextmanager
+def use_suppression_lookup(lookup):
+    token = _scoped_lookup.set(lookup)
+    try:
+        yield
+    finally:
+        _scoped_lookup.reset(token)
+
 
 # Mirror the auth-api ``_is_org_deleted`` cache window (CAURA-690).
 # Operators who soft-delete an org accept up to this much latency on
@@ -91,6 +107,9 @@ async def is_tenant_suppressed(tenant_id: str) -> bool:
     case (live, unknown, transport failure) returns ``False`` — the
     boundary fails OPEN so a storage flap can't take core-api down.
     """
+    lookup = _scoped_lookup.get()
+    if lookup is not None:
+        return await lookup(tenant_id)
     now = time.monotonic()
     cached = _cache.get(tenant_id)
     if cached is not None and cached[1] > now:
