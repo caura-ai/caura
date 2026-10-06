@@ -10,7 +10,7 @@ from time import monotonic
 import httpx
 
 from .agent import AgentConfig
-from .collaboration import Checkpoint, Presence
+from .collaboration import AgentDescription, Checkpoint, Presence
 from .config import require_api_key
 from .protocol import Claim, Receipt, SendMessage
 from .retry import Backoff, retry_after_seconds, transient_status
@@ -251,6 +251,15 @@ class Bus:
 
     async def advertise(self, profile: Presence):
         return await self.request("PUT", "presence", json=profile.model_dump(), retry_safe=True)
+
+    async def description(self):
+        """This agent's registered description (``description`` may be null)."""
+        return await self.request("GET", "agents/me/description", retry_safe=True)
+
+    async def describe(self, description: str | None):
+        """Set (or, with null/blank, clear) this agent's registered description."""
+        body = AgentDescription(description=description)
+        return await self.request("PUT", "agents/me/description", json=body.model_dump(), retry_safe=True)
 
     async def discover(self, *, capability: str | None = None, available_only=True, fleet_id=None):
         params = {"capability": capability, "available_only": available_only, "fleet_id": fleet_id}

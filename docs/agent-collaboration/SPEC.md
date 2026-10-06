@@ -60,12 +60,17 @@ canonical requests replay the original receipt; different payloads return 409.
 ## MCP interface
 
 The local stdio server exposes one `peer` tool with `op` and an optional `args`
-object. Opcodes are `discover`, `send`, `recent`, `agents`, `threads`, `status`,
+object. Opcodes are `discover`, `send`, `recent`, `agents`, `describe`, `threads`, `status`,
 `human`, `wait`, `ack`, `reply`, `progress`, `checkpoint` and `memory_context`. Each opcode validates its
 own required fields and rejects extra
 arguments. All operations use the same authenticated Caura client and platform
 authorization. Directory and thread results are wrapped in `agents` and
-`threads` lists; other results retain their API object shape. The seven former
+`threads` lists; other results retain their API object shape.
+Directory entries carry `description`, the agent's registered expertise (at most
+1000 characters, `null` when unset). It persists while the agent is offline and
+is distinct from live runtime state: `availability` (ready/busy/offline) and
+`sessions[]`, whose own `description` is the session's runtime text. `describe`
+sets or clears (null or blank) only the calling agent's description. The seven former
 tool names are replaced; clients should restart MCP and refresh their tool list.
 See [agent instructions](PEER_AGENT_CLAUDE_template.md) for arguments.
 

@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from caura_bus_core import AgentConfig, Bus, Kind, SendMessage, load_config
 from caura_bus_core.bus import HumanRequired, PlatformError
+from caura_bus_core.collaboration import AGENT_DESCRIPTION_MAX_LENGTH
 from caura_bus_core.protocol import MemoryContextRequest, StrictModel
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
@@ -45,6 +46,7 @@ Opcode = Literal[
     "send",
     "recent",
     "agents",
+    "describe",
     "threads",
     "status",
     "requests",
@@ -124,6 +126,11 @@ class Agents(Arguments):
     fleet_id: str | None = None
 
 
+class Describe(Arguments):
+    # Required (possibly null) so an empty call can never clear it by accident.
+    description: str | None = Field(max_length=AGENT_DESCRIPTION_MAX_LENGTH)
+
+
 class Requests(Arguments):
     state: Literal["awaiting", "overdue", "unanswered"] | None = None
     limit: int = Field(default=20, ge=1, le=100)
@@ -143,6 +150,7 @@ OPERATIONS: dict[str, type[Arguments]] = {
     "send": Send,
     "recent": Recent,
     "agents": Agents,
+    "describe": Describe,
     "threads": Arguments,
     "status": Status,
     "requests": Requests,
@@ -171,7 +179,11 @@ async def _resolve_peer_list(to: list[str], app: AppContext) -> list[str]:
 async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> dict:
     """Caura peer operations. args fields by op (* required; others optional):
     discover: capability, available_only=true, fleet_id. Returns agents with live skills/status.
-    agents: fleet_id. Returns registered peers.
+      description is the registered expertise (kept while offline, may be null);
+      availability (ready/busy/offline) and sessions are live runtime state.
+    agents: fleet_id. Returns registered peers, each with its registered description.
+    describe: description* (string up to 1000 chars, or null/blank to clear). Sets your own
+      registered expertise; it never changes other agents.
     send: to* (ID list), body*, idempotency_key*, kind=info (info/request/response/ack),
       thread_id, reply_to, expect_reply_within_seconds=60..604800, capability (request only).
       Returns message_id/thread_id; accepted does not mean completed.
@@ -204,7 +216,18 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
 
 
 REMOTE_OPERATIONS = frozenset(
-    {"discover", "send", "recent", "agents", "threads", "status", "requests", "human", "memory_context"}
+    {
+        "discover",
+        "send",
+        "recent",
+        "agents",
+        "describe",
+        "threads",
+        "status",
+        "requests",
+        "human",
+        "memory_context",
+    }
 )
 
 
@@ -306,6 +329,8 @@ async def dispatch(
         case Agents():
             agents = await app.bus.agents(params.fleet_id)
             return {"agents": [a for a in agents if a["agent_id"] != app.config.agent.agent_id]}
+        case Describe():
+            return await app.bus.describe(params.description)
         case Requests():
             return await app.bus.requests(**params.model_dump())
         case Status():

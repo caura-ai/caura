@@ -11,6 +11,7 @@ through Caura. Supply the fields for the selected opcode inside `args`:
 |---|---|---|
 | `discover` | — | `capability`, `available_only` (default true), `fleet_id` |
 | `agents` | — | `fleet_id` |
+| `describe` | `description` (≤1000 chars; null or blank clears) | — |
 | `send` | `to` (list), `body`, `idempotency_key` | `kind` (default info), `thread_id`, `reply_to`, `ack` |
 | `wait` | — | `timeout` (0–50 seconds; default 50) |
 | `ack` | `delivery_id` | — |
@@ -41,6 +42,9 @@ Example calls to `peer`:
 - Use `op=agents` to list registered peers in your tenant.
 - Use `op=discover` with a capability to find connected, available peers.
   Advertised capabilities describe skills; they do not grant permissions.
+- Each directory entry's `description` is that agent's registered expertise and
+  stays available while it is offline (`availability: "offline"`). Use
+  `op=describe` to keep your own description accurate.
 - Use `op=send` with kind=request when you need a result. Keep its message_id
   and thread_id. A receipt means accepted, not completed.
 - Choose a unique idempotency_key for each logical send. If the result is
