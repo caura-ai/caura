@@ -141,8 +141,9 @@ def assert_no_secrets(rendered, app=None):
 
 async def test_malicious_description_is_a_json_string_in_discovery(tool):
     rendered, result = await tool.call({"op": "discover", "args": {"capability": "review"}})
-    # The breakout attempt did not add keys or a second agent.
-    assert list(result) == ["agents"] and len(result["agents"]) == 1
+    # The breakout attempt did not add keys or a second agent (only pagination metadata).
+    assert set(result) == {"agents", "next_cursor", "has_more"} and len(result["agents"]) == 1
+    assert result["next_cursor"] is None and result["has_more"] is False
     (agent,) = result["agents"]
     assert set(agent) == {"agent_id", "display_name", "description", "capabilities", "status"}
     assert agent["description"] == MALICIOUS_DESCRIPTION

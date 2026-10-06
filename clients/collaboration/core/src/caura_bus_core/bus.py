@@ -10,7 +10,7 @@ from time import monotonic
 import httpx
 
 from .agent import AgentConfig
-from .collaboration import Checkpoint, Presence
+from .collaboration import AgentDescription, Checkpoint, Presence
 from .config import require_api_key
 from .protocol import Claim, Receipt, SendMessage
 from .retry import Backoff, retry_after_seconds, transient_status
@@ -30,6 +30,31 @@ class PlatformError(RuntimeError):
         self.status = status
         self.detail = detail
         super().__init__(f"Caura returned {status}: {detail}")
+
+
+# Directory pagination bounds. The server pages ``agents``/``discover`` with an
+# opaque keyset cursor and accepts 1-500 agents per page.
+DIRECTORY_PAGE_MAX = 500
+DIRECTORY_PAGE_DEFAULT = 100
+DIRECTORY_MAX_PAGES = 200
+
+
+class DirectoryIncomplete(RuntimeError):
+    """The directory has more pages than a full listing is allowed to fetch."""
+
+
+def _page_size(limit: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= DIRECTORY_PAGE_MAX:
+        raise ValueError(f"limit must be between 1 and {DIRECTORY_PAGE_MAX}")
+    return limit
+
+
+def _directory_page(result) -> dict:
+    # A server without directory pagination ignores cursor/limit and returns
+    # its capped bare list; it offers no continuation, so treat it as final.
+    if isinstance(result, list):
+        return {"agents": result, "next_cursor": None}
+    return {"agents": result["agents"], "next_cursor": result.get("next_cursor")}
 
 
 class Bus:
@@ -213,7 +238,34 @@ class Bus:
         )
 
     async def agents(self, fleet_id: str | None = None):
+        """First directory page only, as a bare list (legacy). Prefer ``agents_page``/``agents_all``."""
         return await self.request("GET", "agents", params={"fleet_id": fleet_id} if fleet_id else {})
+
+    async def agents_page(
+        self, fleet_id: str | None = None, *, cursor: str | None = None, limit: int = DIRECTORY_PAGE_DEFAULT
+    ) -> dict:
+        """One bounded directory page: ``{"agents", "next_cursor"}``; more exist while ``next_cursor`` is set."""
+        params = {"fleet_id": fleet_id, "cursor": cursor, "limit": _page_size(limit)}
+        return _directory_page(
+            await self.request("GET", "agents", params={k: v for k, v in params.items() if v is not None})
+        )
+
+    async def agents_all(self, fleet_id: str | None = None, *, max_pages: int = DIRECTORY_MAX_PAGES) -> list:
+        """Every registered agent, following ``next_cursor`` to the last page."""
+        return await self._all_pages(
+            lambda cursor: self.agents_page(fleet_id, cursor=cursor, limit=DIRECTORY_PAGE_MAX), max_pages
+        )
+
+    async def _all_pages(self, fetch, max_pages: int) -> list:
+        agents: list = []
+        cursor = None
+        for _ in range(max_pages):
+            page = await fetch(cursor)
+            agents.extend(page["agents"])
+            cursor = page["next_cursor"]
+            if cursor is None:
+                return agents
+        raise DirectoryIncomplete(f"agent directory exceeds {max_pages} pages")
 
     async def recent(
         self,
@@ -257,10 +309,65 @@ class Bus:
     async def advertise(self, profile: Presence):
         return await self.request("PUT", "presence", json=profile.model_dump(), retry_safe=True)
 
+    async def description(self):
+        """This agent's registered description (``description`` may be null)."""
+        return await self.request("GET", "agents/me/description", retry_safe=True)
+
+    async def describe(self, description: str | None):
+        """Set (or, with null/blank, clear) this agent's registered description."""
+        body = AgentDescription(description=description)
+        return await self.request("PUT", "agents/me/description", json=body.model_dump(), retry_safe=True)
+
     async def discover(self, *, capability: str | None = None, available_only=True, fleet_id=None):
+        """First discovery page only, as a bare list (legacy). Prefer ``discover_page``."""
         params = {"capability": capability, "available_only": available_only, "fleet_id": fleet_id}
         return await self.request(
             "GET", "discover", params={k: v for k, v in params.items() if v is not None}
+        )
+
+    async def discover_page(
+        self,
+        *,
+        capability: str | None = None,
+        available_only=True,
+        fleet_id=None,
+        cursor: str | None = None,
+        limit: int = DIRECTORY_PAGE_DEFAULT,
+    ) -> dict:
+        """One bounded discovery page: ``{"agents", "next_cursor"}``.
+
+        Pass ``next_cursor`` back with the same filters for the next page; a
+        cursor is bound to its filters and tenant.
+        """
+        params = {
+            "capability": capability,
+            "available_only": available_only,
+            "fleet_id": fleet_id,
+            "cursor": cursor,
+            "limit": _page_size(limit),
+        }
+        return _directory_page(
+            await self.request("GET", "discover", params={k: v for k, v in params.items() if v is not None})
+        )
+
+    async def discover_all(
+        self,
+        *,
+        capability: str | None = None,
+        available_only=True,
+        fleet_id=None,
+        max_pages: int = DIRECTORY_MAX_PAGES,
+    ) -> list:
+        """Every matching agent, following ``next_cursor`` to the last page."""
+        return await self._all_pages(
+            lambda cursor: self.discover_page(
+                capability=capability,
+                available_only=available_only,
+                fleet_id=fleet_id,
+                cursor=cursor,
+                limit=DIRECTORY_PAGE_MAX,
+            ),
+            max_pages,
         )
 
     async def checkpoint(self, checkpoint: Checkpoint):

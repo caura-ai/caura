@@ -242,7 +242,10 @@ def discover(
     config: Path | None = typer.Option(None),
 ):
     """Find connected peers by capability and availability."""
-    execute(config, lambda bus: bus.discover(capability=capability, available_only=not include_offline))
+    execute(
+        config,
+        lambda bus: bus.discover_all(capability=capability, available_only=not include_offline),
+    )
 
 
 @app.command()
@@ -268,7 +271,7 @@ def watch(config: Path | None = typer.Option(None), after: int = 0):
 
 @agents_app.command("list")
 def agents_list(fleet: str | None = None, config: Path | None = typer.Option(None)):
-    execute(config, lambda bus: bus.agents(fleet))
+    execute(config, lambda bus: bus.agents_all(fleet))
 
 
 @threads_app.command("list")
