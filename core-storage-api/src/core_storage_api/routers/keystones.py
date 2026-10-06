@@ -41,6 +41,14 @@ _svc = PostgresService()
 # docs promise, even for direct storage clients.
 _DOC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 
+# Text Postgres can't read back: a NUL, and an unpaired surrogate, which is no
+# character at all. ``documents.data`` is ``json`` and stores either as its
+# escape, but ``->>`` then fails on the whole document. The list reads
+# ``data->>'scope'`` on every keystone in the tenant, so one such rule would
+# fail every agent's list. (A ``text`` column, such as ``fleet_id``'s, refuses
+# both outright.)
+_UNREADABLE_TEXT_RE = re.compile(r"[\x00\ud800-\udfff]")
+
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -51,10 +59,16 @@ def _validate_payload(body: dict) -> tuple[str, dict, str | None]:
     """Validate a POST body and return ``(doc_id, normalised_data, fleet_id)``.
 
     Rejects missing fields, unknown scope, weight bucket mismatch,
-    agent_id mismatch with scope. We reject (not coerce) on missing
-    scope per the spec — silent defaults hide bugs.
+    agent_id mismatch with scope, and text Postgres can't read back. We
+    reject (not coerce) on missing scope per the spec — silent defaults
+    hide bugs.
     """
-    errors: list[str] = []
+    # Every string in the body, so a field added later is covered too.
+    errors: list[str] = [
+        f"{key} must not contain a NUL character or an unpaired surrogate"
+        for key, value in body.items()
+        if isinstance(value, str) and _UNREADABLE_TEXT_RE.search(value)
+    ]
 
     doc_id = body.get("doc_id")
     if not doc_id or not isinstance(doc_id, str):
