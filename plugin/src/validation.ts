@@ -6,7 +6,7 @@
  */
 
 import { createHmac, timingSafeEqual } from "crypto";
-import { resolve } from "path";
+import { isAbsolute, relative, resolve, sep } from "path";
 import { realpathSync, existsSync } from "fs";
 
 // --- UUID validation ---
@@ -35,25 +35,103 @@ export function assertSafePathSegment(
 
 // --- HTTPS enforcement ---
 
-export function warnIfInsecureUrl(apiUrl: string, apiKey: string): void {
-  if (apiKey && apiUrl.startsWith("http://")) {
+/**
+ * Whether the API key may travel to ``apiUrl``:
+ *
+ * - ``send``: https, or plain http to a loopback host (never leaves the box).
+ * - ``send-insecure``: plain http to a remote host, explicitly allowed via
+ *   ``CAURA_ALLOW_INSECURE_HTTP``.
+ * - ``refuse``: plain http to a remote host (or an unparseable URL) — the key
+ *   would cross the network in cleartext, so it must not be sent.
+ */
+export type KeyTransportPolicy = "send" | "send-insecure" | "refuse";
+
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  return (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  );
+}
+
+export function keyTransportPolicy(apiUrl: string, allowInsecureHttp: boolean): KeyTransportPolicy {
+  let url: URL;
+  try {
+    url = new URL(apiUrl);
+  } catch {
+    return "refuse";
+  }
+  if (url.protocol === "https:") return "send";
+  if (url.protocol === "http:" && isLoopbackHost(url.hostname)) return "send";
+  return url.protocol === "http:" && allowInsecureHttp ? "send-insecure" : "refuse";
+}
+
+export function insecureKeyTransportMessage(apiUrl: string): string {
+  let host = apiUrl;
+  try {
+    host = new URL(apiUrl).host;
+  } catch {
+    // keep the raw value; it is what the operator configured
+  }
+  return (
+    `[caura] Refusing to send CAURA_API_KEY to ${host}: CAURA_API_URL uses plain HTTP to a ` +
+    `non-loopback host, so the key would cross the network in cleartext. ` +
+    `Fix: point CAURA_API_URL at https://, or set CAURA_ALLOW_INSECURE_HTTP=true ` +
+    `in the plugin .env to accept the risk (e.g. a trusted private network).`
+  );
+}
+
+/** Import-time report: one error when refusing, one warning when opted in. */
+export function reportKeyTransportPolicy(
+  apiUrl: string,
+  apiKey: string,
+  policy: KeyTransportPolicy,
+): void {
+  if (!apiKey) return;
+  if (policy === "refuse") {
+    console.error(insecureKeyTransportMessage(apiUrl));
+  } else if (policy === "send-insecure") {
     console.warn(
-      "[caura] WARNING: CAURA_API_KEY is set but CAURA_API_URL uses plain HTTP. " +
-        "API key will be transmitted in cleartext. Use https:// in production.",
+      "[caura] WARNING: CAURA_ALLOW_INSECURE_HTTP is set — CAURA_API_KEY will be sent in " +
+        "cleartext over plain HTTP to a non-loopback host, so anyone on the path can read it and " +
+        "forge what the server sends; deploy, update_plugin and educate commands are refused and " +
+        "skills are not synced in this mode. Use https:// where possible.",
     );
   }
 }
 
 // --- Path containment ---
 
+interface PathContainmentOps {
+  relative(from: string, to: string): string;
+  isAbsolute(path: string): boolean;
+  sep: string;
+}
+
+const HOST_PATH_OPS: PathContainmentOps = { relative, isAbsolute, sep };
+
+/** @internal Exported to inject platform-specific path operations in tests. */
+export function isContainedResolvedPath(
+  child: string,
+  parent: string,
+  pathOps: PathContainmentOps = HOST_PATH_OPS,
+): boolean {
+  const relativePath = pathOps.relative(parent, child);
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${pathOps.sep}`) &&
+      !pathOps.isAbsolute(relativePath))
+  );
+}
+
 export function isContainedPath(child: string, parent: string): boolean {
   try {
     const resolvedChild = existsSync(child) ? realpathSync(child) : resolve(child);
     const resolvedParent = existsSync(parent) ? realpathSync(parent) : resolve(parent);
-    return (
-      resolvedChild === resolvedParent ||
-      resolvedChild.startsWith(resolvedParent + "/")
-    );
+    return isContainedResolvedPath(resolvedChild, resolvedParent);
   } catch {
     return false;
   }

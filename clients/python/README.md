@@ -42,6 +42,12 @@ with Caura("standalone", tenant_id="default", base_url="http://localhost:8000") 
     ...
 ```
 
+Plain `http://` sends the API key in clear, so the client allows it only to a
+loopback host (`localhost`, `127.0.0.0/8`, `::1`) and otherwise raises
+`ValueError` naming the host. Use `https://`, or pass `allow_insecure_http=True`
+(or set `CAURA_ALLOW_INSECURE_HTTP=true`) to accept the risk, e.g. on a trusted
+private network.
+
 New to Caura? Start with [what Caura is](https://caura.ai/docs) and the
 [LongMemEval benchmark harness](https://github.com/caura-ai/caura-longmemeval).
 To reach the same memory from an MCP client with no SDK, see the

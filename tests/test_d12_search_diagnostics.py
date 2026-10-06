@@ -132,10 +132,15 @@ async def test_diagnostic_capture_reasons_and_counts():
     # score factors survive into the trace
     assert trace[0]["score"] == 1.2 and trace[0]["vec_sim"] == 0.9
     counts = ctx.data["diagnostic_counts"]
+    # Exact-dict on purpose: the counters are a published diagnostic shape, so a
+    # new one has to be added here deliberately rather than slipping in.
+    # ``excluded_derived`` is pm-0918-c-03's, and it is 0 here because this
+    # fixture's rows carry no fan-out metadata — the exclusion did not run.
     assert counts == {
         "candidates_considered": 4,
         "returned": 2,
         "excluded_below_min_similarity": 1,
+        "excluded_derived": 0,
         "excluded_by_top_k_trim": 1,
     }
 

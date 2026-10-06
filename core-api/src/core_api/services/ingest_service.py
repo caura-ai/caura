@@ -18,6 +18,7 @@ from fastapi import HTTPException
 
 from common.embedding import get_embedding
 from common.enrichment.constants import DEFAULT_MEMORY_TYPE
+from common.provider_names import ProviderName
 from core_api.clients.storage_client import get_storage_client
 from core_api.config import settings
 from core_api.constants import BULK_MAX_ITEMS, MEMORY_TYPES, MEMORY_TYPES_WRITE
@@ -28,6 +29,7 @@ from core_api.schemas import (
     IngestCommitRequest,
     IngestRequest,
 )
+from core_api.services.agent_service import lookup_agent
 from core_api.services.ingest_chunking import (
     DOC_HARD_TOKEN_LIMIT,
     chunk_blocks,
@@ -291,6 +293,19 @@ def _fake_ingest() -> list:
     return []
 
 
+class IngestExtractionFailed(RuntimeError):
+    """M-48: no configured LLM provider produced an extraction for a section.
+
+    A ``RuntimeError`` so auto-chunk, which catches that and falls back to a
+    single memory, behaves as it did when an outage looked like no facts.
+    """
+
+
+def _no_extraction() -> list:
+    """``call_with_fallback``'s last resort once a real provider has failed."""
+    raise IngestExtractionFailed("no LLM provider produced an extraction")
+
+
 async def _chunk_content(
     text: str,
     focus: str | None = None,
@@ -334,10 +349,13 @@ async def _chunk_content(
     async def _do_chunk(llm):
         return await llm.complete_json(prompt)
 
+    # M-48: the stub's "no facts" only where the operator chose it. Reached after
+    # a real provider failed, it passed an outage off as an empty section.
+    chose_stub = provider_name in (ProviderName.FAKE, ProviderName.NONE)
     raw = await call_with_fallback(
         primary_provider_name=provider_name,
         call_fn=_do_chunk,
-        fake_fn=_fake_ingest,
+        fake_fn=_fake_ingest if chose_stub else _no_extraction,
         tenant_config=tenant_config,
         service_label="ingest",
     )
@@ -383,9 +401,12 @@ async def _chunk_content(
             dropped_low_salience += 1
             continue
 
-        st = item.get("suggested_type", "fact")
-        if st not in MEMORY_TYPES:
-            st = "fact"
+        # L-135: only a type a caller may write, as ``ingest_commit`` coerces
+        # (M-42), so the preview, auto-chunk and commit agree. A reserved type
+        # (``outcome``, ``rule``) used to reach an auto-chunk child row as is.
+        st = item.get("suggested_type", DEFAULT_MEMORY_TYPE)
+        if st not in MEMORY_TYPES_WRITE:
+            st = DEFAULT_MEMORY_TYPE
 
         fact_out: dict = {"content": body, "suggested_type": st}
         # Surface salience on the returned fact when present, so the
@@ -413,13 +434,24 @@ def _is_blocked_ip(addr: str) -> bool:
     Covers RFC1918 private ranges, loopback, link-local (incl. AWS/GCP/Azure
     metadata IPs), multicast, and reserved. IPv6 unique-local fc00::/7 is
     classified as private by the ipaddress module.
+
+    L-73: and anything else that is not globally reachable. RFC 6598 shared
+    address space, 100.64.0.0/10 (carrier-grade NAT, Tailscale's tailnet range,
+    overlay pod networks), carries none of the flags below and was fetched.
+    ``not is_global`` is added to the flags rather than replacing them: it
+    counts IPv4 multicast and unallocated IPv6 (``is_reserved``) as global.
     """
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
         return False
+    # How the flags treat ``::ffff:a.b.c.d`` depends on the Python patch
+    # release, so judge the IPv4 address it maps to.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     return (
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_multicast
@@ -862,11 +894,13 @@ async def _walk_redirects_and_fetch(url: str) -> str:
 
                 # MIME allowlist on the final response, not the initial request.
                 content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
-                if content_type and content_type not in ALLOWED_INGEST_MIME_TYPES:
+                # L-131: a missing or empty type is off the list too. Skipping
+                # the check for it decoded a PDF or zip as text for the LLM.
+                if content_type not in ALLOWED_INGEST_MIME_TYPES:
                     raise HTTPException(
                         status_code=422,
                         detail=(
-                            f"Unsupported content type: {content_type}. "
+                            f"Unsupported content type: {content_type or '(none)'}. "
                             f"Allowed: {sorted(ALLOWED_INGEST_MIME_TYPES)}"
                         ),
                     )
@@ -971,16 +1005,27 @@ async def _prior_ingest_was_complete(tenant_id: str, run_id: str) -> bool:
     return errored == 0
 
 
-async def _find_prior_ingest_by_doc_hash(tenant_id: str, doc_hash: str) -> list[dict]:
-    """A2 cache lookup. Returns memory rows from the most recent prior ingest of
-    the same content for the same tenant — or empty list if no cache hit.
+async def _find_prior_ingest_by_doc_hash(
+    tenant_id: str, doc_hash: str, *, fleet_id: str | None, agent_id: str
+) -> list[dict]:
+    """A2 cache lookup. Returns the caller's memory rows from its prior ingests
+    of the same content — or empty list if no cache hit.
 
     A "prior ingest" means a non-deleted row whose metadata carries the same
-    ``doc_hash`` value and was tagged as ``source="ingest"``. When multiple
-    runs match, the storage endpoint returns the rows tagged with the
-    most-recent ``run_id`` (the newest-run filter runs server-side).
+    ``doc_hash`` value and was tagged as ``source="ingest"``, written by this
+    agent in this fleet (L-74: ``doc_hash`` is whatever a committing caller
+    sent, so another principal's rows can never be this caller's cache). Rows
+    span every such run, newest first, so ``[0]`` is from the newest run.
+
+    An omitted fleet is the agent's home fleet: the fleet ``/ingest/commit``
+    writes to when the request names none.
     """
-    return await get_storage_client().find_prior_ingest_by_doc_hash(tenant_id, doc_hash)
+    if not fleet_id:
+        agent = await lookup_agent(tenant_id, agent_id)
+        fleet_id = (agent or {}).get("fleet_id")
+    return await get_storage_client().find_prior_ingest_by_doc_hash(
+        tenant_id, doc_hash, fleet_id=fleet_id, agent_id=agent_id
+    )
 
 
 async def ingest_preview(request: IngestRequest) -> dict:
@@ -997,10 +1042,11 @@ async def ingest_preview(request: IngestRequest) -> dict:
       skipped_reason  — only present when no LLM call happened
                         ("content_too_short" today; future reasons may surface)
       cached          — A2: present and True iff this content was previously
-                        ingested by the same tenant. ``facts`` then come from
-                        the prior run, ``run_id`` is set to the prior run's id,
-                        and no LLM call was made.
-      run_id          — only set when cached=True; the prior ingest_run_id.
+                        ingested by the same agent in the same fleet.
+                        ``facts`` then come from those prior runs, ``run_id``
+                        is set to the newest of them, and no LLM call was made.
+      run_id          — only set when cached=True; the caller's own newest
+                        prior ingest_run_id.
     """
     tenant_config = await resolve_config(request.tenant_id)
 
@@ -1023,8 +1069,8 @@ async def ingest_preview(request: IngestRequest) -> dict:
     # ---- A2: doc-hash idempotency ----
     # Hash the full content (post-PR#7 there's no more truncate-to-50k cap
     # — the chunker handles arbitrarily large docs up to ``DOC_HARD_TOKEN_LIMIT``).
-    # If a prior ingest of identical content already exists for this tenant,
-    # return the cached facts straight from those memories — no LLM call.
+    # If this agent already ingested identical content in this fleet, return
+    # the cached facts straight from those memories — no LLM call.
     # Per-fact source_uri precedence:
     #   1. Caller-supplied ``request.source_uri`` — used by ``/ingest/file``
     #      to thread ``upload:<filename>`` through so the filename survives.
@@ -1032,7 +1078,9 @@ async def ingest_preview(request: IngestRequest) -> dict:
     #   3. ``"text-input"`` marker for pasted-content / no-source ingests.
     source_uri_default = request.source_uri or url or "text-input"
     doc_hash = _doc_hash(request.tenant_id, content)
-    cached_memories = await _find_prior_ingest_by_doc_hash(request.tenant_id, doc_hash)
+    cached_memories = await _find_prior_ingest_by_doc_hash(
+        request.tenant_id, doc_hash, fleet_id=request.fleet_id, agent_id=request.agent_id
+    )
     if cached_memories and not await _prior_ingest_was_complete(
         request.tenant_id, cached_memories[0]["run_id"]
     ):
@@ -1141,7 +1189,8 @@ async def ingest_preview(request: IngestRequest) -> dict:
     t0 = time.perf_counter()
     sem = asyncio.Semaphore(_PREVIEW_CONCURRENCY)
 
-    async def _extract_section(sec) -> list[dict]:
+    async def _extract_section(sec) -> list[dict] | None:
+        """The section's facts, or None when its extraction failed (M-48)."""
         async with sem:
             try:
                 return await _chunk_content(
@@ -1151,29 +1200,37 @@ async def ingest_preview(request: IngestRequest) -> dict:
                     breadcrumb=sec.breadcrumb or None,
                 )
             except Exception:
-                # Per-section failure shouldn't tank the whole preview.
-                # Log and return empty so other sections still contribute.
+                # Per-section failure shouldn't tank the whole preview, so the
+                # other sections still contribute. It is counted, though: the
+                # caller is told, and the run is not cacheable.
                 logger.exception(
                     "ingest_preview: section extraction failed (breadcrumb=%r tokens=%d)",
                     sec.breadcrumb,
                     sec.token_count,
                 )
-                return []
+                return None
 
     section_results = await asyncio.gather(*(_extract_section(s) for s in sections))
+    sections_failed = sum(1 for sec_facts in section_results if sec_facts is None)
+    if sections_failed == len(sections):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Fact extraction failed for all {len(sections)} section(s); retry later",
+        )
     facts: list[dict] = []
     for sec, sec_facts in zip(sections, section_results):
         # Stamp the section's breadcrumb into each fact's metadata-like
         # field so the commit path can persist provenance at the
         # section level later (Tier 2 follow-up may surface it on memory).
-        for f in sec_facts:
+        for f in sec_facts or []:
             f.setdefault("source_uri", source_uri_default)
-        facts.extend(sec_facts)
+            facts.append(f)
     chunk_ms = int((time.perf_counter() - t0) * 1000)
 
     logger.info(
-        "ingest_preview: chunked %d sections (total %d tokens) into %d facts in %dms",
+        "ingest_preview: chunked %d sections (%d failed, total %d tokens) into %d facts in %dms",
         len(sections),
+        sections_failed,
         total_tokens,
         len(facts),
         chunk_ms,
@@ -1184,12 +1241,15 @@ async def ingest_preview(request: IngestRequest) -> dict:
         "content_length": len(content),
         "facts": facts,
         "chunk_ms": chunk_ms,
-        "doc_hash": doc_hash,  # A2: caller echoes this to commit for future cache hits
+        # A2: caller echoes this to commit for future cache hits. M-48: never for
+        # a partial run, which would then be served as the whole document.
+        "doc_hash": None if sections_failed else doc_hash,
         "sections": len(sections),  # A4: diagnostic — how many LLM calls did this run?
+        "sections_failed": sections_failed,
     }
 
 
-def _summarize_batch_for_embedding(survivors: list, cap: int = _PARENT_DOC_SUMMARY_CAP) -> str | None:
+def _summarize_batch_for_embedding(facts: list, cap: int = _PARENT_DOC_SUMMARY_CAP) -> str | None:
     """Build a short, embeddable summary from the first few facts of an ingest batch.
 
     Returned string goes into the parent Document's ``data["summary"]`` field
@@ -1205,7 +1265,7 @@ def _summarize_batch_for_embedding(survivors: list, cap: int = _PARENT_DOC_SUMMA
     """
     parts: list[str] = []
     total = 0
-    for f in survivors:
+    for f in facts:
         text = (getattr(f, "content", None) or "").strip()
         if not text:
             continue
@@ -1226,6 +1286,7 @@ async def _write_parent_ingest_document(
     request: IngestCommitRequest,
     run_id: str,
     survivors: list,
+    governed: list,
     created: int,
     errored: int,
     skipped: int,
@@ -1238,8 +1299,10 @@ async def _write_parent_ingest_document(
     NOT roll back the memories the commit just wrote; we log and continue.
 
     The Document's ``data["summary"]`` is populated from the first ~500 chars
-    of fact contents so the storage layer embeds it (free semantic search
-    over uploaded files). Other fields are pure provenance metadata.
+    of the ``governed`` items' contents, so the storage layer embeds it (free
+    semantic search over uploaded files). Those are the bulk items as the PII
+    gate left them, never the raw ``survivors`` (M-121). Other fields are pure
+    provenance metadata.
 
     Skipped entirely when ``created == 0`` — a batch that produced no new
     memories doesn't need a parent record (it was a full dedup hit; the
@@ -1269,10 +1332,13 @@ async def _write_parent_ingest_document(
         "ingest_ms": ingest_ms,
         "agent_id": request.agent_id,
     }
-    summary = _summarize_batch_for_embedding(survivors)
+    summary = _summarize_batch_for_embedding(governed)
     payload: dict = {
         "tenant_id": request.tenant_id,
         "fleet_id": request.fleet_id,
+        # L-132: the author column, as the REST document route sets it. Inside
+        # ``data`` alone it left documents.agent_id NULL for every batch.
+        "agent_id": request.agent_id,
         "collection": INGEST_DOCUMENTS_COLLECTION,
         "doc_id": run_id,
         "data": data,
@@ -1353,27 +1419,26 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
 
     Three correctness/quality moves over the original loop:
 
-    1. **Strong write_mode** (P1.3). Each ``MemoryCreate`` carries
-       ``write_mode="strong"``, forcing the inline enrichment path so
-       title/tags/weight are populated synchronously. Previously these
-       went out via the fast path's deferred-enrichment queue, which
-       isn't consumed in some deployments — leaving memories with
-       ``title=null`` indefinitely.
+    1. **Strong write_mode** (P1.3, L-133). Each bulk item carries
+       ``write_mode="strong"``, so ``create_memories_bulk`` embeds it inline
+       and an ingested fact is vector-searchable once commit returns, even
+       in deployments that otherwise defer embedding (there a failed batch
+       embed falls back to the backfill instead of failing). Enrichment (title,
+       tags, weight) follows the deployment mode on this path: inline where
+       ``inline_enrichment`` is on, otherwise the deferred queue, which
+       strong mode does not change.
 
-    2. **Pre-loop content-hash dedup** (P1.4). Before any enrichment
-       LLM call, batch-query existing content hashes for this tenant.
-       Facts whose hash already exists short-circuit straight into
-       ``skipped_duplicates``. Without this gate, every duplicate
-       paid a full strong-mode LLM round-trip before being rejected
-       with a 409 inside ``create_memory`` — pure waste on overlap-
-       heavy batches (the common re-ingest case).
+    2. **Pre-loop content-hash dedup** (P1.4). Before any embed or
+       enrichment call, batch-query existing content hashes for this
+       tenant, fleet and agent. Facts whose hash already exists
+       short-circuit straight into ``skipped_duplicates``, so overlap-heavy
+       batches (the common re-ingest case) pay nothing for them.
 
-    3. **Bounded-parallel writes** (P1.3). Survivors go through
-       ``create_memory`` concurrently with ``Semaphore(_COMMIT_CONCURRENCY)``
-       Strong-mode runs a real OpenAI enrichment per fact (~2s); without
-       parallelism, 10 facts is 20s+. ``tenant_config`` is pre-warmed
-       once so the per-fact pipeline reuses the cache instead of racing
-       on the shared session.
+    3. **Bulk writes** (audit finding #28). Survivors go through
+       ``create_memories_bulk`` in chunks of ``BULK_MAX_ITEMS``: one batched
+       embedding call per chunk and semaphored enrichment, rather than one
+       ``create_memory`` per fact. ``tenant_config`` is pre-warmed once so
+       the writes reuse the cache instead of racing on the shared session.
     """
     run_id = request.run_id or str(uuid.uuid4())
     # Caller-supplied url wins (dashboard back-compat). When the caller
@@ -1522,6 +1587,14 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
     # only — the latency win outweighs the loss. Verbatim re-ingest of
     # the same content is still caught by the content-hash dedup at the
     # top of this function and inside ``create_memories_bulk``.
+    #
+    # M-121: the items each bulk call did not refuse, for the parent summary.
+    # The bulk PII gate masks an item's ``content`` in place and refuses an
+    # item as a per-item error, so these hold the text that was stored. The
+    # summary was built from ``survivors``, the facts as extracted, which put a
+    # refused fact, or a masked one unmasked, into a document any credential in
+    # the tenant can read.
+    governed: list[BulkMemoryItem] = []
     if survivors:
         bulk_items: list[BulkMemoryItem] = []
         for fact in survivors:
@@ -1551,6 +1624,9 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                     source_uri=effective_source,
                     run_id=run_id,
                     metadata=metadata,
+                    # L-133: the docstring's promise. Without it, a deferred
+                    # deployment returned these facts before any was embedded.
+                    write_mode="strong",
                 )
             )
         # H-07: chunked, because ``BulkMemoryCreate.items`` carries
@@ -1606,7 +1682,7 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                 errored += bulk_response.errors
                 # Surface per-item error reasons in the logs so the cleanup
                 # message at the bottom of this function still points at the
-                # offending facts.
+                # offending facts. Every other item goes to the summary.
                 for item in bulk_response.results:
                     if item.status == "error":
                         # Mirror the legacy "fact[N]" log format the
@@ -1621,6 +1697,8 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
                             run_id,
                             item.error,
                         )
+                    else:
+                        governed.append(bulk_data.items[item.index])
             except HTTPException as e:
                 # A 4xx/5xx from the bulk endpoint aborts this batch (e.g. 504
                 # from the bulk-embedding timeout). Stop rather than carry on:
@@ -1686,6 +1764,7 @@ async def ingest_commit(request: IngestCommitRequest) -> dict:
         request=request,
         run_id=run_id,
         survivors=survivors,
+        governed=governed,
         created=created,
         errored=errored,
         skipped=skipped,

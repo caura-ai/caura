@@ -117,6 +117,48 @@ def test_parse_markdown_fenced_code_preserved():
     assert "def f(): return 1" in code[0].text
 
 
+# M-46: the list and blockquote walkers kept only ``inline`` tokens, so a code
+# block nested in a list item or a blockquote never reached extraction.
+_NESTED_CODE = {
+    "fenced": (
+        "   ```bash\n   curl -sSL https://example.com/install.sh | sh\n   ```\n",
+        "> ```yaml\n> retries: 3\n> timeout: 30s\n> ```\n",
+    ),
+    "indented": (
+        "       curl -sSL https://example.com/install.sh | sh\n",
+        ">     retries: 3\n>     timeout: 30s\n",
+    ),
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("style", sorted(_NESTED_CODE))
+def test_parse_markdown_keeps_code_nested_in_a_list_item(style):
+    text = (
+        "# Install\n\n1. Run the installer:\n\n"
+        + _NESTED_CODE[style][0]
+        + "\n2. Start the service.\n"
+    )
+    lists = [b for b in parse_markdown(text) if b.type == "list"]
+    assert len(lists) == 1
+    body = lists[0].text
+    command = "curl -sSL https://example.com/install.sh | sh"
+    assert command in body
+    assert body.index("Run the installer") < body.index(command)
+    assert body.index(command) < body.index("Start the service")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("style", sorted(_NESTED_CODE))
+def test_parse_markdown_keeps_code_nested_in_a_blockquote(style):
+    text = "# Config\n\n> Example config:\n>\n" + _NESTED_CODE[style][1]
+    quotes = [b for b in parse_markdown(text) if b.type == "blockquote"]
+    assert len(quotes) == 1
+    body = quotes[0].text
+    assert "retries: 3\ntimeout: 30s" in body
+    assert body.index("Example config:") < body.index("retries: 3")
+
+
 @pytest.mark.unit
 def test_parse_markdown_table():
     text = (

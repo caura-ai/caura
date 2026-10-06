@@ -349,17 +349,103 @@ async def test_verify_detects_tail_truncation():
     assert res["first_broken"]["chain_seq"] == 2
 
 
-async def test_chained_insert_rejects_raw_pii_and_persists_nothing():
+async def test_chained_insert_scrubs_raw_pii_and_keeps_the_event():
+    """A card- or SSN-shaped span is scrubbed, not refused.
+
+    Refusing raised inside the tenant's transaction and rolled back every event
+    of that tenant in the batch — a memory title or PATCH diff echoing a
+    user-typed number cost the whole slice of the compliance trail. The event
+    now lands with the span replaced, and the chain attests the scrubbed text.
+    """
+    from core_storage_api.services.audit_chain import (
+        CARD_PLACEHOLDER,
+        SCRUBBED_MARKER_KEY,
+        SSN_PLACEHOLDER,
+    )
+
     svc = PostgresService()
     tenant = _tenant()
-    with pytest.raises(PIIInAuditError):
-        await _insert(
-            svc, tenant, [_event("leak", detail={"raw": "4111 1111 1111 1111"})]
-        )
-    # The transaction rolled back on the raise — no head row, no audit rows.
+    await _insert(
+        svc,
+        tenant,
+        [
+            _event("ok-before"),
+            _event(
+                "leak",
+                detail={
+                    "title": "card 4111 1111 1111 1111 and ssn 123-45-6789",
+                    "n": 3,
+                },
+            ),
+            _event("ok-after"),
+        ],
+    )
     res = await svc.audit_verify_chain(tenant)
     assert res["valid"] is True
-    assert res["verified_count"] == 0
+    assert res["verified_count"] == 3
+    async with get_session() as s:
+        detail = (
+            await s.execute(
+                text(
+                    "SELECT detail FROM audit_log WHERE tenant_id=:t AND action='leak'"
+                ),
+                {"t": tenant},
+            )
+        ).scalar_one()
+    assert detail["title"] == f"card {CARD_PLACEHOLDER} and ssn {SSN_PLACEHOLDER}"
+    assert detail["n"] == 3
+    assert detail[SCRUBBED_MARKER_KEY] is True
+
+
+def test_scrub_pii_leaves_clean_details_untouched():
+    from core_storage_api.services.audit_chain import scrub_pii
+
+    clean = {"content_sha256": "a" * 64, "order_id": "1234567890123456"}
+    assert scrub_pii(clean) is clean
+    assert scrub_pii(None) is None
+    # Whatever the scrub leaves, the backstop accepts.
+    assert_pii_safe(scrub_pii({"x": ["4111-1111-1111-1111", {"y": "123-45-6789"}]}))
+
+
+async def test_one_tenants_failure_does_not_cost_the_later_tenants(monkeypatch):
+    """Tenants commit in their own transactions; a failure in one used to stop
+    the loop, so every tenant after it in the batch was never written."""
+    svc = PostgresService()
+    bad, good = _tenant(), _tenant()
+    original = svc._audit_chain_one_tenant
+
+    async def failing_for_bad(tenant_id, events):
+        if tenant_id == bad:
+            raise RuntimeError("simulated tenant failure")
+        await original(tenant_id, events)
+
+    monkeypatch.setattr(svc, "_audit_chain_one_tenant", failing_for_bad)
+    with pytest.raises(RuntimeError):
+        await svc.audit_add_batch_chained(
+            [{**_event("a"), "tenant_id": bad}, {**_event("b"), "tenant_id": good}]
+        )
+    assert (await svc.audit_verify_chain(good))["verified_count"] == 1
+
+
+async def test_bulk_route_answers_a_residual_pii_refusal_with_a_non_retryable_422(
+    storage_http, monkeypatch
+):
+    from core_storage_api.routers import audit as audit_router
+
+    async def refuse(_events):
+        raise PIIInAuditError("audit detail appears to contain raw PII")
+
+    monkeypatch.setattr(audit_router._svc, "audit_add_batch", refuse)
+    resp = await storage_http.post(
+        "/api/v1/storage/audit-logs/bulk",
+        json={
+            "events": [
+                {"tenant_id": _tenant(), "action": "a", "resource_type": "memory"}
+            ]
+        },
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["retryable"] is False
 
 
 async def test_empty_batch_is_a_noop():

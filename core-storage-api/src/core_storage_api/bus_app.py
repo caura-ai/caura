@@ -44,7 +44,7 @@ async def lifespan(app):
         try:
             yield
         finally:
-            if reconciler is not None:
+            if store is not None and reconciler is not None:
                 reconciler.cancel()
                 with suppress(asyncio.CancelledError):
                     await reconciler

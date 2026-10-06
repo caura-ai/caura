@@ -9,7 +9,6 @@ from __future__ import annotations
 # the separate legacy import package and the two legacy package-forwarder
 # distributions that once depended on this one -- no transition is owed to
 # pre-rename installs.
-
 from ._version import __version__
 from .client import DEFAULT_BASE_URL, Caura
 from .exceptions import (
@@ -23,15 +22,15 @@ from .exceptions import (
 from .models import Memory, RecallResult
 
 __all__ = [
-    "Caura",
-    "Memory",
-    "RecallResult",
-    "CauraError",
-    "CauraAPIError",
+    "DEFAULT_BASE_URL",
     "AuthError",
+    "Caura",
+    "CauraAPIError",
+    "CauraError",
+    "Memory",
     "NotFoundError",
     "RateLimitError",
+    "RecallResult",
     "TransportError",
-    "DEFAULT_BASE_URL",
     "__version__",
 ]

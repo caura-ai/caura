@@ -139,8 +139,7 @@ describe("createToolFromSpec factory", () => {
     const doc = createToolFromSpec("caura_doc").parameters as any;
     // ``collection`` is required for write/read/query/delete but optional
     // for search (omit → search across all collections) and list_collections,
-    // so the schema gates only ``op``; the server enforces collection
-    // per-op.
+    // so the schema gates only ``op``; dispatch validates collection per-op.
     assert.deepEqual(doc.required, ["op"]);
     assert.deepEqual(doc.properties.op.enum, [
       "write", "read", "query", "delete", "search", "list_collections",
@@ -233,6 +232,28 @@ describe("createToolFromSpec factory", () => {
     assert.deepEqual(list.required, []);
     assert.ok(list.properties.cursor);
     assert.ok(list.properties.include_deleted);
+  });
+
+  test("recall, stats and tune expose supported request options", () => {
+    const expected = {
+      caura_recall: { valid_at: "string", min_similarity: "number", diagnostic: "boolean" },
+      caura_stats: { include_deleted: "boolean" },
+      caura_tune: { agent_id: "string" },
+    };
+    for (const [name, fields] of Object.entries(expected)) {
+      const schema = createToolFromSpec(name).parameters as any;
+      for (const [field, type] of Object.entries(fields)) {
+        assert.ok(getSpec(name).params.some(p => p.name === field), `${name}.${field}: not in tool contract`);
+        assert.equal(schema.properties[field]?.type, type, `${name}.${field}: missing from plugin schema`);
+      }
+    }
+  });
+
+  test("metadata updates describe merge by default and expose explicit replacement", () => {
+    const schema = createToolFromSpec("caura_manage").parameters as any;
+    assert.match(schema.properties.metadata.description, /[Mm]erges keys by default/);
+    assert.deepEqual(schema.properties.metadata_mode.enum, ["merge", "replace"]);
+    assert.equal(schema.properties.metadata_mode.default, undefined);
   });
 
   // ``GET /memories`` and ``GET /memories/stats`` declare ``scope`` as an

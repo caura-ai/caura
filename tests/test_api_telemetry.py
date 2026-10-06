@@ -16,7 +16,7 @@ import pytest
 
 from core_api.config import settings
 from core_api.heartbeat import sender as sender_mod
-from core_api.heartbeat.identity import DEPLOYMENT_ORG_ID
+from core_api.heartbeat.identity import DEPLOYMENT_ORG_ID, load_or_create
 from core_api.heartbeat.policy import REASON_INVALID_ENDPOINT_URL, Disabled, Enabled
 from core_api.heartbeat.sender import HeartbeatSender
 from core_api.heartbeat.state import SharedState
@@ -90,6 +90,7 @@ async def test_telemetry_reports_a_bad_collector_url(client, monkeypatch):
 
 async def test_telemetry_preview_when_enabled(client, sc):
     """With a sender installed, the preview is a valid schema-1 payload built from storage."""
+    ident = await load_or_create(sc)  # what the first send does
     sender_mod._sender = HeartbeatSender(settings, version="3.16.0")
     sender_mod._decision = Enabled()
 
@@ -98,27 +99,44 @@ async def test_telemetry_preview_when_enabled(client, sc):
     body = resp.json()
     assert body["enabled"] is True
     assert body["reason"] is None
-    uuid.UUID(body["deployment_id"])
+    assert body["deployment_id"] == ident.deployment_id
     preview = body["payload_preview"]
     assert_valid(preview)
-    assert preview["deployment_id"] == body["deployment_id"]
+    assert preview["deployment_id"] == ident.deployment_id
     assert preview["version"] == "3.16.0"
     assert preview["mode"]["standalone"] is True
-
-    # The identity landed in the reserved org-settings row.
-    stored = await sc.get_org_settings(DEPLOYMENT_ORG_ID)
-    assert stored["deployment_id"] == body["deployment_id"]
-    assert len(stored["deployment_token"]) == 64
 
     # A second read is stable.
     resp = await client.get("/api/v1/telemetry", headers=get_admin_headers())
     assert resp.json()["deployment_id"] == body["deployment_id"]
 
 
+async def test_the_preview_never_creates_the_identity(client, sc):
+    """L-127. The first send creates the deployment identity (docs/telemetry.md).
+    Inspecting the endpoint before then must not, or any credential, read-only
+    included, would write the deployment row through a GET."""
+    await sc.update_org_settings(
+        DEPLOYMENT_ORG_ID,
+        {"deployment_id": None, "deployment_token": None},
+        changed_by="test",
+    )
+    sender_mod._sender = HeartbeatSender(settings, version="3.16.0")
+    sender_mod._decision = Enabled()
+
+    resp = await client.get("/api/v1/telemetry", headers=get_admin_headers())
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["deployment_id"] is None
+    assert body["payload_preview"]["deployment_id"] is None
+    assert "deployment_id" not in await sc.get_org_settings(DEPLOYMENT_ORG_ID)
+
+
 async def test_follower_worker_reports_the_leaders_values_and_summed_counts(
-    client, tmp_path
+    client, sc, tmp_path
 ):
     """A worker that does not hold the lock answers from state.json and sums counters."""
+    await load_or_create(sc)  # the leader's first send created it
     leader = SharedState(tmp_path)
     assert leader.try_acquire_leader()
     try:

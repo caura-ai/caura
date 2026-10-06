@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, Index, Integer, Text, text
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.models.base import Base
@@ -27,12 +27,15 @@ class CrystallizationReport(Base):
         DateTime(timezone=True), nullable=True
     )
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    summary: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
-    hygiene: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
-    health: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
-    usage_data: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
-    issues: Mapped[list] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
-    crystallization: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    # These six are ``json``, not JSONB: migration 001 creates them that way
+    # (CAURA-595), and ``test_models_match_the_migrated_schema`` holds the
+    # models to the schema.
+    summary: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
+    hygiene: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
+    health: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
+    usage_data: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
+    issues: Mapped[list] = mapped_column(JSON, server_default=text("'[]'::jsonb"))
+    crystallization: Mapped[dict] = mapped_column(JSON, server_default=text("'{}'::jsonb"))
 
     __table_args__ = (
         Index("ix_analysis_reports_tenant_started", "tenant_id", started_at.desc()),

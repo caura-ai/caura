@@ -130,7 +130,9 @@ async def test_get_entity_returns_relations_from_endpoint(monkeypatch):
     )
     monkeypatch.setattr(entity_service, "get_storage_client", lambda: sc)
 
-    out = await entity_service.get_entity(uuid.uuid4(), "t", caller_agent_id=None)
+    out = await entity_service.get_entity(
+        uuid.uuid4(), "t", caller_agent_id=None, caller_tenant_id="t"
+    )
     assert len(out.relations) == 1
     r = out.relations[0]
     assert r.relation_type == "authenticates"
@@ -153,7 +155,9 @@ async def test_get_entity_degrades_to_empty_relations_on_endpoint_failure(monkey
     sc.get_outgoing_relations = AsyncMock(side_effect=RuntimeError("storage down"))
     monkeypatch.setattr(entity_service, "get_storage_client", lambda: sc)
 
-    out = await entity_service.get_entity(uuid.uuid4(), "t", caller_agent_id=None)
+    out = await entity_service.get_entity(
+        uuid.uuid4(), "t", caller_agent_id=None, caller_tenant_id="t"
+    )
     assert out is not None
     assert out.relations == []
 
@@ -170,5 +174,7 @@ async def test_get_entity_ignores_legacy_entity_relations_key(monkeypatch):
     sc.get_outgoing_relations = AsyncMock(return_value=[])
     monkeypatch.setattr(entity_service, "get_storage_client", lambda: sc)
 
-    out = await entity_service.get_entity(uuid.uuid4(), "t", caller_agent_id=None)
+    out = await entity_service.get_entity(
+        uuid.uuid4(), "t", caller_agent_id=None, caller_tenant_id="t"
+    )
     assert out.relations == []

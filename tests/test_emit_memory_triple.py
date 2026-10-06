@@ -392,51 +392,63 @@ class TestEmitMemoryTriple:
 
 @pytest.mark.unit
 class TestSubjectInference:
-    """CAURA-127 — identifier-token heuristic + upsert for the bare-POST
-    shape. When no ``role="subject"`` entity_link is supplied, the
-    step looks at ``content[:match.start()]`` and emits a subject
-    from a deterministic identifier-token regex. Proper-noun shapes
-    never reach that regex — since A59 they are handled by a
-    lookup-only path (``TestProperNounSubjectLookup`` below), which
-    still creates nothing. Each test below mocks ``upsert_entity``
-    (it would otherwise touch the real storage client)."""
+    """CAURA-127 — identifier-token heuristic for the bare-POST shape.
+    When no ``role="subject"`` entity_link is supplied, the step looks
+    at ``content[:match.start()]`` and emits a subject from a
+    deterministic identifier-token regex. Proper-noun shapes never
+    reach that regex — since A59 they are handled by a lookup-only
+    path (``TestProperNounSubjectLookup`` below), which still creates
+    nothing.
+
+    Since L-18 the identifier path also only looks up: a new identifier
+    is created after the row is written, by ``CreatePendingSubject``
+    (``tests/test_l18_identifier_subject_after_write.py``). Each test
+    below makes the identifier lookup resolve, which keeps them about
+    the heuristic (it would otherwise touch the real storage client)."""
 
     @staticmethod
-    def _patch_upsert(monkeypatch, returned_id):
-        """Replace ``upsert_entity`` with an AsyncMock returning an
-        object whose ``.id`` attribute is ``returned_id``."""
+    def _patch_identifier_lookup(monkeypatch, returned_id):
+        """Resolve identifier lookups to ``returned_id``; return their mock.
+
+        Only a lookup typed ``identifier`` reaches the returned mock, so
+        ``assert_not_called`` still means "the heuristic did not fire". A
+        proper-noun lookup (untyped) misses, as an unknown name.
+        """
         from unittest.mock import AsyncMock as _AM
 
-        fake = _AM(return_value=SimpleNamespace(id=returned_id))
-        monkeypatch.setattr(
-            "core_api.pipeline.steps.write.emit_memory_triple.upsert_entity",
-            fake,
-        )
-        return fake
+        identifier = _AM(return_value=returned_id)
 
-    async def test_identifier_token_subject_upserts_and_emits(self, monkeypatch):
+        async def lookup(**kwargs):
+            if kwargs.get("entity_type") == "identifier":
+                return await identifier(**kwargs)
+            return None
+
+        monkeypatch.setattr(
+            "core_api.pipeline.steps.write.emit_memory_triple.find_entity_by_exact_name",
+            lookup,
+        )
+        return identifier
+
+    async def test_identifier_token_subject_resolves_and_emits(self, monkeypatch):
         """TOKEN-shaped subject without entity_links → heuristic infers
-        ``TOKEN-XYZ``, calls upsert, populates triple."""
+        ``TOKEN-XYZ``, looks it up, populates triple."""
         upserted_id = uuid4()
-        fake = self._patch_upsert(monkeypatch, upserted_id)
+        fake = self._patch_identifier_lookup(monkeypatch, upserted_id)
         data = _input("TOKEN-736C57D0 has release date 2027-05-01")
         result = await EmitMemoryTriple().execute(_ctx(data))
         assert result is None, f"Expected emit; got {result}"
         assert data.subject_entity_id == upserted_id
         assert data.predicate == "release_date"
         assert data.object_value == "2027-05-01"
-        # The upsert call carries the inferred canonical_name and the
-        # canonical ``identifier`` entity_type. Under the CAURA-127
-        # signature cleanup, ``data`` is positional[0] (was [1] when
-        # the legacy ``db`` parameter still came first).
+        # The lookup carries the inferred canonical_name and the
+        # canonical ``identifier`` entity_type.
         fake.assert_called_once()
-        entity_upsert = fake.call_args.args[0]
-        assert entity_upsert.entity_type == "identifier"
-        assert entity_upsert.canonical_name == "TOKEN-736C57D0"
+        assert fake.call_args.kwargs["entity_type"] == "identifier"
+        assert fake.call_args.kwargs["canonical_name"] == "TOKEN-736C57D0"
 
     async def test_uuid_subject_infers(self, monkeypatch):
         """Canonical UUID subjects are identifier-shaped → infer + emit."""
-        self._patch_upsert(monkeypatch, uuid4())
+        self._patch_identifier_lookup(monkeypatch, uuid4())
         data = _input("12345678-1234-1234-1234-123456789abc status is open")
         await EmitMemoryTriple().execute(_ctx(data))
         assert data.predicate == "status"
@@ -444,7 +456,7 @@ class TestSubjectInference:
 
     async def test_dotted_identifier_subject_infers(self, monkeypatch):
         """Dotted service names: ``api.user.create`` → identifier."""
-        self._patch_upsert(monkeypatch, uuid4())
+        self._patch_identifier_lookup(monkeypatch, uuid4())
         data = _input("api.user.create status is deprecated")
         await EmitMemoryTriple().execute(_ctx(data))
         assert data.predicate == "status"
@@ -452,7 +464,7 @@ class TestSubjectInference:
 
     async def test_build_ref_subject_infers(self, monkeypatch):
         """Build references like ``build #4521`` and ``build-734``."""
-        self._patch_upsert(monkeypatch, uuid4())
+        self._patch_identifier_lookup(monkeypatch, uuid4())
         data = _input("build #4521 status is failed")
         await EmitMemoryTriple().execute(_ctx(data))
         assert data.predicate == "status"
@@ -466,8 +478,9 @@ class TestSubjectInference:
         the fragmentation risk that skip-on-doubt exists to avoid. Since
         A59 an UNKNOWN name skips as ``no_subject_match`` rather than
         ``no_subject``, but the thing this test protects is unchanged:
-        ``upsert_entity`` is never called for a name."""
-        fake = self._patch_upsert(monkeypatch, uuid4())
+        the identifier path (whose miss is created after the write) is
+        never taken for a name."""
+        fake = self._patch_identifier_lookup(monkeypatch, uuid4())
         lookup = _patch_lookup(monkeypatch, None)
         data = _input("Alice has release date 2027-05-01")
         result = await EmitMemoryTriple().execute(_ctx(data))
@@ -478,7 +491,7 @@ class TestSubjectInference:
 
     async def test_stopword_subject_skips(self, monkeypatch):
         """``She`` / ``They`` / ``Today`` / ``Q4`` all skip."""
-        fake = self._patch_upsert(monkeypatch, uuid4())
+        fake = self._patch_identifier_lookup(monkeypatch, uuid4())
         for content in [
             "She has release date 2027",
             "They deadline is Friday",
@@ -493,7 +506,7 @@ class TestSubjectInference:
 
     async def test_empty_head_skips(self, monkeypatch):
         """Content with no text before the predicate phrase → skip."""
-        fake = self._patch_upsert(monkeypatch, uuid4())
+        fake = self._patch_identifier_lookup(monkeypatch, uuid4())
         data = _input("has release date 2027-05-01")
         result = await EmitMemoryTriple().execute(_ctx(data))
         assert result.outcome == StepOutcome.SKIPPED
@@ -504,7 +517,7 @@ class TestSubjectInference:
         """Subject inference must take the identifier from the CURRENT
         clause, not from a previous sentence. ``"Foo. TOKEN-X has …"``
         should yield ``TOKEN-X``, not ``Foo. TOKEN-X``."""
-        self._patch_upsert(monkeypatch, uuid4())
+        self._patch_identifier_lookup(monkeypatch, uuid4())
         data = _input("Foo. TOKEN-X9 has release date 2027-05-01")
         await EmitMemoryTriple().execute(_ctx(data))
         assert data.predicate == "release_date"
@@ -524,7 +537,7 @@ class TestSubjectInference:
         sibling case the reviewer accepted; fully forbidding any
         trailing dash would need ``(?:[A-Z0-9-]*[A-Z0-9])?`` which
         is out of scope here."""
-        fake = self._patch_upsert(monkeypatch, uuid4())
+        fake = self._patch_identifier_lookup(monkeypatch, uuid4())
         data = _input("TOKEN--- has release date 2027-05-01")
         result = await EmitMemoryTriple().execute(_ctx(data))
         assert result.outcome == StepOutcome.SKIPPED
@@ -540,15 +553,14 @@ class TestSubjectInference:
         identifier. The object still uses the rightmost end for a
         clean tail."""
         upserted_id = uuid4()
-        fake = self._patch_upsert(monkeypatch, upserted_id)
+        fake = self._patch_identifier_lookup(monkeypatch, upserted_id)
         data = _input("TOKEN-XYZ has release date is 2027-05-01")
         result = await EmitMemoryTriple().execute(_ctx(data))
         assert result is None, f"Expected emit; got {result}"
         assert data.predicate == "release_date"
         assert data.object_value == "2027-05-01"
         fake.assert_called_once()
-        eu = fake.call_args.args[0]
-        assert eu.canonical_name == "TOKEN-XYZ"
+        assert fake.call_args.kwargs["canonical_name"] == "TOKEN-XYZ"
 
     async def test_uppercase_uuid_subject_infers(self, monkeypatch):
         """UUIDs in the wild come in both cases. The UUID alternative
@@ -556,40 +568,41 @@ class TestSubjectInference:
         ``DEADBEEF-…`` matches without re-enabling global
         ``re.IGNORECASE`` (which would re-introduce the full-stack
         regression)."""
-        self._patch_upsert(monkeypatch, uuid4())
+        self._patch_identifier_lookup(monkeypatch, uuid4())
         data = _input("DEADBEEF-1234-5678-9ABC-DEF012345678 status is shipped")
         await EmitMemoryTriple().execute(_ctx(data))
         assert data.predicate == "status"
         assert data.subject_entity_id is not None
 
-    async def test_upsert_deferred_until_after_object_extraction(self, monkeypatch):
+    async def test_lookup_deferred_until_after_object_extraction(self, monkeypatch):
         """If object extraction skips (``object_unparseable``), the
-        upsert MUST NOT have fired — otherwise we'd leak orphan
-        Entity rows for memories that never persisted their triple.
+        lookup MUST NOT have fired — a read the skip makes useless (it
+        once was an upsert, which leaked orphan Entity rows).
         Content "TOKEN-NOPE has release date" with empty tail after
         the predicate fails ``_normalize_object`` and skips."""
-        fake = self._patch_upsert(monkeypatch, uuid4())
+        fake = self._patch_identifier_lookup(monkeypatch, uuid4())
         # Trailing "has release date" with no date after → unparseable.
         data = _input("TOKEN-NOPE has release date")
         result = await EmitMemoryTriple().execute(_ctx(data))
         assert result.outcome == StepOutcome.SKIPPED
         assert result.detail["reason"] == "object_unparseable"
-        # Upsert must NOT have been called — that's the whole point of
+        # The lookup must NOT have been called — that's the whole point of
         # deferring it until after object extraction succeeds.
         fake.assert_not_called()
 
-    async def test_upsert_failure_degrades_to_skip(self, monkeypatch):
-        """Upsert raising must not break the write pipeline."""
+    async def test_lookup_failure_degrades_to_skip(self, monkeypatch):
+        """The identifier lookup raising must not break the write pipeline."""
         from unittest.mock import AsyncMock as _AM
 
         fake = _AM(side_effect=RuntimeError("storage unavailable"))
         monkeypatch.setattr(
-            "core_api.pipeline.steps.write.emit_memory_triple.upsert_entity", fake
+            "core_api.pipeline.steps.write.emit_memory_triple.find_entity_by_exact_name",
+            fake,
         )
         data = _input("TOKEN-FAILS has release date 2027")
         result = await EmitMemoryTriple().execute(_ctx(data))
         assert result.outcome == StepOutcome.SKIPPED
-        assert result.detail["reason"] == "subject_upsert_failed"
+        assert result.detail["reason"] == "subject_lookup_failed"
 
     async def test_lowercase_hyphenated_word_does_not_match(self, monkeypatch):
         """``IGNORECASE`` was removed from ``_IDENTIFIER_TOKEN`` so the
@@ -597,7 +610,7 @@ class TestSubjectInference:
         matches ordinary English words like ``full-stack``,
         ``long-term``, ``pre-release``. The heuristic must skip rather
         than create a spurious ``full-stack`` Entity."""
-        fake = self._patch_upsert(monkeypatch, uuid4())
+        fake = self._patch_identifier_lookup(monkeypatch, uuid4())
         for content in [
             "full-stack has release date 2027",
             "long-term status is ongoing",
@@ -614,7 +627,7 @@ class TestSubjectInference:
         GitHub / Jira / Linear. Earlier ``{2,}`` quantifier required 3+
         letters before the dash; ``{1,}`` lets ``PR``, ``OP``, ``QA``
         through while still rejecting ``A-1`` (only 1 char)."""
-        self._patch_upsert(monkeypatch, uuid4())
+        self._patch_identifier_lookup(monkeypatch, uuid4())
         for content, expected_subject in [
             ("PR-1234 status is merged", "PR-1234"),
             ("OP-87 priority is high", "OP-87"),
@@ -629,7 +642,7 @@ class TestSubjectInference:
         IDs. The version alternative now requires either a ``v`` prefix
         (v2.4) or a 3-part dotted form (2.4.0) so bare decimals can't
         accidentally become Entity rows."""
-        fake = self._patch_upsert(monkeypatch, uuid4())
+        fake = self._patch_identifier_lookup(monkeypatch, uuid4())
         for content in [
             "0.9 status is shipped",
             "1.5 status is open",
@@ -645,7 +658,7 @@ class TestSubjectInference:
         """Counter-test to ``test_bare_decimal_is_not_an_identifier``:
         the canonical version shapes ``v2.4`` and ``2.4.0`` ARE
         identifier-like and must still infer."""
-        self._patch_upsert(monkeypatch, uuid4())
+        self._patch_identifier_lookup(monkeypatch, uuid4())
         for content in [
             "v2.4 status is shipped",
             "v1.0 status is GA",
@@ -663,7 +676,7 @@ class TestSubjectInference:
         ``\\s*$`` anchor without an explicit punctuation strip.
         ``_infer_subject_token`` strips trailing ``.,;:!`` before the
         sentence-split."""
-        self._patch_upsert(monkeypatch, uuid4())
+        self._patch_identifier_lookup(monkeypatch, uuid4())
         data = _input("TOKEN-XYZ, has release date 2027-05-01")
         result = await EmitMemoryTriple().execute(_ctx(data))
         assert result is None, f"Expected emit; got {result}"
@@ -672,8 +685,8 @@ class TestSubjectInference:
 
     async def test_explicit_entity_links_still_take_precedence(self, monkeypatch):
         """When caller supplies role=subject link AND content has an
-        identifier token, the link wins — no upsert call."""
-        fake = self._patch_upsert(monkeypatch, uuid4())
+        identifier token, the link wins — no identifier lookup."""
+        fake = self._patch_identifier_lookup(monkeypatch, uuid4())
         link_id = uuid4()
         data = _input("TOKEN-Z has release date 2027", subject_id=link_id)
         await EmitMemoryTriple().execute(_ctx(data))
@@ -852,7 +865,7 @@ class TestProperNounSubjectLookup:
     async def test_an_unknown_name_skips_and_creates_nothing(self, monkeypatch):
         """The safety property. A name nobody has seen stays the extraction
         worker's to create, so this path can never fragment an entity."""
-        upsert = TestSubjectInference._patch_upsert(monkeypatch, uuid4())
+        upsert = TestSubjectInference._patch_identifier_lookup(monkeypatch, uuid4())
         _patch_lookup(monkeypatch, None)
         data = _input("Atlas has release date 2027-05-01")
         result = await EmitMemoryTriple().execute(_ctx(data))
@@ -908,16 +921,19 @@ class TestProperNounSubjectLookup:
     async def test_identifier_subjects_keep_their_create_on_miss_behaviour(
         self, monkeypatch
     ):
-        """Precedence guard. The identifier path runs first and is unchanged
-        — if the proper-noun path ever claimed these, identifier subjects
-        would silently stop being created."""
-        upsert = TestSubjectInference._patch_upsert(monkeypatch, uuid4())
+        """Precedence guard. The identifier path runs first — if the
+        proper-noun path ever claimed these, identifier subjects would
+        silently stop being created. A miss is left pending for
+        ``CreatePendingSubject`` to create after the write (L-18), which
+        the proper-noun path never does."""
         lookup = _patch_lookup(monkeypatch, None)
         data = _input("TOKEN-736C57D0 has release date 2027-05-01")
-        result = await EmitMemoryTriple().execute(_ctx(data))
+        ctx = _ctx(data)
+        result = await EmitMemoryTriple().execute(ctx)
         assert result is None, f"Expected emit; got {result}"
-        upsert.assert_called_once()
-        lookup.assert_not_called()
+        lookup.assert_called_once()
+        assert lookup.call_args.kwargs["entity_type"] == "identifier"
+        assert ctx.data["pending_subject"]["canonical_name"] == "TOKEN-736C57D0"
 
     async def test_the_lookup_is_deferred_until_every_other_gate_passes(
         self, monkeypatch

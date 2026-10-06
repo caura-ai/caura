@@ -21,12 +21,9 @@ import hashlib
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
-
-import httpx
 
 from ..client import Caura
-from ..exceptions import AuthError, CauraAPIError, NotFoundError
+from ..exceptions import AuthError, CauraAPIError, NotFoundError, TransportError
 from .discovery import HARNESS_CLAUDE_CODE, HARNESS_CURSOR, Transcript
 from .parser import count_lines, scan_events
 from .windows import Window, build_windows, window_is_worth_interviewing
@@ -61,7 +58,7 @@ def watermark_doc_id(node_id: str) -> str:
 class RunConfig:
     agent_id: str
     machine12: str
-    fleet_id: Optional[str] = None
+    fleet_id: str | None = None
     max_event_chars: int = 4_000
     max_windows: int = 8
     min_events: int = 10
@@ -76,8 +73,8 @@ class FileResult:
     windows_submitted: int = 0
     events_submitted: int = 0
     memories_written: int = 0
-    skipped_reason: Optional[str] = None
-    error: Optional[str] = None
+    skipped_reason: str | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -121,9 +118,19 @@ def _submit_window(mc: Caura, cfg: RunConfig, node_id: str, window: Window) -> d
     )
 
 
-def run_file(mc: Caura, transcript: Transcript, cfg: RunConfig, windows_budget: int) -> FileResult:
-    """Drain one transcript up to the shared windows budget."""
-    result = FileResult(path=transcript.path)
+def run_file(
+    mc: Caura,
+    transcript: Transcript,
+    cfg: RunConfig,
+    windows_budget: int,
+    result: FileResult | None = None,
+) -> FileResult:
+    """Drain one transcript up to the shared windows budget.
+
+    Progress is recorded on ``result`` as it happens, so a caller that passes
+    its own keeps the windows already committed if this raises (M-04)."""
+    if result is None:
+        result = FileResult(path=transcript.path)
     node_id = node_id_for(cfg.machine12, transcript.path, transcript.dialect)
     # Dry-run is fully offline: no watermark read, no submit — parse and
     # window from the start of the file as if never interviewed.
@@ -191,7 +198,7 @@ def run_file(mc: Caura, transcript: Transcript, cfg: RunConfig, windows_budget: 
             result.error = f"window [{window.cursor_from}..{window.cursor_to}]: {exc}"
             _log(cfg, f"{transcript.path.name}: {result.error} - skipping file")
             break
-        except httpx.TransportError as exc:
+        except TransportError as exc:
             result.error = f"transport: {exc}"
             _log(cfg, f"{transcript.path.name}: {result.error} - skipping file")
             break
@@ -216,7 +223,9 @@ def _try_submit(mc: Caura, cfg: RunConfig, node_id: str, window: Window) -> dict
             _log(cfg, f"504 on [{window.cursor_from}..{window.cursor_to}], one dedup-safe retry")
             return _submit_window(mc, cfg, node_id, window)
         raise
-    except httpx.TransportError:
+    except TransportError:
+        # The SDK's own class: ``Caura`` wraps every httpx transport fault in it,
+        # so ``httpx.TransportError`` never reached here (M-04).
         _log(cfg, f"transport error on [{window.cursor_from}..{window.cursor_to}], one dedup-safe retry")
         return _submit_window(mc, cfg, node_id, window)
 
@@ -226,14 +235,17 @@ def run_all(mc: Caura, transcripts: list[Transcript], cfg: RunConfig) -> RunSumm
     for transcript in transcripts:
         if summary.windows_budget_left <= 0:
             break
+        result = FileResult(path=transcript.path)
         try:
-            result = run_file(mc, transcript, cfg, summary.windows_budget_left)
+            run_file(mc, transcript, cfg, summary.windows_budget_left, result)
         except AuthError as exc:
             print(f"[interviewer] ABORT: {exc} (tenant not enabled, or bad credentials)", file=sys.stderr)
             summary.aborted = True
             break
-        except Exception as exc:  # per-file isolation: one bad file never stops the run
-            result = FileResult(path=transcript.path, error=f"unexpected: {exc}")
+        except Exception as exc:  # noqa: BLE001 - per-file isolation must keep the run going.
+            # ``result`` keeps the windows already committed, so they are still
+            # reported and charged to the budget.
+            result.error = f"unexpected: {exc}"
             print(f"[interviewer] ERROR {transcript.path.name}: {exc}", file=sys.stderr)
         summary.windows_budget_left -= result.windows_submitted
         summary.files.append(result)

@@ -1,8 +1,18 @@
 import uuid
+from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Float, ForeignKey, Index, Text, func, text
-from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSON, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from common.constants import VECTOR_DIM
@@ -19,9 +29,17 @@ class Entity(Base):
     fleet_id: Mapped[str | None] = mapped_column(Text)
     entity_type: Mapped[str] = mapped_column(Text, nullable=False)
     canonical_name: Mapped[str] = mapped_column(Text, nullable=False)
-    attributes: Mapped[dict | None] = mapped_column(JSONB)
+    # ``json``, not JSONB: migration 001 creates it that way (CAURA-595), and
+    # ``test_models_match_the_migrated_schema`` holds the model to the schema.
+    attributes: Mapped[dict | None] = mapped_column(JSON)
     name_embedding = mapped_column(Vector(VECTOR_DIM))
     search_vector = mapped_column(TSVECTOR)
+    # When the entity was first seen. The nightly duplicate merge keeps the
+    # oldest of two compatible unqualified names, as the write path keeps the
+    # first (H-05). Migration 060; rows from before it all read its time.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
 
     __table_args__ = (
         # The dedup constraint ``entity_add`` relies on. Created in migration
@@ -65,11 +83,42 @@ class Relation(Base):
         ForeignKey("entities.id", ondelete="CASCADE"), nullable=False
     )
     weight: Mapped[float] = mapped_column(Float, server_default=text("1.0"))
+    # Current visibility anchor. RelationEvidence records all memory
+    # assertions so deleting this one can select another real asserter.
     evidence_memory_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("memories.id", ondelete="SET NULL")
     )
 
     __table_args__ = (
+        # The natural key ``relation_add`` upserts on. Created in migration 001
+        # (``op.create_unique_constraint``) and, like
+        # ``uq_entities_tenant_type_name_fleet`` above, declared nowhere else —
+        # so a schema built from this metadata rather than the migration chain
+        # (``tests/conftest.py`` uses ``Base.metadata.create_all``) had no such
+        # constraint, and the upsert's ``ON CONFLICT ON CONSTRAINT
+        # uq_relations_natural_key`` — which names it — could not resolve there
+        # at all. Not a silent divergence like the entities one: Postgres
+        # rejects the statement outright, which is why every relation-upsert
+        # test had to live in ``core-storage-api/tests/`` against the
+        # migration-owned schema.
+        #
+        # A ``UniqueConstraint`` and not an ``Index(unique=True)``: ``ON
+        # CONFLICT ON CONSTRAINT`` resolves names in ``pg_constraint``, and a
+        # bare unique index is not there. ``Entity`` can use an index because
+        # its key is over expressions (``lower()``/``COALESCE()``), which a
+        # constraint cannot express; these four columns are plain.
+        #
+        # ``fleet_id`` is deliberately absent — the key is tenant-wide, which is
+        # what lets a fleet-scoped ``infer_relations`` run reinforce an edge a
+        # full run created, and what makes ``relation_add``'s fleet_id
+        # first-writer-wins.
+        UniqueConstraint(
+            "tenant_id",
+            "from_entity_id",
+            "relation_type",
+            "to_entity_id",
+            name="uq_relations_natural_key",
+        ),
         Index("ix_relations_from", "from_entity_id"),
         Index("ix_relations_to", "to_entity_id"),
         # For DELETEs on ``memories``, not reads here — the referencing side of
@@ -81,6 +130,21 @@ class Relation(Base):
             postgresql_where=text("evidence_memory_id IS NOT NULL"),
         ),
     )
+
+
+class RelationEvidence(Base):
+    """Each memory that actually asserted a typed relation."""
+
+    __tablename__ = "relation_evidence"
+
+    relation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("relations.id", ondelete="CASCADE"), primary_key=True
+    )
+    memory_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("memories.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    __table_args__ = (Index("ix_relation_evidence_memory_id", "memory_id"),)
 
 
 # Who created a ``memory_entity_links`` row. Not a free-form string: one

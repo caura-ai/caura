@@ -4,7 +4,8 @@ Covers four new (and one widened) endpoints used by the P1 / P2 / P5
 performance overhaul:
 
 - ``POST /memories/batch-update-status`` — widened with per-row
-  ``supersedes_id`` / ``unset_supersedes`` / ``expected_supersedes_id``
+  ``supersedes_id`` / ``unset_supersedes`` / ``expected_supersedes_id``,
+  and (09/22 M-01) ``expect_supersedes_null``
 - ``POST /memories/bulk-get`` — ordered list with ``None`` for missing
 - ``POST /entities/bulk-resolve`` — Phase 1 + Phase 2 in one round-trip
 - ``POST /entities/bulk-upsert`` — create + update + race-merge in one txn
@@ -161,6 +162,130 @@ async def test_batch_update_status_cas_skip_on_mismatch(sc):
     newer_post = await sc.get_memory(newer["id"], tid)
     assert newer_post["status"] == "conflicted"
     assert str(newer_post["supersedes_id"]) == str(other["id"])
+
+
+async def test_batch_update_status_sets_pointer_unconditionally_by_default(sc):
+    """Backward compatibility, stated as a test rather than assumed.
+
+    Without ``expect_supersedes_null`` the pointer write is unconditional —
+    it overwrites an edge the row already carries. This is the behaviour
+    09/22 M-01 found the contradiction detector relying on a CAS to prevent;
+    pinning it here makes the opt-in nature of the new flag explicit, so a
+    future reader cannot mistake the batch route for one that has always
+    guarded the edge.
+    """
+    tid = _t()
+    first = await _write_memory(sc, tid, "first target")
+    second = await _write_memory(sc, tid, "second target")
+    row = await _write_memory(sc, tid, "the chain head")
+
+    await sc.batch_update_status(
+        {
+            "updates": [
+                {
+                    "memory_id": row["id"],
+                    "status": "conflicted",
+                    "supersedes_id": first["id"],
+                }
+            ]
+        },
+        tenant_id=tid,
+    )
+    result = await sc.batch_update_status(
+        {
+            "updates": [
+                {
+                    "memory_id": row["id"],
+                    "status": "conflicted",
+                    "supersedes_id": second["id"],
+                }
+            ]
+        },
+        tenant_id=tid,
+    )
+
+    assert result["skipped"] == []
+    assert result["edge_skipped"] == []
+    post = await sc.get_memory(row["id"], tid)
+    # ``first`` is now orphaned — nothing points at it.
+    assert str(post["supersedes_id"]) == str(second["id"])
+
+
+async def test_batch_update_status_expect_null_refuses_to_re_point(sc):
+    """09/22 M-01 — the CAS the detector's comments named, now real on the
+    batch route. A second writer loses the edge and says so."""
+    tid = _t()
+    first = await _write_memory(sc, tid, "first target")
+    second = await _write_memory(sc, tid, "second target")
+    row = await _write_memory(sc, tid, "the chain head")
+
+    won = await sc.batch_update_status(
+        {
+            "updates": [
+                {
+                    "memory_id": row["id"],
+                    "status": "conflicted",
+                    "supersedes_id": first["id"],
+                    "expect_supersedes_null": True,
+                }
+            ]
+        },
+        tenant_id=tid,
+    )
+    assert won["edge_skipped"] == []
+
+    lost = await sc.batch_update_status(
+        {
+            "updates": [
+                {
+                    "memory_id": row["id"],
+                    "status": "outdated",
+                    "supersedes_id": second["id"],
+                    "expect_supersedes_null": True,
+                }
+            ]
+        },
+        tenant_id=tid,
+    )
+
+    # The edge is reported as lost, NOT as a skipped row...
+    assert lost["edge_skipped"] == [row["id"]]
+    assert lost["skipped"] == []
+
+    post = await sc.get_memory(row["id"], tid)
+    # ...the first writer keeps the edge, so nothing is orphaned...
+    assert str(post["supersedes_id"]) == str(first["id"])
+    # ...and the status flip the loser also asked for still landed. Losing a
+    # race for the chain edge must not cost the caller an unrelated write;
+    # this is the split ``PATCH /memories/{id}/status`` has always had.
+    assert post["status"] == "outdated"
+
+
+async def test_batch_update_status_expect_null_writes_when_pointer_is_free(sc):
+    """The happy path: the flag is a CAS, not a refusal to write."""
+    tid = _t()
+    target = await _write_memory(sc, tid, "target")
+    row = await _write_memory(sc, tid, "chain head")
+
+    result = await sc.batch_update_status(
+        {
+            "updates": [
+                {
+                    "memory_id": row["id"],
+                    "status": "conflicted",
+                    "supersedes_id": target["id"],
+                    "expect_supersedes_null": True,
+                }
+            ]
+        },
+        tenant_id=tid,
+    )
+
+    assert result["skipped"] == []
+    assert result["edge_skipped"] == []
+    post = await sc.get_memory(row["id"], tid)
+    assert str(post["supersedes_id"]) == str(target["id"])
+    assert post["status"] == "conflicted"
 
 
 # ============================================================================

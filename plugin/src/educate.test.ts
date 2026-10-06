@@ -1,7 +1,7 @@
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, win32 } from "path";
 import { fileURLToPath } from "url";
 import { tmpdir } from "os";
 import { educateAgents, writeEducationFiles } from "./index.js";
@@ -10,6 +10,7 @@ import {
   buildAgentsMd,
   discoverAgentWorkspaces,
   cleanupStaleHeartbeatEducation,
+  resolveWorkspacePath,
 } from "./educate.js";
 import { CAURA_TOOLS } from "./tools.js";
 import { MEMORY_TYPES, STATUSES } from "./tool-definitions.js";
@@ -155,6 +156,25 @@ describe("discoverAgentWorkspaces", () => {
       try { rmSync(d, { recursive: true, force: true }); } catch {}
     }
     dirs.length = 0;
+  });
+
+  test("keeps absolute Windows workspace paths absolute", () => {
+    assert.equal(
+      resolveWorkspacePath(
+        "C:\\Users\\agent\\.openclaw",
+        "C:\\Users\\agent\\workspace-custom",
+        win32,
+      ),
+      "C:\\Users\\agent\\workspace-custom",
+    );
+    assert.equal(
+      resolveWorkspacePath(
+        "C:\\Users\\agent\\.openclaw",
+        "workspace-relative",
+        win32,
+      ),
+      "C:\\Users\\agent\\.openclaw\\workspace-relative",
+    );
   });
 
   test("finds the default <baseDir>/workspace as id=main", () => {

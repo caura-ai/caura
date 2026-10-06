@@ -28,7 +28,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 
 // Read into module constants at import time, so it must precede the import.
-process.env.CAURA_API_URL = "http://op-dispatch.test";
+process.env.CAURA_API_URL = "https://op-dispatch.test";
 process.env.CAURA_API_KEY = "test-key";
 process.env.CAURA_TENANT_ID = "t-op-dispatch";
 
@@ -88,6 +88,29 @@ async function outcomeOf(
 }
 
 const MEMORY_ID = "11111111-1111-4111-8111-111111111111";
+
+describe("document operations require a usable collection before any request", () => {
+  for (const op of ["write", "read", "query", "delete"]) {
+    test(`${op} rejects missing, empty and non-string collections`, async () => {
+      for (const collection of [undefined, null, "", "   ", 123]) {
+        const outcome = await outcomeOf("caura_doc", {
+          op, collection, doc_id: "doc-1", data: { title: "Runbook" },
+        });
+        assert.deepEqual(captured, [], "invalid collection reached the network");
+        assert.match(String(outcome), /requires a non-empty collection/);
+      }
+    });
+  }
+
+  for (const op of ["search", "list_collections"]) {
+    test(`${op} still accepts an omitted collection`, async () => {
+      const outcome = await outcomeOf("caura_doc", { op, query: "runbook" });
+      assert.ok(!(outcome instanceof Error), String(outcome));
+      assert.equal(captured.length, 1);
+      assert.equal(captured[0].url.searchParams.has("collection"), false);
+    });
+  }
+});
 
 describe("an unrecognised op is refused, not dispatched as a write", () => {
   // One value per tool: after the guard there is no branching on the op VALUE,

@@ -24,6 +24,15 @@ These tests pin the contract at all three layers:
 2. REST: ``POST /api/v1/recall`` surfaces the alias to the wire.
 3. MCP: ``caura_recall(include_brief=True)`` surfaces it under
    ``brief``.
+
+ax-0917-h-03 amends layer 3 only. Serialising the list twice is half of every
+recall payload, so the alias became a choice: REST still emits it by default
+(``RecallResponse.items`` is published OpenAPI and
+``docs/public-api-stability.md`` makes REST response shapes SemVer contract —
+layers 1 and 2 below are unchanged and are now the back-compat pin), while the
+MCP brief opts out, because that payload already carries the identical rows
+twice outside the brief. ``tests/test_ax0917_recall_envelope.py`` pins the
+opt-out and the byte win.
 """
 
 from __future__ import annotations
@@ -282,14 +291,23 @@ async def test_rest_recall_response_carries_both_memories_and_items(
 # ---------------------------------------------------------------------------
 
 
-async def test_mcp_recall_brief_contains_both_keys(mcp_env, monkeypatch):
-    """``caura_recall(include_brief=True)`` wraps the
-    ``summarize_memories`` dict at ``payload["brief"]``. After C4 that
-    dict carries both ``memories`` and ``items``.
+async def test_mcp_recall_brief_carries_memories_without_the_alias(
+    mcp_env, monkeypatch
+):
+    """``caura_recall(include_brief=True)`` wraps the ``summarize_memories``
+    dict at ``payload["brief"]``.
+
+    C4 originally pinned BOTH keys here too. ax-0917-h-03 took the alias back
+    out of the MCP brief and left it on REST: this payload already carries the
+    identical rows under ``results`` and its own permanent ``items`` alias
+    (C31/D1), so the brief's copy made four of them, and
+    ``docs/public-api-stability.md`` pins MCP tool names and parameters rather
+    than a tool's JSON body. ``memories`` — /recall's canonical key, the one
+    both first-party SDKs read first — is what has to survive.
 
     We mock ``search_memories`` to return zero results so the REAL
     ``summarize_memories`` empty-branch runs end-to-end — no LLM round-
-    trip, no provider config required, and the alias has to come from
+    trip, no provider config required, and the shape has to come from
     the actual helper (not a test stub)."""
     mcp_env["service"]("search_memories").return_value = []
     monkeypatch.setattr(
@@ -308,7 +326,11 @@ async def test_mcp_recall_brief_contains_both_keys(mcp_env, monkeypatch):
 
     assert "brief" in payload, "MCP recall did not surface a brief"
     brief = payload["brief"]
-    assert "memories" in brief, "legacy `memories` key missing from MCP brief"
-    assert "items" in brief, "C4: `items` alias missing from MCP brief"
-    assert brief["items"] == brief["memories"]
-    assert brief["memory_count"] == len(brief["memories"]) == len(brief["items"])
+    assert "memories" in brief, "canonical `memories` key missing from MCP brief"
+    assert "items" not in brief, (
+        "ax-0917-h-03: the brief must not re-duplicate rows the payload already "
+        "carries under `results`/`items`"
+    )
+    assert brief["memory_count"] == len(brief["memories"])
+    # The outer MCP payload keeps its own C31/D1 dual-emit — untouched here.
+    assert "results" in payload and "items" in payload

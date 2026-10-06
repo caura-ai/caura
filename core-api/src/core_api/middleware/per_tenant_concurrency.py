@@ -15,9 +15,12 @@ Two caps compose:
 
 2. **Storage-call slot** (``"storage_write"`` / ``"storage_search"``,
    CAURA-602 follow-up). Held only across the storage roundtrip itself.
-   Acquire is unbounded — the outer request budget already caps how
-   long the wait can run, and queueing here is the *intended* shape
-   (a tenant in the embed phase doesn't hold a storage connection).
+   Acquire is unbounded — the caller's own budget already caps how
+   long the wait can run (a request budget, or the audit flusher's
+   acquire timeout; the roster is in :func:`per_tenant_storage_slot`),
+   and queueing here is the
+   *intended* shape (a tenant in the embed phase doesn't hold a
+   storage connection).
    Bounds storage-pool occupancy per tenant — keeps a hot tenant from
    parking every storage-writer connection on a 20-item bulk while
    tenant B waits to write a single row.
@@ -38,6 +41,7 @@ from typing import Literal
 from fastapi import HTTPException
 
 from core_api.config import settings
+from core_api.request_phase import phase
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +123,8 @@ async def per_tenant_slot(
     sem = _get_semaphore(scope, tenant_id)
     try:
         async with asyncio.timeout(settings.per_tenant_acquire_timeout_seconds):
-            await sem.acquire()
+            with phase(f"slot_acquire.{scope}"):
+                await sem.acquire()
     except TimeoutError:
         logger.info(
             "per-tenant concurrency cap reached",
@@ -150,10 +155,60 @@ async def per_tenant_storage_slot(
     Caller wraps a single ``sc.<call>`` invocation; the slot is held
     only while the storage call is in flight, freeing as soon as the
     response (or its cancellation) returns. Acquisition queues
-    unboundedly — the outer request budget (``RequestTimeoutMiddleware``
-    or the bulk route's ``asyncio.wait_for``) already caps total wall
-    time, and the request slot was already approved at route entry, so
-    a second fast-fail here would surface as a confusing 429-after-200.
+    unboundedly — an outer request budget already caps total wall time,
+    and the request slot was already approved at route entry, so a
+    second fast-fail here would surface as a confusing 429-after-200.
+
+    That justification is a claim about the CALLERS, so it is only worth
+    as much as the roster of them — and it was false on the transport
+    agents use most until oss-0924-h-02, with nothing here to show it.
+    Every path that can reach this acquire, and what caps it:
+
+    * REST, blanket — ``RequestTimeoutMiddleware``
+      (``request_timeout_seconds``, 45s).
+    * REST, opted out of the blanket middleware — the route's own
+      ``asyncio.wait_for``: ``/memories/bulk``
+      (``bulk_request_timeout_seconds``, 90s) and ``/interview/submit``
+      (``interview_request_timeout_seconds``, 90s).
+    * MCP ``tools/call`` — ``_InstrumentedMCPServer.call_tool``'s
+      ``asyncio.timeout`` (``mcp_request_timeout_seconds``, 90s). This
+      is the one that did not exist: the mount is skipped by the
+      middleware, ``caura_recall`` reaches this semaphore through
+      ``search_memories``, and the wait here was capped by nothing but
+      the client hanging up.
+    * ``/admin/org/purge-data`` — opted out and enforces NO deadline of
+      its own. It reaches no acquire here either: it calls
+      ``purge_tenant_data`` on the storage client directly, so there is
+      no unbounded wait on this path for a budget to cap, and what
+      bounds it is that client's own httpx timeouts
+      (``STORAGE_READ_TIMEOUT_SECONDS``). A terminal admin batch driven
+      by the daily sweep, not a caller waiting on a queue; noted so the
+      list above is exhaustive rather than convenient.
+    * The audit-queue flusher (``_flush_one_tenant``, ``app.py``) — a
+      background loop, not a request, so no request budget exists to
+      cap it. It arms its own: an ``asyncio.timeout`` over this acquire
+      (``audit_flush_slot_timeout_seconds``, 10s), disarmed once the
+      slot is held so the POST is left to the storage client's own
+      timeouts. Expiry drops that tenant's slice only. Before
+      oss-0927-m-04 this acquire was uncapped, and because the flusher
+      gathers every tenant of a chunk, one saturated tenant held the
+      whole flush cycle until the queue filled and dropped everyone's
+      events.
+
+    A new entry point that reaches a ``per_tenant_storage_slot`` caller
+    without a budget of its own puts this docstring back into the state
+    that made it a defect. Add the budget, or add the caller here and
+    say what bounds it.
+
+    None of that is enforced by being written here — which is how the
+    MCP entry came to be false and stay false. It is enforced by
+    ``tests/test_ax_h01_deadline_armed_guard.py``, which drives each
+    surface above through its real entry point, reads the recorder AT
+    this acquire, and then saturates this semaphore to prove the
+    deadline really cancels the wait rather than merely being bound
+    beside it (the flusher, having no recorder, is driven against the
+    saturated semaphore alone). The roster in that file is the checked copy of this list;
+    a surface added to one and not the other fails there by name.
 
     Tenant-A storm scenario: A's writes occupy ``cap`` storage slots;
     A's request 5+ queues on ``sem.acquire()``. Tenant B's write enters
@@ -177,7 +232,12 @@ async def per_tenant_storage_slot(
             "per-tenant storage slot saturated; queuing",
             extra={"scope": scope, "tenant_id": tenant_id, "cap": _cap_for(scope)},
         )
-    await sem.acquire()
+    # DEBUG is off in prod, so the log above is not evidence there. This
+    # queue is unbounded by design and explicitly relies on the request
+    # budget as its only cap — which makes it a prime candidate for eating
+    # that budget, and the one hop that had no signal at all when it did.
+    with phase(f"slot_acquire.{scope}"):
+        await sem.acquire()
     try:
         yield
     finally:

@@ -31,7 +31,8 @@ from __future__ import annotations
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import text
+from sqlalchemy import JSON, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 import common.models  # noqa: F401  — registers every model; the fix under test
@@ -134,6 +135,44 @@ async def test_the_indexes_only_the_migrations_know_about_are_the_known_ones() -
         f"appeared: {sorted(removed - _INDEXES_ONLY_IN_MIGRATIONS)}\n"
         f"disappeared: {sorted(_INDEXES_ONLY_IN_MIGRATIONS - removed)}"
     )
+
+
+async def test_every_json_column_is_the_json_type_its_model_declares() -> None:
+    """Seventeen columns from migration 001 were ``json`` in every migrated
+    database while their models declared ``JSONB`` (CAURA-595).
+
+    The models are what a reader writes SQL against, so the gap surfaced as
+    queries that only fail on a migrated database: ``jsonb_typeof`` and the
+    ``?`` operator both raised ``UndefinedFunctionError`` on these columns, and
+    ``COALESCE(metadata, '{}'::jsonb)`` raised ``CannotCoerceError``. Checked
+    against ``information_schema`` rather than through ``compare_metadata``,
+    whose type comparison the tests above never consulted, so the answer is
+    the database's own.
+    """
+    declared = {
+        (table.name, column.name): "jsonb" if isinstance(column.type, JSONB) else "json"
+        for table in Base.metadata.tables.values()
+        for column in table.columns
+        if isinstance(column.type, JSON)
+    }
+    async with get_engine().connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT table_name, column_name, data_type FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND data_type IN ('json', 'jsonb')"
+                )
+            )
+        ).all()
+    migrated = {(table, column): data_type for table, column, data_type in rows}
+
+    wrong = sorted(
+        f"{table}.{column}: model {kind}, schema {migrated.get((table, column))}"
+        for (table, column), kind in declared.items()
+        if migrated.get((table, column)) != kind
+    )
+    assert len(declared) >= 25, f"only {len(declared)} JSON columns declared — the scan is broken"
+    assert not wrong, "model and migrated schema disagree on JSON type:\n" + "\n".join(wrong)
 
 
 async def test_the_schema_really_has_no_row_level_security() -> None:

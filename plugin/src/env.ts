@@ -3,12 +3,16 @@
  *
  * Security fixes:
  * - .env parse errors are logged (no silent swallow)
- * - HTTPS warning on insecure URL
+ * - API key never sent over plain HTTP to a non-loopback host (opt-in override)
  */
 
 import { readFileSync, existsSync } from "fs";
 import { getPluginEnvPath } from "./paths.js";
-import { warnIfInsecureUrl } from "./validation.js";
+import {
+  insecureKeyTransportMessage,
+  keyTransportPolicy,
+  reportKeyTransportPolicy,
+} from "./validation.js";
 import { withUserAgent } from "./user-agent.js";
 
 /**
@@ -98,9 +102,11 @@ export const CAURA_FLEET_ID = readEnv(["CAURA_FLEET_ID", "MEMCLAW_FLEET_ID"]) ||
 export let CAURA_TENANT_ID = readEnv(["CAURA_TENANT_ID", "MEMCLAW_TENANT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 export const CAURA_NODE_NAME = readEnv(["CAURA_NODE_NAME", "MEMCLAW_NODE_NAME"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 export const CAURA_AGENT_ID = readEnv(["CAURA_AGENT_ID", "MEMCLAW_AGENT_ID"]) || "";  // legacy-name-ok: rule 3 dual-read alias
-// Default to true — auto-writing turn summaries is the core fix for the
-// "100% dark matter" problem (memories written but never recalled).
-// Users can opt out with CAURA_AUTO_WRITE_TURNS=false.
+// Default to true for all automatic conversation-memory writes: user messages
+// from ingest, turn summaries, compaction summaries and the pre-compaction
+// memory-flush turn (index.ts). Setting false disables these four paths;
+// explicit writes and runtime compaction remain available. The independently
+// enabled Interviewer has its own controls.
 export const CAURA_AUTO_WRITE_TURNS =
   readEnv(["CAURA_AUTO_WRITE_TURNS", "MEMCLAW_AUTO_WRITE_TURNS"]) !== "false";  // legacy-name-ok: rule 3 dual-read alias
 
@@ -142,8 +148,31 @@ export const CAURA_INTERVIEWER_TASKS = readEnv(["CAURA_INTERVIEWER_TASKS", "MEMC
 // filename); set this when a deployment relocates OpenClaw state.
 export const CAURA_TASK_DB_PATH = readEnv(["CAURA_TASK_DB_PATH", "MEMCLAW_TASK_DB_PATH"]) || "";  // legacy-name-ok: rule 3 dual-read alias
 
-// Warn at import time if API key is set but URL is HTTP
-warnIfInsecureUrl(CAURA_API_URL, CAURA_API_KEY);
+// Explicit opt-in to send the API key over plain HTTP to a non-loopback host
+// (e.g. an on-prem backend on a trusted private network). Without it the key
+// is refused at every outbound call site — see ``assertKeyTransportAllowed``.
+export const CAURA_ALLOW_INSECURE_HTTP = ["true", "1"].includes(
+  readEnv(["CAURA_ALLOW_INSECURE_HTTP"]) ?? "",
+);
+export const CAURA_KEY_TRANSPORT = keyTransportPolicy(CAURA_API_URL, CAURA_ALLOW_INSECURE_HTTP);
+// The channel to CAURA_API_URL is cleartext to another machine, opted in or not
+// (L-80). "refuse" only stops the KEY: a node with no CAURA_API_KEY still talks
+// to that host in the clear, so it gates what the plugin accepts from it.
+export const CAURA_CLEARTEXT_REMOTE = CAURA_KEY_TRANSPORT !== "send";
+
+// Report once at import: error when the key will be refused, warning when opted in.
+reportKeyTransportPolicy(CAURA_API_URL, CAURA_API_KEY, CAURA_KEY_TRANSPORT);
+
+/**
+ * Throw before any credential header is attached when CAURA_API_URL is plain
+ * HTTP to a non-loopback host and CAURA_ALLOW_INSECURE_HTTP is not set. Every
+ * site that sends ``X-API-Key`` must call this first.
+ */
+export function assertKeyTransportAllowed(): void {
+  if (CAURA_KEY_TRANSPORT === "refuse") {
+    throw new Error(insecureKeyTransportMessage(CAURA_API_URL));
+  }
+}
 
 // --- Tenant resolution ---
 
@@ -169,6 +198,7 @@ const TENANT_RESOLVE_TIMEOUT_MS = 10_000;
 export async function resolveTenantId(): Promise<string> {
   if (CAURA_TENANT_ID) return CAURA_TENANT_ID;
   if (!CAURA_API_KEY) return "";
+  assertKeyTransportAllowed();
 
   const MAX_RETRIES = 3;
   const BASE_DELAY_MS = 2000;
@@ -179,6 +209,7 @@ export async function resolveTenantId(): Promise<string> {
         new URL(`${CAURA_API_PREFIX}/whoami`, CAURA_API_URL).toString(),
         {
           method: "GET",
+          redirect: "error",
           headers: withUserAgent({ "X-API-Key": CAURA_API_KEY }),
           // Bound per-attempt wall-clock; see TENANT_RESOLVE_TIMEOUT_MS
           // docstring above for why this is critical to liveness.
@@ -282,13 +313,16 @@ let toolDescriptions: Record<string, string> = {};
 export async function fetchToolDescriptions(): Promise<void> {
   try {
     const headers: Record<string, string> = withUserAgent();
-    if (CAURA_API_KEY) headers["X-API-Key"] = CAURA_API_KEY;
+    if (CAURA_API_KEY) {
+      assertKeyTransportAllowed();
+      headers["X-API-Key"] = CAURA_API_KEY;
+    }
     const res = await fetch(
       new URL(`${CAURA_API_PREFIX}/tool-descriptions`, CAURA_API_URL).toString(),
       // Bound the fetch — same rationale as resolveTenantId. Less
       // critical here (cold path, called at registration not per-turn)
       // but a hung registration still blocks plugin load.
-      { headers, signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS) },
+      { headers, redirect: "error", signal: AbortSignal.timeout(TENANT_RESOLVE_TIMEOUT_MS) },
     );
     if (res.ok) {
       toolDescriptions = (await res.json()) as Record<string, string>;

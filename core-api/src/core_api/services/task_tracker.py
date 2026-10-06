@@ -102,9 +102,12 @@ async def tracked_task(
         # the ``except Exception`` below and this function returned having
         # written nothing. Shutdown cancels every tracked task, so a write that
         # was already ACKed to the caller lost its enrichment or its embed with
-        # no row, no retry and nothing to find it by: for the embed path the
-        # daily backfill eventually repairs it, but ``enrichment_pending`` rows
-        # have no sweep at all and stayed pending forever.
+        # no row, no retry and nothing to find it by. Both paths, equally: the
+        # embed side has a daily backfill on paper, but it registers only when
+        # ``embed_backfill_enabled`` is set, that defaults FALSE, and the topic
+        # it publishes into has never been provisioned — so "the sweep will
+        # repair it" is not a property this system has, and an earlier version
+        # of this comment claimed it was.
         #
         # Recorded as ``cancelled``, not ``failed``: nothing raised, and an
         # operator triaging genuine failures should not have a clean shutdown

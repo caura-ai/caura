@@ -8,7 +8,12 @@ import time
 from fastapi import HTTPException
 
 from common import duplicate_memory
-from core_api.clients.storage_client import DuplicateMemoryError, get_storage_client
+from core_api.clients.storage_client import (
+    CoreStorageClient,
+    DuplicateMemoryError,
+    StoragePointerRejectedError,
+    get_storage_client,
+)
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepResult
 from core_api.schemas import EntityLinkIn
@@ -68,6 +73,120 @@ def _record_link_failure(
             "permanent": permanent,
         },
     )
+
+
+async def write_entity_links(
+    sc: CoreStorageClient, links: list[EntityLinkIn], memory_id: object, tenant_id: str
+) -> tuple[list[EntityLinkIn], list[dict]]:
+    """Link the committed memory ``memory_id`` to ``links``.
+
+    Returns the links that persisted and one record per link that did not. The
+    memory is already committed, so a failed link degrades rather than raising
+    (H-05, see ``WriteMemoryRow``). Shared with the auto-chunk parent (M-51), so
+    both writers link, degrade and log the same way.
+
+    ``links`` are caller-supplied UUIDs with no upstream existence check, so one
+    bad id is an FK violation. A single bad id must not discard the valid links
+    beside it.
+    """
+    linked: list = []
+    link_failures: list[dict] = []
+    # OSS 08/14 L-34 — one bulk round-trip per 500 links, not one per link.
+    # A write naming 40 entities used to make 40 sequential HTTP calls to
+    # core-storage-api on the inline write path, with the caller blocked on
+    # all of them.
+    #
+    # The per-link loop this replaces was deliberate, and its reason (the
+    # H-05 incident: "a single bad id must not discard the valid links
+    # beside it") is preserved rather than traded away — because
+    # ``entity_bulk_upsert_links`` was built with the same requirement. It
+    # runs each item in its OWN session precisely so an FK violation on item
+    # N cannot roll back items 0..N-1, and reports the failure per item as
+    # ``error="fk_violation"`` aligned by ``input_idx``. Batching the links
+    # is therefore not the trade the fan-out's per-fact CREATE would be,
+    # where the bulk helper is all-or-nothing.
+    #
+    # Chunked at the router's documented 500-item cap because
+    # ``entity_links`` is unbounded: a 501-link write would otherwise come
+    # back 422 for the whole request and lose every link, which is exactly
+    # the failure mode this loop exists to prevent.
+    for chunk_start in range(0, len(links), _LINK_BULK_CHUNK):
+        chunk = links[chunk_start : chunk_start + _LINK_BULK_CHUNK]
+        items = [
+            {
+                "input_idx": idx,
+                "memory_id": memory_id,
+                # Stringify the UUID for JSON transport — mirrors line 60's
+                # handling of ``subject_entity_id``. SQLAlchemy auto-coerces
+                # on receive, so the persisted value is identical.
+                "entity_id": str(link.entity_id),
+                "role": link.role,
+            }
+            for idx, link in enumerate(chunk)
+        ]
+        try:
+            results = await sc.bulk_upsert_entity_links(tenant_id, items)
+        except Exception as exc:
+            # Still degrade in EVERY case — the row is committed, and letting
+            # anything propagate here is exactly the H-05 bug. The whole
+            # chunk is lost rather than one link, which is the one place the
+            # batching does change behaviour; the classification below is
+            # what keeps that readable. A transport failure that takes out a
+            # chunk is an outage, and the old comment already said an outage
+            # is not N independent data-loss events.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            permanent = status is not None and 400 <= status < 500
+            for link in chunk:
+                _record_link_failure(link_failures, link, permanent, memory_id, tenant_id, exc=exc)
+            continue
+
+        # Aligned by ``input_idx`` rather than by position: the response is
+        # documented as aligned to input, but the id is what makes that a
+        # checked property instead of an assumption.
+        by_idx = {r.get("input_idx"): r for r in results}
+        for idx, link in enumerate(chunk):
+            res = by_idx.get(idx)
+            if res is None or res.get("error"):
+                # ``fk_violation`` is the caller naming a memory or entity
+                # that does not exist or is not theirs — permanent, their
+                # input, one link, same verdict the 4xx branch gave it
+                # before. A missing slot is storage not answering for an
+                # item it was asked about; treated the same way, since the
+                # link is equally not there.
+                _record_link_failure(
+                    link_failures,
+                    link,
+                    True,
+                    memory_id,
+                    tenant_id,
+                    error=(res or {}).get("error", "missing_result"),
+                )
+                continue
+            linked.append(link)
+    if link_failures:
+        transient = sum(1 for f in link_failures if not f["permanent"])
+        if len(link_failures) > _MAX_LINK_ERROR_LOGS or transient:
+            # One summary, because ``entity_links`` is unbounded: a caller
+            # sending a thousand bad ids would otherwise emit a thousand ERROR
+            # lines, and log volume proportional to caller input is a
+            # denial-of-observability. Also fires whenever ANY failure was
+            # transient — that is the outage signal, and it must not be the
+            # thing the cap swallowed.
+            logger.error(
+                "entity links dropped: %d of %d (%d transient)",
+                len(link_failures),
+                len(links),
+                transient,
+                extra={
+                    "memory_id": memory_id,
+                    "tenant_id": tenant_id,
+                    "dropped": len(link_failures),
+                    "requested": len(links),
+                    "transient": transient,
+                    "logged_individually": min(len(link_failures), _MAX_LINK_ERROR_LOGS),
+                },
+            )
+    return linked, link_failures
 
 
 class WriteMemoryRow:
@@ -166,6 +285,13 @@ class WriteMemoryRow:
                 status_code=409,
                 detail=duplicate_memory.core_api_detail(str(exc), **exc.fields),
             ) from exc
+        except StoragePointerRejectedError as exc:
+            # A caller-supplied pointer (``subject_entity_id``) that is not a row
+            # of this tenant — absent or another tenant's, storage does not say
+            # which. The caller's to fix, so 422; and raised as HTTPException
+            # because the pipeline runner turns anything else into a bare 500.
+            # Nothing was committed.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         timings["storage_ms"] = round((time.perf_counter() - storage_t0) * 1000)
 
         # H-05: the row above is COMMITTED, so everything after it degrades rather
@@ -174,116 +300,14 @@ class WriteMemoryRow:
         # enrichment backfill — so the caller got a 500 for a write that persisted
         # and the row was left unreachable and unrepairable. The test in
         # tests/pipeline/test_write_pipeline.py carries the full incident.
-        #
-        # ``entity_links`` are caller-supplied UUIDs with no upstream existence
-        # check, so one bad id is an FK violation → storage 500 → HTTPStatusError.
-        # Per-link rather than one try around the loop: a single bad id must not
-        # discard the valid links beside it.
         links_t0 = time.perf_counter()
-        linked: list = []
-        link_failures: list[dict] = []
-        # OSS 08/14 L-34 — one bulk round-trip per 500 links, not one per link.
-        # A write naming 40 entities used to make 40 sequential HTTP calls to
-        # core-storage-api on the inline write path, with the caller blocked on
-        # all of them.
-        #
-        # The per-link loop this replaces was deliberate, and its reason (the
-        # H-05 incident: "a single bad id must not discard the valid links
-        # beside it") is preserved rather than traded away — because
-        # ``entity_bulk_upsert_links`` was built with the same requirement. It
-        # runs each item in its OWN session precisely so an FK violation on item
-        # N cannot roll back items 0..N-1, and reports the failure per item as
-        # ``error="fk_violation"`` aligned by ``input_idx``. Batching the links
-        # is therefore not the trade the fan-out's per-fact CREATE would be,
-        # where the bulk helper is all-or-nothing.
-        #
-        # Chunked at the router's documented 500-item cap because
-        # ``entity_links`` is unbounded: a 501-link write would otherwise come
-        # back 422 for the whole request and lose every link, which is exactly
-        # the failure mode this loop exists to prevent.
-        for chunk_start in range(0, len(data.entity_links), _LINK_BULK_CHUNK):
-            chunk = data.entity_links[chunk_start : chunk_start + _LINK_BULK_CHUNK]
-            items = [
-                {
-                    "input_idx": idx,
-                    "memory_id": memory["id"],
-                    # Stringify the UUID for JSON transport — mirrors line 60's
-                    # handling of ``subject_entity_id``. SQLAlchemy auto-coerces
-                    # on receive, so the persisted value is identical.
-                    "entity_id": str(link.entity_id),
-                    "role": link.role,
-                }
-                for idx, link in enumerate(chunk)
-            ]
-            try:
-                results = await sc.bulk_upsert_entity_links(data.tenant_id, items)
-            except Exception as exc:
-                # Still degrade in EVERY case — the row is committed, and letting
-                # anything propagate here is exactly the H-05 bug. The whole
-                # chunk is lost rather than one link, which is the one place the
-                # batching does change behaviour; the classification below is
-                # what keeps that readable. A transport failure that takes out a
-                # chunk is an outage, and the old comment already said an outage
-                # is not N independent data-loss events.
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                permanent = status is not None and 400 <= status < 500
-                for link in chunk:
-                    _record_link_failure(
-                        link_failures, link, permanent, memory["id"], data.tenant_id, exc=exc
-                    )
-                continue
-
-            # Aligned by ``input_idx`` rather than by position: the response is
-            # documented as aligned to input, but the id is what makes that a
-            # checked property instead of an assumption.
-            by_idx = {r.get("input_idx"): r for r in results}
-            for idx, link in enumerate(chunk):
-                res = by_idx.get(idx)
-                if res is None or res.get("error"):
-                    # ``fk_violation`` is the caller naming a memory or entity
-                    # that does not exist or is not theirs — permanent, their
-                    # input, one link, same verdict the 4xx branch gave it
-                    # before. A missing slot is storage not answering for an
-                    # item it was asked about; treated the same way, since the
-                    # link is equally not there.
-                    _record_link_failure(
-                        link_failures,
-                        link,
-                        True,
-                        memory["id"],
-                        data.tenant_id,
-                        error=(res or {}).get("error", "missing_result"),
-                    )
-                    continue
-                linked.append(link)
+        linked, link_failures = await write_entity_links(sc, data.entity_links, memory["id"], data.tenant_id)
         timings["entity_links_ms"] = round((time.perf_counter() - links_t0) * 1000)
         # Read by ``_memory_out_with_created_links``, which echoes these rather
         # than the request so the caller is told what actually persisted.
         ctx.data["entity_links_created"] = linked
         if link_failures:
             ctx.data["entity_link_failures"] = link_failures
-            transient = sum(1 for f in link_failures if not f["permanent"])
-            if len(link_failures) > _MAX_LINK_ERROR_LOGS or transient:
-                # One summary, because ``entity_links`` is unbounded: a caller
-                # sending a thousand bad ids would otherwise emit a thousand ERROR
-                # lines, and log volume proportional to caller input is a
-                # denial-of-observability. Also fires whenever ANY failure was
-                # transient — that is the outage signal, and it must not be the
-                # thing the cap swallowed.
-                logger.error(
-                    "entity links dropped: %d of %d (%d transient)",
-                    len(link_failures),
-                    len(data.entity_links),
-                    transient,
-                    extra={
-                        "memory_id": memory["id"],
-                        "tenant_id": data.tenant_id,
-                        "dropped": len(link_failures),
-                        "requested": len(data.entity_links),
-                        "transient": transient,
-                        "logged_individually": min(len(link_failures), _MAX_LINK_ERROR_LOGS),
-                    },
-                )
 
         detail = {
             "memory_type": fields["memory_type"],

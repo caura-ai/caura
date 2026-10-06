@@ -18,7 +18,7 @@ services:
     purpose: storage service — SQL + vector search over Postgres/pgvector
     path: core-storage-api/
   - name: core-operations
-    purpose: cron/scheduled background jobs host (no business HTTP surface, /healthz only)
+    purpose: cron/scheduled background jobs host (no business HTTP surface, /healthz only); runs in the shipped OSS compose stack against core-api's admin endpoints
     path: core-operations/
   - name: core-worker
     purpose: event consumers for managed/deferred-mode deployments (deployment_mode=deferred); not part of the shipped OSS compose stack
@@ -38,7 +38,7 @@ cron_ticks:
     cadence: daily (configurable UTC hour, default 02:00)
     module: core_operations.app
   - name: lifecycle-crystallize
-    cadence: daily (configurable UTC hour, default 02:00)
+    cadence: daily (configurable UTC hour, default 02:00); LIFECYCLE_CRYSTALLIZE_EVERY_HOURS below 24 runs every N hours on slots counted from that hour
     module: core_operations.app
   - name: lifecycle-entity-link
     cadence: daily (configurable UTC hour, default 02:00)
@@ -76,6 +76,8 @@ event_topic_families:
     topics: 2   # suppression-changed, settings-changed
   - name: Lifecycle
     topics: 9   # archive-expired/-stale/purge/crystallize/crystallize-on-demand/entity-link/insights/embed-backfill/forge-distill (all -requested)
+  - name: Collaboration
+    topics: 1   # wake (optional collaboration mounts)
 
 # Components that are NOT driven by core-operations' scheduler and need an
 # operator-provided external schedule.

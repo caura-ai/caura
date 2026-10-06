@@ -43,9 +43,15 @@ from core_storage_api.services.postgres_service import _saturate_rank
 #
 # History of the constants: 18 -> 9 (``_saturate_rank`` algebra), 9 -> 10 and
 # 20 -> 21 (CAURA-722 diagnostic projection, deliberately), 10 -> 1 and
-# 21 -> 4 (the two-layer split). Measured effect of the split alone on a
-# 50k-row / 1024-dim rig: the scored candidate select dropped 427ms -> 90ms —
-# the six distance evaluations per row were the dominant per-row cost.
+# 21 -> 4 (the two-layer split). Renders are not evaluations: with six renders
+# the planner postponed the expensive non-sort-key columns above the Sort/Limit
+# and the scan evaluated the distance twice per row at the default
+# ``cosine_distance`` cost (once at COST 100). Re-measured 2026-09-17 on a
+# standalone rig (pgvector 0.8.1, PG 16.12, 50k rows x 1024-dim): the split
+# alone takes the serial scored select from ~196 ms to ~157 ms and loses the
+# parallel workers (two-worker wall-clock 123 -> 156 ms); the order-of-magnitude
+# win is the ANN candidate pool. An earlier "427ms -> 90ms" figure for the split
+# alone did not reproduce.
 _EXPECTED_TS_RANK_CD_RENDERS = 1
 # ``plainto_tsquery`` remains in exactly four places, all inside the
 # ingredients CTE: the CAURA-594 admission guard (WHERE), the conflicted
@@ -55,8 +61,9 @@ _EXPECTED_TS_RANK_CD_RENDERS = 1
 # is the floor for this statement shape, not a concession.
 _EXPECTED_TSQUERY_RENDERS = 4
 # The pgvector cosine distance: the single most expensive expression in the
-# statement (a 1024-dim float loop per evaluation, ~6x the whole per-row cost
-# when it rendered 6 times). Must stay exactly 1 — inside ``vec_sim`` in the
+# statement (a 1024-dim float loop plus a TOAST fetch per evaluation; one
+# evaluation pass over 42.7k rows costs ~59 ms on the rig above, a ts_rank_cd
+# pass ~10 ms). Must stay exactly 1 — inside ``vec_sim`` in the
 # ingredients CTE. If you need the distance (or a derived similarity) in a new
 # place, reference the ``vec_sim`` / ``similarity`` COLUMN, never
 # ``Memory.embedding.cosine_distance`` — and mind the ``AS MATERIALIZED``

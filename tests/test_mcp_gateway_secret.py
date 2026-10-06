@@ -40,6 +40,7 @@ def _reset_mcp_context_vars():
     mcp_server._scopes_var.set(None)
     mcp_server._via_gateway_var.set(False)
     mcp_server._org_read_only_var.set(False)
+    mcp_server._org_read_only_unknown_var.set(False)
 
 
 # The settings attribute is the RESOLVED dual-read field (CAURA_API_KEY
@@ -239,6 +240,59 @@ async def test_org_read_only_is_ignored_off_the_gateway_path(monkeypatch):
     monkeypatch.setattr(settings, "is_standalone", False)
     await _call_middleware([(b"x-api-key", b"some-key"), (b"x-org-read-only", b"true")])
     assert mcp_server._is_org_read_only() is False
+
+
+async def test_an_unknown_verdict_is_not_read_only(monkeypatch):
+    """THE DANGEROUS DIRECTION, pinned at the parse.
+
+    ``/_auth`` sends ``unknown`` when its own storage lookup failed
+    (caura-ai/caura#1638). If that parsed as read-only, a storage blip would
+    refuse every MCP write on the platform — the exact outage the fail-open
+    exists to prevent, reintroduced by a header comparison. It is one string
+    away from ``"true"``, so it is asserted here rather than only on the
+    context var: a test that sets the var directly cannot see this mistake,
+    and the first version of this suite could not.
+    """
+    monkeypatch.setattr(settings, "gateway_shared_secret", None)
+    await _call_middleware(
+        [(b"x-tenant-id", b"tenant-A"), (b"x-org-read-only", b"unknown")]
+    )
+    assert mcp_server._is_org_read_only() is False
+    assert mcp_server._is_org_read_only_unknown() is True
+
+
+async def test_a_true_verdict_is_not_also_unknown(monkeypatch):
+    """A determined verdict must not be counted as a blind sample — that would
+    lose the observation the whole gate exists to produce."""
+    monkeypatch.setattr(settings, "gateway_shared_secret", None)
+    await _call_middleware(
+        [(b"x-tenant-id", b"tenant-A"), (b"x-org-read-only", b"true")]
+    )
+    assert mcp_server._is_org_read_only_unknown() is False
+
+
+async def test_unknown_is_ignored_off_the_gateway_path(monkeypatch):
+    """Same perimeter as the verdict itself: a direct caller must not be able
+    to self-assert that it was unmeasurable and pollute the window."""
+    monkeypatch.setattr(settings, "gateway_shared_secret", None)
+    monkeypatch.setattr(settings, "is_standalone", False)
+    await _call_middleware(
+        [(b"x-api-key", b"some-key"), (b"x-org-read-only", b"unknown")]
+    )
+    assert mcp_server._is_org_read_only_unknown() is False
+
+
+async def test_unknown_does_not_bleed_between_requests(monkeypatch):
+    """Assigned on every request like its neighbour. A stale True here would
+    mark healthy requests as unmeasured and make a clean window look blind."""
+    monkeypatch.setattr(settings, "gateway_shared_secret", None)
+    await _call_middleware(
+        [(b"x-tenant-id", b"tenant-A"), (b"x-org-read-only", b"unknown")]
+    )
+    assert mcp_server._is_org_read_only_unknown() is True
+
+    await _call_middleware([(b"x-tenant-id", b"tenant-A")])
+    assert mcp_server._is_org_read_only_unknown() is False
 
 
 async def test_org_read_only_does_not_bleed_between_requests(monkeypatch):

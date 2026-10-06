@@ -30,9 +30,11 @@ def test_transport_failure_is_a_client_error(error_type, method, args, kwargs):
         calls.append(request)
         raise cause
 
-    with Caura("test-key", tenant_id="t1", transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(CauraError) as caught:
-            getattr(client, method)(*args, **kwargs)
+    with (
+        Caura("test-key", tenant_id="t1", transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(CauraError) as caught,
+    ):
+        getattr(client, method)(*args, **kwargs)
 
     assert isinstance(caught.value, TransportError)
     assert caught.value.__cause__ is cause
@@ -44,15 +46,19 @@ def test_transport_mapping_does_not_wrap_serialization_errors():
     def handler(request):
         pytest.fail("an unserializable request must not reach the transport")
 
-    with Caura("test-key", tenant_id="t1", transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(TypeError):
-            client.write("hello", metadata={"invalid": object()})
+    with (
+        Caura("test-key", tenant_id="t1", transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(TypeError),
+    ):
+        client.write("hello", metadata={"invalid": object()})
 
 
 def test_transport_mapping_does_not_wrap_invalid_json():
     def handler(request):
         return httpx.Response(200, content=b"not json")
 
-    with Caura("test-key", tenant_id="t1", transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(ValueError):
-            client.health()
+    with (
+        Caura("test-key", tenant_id="t1", transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ValueError),
+    ):
+        client.health()

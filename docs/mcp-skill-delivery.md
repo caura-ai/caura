@@ -194,7 +194,7 @@ catalog is pruned. Operators can add extra target dirs via the
   dirs Caura exclusively controls.
 - **`additive`** — a **shared/foreign** dir. Caura writes its active
   skills there but **only ever touches entries it wrote**, tracked by a
-  per-skill `.memclaw-owned` marker file:
+  per-skill ownership marker file:
   - a slug already occupied by an *unowned* skill is a **collision** —
     skipped, never overwritten (reported in the summary's `collisions`
     list, kept distinct from the catalog-shape `skipped` list);

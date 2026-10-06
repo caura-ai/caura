@@ -4,7 +4,8 @@ Partially DB-free as of Fix 2 Ph6: the NULL-embedding read and the embedding
 write-back route through core-storage-api (``sc.list_null_embedding_entities``
 / ``sc.set_entity_embeddings``), but the LLM ``get_embedding`` loop stays in
 core-api. These mock the storage client + embedder and assert the step:
-read → per-row embed → write, mapping ``backfill_count`` into ``ctx.data``.
+read → embed (one batch call per page; L-174) → write, mapping
+``backfill_count`` into ``ctx.data``.
 
 The Core ``update(Entity.__table__)`` executemany regression anchor (prod
 2026-06-16: ``update(Entity)`` routed to ORM Bulk UPDATE by Primary Key and
@@ -34,7 +35,7 @@ def _ctx(**extra):
 
 @pytest.mark.asyncio
 async def test_read_embed_write_roundtrip():
-    """Read NULL-embedding rows → embed each → write back via storage."""
+    """Read NULL-embedding rows → embed the page → write back via storage."""
     eid = str(uuid.uuid4())
     sc = MagicMock()
     sc.list_null_embedding_entities = AsyncMock(
@@ -42,8 +43,8 @@ async def test_read_embed_write_roundtrip():
     )
     sc.set_entity_embeddings = AsyncMock(return_value=1)
 
-    async def _fake_embed(text, tenant_config, **_kwargs):
-        return [0.1] * 8
+    async def _fake_embed_batch(texts, tenant_config, **_kwargs):
+        return [[0.1] * 8 for _ in texts]
 
     with (
         patch(
@@ -51,8 +52,8 @@ async def test_read_embed_write_roundtrip():
             return_value=sc,
         ),
         patch(
-            "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_embedding",
-            new=_fake_embed,
+            "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_embeddings_batch",
+            new=_fake_embed_batch,
         ),
     ):
         ctx = _ctx()
@@ -90,13 +91,18 @@ async def test_embed_failure_skips_row_but_does_not_fail_step():
     )
     sc.set_entity_embeddings = AsyncMock(return_value=0)
 
-    async def _boom(text, tenant_config):
+    async def _boom(text, tenant_config, **_kwargs):
         raise RuntimeError("provider down")
 
+    # The page's batch call fails, then each name on its own.
     with (
         patch(
             "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_storage_client",
             return_value=sc,
+        ),
+        patch(
+            "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_embeddings_batch",
+            new=_boom,
         ),
         patch(
             "core_api.pipeline.steps.entity_linking.backfill_entity_embeddings.get_embedding",

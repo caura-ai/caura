@@ -24,11 +24,21 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from core_api.schemas import MemoryOut
+from core_api.schemas import MemoryOut, SearchWarning
 
 # --------------------------------------------------------------------------
 # memories / recall / health / version
 # --------------------------------------------------------------------------
+
+
+class MemoryPendingWork(BaseModel):
+    embedding: int = Field(description="Live rows whose vector has not landed yet (`embedding IS NULL`).")
+    enrichment: int = Field(
+        description="Live rows still marked `enrichment_pending` — the deferred LLM enrichment has not written back."
+    )
+    fanout: int = Field(
+        description="Live rows whose persisted atomic facts have not been fanned out into child memories yet."
+    )
 
 
 class MemoryStatsResponse(BaseModel):
@@ -42,6 +52,18 @@ class MemoryStatsResponse(BaseModel):
     )
     deleted: int | None = Field(default=None, description="Only when include_deleted=true.")
     total_including_deleted: int | None = Field(default=None, description="Only when include_deleted=true.")
+    pending: MemoryPendingWork | None = Field(
+        default=None,
+        description=(
+            "Background work still outstanding in this scope, from durable row markers. A row can count "
+            "on more than one axis. Contradiction marks are applied after embed/enrich events and carry "
+            "no durable marker, so allow a short grace period after `settled` flips."
+        ),
+    )
+    settled: bool | None = Field(
+        default=None,
+        description="True when every `pending` count is zero. Wait for this before measuring a freshly ingested store.",
+    )
 
 
 class MemoryCountResponse(BaseModel):
@@ -72,9 +94,15 @@ class MemoryContradictionsResponse(BaseModel):
     memory_id: str
     status: str | None
     superseded_by: SupersessionPeer | None = Field(
-        description="The newer memory that superseded this one; null when none is live."
+        description=(
+            "The older memory this one superseded (via supersedes_id); null when there is none or "
+            "it was deleted. The field name is kept for back-compat; newer memories that superseded "
+            "this one are in superseded_memories and in contradictions with direction superseded_by."
+        )
     )
-    superseded_memories: list[SupersessionPeer]
+    superseded_memories: list[SupersessionPeer] = Field(
+        description="Newer memories that superseded this one, each with supersedes_id pointing here."
+    )
     detection_status: str = Field(description="completed or pending.")
     contradictions: list[ContradictionEntry]
 
@@ -110,12 +138,52 @@ class RecallResponse(BaseModel):
     summary: str
     memory_count: int
     memories: list[MemoryOut]
-    items: list[MemoryOut] = Field(
-        description="Alias of memories (canonical list key per the wire contract)."
+    # ax-0917-h-03 — DEPRECATED, and deliberately still emitted by default here.
+    #
+    # ``POST /recall`` is a SemVer-stable REST surface (docs/public-api-stability.md,
+    # Memory row), so flipping this default is a breaking change owed a major. The
+    # MCP brief carries no such pin — that document fixes tool names and purposes,
+    # not response bodies — so it already defaults to omitting the alias. That
+    # split is a MIGRATION STATE, not a permanent design: marking the field
+    # deprecated here is what gives it an end, so the two surfaces converge at
+    # v4 rather than disagreeing indefinitely.
+    #
+    # Sunset follows the same deprecate-then-remove convention this PR leans on
+    # for h-04 (C25, #967). No first-party consumer reads it: both SDKs read
+    # ``memories`` first and only fall back (clients/python .../models.py,
+    # clients/typescript/src/index.ts), and the plugin's items reader is only
+    # ever fed /search.
+    items: list[MemoryOut] | None = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "DEPRECATED — scheduled for removal in v4.0.0; read `memories` instead. "
+            "Back-compat alias of memories, for consumers written against "
+            "/search's shape. Present unless the request set items_alias=false; "
+            "duplicating the result set is ~50% of this response. The MCP recall "
+            "brief already omits it by default."
+        ),
     )
     recall_ms: int
     diagnostic: RecallDiagnostic | None = Field(
         default=None, description="Only when the request sets diagnostic=true."
+    )
+    # ax-0917-h-05 — same shape as ``SearchResponse.warnings`` (A28). Absent
+    # when there is nothing to report, which is the ordinary case.
+    #
+    # CAURA-723 adds a second family to it: coded caveats about the RESULT SET
+    # rather than about the request, e.g. ``filter_agent_unknown`` when the
+    # agent filter names an id this tenant has never seen. Kept in one field —
+    # both are "the call succeeded, but something you would assume happened did
+    # not", which is exactly what ``SearchWarning`` was defined for.
+    warnings: list[SearchWarning] | None = Field(
+        default=None,
+        description=(
+            "Non-fatal notices about this request or its result set — e.g. "
+            "parameters the endpoint does not read and therefore ignored, or "
+            "'filter_agent_unknown' when the agent filter names an id this "
+            "tenant has never seen."
+        ),
     )
 
 
@@ -192,6 +260,13 @@ class KeystoneDoc(BaseModel):
 class KeystonesEnvelope(BaseModel):
     count: int
     items: list[KeystoneDoc]
+    rule_set_hash: str | None = Field(
+        description=(
+            "The rule-set hash of the rules in items: lowercase hex SHA-256, as "
+            "the broker computes it for the rules it delivers. Null when a rule "
+            "can't be hashed (a missing updated_at, a weight that isn't a number)."
+        )
+    )
 
 
 class KeystoneDeleteResponse(BaseModel):
@@ -291,6 +366,10 @@ class WriteSettings(BaseModel):
     default_write_mode: str | None = Field(description="fast or strong; null means fast.")
     triple_emission_enabled: bool | None
     retraction_enabled: bool | None
+    contradiction_detection_enabled: bool | None = Field(
+        description="Tenant switch for contradiction detection; null means on. False skips "
+        "every detection path for the tenant, so no row is marked outdated/conflicted."
+    )
 
 
 class SettingsResponse(BaseModel):
@@ -470,8 +549,23 @@ class IngestPreviewResponse(BaseModel):
     content_length: int
     facts: list[IngestFact]
     chunk_ms: int
-    doc_hash: str | None = Field(default=None, description="Absent on cache-hit and too-short branches.")
-    sections: int | None = Field(default=None, description="Absent on cache-hit and too-short branches.")
+    doc_hash: str | None = Field(
+        default=None,
+        description=(
+            "Echo to commit to cache this extraction. Null when sections_failed is non-zero, so a "
+            "partial extraction is never cached; absent on the too-short branch."
+        ),
+    )
+    sections: int | None = Field(
+        default=None, description="Absent on the too-short branch; 0 on a cache hit."
+    )
+    sections_failed: int | None = Field(
+        default=None,
+        description=(
+            "Sections whose LLM extraction failed; present on the extraction path. A preview that "
+            "lost every section is a 502 instead."
+        ),
+    )
     cached: bool | None = Field(default=None, description="Only on a doc-hash cache hit.")
     run_id: str | None = Field(default=None, description="Only on a cache hit: the prior run's id.")
     skipped_reason: str | None = Field(default=None, description="Only when skipped (content_too_short).")
@@ -572,6 +666,14 @@ class ConflictOut(BaseModel):
     resolution_note: str | None = None
     resolved_by: str | None = None
     resolved_at: str | None = None
+    # --- fields present on the runtime conflict payload but previously absent here ---
+    fleet_id: str | None = None
+    relationship_confidence: float | None = None
+    diagnosis_confidence: float | None = None
+    evidence_strength: str | None = None
+    audit_reason: str | None = None
+    created_by: str | None = None
+    created_at: str | None = None
 
 
 class ConflictListResponse(BaseModel):
