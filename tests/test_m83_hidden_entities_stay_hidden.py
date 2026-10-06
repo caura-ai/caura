@@ -17,13 +17,15 @@ decides is the one the lists use.
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 
 from core_api import mcp_server
 from core_api.app import app
 from core_api.auth import AuthContext, get_auth_context
 from core_api.tenant_context import set_current_tenant
-from tests._mcp_test_helpers import as_text
+from tests._mcp_test_helpers import as_text, is_error_envelope, parse_envelope
 from tests.conftest import new_tenant_id
 
 pytestmark = pytest.mark.asyncio
@@ -116,9 +118,14 @@ async def test_mcp_entity_get_reads_a_hidden_entity_as_missing(sc, monkeypatch):
         mcp_server, "_get_agent_id", lambda: mcp_server.AgentIdentity("peer")
     )
 
-    out = await mcp_server.caura_entity_get(entity_id=entity)
+    hidden = await mcp_server.caura_entity_get(entity_id=entity)
+    missing = await mcp_server.caura_entity_get(entity_id=str(uuid4()))
 
-    assert as_text(out).startswith("Entity not found."), as_text(out)
+    # M-23: NOT_FOUND in the canonical envelope, with isError, as REST's 404.
+    # It was the prose "Entity not found." with a latency trailer.
+    assert is_error_envelope(hidden), as_text(hidden)
+    assert parse_envelope(hidden) == parse_envelope(missing)
+    assert parse_envelope(hidden)["error"]["code"] == "NOT_FOUND"
 
 
 async def _upsert(client, tenant: str):

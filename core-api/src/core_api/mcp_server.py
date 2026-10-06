@@ -2342,11 +2342,22 @@ async def caura_manage(
                         ),
                         t0,
                     )
+                # Built before the charge: a value the model rejects (weight above
+                # 1, an unknown memory_type or status, empty content) is the
+                # caller's error, answered as INVALID_ARGUMENTS and not billed.
+                # Uncaught, it reached the client as an unstructured tool error
+                # after the charge (M-22), the twin of caura_write's fix.
+                try:
+                    patch = MemoryUpdate(**fields)
+                except ValidationError as e:
+                    return _with_latency(
+                        _error_response("INVALID_ARGUMENTS", f"Invalid update arguments — {e}"), t0
+                    )
                 # WRITE → home tenant only. ``update_memory`` is storage-routed
                 # and scopes the row to the explicit ``tenant_id``.
                 if charges_write_quota("update"):
                     await check_and_increment(tenant_id, "write")
-                result = await update_memory(uid, tenant_id, MemoryUpdate(**fields), agent_id=agent_id)
+                result = await update_memory(uid, tenant_id, patch, agent_id=agent_id)
                 return _with_latency(_serialize(result), t0)
             # op == "delete" — WRITE → home tenant only.
             #
@@ -2439,8 +2450,11 @@ async def caura_entity_get(
     except Exception as e:
         logger.exception("Unhandled error in caura_entity_get")
         return _with_latency(_error_response("INTERNAL_ERROR", str(e)), t0)
-    text = "Entity not found." if not result else _serialize(result)
-    return _with_latency(text, t0)
+    if not result:
+        # The envelope, as REST's 404 (M-23). A hidden entity is ``None`` too
+        # (M-83), so it answers exactly as a missing id.
+        return _with_latency(_error_response("NOT_FOUND", "Entity not found."), t0)
+    return _with_latency(_serialize(result), t0)
 
 
 async def caura_tune(
@@ -3109,8 +3123,11 @@ async def caura_doc(
                     doc_id=doc_id,
                     readable_tenant_ids=readable,
                 )
+                # One reply for a missing doc and a hidden skill below, so neither
+                # leaks existence; the envelope, as REST's 404 (M-23). It was prose.
+                not_found = _error_response("NOT_FOUND", f"Not found: {collection}/{doc_id}")
                 if not doc:
-                    return _with_latency(f"Not found: {collection}/{doc_id}", t0)
+                    return _with_latency(not_found, t0)
                 # Active-only gate for agent-facing skill reads. A
                 # candidate / staged / quarantined / rejected skill is
                 # in-flight or blocked and must not surface to agents —
@@ -3127,7 +3144,7 @@ async def caura_doc(
                     if _skill_hidden_from_agent(
                         doc, caller_tenant_id=tenant_id, caller_opted_in=caller_opted_in
                     ):
-                        return _with_latency(f"Not found: {collection}/{doc_id}", t0)
+                        return _with_latency(not_found, t0)
                 return _with_latency(
                     _dumps(
                         {
@@ -3392,8 +3409,12 @@ async def caura_doc(
                 require_status=_AGENT_VISIBLE_SKILL_STATUS if skills_gate_on else None,
             )
             if not deleted:
+                # The envelope, as REST's 404 (M-23). A bare ``{"error": "<string>"}``
+                # carried no code and reached clients as a successful call.
                 return _with_latency(
-                    _dumps({"error": f"Document '{doc_id}' not found in collection '{collection}'"}),
+                    _error_response(
+                        "NOT_FOUND", f"Document '{doc_id}' not found in collection '{collection}'."
+                    ),
                     t0,
                 )
             # Un-mint, exactly as the REST delete does. ``op=index`` above mints

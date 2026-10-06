@@ -7,6 +7,7 @@
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
       "MISSING_AGENT_ID",
+      "NOT_FOUND",
       "UNAUTHORIZED",
       "UPSTREAM_ERROR"
     ],
@@ -165,6 +166,7 @@
       "FORBIDDEN",
       "INTERNAL_ERROR",
       "INVALID_ARGUMENTS",
+      "NOT_FOUND",
       "UNAUTHORIZED"
     ],
     "impl_status": "live",

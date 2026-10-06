@@ -27,7 +27,12 @@ from core_api.constants import (
     MAX_DOC_SEARCH_TOP_K,
     VECTOR_DIM,
 )
-from tests._mcp_test_helpers import parse_envelope, strip_latency, stub_storage_client
+from tests._mcp_test_helpers import (
+    is_error_envelope,
+    parse_envelope,
+    strip_latency,
+    stub_storage_client,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -109,7 +114,13 @@ async def test_doc_read_missing_doc_id(mcp_env):
 async def test_doc_read_not_found(mcp_env, monkeypatch):
     stub_storage_client(monkeypatch, get_document=None)
     out = await mcp_server.caura_doc(op="read", collection="customers", doc_id="ghost")
-    assert "Not found: customers/ghost" in strip_latency(out)
+    # M-23: NOT_FOUND in the canonical envelope, with isError, as REST's 404.
+    # It was bare prose with a latency trailer, neither JSON nor an error.
+    assert is_error_envelope(out)
+    assert parse_envelope(out)["error"] == {
+        "code": "NOT_FOUND",
+        "message": "Not found: customers/ghost",
+    }
 
 
 async def test_doc_read_happy_path(mcp_env, monkeypatch):
@@ -145,14 +156,16 @@ async def test_doc_delete_missing_doc_id(mcp_env):
 
 async def test_doc_delete_not_found_envelope(mcp_env, monkeypatch):
     """A storage delete that matched nothing returns False → the handler
-    emits a ``{"error": "…"}`` JSON blob."""
+    answers NOT_FOUND in the canonical envelope, with isError (M-23). It sent
+    ``{"error": "<string>"}``, which reached clients as a successful call."""
     sc = stub_storage_client(monkeypatch, delete_document=False)
     out = await mcp_server.caura_doc(
         op="delete", collection="customers", doc_id="ghost"
     )
-    payload = parse_envelope(out)
-    assert "not found" in payload["error"].lower()
-    assert "ghost" in payload["error"]
+    assert is_error_envelope(out)
+    error = parse_envelope(out)["error"]
+    assert error["code"] == "NOT_FOUND"
+    assert "ghost" in error["message"]
     sc.delete_document.assert_awaited_once()
 
 
@@ -697,8 +710,12 @@ async def test_skill_read_hides_non_active_when_flag_on(mcp_env, monkeypatch):
         monkeypatch, get_document=_skill_doc("forge/x", status="staged")
     )
     out = await mcp_server.caura_doc(op="read", collection="skills", doc_id="forge/x")
-    # Non-active skill → same "Not found" as a missing doc (no existence leak).
-    assert "Not found: skills/forge/x" in strip_latency(out)
+    # Non-active skill → same NOT_FOUND as a missing doc (no existence leak).
+    assert is_error_envelope(out)
+    assert parse_envelope(out)["error"] == {
+        "code": "NOT_FOUND",
+        "message": "Not found: skills/forge/x",
+    }
 
 
 async def test_skill_read_returns_active_when_flag_on(mcp_env, monkeypatch):
@@ -1120,8 +1137,11 @@ async def test_skill_delete_hides_non_active_when_flag_on(mcp_env, monkeypatch):
         monkeypatch, delete_document=False
     )  # status guard matched nothing
     out = await mcp_server.caura_doc(op="delete", collection="skills", doc_id="forge/x")
-    payload = parse_envelope(out)  # must be valid JSON
-    assert payload["error"] == "Document 'forge/x' not found in collection 'skills'"
+    assert is_error_envelope(out)
+    assert parse_envelope(out)["error"] == {
+        "code": "NOT_FOUND",
+        "message": "Document 'forge/x' not found in collection 'skills'.",
+    }
 
 
 async def test_skill_delete_allows_active_when_flag_on(mcp_env, monkeypatch):
