@@ -22,12 +22,15 @@ import uuid
 
 import pytest
 
+from core_api.app import app
+from core_api.auth import AuthContext, get_auth_context
 from core_api.constants import SEARCH_OVERFETCH_FACTOR
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.steps.search.resolve_search_profile import ResolveSearchProfile
 from core_api.services import memory_service
 from core_api.services.memory_service import resolve_search_params
 from core_api.services.organization_settings import ResolvedConfig
+from core_api.tenant_context import set_current_tenant
 from tests.conftest import get_test_auth
 
 _PROFILE_TOP_K = 10
@@ -204,3 +207,63 @@ async def test_route_returns_request_top_k_over_tenant_default(
             f"and tenant default_profile.top_k={_PROFILE_TOP_K} returned "
             f"{_count(resp.json())} rows, expected {expected}"
         )
+
+
+_AGENT_TOP_K = 7
+
+
+@pytest.fixture
+def as_tenant():
+    """Authenticate with a tenant credential, as an SDK caller does.
+
+    ``get_test_auth()`` returns the ADMIN key, which resolves to
+    ``tenant_id=None``, and both routes look the agent up only behind
+    ``if auth.tenant_id:``, so under it no agent profile is ever read.
+    """
+
+    def _install(tenant_id: str):
+        async def _dep():
+            set_current_tenant(tenant_id)
+            return AuthContext(tenant_id=tenant_id, readable_tenant_ids=[tenant_id])
+
+        app.dependency_overrides[get_auth_context] = _dep
+
+    yield _install
+    app.dependency_overrides.pop(get_auth_context, None)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("use_pipeline", [True, False], ids=["pipeline", "legacy"])
+@pytest.mark.parametrize("route", ["/api/v1/search", "/api/v1/recall"])
+async def test_route_applies_the_agents_tuned_top_k(
+    client, monkeypatch, as_tenant, use_pipeline, route
+):
+    """M-32: /recall never passed the agent's search profile to the search, so a
+    knob tuned with caura_tune or PATCH /agents/{id}/tune applied on /search and
+    MCP recall and not here. ``top_k`` stands in for every knob: the same profile
+    carries them all. /search is the control.
+    """
+    monkeypatch.setattr(memory_service, "_USE_PIPELINE_SEARCH", use_pipeline)
+    tenant_id = f"test-tenant-m32-{uuid.uuid4().hex[:8]}"
+    headers = get_test_auth(tenant_id)[1]
+    await _seed(client, headers, tenant_id)
+    tuned = await client.patch(
+        f"/api/v1/agents/side60-bot/tune?tenant_id={tenant_id}",
+        headers=headers,
+        json={"top_k": _AGENT_TOP_K},
+    )
+    assert tuned.status_code == 200, tuned.text
+
+    as_tenant(tenant_id)
+    resp = await client.post(
+        route,
+        headers=headers,
+        json={"tenant_id": tenant_id, "query": _QUERY, "caller_agent_id": "side60-bot"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    rows = body["items"] if route.endswith("/search") else body["memories"]
+    assert len(rows) == _AGENT_TOP_K, (
+        f"{route} returned {len(rows)} rows for an agent tuned to {_AGENT_TOP_K}"
+    )

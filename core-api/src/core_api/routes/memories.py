@@ -2940,6 +2940,7 @@ async def recall_endpoint(
     # that peer's private rows and inherited its trust level for the fleet
     # forcing — the escalation /search already refuses.
     eff_agent_id, identity_asserted = _resolve_read_identity(auth, body)
+    _agent = None
     _agent_reg: dict = {}  # CAURA-723 — see /search
     if auth.tenant_id:
         if eff_agent_id:
@@ -3010,6 +3011,9 @@ async def recall_endpoint(
         valid_at=body.valid_at,
         graph_expand=config.graph_expand,
         tenant_config=config,
+        # M-32 — the agent's tuned knobs, as on /search and MCP caura_recall.
+        # Without it /recall ranked with the tenant's untuned defaults.
+        search_profile=_agent.get("search_profile") if _agent else None,
         readable_tenant_ids=auth.readable_tenant_ids if auth.is_cross_tenant_read else None,
         diagnostic=body.diagnostic,
         diagnostic_ctx=diagnostic_ctx if body.diagnostic else None,
