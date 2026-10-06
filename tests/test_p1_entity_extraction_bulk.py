@@ -438,9 +438,9 @@ async def test_first_seen_wins_canonical_when_longer_name_arrives(
 async def test_existing_aliases_preserved_and_extended(
     mock_resolve, mock_extract, mock_sc_factory, mock_embed, _rel, _log
 ):
-    """The existing entity's ``_aliases`` list is preserved verbatim,
-    with the existing ``canonical_name`` and the new surface form
-    appended if not already present. Idempotent under repeated runs."""
+    """The update item names the existing ``canonical_name`` and the new
+    surface form as aliases. Storage unions them into the stored list, which is
+    preserved verbatim (L-46), so the payload no longer copies it."""
     existing_entity_id = str(uuid4())
     mock_resolve.return_value = _config()
     mock_extract.return_value = _graph([_entity("acme co", "organization")])
@@ -475,8 +475,10 @@ async def test_existing_aliases_preserved_and_extended(
     aliases = sc.bulk_upsert_entities.call_args.kwargs["items"][0]["attributes"][
         "_aliases"
     ]
-    # Prior aliases preserved; "acme co" is new and gets appended.
-    assert aliases == ["acme", "acme corp", "acme co"]
+    # The item carries the stored canonical name and the new form; storage
+    # unions them into the row's aliases, so "acme corp" stays without being
+    # sent (L-46, tests/test_entity_upsert_merges.py).
+    assert aliases == ["acme", "acme co"]
 
 
 @patch("core_api.services.entity_extraction_worker.log_action", new_callable=AsyncMock)

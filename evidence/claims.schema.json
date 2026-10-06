@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://caura.ai/schemas/evidence-claims-v1.json",
+  "title": "Caura public evidence claims registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "registry_version", "updated_at", "claims"],
+  "properties": {
+    "$schema": { "const": "./claims.schema.json" },
+    "registry_version": { "const": 1 },
+    "updated_at": { "type": "string", "format": "date" },
+    "claims": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/claim" } }
+  },
+  "$defs": {
+    "nullableUrl": {
+      "type": ["string", "null"],
+      "format": "uri",
+      "pattern": "^https://",
+      "description": "Null is permitted only where status and evidence_gap make the unavailable or non-applicable evidence explicit."
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value", "unit", "display", "measurement_at"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "value": { "type": "number" },
+        "unit": { "enum": ["percent", "milliseconds", "agents", "memories", "skills", "tokens"] },
+        "display": { "type": "string", "minLength": 1 },
+        "measurement_at": {
+          "type": ["string", "null"],
+          "format": "date",
+          "description": "Null only when the date is unknown and the containing claim is withdrawn or withheld."
+        }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["population", "sample_size", "numerator", "denominator", "dataset", "dataset_version", "sampling_notes", "null_reason"],
+      "properties": {
+        "population": { "type": "string", "minLength": 1 },
+        "sample_size": { "type": ["integer", "null"], "minimum": 1 },
+        "numerator": { "type": ["integer", "null"], "minimum": 0 },
+        "denominator": { "type": ["integer", "null"], "minimum": 1 },
+        "dataset": { "type": ["string", "null"] },
+        "dataset_version": { "type": ["string", "null"] },
+        "sampling_notes": { "type": "string", "minLength": 1 },
+        "null_reason": { "type": ["string", "null"] }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applicable", "provider", "model", "immutable_snapshot", "notes"],
+      "properties": {
+        "applicable": { "type": "boolean" },
+        "provider": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "immutable_snapshot": { "type": ["string", "null"] },
+        "notes": { "type": "string", "minLength": 1 }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "parameters"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "parameters": { "type": "object" }
+      }
+    },
+    "codeCommit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "null_reason"],
+      "properties": {
+        "repository": { "type": ["string", "null"], "format": "uri", "pattern": "^https://" },
+        "commit": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "null_reason": { "type": ["string", "null"] }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "url", "kind"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "kind": { "enum": ["artifact", "harness", "methodology", "dataset", "case_study"] }
+      }
+    },
+    "disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "reason"],
+      "properties": {
+        "at": { "type": "string", "format": "date" },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "status", "role", "metric", "benchmark", "measurement_at",
+        "last_verified_at", "approved_wording", "scope", "evaluation",
+        "answering_model", "judge", "configuration", "code_commit", "methodology_url",
+        "raw_result_url", "reproducible_harness_url", "evidence_gap", "measurements",
+        "sources", "caveats", "withdrawal", "withholding"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(?:_[a-z0-9]+)*$" },
+        "title": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["active", "withdrawn", "withheld"] },
+        "role": { "enum": ["headline", "control", "supporting", "historical", "adoption"] },
+        "metric": { "enum": ["accuracy", "token_savings", "search_latency", "adoption"] },
+        "benchmark": { "type": ["string", "null"], "enum": ["LoCoMo", "LongMemEval", null] },
+        "measurement_at": { "type": ["string", "null"], "format": "date" },
+        "last_verified_at": { "type": "string", "format": "date" },
+        "approved_wording": { "type": ["string", "null"] },
+        "scope": { "type": "string", "minLength": 1 },
+        "evaluation": { "$ref": "#/$defs/evaluation" },
+        "answering_model": { "$ref": "#/$defs/model" },
+        "judge": { "$ref": "#/$defs/model" },
+        "configuration": { "$ref": "#/$defs/configuration" },
+        "code_commit": { "$ref": "#/$defs/codeCommit" },
+        "methodology_url": { "$ref": "#/$defs/nullableUrl" },
+        "raw_result_url": { "$ref": "#/$defs/nullableUrl" },
+        "reproducible_harness_url": { "$ref": "#/$defs/nullableUrl" },
+        "evidence_gap": { "type": ["string", "null"] },
+        "measurements": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/measurement" } },
+        "sources": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/source" } },
+        "caveats": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "withdrawal": { "oneOf": [{ "$ref": "#/$defs/disposition" }, { "type": "null" }] },
+        "withholding": { "oneOf": [{ "$ref": "#/$defs/disposition" }, { "type": "null" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "active" } } },
+          "then": {
+            "properties": {
+              "approved_wording": { "type": "string", "minLength": 1 },
+              "withdrawal": { "type": "null" },
+              "withholding": { "type": "null" },
+              "evidence_gap": { "type": "null" }
+            },
+            "anyOf": [
+              { "properties": { "raw_result_url": { "type": "string" } } },
+              { "properties": { "reproducible_harness_url": { "type": "string" } } }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "withdrawn" } } },
+          "then": {
+            "properties": {
+              "approved_wording": { "type": "null" },
+              "withdrawal": { "$ref": "#/$defs/disposition" },
+              "withholding": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "withheld" } } },
+          "then": {
+            "properties": {
+              "approved_wording": { "type": "null" },
+              "withdrawal": { "type": "null" },
+              "withholding": { "$ref": "#/$defs/disposition" },
+              "evidence_gap": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

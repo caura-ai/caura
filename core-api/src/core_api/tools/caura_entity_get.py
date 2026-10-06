@@ -18,6 +18,7 @@ _SPEC = ToolSpec(
         "FORBIDDEN",
         "INTERNAL_ERROR",
         "INVALID_ARGUMENTS",
+        "NOT_FOUND",
         "UNAUTHORIZED",
     ),
 )

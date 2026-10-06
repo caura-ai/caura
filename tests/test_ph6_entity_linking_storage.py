@@ -202,7 +202,8 @@ async def test_resolve_merges_duplicate_pair(sc):
     tenant = _t()
     emb = fake_embedding("acme")
     # Identical embeddings (sim=1.0) but distinct names so the unique index
-    # is not tripped. Canonical pick = longest name → "Acme Corporation".
+    # is not tripped. Canonical pick = first seen → "Acme Corporation", seeded
+    # first (H-05; tests/test_entity_merge_keeps_first_seen_and_evidence.py).
     canonical = await _seed_entity(
         tenant_id=tenant, canonical_name="Acme Corporation", name_embedding=emb
     )
@@ -236,6 +237,55 @@ async def test_resolve_merges_duplicate_pair(sc):
     attrs = await _entity_attrs(canonical)
     assert "Acme" in attrs["_aliases"]
     assert "Acme Corporation" in attrs["_aliases"]
+
+
+async def test_resolve_repoints_memory_subjects_onto_the_canonical(sc):
+    """``memories.subject_entity_id`` is a reference to the dupe too.
+
+    The merge repointed links and relations and then deleted the dupe, leaving
+    every memory whose RDF subject it was pointing at a deleted entity (or NULL
+    where the ``ON DELETE SET NULL`` FK exists) while its ``predicate`` and
+    ``object_value`` stayed set.
+    """
+    tenant = _t()
+    emb = fake_embedding("globex")
+    canonical = await _seed_entity(
+        tenant_id=tenant, canonical_name="Globex Corporation", name_embedding=emb
+    )
+    dupe = await _seed_entity(
+        tenant_id=tenant, canonical_name="Globex", name_embedding=emb
+    )
+    mem = await _seed_memory(tenant_id=tenant, content="globex status is up")
+    async with get_session() as session:
+        await session.execute(
+            text(
+                "UPDATE memories SET subject_entity_id = CAST(:e AS uuid), "
+                "predicate = 'status', object_value = 'up' WHERE id = CAST(:m AS uuid)"
+            ),
+            {"e": dupe, "m": mem},
+        )
+
+    resp = await sc.resolve_entities(
+        tenant_id=tenant,
+        fleet_id=None,
+        batch_size=100,
+        threshold=0.85,
+        candidate_limit=3,
+    )
+
+    assert resp["merged_entity_ids"] == [dupe]
+    async with get_session() as session:
+        subject = (
+            await session.execute(
+                text(
+                    "SELECT subject_entity_id FROM memories WHERE id = CAST(:m AS uuid)"
+                ),
+                {"m": mem},
+            )
+        ).scalar_one()
+    assert str(subject) == canonical, (
+        f"subject is {subject!r} after the merge, not the canonical"
+    )
 
 
 async def test_resolve_repoints_relations_and_preserves_higher_weight(sc):

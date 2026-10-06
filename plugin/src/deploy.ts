@@ -21,6 +21,32 @@ import { logError } from "./logger.js";
 
 const BUILD_COMMAND = "npx tsc 2>&1";
 
+/**
+ * Keys a REMOTE deploy may never set, whatever the server sends: where the
+ * node sends its key, the key itself, the tenant it acts for, and the switches
+ * that keep it safe. Changing them is a local operator decision. The server
+ * refuses the same keys (``_REMOTE_ENV_DENYLIST_SUFFIXES`` in
+ * ``core_api/routes/fleet.py``); this is the node's own copy of the rule.
+ */
+export const REMOTE_ENV_DENYLIST_SUFFIXES = [
+  "_API_URL",
+  "_API_KEY",
+  "_API_PREFIX",
+  "_KEY_TRANSPORT",
+  "_TENANT_ID",
+  "_ALLOW_INSECURE_HTTP",
+  "_REQUIRE_SIGNED_COMMANDS",
+  "_TASK_DB_PATH",
+];
+
+export function isRemoteEnvDenied(key: string): boolean {
+  const upper = key.toUpperCase();
+  return (
+    hasPluginEnvPrefix(upper) &&
+    REMOTE_ENV_DENYLIST_SUFFIXES.some((suffix) => upper.endsWith(suffix))
+  );
+}
+
 type BuildRunner = (
   command: string,
   options: { cwd: string; encoding: "utf-8"; timeout: number },
@@ -84,6 +110,10 @@ export async function deployPlugin(
 
       // Merge provided keys over existing
       for (const [key, val] of Object.entries(envVars)) {
+        if (isRemoteEnvDenied(key)) {
+          logError("deploy: refusing remote env var", key);
+          continue;
+        }
         if (hasPluginEnvPrefix(key) && typeof val === "string") {
           existing.set(key, val.replace(/[\r\n]/g, ""));
           envChanges.push(key);

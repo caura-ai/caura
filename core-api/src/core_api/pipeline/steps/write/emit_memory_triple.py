@@ -8,11 +8,12 @@ Contract:
   the reason logged at DEBUG. The downstream LLM contradiction path
   remains unchanged and continues to handle anything we skip.
 - This step never overwrites caller-supplied triple fields.
-- This step issues no LLM calls. It reaches storage only to resolve the
-  subject entity (an upsert for identifier-shaped subjects, a read-only
-  lookup for proper nouns), and otherwise mutates only
+- This step issues no LLM calls and creates nothing. It reaches storage
+  only for read-only subject lookups, and otherwise mutates only
   ``ctx.data["input"]`` (the in-memory MemoryCreate) so that
-  ``WriteMemoryRow`` (line 60-62) persists the populated columns.
+  ``WriteMemoryRow`` persists the populated columns. A new identifier
+  subject is left in ``ctx.data[PENDING_SUBJECT]`` for
+  ``CreatePendingSubject`` to create after the row is written (L-18).
 """
 
 from __future__ import annotations
@@ -26,10 +27,16 @@ from uuid import UUID
 from common.constants import SINGLE_VALUE_PREDICATES
 from core_api.pipeline.context import PipelineContext
 from core_api.pipeline.step import StepOutcome, StepResult
-from core_api.schemas import EntityUpsert
-from core_api.services.entity_service import find_entity_by_exact_name, upsert_entity
+from core_api.services.entity_service import AmbiguousEntityName, find_entity_by_exact_name
 
 logger = logging.getLogger(__name__)
+
+# L-18. ``ctx.data`` key for an identifier subject that no entity holds yet:
+# ``{"canonical_name", "predicate", "object_value"}``. The entity used to be
+# upserted here, before the semantic gate and WriteMemoryRow, so a write they
+# refused left an entity no memory references. ``CreatePendingSubject`` creates
+# it after the row is written; ``CheckSemanticDuplicate`` reads the key too.
+PENDING_SUBJECT: Final = "pending_subject"
 
 
 # Phrase → predicate table. Only entries whose predicate appears in
@@ -607,8 +614,9 @@ class EmitMemoryTriple:
             #       — high-trust, no DB hit, used by SDK / MCP callers.
             #   (b) identifier-token heuristic on ``content[:match.start()]``
             #       — closes the loadtest's bare-POST shape. Only fires
-            #       for identifier-shaped tokens (gap A5), and CREATES
-            #       the entity on a miss.
+            #       for identifier-shaped tokens (gap A5). A miss is
+            #       created too, but only after the row is written (L-18,
+            #       ``PENDING_SUBJECT``).
             #   (c) proper-noun name resolved by LOOKUP ONLY (A59) —
             #       fills the subject on a repeat mention of a name the
             #       entity table already holds, and creates nothing. A
@@ -626,10 +634,10 @@ class EmitMemoryTriple:
             # Two-phase subject resolution. Phase A (here): identify
             # the source — caller-supplied link OR heuristic-inferred
             # text. Phase B (after all SKIP gates pass): if the source
-            # was the heuristic, do the entity upsert. Splitting these
-            # keeps us from creating orphan Entity rows when a later
-            # gate (object-extraction, predicate-not-in-allowlist)
-            # skips the emission.
+            # was the heuristic, look the entity up. Splitting these
+            # spares the read when a later gate (object-extraction,
+            # predicate-not-in-allowlist) skips the emission. Creating a
+            # new identifier waits for the row itself (L-18).
             subject_entity_id: UUID | None
             inferred: str | None = None
             proper_noun: str | None = None
@@ -661,10 +669,10 @@ class EmitMemoryTriple:
             if object_value is None:
                 return StepResult(outcome=StepOutcome.SKIPPED, detail={"reason": "object_unparseable"})
 
-            # Phase B — deferred upsert. Only runs if the subject came
+            # Phase B — deferred lookup. Only runs if the subject came
             # from the heuristic AND every downstream gate above passed.
-            # If the upsert raises (transient storage failure, etc.),
-            # SKIP with ``subject_upsert_failed`` — never break the
+            # If the lookup raises (transient storage failure, etc.),
+            # SKIP with ``subject_lookup_failed`` — never break the
             # write pipeline.
             if proper_noun is not None and subject_entity_id is None:
                 # Lookup-only: a name we have never seen stays the extraction
@@ -682,6 +690,13 @@ class EmitMemoryTriple:
                         fleet_id=data.fleet_id,
                         canonical_name=proper_noun,
                     )
+                except AmbiguousEntityName:
+                    # The name is held by more than one entity type (M-25):
+                    # skip-on-doubt, as for two caller-supplied subjects.
+                    return StepResult(
+                        outcome=StepOutcome.SKIPPED,
+                        detail={"reason": "ambiguous_subject", "subject_candidate": proper_noun},
+                    )
                 except Exception as exc:
                     logger.warning("Proper-noun subject lookup failed for %r: %s", proper_noun, exc)
                     return StepResult(
@@ -694,31 +709,39 @@ class EmitMemoryTriple:
                         detail={"reason": "no_subject_match", "subject_candidate": proper_noun},
                     )
 
+            pending = False
             if inferred is not None and subject_entity_id is None:
+                # L-18: look up, never create, here. This step runs before the
+                # semantic gate and WriteMemoryRow, and an entity created for a
+                # write they refuse is referenced by nothing. A new identifier is
+                # held as pending and ``CreatePendingSubject`` creates it once
+                # the row exists. Typed, so a name held by other types cannot be
+                # ambiguous; in the write's fleet only (M-119).
                 try:
-                    entity = await upsert_entity(
-                        EntityUpsert(
-                            tenant_id=data.tenant_id,
-                            fleet_id=data.fleet_id,
-                            entity_type="identifier",
-                            canonical_name=inferred,
-                        ),
+                    subject_entity_id = await find_entity_by_exact_name(
+                        tenant_id=data.tenant_id,
+                        fleet_id=data.fleet_id,
+                        canonical_name=inferred,
+                        entity_type="identifier",
                     )
                 except Exception as exc:
-                    logger.warning(
-                        "Subject-inference upsert failed for %r: %s",
-                        inferred,
-                        exc,
-                    )
+                    logger.warning("Subject-inference lookup failed for %r: %s", inferred, exc)
                     return StepResult(
                         outcome=StepOutcome.SKIPPED,
-                        detail={"reason": "subject_upsert_failed"},
+                        detail={"reason": "subject_lookup_failed"},
                     )
-                subject_entity_id = entity.id
+                if subject_entity_id is None:
+                    ctx.data[PENDING_SUBJECT] = {
+                        "canonical_name": inferred,
+                        "predicate": predicate,
+                        "object_value": object_value,
+                    }
+                    pending = True
 
-            data.subject_entity_id = subject_entity_id
-            data.predicate = predicate
-            data.object_value = object_value
+            if not pending:
+                data.subject_entity_id = subject_entity_id
+                data.predicate = predicate
+                data.object_value = object_value
 
             emit_ms = round((time.perf_counter() - t0) * 1000, 1)
             fields = ctx.data.get("memory_fields")
@@ -727,8 +750,9 @@ class EmitMemoryTriple:
                 if isinstance(metadata, dict):
                     metadata["triple_emission_ms"] = emit_ms
             logger.info(
-                "emit_triple populated subject=%s predicate=%s ms=%s",
-                str(subject_entity_id)[:8],
+                "emit_triple %s subject=%s predicate=%s ms=%s",
+                "pending" if pending else "populated",
+                inferred if pending else str(subject_entity_id)[:8],
                 predicate,
                 emit_ms,
             )

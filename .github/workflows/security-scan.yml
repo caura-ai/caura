@@ -16,7 +16,7 @@ on:
   pull_request:
     branches: [main, dev]
   schedule:
-    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+    - cron: "1 6 * * 1" # weekly, Monday 06:01 UTC
   workflow_dispatch:
 
 env:

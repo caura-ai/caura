@@ -157,6 +157,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional retention hint. Once this time passes, the row moves to status outdated on the next lifecycle tick and drops out of default search results. Not a hard cutoff: the row remains readable until that tick runs. Distinct from ts_valid_end, which closes a temporal-validity interval rather than expressing retention.",
             "title": "Expires At"
           },
           "memory_type": {
@@ -540,6 +541,150 @@
           "event_bus"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "KeystoneData": {
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when scope=agent.",
+            "title": "Agent Id"
+          },
+          "author_user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when supplied at write time.",
+            "title": "Author User Id"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "scope": {
+            "description": "tenant, fleet, or agent.",
+            "title": "Scope",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "weight": {
+            "description": "Priority bucket 25, 50, or 100 (request labels low/med/high are converted).",
+            "title": "Weight",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "title",
+          "content",
+          "weight",
+          "scope"
+        ],
+        "title": "KeystoneData",
+        "type": "object"
+      },
+      "KeystoneDoc": {
+        "properties": {
+          "collection": {
+            "description": "Always \"_keystones\".",
+            "title": "Collection",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/KeystoneData"
+          },
+          "doc_id": {
+            "title": "Doc Id",
+            "type": "string"
+          },
+          "fleet_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Null for tenant-scope rules.",
+            "title": "Fleet Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "tenant_id": {
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "fleet_id",
+          "collection",
+          "doc_id",
+          "data",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "KeystoneDoc",
+        "type": "object"
+      },
+      "KeystonesEnvelope": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/KeystoneDoc"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "rule_set_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The rule-set hash of the rules in items: lowercase hex SHA-256, as the broker computes it for the rules it delivers. Null when a rule can't be hashed (a missing updated_at, a weight that isn't a number).",
+            "title": "Rule Set Hash"
+          }
+        },
+        "required": [
+          "count",
+          "items",
+          "rule_set_hash"
+        ],
+        "title": "KeystonesEnvelope",
         "type": "object"
       },
       "MemoryDetailResponse": {
@@ -1233,6 +1378,7 @@
                 "type": "null"
               }
             ],
+            "description": "Optional retention hint. Once this time passes, the row moves to status outdated on the next lifecycle tick and drops out of default search results. Not a hard cutoff: the row remains readable until that tick runs. Distinct from ts_valid_end, which closes a temporal-validity interval rather than expressing retention.",
             "title": "Expires At"
           },
           "memory_type": {
@@ -1256,6 +1402,7 @@
                 "type": "null"
               }
             ],
+            "description": "Free-form metadata stored with the memory. Keys you send are yours: enrichment never overwrites a `summary` or `tags` you supply here, on this write or on any later one — the platform's own versions go to `system_metadata` instead. Platform-reserved keys (timings, governance verdicts, provenance) are stripped from this dict; send them and they are dropped, not stored.",
             "title": "Metadata"
           },
           "metadata_mode": {
@@ -1597,6 +1744,7 @@
         "type": "object"
       },
       "SearchRequest": {
+        "additionalProperties": true,
         "properties": {
           "caller_agent_id": {
             "anyOf": [
@@ -1614,6 +1762,18 @@
             "default": false,
             "title": "Diagnostic",
             "type": "boolean"
+          },
+          "entity_boost": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set false for this call only to rank by the plain hybrid (vector + full-text) score: entity/graph retrieval is skipped, so no entity boost multiplier is applied and the ENTITY_LOOKUP short-circuit cannot fire. Omit (or true) for the tenant's search.entity_retrieval behaviour; a request cannot enable entity retrieval over a tenant that disabled it. REST only: the MCP tools do not expose this per request.",
+            "title": "Entity Boost"
           },
           "filter_agent_id": {
             "anyOf": [
@@ -1639,6 +1799,18 @@
               }
             ],
             "title": "Fleet Ids"
+          },
+          "include_derived": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether to return atomic-fact fan-out children — short single-claim rows the platform derives from a memory you wrote, which stay retrievable alongside it. Omit to inherit the tenant's search.include_derived setting, which in turn falls back to the global default (currently true). Precedence: this field beats the tenant setting beats the global default. Excluded rows are dropped BEFORE the top_k trim, so top_k still returns top_k rows. Does not affect auto-chunk children, which are the only sub-document vectors a long document has. REST only: the MCP tools do not expose this per request — an MCP caller sets the tenant's search.include_derived instead, and an unknown argument sent to an MCP tool is dropped silently rather than reported (oss-0923-h-01).",
+            "title": "Include Derived"
           },
           "memory_type_filter": {
             "anyOf": [
@@ -1671,6 +1843,18 @@
             "title": "Query",
             "type": "string"
           },
+          "recall_boost": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Set false for this call only to neutralise the popularity recall_boost factor (score multiplier fixed at 1.0) AND to skip the recall_count bump for the returned rows, so the read neither uses nor feeds the recall signal (the response reports recall_tracked: false). Omit (or true) for the tenant's behaviour; a request cannot enable the boost over a tenant that disabled it. REST only: the MCP tools do not expose this per request.",
+            "title": "Recall Boost"
+          },
           "status_filter": {
             "anyOf": [
               {
@@ -1692,7 +1876,7 @@
           },
           "top_k": {
             "default": 5,
-            "description": "Maximum results the query returns (1-200, default 5). Not the response ceiling: each returned outdated/conflicted row also carries its newest correction, injected beyond this budget and marked injected: true (with score: null), so a response holds at most 2*top_k items.",
+            "description": "Maximum results the query returns (1-200, default 5). Not the response ceiling: each returned outdated/conflicted row also carries its newest correction, injected beyond this budget and marked injected: true (with score: null), so a response holds at most 2*top_k items. Also accepted as 'limit': sent on its own it is absorbed silently and no warning is raised. Sent together with 'top_k', top_k wins and the response carries a 'superseded_parameter_alias' warning naming 'limit' as superseded by 'top_k' — not an 'unrecognized_parameters' one, because the endpoint does read 'limit'; it was simply outranked.",
             "maximum": 200.0,
             "minimum": 1.0,
             "title": "Top K",
@@ -1740,7 +1924,7 @@
           },
           "recall_tracked": {
             "default": false,
-            "description": "Whether this search bumped recall_count for the memories it returned. False means they were not reinforced: the caller presented no agent identity (a tenant-scoped key that did not set filter_agent_id — recall_count stays 0 for that caller and recall_boost never engages), the call set diagnostic=true, or nothing matched.",
+            "description": "Whether this search bumped recall_count for the memories it returned. False means they were not reinforced: the caller presented no agent identity (a tenant-scoped key that did not set filter_agent_id — recall_count stays 0 for that caller and recall_boost never engages), the call set diagnostic=true or recall_boost=false, or nothing matched.",
             "title": "Recall Tracked",
             "type": "boolean"
           },
@@ -1941,6 +2125,129 @@
         ]
       }
     },
+    "/api/v1/keystones": {
+      "get": {
+        "description": "Return scope-merged keystone rules. No trust gate — reads are\nsafe and the plugin needs this on every session start.\n\nCross-tenant credentials may inspect any tenant in their readable set\nby pinning ``tenant_id`` to it; the read is scoped to that single\ntenant's rules. Aggregate keystone view across the readable set\nisn't exposed here — agents should keep keystones explicitly per\ntenant for scope clarity.\n\nThe envelope's ``rule_set_hash`` names the rules in ``items``, so a\ncaller can tell whether a set it holds is still current.",
+        "operationId": "list_keystones_api_v1_keystones_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fleet_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fleet Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "description": "C30/D1 opt-in: return {count, items} instead of the bare array. The bare array stays the default until a separate announced deprecation wave.",
+            "in": "query",
+            "name": "envelope",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "C30/D1 opt-in: return {count, items} instead of the bare array. The bare array stays the default until a separate announced deprecation wave.",
+              "title": "Envelope",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "items": {
+                        "$ref": "#/components/schemas/KeystoneDoc"
+                      },
+                      "type": "array"
+                    },
+                    {
+                      "$ref": "#/components/schemas/KeystonesEnvelope"
+                    }
+                  ],
+                  "title": "Response 200 List Keystones Api V1 Keystones Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authentication failed or was not supplied."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CauraError"
+                }
+              }
+            },
+            "description": "Authenticated, but not permitted to perform this operation."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "summary": "List Keystones",
+        "tags": [
+          "Keystones"
+        ]
+      }
+    },
     "/api/v1/memories": {
       "get": {
         "description": "List memories with filtering, sorting, and pagination.\n\n**Visibility scoping:** When ``agent_id`` is provided, the caller can see\ntheir own ``scope_agent`` memories plus all ``scope_team``/``scope_org``\nmemories. When ``agent_id`` is omitted, ``scope_agent`` memories are hidden\n(safe default). This means memory types like ``insight`` that are typically\ncreated with agent-scoped visibility will only appear when ``agent_id`` is\npassed.\n\n**Author filter:** ``written_by`` selects the authoring agent. It is separate\nfrom ``agent_id`` (the visibility identity) so a caller can ask for a peer's\nauthored rows without claiming that peer's identity; ``agent_id`` remains the\nauthor filter when ``written_by`` is omitted. Filtering by author only ever\nnarrows the caller's existing visibility — it cannot surface a row an\nunfiltered list would have hidden.\n\n**Scope:** ``scope`` is optional and mirrors the MCP / plugin ``caura_list``\ncontract, including its trust ladder (see ``_resolve_scoped_read``). Omit it\nand the route behaves exactly as before.\n\n**Pagination:** Both cursor-based and offset-based pagination are supported.\nCursor pagination (via ``cursor``) is recommended for large datasets and only\nworks with ``sort=created_at&order=desc``. Offset pagination works with any\nsort order.",
@@ -1995,7 +2302,7 @@
             }
           },
           {
-            "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter.",
+            "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter. Unrelated to the `visibility` parameter despite the shared word: this selects how wide to look at read time, `visibility=scope_*` filters on the tier a writer stamped on the row. Keystone routes spell their own scope with a different enum again ('tenant' where this says 'all').",
             "in": "query",
             "name": "scope",
             "required": false,
@@ -2009,7 +2316,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter.",
+              "description": "Opt-in read scope, mirroring the MCP/plugin contract. 'agent' = your own memories (trust >= 1); 'fleet' = cross-agent within a fleet (own fleet trust >= 1, a different fleet trust >= 2); 'all' = tenant-wide (trust >= 2). Omit for the historical behaviour, where `agent_id` is the author filter. Unrelated to the `visibility` parameter despite the shared word: this selects how wide to look at read time, `visibility=scope_*` filters on the tier a writer stamped on the row. Keystone routes spell their own scope with a different enum again ('tenant' where this says 'all').",
               "title": "Scope"
             }
           },
@@ -2117,6 +2424,7 @@
             }
           },
           {
+            "description": "Filter on the write-time visibility tier stamped on the row (`scope_agent`, `scope_team`, `scope_org`). Not the `scope` parameter above, which chooses read breadth — the two words look alike and control different things.",
             "in": "query",
             "name": "visibility",
             "required": false,
@@ -2129,6 +2437,7 @@
                   "type": "null"
                 }
               ],
+              "description": "Filter on the write-time visibility tier stamped on the row (`scope_agent`, `scope_team`, `scope_org`). Not the `scope` parameter above, which chooses read breadth — the two words look alike and control different things.",
               "title": "Visibility"
             }
           },
@@ -2248,11 +2557,13 @@
             }
           },
           {
+            "description": "Include soft-deleted rows. Honoured for tenant credentials; an agent credential needs trust >= 3, below which it is ignored (as on MCP `caura_list`).",
             "in": "query",
             "name": "include_deleted",
             "required": false,
             "schema": {
               "default": false,
+              "description": "Include soft-deleted rows. Honoured for tenant credentials; an agent credential needs trust >= 3, below which it is ignored (as on MCP `caura_list`).",
               "title": "Include Deleted",
               "type": "boolean"
             }

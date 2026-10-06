@@ -35,9 +35,13 @@ import pytest
 from core_api.services import memory_service
 from core_api.services.system_metadata import SYSTEM_NAMESPACE
 
-# ``unit`` only at module level: the three helper tests are sync, and a
-# blanket asyncio mark warns on each. Async tests carry their own.
-pytestmark = pytest.mark.unit
+# No module-level ``pytestmark = pytest.mark.unit``: it would also land on the
+# ``integration`` tests below, which need Postgres, so every DB-less
+# ``-m unit`` run went red on them (oss-0909-l-04). Markers are per test; CI
+# runs both classes (``-m "not benchmark"``).
+#
+# ``unit`` only, never a blanket asyncio mark: the helper tests are sync, and
+# it warns on each. Async tests carry their own.
 
 TENANT = "t-c25-paths"
 
@@ -108,6 +112,7 @@ def _enrichment(**over):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_helper_reports_only_caller_ownable_keys():
     """Narrowed to ``CALLER_OWNABLE_KEYS``. ``set_system_value`` consults the
     set for no other key, so anything else would be inert — and the deferred
@@ -122,6 +127,7 @@ def test_helper_reports_only_caller_ownable_keys():
     ]
 
 
+@pytest.mark.unit
 def test_helper_returns_none_when_the_caller_owns_nothing():
     """``None`` rather than ``[]``, matching the sibling
     ``_agent_provided_enrichment_fields``'s "trust enrichment for everything"
@@ -130,6 +136,7 @@ def test_helper_returns_none_when_the_caller_owns_nothing():
     assert memory_service._caller_owned_enrichment_metadata_keys(data) is None
 
 
+@pytest.mark.unit
 def test_helper_tolerates_absent_or_non_dict_metadata():
     """Synthetic inputs and callers that pass no metadata at all must not raise
     — this runs on the write hot path."""
@@ -208,9 +215,20 @@ async def _run_background(caller_owned, *, row_metadata):
         for arg in list(call.args) + list(call.kwargs.values()):
             if isinstance(arg, dict):
                 applied.update(arg)
-    return applied.get("metadata_", {})
+    # The task sends a ``metadata_patch`` (L-33), so what the row holds is that
+    # patch merged over ``row_metadata`` the way storage merges it: top level,
+    # then ``_system`` one level deep.
+    sent = applied.get("metadata_patch", {})
+    merged = {**row_metadata, **sent}
+    if SYSTEM_NAMESPACE in sent:
+        merged[SYSTEM_NAMESPACE] = {
+            **(row_metadata.get(SYSTEM_NAMESPACE) or {}),
+            **sent[SYSTEM_NAMESPACE],
+        }
+    return merged
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_inline_task_leaves_a_caller_owned_summary_alone():
     """The clobber, on the path that runs on every inline deployment."""
@@ -219,6 +237,7 @@ async def test_inline_task_leaves_a_caller_owned_summary_alone():
     assert meta[SYSTEM_NAMESPACE]["summary"] == "PLATFORM SUMMARY"
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_inline_task_still_fills_a_summary_the_caller_did_not_set():
     """The boundary must not become "never write summary" — when the caller
@@ -232,6 +251,7 @@ async def test_inline_task_still_fills_a_summary_the_caller_did_not_set():
     assert meta[SYSTEM_NAMESPACE]["summary"] == "PLATFORM SUMMARY"
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_inline_task_owns_keys_independently():
     """Owning ``summary`` must not pin ``tags`` too."""
@@ -240,6 +260,7 @@ async def test_inline_task_owns_keys_independently():
     assert meta["tags"] == ["platform-tag"]
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_inline_task_leaves_caller_owned_tags_alone():
     """``tags`` is the other half of ``CALLER_OWNABLE_KEYS`` and needs its own
@@ -258,6 +279,7 @@ async def test_inline_task_leaves_caller_owned_tags_alone():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_schedule_forwards_the_keys_to_the_inline_path():
     captured: dict = {}
@@ -283,6 +305,7 @@ async def test_schedule_forwards_the_keys_to_the_inline_path():
     assert captured.get("caller_owned_metadata_keys") == ["summary"]
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_schedule_forwards_the_keys_to_the_deferred_path():
     captured: dict = {}
@@ -401,6 +424,7 @@ async def test_bulk_write_leaves_a_caller_owned_summary_alone(_engine, monkeypat
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_the_publisher_puts_the_keys_on_the_wire_and_they_survive_the_round_trip():
     """Publish → payload → ``MemoryEnrichRequest`` — the worker's own first step.
@@ -439,6 +463,7 @@ async def test_the_publisher_puts_the_keys_on_the_wire_and_they_survive_the_roun
     assert rebuilt.caller_owned_metadata_keys == ["summary"]
 
 
+@pytest.mark.unit
 @pytest.mark.asyncio
 async def test_the_wire_field_defaults_to_none_when_the_caller_owns_nothing():
     """A publisher that omits it (or an in-flight message from before this
@@ -473,6 +498,7 @@ async def test_the_wire_field_defaults_to_none_when_the_caller_owns_nothing():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
 def test_the_worker_mirror_of_caller_ownable_keys_does_not_drift():
     """core-worker cannot import core-api, so it carries its own copy of
     ``CALLER_OWNABLE_KEYS``. This is the one pytest root that can import both,
@@ -490,6 +516,7 @@ def test_the_worker_mirror_of_caller_ownable_keys_does_not_drift():
     assert _CALLER_OWNABLE_KEYS == CALLER_OWNABLE_KEYS
 
 
+@pytest.mark.unit
 def test_the_narrowing_helper_cannot_emit_a_non_ownable_key():
     """The publisher half of the same property: whatever a caller puts in
     ``metadata``, only ownable keys go on the wire. Without this, the worker's

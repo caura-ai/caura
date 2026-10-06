@@ -115,6 +115,69 @@ def test_every_concurrent_index_build_survives_an_interrupted_prior_run(name: st
     )
 
 
+def _add_columns_in_migrations_with_an_autocommit_block() -> list[tuple[str, int, bool]]:
+    """``(filename, line, idempotent)`` for every column add in an ``upgrade()``
+    that also opens an ``autocommit_block``.
+
+    Entering the block COMMITS the migration's transaction, while
+    ``alembic_version`` moves only after ``upgrade()`` returns. A run killed in
+    the block therefore leaves the column committed and the revision unrecorded,
+    and the retry re-runs ``upgrade()`` from the top.
+    """
+    out: list[tuple[str, int, bool]] = []
+    for path in sorted(_VERSIONS.glob("[0-9]*.py")):
+        source = path.read_text()
+        tree = ast.parse(source)
+        upgrade = next((n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade"), None)
+        if upgrade is None:
+            continue
+        calls = [
+            n for n in ast.walk(upgrade) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        ]
+        if not any(c.func.attr == "autocommit_block" for c in calls):  # type: ignore[attr-defined]
+            continue
+        for call in calls:
+            if call.func.attr == "add_column":  # type: ignore[attr-defined]
+                idempotent = any(
+                    kw.arg == "if_not_exists"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                    for kw in call.keywords
+                )
+                out.append((path.name, call.lineno, idempotent))
+        for sql in _executed_sql(upgrade, source).split("\n"):
+            if re.search(r"ADD\s+COLUMN", sql, re.I):
+                out.append((path.name, 0, bool(re.search(r"ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS", sql, re.I))))
+    return out
+
+
+def test_the_add_column_scan_sees_the_migrations_it_is_asserting_about() -> None:
+    names = {name for name, _, _ in _add_columns_in_migrations_with_an_autocommit_block()}
+    assert {"026_audit_client_event_id.py", "037_memories_embedded_content_hash.py"} <= names, (
+        f"the scan found {sorted(names)} — it is no longer seeing column adds"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,line,idempotent",
+    [
+        pytest.param(*case, id=f"{case[0]}:{case[1]}")
+        for case in _add_columns_in_migrations_with_an_autocommit_block()
+    ],
+)
+def test_a_column_add_before_an_autocommit_block_survives_a_retry(
+    name: str, line: int, idempotent: bool
+) -> None:
+    """A plain ``ADD COLUMN`` here turns one interrupted index build into a
+    wedge: every retry fails on the column the first attempt already committed,
+    before it reaches the index. ``test_migration_retry.py`` reproduces it."""
+    assert idempotent, (
+        f"{name}:{line} adds a column without IF NOT EXISTS in an upgrade() that opens an "
+        "autocommit_block. Pass if_not_exists=True to op.add_column (or use "
+        "'ADD COLUMN IF NOT EXISTS', as 026 does)."
+    )
+
+
 def test_the_stamp_sentinel_is_still_a_migration_only_table() -> None:
     """``init_database`` refuses to stamp unless this table is present.
 
@@ -136,32 +199,79 @@ def test_the_stamp_sentinel_is_still_a_migration_only_table() -> None:
     assert creators, f"no migration mentions {_CHAIN_SENTINEL_TABLE}"
 
 
-# ``(has_tables, has_alembic_version, has_chain_evidence) -> action`` over every
-# combination, because the old code's mistake was in a combination nobody had
-# written down. The two rows that matter are the last two: same database shape,
-# and the only thing separating "record what the schema shows" from "guess" is
-# whether the chain left its fingerprint.
+# ``(has_tables, has_alembic_version, has_chain_evidence, has_head_evidence)
+# -> action`` over every combination, because the old code's mistake was in a
+# combination nobody had written down. The rows that matter are the last four:
+# same database shape, and the only thing separating "record what the schema
+# shows" from "guess" is whether the chain left its fingerprint — at 019 AND at
+# head. The sentinel alone used to be enough, and stamped head over a database
+# that had stopped anywhere after 019.
 _BOOTSTRAP_CASES = [
-    (False, False, False, "upgrade"),  # empty database — run the whole chain
-    (False, False, True, "upgrade"),  # sentinel without memories: still not tracked
-    (False, True, False, "upgrade"),  # tracked, tables dropped — chain decides
-    (False, True, True, "upgrade"),
-    (True, True, False, "upgrade"),  # the steady state: tracked, run what's pending
-    (True, True, True, "upgrade"),
-    (True, False, True, "stamp"),  # chain-built, version row lost
-    (True, False, False, "refuse"),  # create_all-shaped: the silent wedge
+    (False, False, False, False, "upgrade"),  # empty database — run the whole chain
+    (False, False, True, False, "upgrade"),  # sentinel without memories: still not tracked
+    (False, False, True, True, "upgrade"),
+    (False, False, False, True, "upgrade"),
+    (False, True, False, False, "upgrade"),  # tracked, tables dropped — chain decides
+    (False, True, True, True, "upgrade"),
+    (True, True, False, False, "upgrade"),  # the steady state: tracked, run what's pending
+    (True, True, True, False, "upgrade"),  # tracked and behind head: the ordinary upgrade
+    (True, True, True, True, "upgrade"),
+    (True, True, False, True, "upgrade"),
+    (True, False, True, True, "stamp"),  # chain-built through head, version row lost
+    (True, False, True, False, "refuse"),  # chain-built, revision unknown: stamping head skips the gap
+    (True, False, False, False, "refuse"),  # create_all-shaped: the silent wedge
+    (True, False, False, True, "refuse"),  # head's object without the chain's: still create_all-shaped
 ]
 
 
-@pytest.mark.parametrize("tables,version,evidence,expected", _BOOTSTRAP_CASES)
+@pytest.mark.parametrize("tables,version,evidence,head,expected", _BOOTSTRAP_CASES)
 def test_the_bootstrap_decision_is_the_same_for_every_probe_combination(
-    tables: bool, version: bool, evidence: bool, expected: str
+    tables: bool, version: bool, evidence: bool, head: bool, expected: str
 ) -> None:
     from core_storage_api.database.init import schema_bootstrap_action
 
     assert (
-        schema_bootstrap_action(has_tables=tables, has_alembic_version=version, has_chain_evidence=evidence)
+        schema_bootstrap_action(
+            has_tables=tables,
+            has_alembic_version=version,
+            has_chain_evidence=evidence,
+            has_head_evidence=head,
+        )
         == expected
+    )
+
+
+def test_a_chain_built_database_short_of_head_is_refused_rather_than_stamped() -> None:
+    """The sentinel proves migration 019 ran, nothing later. A database that
+    stopped after 019 and lost its version row was stamped at head, and every
+    migration in between was skipped for good."""
+    from core_storage_api.database.init import schema_bootstrap_action
+
+    assert (
+        schema_bootstrap_action(
+            has_tables=True, has_alembic_version=False, has_chain_evidence=True, has_head_evidence=False
+        )
+        == "refuse"
+    )
+
+
+def test_the_head_fingerprint_names_the_current_head() -> None:
+    """``init_database`` stamps head only over the head migration's fingerprint,
+    and a fingerprint written for an older head proves nothing about this one.
+    Boot treats a stale entry as no evidence, which is safe but turns a
+    legitimate stamp into a refusal — so a new migration must move it."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    from core_storage_api.database.init import _HEAD_FINGERPRINT_REVISION
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(_VERSIONS.parent))
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    assert head == _HEAD_FINGERPRINT_REVISION, (
+        f"the newest migration is {head}, but init.py's head fingerprint still describes "
+        f"{_HEAD_FINGERPRINT_REVISION}. Point _HEAD_FINGERPRINT_REVISION/_HEAD_FINGERPRINT_SQL at an "
+        "object the new head creates (or set the SQL to None if it creates none)."
     )
 
 
@@ -178,7 +288,9 @@ def test_a_create_all_shaped_database_is_refused_rather_than_stamped() -> None:
     from core_storage_api.database.init import schema_bootstrap_action
 
     assert (
-        schema_bootstrap_action(has_tables=True, has_alembic_version=False, has_chain_evidence=False)
+        schema_bootstrap_action(
+            has_tables=True, has_alembic_version=False, has_chain_evidence=False, has_head_evidence=False
+        )
         == "refuse"
     )
 
@@ -196,10 +308,13 @@ def test_the_bootstrap_docstring_names_every_action_it_can_take() -> None:
     from core_storage_api.database.init import init_database, schema_bootstrap_action
 
     actions = {
-        schema_bootstrap_action(has_tables=t, has_alembic_version=v, has_chain_evidence=e)
+        schema_bootstrap_action(
+            has_tables=t, has_alembic_version=v, has_chain_evidence=e, has_head_evidence=h
+        )
         for t in (True, False)
         for v in (True, False)
         for e in (True, False)
+        for h in (True, False)
     }
     assert actions == {"upgrade", "stamp", "refuse"}, f"decision returns {actions}"
 

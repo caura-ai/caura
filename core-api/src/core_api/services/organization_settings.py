@@ -45,6 +45,14 @@ from core_api.constants import (
     CRYSTALLIZER_DEDUP_THRESHOLD,
     CRYSTALLIZER_MIN_CLUSTER_SIZE,
 )
+from core_api.services.settings_crypto import (
+    decrypt_api_key,
+    encrypt_api_keys,
+    encryption_enabled,
+    needs_encryption,
+)
+from core_api.services.task_tracker import tracked_task
+from core_api.tasks import track_task
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +64,13 @@ DEFAULT_SETTINGS: dict = {
         "provider": None,
         "model": None,
         "enabled": None,
+        # pm-0918-c-04. MUST be listed here, not only as a ResolvedConfig
+        # property: ``_check_keys`` validates a settings write against this
+        # schema, so a knob absent from it is READ-ONLY — the resolver returns
+        # its default and every attempt to set it raises "Unknown settings
+        # key(s)". A switch nobody can switch is worse than no switch, because
+        # it reads as shipped.
+        "atomic_fact_fanout_enabled": None,
     },
     "recall": {
         "provider": None,
@@ -66,7 +81,9 @@ DEFAULT_SETTINGS: dict = {
         # instead of going along with it. Off (None/False) keeps the recall
         # prompt byte-identical to pre-A64. Evidence: STALE T2 31%->71%
         # overall with the guard; true-premise control +1.9pp overall
-        # (benchmark/a57-recall-experiments-findings.md).
+        # (findings: ``<multi-repo-workspace-root>/benchmark/
+        # a57-recall-experiments-findings.md`` -- WORKSPACE ROOT, one level
+        # above this repo; not in this repo on any ref).
         "premise_guard": None,
     },
     "embedding": {
@@ -87,7 +104,7 @@ DEFAULT_SETTINGS: dict = {
     # generation spends LLM tokens. See core_api.services.agent_digest.
     "agent_digest": {
         "enabled": False,
-        "cadence": "daily",  # daily | weekly | both
+        "cadence": "daily",  # daily | weekly | both — see AGENT_DIGEST_CADENCE_PERIODS
         "provider": "openai",
         "model": "gpt-5.4-mini",
         "top_n": 25,
@@ -138,6 +155,28 @@ DEFAULT_SETTINGS: dict = {
         # ``entity_linking.auto_entity_linking_enabled``) and relation inference
         # keep populating the graph, so flipping this back on needs no backfill.
         "entity_retrieval": None,
+        # pm-0918-c-03 — whether ``/search`` returns atomic-fact fan-out children
+        # (A70) alongside the rows the caller wrote. ``None`` resolves to the
+        # global default, which is TRUE: today's behaviour, unchanged for a
+        # tenant that never touches this.
+        #
+        # LISTED HERE, not only as a ``ResolvedConfig`` property, and the sibling
+        # row is why: ``_check_keys`` validates a settings write against this
+        # schema, so a knob missing from it is READ-ONLY — ``PUT /settings``
+        # answers 422 "Unknown settings key(s)" while the resolver cheerfully
+        # serves the default. pm-0918-c-04 shipped exactly that and it read as
+        # working. ``test_the_tenant_default_survives_a_real_settings_put``
+        # exercises the HTTP route rather than building a ``ResolvedConfig``,
+        # because constructing the config object directly is what hid it.
+        #
+        # A tenant crowded by fan-out children sets this to ``false`` and gets
+        # the behaviour of option (c) — exclude by default — for its own store,
+        # without a deploy and without imposing it on every other tenant. That is
+        # the same argument that justified A70's per-tenant write-side switch,
+        # ``enrichment.atomic_fact_fanout_enabled``, and the two are independent:
+        # this one hides existing children from reads, that one stops new ones
+        # being written.
+        "include_derived": None,
         # Tenant-wide default search profile (A47). Any search_profile knob set
         # here (min_similarity, top_k, freshness_floor, ...) becomes the fallback
         # for EVERY agent in the tenant, filling the gap between a per-agent tuned
@@ -256,6 +295,26 @@ DEFAULT_SETTINGS: dict = {
         # stands. Ops escape valve for tenants whose retraction
         # misbehaves; flip per-tenant without a deploy.
         "retraction_enabled": None,
+        # lme-0929-m-05 (SIDE-58) — tenant master switch for contradiction
+        # detection. ``None``/``True`` (the default) is today's behaviour.
+        # ``False`` skips EVERY detection entry point for the tenant — Path A
+        # (write, bulk, update, re-embed, the ENRICHED/EMBEDDED back-channel)
+        # and Path C (post entity-extraction, including its retraction phase) —
+        # so no new row is marked ``outdated``/``conflicted`` and no judge LLM
+        # call is made. Writes are unaffected. Forward-only: rows already marked
+        # before the flip keep their status.
+        #
+        # For stores where every row is a verbatim source record (benchmark
+        # tenants: on LongMemEval, detection hid 4,374 stored turns across 500
+        # stores from default search) and customers that want an append-only
+        # store. The gate is read inside the two detector entries every trigger
+        # routes through (``contradiction_detector``), not at the dozen call
+        # sites, so a trigger added later is gated without anyone remembering.
+        #
+        # Listed here, not only as a ``ResolvedConfig`` property: a knob absent
+        # from this schema is rejected by ``_check_keys`` and so is unsettable
+        # (the pm-0918-c-04 lesson).
+        "contradiction_detection_enabled": None,
     },
     "agents": {
         "require_agent_approval": None,
@@ -330,8 +389,26 @@ DEFAULT_SETTINGS: dict = {
             "min_cluster_size": 3,
             "min_distinct_agents": 3,
             "freshness_window_days": 14,
-            "llm_tokens_per_run": 50_000,
             "max_writes_per_run": 20,
+            # THE ceiling on a run's LLM spend, and the only one — see
+            # ``test_forge_spend_is_bounded_by_attempts_not_tokens``.
+            # Attempt ceiling: how many clusters one run may distill,
+            # written or not. 0 = derive from ``max_writes_per_run``
+            # (see ``ForgeConfig.effective_max_clusters_per_run``).
+            # This, not ``max_writes_per_run``, is what bounds spend —
+            # every attempted cluster pays for a distill call before we
+            # can know whether it will be written.
+            #
+            # It bounds ATTEMPTS, not tokens and not dollars. There is
+            # no per-tenant token or cost ceiling anywhere in Forge, and
+            # this is the honest statement of that rather than an
+            # omission: a ``llm_tokens_per_run`` key used to sit above
+            # and was read by nothing (oss-0922-l-05), so an operator
+            # setting a token ceiling believed spend was capped when it
+            # was not. What actually bounds a run is attempts times a
+            # prompt whose size is itself capped by
+            # ``memory_excerpt_char_cap`` and ``min_cluster_size``.
+            "max_clusters_per_run": 0,
         },
         # OpenClaw PROPOSAL.md bridge (Phase 5). Default OFF — turning
         # it on only matters once the OpenClaw workspace emitter ships.
@@ -533,6 +610,12 @@ _NON_BUSINESS_DISPOSITIONS = frozenset({"drop", "keep_private", "store"})
 # The fast pre-gate accepts any known LLM provider name (incl. ``none``/``fake``
 # for disable/test). Membership-checked so a typo can't silently disable the gate.
 _PREGATE_PROVIDERS = frozenset(p.value for p in ProviderName)
+#: Which digest runs (``period``) each ``agent_digest.cadence`` takes (M-113).
+AGENT_DIGEST_CADENCE_PERIODS: dict[str, frozenset[str]] = {
+    "daily": frozenset({"day"}),
+    "weekly": frozenset({"week"}),
+    "both": frozenset({"day", "week"}),
+}
 
 
 def _validate_governance_enums(payload: dict) -> None:
@@ -569,6 +652,21 @@ def _validate_governance_enums(payload: dict) -> None:
         )
 
 
+def _validate_agent_digest_cadence(payload: dict) -> None:
+    """Raise ``ValueError`` for an ``agent_digest.cadence`` outside its three values.
+
+    ``None`` passes: it resets the override to the default, as for every key. A
+    non-string is refused here too: a dict passes ``_validate_leaf_types``, which
+    recurses into dicts, and would reach the lookup below unhashable.
+    """
+    digest = payload.get("agent_digest")
+    cadence = digest.get("cadence") if isinstance(digest, dict) else None
+    if cadence is not None and (not isinstance(cadence, str) or cadence not in AGENT_DIGEST_CADENCE_PERIODS):
+        raise ValueError(
+            f"agent_digest.cadence must be one of {sorted(AGENT_DIGEST_CADENCE_PERIODS)}, got {cadence!r}"
+        )
+
+
 def _validate_default_search_profile(payload: dict) -> None:
     """Strictly validate the tenant-wide ``search.default_profile`` on write.
 
@@ -587,6 +685,12 @@ def _validate_default_search_profile(payload: dict) -> None:
         knob = SEARCH_KNOBS.get(key)
         if knob is None:
             raise ValueError(f"search.default_profile: unknown key {key!r} (allowed: {sorted(SEARCH_KNOBS)})")
+        # ``null`` on a KNOWN knob is the reset shape: storage deletes the key
+        # (``merge_settings_update``) and the resolver falls back to the global
+        # default. The unknown-key check above runs first, so a typo sent as
+        # null still 422s rather than "resetting" a knob that does not exist.
+        if value is None:
+            continue
         expected_type, (lo, hi) = knob.value_type, knob.bounds
         # Accept an int where a float is expected (e.g. min_similarity=0 → 0.0),
         # but never a bool (bool is an int subclass and would slip through).
@@ -610,6 +714,15 @@ def _validate_default_search_profile(payload: dict) -> None:
         )
 
 
+# Object-valued settings that may be sent as ``null`` to drop the whole object
+# back to its default. An allowlist rather than "any object" on purpose: most
+# resolvers read ``self._ts.get("<section>", {}).get(...)``, which crashes on a
+# stored ``None`` if a storage build that predates ``merge_settings_update``
+# stores the null instead of deleting it. The ``default_profile`` resolver reads
+# ``... or {}`` and is null-safe either way.
+_NULLABLE_OBJECT_KEYS: frozenset[str] = frozenset({"search.default_profile"})
+
+
 def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
     """Raise ``ValueError`` for any key in *payload* not present in *schema*.
 
@@ -622,8 +735,10 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
     for k, v in payload.items():
         schema_v = schema.get(k)
         if isinstance(schema_v, dict):
+            full_key = f"{path}.{k}" if path else k
+            if v is None and full_key in _NULLABLE_OBJECT_KEYS:
+                continue
             if not isinstance(v, dict):
-                full_key = f"{path}.{k}" if path else k
                 raise ValueError(f"Settings key {full_key!r} must be an object, got {type(v).__name__}")
             if schema_v:
                 _check_keys(v, schema_v, path=f"{path}.{k}" if path else k)
@@ -632,6 +747,25 @@ def _check_keys(payload: dict, schema: dict, path: str = "") -> None:
 # Expected Python types for leaf values that need validation beyond key presence.
 # Dotted paths match the nested structure in DEFAULT_SETTINGS.
 _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
+    # Per-service on/off switches. ``DEFAULT_SETTINGS`` holds ``None`` for
+    # these (unset → platform default), so a string "false" would otherwise
+    # be stored, echoed back as off, and resolve TRUTHY in every consumer.
+    "enrichment.enabled": bool,
+    "recall.enabled": bool,
+    "recall.premise_guard": bool,
+    "entity_extraction.enabled": bool,
+    "enrichment.atomic_fact_fanout_enabled": bool,
+    "agent_digest.enabled": bool,
+    "agent_digest.cadence": str,
+    "agent_digest.provider": str,
+    "agent_digest.model": str,
+    "agent_digest.top_n": int,
+    "agent_digest.max_memories_per_agent": int,
+    "agent_digest.min_activity_threshold": int,
+    "agent_digest.event_floor": int,
+    "agent_digest.listed_max": int,
+    "agent_digest.max_cost_per_run_usd": (int, float),
+    "agent_digest.retention_days": int,
     "security_audit.schedule_enabled": bool,
     "security_audit.schedule_cron": str,
     "security_audit.alerts_enabled": bool,
@@ -644,6 +778,10 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "search.recall_for_asserted_identity": bool,
     "search.graph_retrieval": bool,
     "search.entity_retrieval": bool,
+    # bool, NOT just "present": a string "false" is TRUTHY, so without this a
+    # tenant that set it off would resolve to ON while the dashboard rendered
+    # their "off" back to them. Same trap as the c-04 switch above.
+    "search.include_derived": bool,
     "crystallizer.auto_crystallize": bool,
     "crystallizer.dedup_threshold": float,
     "crystallizer.min_cluster_size": int,
@@ -663,6 +801,7 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "write.triple_emission_enabled": bool,
     "write.bulk_subject_batching": bool,
     "write.retraction_enabled": bool,
+    "write.contradiction_detection_enabled": bool,
     # Skill Factory SF-006 — type validators for the skills_factory namespace.
     "skills_factory.enabled": bool,
     "skills_factory.description_max_bytes": int,
@@ -675,8 +814,8 @@ _LEAF_TYPES: dict[str, type | tuple[type, ...]] = {
     "skills_factory.forge.min_cluster_size": int,
     "skills_factory.forge.min_distinct_agents": int,
     "skills_factory.forge.freshness_window_days": int,
-    "skills_factory.forge.llm_tokens_per_run": int,
     "skills_factory.forge.max_writes_per_run": int,
+    "skills_factory.forge.max_clusters_per_run": int,
     "skills_factory.openclaw_bridge.enabled": bool,
     # Interviewer Phase 1.
     "interviewer.enabled": bool,
@@ -730,7 +869,29 @@ _LEAF_RANGES: dict[str, tuple[int, int]] = {
     # typo can't pin a DoS-shaped write through the validator.
     "skills_factory.body_max_bytes": (1, 10_000_000),
     "skills_factory.description_max_bytes": (1, 10_000),
+    # 0 is the "derive from max_writes_per_run" sentinel, so the floor is
+    # 0 rather than 1. Upper bound is a spend guard: every attempt buys a
+    # distill LLM call, and 1000 of them in one tick is already far past
+    # any sane window's cluster count.
+    "skills_factory.forge.max_clusters_per_run": (0, 1000),
 }
+
+
+def _validate_api_keys(payload: dict) -> None:
+    """Raise ``ValueError`` for a provider key that is neither a string nor ``null``.
+
+    ``api_keys`` declares no keys, so ``_check_keys`` accepts any value under it.
+    Only strings are encrypted, so a key sent inside a list or an object would be
+    stored as submitted, and it could not work as a key anyway (M-99).
+    """
+    api_keys = payload.get("api_keys")
+    if not isinstance(api_keys, dict):
+        return
+    for name, value in api_keys.items():
+        if value is not None and not isinstance(value, str):
+            raise ValueError(
+                f"Settings key 'api_keys.{name}' must be a string or null, got {type(value).__name__}"
+            )
 
 
 def _validate_leaf_types(payload: dict, prefix: str = "") -> None:
@@ -941,6 +1102,7 @@ class ResolvedConfig:
             (ProviderName.ANTHROPIC.value, self.anthropic_api_key),
             (ProviderName.GEMINI.value, self.gemini_api_key),
             (ProviderName.OPENROUTER.value, self.openrouter_api_key),
+            (ProviderName.ATLASCLOUD.value, self.atlascloud_api_key),
         ]
         for prov, key in candidates:
             if prov != primary and key:
@@ -950,19 +1112,38 @@ class ResolvedConfig:
     # API keys (from global config only in OSS)
     @property
     def openai_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("openai_api_key") or global_settings.openai_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("openai_api_key"))
+            or global_settings.openai_api_key
+        )
 
     @property
     def anthropic_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("anthropic_api_key") or global_settings.anthropic_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("anthropic_api_key"))
+            or global_settings.anthropic_api_key
+        )
 
     @property
     def openrouter_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("openrouter_api_key") or global_settings.openrouter_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("openrouter_api_key"))
+            or global_settings.openrouter_api_key
+        )
+
+    @property
+    def atlascloud_api_key(self) -> str | None:
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("atlascloud_api_key"))
+            or global_settings.atlascloud_api_key
+        )
 
     @property
     def gemini_api_key(self) -> str | None:
-        return self._ts.get("api_keys", {}).get("gemini_api_key") or global_settings.gemini_api_key
+        return (
+            decrypt_api_key(self._ts.get("api_keys", {}).get("gemini_api_key"))
+            or global_settings.gemini_api_key
+        )
 
     # Search
     @property
@@ -1007,6 +1188,26 @@ class ResolvedConfig:
         """
         val = self._ts.get("search", {}).get("entity_retrieval")
         return val if val is not None else global_settings.entity_retrieval_enabled
+
+    @property
+    def search_include_derived(self) -> bool | None:
+        """Whether ``/search`` returns atomic-fact fan-out children (pm-0918-c-03).
+
+        Returns ``None`` — NOT a resolved boolean — when the tenant has not set
+        it, and that is the whole point of the signature. This property is the
+        MIDDLE layer of a three-layer resolution (request flag > tenant setting >
+        ``INCLUDE_DERIVED_DEFAULT``), so it has to be able to say "not set" and
+        let ``resolve_include_derived`` fall through. Collapsing it to ``return
+        val if val is not None else True`` — the shape every neighbour here
+        uses — would make an unset tenant indistinguishable from one that
+        explicitly asked for derived rows, and the global default would then be
+        unreachable and untestable.
+
+        It is also why this is one of the few properties on this class that is
+        not typed ``bool``. Read it through ``resolve_include_derived``; reading
+        it directly and treating a falsy ``None`` as "off" inverts the default.
+        """
+        return self._ts.get("search", {}).get("include_derived")
 
     @property
     def default_search_profile(self) -> dict:
@@ -1065,6 +1266,40 @@ class ResolvedConfig:
         if val is None:
             return CRYSTALLIZER_MIN_CLUSTER_SIZE
         return max(2, int(val))
+
+    @property
+    def atomic_fact_fanout_enabled(self) -> bool:
+        """Create a child memory per extracted atomic fact (default ON).
+
+        A70 shipped this on the strength of a measurement that it almost never
+        fires, taken on conversational content. pm-0918-c-04 asked whether it
+        should be gated off for document-shaped writes, on the theory that
+        2,000-character chunks are the shape it fires on.
+
+        That question is still OPEN. The attempt to settle it against the local
+        corpus failed for reasons worth knowing before anyone tries again: every
+        fan-out child in that database came from benchmark conversation data,
+        the non-benchmark slice produced none at all, and the corpus predates
+        A70 — so it contains no worker-path fan-out, and pre-A70 deferred writes
+        discarded their facts, which reads as "did not fan out". See
+        docs/atomic-fact-fanout/pm-c04-fanout-rate-findings.md.
+
+        So this is a switch and not a threshold, because there is no evidence
+        for where a threshold would go — not because the evidence rules one out.
+
+        A switch is worth having regardless of how that question lands: a tenant
+        whose results are crowded by fan-out children turns them off for its own
+        store, immediately, without a deploy and without inheriting a number
+        somebody guessed. Default ON is today's behaviour; changing every
+        tenant's store to address one store's regression would be the wrong
+        default whichever way the measurement eventually goes.
+
+        Off is cheaper but not free of consequence: it skips the children's
+        embeddings and writes, NOT the enrichment call that extracted the facts
+        — that has already happened by the time this is read.
+        """
+        val = self._ts.get("enrichment", {}).get("atomic_fact_fanout_enabled")
+        return val if val is not None else True
 
     # Dedup
     @property
@@ -1195,6 +1430,21 @@ class ResolvedConfig:
         val = self._ts.get("write", {}).get("retraction_enabled")
         return bool(val) if val is not None else True
 
+    @property
+    def contradiction_detection_enabled(self) -> bool:
+        """Tenant master switch for contradiction detection (default ON).
+
+        lme-0929-m-05 (SIDE-58). ``False`` makes both detector entries (Path A
+        ``detect_contradictions_async``, Path C
+        ``detect_contradictions_by_entities_async``) return before any storage
+        read, lock, admission slot or LLM call, so nothing is marked
+        ``outdated``/``conflicted`` for this tenant. When off it subsumes
+        ``retraction_enabled``: with Path C skipped there is nothing to retract.
+        Forward-only — existing statuses are left as they are.
+        """
+        val = self._ts.get("write", {}).get("contradiction_detection_enabled")
+        return bool(val) if val is not None else True
+
     # Agents
     @property
     def require_agent_approval(self) -> bool:
@@ -1274,6 +1524,12 @@ def validate_search_profile(profile: dict) -> dict:
         knob = SEARCH_KNOBS.get(key)
         if knob is None:
             cleaned[key] = value
+            continue
+
+        # ``null`` means "unset" (the settings reset shape), not a malformed
+        # value: drop it without the wrong-type warning. A row only holds one if
+        # a storage build that predates ``merge_settings_update`` stored it.
+        if value is None:
             continue
 
         expected_type, (lo, hi) = knob.value_type, knob.bounds
@@ -1359,10 +1615,42 @@ async def _load_and_cache(tenant_id: str) -> dict:
     # The cost is bounded by the thing the cache already guarantees: at most one
     # read per tenant per TTL per process. That is what makes taking it from the
     # primary affordable here and not elsewhere.
-    resolved = await get_storage_client().get_org_settings(tenant_id)
+    stored = await get_storage_client().get_org_settings(tenant_id)
+    resolved = await _encrypt_legacy_api_keys(tenant_id, stored)
     _settings_cache[tenant_id] = resolved
     logger.info("organization_settings cache miss for %s; loaded via storage-api and cached", tenant_id)
     return resolved
+
+
+async def _encrypt_legacy_api_keys(tenant_id: str, stored: dict) -> dict:
+    """Encrypt provider keys stored before ``api_keys`` were encrypted (M-99).
+
+    ``update_settings`` encrypts every key it saves, but a key saved before that
+    stays plaintext until its tenant saves again. The first load after the
+    deploy swaps it, so every tenant in use is converted without a cross-tenant
+    sweep. Storage swaps a key only while it still holds the plaintext read
+    here, so a tenant saving a new key meanwhile keeps it, and workers loading
+    together swap each key once. Without ``SETTINGS_ENCRYPTION_KEY`` nothing
+    changes, as the save path then stores plaintext too. A failure leaves the
+    keys as they were, which ``decrypt_api_key`` reads, and the next load retries.
+    """
+    api_keys = stored.get("api_keys")
+    if not encryption_enabled() or not isinstance(api_keys, dict):
+        return stored
+    plaintext = {name: value for name, value in api_keys.items() if needs_encryption(value)}
+    if not plaintext:
+        return stored
+    encrypted = encrypt_api_keys(plaintext)
+    try:
+        swapped = await get_storage_client().encrypt_org_api_keys(
+            tenant_id, expected=plaintext, encrypted=encrypted, changed_by="system:encrypt-legacy-api-keys"
+        )
+    except Exception:
+        logger.warning(
+            "legacy api_keys encryption failed for %s; keys left as stored", tenant_id, exc_info=True
+        )
+        return stored
+    return {**stored, "api_keys": {**api_keys, **{name: encrypted[name] for name in swapped}}}
 
 
 # C36 — provider keys must never leave the server readable. Display replaces
@@ -1413,6 +1701,23 @@ async def get_settings_for_display(tenant_id: str) -> dict:
     return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, raw))
 
 
+#: The crystallizer settings a dedup stamp was settled under (M-38).
+_SWEEP_POLICY_KEYS = frozenset({"min_cluster_size", "dedup_threshold", "auto_crystallize"})
+
+
+async def _reopen_dedup_sweep(tenant_id: str) -> None:
+    """Clear the tenant's dedup stamps, one bounded storage call at a time (M-38).
+
+    A storage build without ``done`` cleared every row in one call, so its
+    answer ends the loop.
+    """
+    sc = get_storage_client()
+    while True:
+        result = await sc.reset_dedup_checked(tenant_id)
+        if result.get("done", True):
+            return
+
+
 async def update_settings(
     tenant_id: str,
     new_settings: dict,
@@ -1421,12 +1726,16 @@ async def update_settings(
 ) -> dict:
     """Upsert tenant overrides + write an audit row with the flat diff.
 
-    Writes are a deep MERGE (``_deep_merge``), so an omitted key keeps its
-    current value. The reset shape is an explicit ``null``: ``_validate_leaf_types``
-    passes ``None`` through deliberately, every resolver property reads ``None``
-    as "no override", and a section set to ``None`` drops the whole group back to
-    defaults. ``{}`` for a section merges nothing and is a no-op — it looks like
-    a clear and is not one, which is the trap worth knowing about.
+    Writes are a deep MERGE, so an omitted key keeps its current value. The
+    reset shape is an explicit ``null``: validation passes ``None`` through
+    deliberately (for a ``search.default_profile`` knob too, provided the knob
+    exists), and storage applies the payload with ``merge_settings_update``,
+    which DELETES the override so the resolver falls back to the default.
+    ``search.default_profile`` itself may also be sent as ``null`` to drop every
+    tenant-default knob at once; other object-valued sections may not (see
+    ``_NULLABLE_OBJECT_KEYS``). ``{}`` for a section merges nothing and is a
+    no-op — it looks like a clear and is not one, which is the trap worth
+    knowing about.
 
     Returns the merged display view (``DEFAULT_SETTINGS`` ⊕ tenant overrides)
     so callers can echo back the resulting state. No-ops when the submitted
@@ -1453,8 +1762,10 @@ async def update_settings(
     new_settings = filtered
 
     _check_keys(new_settings, DEFAULT_SETTINGS)
+    _validate_api_keys(new_settings)
     _validate_leaf_types(new_settings)
     _validate_governance_enums(new_settings)
+    _validate_agent_digest_cadence(new_settings)
     _validate_default_search_profile(new_settings)
     cron_override = new_settings.get("security_audit", {}).get("schedule_cron")
     if cron_override is not None:
@@ -1464,6 +1775,10 @@ async def update_settings(
     # transaction (the FOR UPDATE lost-update guard can't span an HTTP read +
     # write, so it lives in storage-api). ``merged`` is the resulting raw
     # overrides; ``changed`` is False when the payload was a no-op.
+    # Provider keys are encrypted before they leave this service, so neither
+    # the settings row nor its audit diff ever holds them in plaintext.
+    if isinstance(new_settings.get("api_keys"), dict):
+        new_settings = {**new_settings, "api_keys": encrypt_api_keys(new_settings["api_keys"])}
     result = await get_storage_client().update_org_settings(tenant_id, new_settings, changed_by=changed_by)
     merged = result["settings"]
     if not result.get("changed"):
@@ -1493,5 +1808,15 @@ async def update_settings(
             tenant_id,
             exc_info=True,
         )
+
+    # M-38: a crystallizer sweep setting is the policy a dedup stamp was settled
+    # under, so a change to one reopens the stamped rows for the next run. Keyed
+    # on the payload, as storage returns no diff: a save that resends an
+    # unchanged value costs one re-scan. In the background, so the save does not
+    # wait on a large tenant, and never failing the write, which has committed.
+    # A failure is logged at ERROR and recorded in ``background_task_log``:
+    # re-saving the same value is a no-op, so nothing else would retry it.
+    if _SWEEP_POLICY_KEYS & set(new_settings.get("crystallizer") or {}):
+        track_task(tracked_task(_reopen_dedup_sweep(tenant_id), "crystallizer_reopen_sweep", None, tenant_id))
 
     return _settings_display_view(_deep_merge(DEFAULT_SETTINGS, merged))

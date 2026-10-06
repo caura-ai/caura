@@ -19,6 +19,7 @@ from core_api.clients.identity_token import evict as _evict_id_token
 from core_api.clients.identity_token import fetch_auth_header
 from core_api.config import settings
 from core_api.constants import STORAGE_CONNECT_TIMEOUT_SECONDS, STORAGE_READ_TIMEOUT_SECONDS
+from core_api.request_phase import phase
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ _DUPLICATE_FALLBACK_DETAIL = "Duplicate memory exists"
 # memory exists", which would be an actively wrong description of a failure that
 # has nothing to do with duplicates.
 _PERMANENT_FALLBACK_DETAIL = "storage refused the write; a retry cannot clear it"
+# Storage's per-request cap on POST /memories/bulk-get (a longer list is a 422).
+_BULK_GET_MAX_IDS = 1000
 
 
 class DuplicateMemoryError(Exception):
@@ -119,6 +122,38 @@ def _storage_duplicate_fields(response: httpx.Response) -> dict:
     if not isinstance(body, dict):
         return {}
     return {k: body[k] for k in ("reason", "existing_id", "existing_status") if k in body}
+
+
+class StoragePointerRejectedError(permanent_failure.PermanentWriteFailure):
+    """Storage refused a write: a pointer it carried names no row of the tenant.
+
+    ``subject_entity_id`` / ``supersedes_id`` / ``evidence_memory_id`` arrive
+    from public request bodies (create, bulk, PATCH, relation upsert), so this
+    is the caller's mistake and ``app`` answers it 422. Translated here, at the
+    one boundary every write crosses, for the reason ``PermanentStorageWriteError``
+    is: left an ``httpx.HTTPStatusError``, a storage 4xx reaches
+    ``upstream_http_error_handler``, which re-raises it as a 500.
+
+    ``fields["field"]`` names the pointer. Nothing says whether the row is
+    absent or another tenant's — storage gives one answer for both.
+    """
+
+
+def _storage_pointer_rejected(response: httpx.Response) -> StoragePointerRejectedError | None:
+    """The typed error for storage's pointer refusal, or ``None`` for anything else."""
+    if response.status_code != 422:
+        return None
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(detail, dict) or detail.get("error") != permanent_failure.CAUSE_POINTER_NOT_IN_TENANT:
+        return None
+    message = detail.get("message")
+    return StoragePointerRejectedError(
+        message if isinstance(message, str) and message else "a pointer names no row in this tenant",
+        {k: v for k, v in detail.items() if k == "field"},
+    )
 
 
 def _storage_permanent(response: httpx.Response) -> tuple[str, dict] | None:
@@ -222,6 +257,27 @@ def get_storage_client() -> CoreStorageClient:
     if _client is None:
         _client = CoreStorageClient()
     return _client
+
+
+def _entity_reader_params(reader: dict | None) -> dict[str, Any]:
+    """Query-string form of an agent reader scope (``entity_reader_scope``).
+
+    A query string cannot carry an empty list, so "bound to no fleet" travels
+    as ``caller_fleet_bound=true`` with no ``caller_fleet_ids``.
+    """
+    if not reader:
+        return {}
+    params: dict[str, Any] = {
+        "caller_agent_id": reader["caller_agent_id"],
+    }
+    if reader.get("caller_tenant_id"):
+        params["caller_tenant_id"] = reader["caller_tenant_id"]
+    fleets = reader.get("caller_fleet_ids")
+    if fleets is not None:
+        params["caller_fleet_bound"] = "true"
+        if fleets:
+            params["caller_fleet_ids"] = list(fleets)
+    return params
 
 
 class CoreStorageClient:
@@ -426,11 +482,17 @@ class CoreStorageClient:
             return self._cancel_safe(do_request())
 
         observed_gen = self._pool_generation
-        try:
-            return await retry(_shielded, label=label)
-        except httpx.PoolTimeout:
-            await self._recycle_pools(observed_gen=observed_gen, label=label)
-            return await retry(_shielded, label=label)
+        # ``label`` is already ``"<VERB> <route template>"`` — bounded, no path
+        # params — so it is safe as a phase name and reads as the hop it is.
+        # Wrapping the whole retry policy, not one attempt: a request that
+        # burns the budget across three retries spent that time HERE, and
+        # per-attempt phases would report the last one's few hundred ms.
+        with phase(f"storage.{label}"):
+            try:
+                return await retry(_shielded, label=label)
+            except httpx.PoolTimeout:
+                await self._recycle_pools(observed_gen=observed_gen, label=label)
+                return await retry(_shielded, label=label)
 
     # -- internal helpers ------------------------------------------------
 
@@ -562,6 +624,11 @@ class CoreStorageClient:
             # inside ``with_retry`` before reaching here. Bounded, so not the
             # unbounded-loop defect, but wasted; the bulk insert is
             # ``idempotent=False`` and is unaffected.
+            #
+            # The pointer refusal first: it carries the same ``retryable:
+            # false`` marker, but it is a 422 the caller fixes, not a 500.
+            if (pointer := _storage_pointer_rejected(resp)) is not None:
+                raise pointer from exc
             if (permanent := _storage_permanent(resp)) is None:
                 raise
             raise PermanentStorageWriteError(*permanent) from exc
@@ -577,6 +644,8 @@ class CoreStorageClient:
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=False)
+        if (pointer := _storage_pointer_rejected(resp)) is not None:
+            raise pointer
         resp.raise_for_status()
         return resp.json()
 
@@ -593,7 +662,17 @@ class CoreStorageClient:
         resp.raise_for_status()
         return True
 
-    async def _post_optional(self, path: str, data: Any = None, *, read: bool = False) -> dict | None:
+    async def _post_optional(
+        self,
+        path: str,
+        data: Any = None,
+        *,
+        read: bool = False,
+        retry: Callable[..., Awaitable[httpx.Response]] = with_connect_phase_retry,
+    ) -> dict | None:
+        """POST that answers ``None`` on a 404. ``retry`` defaults to the POST
+        policy; a caller whose POST only names what to read or delete (the
+        body-addressed document routes) passes the GET or DELETE policy."""
         prefix = self._read_prefix if read else self._prefix
         headers = await self._auth_headers(read=read)
 
@@ -605,7 +684,7 @@ class CoreStorageClient:
                 headers=headers,
             )
 
-        resp = await self._execute(_do, retry=with_connect_phase_retry, label=f"POST {path}")
+        resp = await self._execute(_do, retry=retry, label=f"POST {path}")
         if resp.status_code == 404:
             return None
         self._maybe_evict_on_auth_error(resp, read=read)
@@ -721,38 +800,41 @@ class CoreStorageClient:
         return await self._delete(f"/memories/{memory_id}", tenant_id=tenant_id)
 
     async def set_subject_entity_if_null(
-        self, memory_id: str, tenant_id: str, subject_entity_id: str
+        self, memory_id: str, tenant_id: str, subject_entity_id: str, *, content: str | None = None
     ) -> bool:
         """A63 — conditional subject write-back from the extraction worker.
 
         Storage-side single UPDATE guarded by ``subject_entity_id IS
-        NULL`` (the write-time triple path's value wins). Returns whether
-        the row was actually updated; ``False`` is a benign skip."""
-        result = await self._post(
-            f"/memories/{memory_id}/subject-entity",
-            {"tenant_id": tenant_id, "subject_entity_id": subject_entity_id},
-            read=False,
-        )
+        NULL`` (the write-time triple path's value wins), and, with
+        ``content``, by the row still holding the text the subject was
+        extracted from (M-39). Returns whether the row was actually
+        updated; ``False`` is a benign skip."""
+        body = {"tenant_id": tenant_id, "subject_entity_id": subject_entity_id}
+        if content is not None:
+            body["content"] = content
+        result = await self._post(f"/memories/{memory_id}/subject-entity", body, read=False)
         return bool(result and result.get("updated"))
 
     async def set_predicate_if_null(
-        self, memory_id: str, tenant_id: str, predicate: str, object_value: str
+        self,
+        memory_id: str,
+        tenant_id: str,
+        predicate: str,
+        object_value: str,
+        *,
+        content: str | None = None,
     ) -> bool:
         """A65 — conditional predicate/object write-back from the extraction worker.
 
         Sibling of ``set_subject_entity_if_null``. Storage-side single UPDATE
         guarded by ``predicate IS NULL`` (the write-time triple path's value
-        wins). Returns whether the row was actually updated; ``False`` is a
+        wins), and, with ``content``, by the row still holding that text
+        (M-39). Returns whether the row was actually updated; ``False`` is a
         benign skip."""
-        result = await self._post(
-            f"/memories/{memory_id}/predicate",
-            {
-                "tenant_id": tenant_id,
-                "predicate": predicate,
-                "object_value": object_value,
-            },
-            read=False,
-        )
+        body = {"tenant_id": tenant_id, "predicate": predicate, "object_value": object_value}
+        if content is not None:
+            body["content"] = content
+        result = await self._post(f"/memories/{memory_id}/predicate", body, read=False)
         return bool((result or {}).get("updated"))
 
     async def update_memory_status(
@@ -961,15 +1043,18 @@ class CoreStorageClient:
         # is picked up by a later crystallizer pass.
         return await self._post("/memories/entity-overlap-candidates", data, read=True)  # type: ignore[return-value]
 
-    async def find_by_supersedes_id(self, tenant_id: str, supersedes_id: str) -> list[dict]:
+    async def find_by_supersedes_id(
+        self, tenant_id: str, supersedes_id: str, *, read: bool = True
+    ) -> list[dict]:
         """A53 — rows whose supersedes_id points at ``supersedes_id``.
 
         Retraction-shaped: unlike ``find_successors`` this applies no status or
         visibility filter, because retraction must reach the row that owns the
-        chain edge whatever state it is in.
+        chain edge whatever state it is in. ``read=False`` routes to the WRITER,
+        for a caller about to write on what it finds.
         """
         return await self._get_list(
-            "/memories/by-supersedes-id", tenant_id=tenant_id, supersedes_id=supersedes_id
+            "/memories/by-supersedes-id", read=read, tenant_id=tenant_id, supersedes_id=supersedes_id
         )
 
     async def find_children_by_parent_id(self, tenant_id: str, parent_id: str) -> list[dict]:
@@ -1048,12 +1133,22 @@ class CoreStorageClient:
         review_status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        *,
+        memory_id: str | None = None,
+        read: bool = True,
     ) -> list[dict]:
-        """D11 — the conflict review queue for a tenant."""
+        """D11 — the conflict review queue for a tenant.
+
+        ``memory_id`` narrows it to the records naming that memory on either side;
+        ``read=False`` routes to the WRITER, for a caller about to write on what it
+        finds (the dismissal undo, M-102).
+        """
         params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
         if review_status is not None:
             params["review_status"] = review_status
-        return await self._get_list("/memories/memory-conflicts", **params)
+        if memory_id is not None:
+            params["memory_id"] = memory_id
+        return await self._get_list("/memories/memory-conflicts", read=read, **params)
 
     async def get_memory_conflict(self, conflict_id: str, tenant_id: str) -> dict | None:
         """One conflict row. ``None`` when absent or owned by another tenant."""
@@ -1179,13 +1274,15 @@ class CoreStorageClient:
         status: str | None = None,
         exclude_scope_agent: bool = False,
         caller_agent_id: str | None = None,
+        caller_tenant_id: str | None = None,
     ) -> int:
         """Live-memory count; ``status`` narrows to one exact status.
 
         ``exclude_scope_agent`` applies the list route's visibility scoping and
         ``caller_agent_id`` is the identity inside it — an agent's own private
         rows stay counted, its peers' do not. Both default off, keeping the
-        whole-corpus system callers' numbers unchanged.
+        whole-corpus system callers' numbers unchanged. ``caller_tenant_id`` is
+        that identity's home tenant, when the count is of a sibling (M-94).
         """
         params: dict[str, Any] = {"tenant_id": tenant_id}
         if fleet_id is not None:
@@ -1196,6 +1293,8 @@ class CoreStorageClient:
             params["exclude_scope_agent"] = True
         if caller_agent_id is not None:
             params["caller_agent_id"] = caller_agent_id
+        if caller_tenant_id is not None:
+            params["caller_tenant_id"] = caller_tenant_id
         result = await self._get("/memories/count-active", **params)
         return (result or {}).get("count", 0)
 
@@ -1320,11 +1419,13 @@ class CoreStorageClient:
         """Agent-activity + peak-hours from audit_log (crystallizer usage)."""
         return await self._get("/memories/audit-usage", tenant_id=tenant_id) or {}
 
-    async def find_prior_ingest_by_doc_hash(self, tenant_id: str, doc_hash: str) -> list[dict]:
-        """Prior ingest rows for a doc_hash (idempotency cache; write-path read)."""
+    async def find_prior_ingest_by_doc_hash(
+        self, tenant_id: str, doc_hash: str, *, fleet_id: str | None, agent_id: str
+    ) -> list[dict]:
+        """The caller's prior ingest rows for a doc_hash (idempotency cache; write-path read)."""
         result = await self._post(
             "/memories/prior-ingest-by-doc-hash",
-            {"tenant_id": tenant_id, "doc_hash": doc_hash},
+            {"tenant_id": tenant_id, "doc_hash": doc_hash, "fleet_id": fleet_id, "agent_id": agent_id},
             read=False,
         )
         return result.get("rows", []) if isinstance(result, dict) else []
@@ -1365,6 +1466,15 @@ class CoreStorageClient:
             {"memory_ids": memory_ids, "tenant_id": tenant_id},
         )  # type: ignore[return-value]
 
+    async def reset_dedup_checked(self, tenant_id: str) -> dict:
+        """M-38 — return up to one batch of the tenant's settled rows to the dedup sweep.
+
+        Returns ``{"reset": n, "done": bool}``; repeat the call until ``done``.
+        Idempotent: clearing a cleared stamp changes nothing, so a retried POST is
+        safe.
+        """
+        return await self._post("/memories/reset-dedup-checked", {"tenant_id": tenant_id}, idempotent=True)  # type: ignore[return-value]
+
     async def batch_update_status(self, data: dict, *, tenant_id: str) -> dict:
         """Apply status updates to many memories within one tenant.
 
@@ -1381,22 +1491,27 @@ class CoreStorageClient:
         ids: list[str],
         tenant_id: str,
     ) -> list[dict | None]:
-        """Fetch many memories in one round-trip; order matches input ``ids``.
+        """Fetch many memories; order matches input ``ids``.
 
         Missing rows — deleted, nonexistent, or belonging to another tenant —
         come back as ``None`` in the same slot rather than being dropped from
         the list. Lets callers zip the response back to their original id list.
-        Capped at 1000 ids server-side; callers needing more must chunk
-        client-side.
+        Storage caps one request at 1000 ids, so a longer list goes out in
+        chunks of that size, one after another (M-41: the graph evidence filter
+        sent every id at once and answered 500 past the cap).
 
         ``tenant_id`` is required. As an optional argument it was the client
         half of GHSA-wgvw-28pq-jc36, and one of the two call sites did in fact
         omit it.
         """
-        payload: dict[str, Any] = {"ids": ids, "tenant_id": tenant_id}
-        return await self._post(  # type: ignore[return-value]
-            "/memories/bulk-get", payload, read=True
-        )
+        rows: list[dict | None] = []
+        for start in range(0, len(ids), _BULK_GET_MAX_IDS):
+            payload: dict[str, Any] = {"ids": ids[start : start + _BULK_GET_MAX_IDS], "tenant_id": tenant_id}
+            chunk: list[dict | None] = await self._post(  # type: ignore[assignment]
+                "/memories/bulk-get", payload, read=True
+            )
+            rows.extend(chunk)
+        return rows
 
     # =====================================================================
     # Fix 2 Phase 2 — fleet/admin discovery, detail, bulk mutations
@@ -1613,10 +1728,17 @@ class CoreStorageClient:
     async def create_entity(self, data: dict) -> dict:
         return await self._post("/entities", data)  # type: ignore[return-value]
 
-    async def get_entity(self, entity_id: str, tenant_id: str) -> dict | None:
+    async def get_entity(
+        self, entity_id: str, tenant_id: str, reader: dict | None = None, *, read: bool = True
+    ) -> dict | None:
         # Same contract as ``get_memory``: the row is addressed by a bare UUID,
-        # so the tenant has to travel with it or storage has no predicate.
-        return await self._get(f"/entities/{entity_id}", tenant_id=tenant_id)
+        # so the tenant has to travel with it or storage has no predicate. An
+        # agent ``reader`` (``entity_reader_scope``) gets ``None`` for an entity
+        # the list hides from it. ``read=False`` routes to the WRITER, for a
+        # read-your-write of an entity this request just upserted.
+        return await self._get(
+            f"/entities/{entity_id}", read=read, tenant_id=tenant_id, **_entity_reader_params(reader)
+        )
 
     async def get_entities_by_ids(self, entity_ids: list[str], tenant_id: str) -> dict:
         """Batch form of ``get_entity``: ``{entity_id: row}`` for one tenant.
@@ -1640,6 +1762,26 @@ class CoreStorageClient:
         # Same contract as ``update_memory`` above, for the same reason.
         # The explicit arg wins over any ``tenant_id`` in ``data``.
         return await self._patch(f"/entities/{entity_id}", {**data, "tenant_id": tenant_id})
+
+    async def merge_entity(
+        self,
+        entity_id: str,
+        tenant_id: str,
+        attributes: dict,
+        name_embedding: list[float] | None = None,
+    ) -> dict | None:
+        """Merge an upsert's attributes into an existing entity (L-46).
+
+        Storage merges under a row lock and returns the merged row, read from
+        the writer: a key ``attributes`` names takes its value, every other
+        stored key stays, ``_aliases`` is the union, and ``name_embedding`` only
+        fills a row that has none. ``None`` when the entity is gone or is
+        another tenant's. ``update_entity`` is the replacing edit.
+        """
+        body: dict[str, Any] = {"tenant_id": tenant_id, "attributes": attributes}
+        if name_embedding is not None:
+            body["name_embedding"] = name_embedding
+        return await self._post_optional(f"/entities/{entity_id}/merge", body)
 
     async def find_exact_entity(
         self,
@@ -1718,8 +1860,9 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         fleet_id: str | None = None,
+        reader: dict | None = None,
     ) -> dict:
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        params: dict[str, Any] = {"tenant_id": tenant_id, **_entity_reader_params(reader)}
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
         return await self._get("/entities/full-graph", **params) or {}
@@ -1732,8 +1875,14 @@ class CoreStorageClient:
         search: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        reader: dict | None = None,
     ) -> list[dict]:
-        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
+        params: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "limit": limit,
+            "offset": offset,
+            **_entity_reader_params(reader),
+        }
         if fleet_id is not None:
             params["fleet_id"] = fleet_id
         if entity_type is not None:
@@ -1746,15 +1895,20 @@ class CoreStorageClient:
         self,
         tenant_id: str,
         entity_ids: list[str],
+        reader: dict | None = None,
     ) -> dict:
         return await self._post(  # type: ignore[return-value]
             "/entities/count-memories",
-            {"tenant_id": tenant_id, "entity_ids": entity_ids},
+            {"tenant_id": tenant_id, "entity_ids": entity_ids, **(reader or {})},
             read=True,
         )
 
-    async def get_entity_with_linked_memories(self, entity_id: str, tenant_id: str) -> dict | None:
-        return await self._get(f"/entities/{entity_id}/with-memories", tenant_id=tenant_id)
+    async def get_entity_with_linked_memories(
+        self, entity_id: str, tenant_id: str, reader: dict | None = None
+    ) -> dict | None:
+        return await self._get(
+            f"/entities/{entity_id}/with-memories", tenant_id=tenant_id, **_entity_reader_params(reader)
+        )
 
     async def get_outgoing_relations(self, entity_id: str, tenant_id: str) -> list[dict]:
         # ``tenant_id`` was optional here and storage fell back to the addressed
@@ -1901,18 +2055,15 @@ class CoreStorageClient:
         tenant_id: str,
         fleet_id: str | None,
         batch_size: int,
+        after_id: str | None = None,
     ) -> list[dict]:
         """Entities needing a name embedding (read half of backfill). Returns a
-        list of ``{id, canonical_name}`` dicts for the core-api LLM embed loop."""
-        resp = await self._post(
-            "/entities/list-null-embeddings",
-            {
-                "tenant_id": tenant_id,
-                "fleet_id": fleet_id,
-                "batch_size": batch_size,
-            },
-            read=True,
-        )
+        list of ``{id, canonical_name}`` dicts for the core-api LLM embed loop,
+        ordered by id and resuming after ``after_id`` (L-174)."""
+        body: dict[str, Any] = {"tenant_id": tenant_id, "fleet_id": fleet_id, "batch_size": batch_size}
+        if after_id is not None:
+            body["after_id"] = after_id
+        resp = await self._post("/entities/list-null-embeddings", body, read=True)
         return resp["rows"]  # type: ignore[index,return-value]
 
     async def set_entity_embeddings(
@@ -2056,14 +2207,14 @@ class CoreStorageClient:
         # (e.g. immediately after an upsert) so replication lag can't yield None.
         # ``readable_tenant_ids`` widens the tenant predicate to ANY($readable)
         # for cross-tenant credentials (omit ⇒ home-tenant only).
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        # M-14: both names travel in the body. In the path, a ``/`` in the
+        # collection, a ``?``, ``#``, ``%XX`` or dot segment in either, reached
+        # a different document or route, and storage decodes the path before
+        # routing it, so escaping cannot fix the ``/``.
+        body: dict[str, Any] = {"tenant_id": tenant_id, "collection": collection, "doc_id": doc_id}
         if readable_tenant_ids is not None:
-            params["readable_tenant_ids"] = readable_tenant_ids
-        return await self._get(
-            f"/documents/{collection}/{doc_id}",
-            read=read,
-            **params,
-        )
+            body["readable_tenant_ids"] = readable_tenant_ids
+        return await self._post_optional("/documents/get", body, read=read, retry=_read_retry)
 
     async def count_unindexed_documents(self, data: dict) -> int:
         """Documents in scope that vector search cannot see (ax-0917-h-08)."""
@@ -2139,10 +2290,17 @@ class CoreStorageClient:
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict]:
-        params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
+        # Body-addressed, as ``get_document`` is (M-14).
+        body: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "collection": collection,
+            "limit": limit,
+            "offset": offset,
+        }
         if fleet_id is not None:
-            params["fleet_id"] = fleet_id
-        return await self._get_list(f"/documents/{collection}", **params)
+            body["fleet_id"] = fleet_id
+        docs = await self._post_optional("/documents/list", body, read=True, retry=_read_retry)
+        return docs or []  # type: ignore[return-value]
 
     async def delete_document(
         self,
@@ -2156,13 +2314,12 @@ class CoreStorageClient:
         # DELETE atomically (the MCP skills active-only gate): a non-matching /
         # missing row deletes nothing and returns False, indistinguishable from
         # a missing one. Home-tenant scoped (deletes never span readable tenants).
-        params: dict[str, Any] = {"tenant_id": tenant_id}
+        # Body-addressed, as ``get_document`` is (M-14), with the DELETE retry
+        # policy: a replay after a committed delete 404s, as a DELETE's does.
+        body: dict[str, Any] = {"tenant_id": tenant_id, "collection": collection, "doc_id": doc_id}
         if require_status is not None:
-            params["require_status"] = require_status
-        return await self._delete(
-            f"/documents/{collection}/{doc_id}",
-            **params,
-        )
+            body["require_status"] = require_status
+        return await self._post_optional("/documents/delete", body, retry=with_retry) is not None
 
     # =====================================================================
     # Skill factory pipeline (Fix 2 Ph5a)
@@ -2682,6 +2839,25 @@ class CoreStorageClient:
     async def delete_node(self, tenant_id: str, node_name: str) -> bool:
         return await self._delete(f"/fleet/nodes/{node_name}", tenant_id=tenant_id)
 
+    async def release_node(
+        self, tenant_id: str, node_id: str, owner_principal: str | None = None
+    ) -> dict | None:
+        """Clear a node's credential binding, or move it to ``owner_principal`` (M-85).
+
+        None if no such node.
+        """
+        return await self._post_optional(
+            f"/fleet/nodes/{node_id}/release",
+            {"tenant_id": tenant_id, "owner_principal": owner_principal},
+        )
+
+    async def claim_interview_request(self, tenant_id: str, command_id: str, node_id: str) -> bool:
+        """Spend a delivered ``interview_request`` on one window (M-86). False if it admits none."""
+        resp = await self._post(
+            f"/fleet/commands/{command_id}/claim", {"tenant_id": tenant_id, "node_id": node_id}
+        )
+        return isinstance(resp, dict) and resp.get("ok") is True
+
     async def create_command(self, data: dict) -> dict:
         return await self._post("/fleet/commands", data)  # type: ignore[return-value]
 
@@ -2693,8 +2869,12 @@ class CoreStorageClient:
         command: str | None = None,
         limit: int = 50,
         node_id: str | None = None,
+        owner_principal: str | None = None,
     ) -> list[dict]:
         params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit}
+        if owner_principal is not None:
+            # M-85 — only commands of nodes bound to this credential.
+            params["owner_principal"] = owner_principal
         if node_name is not None:
             params["node_name"] = node_name
         if node_id is not None:
@@ -2738,6 +2918,22 @@ class CoreStorageClient:
             "/fleet/commands/ack",
             {"command_ids": command_ids, "tenant_id": tenant_id},
         )
+
+    async def agent_scope_probe(self, data: dict) -> dict | None:
+        """CAURA-723 — ``{has_memories, agent_registered}`` for one agent id.
+
+        Called only after a search that came back EMPTY, so a successful
+        agent-filtered search never pays for it. ``services/agent_scope``
+        carries the reasoning for that ordering; note it is not free, and this
+        docstring said the opposite until review caught it.
+
+        ``read=True``: the search this explains reads the replica, so answering
+        from the same replica keeps the probe's story consistent with the
+        result. Reading the primary could report "has memories" for a row the
+        search on the replica could not see — the one inconsistency that would
+        make the warning misleading rather than merely stale.
+        """
+        return await self._post_optional("/memories/agent-scope-probe", data, read=True)
 
     async def fleet_exists(self, tenant_id: str, fleet_id: str) -> bool:
         result = await self._get(
@@ -2896,6 +3092,21 @@ class CoreStorageClient:
             },
         )
 
+    async def release_idempotency_claim(
+        self,
+        *,
+        tenant_id: str,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> bool:
+        """Delete a still-pending claim; ``False`` if none was pending."""
+        return await self._delete(
+            "/idempotency/claim",
+            tenant_id=tenant_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+
     # =====================================================================
     # Audit
     # =====================================================================
@@ -2926,6 +3137,10 @@ class CoreStorageClient:
         action: str | None = None,
         resource_type: str | None = None,
         since: datetime | None = None,
+        agent_id: str | None = None,
+        resource_id: UUID | None = None,
+        cursor_ts: datetime | None = None,
+        cursor_id: UUID | None = None,
     ) -> list[dict]:
         params: dict[str, Any] = {
             "tenant_id": tenant_id,
@@ -2936,10 +3151,17 @@ class CoreStorageClient:
             params["action"] = action
         if resource_type is not None:
             params["resource_type"] = resource_type
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+        if resource_id is not None:
+            params["resource_id"] = str(resource_id)
         if since is not None:
             # OSS 08/14 M-11 — forwarded as ISO-8601; the storage route parses
             # it back to a datetime and the filter runs in SQL.
             params["since"] = since.isoformat()
+        if cursor_ts is not None and cursor_id is not None:
+            params["cursor_ts"] = cursor_ts.isoformat()
+            params["cursor_id"] = str(cursor_id)
         return await self._get_list("/audit-logs", **params)
 
     async def verify_audit_chain(self, tenant_id: str, limit: int = 100_000, start_seq: int = 1) -> dict:
@@ -3058,7 +3280,7 @@ class CoreStorageClient:
         *,
         org_id: str,
         action: str,
-        since_hours: int,
+        since_hours: float,
     ) -> bool:
         """CAURA-657 dedup gate. The pipeline-op consumers (crystallize,
         entity-link) check this before invoking the primitive — skip the
@@ -3151,6 +3373,24 @@ class CoreStorageClient:
                 f"{type(result).__name__!r}"
             )
         return result
+
+    async def encrypt_org_api_keys(
+        self, org_id: str, *, expected: dict[str, str], encrypted: dict[str, str], changed_by: str
+    ) -> list[str]:
+        """Swap each key for its ciphertext while it still holds ``expected`` (M-99).
+
+        Returns the names swapped. Non-idempotent ``_post``, though a replay is
+        harmless: a swapped key no longer matches ``expected``.
+        """
+        result = await self._post(
+            f"/organization-settings/{org_id}/encrypt-api-keys",
+            {"expected": expected, "encrypted": encrypted, "changed_by": changed_by},
+        )
+        if not isinstance(result, dict):
+            raise ValueError(
+                f"core-storage-api returned unexpected type for api-key encryption: {type(result).__name__!r}"
+            )
+        return result.get("swapped", [])
 
     # =====================================================================
     # Tenant discovery (Fix 2 Phase 1) — lifecycle-fanout target lists

@@ -12,9 +12,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from core_api import mcp_server
+from core_api.agent_ids import INSIGHTER_AGENT_ID
 from tests._mcp_test_helpers import parse_envelope, strip_latency
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
+
+_RETIRED_INSIGHTER_INPUT = "memclaw-insighter"  # legacy-name-ok: supported input alias
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +232,34 @@ async def test_set_agent_scope_self_succeeds_at_trust_1(mcp_env, monkeypatch):
     assert trust_calls == [1], f"expected single [1] DB call, got {trust_calls}"
 
 
+async def test_set_self_scope_normalizes_retired_caller_identity(mcp_env, monkeypatch):
+    monkeypatch.setattr(mcp_server, "_get_agent_id", lambda: _RETIRED_INSIGHTER_INPUT)
+    trust = AsyncMock(return_value=(1, False, None))
+    audit = AsyncMock()
+    monkeypatch.setattr(mcp_server, "_require_trust", trust)
+    monkeypatch.setattr(mcp_server, "log_action", audit)
+    _stub_storage_client(
+        monkeypatch,
+        get_document=None,
+        upsert_keystone={"id": "11111111-1111-4111-8111-111111111111", "doc_id": "r"},
+    )
+
+    out = await mcp_server.caura_keystones_set(
+        op="set",
+        doc_id="r",
+        title="T",
+        content="C",
+        scope="agent",
+        weight="med",
+        fleet_id="fleet-X",
+        agent_id=_RETIRED_INSIGHTER_INPUT,
+    )
+
+    assert parse_envelope(out)["ok"] is True
+    trust.assert_awaited_once_with("test-tenant", INSIGHTER_AGENT_ID, min_level=1)
+    assert audit.await_args.kwargs["agent_id"] == INSIGHTER_AGENT_ID
+
+
 async def test_set_agent_scope_other_rejected_at_trust_1(mcp_env, monkeypatch):
     """A trust-1 caller CANNOT author a ``scope=agent`` rule targeting
     a different agent (admin-on-behalf). The single ``_require_trust``
@@ -300,6 +331,27 @@ async def test_delete_own_agent_rule_succeeds_at_trust_1(mcp_env, monkeypatch):
     # min_level is the anti-probing floor (1); the rule-shape floor is
     # checked in-memory against the returned trust level.
     assert trust_calls == [1], f"expected single [1] DB call, got {trust_calls}"
+
+
+async def test_delete_self_scope_normalizes_retired_caller_identity(
+    mcp_env, monkeypatch
+):
+    monkeypatch.setattr(mcp_server, "_get_agent_id", lambda: _RETIRED_INSIGHTER_INPUT)
+    trust = AsyncMock(return_value=(1, False, None))
+    audit = AsyncMock()
+    monkeypatch.setattr(mcp_server, "_require_trust", trust)
+    monkeypatch.setattr(mcp_server, "log_action", audit)
+    _stub_storage_client(
+        monkeypatch,
+        get_document={"data": {"scope": "agent", "agent_id": INSIGHTER_AGENT_ID}},
+        delete_keystone=True,
+    )
+
+    out = await mcp_server.caura_keystones_set(op="delete", doc_id="r")
+
+    assert parse_envelope(out)["ok"] is True
+    trust.assert_awaited_once_with("test-tenant", INSIGHTER_AGENT_ID, min_level=1)
+    assert audit.await_args.kwargs["agent_id"] == INSIGHTER_AGENT_ID
 
 
 async def test_set_overwrite_fleet_with_self_agent_uses_stored_floor(

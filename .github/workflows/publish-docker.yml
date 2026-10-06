@@ -1,7 +1,8 @@
 name: publish-docker
 
-# Builds and publishes the core-api and core-storage-api container images
-# to GitHub Container Registry (ghcr.io) on every published GitHub Release.
+# Builds and publishes the core-api, core-storage-api and core-operations
+# container images to GitHub Container Registry (ghcr.io) on every published
+# GitHub Release.
 #
 # release-please cuts the GitHub Release on release-PR merge — that fires
 # this workflow. Multi-arch (linux/amd64, linux/arm64). Tags are derived
@@ -41,7 +42,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'backend-')
     runs-on: ubuntu-latest
     strategy:
-      # All-or-nothing publish: if one image fails, abort the other so
+      # All-or-nothing publish: if one image fails, abort the others so
       # we don't ship a release where (e.g.) core-api:v1.0.0 exists in
       # the registry but core-storage-api:v1.0.0 doesn't — a state that
       # would silently break ``docker compose up`` for that version.
@@ -49,19 +50,28 @@ jobs:
       # workflow_dispatch with the same tag for atomicity.
       fail-fast: true
       matrix:
+        # ``image`` is the published ghcr repository. The first two keep the
+        # names they were published under (rule 3: old names stay readable).
+        # core-operations is new, so it is published under the new brand: rule 7
+        # mints nothing new under the old name (M-109).
         include:
           - name: core-api
+            image: caura-memclaw-core-api # legacy-name-floor: the published ghcr repository name
             dockerfile: core-api/Dockerfile
           - name: core-storage-api
+            image: caura-memclaw-core-storage-api # legacy-name-floor: the published ghcr repository name
             dockerfile: core-storage-api/Dockerfile
+          - name: core-operations
+            image: caura-core-operations
+            dockerfile: core-operations/Dockerfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.event.release.tag_name }}
           persist-credentials: false
 
-      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to ghcr.io
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -125,7 +135,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/caura-memclaw-${{ matrix.name }} # legacy-name-floor: the published ghcr repository name
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           # ``latest`` defaults to release-event-only — a
           # workflow_dispatch with an older tag must not silently rewind
           # ``latest``. For the recovery use case (e.g. transient
@@ -147,13 +157,13 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.push_latest == 'true' }}
           labels: |
-            org.opencontainers.image.title=caura-memclaw-${{ matrix.name }}
+            org.opencontainers.image.title=${{ matrix.image }}
             org.opencontainers.image.description=Caura ${{ matrix.name }} — fleet memory for AI agents
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build and push (${{ matrix.name }})
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}

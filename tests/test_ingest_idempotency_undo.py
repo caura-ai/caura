@@ -85,7 +85,7 @@ async def test_cache_hit_returns_cached_facts_without_llm(
         },
     }
 
-    async def _fake_lookup(tenant_id, doc_hash):
+    async def _fake_lookup(tenant_id, doc_hash, **_scope):
         return [prior_memory]
 
     monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _fake_lookup)
@@ -128,7 +128,7 @@ async def test_cache_miss_runs_llm_normally(monkeypatch, fake_tenant_config):
     """No prior memories → cache miss → LLM runs, response carries doc_hash
     so the next caller can echo it back to commit for future cache hits."""
 
-    async def _no_cache(tenant_id, doc_hash):
+    async def _no_cache(tenant_id, doc_hash, **_scope):
         return []
 
     monkeypatch.setattr(ingest_service, "_find_prior_ingest_by_doc_hash", _no_cache)

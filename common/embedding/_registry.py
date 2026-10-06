@@ -19,7 +19,10 @@ from collections import OrderedDict
 from common.constants import VECTOR_DIM
 from common.embedding.constants import OPENAI_EMBEDDING_MODEL
 from common.embedding.protocols import EmbeddingProvider
-from common.embedding.providers.fake import FakeEmbeddingProvider
+from common.embedding.providers.fake import (
+    FakeEmbeddingProvider,
+    UnconfiguredEmbeddingProvider,
+)
 from common.embedding.providers.local import LocalEmbedding
 from common.embedding.providers.openai import OpenAIEmbeddingProvider
 from common.provider_names import ProviderName
@@ -155,6 +158,10 @@ def _get_or_create_openai_provider(
     return provider
 
 
+# One ERROR per process for the no-credential case — see ``get_embedding_provider``.
+_unconfigured_logged = False
+
+
 def _resolve_openai_api_key(tenant_config: object | None) -> str:
     """Tenant override first, then ``OPENAI_API_KEY`` env. Empty string if neither.
 
@@ -212,10 +219,21 @@ def get_embedding_provider(
                     platform.model,
                 )
                 return platform
-            logger.warning(
-                "No API key for OpenAI embedding provider, returning FakeEmbeddingProvider",
-            )
-            return FakeEmbeddingProvider()
+            # ERROR, once: this is a deployment-level misconfiguration, and
+            # the registry runs per request. Rows written from here on are
+            # stored WITHOUT an embedding (see UnconfiguredEmbeddingProvider)
+            # rather than with a hash vector posing as a real one.
+            global _unconfigured_logged
+            if not _unconfigured_logged:
+                _unconfigured_logged = True
+                logger.error(
+                    "EMBEDDING_PROVIDER=openai but no OpenAI API key or platform "
+                    "embedding is configured: memories are stored without "
+                    "embeddings (keyword search only) until OPENAI_API_KEY or "
+                    "PLATFORM_EMBEDDING_* is set. Set EMBEDDING_PROVIDER=fake to "
+                    "use deterministic test vectors instead."
+                )
+            return UnconfiguredEmbeddingProvider()
         embed_model = (
             getattr(tenant_config, "embedding_model", None)
             if tenant_config is not None
