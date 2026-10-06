@@ -10,6 +10,27 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.23.0](https://github.com/caura-ai/caura/compare/backend-v3.22.3...backend-v3.23.0) (2026-10-06)
+
+
+### Features
+
+* **audit:** record who made a governance write, and from which client ([#1884](https://github.com/caura-ai/caura/issues/1884)) ([5155a0a](https://github.com/caura-ai/caura/commit/5155a0a7194be899b379ce662f5fccbb57476251))
+* **governance:** add the rule-set hash and its shared test vectors (g1.2) ([#1883](https://github.com/caura-ai/caura/issues/1883)) ([7d727b6](https://github.com/caura-ai/caura/commit/7d727b67c820a41736299ad23c657469beaaaa67))
+* **keystones:** the list's envelope names its rules by their rule-set hash (g1.10) ([#1910](https://github.com/caura-ai/caura/issues/1910)) ([b1ac501](https://github.com/caura-ai/caura/commit/b1ac50139450119b2291abf424ae60ae179ec693))
+
+
+### Bug Fixes
+
+* **entities:** a proper-noun subject resolves in the write's own fleet ([#1881](https://github.com/caura-ai/caura/issues/1881)) ([d9913e6](https://github.com/caura-ai/caura/commit/d9913e674fdefa7d0074e3c94f21698f7d274d48))
+* **fleet:** a malformed fleet_id is a 422, not a 500 ([#1895](https://github.com/caura-ai/caura/issues/1895)) ([b108a84](https://github.com/caura-ai/caura/commit/b108a84d70b4cf1ac0d60ee6fa4fac19f5a76981))
+* thirteen reviewed OSS audit fixes, combined to merge in one CI run ([#1909](https://github.com/caura-ai/caura/issues/1909)) ([675baa5](https://github.com/caura-ai/caura/commit/675baa5596fce9d31d701b5683d9ce261c9883c8))
+
+
+### Documentation
+
+* **evidence:** establish canonical public claims registry ([#1887](https://github.com/caura-ai/caura/issues/1887)) ([401b907](https://github.com/caura-ai/caura/commit/401b907af693462e2ec4319cd278de5f5dd0b8d0))
+
 ## [3.22.3](https://github.com/caura-ai/caura/compare/backend-v3.22.2...backend-v3.22.3) (2026-10-06)
 
 
