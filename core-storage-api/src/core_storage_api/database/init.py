@@ -22,7 +22,7 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # its own it would certify 020 onwards over a database that may have stopped
 # anywhere after 019 — a selective restore, or an operator who dropped
 # ``alembic_version`` to clear a wedged upgrade. The probe is an object the head
-# migration creates; for 059 that is ``ix_memories_ingest_doc_hash``. An index
+# migration creates; for 060 that is the ``entities.created_at`` column. An index
 # probe must check the index is VALID, since an interrupted CONCURRENTLY build
 # leaves an invalid one. The probe need not be migration-only — the sentinel
 # already rules out a ``create_all`` schema — but it must not exist before head.
@@ -31,11 +31,10 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # ``test_the_head_fingerprint_names_the_current_head`` fails until it does. A
 # head with no object of its own may set the probe to ``None``, which makes the
 # stamp branch refuse — the safe answer when there is nothing to check.
-_HEAD_FINGERPRINT_REVISION = "059"
+_HEAD_FINGERPRINT_REVISION = "060"
 _HEAD_FINGERPRINT_SQL: str | None = (
-    "SELECT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
-    "JOIN pg_namespace n ON n.oid = c.relnamespace "
-    "WHERE n.nspname = 'public' AND c.relname = 'ix_memories_ingest_doc_hash' AND i.indisvalid)"
+    "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+    "WHERE table_schema = 'public' AND table_name = 'entities' AND column_name = 'created_at')"
 )
 
 _engine: AsyncEngine | None = None

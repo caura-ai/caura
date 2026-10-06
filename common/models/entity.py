@@ -1,7 +1,17 @@
 import uuid
+from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Float, ForeignKey, Index, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSON, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,6 +34,12 @@ class Entity(Base):
     attributes: Mapped[dict | None] = mapped_column(JSON)
     name_embedding = mapped_column(Vector(VECTOR_DIM))
     search_vector = mapped_column(TSVECTOR)
+    # When the entity was first seen. The nightly duplicate merge keeps the
+    # oldest of two compatible unqualified names, as the write path keeps the
+    # first (H-05). Migration 060; rows from before it all read its time.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
 
     __table_args__ = (
         # The dedup constraint ``entity_add`` relies on. Created in migration

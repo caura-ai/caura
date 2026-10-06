@@ -201,12 +201,13 @@ async def test_a_run_with_no_fleet_merges_within_a_fleet_and_never_across(sc):
 
     assert out["merge_count"] == 2, out
     names = {e["canonical_name"] for e in await sc.list_entities(tenant)}
+    # Each merged pair keeps its first seen name (H-05).
     assert names == {
         "globex",
         "globex corp",
         "globex company",
-        "initech corp",
-        "umbrella corp",
+        "initech",
+        "umbrella",
     }
 
 

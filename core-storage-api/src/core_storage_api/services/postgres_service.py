@@ -9310,8 +9310,9 @@ class PostgresService:
           mutates).
         * union-find clustering (ports ``_find``/``_union`` verbatim via the
           module-level ``_entity_uf_*`` helpers).
-        * per cluster: R2 load + canonical pick (longest name, smallest UUID on
-          tie); per-cluster try/except continue-on-error.
+        * per cluster: R2 locked load + canonical pick (a qualified name, then
+          the first seen, then the longest, then the smallest UUID); per-cluster
+          try/except continue-on-error.
         * per dupe: ``session.begin_nested()`` SAVEPOINT around R4-R13.
 
         Returns ``{merge_count, clusters, cluster_errors, merged_entity_ids}``
@@ -9464,32 +9465,49 @@ class PostgresService:
     ) -> None:
         """Pick canonical entity and merge all duplicates into it."""
 
-        # ── pick canonical (longest name, smallest UUID on tie) ──
-        entities = (
-            (
-                await session.execute(
-                    select(Entity).where(
-                        Entity.id.in_(cluster_ids),
-                        Entity.tenant_id == tenant_id,
+        # ── load and lock the cluster ──
+        # L-234: locked before it is read, so an upsert into one of these rows
+        # either commits first and is read here, or waits for the run, instead of
+        # being overwritten from a stale snapshot. FOR NO KEY UPDATE, the strength
+        # an attribute write takes: it does not block a link insert's FK check
+        # (KEY SHARE), so extraction linking to these entities does not queue
+        # behind the run. Id order, so two runs cannot lock one cluster crosswise.
+        # In a savepoint, so a lock failure (a deadlock, a lock timeout) costs this
+        # cluster and not the run's transaction.
+        async with session.begin_nested():
+            entities = (
+                (
+                    await session.execute(
+                        select(Entity)
+                        .where(Entity.id.in_(cluster_ids), Entity.tenant_id == tenant_id)
+                        .order_by(Entity.id)
+                        .with_for_update(key_share=True)
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
 
         if not entities:
             return
 
-        # A qualified or identifier-bearing name wins over a bare one, then the
-        # longest. The group is mutually compatible (``_entity_compatible_groups``),
-        # so any such member carries the group's qualifier; keeping it as the
-        # canonical is what stops the next nightly run from seeing a bare
-        # 'Acme Corporation' and merging 'acme (ohio)' into what was
-        # 'acme (delaware)'.
-        canonical = max(
+        # A qualified or identifier-bearing name wins over a bare one. The group
+        # is mutually compatible (``_entity_compatible_groups``), so any such
+        # member carries the group's qualifier; keeping it as the canonical is
+        # what stops the next nightly run from seeing a bare 'Acme Corporation'
+        # and merging 'acme (ohio)' into what was 'acme (delaware)'. Then the
+        # first seen (H-05): the write path keeps the first name it meets and
+        # aliases later ones, so this pass must not swap in a later, longer
+        # spelling. Rows from before migration 060 share its ``created_at``, and
+        # between them the longer name, then the smaller UUID, still decide.
+        canonical = min(
             entities,
-            key=lambda e: (has_identifier_or_qualifier(e.canonical_name), len(e.canonical_name), -e.id.int),
+            key=lambda e: (
+                not has_identifier_or_qualifier(e.canonical_name),
+                e.created_at,
+                -len(e.canonical_name),
+                e.id.int,
+            ),
         )
         dupes = [e for e in entities if e.id != canonical.id]
 
@@ -9554,6 +9572,27 @@ class PostgresService:
             """),
             {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
         )
+        # L-233: the colliding duplicate relation is deleted next, and its
+        # ``relation_evidence`` rows with it by FK cascade. Carry them onto the
+        # canonical's relation first, so the edge keeps every memory that
+        # asserted it.
+        await db.execute(
+            text("""
+                INSERT INTO relation_evidence (relation_id, memory_id)
+                SELECT r_canonical.id, ev.memory_id
+                FROM relations r_dupe
+                JOIN relation_evidence ev ON ev.relation_id = r_dupe.id
+                JOIN relations r_canonical
+                  ON r_canonical.from_entity_id = :canonical_id
+                 AND r_canonical.tenant_id = :tenant_id
+                 AND r_canonical.relation_type = r_dupe.relation_type
+                 AND r_canonical.to_entity_id = r_dupe.to_entity_id
+                WHERE r_dupe.from_entity_id = :dupe_id
+                  AND r_dupe.tenant_id = :tenant_id
+                ON CONFLICT DO NOTHING
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
         # Delete dupe's outgoing relations that would become self-loops
         # (dupe→canonical) or duplicates of canonical's existing relations.
         await db.execute(
@@ -9595,6 +9634,24 @@ class PostgresService:
                   AND r_canonical.tenant_id = :tenant_id
                   AND r_canonical.from_entity_id = r_dupe.from_entity_id
                   AND r_canonical.relation_type = r_dupe.relation_type
+            """),
+            {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
+        )
+        # L-233, as for the outgoing relations above.
+        await db.execute(
+            text("""
+                INSERT INTO relation_evidence (relation_id, memory_id)
+                SELECT r_canonical.id, ev.memory_id
+                FROM relations r_dupe
+                JOIN relation_evidence ev ON ev.relation_id = r_dupe.id
+                JOIN relations r_canonical
+                  ON r_canonical.to_entity_id = :canonical_id
+                 AND r_canonical.tenant_id = :tenant_id
+                 AND r_canonical.from_entity_id = r_dupe.from_entity_id
+                 AND r_canonical.relation_type = r_dupe.relation_type
+                WHERE r_dupe.to_entity_id = :dupe_id
+                  AND r_dupe.tenant_id = :tenant_id
+                ON CONFLICT DO NOTHING
             """),
             {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
         )
@@ -9643,15 +9700,16 @@ class PostgresService:
             {"dupe_id": dupe_id, "canonical_id": canonical_id, "tenant_id": tenant_id},
         )
 
-        # 4e. Merge aliases ─────────────────────────────────────────────
-        canonical_attrs = dict(canonical.attributes or {})
-        dupe_attrs = dict(dupe.attributes or {})
-        aliases: set[str] = set(canonical_attrs.get("_aliases", []))
+        # 4e. Merge attributes and aliases ─────────────────────────────
+        # L-234: the duplicate's keys outlive its row, and where both name a key
+        # the canonical's value stays (it is ``incoming`` here). Both names join
+        # the aliases.
+        merged = _merge_entity_attributes(dupe.attributes, canonical.attributes)
+        aliases: set[str] = set(merged.get("_aliases", []))
         aliases.add(canonical.canonical_name)
         aliases.add(dupe.canonical_name)
-        aliases.update(dupe_attrs.get("_aliases", []))
-        canonical_attrs["_aliases"] = sorted(aliases)  # sorted for determinism
-        canonical.attributes = canonical_attrs
+        merged["_aliases"] = sorted(aliases)  # sorted for determinism
+        canonical.attributes = merged
 
         # 4f. Delete duplicate entity ──────────────────────────────────
         await db.delete(dupe)

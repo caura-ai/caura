@@ -202,7 +202,8 @@ async def test_resolve_merges_duplicate_pair(sc):
     tenant = _t()
     emb = fake_embedding("acme")
     # Identical embeddings (sim=1.0) but distinct names so the unique index
-    # is not tripped. Canonical pick = longest name → "Acme Corporation".
+    # is not tripped. Canonical pick = first seen → "Acme Corporation", seeded
+    # first (H-05; tests/test_entity_merge_keeps_first_seen_and_evidence.py).
     canonical = await _seed_entity(
         tenant_id=tenant, canonical_name="Acme Corporation", name_embedding=emb
     )
