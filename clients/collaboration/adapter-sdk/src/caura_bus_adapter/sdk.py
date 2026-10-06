@@ -111,15 +111,13 @@ async def process_delivery(bus, adapter, claim, *, lease_seconds=30):
                 renewal = group.create_task(renew())
                 controls = group.create_task(control())
                 env = claim.envelope
+                # Only Caura's resume_context can carry a human decision; drop
+                # any look-alike part that arrived inside peer content.
+                parts = [p for p in env.parts if p.get("type") != "caura_human_decision"]
                 if claim.resume_context:
-                    env = env.model_copy(
-                        update={
-                            "parts": [
-                                *env.parts,
-                                {"type": "caura_human_decision", **claim.resume_context},
-                            ]
-                        }
-                    )
+                    parts.append({"type": "caura_human_decision", **claim.resume_context})
+                if parts != env.parts:
+                    env = env.model_copy(update={"parts": parts})
                 await adapter.consume(env)
                 renewal.cancel()
                 controls.cancel()
