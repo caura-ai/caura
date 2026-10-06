@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import weakref
 from collections.abc import MutableMapping
@@ -208,10 +209,12 @@ class FleetCreateIn(TenantScopedBody):
     display_name: str | None = None
     description: str | None = None
 
+    # A field validator, so a malformed id is the 422 every malformed body gets.
+    # As a bare classmethod called from the handler, its ValueError reached the
+    # catch-all handler as a 500 (M-31).
+    @field_validator("fleet_id")
     @classmethod
     def validate_fleet_id(cls, v: str) -> str:
-        import re
-
         if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9\-]{1,48}[a-zA-Z0-9]$", v):
             raise ValueError(
                 "fleet_id must be 3-50 chars, alphanumeric + hyphens, no leading/trailing hyphens"
@@ -404,9 +407,6 @@ async def create_fleet(
     auth.enforce_read_only()
     auth.enforce_usage_limits()
     auth.enforce_tenant(body.tenant_id)
-
-    # Validate fleet_id format
-    FleetCreateIn.validate_fleet_id(body.fleet_id)
 
     sc = get_storage_client()
 
