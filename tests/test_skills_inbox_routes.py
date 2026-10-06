@@ -16,6 +16,9 @@ First dedicated coverage for ``core_api.routes.skills_inbox``:
   tenant member; everything is behind ``skills_factory.enabled``.
 - Per-action status matrices, body validation (422s), and the TOCTOU
   409 guards.
+- Quarantined skills (M-120, owner decision 2026-10-05): the list's
+  ``status=quarantined`` view, and approve's ``override_quarantine``,
+  which needs a reason, is audited, and never lifts a fatal finding.
 
 All tests are pure unit tests — storage, settings, Sentinel, and the
 skill-write validator are patched at the module seam; no DB.
@@ -31,7 +34,7 @@ from core_api import errors
 from core_api.app import http_exception_handler as _http_exception_handler
 from core_api.auth import AuthContext, get_auth_context
 from core_api.routes import skills_inbox as si
-from core_api.services.forge.sentinel_scan import ScanResult
+from core_api.services.forge.sentinel_scan import ScanFinding, ScanResult
 
 pytestmark = pytest.mark.unit
 
@@ -267,6 +270,7 @@ def make_client(
     # every pre-existing test in this file keeps exercising the same caller.
     capabilities: set[str] | None = None,
     is_demo: bool = False,
+    user_id: str | None = None,
 ) -> AsyncClient:
     app = FastAPI()
     app.include_router(si.router, prefix="/api/v1")
@@ -283,6 +287,7 @@ def make_client(
         is_admin=is_admin,
         capabilities=capabilities,
         is_demo=is_demo,
+        user_id=user_id,
     )
 
     async def _auth_dep():
@@ -786,6 +791,168 @@ async def test_approve_concurrent_status_flip_409(storage, settings, side_effect
         r = await client.post(f"{BASE}/{SLUG}/approve")
     assert r.status_code == 409
     assert "concurrently transitioned" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Quarantined skills: review and override (M-120)
+# ---------------------------------------------------------------------------
+
+DESTRUCTIVE = ScanFinding(
+    code="DESTRUCTIVE_COMMAND",
+    severity="critical",
+    message="rm -rf / in content",
+    locator="data.content",
+)
+OVERRIDABLE_SCAN = ScanResult(
+    state="quarantined",
+    scanned_at="2026-07-20T00:00:00+00:00",
+    critical=1,
+    warn=0,
+    info=0,
+    findings=(DESTRUCTIVE,),
+)
+OVERRIDE = {"override_quarantine": True, "reason": "reviewed: it wipes a sandbox"}
+
+
+def quarantined_doc() -> dict:
+    return forge_doc(
+        status="quarantined",
+        quarantined_at="2026-07-20T00:00:00+00:00",
+        quarantine_reason="sentinel",
+        scan=OVERRIDABLE_SCAN.as_doc_field(),
+    )
+
+
+async def test_list_shows_quarantined_skills_with_their_findings(storage, settings):
+    storage.query_rows = [quarantined_doc()]
+    async with make_client() as client:
+        r = await client.get(BASE, params={"status": "quarantined"})
+    assert r.status_code == 200, r.text
+    (query,) = storage.queries
+    assert query["where"] == {"status": "quarantined"}
+    (card,) = r.json()["items"]
+    assert card["status"] == "quarantined"
+    assert card["sentinel_scan"]["findings"][0]["code"] == "DESTRUCTIVE_COMMAND"
+
+
+async def test_list_still_defaults_to_staged(storage, settings):
+    async with make_client() as client:
+        r = await client.get(BASE)
+    assert r.status_code == 200, r.text
+    assert storage.queries[0]["where"] == {"status": "staged"}
+
+
+@pytest.mark.parametrize("status", ["active", "candidate", "rejected"])
+async def test_list_refuses_any_other_status(storage, settings, status):
+    async with make_client() as client:
+        r = await client.get(BASE, params={"status": status})
+    assert r.status_code == 422, r.text
+    assert storage.queries == []
+
+
+async def test_an_override_approves_a_quarantined_skill_and_is_audited(
+    storage, settings, side_effects
+):
+    side_effects.scan.result = OVERRIDABLE_SCAN
+    storage.seed(quarantined_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 200, r.text
+    assert r.json()["previous_status"] == "quarantined"
+    assert r.json()["new_status"] == "active"
+    (payload,) = storage.upserts
+    data = payload["data"]
+    assert data["status"] == "active"
+    # The verdict it was approved over stays on the skill, with the override.
+    assert data["scan"] == OVERRIDABLE_SCAN.as_doc_field()
+    assert data["quarantine_override"]["reason"] == OVERRIDE["reason"]
+    ((_, audit),) = side_effects.log.calls
+    assert audit["critical"] is True
+    assert audit["detail"]["override_quarantine"] is True
+    assert audit["detail"]["reason"] == OVERRIDE["reason"]
+    assert audit["detail"]["critical_codes"] == ["DESTRUCTIVE_COMMAND"]
+
+
+@pytest.mark.parametrize(
+    ("client_kw", "approver"),
+    [
+        ({"user_id": "user-7"}, "user-7"),
+        ({"org_role": None, "is_admin": True}, "admin-api-key"),
+    ],
+    ids=["gateway_user", "admin_key"],
+)
+async def test_an_override_always_names_its_approver(
+    storage, settings, side_effects, client_kw, approver
+):
+    """The admin API key carries no user, and the override must still say who
+    approved it, on the doc and in the audit row."""
+    side_effects.scan.result = OVERRIDABLE_SCAN
+    storage.seed(quarantined_doc())
+    async with make_client(**client_kw) as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 200, r.text
+    assert storage.upserts[0]["data"]["quarantine_override"]["approved_by"] == approver
+    ((_, audit),) = side_effects.log.calls
+    assert audit["detail"]["approved_by"] == approver
+
+
+async def test_an_override_moves_the_quarantine_markers_into_its_record(
+    storage, settings, side_effects
+):
+    """An active skill must not look quarantined; the markers stay, as history,
+    inside ``quarantine_override``."""
+    side_effects.scan.result = OVERRIDABLE_SCAN
+    storage.seed(quarantined_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 200, r.text
+    data = storage.upserts[0]["data"]
+    assert "quarantined_at" not in data and "quarantine_reason" not in data
+    record = data["quarantine_override"]
+    assert record["quarantined_at"] == "2026-07-20T00:00:00+00:00"
+    assert record["quarantine_reason"] == "sentinel"
+
+
+async def test_an_override_approves_a_staged_skill_whose_rescan_is_critical(
+    storage, settings, side_effects
+):
+    side_effects.scan.result = OVERRIDABLE_SCAN
+    storage.seed(forge_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 200, r.text
+    assert storage.upserts[0]["data"]["status"] == "active"
+
+
+@pytest.mark.parametrize(
+    "body", [{"override_quarantine": True}, {**OVERRIDE, "reason": ""}]
+)
+async def test_an_override_needs_a_reason(storage, settings, side_effects, body):
+    storage.seed(quarantined_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=body)
+    assert r.status_code == 422, r.text
+    assert storage.upserts == []
+
+
+async def test_an_override_never_lifts_a_fatal_finding(storage, settings, side_effects):
+    too_big = ScanFinding(
+        code="BODY_TOO_LARGE", severity="critical", message="too big", fatal=True
+    )
+    side_effects.scan.result = ScanResult(
+        state="quarantined",
+        scanned_at="2026-07-20T00:00:00+00:00",
+        critical=1,
+        warn=0,
+        info=0,
+        findings=(too_big,),
+    )
+    storage.seed(quarantined_doc())
+    async with make_client() as client:
+        r = await client.post(f"{BASE}/{SLUG}/approve", json=OVERRIDE)
+    assert r.status_code == 422, r.text
+    assert "rescan refused" in r.json()["detail"]
+    assert storage.upserts == []
 
 
 # ---------------------------------------------------------------------------
