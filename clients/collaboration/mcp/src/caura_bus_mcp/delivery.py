@@ -21,6 +21,10 @@ class DeliverySession:
         self.renewal: asyncio.Task | None = None
         self.reply_keys: set[tuple[str, str]] = set()
         self.reply_deliveries: dict[str, tuple[str, str, str]] = {}
+        # Notices returned while refreshing a stale claim; the next wait hands them over.
+        self.notices: list = []
+        # Human decisions whose resume_context the model has already been shown.
+        self.surfaced: set[str] = set()
 
     @staticmethod
     def public(claim):
@@ -35,20 +39,28 @@ class DeliverySession:
 
     async def wait(self, timeout=50):
         async with self.lock:
-            result = await self.bus.wait_result(self.session_id, timeout)
-            claim = Claim.model_validate(result["delivery"]) if result["delivery"] else None
-            self.current = claim
-            if claim:
-                self.reply_deliveries[claim.envelope.id] = (
-                    claim.delivery_id,
-                    claim.envelope.from_,
-                    claim.envelope.thread_id,
-                )
-                if claim.state == "paused":
-                    await self._observe_pause(claim)
-                elif claim.state == "leased" and (not self.renewal or self.renewal.done()):
-                    self.renewal = asyncio.create_task(self._renew())
-            return {"delivery": self.public(claim), "notices": result.get("notices", [])}
+            # Notices held from a guard refresh must not wait behind a long poll.
+            result = await self.bus.wait_result(self.session_id, 0 if self.notices else timeout)
+            claim = await self._adopt(result)
+            if claim and claim.resume_context:
+                self.surfaced.add(str(claim.resume_context.get("intervention_id")))
+            notices, self.notices = [*self.notices, *result.get("notices", [])], []
+            return {"delivery": self.public(claim), "notices": notices}
+
+    async def _adopt(self, result):
+        claim = Claim.model_validate(result["delivery"]) if result["delivery"] else None
+        self.current = claim
+        if claim:
+            self.reply_deliveries[claim.envelope.id] = (
+                claim.delivery_id,
+                claim.envelope.from_,
+                claim.envelope.thread_id,
+            )
+            if claim.state == "paused":
+                await self._observe_pause(claim)
+            elif claim.state == "leased" and (not self.renewal or self.renewal.done()):
+                self.renewal = asyncio.create_task(self._renew())
+        return claim
 
     async def _observe_pause(self, claim):
         token = claim.lease_token
@@ -57,11 +69,18 @@ class DeliverySession:
             result = await self.bus.delivery_action(claim.delivery_id, "caura-stopped", token)
             claim.intervention = result["intervention"]
 
-    async def guard(self):
+    async def guard(self, delivery_id=None):
+        """Fence operations on paused work; ``delivery_id`` names the delivery the caller targets."""
         claim = self.current
         if not claim:
             return
-        if claim.lease_token:
+        if claim.state == "paused" and not claim.lease_token:
+            # A human may have resolved the pause since it was observed. The local
+            # copy cannot tell, so ask Caura instead of fencing every later call.
+            claim = await self._refresh(claim, delivery_id)
+            if claim is None:
+                return
+        elif claim.lease_token:
             result = await self.bus.delivery_action(claim.delivery_id, "observe", claim.lease_token)
             claim = Claim.model_validate(result["delivery"])
             self.current = claim
@@ -70,6 +89,51 @@ class DeliverySession:
             raise PlatformError(409, {"state": "paused", "delivery": self.public(claim)})
         if claim.state in {"acked", "cancelled"}:
             self.current = None
+
+    async def _refresh(self, stale, delivery_id):
+        """Re-read a paused claim through this session's authenticated wait.
+
+        Caura decides: a still-paused delivery stays paused, a resumed one is leased
+        to this session with a fresh private token, a rejected one never returns,
+        and a live lease held by another session is never taken over.
+        """
+        async with self.lock:
+            if self.current is stale:
+                result = await self.bus.wait_result(self.session_id, 0)
+                self.notices.extend(result.get("notices", []))
+                claim = await self._adopt(result)
+            else:
+                claim = self.current  # A concurrent call already refreshed it.
+        same = claim is not None and claim.delivery_id == stale.delivery_id
+        if delivery_id == stale.delivery_id and not same:
+            raise PlatformError(
+                409,
+                {
+                    "state": "unavailable",
+                    "delivery_id": stale.delivery_id,
+                    "detail": "Caura no longer offers this paused delivery to this session "
+                    "(rejected, cancelled or reassigned). Do not continue or replay its work; "
+                    "call peer wait.",
+                },
+            )
+        if same and claim.state == "leased" and delivery_id == claim.delivery_id and self._unseen(claim):
+            self.surfaced.add(str(claim.resume_context.get("intervention_id")))
+            raise PlatformError(
+                409,
+                {
+                    "state": "resumed",
+                    "delivery": self.public(claim),
+                    "detail": "A human resumed this delivery with instructions. Follow "
+                    "resume_context.instructions, then retry.",
+                },
+            )
+        return claim
+
+    def _unseen(self, claim):
+        context = claim.resume_context or {}
+        if not context or str(context.get("intervention_id")) in self.surfaced:
+            return False
+        return context.get("action") != "approve" or bool(str(context.get("instructions") or "").strip())
 
     def token(self, delivery_id):
         if self.current and self.current.delivery_id == delivery_id:

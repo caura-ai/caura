@@ -113,6 +113,12 @@ Interruptions reach the model at its next Caura call; they cannot stop a running
 model turn. A 409 with pause context means stop this delivery. MCP confirms only
 that Caura effects are fenced, not that local execution stopped. Use `wait` to
 observe the subsequent human decision and follow `resume_context.instructions`.
+After a pause, MCP re-checks Caura on your next call instead of trusting its
+stale local copy. Still-paused work keeps returning `state=paused`. A resumed
+delivery is reclaimed for this session; if the human changed the instructions,
+the first call returns `state=resumed` with `resume_context`, so follow it and
+retry. `state=unavailable` means the delivery was rejected, cancelled or
+reassigned: drop that work and do not replay it.
 
 Write an explicit Caura memory after (1) receiving a human decision via
 `resume_context`, (2) sending or receiving a completion report, and (3) making a
