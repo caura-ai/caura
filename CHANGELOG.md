@@ -10,6 +10,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.22.3](https://github.com/caura-ai/caura/compare/backend-v3.22.2...backend-v3.22.3) (2026-10-06)
+
+
+### Bug Fixes
+
+* **conflicts:** dismissing a verdict reverts a loser it left unlinked ([#1885](https://github.com/caura-ai/caura/issues/1885)) ([967be3c](https://github.com/caura-ai/caura/commit/967be3c6fb4ad2cee30fc96dc39d4098f0c0ed21))
+* **entities:** graph expansion skips edges with only deleted evidence ([#1879](https://github.com/caura-ai/caura/issues/1879)) ([aa2ec38](https://github.com/caura-ai/caura/commit/aa2ec387b960ade45788b7535d48be462ace8170))
+
 ## [3.22.2](https://github.com/caura-ai/caura/compare/backend-v3.22.1...backend-v3.22.2) (2026-10-06)
 
 
