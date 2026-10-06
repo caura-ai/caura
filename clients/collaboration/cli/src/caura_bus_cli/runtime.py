@@ -318,7 +318,9 @@ async def receive(config, state, hook=None, wait=0, idle_listen_seconds=5):
                         )
                         next_status = time.monotonic() + 10
                         if hook == "Stop":
-                            await bus.advertise(profile)
+                            # Match the waker: a held lease is busy, not ready.
+                            status = "busy" if snapshot.get("active") else "ready"
+                            await bus.advertise(profile.model_copy(update={"status": status}))
                     failures = 0
                     await asyncio.sleep(min(1, remaining))
                 except (PlatformError, httpx.TransportError) as exc:
