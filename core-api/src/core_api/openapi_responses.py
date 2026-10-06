@@ -260,6 +260,13 @@ class KeystoneDoc(BaseModel):
 class KeystonesEnvelope(BaseModel):
     count: int
     items: list[KeystoneDoc]
+    rule_set_hash: str | None = Field(
+        description=(
+            "The rule-set hash of the rules in items: lowercase hex SHA-256, as "
+            "the broker computes it for the rules it delivers. Null when a rule "
+            "can't be hashed (a missing updated_at, a weight that isn't a number)."
+        )
+    )
 
 
 class KeystoneDeleteResponse(BaseModel):

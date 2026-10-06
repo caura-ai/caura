@@ -9,6 +9,23 @@ env:
   UV_VERSION: "0.9.26"
 
 jobs:
+  evidence-registry:
+    name: Evidence registry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned JSON Schema validator
+        run: python3 -m pip install --disable-pip-version-check -r scripts/requirements-evidence.txt
+
+      - name: Validate claims and generated benchmark copy
+        run: python3 scripts/evidence_registry.py --check
+
   ci:
     name: CI
     runs-on: ubuntu-latest

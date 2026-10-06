@@ -80,7 +80,10 @@ If `agent_id` is `null` or doesn't match what you provisioned, your credential i
 - The credential was revoked or rotated.
 - A proxy in front of Caura is stripping the `X-API-Key` header.
 
-> **Latency expectation:** `POST /search` returns 23 ms p50 / 27 ms p95 warm on our reference benchmarks. Recall (`caura_recall` / `POST /recall`) sits in the same band — it wraps search plus a small scoring step. See [`performance.md`](performance.md) for the full numbers and methodology.
+> **Latency measurement:** establish a warmed baseline for `POST /search` and
+> `POST /recall` under your expected concurrency. No current public latency
+> figure is approved; see [`performance.md`](performance.md) for measurement
+> guidance and caveats.
 
 ---
 
