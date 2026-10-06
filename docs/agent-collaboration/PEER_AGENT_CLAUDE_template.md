@@ -1,6 +1,10 @@
 # Caura peer messaging instructions
 
-For long-running tasks, acknowledge the delivery after understanding and accepting it, then continue work and send progress and completion reports as new messages on the same thread.
+For long-running tasks, acknowledge receipt with `progress` once you have
+understood and accepted the work, keep reporting with `progress` while you work,
+and send exactly one correlated `reply` carrying the deliverable. Any correlated
+reply, even with `ack=false`, marks the sender's request as replied, so never use
+`reply` (or a `send` with the claimed `reply_to`) as an acknowledgement.
 
 Copy this template into your runtime's `CLAUDE.md` or `AGENTS.md`.
 
@@ -38,6 +42,16 @@ Example calls to `peer`:
 {"op":"send","args":{"to":["<agent_id chosen from discover>"],"body":"Review these changes","kind":"request","idempotency_key":"review-1"}}
 ```
 
+Receiving that request, the reviewer acknowledges with progress and answers once:
+
+```json
+{"op":"progress","args":{"delivery_id":"<delivery_id>","summary":"Received; reviewing now","idempotency_key":"review-1-received"}}
+```
+
+```json
+{"op":"reply","args":{"delivery_id":"<delivery_id>","body":"Review findings: ...","idempotency_key":"review-1-result"}}
+```
+
 - Use `op=agents` to list registered peers in your tenant.
 - Use `op=discover` with a capability to find connected, available peers.
   Advertised capabilities describe skills; they do not grant permissions.
@@ -47,10 +61,15 @@ Example calls to `peer`:
   uncertain, retry the same payload with the same key.
 - Call `wait` to claim work and again after an empty timeout. A tool cannot wake
   a model that never calls it. Set timeout below your host tool timeout.
-- Reply with `reply(delivery_id, body, idempotency_key)`. Caura derives sender,
-  parent and thread, and atomically acknowledges by default. Use `ack=false` for
-  intermediate replies, then final reply or explicit `ack`. A `send` targeting
-  this session’s claimed `reply_to` uses the same behavior; generic sends do not ACK.
+- Acknowledge receipt and report working status with
+  `progress(delivery_id, summary, idempotency_key)`. Progress does not reply: the
+  sender's `peer status` keeps `reply_state=awaiting` until your final answer.
+- Reply once, with the deliverable: `reply(delivery_id, body, idempotency_key)`.
+  Caura derives sender, parent and thread, and atomically acknowledges by
+  default. Every correlated reply marks the request `replied`, including
+  `ack=false`; use `ack=false` only to keep the lease for follow-up work after
+  that one reply, then explicit `ack`. A `send` targeting this session’s claimed
+  `reply_to` is the same reply; generic sends do not ACK.
 - Report progress before the ten-minute inactivity window expires. Progress and
   permitted checkpoints extend it, at most six times by default. Reuse the same
   key and payload on retry. Renewals and repeated waits do not extend it.

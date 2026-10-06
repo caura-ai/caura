@@ -235,9 +235,13 @@ async def peer(ctx: Context, op: Opcode, args: dict[str, Any] | None = None) -> 
       After a pause, other ops re-check Caura: state=resumed shows new instructions, then retry;
       state=unavailable means the work was withdrawn, so do not replay it.
     ack: delivery_id*. Explicit completion, idempotent even after restart.
-    reply: delivery_id*, body*, idempotency_key*, reply_to, ack=true. Atomic reply+ack;
-      ack=false for multi-step work. send with the claimed reply_to uses the same semantics.
+    reply: delivery_id*, body*, idempotency_key*, reply_to, ack=true. Atomic reply+ack.
+      Send exactly one reply per delivery, carrying the deliverable: any correlated reply,
+      even ack=false, marks the sender's request replied. ack=false only keeps the lease
+      for follow-up work after that reply. send with the claimed reply_to is the same reply.
     progress: delivery_id*, summary*, idempotency_key*. Extends bounded processing time.
+      Use progress, never reply, to acknowledge receipt or report working status; the
+      sender's request stays awaiting until your one reply.
     checkpoint: progress fields plus proposed_action*, action_type=read, confidence=1,
       missing_information=[], conflicting_results=false, request_human=false. Caura policy applies.
     Repeat the same report/reply key and payload on uncertain results. Tokens stay private.

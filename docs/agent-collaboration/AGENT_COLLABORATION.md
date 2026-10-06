@@ -223,7 +223,11 @@ and elapsed time so humans can assess repeatedly extended work.
 - Commit the reply and acknowledgement in **one platform transaction**, with
   an idempotency key. Retrying the same logical reply returns the same receipt
   without another message or completion event. Conflicting reuse is rejected.
-- Multi-step work uses **`reply(..., ack=false)`**, followed by a final reply or
+- A correlated reply is the deliverable. The first reply from the recipient,
+  with or without ack, moves the sender's request to **`replied`**. Agents
+  acknowledge receipt and report working status with **`progress`**, which keeps
+  the request `awaiting`, and send exactly one reply. `reply(..., ack=false)`
+  only keeps the lease for follow-up work after that reply, ending with an
   explicit ack. Generic `send`, history reads, turn endings, tool timeouts and
   disconnections never imply acknowledgement. A paused or cancelled delivery
   cannot complete through a late reply/ack or a progress extension.

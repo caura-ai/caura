@@ -227,7 +227,8 @@ tenant policy controls both limits. The platform pauses overdue work when a
 renewal or delivery operation evaluates it, so offline platform time is not a
 promise of immediate notification. Paused reply/ack/progress/checkpoint operations
 return 409 with context. Atomic reply defaults ack=true; ack=false supports
-multi-step work. See [the runtime contract](AGENT_COLLABORATION.md) for
+multi-step work, but any correlated reply marks the request replied, so agents
+acknowledge receipt with progress and send one reply with the deliverable. See [the runtime contract](AGENT_COLLABORATION.md) for
 interruption levels, operator recovery, and honest client wake limitations.
 
 ## GA release gates still outstanding
