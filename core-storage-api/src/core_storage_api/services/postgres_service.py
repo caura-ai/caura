@@ -3029,6 +3029,7 @@ class PostgresService:
         review_status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        memory_id: UUID | None = None,
     ) -> list[MemoryConflict]:
         """D11 — the review queue for one tenant.
 
@@ -3037,6 +3038,10 @@ class PostgresService:
         unscoped read would hand one tenant another's memories. Ordered oldest
         first — a review queue is worked front to back, and newest-first would
         leave the oldest unreviewed rows permanently at the bottom.
+
+        ``memory_id`` narrows it to the records naming that memory on either side
+        (M-102): a dismissal reverts a loser only when no other standing record
+        still demotes it. Both columns are indexed.
         """
         from common.models.memory_conflict import REVIEW_STATUSES
 
@@ -3046,6 +3051,13 @@ class PostgresService:
             stmt = select(MemoryConflict).where(MemoryConflict.tenant_id == tenant_id)
             if review_status:
                 stmt = stmt.where(MemoryConflict.review_status == review_status)
+            if memory_id is not None:
+                stmt = stmt.where(
+                    or_(
+                        MemoryConflict.new_memory_id == memory_id,
+                        MemoryConflict.old_memory_id == memory_id,
+                    )
+                )
             stmt = (
                 stmt.order_by(MemoryConflict.created_at.asc())
                 .limit(max(1, min(limit, 200)))

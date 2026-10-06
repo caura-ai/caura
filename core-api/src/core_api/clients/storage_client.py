@@ -1131,12 +1131,22 @@ class CoreStorageClient:
         review_status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        *,
+        memory_id: str | None = None,
+        read: bool = True,
     ) -> list[dict]:
-        """D11 — the conflict review queue for a tenant."""
+        """D11 — the conflict review queue for a tenant.
+
+        ``memory_id`` narrows it to the records naming that memory on either side;
+        ``read=False`` routes to the WRITER, for a caller about to write on what it
+        finds (the dismissal undo, M-102).
+        """
         params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
         if review_status is not None:
             params["review_status"] = review_status
-        return await self._get_list("/memories/memory-conflicts", **params)
+        if memory_id is not None:
+            params["memory_id"] = memory_id
+        return await self._get_list("/memories/memory-conflicts", read=read, **params)
 
     async def get_memory_conflict(self, conflict_id: str, tenant_id: str) -> dict | None:
         """One conflict row. ``None`` when absent or owned by another tenant."""

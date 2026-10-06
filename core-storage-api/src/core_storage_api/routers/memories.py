@@ -1424,12 +1424,18 @@ async def list_memory_conflicts(
     review_status: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    memory_id: str | None = None,
 ) -> list[dict]:
     """D11 — the review queue. Tenant-scoped; see the service docstring for why
-    that is a boundary rather than a filter."""
+    that is a boundary rather than a filter. ``memory_id`` narrows it to the
+    records naming that memory (M-102)."""
     try:
         rows = await _svc.memory_conflicts_list(
-            tenant_id=tenant_id, review_status=review_status, limit=limit, offset=offset
+            tenant_id=tenant_id,
+            review_status=review_status,
+            limit=limit,
+            offset=offset,
+            memory_id=UUID(memory_id) if memory_id is not None else None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

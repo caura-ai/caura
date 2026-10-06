@@ -14,7 +14,9 @@ Read-only listing plus one state transition. A ``resolved`` decision touches no
 memory row. A ``dismissed`` one also undoes what detection did to the pair
 (M-102): it was the only record that detection was wrong, and nothing else ever
 read it, so the loser stayed demoted and the winner's edge kept presenting it as
-corrected. The undo goes through the same CAS-guarded writes retraction uses.
+corrected. The undo goes through the same CAS-guarded writes retraction uses. A
+verdict that left no chain edge (M-34) is known only from its record; its loser
+is reverted when nothing else still holds it.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from core_api.errors import (
 )
 from core_api.schemas import ConflictListResponse, ConflictOut, ConflictResolveRequest
 from core_api.services.audit_service import log_action
+from core_api.services.contradiction_detector import _pick_older
 from core_api.services.trust_service import require_trust as _require_trust
 
 logger = logging.getLogger(__name__)
@@ -109,11 +112,13 @@ async def _undo_dismissed_verdict(sc, conflict: dict) -> str:
     still on it and no other row still points at it. Storage has no expected-status
     guard on that write, so the late read is the narrowest window available.
 
+    A pair no edge joins goes to ``_revert_unlinked_loser``.
+
     Returns ``"undone"``; ``"not_applied"`` when there was nothing to undo (a
-    memory is gone, or the chain no longer joins the pair, whether found on the
-    read or by the CAS); or ``"partial"`` when the edge was cleared but the loser
-    could not be reverted. A dismissed conflict cannot be filed again, so a partial
-    undo is left to a person, who can set the loser's status through
+    memory is gone, the CAS found the chain moved, or an unlinked loser is still
+    held); or ``"partial"`` when the edge was cleared but the loser could not be
+    reverted. A dismissed conflict cannot be filed again, so a partial undo is
+    left to a person, who can set the loser's status through
     ``PATCH /memories/{id}``. Any other storage error, at or before the edge write,
     is raised: the caller records that as ``"failed"``.
     """
@@ -128,7 +133,7 @@ async def _undo_dismissed_verdict(sc, conflict: dict) -> str:
     elif str(old.get("supersedes_id") or "") == new_id:
         owner_id, loser_id, owner_status = old_id, new_id, old.get("status", "active")
     else:
-        return "not_applied"
+        return await _revert_unlinked_loser(sc, conflict, new, old)
     try:
         await sc.update_memory_status(
             owner_id,
@@ -165,6 +170,43 @@ async def _undo_dismissed_verdict(sc, conflict: dict) -> str:
     return "undone"
 
 
+async def _revert_unlinked_loser(sc, conflict: dict, new: dict, old: dict) -> str:
+    """Revert the loser of a dismissed verdict no chain edge records (M-102, M-34).
+
+    Detection demotes every loser of a run but wires a winner's one
+    ``supersedes_id`` to its first loser only, or to none when it already
+    supersedes a row. caura PR #1815 records each such loser, and that record is
+    all that names it. A pair whose winner's edge has moved on since looks the
+    same, so it is handled the same way.
+
+    The loser is the older row, as detection picks it (``_pick_older``). It is
+    reverted only when nothing else holds it: no row's ``supersedes_id`` points
+    at it, and no other record that is not dismissed says it lost to a live,
+    newer row. Then it is read again, last, and reverted only if detection's
+    status is still on it, as the edge path does. Every read goes to the writer.
+    Returns ``"undone"`` or ``"not_applied"``. A storage error is raised, for the
+    caller to record as ``"failed"``: nothing has been written.
+    """
+    tenant_id = str(conflict["tenant_id"])
+    loser_id = str(_pick_older(new, old)["id"])
+    if await sc.find_by_supersedes_id(tenant_id, loser_id, read=False):
+        return "not_applied"
+    loser = new if loser_id == str(new["id"]) else old
+    for record in await sc.list_memory_conflicts(tenant_id, limit=200, memory_id=loser_id, read=False):
+        if str(record.get("id")) == str(conflict.get("id")) or record.get("review_status") == "dismissed":
+            continue
+        new_side, old_side = str(record.get("new_memory_id")), str(record.get("old_memory_id"))
+        rival = await sc.get_memory(old_side if new_side == loser_id else new_side, tenant_id, read=False)
+        if rival and rival.get("deleted_at") is None and _pick_older(loser, rival) is loser:
+            logger.info("dismissal left %s demoted: conflict %s still holds it", loser_id, record.get("id"))
+            return "not_applied"
+    fresh = await sc.get_memory(loser_id, tenant_id, read=False)
+    if not fresh or fresh.get("deleted_at") is not None or fresh.get("status") not in CONTRADICTED_STATUSES:
+        return "not_applied"
+    await sc.update_memory_status(loser_id, "active", tenant_id=tenant_id)
+    return "undone"
+
+
 @router.patch("/conflicts/{conflict_id}/resolve", responses={200: {"model": _oar.ConflictOut}})
 async def resolve_conflict(
     conflict_id: str,
@@ -176,16 +218,18 @@ async def resolve_conflict(
     ``dismissed`` also undoes detection's change to the pair: the winner's
     ``supersedes_id`` is cleared and the loser reverted to ``active``, unless the
     chain has changed since, someone else has set the loser's status, or another
-    row still points at it. The decision is recorded either way, and the audit
-    entry's ``undo`` says how far the undo got: ``undone``, ``not_applied``,
-    ``partial``, or ``failed`` when a storage error stopped it at or before the
-    edge write.
+    row still points at it. For a pair no edge joins, the older row is reverted
+    when no edge and no other standing record still holds it (M-102). The
+    decision is recorded either way, and the audit entry's ``undo`` says how far
+    the undo got: ``undone``, ``not_applied``, ``partial``, or ``failed`` when a
+    storage error stopped it at or before the edge write.
 
-    409 when the row is no longer ``pending``. Two people working the same queue
-    is the ordinary case, not the edge case: the storage-side compare-and-set is
-    what stops the second decision silently overwriting the first, and this is
-    the status code that tells the caller their queue entry was stale rather
-    than pretending the write landed.
+    404 when storage has no such conflict for the tenant (L-228). 409 when the
+    row is no longer ``pending``. Two people working the same queue is the
+    ordinary case, not the edge case: the storage-side compare-and-set is what
+    stops the second decision silently overwriting the first, and this is the
+    status code that tells the caller their queue entry was stale rather than
+    pretending the write landed.
     """
     auth.enforce_tenant(body.tenant_id)
     # Blocks demo-sandbox and read-only credentials before any state moves — a
@@ -229,6 +273,10 @@ async def resolve_conflict(
         if status in (400, 404, 409):
             raise HTTPException(status_code=status, detail=str(exc)) from exc
         raise
+    if row is None:
+        # L-228: storage's answer for an unknown or foreign id. Nothing was
+        # decided, so there is nothing to undo and nothing to audit.
+        raise HTTPException(status_code=404, detail="Conflict not found")
     # After the record: the decision stands even if undoing it does not.
     undo: str | None = None
     if body.review_status == "dismissed":

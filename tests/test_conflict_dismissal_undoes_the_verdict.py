@@ -12,6 +12,17 @@ and no other row still points at it. A chain that has moved on since is not the
 dismissal's to undo, and the decision is recorded whatever happens to the rows.
 The audit entry says how far the undo got, and tells a storage failure, which
 leaves the verdict in place for a person to fix, from there being nothing to undo.
+
+A verdict detection left without a chain edge (M-34: a winner wires its one
+``supersedes_id`` to its first loser only, or to none when it already supersedes
+a row) is known only from its record. Dismissing one returned ``not_applied``
+and left the loser demoted (M-102). The undo now reverts that loser, the older
+row of the pair, unless something else still holds it: an edge, or another
+standing record that it lost to a live, newer row. A loser whose winner's edge
+has since moved on is the same shape and is reverted the same way.
+
+L-228: a conflict storage does not have, or another tenant's, is a 404 before
+any undo or audit, not an undo reported as failed.
 """
 
 from __future__ import annotations
@@ -23,6 +34,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from core_api.auth import AuthContext
 from core_api.routes import conflicts
@@ -70,19 +82,22 @@ async def _run_review(
     read_error=None,
     holders=(),
     status_on_reread=None,
+    records=(),
+    extra_rows=(),
 ):
     """Drive ``resolve_conflict`` with storage mocked.
 
     ``holders`` are the rows ``find_by_supersedes_id`` reports pointing at the
     loser; ``status_on_reread`` is the status a row reports from its second
-    read on, as if another writer changed it in between. ``reads`` logs each
-    memory read and holder lookup with its keyword arguments.
+    read on, as if another writer changed it in between. ``records`` are the
+    other conflict records storage reports naming a memory, alongside the one
+    under review, and ``extra_rows`` the memories they name. ``reads`` logs each
+    memory read, holder lookup and record lookup with its keyword arguments.
     """
     sc = AsyncMock()
-    sc.resolve_memory_conflict = AsyncMock(
-        return_value=_conflict(new["id"], old["id"], review_status)
-    )
-    rows = {new["id"]: new, old["id"]: old}
+    reviewed = _conflict(new["id"], old["id"], review_status)
+    sc.resolve_memory_conflict = AsyncMock(return_value=reviewed)
+    rows = {new["id"]: new, old["id"]: old, **{r["id"]: r for r in extra_rows}}
     reads: list[tuple[str, dict]] = []
 
     def get_memory(mid, _tenant, **kw):
@@ -102,6 +117,12 @@ async def _run_review(
         return list(holders)
 
     sc.find_by_supersedes_id = AsyncMock(side_effect=find_by_supersedes_id)
+
+    async def list_memory_conflicts(_tenant, **kw):
+        reads.append(("records", kw))
+        return [reviewed, *records]
+
+    sc.list_memory_conflicts = AsyncMock(side_effect=list_memory_conflicts)
     writes: list[tuple] = []
 
     async def update_memory_status(mid, status, supersedes_id=None, **kw):
@@ -151,6 +172,24 @@ def _flipped():
     )
 
 
+def _unlinked(*, winner_edge: str | None = None):
+    """A verdict that left no chain edge (M-34): the older row is demoted and
+    nothing points at it. ``winner_edge`` is what the winner supersedes instead."""
+    old_id, new_id = str(uuid4()), str(uuid4())
+    new = _mem(new_id, status="active", supersedes_id=winner_edge)
+    old = _mem(old_id, status="conflicted", supersedes_id=None)
+    new["created_at"] = "2026-10-02T00:00:00+00:00"
+    old["created_at"] = "2026-10-01T00:00:00+00:00"
+    return new, old
+
+
+def _rival(created_at: str = "2026-10-03T00:00:00+00:00") -> dict:
+    """Another winner, with no chain edge of its own."""
+    rival = _mem(str(uuid4()), status="active", supersedes_id=None)
+    rival["created_at"] = created_at
+    return rival
+
+
 def _reverts(writes: list[tuple]) -> list[tuple]:
     return [w for w in writes if not w[2]]
 
@@ -182,15 +221,6 @@ async def test_resolving_a_conflict_touches_no_memory():
     new, old = _canonical()
     _out, writes = await _review("resolved", new, old)
     assert writes == []
-
-
-async def test_a_chain_that_moved_on_is_left_alone():
-    new, old = _canonical()
-    new["supersedes_id"] = str(uuid4())  # another detection re-pointed it since
-    r = await _run_review("dismissed", new, old)
-    assert r.writes == []
-    assert r.out.review_status == "dismissed"
-    assert r.detail["undo"] == "not_applied"
 
 
 async def test_a_loser_someone_else_moved_keeps_its_status():
@@ -286,3 +316,121 @@ async def test_a_partial_undo_is_logged_as_an_error(caplog):
             "dismissed", new, old, revert_error=RuntimeError("storage unavailable")
         )
     assert any(rec.levelno >= logging.ERROR for rec in caplog.records), caplog.records
+
+
+# ── M-102 / M-34: a verdict that left no chain edge ───────────────────────
+
+
+@pytest.mark.parametrize(
+    "winner_edge", [False, True], ids=["no_edge", "edge_elsewhere"]
+)
+async def test_dismissing_an_unlinked_verdict_reverts_its_loser(winner_edge):
+    """The record is all that names this loser, and the dismissal says the
+    verdict was wrong. Whether the winner never pointed at it or points
+    elsewhere now, no edge is rewritten: there is none to clear."""
+    new, old = _unlinked(winner_edge=str(uuid4()) if winner_edge else None)
+    r = await _run_review("dismissed", new, old)
+    assert not [w for w in r.writes if w[2]], f"an edge was rewritten: {r.writes}"
+    assert [(w[0], w[1]) for w in _reverts(r.writes)] == [(old["id"], "active")]
+    assert r.detail["undo"] == "undone"
+
+
+async def test_the_older_row_is_the_loser_whichever_side_it_was_filed_on():
+    """Detection picks the loser by age after the verdict, so the record's
+    ``new_memory_id`` can be the row it demoted."""
+    new, old = _unlinked()
+    new["status"], old["status"] = "outdated", "active"
+    new["created_at"], old["created_at"] = old["created_at"], new["created_at"]
+    r = await _run_review("dismissed", new, old)
+    assert [(w[0], w[1]) for w in _reverts(r.writes)] == [(new["id"], "active")]
+
+
+async def test_an_unlinked_loser_another_standing_verdict_holds_keeps_its_status():
+    """A newer, live row's record, not dismissed, says it lost there too."""
+    new, old = _unlinked()
+    rival = _rival()
+    held = _conflict(rival["id"], old["id"], "pending")
+    r = await _run_review("dismissed", new, old, records=[held], extra_rows=[rival])
+    assert not _reverts(r.writes), f"the loser was reverted: {r.writes}"
+    assert r.detail["undo"] == "not_applied"
+
+
+@pytest.mark.parametrize("why", ["dismissed", "deleted", "it_won"])
+async def test_a_record_that_no_longer_holds_the_loser_is_set_aside(why):
+    """A record reviewers dismissed, one whose winner is gone, and one the
+    loser itself won (it is the newer row there) demote nothing now."""
+    new, old = _unlinked()
+    rival = _rival(
+        "2026-09-01T00:00:00+00:00" if why == "it_won" else "2026-10-03T00:00:00+00:00"
+    )
+    if why == "deleted":
+        rival["deleted_at"] = "2026-10-04T00:00:00+00:00"
+    record = _conflict(
+        rival["id"], old["id"], "dismissed" if why == "dismissed" else "pending"
+    )
+    r = await _run_review("dismissed", new, old, records=[record], extra_rows=[rival])
+    assert [(w[0], w[1]) for w in _reverts(r.writes)] == [(old["id"], "active")]
+
+
+async def test_an_unlinked_loser_an_edge_still_holds_keeps_its_status():
+    new, old = _unlinked()
+    other = _mem(str(uuid4()), status="active", supersedes_id=old["id"])
+    r = await _run_review("dismissed", new, old, holders=[other])
+    assert not _reverts(r.writes), f"the loser was reverted: {r.writes}"
+    assert r.detail["undo"] == "not_applied"
+
+
+async def test_an_unlinked_loser_someone_else_moved_keeps_its_status():
+    new, old = _unlinked()
+    old["status"] = "confirmed"
+    r = await _run_review("dismissed", new, old)
+    assert r.writes == []
+    assert r.detail["undo"] == "not_applied"
+
+
+async def test_the_unlinked_undo_reads_from_the_writer():
+    new, old = _unlinked()
+    rival = _rival()
+    record = _conflict(rival["id"], old["id"], "pending")
+    rival["deleted_at"] = "2026-10-04T00:00:00+00:00"
+    r = await _run_review("dismissed", new, old, records=[record], extra_rows=[rival])
+    assert {"records", "holders", rival["id"]} <= {mid for mid, _kw in r.reads}, r.reads
+    assert all(kw.get("read") is False for _mid, kw in r.reads), r.reads
+
+
+async def test_a_failed_unlinked_revert_is_reported_as_failed():
+    """Nothing was written, so the verdict is fully in place: not ``partial``."""
+    new, old = _unlinked()
+    r = await _run_review(
+        "dismissed", new, old, revert_error=RuntimeError("storage unavailable")
+    )
+    assert r.out.review_status == "dismissed"
+    assert r.detail["undo"] == "failed"
+
+
+# ── L-228: an unknown or foreign conflict ─────────────────────────────────
+
+
+@pytest.mark.parametrize("review_status", ["dismissed", "resolved"])
+async def test_an_unknown_or_foreign_conflict_is_a_404_with_no_undo_or_audit(
+    review_status,
+):
+    sc = AsyncMock()
+    sc.resolve_memory_conflict = AsyncMock(return_value=None)
+    log = AsyncMock()
+    with (
+        patch.object(conflicts, "get_storage_client", return_value=sc),
+        patch.object(
+            conflicts, "_require_trust", AsyncMock(return_value=(2, False, None))
+        ),
+        patch.object(conflicts, "log_action", log),
+        pytest.raises(HTTPException) as raised,
+    ):
+        await conflicts.resolve_conflict(
+            "c1",
+            ConflictResolveRequest(tenant_id="t1", review_status=review_status),
+            auth=AuthContext(tenant_id="t1"),
+        )
+    assert raised.value.status_code == 404
+    log.assert_not_awaited()
+    sc.get_memory.assert_not_awaited()
