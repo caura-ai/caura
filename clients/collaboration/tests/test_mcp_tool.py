@@ -197,3 +197,19 @@ async def test_human_reply_keeps_parent_and_is_sent_to_platform_for_authorizatio
     )
     payload = json.loads(requests[0].content)
     assert payload["reply_to"] == "parent" and payload["to"] == ["human:owner"]
+
+
+def test_entrypoint_answers_help_and_version_without_serving(monkeypatch, capsys):
+    from caura_bus_mcp import server
+
+    def refuse_to_serve():
+        raise AssertionError("--help/--version must not start the stdio server")
+
+    monkeypatch.setattr(server.mcp, "run", refuse_to_serve)
+    for flag in ("--help", "--version"):
+        with pytest.raises(SystemExit) as stop:
+            server.main([flag])
+        assert stop.value.code == 0
+    out = capsys.readouterr().out
+    assert "usage: caura-bus-mcp" in out
+    assert "caura-bus-mcp 0." in out
