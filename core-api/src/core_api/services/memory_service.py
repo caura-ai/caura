@@ -5875,6 +5875,9 @@ async def _search_memories_pipeline(
         # RECENT_CONTEXT on a request that did not name ``top_k``).
         if (cap := ctx.data.get("strategy_top_k_cap")) is not None:
             retrieval_ctx["effective_top_k"] = cap
+        # The top_k resolved before any strategy cut: the request's when it named
+        # one, else the agent profile's or the tenant default's (M-19).
+        retrieval_ctx["resolved_top_k"] = (ctx.data.get("search_params") or {}).get("top_k")
 
     if recall_ctx is not None:
         # Written by TrackRecalls on every path it takes. Defaulting to False

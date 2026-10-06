@@ -116,6 +116,13 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # The clause also states what the op description cannot fit: the mint does NOT
 # depend on ``data['summary']`` — that field gates doc *indexing* — so a caller
 # cannot opt out by omitting it. Ceiling 5320 -> 5390, leaving 22.
+#
+# 2026-10-06 (M-19): ``caura_recall.top_k`` became optional (``anyOf``
+# integer|null, default null), so an omitted top_k is left to the agent profile
+# or the tenant default, as on REST, and a named one beats them. The description
+# is unchanged. About +11 counted by hand; not measured, because tiktoken was
+# not available where this was written, so the next entry should measure the
+# fixture rather than trust this one. Ceiling NOT raised.
 CEILING_TOKENS = 5390
 
 
