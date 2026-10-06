@@ -152,21 +152,24 @@ rollback), and the inbox resumes as the gate.
 
 ## Dedup safety
 
-The shared lifecycle handler uses
-`_PIPELINE_DEDUP_WINDOW_HOURS` (currently **23 hours** —
-`common/events/lifecycle_handlers.py`) — re-curling the fanout endpoint
-within the window is a no-op for any tenant whose prior tick succeeded.
+Each delivery skips an org that already ran successfully within its dedup
+window, measured from each run's tick. The window is the request's
+`dedup_window_hours`, or 23 hours without it. With the schedule above
+(`dedup_window_hours=5.5`, every 6 hours), every tick runs a full distill.
+Re-curling the fanout endpoint within 5.5 hours of a tenant's successful tick
+is a no-op for that tenant.
 
-**This is why the 6-hourly schedule above is deliberate, not arbitrary.**
-With a 23-hour dedup window, ticks 2, 3 and 4 of each day are expected
-no-ops; the schedule is oversampling so that a single failed or missed
-tick does not cost a whole day. Only a successful tick counts: a tick in
-which every attempted cluster failed on I/O (an LLM or storage outage)
-is finalised as `failure` and redelivered, so the next tick still runs. If you shorten the cron interval hoping
-for more frequent distillation, nothing changes — the window, not the
-schedule, sets the real cadence. Change `_PIPELINE_DEDUP_WINDOW_HOURS`
-instead. Manual `python scripts/forge_dry_run.py` invocations
-bypass the lifecycle path entirely and are not affected.
+The window, not the schedule, sets the real cadence, so keep
+`dedup_window_hours` just under the schedule's interval. Leave it out and a
+6-hourly schedule distills once a day, with its other three ticks no-ops. Set
+the cadence through the request, not by changing the 23-hour default
+(`_PIPELINE_DEDUP_WINDOW_HOURS` in `common/events/lifecycle_handlers.py`).
+The crystallize, entity-link and insights runs share that constant.
+
+Only a successful tick counts. A tick in which every attempted cluster failed
+on I/O (an LLM or storage outage) is finalised as `failure` and redelivered,
+so the next tick still runs. Manual `python scripts/forge_dry_run.py`
+invocations bypass the lifecycle path entirely and are not affected.
 
 ## Opt-in / opt-out
 
