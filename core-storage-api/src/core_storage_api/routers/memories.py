@@ -1701,8 +1701,10 @@ async def list_by_filters(request: Request) -> list[dict]:
 async def stats_breakdown(request: Request) -> dict:
     """Visibility-scoped stats breakdown (MCP ``caura_stats``).
 
-    Body: ``{tenant_id?, fleet_id?, agent_id?, memory_type?, status?,
-    include_deleted?, readable_tenant_ids?, include_pending?}``. Returns
+    Body: ``{tenant_id?, fleet_id?, agent_id?, caller_agent_id?, memory_type?,
+    status?, include_deleted?, readable_tenant_ids?, include_pending?}``.
+    ``agent_id`` filters by author; ``caller_agent_id`` is the identity the
+    counted rows must be visible to (M-104). Returns
     ``{total, by_type, by_agent, by_status}`` plus optional ``by_tenant`` (when
     the readable set spans >1 tenant), ``deleted`` / ``total_including_deleted``
     (when ``include_deleted``) and ``pending`` / ``settled`` (when
@@ -1744,6 +1746,7 @@ async def stats_breakdown(request: Request) -> dict:
         readable_tenant_ids=body.get("readable_tenant_ids"),
         include_pending=bool(body.get("include_pending", False)),
         caller_tenant_id=body.get("caller_tenant_id"),
+        caller_agent_id=body.get("caller_agent_id"),
     )
 
 

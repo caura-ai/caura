@@ -6944,6 +6944,7 @@ class PostgresService:
         readable_tenant_ids: list[str] | None = None,
         include_pending: bool = False,
         caller_tenant_id: str | None = None,
+        caller_agent_id: str | None = None,
     ) -> dict:
         """Return ``{total, by_type, by_agent, by_status}`` (+ optional
         ``by_tenant`` / ``deleted`` / ``total_including_deleted`` /
@@ -6964,12 +6965,15 @@ class PostgresService:
         optional; omitting them aggregates all-time (the MCP ``caura_stats``
         behaviour, unchanged).
 
-        Ports core-api ``services.memory_stats.compute_memory_stats`` verbatim —
-        same visibility scoping (``agent_id`` doubles as visibility identity AND
-        author filter; when omitted, ``scope_agent`` rows are excluded so totals
-        match what a non-semantic list would return), same single-pass GROUPING
-        SETS aggregation, same cross-tenant widening + ``by_tenant`` breakdown,
-        and same ``include_deleted`` CTE. Read-only (reader replica).
+        Ports core-api ``services.memory_stats.compute_memory_stats`` — same
+        single-pass GROUPING SETS aggregation, same cross-tenant widening +
+        ``by_tenant`` breakdown, and same ``include_deleted`` CTE. Read-only
+        (reader replica). Visibility follows ``memory_list_by_filters``:
+        ``caller_agent_id`` is the identity the counted rows must be visible to,
+        so the caller's own ``scope_agent`` rows count, and ``agent_id`` is only
+        the author filter (M-104). A caller that sends ``agent_id`` alone keeps
+        the historical rule, where it doubles as the visibility identity; with
+        neither, ``scope_agent`` rows are excluded.
 
         ``include_scope_agent`` (default False keeps the historical MCP
         ``caura_stats`` behaviour) opts into counting agent-private
@@ -6977,8 +6981,8 @@ class PostgresService:
         a pure COUNT — no memory content is returned — so private rows can be
         tallied without leaking their contents; the report uses it so
         ``durable_memories_written`` reflects everything an agent wrote, not just
-        what it shared. Ignored when ``agent_id`` is set (that path already
-        scopes visibility to the named agent).
+        what it shared. Ignored when an identity is set (``caller_agent_id`` or
+        ``agent_id``), which already scopes visibility to that agent.
         """
         scope_filters: list[ColumnElement[bool]] = []
         if readable_tenant_ids:
@@ -6998,12 +7002,14 @@ class PostgresService:
             )
         if agent_id:
             scope_filters.append(Memory.agent_id == agent_id)
-            # Private rows count for the named agent in its home tenant only —
-            # under ``readable_tenant_ids``, or on a read pinned to a sibling, a
-            # sibling tenant's same-named agent is a different agent (M-94).
+        visible_to = caller_agent_id or agent_id
+        if visible_to:
+            # Private rows count for that agent in its home tenant only — under
+            # ``readable_tenant_ids``, or on a read pinned to a sibling, a sibling
+            # tenant's same-named agent is a different agent (M-94).
             # ``caller_tenant_id`` names that home; ``tenant_id`` is it for every
             # caller that does not pin a sibling.
-            scope_filters.append(_visibility_scope_clause(agent_id, caller_tenant_id or tenant_id))
+            scope_filters.append(_visibility_scope_clause(visible_to, caller_tenant_id or tenant_id))
         elif not include_scope_agent:
             scope_filters.append(_visibility_scope_clause(None))
         if memory_type:

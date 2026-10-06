@@ -3819,6 +3819,8 @@ async def caura_stats(
         # scope='agent' filters to caller's own memories (mirrors caura_list);
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
         # aggregates surface — fleet_id (if supplied) still narrows the pool.
+        # Visibility is the caller's at every scope, as on caura_list, so its
+        # own private rows count in the wider aggregates too (M-104).
         effective_agent_id = agent_id if scope == "agent" else None
         effective_include_deleted = include_deleted and trust >= 3
 
@@ -3833,6 +3835,7 @@ async def caura_stats(
                     "tenant_id": tenant_id,
                     "fleet_id": fleet_id,
                     "agent_id": effective_agent_id,
+                    "caller_agent_id": agent_id,
                     "memory_type": memory_type,
                     "status": status,
                     "include_deleted": effective_include_deleted,

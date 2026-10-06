@@ -734,17 +734,13 @@ async def memory_stats(
             raise HTTPException(status_code=400, detail="tenant_id is required")
         tenant_id = auth.tenant_id
 
-    # ``agent_id`` here is BOTH the author filter and the visibility identity —
-    # it admits the named agent's own scope_agent rows into the counts. An agent
-    # credential naming a PEER would therefore learn that peer's private
-    # per-type/status counts; GET /memories closes the same widening by
-    # preferring the gateway-authenticated agent over the query param.
-    # Stats cannot borrow that fix as-is: with one knob doing both jobs, forcing
-    # it to the caller would silently narrow the historical "no agent_id →
-    # team/org-wide" aggregate. Rejecting the conflict closes the leak and
-    # leaves every legitimate call untouched: omit it for the wider aggregate,
-    # or name yourself. An explicit ``?agent_id=`` is an assertion, not an
-    # omission, and is refused with the rest — see ``enforce_self_agent``.
+    # ``agent_id`` is the author filter. It used to be the visibility identity
+    # too, so an agent credential naming a PEER would have learned that peer's
+    # private per-type/status counts, and a conflicting value is refused rather
+    # than overridden: omit it for the wider aggregate, or name yourself.
+    # Visibility now follows the caller (``caller_agent_id`` below, M-104); the
+    # refusal stays, since an explicit ``?agent_id=`` is an assertion, not an
+    # omission — see ``enforce_self_agent``.
     auth.enforce_self_agent(
         agent_id,
         message=f"agent_id must be omitted or match the authenticated agent ('{auth.agent_id}').",
@@ -755,15 +751,17 @@ async def memory_stats(
     # expression ``effective_agent_id`` exists to name (see its docstring:
     # the bare form is indistinguishable from an audit-attribution line of
     # the same shape), and this is the authorization identity — it gates
-    # ``enforce_fleet_read`` below. Same value, via the audited helper.
+    # ``enforce_fleet_read`` below. Same value, via the audited helper. It is
+    # also the visibility identity storage counts for, so an agent's own
+    # private rows count, as its GET /memories lists them (M-104).
     caller_agent_id = auth.effective_agent_id(agent_id)
     effective_agent_id = agent_id
     if scope is not None:
         # scope='fleet'/'all' drops the per-caller filter so cross-agent
         # aggregates surface; scope='agent' keeps it. Mirrors the MCP handler's
         # ``effective_agent_id``. The returned author filter is unused here —
-        # stats has a single ``agent_id`` knob — but the call still enforces the
-        # trust ladder and may pin fleet_id.
+        # ``effective_agent_id`` is the author filter — but the call still
+        # enforces the trust ladder and may pin fleet_id.
         _, fleet_id = await _resolve_scoped_read(
             scope,
             auth_tenant_id=auth.tenant_id,
@@ -785,6 +783,7 @@ async def memory_stats(
             "tenant_id": tenant_id,
             "fleet_id": fleet_id,
             "agent_id": effective_agent_id,
+            "caller_agent_id": caller_agent_id,
             "memory_type": memory_type,
             "status": status,
             "include_deleted": await _effective_include_deleted(auth, include_deleted),
