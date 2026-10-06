@@ -153,29 +153,26 @@ async def find_entity_by_exact_name(
 
     Matches case-insensitively, as the entity natural key does, and with no
     ``entity_type`` matches any type (M-25): the caller has a name and nothing
-    else, and extraction never writes the old default type. It looks in
-    ``fleet_id`` first and then among tenant-shared (NULL-fleet) entities, which
-    every fleet reads. Raises :class:`AmbiguousEntityName` when the name belongs
-    to more than one type in the scope that matched, so the caller can skip
-    rather than guess.
+    else, and extraction never writes the old default type. It looks only in
+    ``fleet_id`` (M-119, owner decision 2026-10-06), where extraction resolves
+    the same name: a fleet write that took a tenant-shared entity as subject
+    would hold a different row from every later mention, which extraction links
+    to the fleet's own. A fleet-less write looks among tenant-shared entities.
+    Raises :class:`AmbiguousEntityName` when the name belongs to more than one
+    type, so the caller can skip rather than guess.
     """
     sc = get_storage_client()
-    scopes = [fleet_id, None] if fleet_id else [None]
-    row = None
-    for scope in scopes:
-        try:
-            row = await sc.find_exact_entity(
-                tenant_id=tenant_id,
-                name=canonical_name,
-                fleet_id=scope,
-                entity_type=entity_type,
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 409:
-                raise AmbiguousEntityName(canonical_name) from exc
-            raise
-        if row:
-            break
+    try:
+        row = await sc.find_exact_entity(
+            tenant_id=tenant_id,
+            name=canonical_name,
+            fleet_id=fleet_id or None,
+            entity_type=entity_type,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409:
+            raise AmbiguousEntityName(canonical_name) from exc
+        raise
     if not row:
         return None
     raw = row.get("id")

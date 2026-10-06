@@ -11,8 +11,14 @@ not:
 - M-25: EmitMemoryTriple's proper-noun subject lookup sent no ``entity_type``,
   so storage filtered on type ``default``, which extraction never writes, and
   extraction lowercases names: the lookup could never match. It now matches any
-  type, case-insensitively, in the write's fleet and then tenant-shared; a name
-  held by more than one type is ambiguous and skipped.
+  type, case-insensitively; a name held by more than one type is ambiguous and
+  skipped.
+- M-119: that lookup then fell back to tenant-shared entities, while extraction
+  resolves in the write's own fleet. A fleet's first mention of a name a
+  fleet-less entity holds took that entity as subject, extraction created the
+  fleet's own, and later mentions took that one, so the contradiction check
+  never compared the two rows. The lookup stays in the write's fleet now (owner
+  decision 2026-10-06), and a fleet-less write still finds tenant-shared ones.
 - L-47: the lookups split ``fleet_id`` into ``== value`` and ``IS NULL``, so
   ``''`` and NULL, one key in the index, missed each other.
 
@@ -130,11 +136,22 @@ async def test_a_typed_lookup_is_never_ambiguous(sc):
     assert found is not None and found["id"] == person["id"]
 
 
-async def test_a_proper_noun_resolves_through_a_tenant_shared_entity(sc):
+async def test_a_fleet_writes_proper_noun_ignores_a_tenant_shared_entity(sc):
+    """M-119: extraction would create the fleet's own 'atlas'; the subject
+    must not be a different row from the one later mentions resolve to."""
+    tenant = _tenant()
+    await _entity(sc, tenant, "atlas", "project")
+    found = await find_entity_by_exact_name(
+        tenant_id=tenant, canonical_name="Atlas", fleet_id="fleet-a"
+    )
+    assert found is None
+
+
+async def test_a_fleet_less_writes_proper_noun_resolves_a_tenant_shared_entity(sc):
     tenant = _tenant()
     shared = await _entity(sc, tenant, "atlas", "project")
     found = await find_entity_by_exact_name(
-        tenant_id=tenant, canonical_name="Atlas", fleet_id="fleet-a"
+        tenant_id=tenant, canonical_name="Atlas", fleet_id=None
     )
     assert found == UUID(str(shared["id"]))
 
@@ -165,7 +182,7 @@ def _triple_ctx(tenant: str) -> tuple[MemoryCreate, PipelineContext]:
 
 async def test_a_known_proper_noun_fills_the_subject_end_to_end(sc):
     tenant = _tenant()
-    existing = await _entity(sc, tenant, "atlas", "project")
+    existing = await _entity(sc, tenant, "atlas", "project", fleet_id="fleet-a")
     data, ctx = _triple_ctx(tenant)
     result = await EmitMemoryTriple().execute(ctx)
     assert result is None, result
@@ -174,10 +191,22 @@ async def test_a_known_proper_noun_fills_the_subject_end_to_end(sc):
 
 async def test_a_proper_noun_two_types_share_is_skipped_as_ambiguous(sc):
     tenant = _tenant()
-    await _entity(sc, tenant, "atlas", "project")
-    await _entity(sc, tenant, "atlas", "person")
+    await _entity(sc, tenant, "atlas", "project", fleet_id="fleet-a")
+    await _entity(sc, tenant, "atlas", "person", fleet_id="fleet-a")
     data, ctx = _triple_ctx(tenant)
     result = await EmitMemoryTriple().execute(ctx)
     assert result.outcome == StepOutcome.SKIPPED
     assert result.detail["reason"] == "ambiguous_subject"
     assert data.subject_entity_id is None
+
+
+async def test_a_fleet_write_leaves_a_name_only_a_shared_entity_holds_to_extraction(sc):
+    """M-119 end to end: no subject at write time, so extraction's write-back
+    sets the fleet's own entity, the one every later mention resolves to."""
+    tenant = _tenant()
+    await _entity(sc, tenant, "atlas", "project")
+    data, ctx = _triple_ctx(tenant)
+    result = await EmitMemoryTriple().execute(ctx)
+    assert data.subject_entity_id is None
+    assert result is not None and result.outcome == StepOutcome.SKIPPED, result
+    assert result.detail["reason"] == "no_subject_match"

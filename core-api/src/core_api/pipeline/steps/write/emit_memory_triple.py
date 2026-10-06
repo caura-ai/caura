@@ -716,7 +716,7 @@ class EmitMemoryTriple:
                 # write they refuse is referenced by nothing. A new identifier is
                 # held as pending and ``CreatePendingSubject`` creates it once
                 # the row exists. Typed, so a name held by other types cannot be
-                # ambiguous; the write's fleet first, then tenant-shared.
+                # ambiguous; in the write's fleet only (M-119).
                 try:
                     subject_entity_id = await find_entity_by_exact_name(
                         tenant_id=data.tenant_id,
