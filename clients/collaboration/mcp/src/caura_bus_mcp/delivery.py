@@ -29,6 +29,8 @@ class DeliverySession:
         self.reply_deliveries: dict[str, tuple[str, str, str]] = {}
         # Responses already shown via collect/recent(reply_to) or an earlier wait.
         self.presented = PresentedResponses()
+        # Called with a delivery ID once this session finishes it (consultation scopes).
+        self.on_finished = lambda _delivery_id: None
 
     @staticmethod
     def public(claim):
@@ -85,6 +87,7 @@ class DeliverySession:
             raise PlatformError(409, {"state": "paused", "delivery": self.public(claim)})
         if claim.state in {"acked", "cancelled"}:
             self.current = None
+            self.on_finished(claim.delivery_id)
 
     def token(self, delivery_id):
         if self.current and self.current.delivery_id == delivery_id:
@@ -94,6 +97,7 @@ class DeliverySession:
     def completed(self, delivery_id):
         if self.current and self.current.delivery_id == delivery_id:
             self.current = None
+        self.on_finished(delivery_id)
 
     async def _renew(self):
         while True:
