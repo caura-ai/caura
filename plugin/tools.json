@@ -740,11 +740,11 @@
         "type": "bool"
       },
       {
-        "default": 5,
+        "default": null,
         "description": "Max results, default 5. Values above 200 are capped to 200. Superseded hits add their newest correction beyond this cap, marked injected:true.",
         "name": "top_k",
         "required": false,
-        "type": "int"
+        "type": "int | None"
       },
       {
         "default": null,

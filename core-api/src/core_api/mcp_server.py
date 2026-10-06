@@ -1366,14 +1366,14 @@ async def caura_recall(
     fleet_ids: Annotated[list[str] | None, Field(description="Restrict fleets.")] = None,
     include_brief: Annotated[bool, Field(description="Add LLM summary.")] = False,
     top_k: Annotated[
-        int,
+        int | None,
         Field(
             description=f"Max results, default {DEFAULT_SEARCH_TOP_K}. "
             f"Values above {MAX_SEARCH_TOP_K} are capped to {MAX_SEARCH_TOP_K}. "
             "Superseded hits add their newest correction beyond this cap, "
             "marked injected:true."
         ),
-    ] = DEFAULT_SEARCH_TOP_K,
+    ] = None,
     valid_at: Annotated[
         str | None,
         Field(
@@ -1479,7 +1479,11 @@ async def caura_recall(
     # ``effective_top_k: -5``, reporting the bad value back as if honoured.
     # ``max(1, min(...))`` is the same clamp the doc-search path in this file
     # already uses; this one had only half of it.
-    capped_top_k = max(1, min(top_k, MAX_SEARCH_TOP_K))
+    #
+    # M-19: a top_k the caller names beats a tuned profile, as on REST; one it
+    # leaves out is the agent profile's or the tenant default's to set.
+    top_k_explicit = top_k is not None
+    capped_top_k = max(1, min(top_k if top_k is not None else DEFAULT_SEARCH_TOP_K, MAX_SEARCH_TOP_K))
 
     # Audit finding P3: prior implementation held ``_mcp_session()``
     # open across the brief-generation LLM round-trip (~5-30s), pinning
@@ -1536,6 +1540,8 @@ async def caura_recall(
         # identity, but ``diagnostic=true`` and an empty result set still make
         # this False here.
         recall_ctx: dict = {}
+        # The top_k the search resolved, and any strategy cut of it.
+        retrieval_ctx: dict = {}
         results = await search_memories(
             tenant_id=tenant_id,
             query=query,
@@ -1546,6 +1552,7 @@ async def caura_recall(
             memory_type_filter=memory_type,
             status_filter=status,
             top_k=capped_top_k,
+            top_k_explicit=top_k_explicit,
             valid_at=parsed_valid_at,
             recall_boost=config.recall_boost,
             graph_expand=config.graph_expand,
@@ -1558,6 +1565,7 @@ async def caura_recall(
             diagnostic_ctx=diagnostic_ctx if diagnostic else None,
             min_similarity=min_similarity,
             recall_ctx=recall_ctx,
+            retrieval_ctx=retrieval_ctx,
         )
         # Cross-tenant read audit (F2): emit one event per source tenant when
         # the credential widened beyond home. Async queue — non-blocking.
@@ -1598,9 +1606,13 @@ async def caura_recall(
             "count": len(_rows),
             # Against the CLAMPED value, so a negative top_k is not reported as
             # a truncation of a larger request.
-            "truncated": top_k > capped_top_k,
+            "truncated": top_k is not None and top_k > capped_top_k,
             "requested_top_k": top_k,
-            "effective_top_k": capped_top_k,
+            # What the search ran with: a strategy's cut, else the top_k it
+            # resolved from the request, profile or default (M-19).
+            "effective_top_k": retrieval_ctx.get("effective_top_k")
+            or retrieval_ctx.get("resolved_top_k")
+            or capped_top_k,
             "recall_tracked": bool(recall_ctx.get("recall_tracked")),
         }
         if diagnostic:
@@ -1634,7 +1646,11 @@ async def caura_recall(
                 results,
                 query,
                 config,
+                # M-20: the as-of date anchors the brief's relative dates, as on
+                # REST /recall.
+                valid_at=parsed_valid_at,
                 top_k=capped_top_k,
+                t0=t0,
                 # ax-0917-h-03 — no ``items`` inside the brief. This payload
                 # ALREADY carries the identical rows twice, under ``results``
                 # and its permanent ``items`` alias above; the brief used to add
