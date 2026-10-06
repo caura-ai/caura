@@ -1,10 +1,10 @@
 import logging
 import tempfile
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
-from pydantic_settings import BaseSettings, NoDecode
+from pydantic_settings import BaseSettings
 
 from common.embedding._registry import DEFAULT_LOCAL_EMBEDDING_MODEL
 from common.provider_names import DEFAULT_EMBEDDING_PROVIDER
@@ -610,20 +610,6 @@ class Settings(BaseSettings):
     platform_embedding_api_key: SecretStr = SecretStr("")  # OpenAI: API key for embeddings
     platform_embedding_model: str = ""  # e.g. "text-embedding-3-small"
 
-    # Security audit — scheduler + threshold alerts. Enterprise-only feature;
-    # OSS standalone deployments can leave these at defaults (all off).
-    # Per-org overrides live in organization_settings.security_audit.
-    security_audit_schedule_enabled: bool = False
-    security_audit_schedule_cron: str = "0 2 * * *"  # daily 02:00 by default
-    security_audit_alerts_enabled: bool = False
-    # Comma-separated env → list. ``NoDecode`` hands the raw env string to
-    # ``_split_recipients``; without it pydantic-settings JSON-decodes
-    # ``list[str]`` first and a plain ``a@x.com,b@y.com`` crashes at import.
-    security_audit_alert_recipients: Annotated[list[str], NoDecode] = []
-    security_audit_alert_score_below: float | None = None
-    security_audit_alert_critical_findings_min: int | None = None
-    security_audit_alert_score_drop_delta: float | None = None
-
     @model_validator(mode="after")
     def _prefer_the_new_api_key_name(self) -> "Settings":
         """Collapse the two accepted spellings onto the field auth.py reads.
@@ -641,13 +627,6 @@ class Settings(BaseSettings):
         # after we return — this validator only needs to uppercase so env
         # vars like LOG_LEVEL=debug are accepted.
         return v.upper() if isinstance(v, str) else v
-
-    @field_validator("security_audit_alert_recipients", mode="before")
-    @classmethod
-    def _split_recipients(cls, v: object) -> object:
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
-        return v
 
     @field_validator(
         "per_tenant_search_concurrency",
@@ -878,17 +857,6 @@ class Settings(BaseSettings):
                 "Raise PROBE_TIMEOUT_SECONDS, or lower the storage connect ceiling."
             )
         return self
-
-    @field_validator("security_audit_schedule_cron")
-    @classmethod
-    def _validate_cron_field(cls, v: str) -> str:
-        from croniter import CroniterBadCronError, croniter
-
-        try:
-            croniter(v)
-        except (CroniterBadCronError, ValueError) as exc:
-            raise ValueError(f"Invalid cron expression {v!r}: {exc}") from exc
-        return v
 
     @model_validator(mode="after")
     def _remap_deprecated_vertex(self) -> "Settings":

@@ -1451,58 +1451,6 @@ class ResolvedConfig:
         val = self._ts.get("agents", {}).get("require_agent_approval")
         return bool(val) if val is not None else False
 
-    # Security audit
-    @property
-    def security_audit_schedule_enabled(self) -> bool:
-        val = self._ts.get("security_audit", {}).get("schedule_enabled")
-        if val is not None:
-            return bool(val)
-        return global_settings.security_audit_schedule_enabled
-
-    @property
-    def security_audit_schedule_cron(self) -> str:
-        val = self._ts.get("security_audit", {}).get("schedule_cron")
-        if val is not None:
-            return val
-        return global_settings.security_audit_schedule_cron
-
-    @property
-    def security_audit_alerts_enabled(self) -> bool:
-        val = self._ts.get("security_audit", {}).get("alerts_enabled")
-        if val is not None:
-            return bool(val)
-        return global_settings.security_audit_alerts_enabled
-
-    @property
-    def security_audit_alert_recipients(self) -> list[str]:
-        val = self._ts.get("security_audit", {}).get("alert_recipients")
-        if val is not None:
-            if isinstance(val, str):
-                return [val] if val else []
-            return list(val)
-        return list(global_settings.security_audit_alert_recipients)
-
-    @property
-    def security_audit_alert_score_below(self) -> float | None:
-        val = self._ts.get("security_audit", {}).get("alert_score_below")
-        if val is not None:
-            return val
-        return global_settings.security_audit_alert_score_below
-
-    @property
-    def security_audit_alert_critical_findings_min(self) -> int | None:
-        val = self._ts.get("security_audit", {}).get("alert_critical_findings_min")
-        if val is not None:
-            return val
-        return global_settings.security_audit_alert_critical_findings_min
-
-    @property
-    def security_audit_alert_score_drop_delta(self) -> float | None:
-        val = self._ts.get("security_audit", {}).get("alert_score_drop_delta")
-        if val is not None:
-            return val
-        return global_settings.security_audit_alert_score_drop_delta
-
 
 def validate_search_profile(profile: dict) -> dict:
     """Validate and sanitise a search_profile dict against ``SEARCH_KNOBS``.
