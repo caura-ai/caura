@@ -13,6 +13,7 @@ from core_api.clients.storage_client import get_storage_client
 from core_api.errors import coded_detail
 from core_api.schemas import STRICT_WRITE_BODY, TenantScopedBody
 from core_api.services.agent_service import resolve_crystallize_fleet
+from core_api.services.audit_service import log_action
 from core_api.services.crystallizer_service import start_crystallization
 
 router = APIRouter(tags=["Memory Crystallizer"])
@@ -106,6 +107,16 @@ async def trigger_crystallization(
         fleet_id,
         trigger="manual",
         auto_crystallize=config.auto_crystallize_enabled,
+    )
+    # The report row says what the run did; only this says who started it and
+    # from where.
+    await log_action(
+        tenant_id=body.tenant_id,
+        agent_id=auth.agent_id,
+        action="crystallize",
+        resource_type="crystallization_report",
+        resource_id=report_id,
+        detail={"fleet_id": fleet_id, "trigger": "manual", **auth.audit_actor()},
     )
     return CrystallizeResult(report_id=str(report_id), status="running")
 

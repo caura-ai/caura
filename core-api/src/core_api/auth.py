@@ -6,6 +6,7 @@ from fastapi.security import APIKeyHeader
 
 from core_api import errors
 from core_api.agent_ids import AgentIdentity, canonical_service_agent_id
+from core_api.audit_actor import SURFACE_HEADER, actor_detail, parse_surface
 from core_api.config import settings
 from core_api.constants import API_KEY_HEADER
 from core_api.errors import coded_detail
@@ -60,11 +61,19 @@ class AuthContext:
         capabilities: set[str] | None = None,
         # Back-compat alias — older callers still pass ``scopes``.
         scopes: set[str] | None = None,
+        surface: str | None = None,
     ):
         self.tenant_id = tenant_id
         self.is_demo = is_demo
         self.is_admin = is_admin
+        # The person the gateway vouched for (``X-User-ID``), set on Path 4
+        # behind the gateway secret only; None everywhere else. For the audit
+        # trail: see ``core_api.audit_actor``.
         self.user_id = user_id
+        # The allow-listed ``X-Caura-Surface``: which Caura client sent the
+        # request. The client's own claim, so metrics and audit only. No gate
+        # may read it.
+        self.surface = surface
         self.org_id = org_id
         self.org_role = org_role  # "admin" | "member" | None
         self.agent_id = agent_id  # enterprise: set from X-Agent-ID header
@@ -158,6 +167,10 @@ class AuthContext:
         if not self.is_cross_tenant_read or not self.tenant_id:
             return []
         return [t for t in self.readable_tenant_ids if t != self.tenant_id]
+
+    def audit_actor(self) -> dict[str, str | None]:
+        """The ``user_id`` and ``surface`` keys for a write's audit ``detail``."""
+        return actor_detail(self.user_id, self.surface)
 
     def enforce_read_only(self) -> None:
         """Raise 403 if the caller is not allowed to mutate state.
@@ -616,6 +629,9 @@ async def get_auth_context(
     key: str | None = Security(api_key_header),
 ) -> AuthContext:
     ctx = await _resolve_auth_context(request, key)
+    # On every path, unlike the identity headers: it names the client, not the
+    # caller, and nothing may trust it. An unknown value is dropped, never 4xx.
+    ctx.surface = parse_surface(request.headers.get(SURFACE_HEADER))
     # Anonymous heartbeat: count the client family (by User-Agent prefix)
     # once the caller is authenticated. One prefix match, and a no-op unless
     # the heartbeat policy enabled the counter at boot — the raw header is
@@ -789,6 +805,14 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
         # them and API keys stay unable to act on admin-only routes.
         org_role_raw = (request.headers.get("x-org-role") or "").strip().lower()
         org_role = org_role_raw if org_role_raw in ("admin", "member") else None
+        # The person behind a dashboard session or JWT. The gateway sets
+        # ``X-User-ID`` from its /_auth subrequest on every request, and sends
+        # none for an API key of any kind. Stricter than the headers above,
+        # which this path trusts with or without a secret: the value is only
+        # recorded in the audit trail, and the trail must not name a person on
+        # the caller's word. Without the secret nothing shows the gateway set
+        # it, so it is dropped, as the rate-limit bucket drops it.
+        user_id = ((request.headers.get("x-user-id") or "").strip() or None) if gw_secret else None
         set_current_tenant(tenant_id)
         _stash_request_tenant(request, tenant_id)
         # When the gateway plumbs a multi-tenant read set, expose it to the
@@ -804,6 +828,7 @@ async def _resolve_auth_context(request: Request, key: str | None) -> AuthContex
             set_readable_tenants(None)
         return AuthContext(
             tenant_id=tenant_id,
+            user_id=user_id,
             org_role=org_role,
             agent_id=agent_id,
             # The only path that may claim it: the gateway resolved the

@@ -303,6 +303,7 @@ async def resolve_conflict(
             "review_status": body.review_status,
             "resolution_action": body.resolution_action,
             "undo": undo,
+            **auth.audit_actor(),
         },
     )
     return ConflictOut(**row)

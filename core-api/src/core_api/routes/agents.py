@@ -84,7 +84,7 @@ async def patch_agent_trust(
             "new_trust_level": agent.get("trust_level", body.trust_level),
             "old_fleet_id": (before or {}).get("fleet_id"),
             "new_fleet_id": agent.get("fleet_id"),
-            "user_id": auth.user_id,
+            **auth.audit_actor(),
         },
     )
     return AgentOut.model_validate(agent)
@@ -131,7 +131,7 @@ async def update_agent_fleet(
             "agent_id": stored_agent_id,
             "old_fleet_id": old_fleet,
             "new_fleet_id": fleet_id,
-            "user_id": auth.user_id,
+            **auth.audit_actor(),
         },
     )
     return {"agent_id": stored_agent_id, "old_fleet_id": old_fleet, "new_fleet_id": fleet_id}
@@ -204,6 +204,14 @@ async def patch_agent_tune(
         cleared = await sc.reset_search_profile(stored_agent_id, tenant_id)
         if not cleared:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        await log_action(
+            tenant_id=tenant_id,
+            agent_id=auth.agent_id,
+            action="agent_tune",
+            resource_type="agent",
+            resource_id=agent.get("id"),
+            detail={"agent_id": stored_agent_id, "reset": True, **auth.audit_actor()},
+        )
         # Storage answers the reset with ``{"ok": true}``, not the agent row, so
         # the response has to come from a re-read. The merge branch below
         # re-reads too but falls back to the stale pre-write row on a miss,
@@ -226,6 +234,14 @@ async def patch_agent_tune(
         current.update(updates)
         current = validate_search_profile(current)
         await sc.update_search_profile(agent["id"], tenant_id, current)
+        await log_action(
+            tenant_id=tenant_id,
+            agent_id=auth.agent_id,
+            action="agent_tune",
+            resource_type="agent",
+            resource_id=agent.get("id"),
+            detail={"agent_id": agent["agent_id"], "changes": updates, **auth.audit_actor()},
+        )
         # Re-fetch to get the updated agent with full fields. ``read=False``
         # because this is a read-after-write: from a replica it can return the
         # profile as it was before the update on the line above, so the PATCH

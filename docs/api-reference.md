@@ -123,6 +123,7 @@ routes expose generic software or identity-probe data, not tenant data.
 | `X-Agent-ID` | Scopes the request to this agent |
 | `X-Org-Read-Only: true` | Plan-limit read-only mode — creates and other writes that grow the store return 403 `PLAN_LIMIT_READ_ONLY`. Deletes, memory status transitions, agent trust changes and `PUT /settings` stay allowed so an over-limit org can get back under its plan |
 | `X-Tenant-ID` | Tenant identity when using the shared `CAURA_API_KEY` gate |
+| `X-User-ID` | The person behind a dashboard session or JWT; the gateway sends none for an API key. Recorded in the audit trail only (see **Audit attribution** below), and read only when `GATEWAY_SHARED_SECRET` is set |
 
 The identity headers are trusted on the gateway-header auth path. Set
 `GATEWAY_SHARED_SECRET` so that path also requires a matching
@@ -135,6 +136,50 @@ auth middleware rather than a route behind `get_auth_context`, so "authenticates
 first" is a property each surface has to implement for itself. When the key is
 set, send it as `X-API-Key` (or a Bearer token) on MCP calls too; without it the
 request is refused `401` before any identity header is consulted.
+
+**Audit attribution**
+
+A client says which Caura client it is with `X-Caura-Surface`. The value is the
+client's own claim: it labels audit rows and metrics, and no authorization
+decision reads it. The set is closed. Case and surrounding whitespace are
+ignored. A value outside the set is dropped and recorded as `null`, and the
+request goes ahead as normal (no 4xx).
+
+| `X-Caura-Surface` | Client |
+|---|---|
+| `dashboard` | The enterprise web app, outside `/prism` |
+| `prism` | The enterprise web app, on `/prism` |
+| `broker` | caura-daemon, including the `caura` CLI and `caura mcp-server`, which reach core-api through it |
+| `openclaw_plugin` | The OpenClaw plugin |
+
+Calls to `/mcp` are recorded as `mcp`, from the transport. They take no header
+for it, and a REST call cannot claim it.
+
+The writes below record two keys in the audit row's `detail`:
+
+- `user_id`: the person the gateway vouched for (`X-User-ID`, above).
+- `surface`: the allow-listed `X-Caura-Surface`, or `mcp`.
+
+Both keys are always present on these rows, set to `null` when unknown. A
+`null` `user_id` means nobody vouched for a person: an API key of any kind, a
+call that did not come through the gateway, or a deployment without
+`GATEWAY_SHARED_SECRET`. A row without the keys was written before they existed.
+`user_id` is not `author_user_id` on keystone rows: that one is copied from the
+request body.
+
+| `action` | `resource_type` | REST | MCP |
+|---|---|---|---|
+| `delete` | `memory` | `DELETE /memories/{id}` | `caura_manage op=delete` |
+| `bulk_delete` | `memory` | `DELETE /memories`, `POST /memories/bulk-delete` | `caura_manage op=bulk_delete` |
+| `conflict.review` | `memory_conflict` | `PATCH /conflicts/{id}/resolve` | — |
+| `crystallize` | `crystallization_report` | `POST /crystallize` | — |
+| `ingest_commit` | `memory` | `POST /ingest/commit` | — |
+| `ingest_undo` | `memory` | `POST /ingest/undo/{run_id}` | — |
+| `agent_tune` | `agent` | `PATCH /agents/{id}/tune` | `caura_tune` |
+| `agent_trust_update` | `agent` | `PATCH /agents/{id}/trust` | — |
+| `agent_fleet_update` | `agent` | `PATCH /agents/{id}/fleet` | — |
+| `keystone.set` | `keystone` | `POST /keystones` | `caura_keystones_set op=set` |
+| `keystone.delete` | `keystone` | `DELETE /keystones/{doc_id}` | `caura_keystones_set op=delete` |
 
 **Rate limiting (managed platform)**
 

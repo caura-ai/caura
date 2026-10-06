@@ -1015,6 +1015,7 @@ async def delete_all_memories(
             # like the row for a narrow delete that happened to match a lot.
             "tenant_wide": is_tenant_wide,
             "confirm_scope": confirm_scope,
+            **auth.audit_actor(),
         },
     )
 
@@ -1051,7 +1052,7 @@ async def bulk_delete_by_ids(
         tenant_id=tenant_id,
         action="bulk_delete",
         resource_type="memory",
-        detail={"count": deleted, "method": "by_ids"},
+        detail={"count": deleted, "method": "by_ids", **auth.audit_actor()},
     )
     return {"deleted": deleted}
 
@@ -1999,6 +2000,7 @@ async def delete_memory(
         action="delete",
         resource_type="memory",
         resource_id=memory_id,
+        detail=auth.audit_actor(),
     )
 
 
@@ -2766,6 +2768,7 @@ async def ingest_commit_endpoint(
         body.fleet_id = agent["fleet_id"]
     if auth.tenant_id:  # skip enforcement for admin
         await enforce_fleet_write(body.tenant_id, body.agent_id, body.fleet_id)
+    result = await ingest_commit(body)
     if auth.tenant_id:  # skip for admin
         # One unit PER FACT, not one per request. A commit writes
         # ``len(body.facts)`` memories, and every other multi-item write path
@@ -2780,10 +2783,25 @@ async def ingest_commit_endpoint(
         # AFTER the write, the ordering every write surface now shares (REST
         # single and bulk, MCP single and batch): a commit that raised wrote
         # nothing, and a client retrying it must not pay once per attempt.
-        result = await ingest_commit(body)
         await bulk_check_and_increment(body.tenant_id, len(body.facts))
-        return result
-    return await ingest_commit(body)
+    # One row for the commit, the twin of ``ingest_undo``'s. Each memory it
+    # wrote already has a ``create`` row, but none of those says who ran the
+    # ingest or from where. ``.get``: the facts are written and metered by now,
+    # so a reshaped result must cost the row a field, not the caller a 500.
+    await log_action(
+        tenant_id=body.tenant_id,
+        agent_id=body.agent_id,
+        action="ingest_commit",
+        resource_type="memory",
+        detail={
+            "run_id": result.get("run_id"),
+            "count": result.get("memories_created"),
+            "skipped_duplicates": result.get("skipped_duplicates"),
+            "errored": result.get("errored"),
+            **auth.audit_actor(),
+        },
+    )
+    return result
 
 
 @router.post("/ingest/file", responses={200: {"model": _oar.IngestPreviewResponse}})
@@ -2904,7 +2922,7 @@ async def ingest_undo_endpoint(
         tenant_id=tenant_id,
         action="ingest_undo",
         resource_type="memory",
-        detail={"run_id": run_id, "count": deleted_count},
+        detail={"run_id": run_id, "count": deleted_count, **auth.audit_actor()},
     )
     return {"deleted": deleted_count, "run_id": run_id}
 

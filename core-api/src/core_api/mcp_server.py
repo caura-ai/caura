@@ -36,6 +36,7 @@ from core_api.agent_ids import (
     effective_read_agent_id,
     effective_write_agent_id,
 )
+from core_api.audit_actor import MCP_SURFACE, actor_detail
 from core_api.auth import get_admin_key
 from core_api.clients.storage_client import KeystoneUpsertPayload, get_storage_client
 from core_api.constants import (
@@ -189,6 +190,9 @@ _credential_kind_var: contextvars.ContextVar[str | None] = contextvars.ContextVa
 _install_uuid_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "mcp_install_uuid", default=None
 )
+# The person the gateway vouched for (X-User-ID), for audit rows only: the twin
+# of ``AuthContext.user_id``, and set under the same stricter rule.
+_user_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_user_id", default=None)
 # Plan-limit read-only mode, computed by the platform from the persisted usage
 # counters and stamped as X-Org-Read-Only (see ``usage_service``'s module
 # docstring). REST reads it via ``AuthContext.is_read_only``. This middleware
@@ -561,6 +565,14 @@ class MCPAuthMiddleware:
             _install_uuid_var.set(
                 (headers.get(b"x-install-uuid", b"").decode() or None) if via_gateway else None
             )
+            # Needs the secret as well as the gateway path, as REST's Path 4
+            # does: without one nothing shows the gateway set it, and an audit
+            # row must not name a person on the caller's word.
+            _user_id_var.set(
+                (headers.get(b"x-user-id", b"").decode().strip() or None)
+                if via_gateway and settings.gateway_shared_secret
+                else None
+            )
             # Plan-limit read-only mode. Gateway-verified path only, for the
             # same reason as the attributes above but with the direction of the
             # risk reversed: for identity, self-assertion buys access the caller
@@ -630,6 +642,12 @@ def _is_install_credential() -> bool:
 def _get_install_uuid() -> str | None:
     """The broker's install UUID (X-Install-UUID), or None for non-broker calls."""
     return _install_uuid_var.get(None)
+
+
+def _audit_actor() -> dict[str, str | None]:
+    """The ``user_id`` and ``surface`` keys for a write's audit ``detail``, as
+    ``AuthContext.audit_actor`` gives them on REST. The surface is always ``mcp``."""
+    return actor_detail(_user_id_var.get(None), MCP_SURFACE)
 
 
 async def _broker_owned_tool_agent_id(agent_id: str) -> str:
@@ -2137,7 +2155,7 @@ async def caura_manage(
                     agent_id=agent_id,
                     action="bulk_delete",
                     resource_type="memory",
-                    detail={"count": deleted_count, "method": "by_ids", "via": "mcp"},
+                    detail={"count": deleted_count, "method": "by_ids", "via": "mcp", **_audit_actor()},
                 )
                 return _with_latency(_dumps({"deleted": deleted_count, "requested": len(uids)}), t0)
             if op == "lineage":
@@ -2389,6 +2407,16 @@ async def caura_manage(
             if charges_write_quota("delete"):
                 await check_and_increment(tenant_id, "write")
             await soft_delete_memory(uid, tenant_id)
+            # The caller's row, as REST DELETE writes one. The ``soft_delete``
+            # rows above name each row's owner, not who deleted it.
+            await log_action(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                action="delete",
+                resource_type="memory",
+                resource_id=uid,
+                detail={"via": "mcp", **_audit_actor()},
+            )
             # Structured for the same reason as ``op=transition`` above. REST
             # DELETE returns 204 with no body, so there is no shape to copy
             # here; ``memory_id`` matches the transition key rather than the
@@ -2514,6 +2542,14 @@ async def caura_tune(
             current.update(updates)
             current = validate_search_profile(current)
             await get_storage_client().update_search_profile(agent["id"], tenant_id, current)
+            await log_action(
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                action="agent_tune",
+                resource_type="agent",
+                resource_id=agent.get("id"),
+                detail={"agent_id": agent_id, "changes": updates, "via": "mcp", **_audit_actor()},
+            )
         return _with_latency(_dumps({"agent_id": agent_id, "search_profile": current}), t0)
     except HTTPException as e:
         logger.warning("MCP tool error (%s): %s", e.status_code, e.detail)
@@ -4550,6 +4586,7 @@ async def caura_keystones_set(
                         "weight": weight,
                         "author_user_id": author_user_id,
                         "via": "mcp",
+                        **_audit_actor(),
                     },
                 )
                 return _with_latency(
@@ -4636,7 +4673,7 @@ async def caura_keystones_set(
                 action="keystone.delete",
                 resource_type="keystone",
                 resource_id=None,
-                detail={"doc_id": doc_id, "via": "mcp"},
+                detail={"doc_id": doc_id, "via": "mcp", **_audit_actor()},
             )
             return _with_latency(_dumps({"ok": True, "action": "delete", "doc_id": doc_id}), t0)
         except httpx.HTTPStatusError as e:

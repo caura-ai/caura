@@ -483,8 +483,10 @@ async def upsert_keystone(
             "fleet_id": body.fleet_id,
             "agent_id": body.agent_id,
             "weight": body.weight,
+            # The body's claim. ``user_id`` below is the one the gateway vouched for.
             "author_user_id": body.author_user_id,
             "via": "rest",
+            **auth.audit_actor(),
         },
     )
     return doc
@@ -604,6 +606,6 @@ async def delete_keystone(
         action="keystone.delete",
         resource_type="keystone",
         resource_id=None,
-        detail={"doc_id": doc_id, "via": "rest"},
+        detail={"doc_id": doc_id, "via": "rest", **auth.audit_actor()},
     )
     return {"deleted": True, "doc_id": doc_id}
