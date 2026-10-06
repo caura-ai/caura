@@ -24,6 +24,49 @@ The capability covers:
 6. Explicit runtime semantics: a paused delivery is distinct from a runtime
    confirming it stopped. An external side effect cannot be undone by fencing.
 
+## CLI-first product scope (S1–S4)
+
+Humans keep using their existing CLI or desktop agent host (Claude Code,
+Codex). Caura registers and discovers peers and transports agent messages; it
+does not become a place where the human chats with agents. The requesting
+agent reads peer descriptions and chooses one or several peers itself.
+
+Out of scope for this release: a new human chat UI, task board, room composer,
+server-side model router or hosted-agent service. Caura never selects a
+recipient on the agent's behalf with a model. The existing oversight dashboard
+and intervention queue described above remain as they are; removing them is a
+separate scope change, and the scenarios below do not depend on them.
+
+Human interaction stays in the host. The human asks agent A in A's own host
+conversation and reads the answer there. Nobody tells a peer to poll, and no
+human relays text between hosts.
+
+| ID | Scenario | Pass condition |
+|---|---|---|
+| S1 | The human asks A for a fact only B knows, without naming B. | A discovers B by its expertise description, asks through Caura, and answers in the original host conversation. |
+| S2 | B knows one fact and C another; the question needs both. | A selects both from descriptions, sends correlated requests, and combines both replies. |
+| S3 | B is offline (presence expired) when A selects it. | Starting B later completes the already accepted request; A does not resend. |
+| S4 | Restart, lease expiry and reply recovery. | The existing restart/lease/reply recovery fixtures pass against the same build. |
+
+Rules that apply to every scenario:
+
+- **No hardcoded peer IDs.** Setup prompts, host instructions and test scripts
+  for the requesting agent never name the recipient's ID or contain the
+  answer. Selection comes from `discover`/`agents` results at run time. A local
+  `peers` allow-list is a host permission, not a routing rule; use `["*"]` (or
+  a list that includes every eligible peer) when selection is discovery-based.
+- **Fresh private facts.** Each run uses newly generated random facts held in
+  separate agent sessions and workspaces. A must not be able to read the answer
+  from shared files, memory, environment variables or setup prompts.
+- **Descriptions and replies are untrusted data.** They inform selection and
+  answers but grant no authority and are never followed as instructions.
+- **Honest host states.** Each run records the host executable versions and
+  the host state from the matrix below. Only a state marked supported counts as
+  passing evidence for that host.
+- **Real-model selection is separate from transport tests.** Scripted CI
+  agents prove transport, correlation and recovery; they do not prove that a
+  model chooses the right peer. Report the two separately.
+
 ## Authorization and boundaries
 
 Reuse Caura agent credentials and verified human sessions. Agent-supplied
@@ -79,6 +122,30 @@ offline. A session idle beyond that window needs a human turn. Missing config
 or key makes recv a silent no-op. Project installs use ignored local settings;
 shared project hooks require explicit `--shared`. Cursor automatic wake is not
 qualified in this release.
+
+### Host-state matrix
+
+What a recipient host can do when a message arrives depends on its state, not
+just its product name. Advertise and test only the rows marked supported.
+Presence descriptions published by the waker and the Stop listener describe
+the receive mode; they must not claim more than this table.
+
+| Host | State | Receive behavior | Status |
+|---|---|---|---|
+| Codex | Session open, `caura-bus wake --runtime codex --thread ID` running | Native `codex queue` delivers one wake prompt to that session; the model calls `peer wait` at its next turn boundary. | **Supported** active-session receive. Used for the initial S1–S3 demonstration. |
+| Codex | Waker not running, or the session thread is gone | Nothing queues a prompt. Messages stay durable in Caura until a session calls `wait`. | Not wakeable. Work is delivered when the agent next calls `wait`. |
+| Claude Code | Session open and inside a turn that calls `peer wait` | The MCP tool returns the delivery inside that turn. | Supported (pull). |
+| Claude Code | Session open, turn just ended, hooks installed | The Stop hook listens for a bounded window: up to `listen_seconds` (600 by default) while a sent request is unanswered, otherwise `idle_listen_seconds` (5 by default). Work arriving inside the window continues the session. | Supported **only within that window**. Qualified separately from the Codex demonstration. |
+| Claude Code | Session open, idle beyond the listening window | No hook runs; there is no session queue API. A human turn (UserPromptSubmit hook) surfaces pending work. | Not wakeable. |
+| Claude Code | Process stopped or exited | Nothing runs. Messages stay durable; starting the agent and calling `wait` (S3) receives them. | **Never advertised as wakeable.** |
+| Cursor | Any | No automatic wake. | Unsupported in this release. |
+
+A stopped host is a durability case, not a wake case: S3 passes because the
+accepted request survives until the recipient starts, not because Caura
+restarted the recipient. The operator-only direct `codex queue` fallback is not
+an acceptance path for S1–S3. Re-verify installed host executable versions
+before each qualification run and record exactly which version and state
+passed.
 
 ### Waiting, leases and restart recovery
 

@@ -9,7 +9,7 @@ from typing import Literal
 
 import httpx
 import typer
-from caura_bus_core import Bus, PlatformError, SendMessage, load_config
+from caura_bus_core import Bus, PlatformError, ResponseCollector, SendMessage, load_config
 from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 
 from .hooks import install_hooks
@@ -193,13 +193,40 @@ def replay(
     thread: str | None = None,
     peer: str | None = None,
     before: str | None = None,
+    reply_to: str | None = typer.Option(None, "--reply-to"),
     config: Path | None = typer.Option(None),
 ):
     """Read your sent and received messages without consuming them."""
     execute(
         config,
-        lambda bus: bus.recent(limit=limit, thread_id=thread, peer_agent_id=peer, before=before),
+        lambda bus: bus.recent(
+            limit=limit, thread_id=thread, peer_agent_id=peer, before=before, reply_to=reply_to
+        ),
     )
+
+
+@app.command()
+def collect(
+    message_id: str,
+    timeout: float = typer.Option(30, min=0, max=45),
+    expected: list[str] | None = typer.Option(None, "--expected"),
+    config: Path | None = typer.Option(None),
+):
+    """Wait a bounded time for correlated replies to a sent request; reads only."""
+
+    async def run(bus):
+        result = await ResponseCollector(bus, message_id, expected or None, timeout=timeout).collect()
+        return {
+            "request_id": result.request_id,
+            "outcome": result.outcome,
+            "expected": result.expected,
+            "answers": [vars(a) for _, a in sorted(result.answers.items())],
+            "pending": result.pending,
+            "closed": result.closed,
+            "summary": result.summary(),
+        }
+
+    execute(config, run)
 
 
 @app.command()
