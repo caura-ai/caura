@@ -10,6 +10,15 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.23.1](https://github.com/caura-ai/caura/compare/backend-v3.23.0...backend-v3.23.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **audit:** filter the audit log by resource type and return its seq ([#1915](https://github.com/caura-ai/caura/issues/1915)) ([62ec868](https://github.com/caura-ai/caura/commit/62ec868a2bb276f98febed7e24686d7dabbf2790))
+* **stats:** an agent's stats count its own private notes ([#1911](https://github.com/caura-ai/caura/issues/1911)) ([686df2a](https://github.com/caura-ai/caura/commit/686df2a9c2dd4e1403bb10062a720839b089381a))
+* **stm:** refuse a bulletin write that names no fleet ([#1929](https://github.com/caura-ai/caura/issues/1929)) ([fb0664a](https://github.com/caura-ai/caura/commit/fb0664aa7b0435543903083f651174859bb005e9))
+
 ## [3.23.0](https://github.com/caura-ai/caura/compare/backend-v3.22.3...backend-v3.23.0) (2026-10-06)
 
 
