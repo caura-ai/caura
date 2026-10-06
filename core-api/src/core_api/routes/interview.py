@@ -411,10 +411,10 @@ async def submit_interview(
         )
 
     if result["status"] == "failed":
-        # Whole window failed to persist: watermark NOT advanced; the
-        # plugin must NOT prune. 500 (origin error, not 502 — proxies/ALBs
-        # rewrite 502 and strip the JSON body) → the command retries next
-        # tick (caller checks >= 400).
+        # Whole window failed to persist, or no LLM answered (M-50):
+        # watermark NOT advanced; the plugin must NOT prune. 500 (origin
+        # error, not 502 — proxies/ALBs rewrite 502 and strip the JSON body)
+        # → the command retries next tick (caller checks >= 400).
         raise HTTPException(status_code=500, detail="interview ingest failed; window not consumed")
     if result["status"] == "partial":
         # Mirror the bulk endpoint's 207 semantics: some rows landed, the
