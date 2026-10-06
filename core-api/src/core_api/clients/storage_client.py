@@ -246,6 +246,10 @@ class KeystoneUpsertPayload(TypedDict):
     fleet_id: NotRequired[str]
     agent_id: NotRequired[str]
     author_user_id: NotRequired[str]
+    # Who made the change, for its version: the calling agent and the person
+    # the gateway vouched for. ``author_user_id`` above is the body's claim.
+    actor_agent_id: NotRequired[str]
+    actor_user_id: NotRequired[str]
 
 
 _client: CoreStorageClient | None = None
@@ -2811,8 +2815,51 @@ class CoreStorageClient:
     async def upsert_keystone(self, data: KeystoneUpsertPayload) -> dict:
         return await self._post("/keystones", data)  # type: ignore[return-value]
 
-    async def delete_keystone(self, tenant_id: str, doc_id: str) -> bool:
-        return await self._delete(f"/keystones/{doc_id}", tenant_id=tenant_id)
+    async def delete_keystone(
+        self,
+        tenant_id: str,
+        doc_id: str,
+        *,
+        actor_agent_id: str | None = None,
+        actor_user_id: str | None = None,
+    ) -> bool:
+        actor = {"actor_agent_id": actor_agent_id, "actor_user_id": actor_user_id}
+        return await self._delete(
+            f"/keystones/{doc_id}", tenant_id=tenant_id, **{k: v for k, v in actor.items() if v is not None}
+        )
+
+    async def list_keystone_versions(
+        self,
+        tenant_id: str,
+        *,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+        limit: int,
+        before: int | None = None,
+    ) -> dict:
+        params = {"fleet_id": fleet_id, "agent_id": agent_id, "before": before}
+        return await self._get(  # type: ignore[return-value]
+            "/keystones/versions",
+            tenant_id=tenant_id,
+            limit=limit,
+            **{k: v for k, v in params.items() if v is not None},
+        )
+
+    async def get_keystone_version(
+        self,
+        tenant_id: str,
+        version: int,
+        *,
+        fleet_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict | None:
+        """One version; ``None`` when the tenant has no such version."""
+        params = {"fleet_id": fleet_id, "agent_id": agent_id}
+        return await self._get(
+            f"/keystones/versions/{version}",
+            tenant_id=tenant_id,
+            **{k: v for k, v in params.items() if v is not None},
+        )
 
     # =====================================================================
     # Fleet

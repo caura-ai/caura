@@ -9,8 +9,12 @@ Endpoints (all under the storage prefix ``/api/v1/storage``):
 * ``GET    /keystones`` — list resolved scope union
 * ``POST   /keystones`` — upsert a rule
 * ``DELETE /keystones/{doc_id}`` — remove a rule
+* ``GET    /keystones/versions`` — the tenant's versions, newest first
+* ``GET    /keystones/versions/{version}`` — one version and its rules
 
-Audit: every write/delete emits an audit row (``CAURA-000``).
+Every write records a version (migration 061) and emits an audit row
+(``CAURA-000``). The writes take who made them as ``actor_agent_id`` and
+``actor_user_id``, the body's for a set and the query's for a delete.
 """
 
 from __future__ import annotations
@@ -19,14 +23,17 @@ import logging
 import re
 from typing import cast
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
 from core_storage_api.schemas import DOCUMENT_FIELDS, orm_to_dict
 from core_storage_api.services.keystones import (
-    KEYSTONE_COLLECTION,
     KEYSTONE_VALID_SCOPES,
     KEYSTONE_WEIGHT_BUCKETS,
+    get_keystone_version,
+    list_keystone_versions,
     list_keystones,
+    remove_keystone,
+    set_keystone,
 )
 from core_storage_api.services.postgres_service import PostgresService
 
@@ -109,9 +116,14 @@ def _validate_payload(body: dict) -> tuple[str, dict, str | None]:
     if agent_id is not None and not isinstance(agent_id, str):
         errors.append("agent_id must be a string")
 
+    # Optional names: the author the body claims, and who made the change, for
+    # its version (core-api sends the calling agent and the person the gateway
+    # vouched for when it knows them).
+    for key in ("author_user_id", "actor_agent_id", "actor_user_id"):
+        value = body.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            errors.append(f"{key} must be a non-empty string")
     author_user_id = body.get("author_user_id")
-    if author_user_id is not None and (not isinstance(author_user_id, str) or not author_user_id):
-        errors.append("author_user_id must be a non-empty string")
 
     # Scope-specific shape rules. We only enforce these when scope itself
     # validated above — otherwise the error list double-reports.
@@ -155,6 +167,18 @@ def _validate_payload(body: dict) -> tuple[str, dict, str | None]:
     return doc_id_s, data, fleet_id
 
 
+def _require_scope(tenant_id: str, fleet_id: str | None, agent_id: str | None) -> None:
+    """The read routes' shared checks on whose rules are asked for."""
+    # ``agent_id`` without ``fleet_id`` cannot resolve to any agent-scope
+    # row (fleet_id is part of the agent-scope key) — accepting the call
+    # would silently degrade to fleet/tenant scope and hide a caller bug.
+    if agent_id is not None and fleet_id is None:
+        raise HTTPException(status_code=422, detail=["agent_id requires fleet_id"])
+
+    if not tenant_id:
+        raise HTTPException(status_code=422, detail=["tenant_id is required"])
+
+
 async def _audit(
     *,
     tenant_id: str,
@@ -164,8 +188,8 @@ async def _audit(
 ) -> None:
     """Best-effort audit emission.
 
-    ``audit_add`` and ``document_upsert`` / ``document_delete_by_doc_id``
-    use independent DB sessions; Postgres can't roll one back from the
+    ``audit_add`` and the keystone write (with its version) use
+    independent DB sessions; Postgres can't roll one back from the
     other without explicit 2PC. So if audit fails AFTER the document
     write committed, surfacing the audit error as 500 would tell the
     client "your write failed" while the rule sits persisted — strictly
@@ -211,14 +235,7 @@ async def get_keystones(
     ``KEYSTONE_MAX_RESULTS`` so callers can warn an operator that
     rules are silently being dropped from the agent's context.
     """
-    # ``agent_id`` without ``fleet_id`` cannot resolve to any agent-scope
-    # row (fleet_id is part of the agent-scope key) — accepting the call
-    # would silently degrade to fleet/tenant scope and hide a caller bug.
-    if agent_id is not None and fleet_id is None:
-        raise HTTPException(status_code=422, detail=["agent_id requires fleet_id"])
-
-    if not tenant_id:
-        raise HTTPException(status_code=422, detail=["tenant_id is required"])
+    _require_scope(tenant_id, fleet_id, agent_id)
 
     docs, truncated = await list_keystones(
         tenant_id=tenant_id,
@@ -240,13 +257,13 @@ async def upsert_keystone(request: Request) -> dict:
 
     doc_id, data, fleet_id = _validate_payload(body)
 
-    doc = await _svc.document_upsert(
+    doc, version = await set_keystone(
         tenant_id=tenant_id,
-        collection=KEYSTONE_COLLECTION,
         doc_id=doc_id,
         data=data,
         fleet_id=fleet_id,
-        system=True,
+        actor_agent_id=body.get("actor_agent_id"),
+        actor_user_id=body.get("actor_user_id"),
     )
     await _audit(
         tenant_id=tenant_id,
@@ -259,6 +276,7 @@ async def upsert_keystone(request: Request) -> dict:
             "agent_id": data.get("agent_id"),
             "weight": data["weight"],
             "author_user_id": data.get("author_user_id"),
+            "version": version,
         },
     )
     return orm_to_dict(doc, DOCUMENT_FIELDS)
@@ -268,21 +286,70 @@ async def upsert_keystone(request: Request) -> dict:
 async def delete_keystone(
     doc_id: str,
     tenant_id: str,
+    actor_agent_id: str | None = Query(default=None, min_length=1),
+    actor_user_id: str | None = Query(default=None, min_length=1),
 ) -> dict:
     if not tenant_id:
         raise HTTPException(status_code=422, detail=["tenant_id is required"])
-    deleted_id = await _svc.document_delete_by_doc_id(
+    removed = await remove_keystone(
         tenant_id=tenant_id,
-        collection=KEYSTONE_COLLECTION,
         doc_id=doc_id,
-        system=True,
+        actor_agent_id=actor_agent_id,
+        actor_user_id=actor_user_id,
     )
-    if deleted_id is None:
+    if removed is None:
         raise HTTPException(status_code=404, detail="Keystone not found")
+    deleted_id, version = removed
     await _audit(
         tenant_id=tenant_id,
         action="keystone.delete",
         resource_id=deleted_id,
-        detail={"doc_id": doc_id},
+        detail={"doc_id": doc_id, "version": version},
     )
     return {"deleted_id": str(deleted_id)}
+
+
+@router.get("/versions")
+async def keystone_versions(
+    tenant_id: str,
+    fleet_id: str | None = None,
+    agent_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    before: int | None = Query(default=None, ge=1),
+) -> dict:
+    """The tenant's keystone versions, newest first, each with the rule-set
+    hash of what it gives ``(fleet_id, agent_id)``.
+
+    ``next_before`` pages on: pass it back as ``before``. ``None`` on the
+    last page.
+    """
+    _require_scope(tenant_id, fleet_id, agent_id)
+    items, next_before = await list_keystone_versions(
+        tenant_id=tenant_id,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+        limit=limit,
+        before=before,
+    )
+    return {"count": len(items), "items": items, "next_before": next_before}
+
+
+@router.get("/versions/{version}")
+async def keystone_version(
+    version: int,
+    tenant_id: str,
+    fleet_id: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """One version, with the rules it gives ``(fleet_id, agent_id)`` in the
+    list's order as ``items``."""
+    _require_scope(tenant_id, fleet_id, agent_id)
+    found = await get_keystone_version(
+        tenant_id=tenant_id,
+        version=version,
+        fleet_id=fleet_id,
+        agent_id=agent_id,
+    )
+    if found is None:
+        raise HTTPException(status_code=404, detail="Keystone version not found")
+    return found

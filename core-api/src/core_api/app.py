@@ -64,6 +64,7 @@ from core_api.routes.health import router as health_router
 from core_api.routes.insights import router as insights_router
 from core_api.routes.interview import router as interview_router
 from core_api.routes.keystones import router as keystones_router
+from core_api.routes.keystones import versions_router as keystone_versions_router
 from core_api.routes.lifecycle import router as lifecycle_router
 from core_api.routes.memories import admin_memories_router
 from core_api.routes.memories import router as memories_router
@@ -1207,6 +1208,7 @@ app.include_router(reports_router, prefix="/api/v1")
 # change until they explicitly enable the feature.
 app.include_router(skills_inbox_router, prefix="/api/v1")
 app.include_router(keystones_router, prefix="/api/v1")
+app.include_router(keystone_versions_router, prefix="/api/v1")
 # Rename compatibility (2026-08-14): the keystones REST surface
 # shipped under the old brand prefix and customer scripts call it. The
 # canonical path is now the brand-neutral /api/v1/keystones (matching every

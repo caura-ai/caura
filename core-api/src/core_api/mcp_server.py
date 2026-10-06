@@ -4574,6 +4574,10 @@ async def caura_keystones_set(
                     payload["agent_id"] = agent_id
                 if author_user_id is not None:
                     payload["author_user_id"] = author_user_id
+                payload["actor_agent_id"] = caller_agent_id
+                actor_user_id = _user_id_var.get(None)
+                if actor_user_id is not None:
+                    payload["actor_user_id"] = actor_user_id
                 doc = await sc.upsert_keystone(payload)
                 await log_action(
                     tenant_id=tenant_id,
@@ -4667,7 +4671,12 @@ async def caura_keystones_set(
                     ),
                     t0,
                 )
-            deleted = await sc.delete_keystone(tenant_id=tenant_id, doc_id=doc_id)
+            deleted = await sc.delete_keystone(
+                tenant_id=tenant_id,
+                doc_id=doc_id,
+                actor_agent_id=caller_agent_id,
+                actor_user_id=_user_id_var.get(None),
+            )
             if not deleted:
                 return _with_latency(_error_response("NOT_FOUND", f"Keystone '{doc_id}' not found."), t0)
             await log_action(

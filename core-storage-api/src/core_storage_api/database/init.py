@@ -31,10 +31,10 @@ _CHAIN_SENTINEL_TABLE = "tenant_suppression"
 # ``test_the_head_fingerprint_names_the_current_head`` fails until it does. A
 # head with no object of its own may set the probe to ``None``, which makes the
 # stamp branch refuse — the safe answer when there is nothing to check.
-_HEAD_FINGERPRINT_REVISION = "060"
+_HEAD_FINGERPRINT_REVISION = "061"
 _HEAD_FINGERPRINT_SQL: str | None = (
-    "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-    "WHERE table_schema = 'public' AND table_name = 'entities' AND column_name = 'created_at')"
+    "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+    "WHERE table_schema = 'public' AND table_name = 'keystone_versions')"
 )
 
 _engine: AsyncEngine | None = None

@@ -1257,6 +1257,9 @@ _PURGE_TENANT_TABLES: tuple[str, ...] = (
     # against a tenant that no longer exists.
     "audit_chain_head",
     "documents",
+    # Every version's snapshot holds the tenant's keystone text (migration 061),
+    # so the history goes with the documents it copies.
+    "keystone_versions",
     "analysis_reports",
     "dedup_reviews",
     "background_task_log",
@@ -10468,6 +10471,7 @@ class PostgresService:
         agent_id: str | None = None,
         system: bool = False,
         force: bool = False,
+        session: AsyncSession | None = None,
     ) -> Document:
         """INSERT ... ON CONFLICT DO UPDATE. Returns the upserted Document.
 
@@ -10484,39 +10488,53 @@ class PostgresService:
         of those 0 bytes replaced a 105KB shared checklist, and recovery meant
         reconstructing it by hand. ``_guard_document_shrink`` refuses a
         catastrophic shrink unless the caller passes ``force``.
+
+        The check and the write share one transaction: the caller's when it
+        passes ``session`` (a keystone write records its version in it).
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
-        if not force:
-            await self._guard_document_shrink(tenant_id, collection, doc_id, data)
-        async with get_session() as session:
-            stmt = (
-                pg_insert(Document)
-                .values(
+        if session is None:
+            async with get_session() as own:
+                return await self.document_upsert(
                     tenant_id=tenant_id,
-                    fleet_id=fleet_id,
                     collection=collection,
                     doc_id=doc_id,
                     data=data,
+                    fleet_id=fleet_id,
                     agent_id=agent_id,
+                    system=system,
+                    force=force,
+                    session=own,
                 )
-                .on_conflict_do_update(
-                    constraint="uq_documents_tenant_collection_doc",
-                    set_={
-                        "data": data,
-                        "fleet_id": fleet_id,
-                        # ax-0917-m-14 — the upsert replaces the document, so
-                        # the author recorded is whoever wrote THIS version.
-                        # Keeping the original author would attribute someone
-                        # else's edit to the first writer.
-                        "agent_id": agent_id,
-                        "updated_at": datetime.now(UTC),
-                    },
-                )
-                .returning(Document)
+        if not force:
+            await self._guard_document_shrink(session, tenant_id, collection, doc_id, data)
+        stmt = (
+            pg_insert(Document)
+            .values(
+                tenant_id=tenant_id,
+                fleet_id=fleet_id,
+                collection=collection,
+                doc_id=doc_id,
+                data=data,
+                agent_id=agent_id,
             )
-            result = await session.execute(stmt)
-            return result.scalar_one()
+            .on_conflict_do_update(
+                constraint="uq_documents_tenant_collection_doc",
+                set_={
+                    "data": data,
+                    "fleet_id": fleet_id,
+                    # ax-0917-m-14 — the upsert replaces the document, so
+                    # the author recorded is whoever wrote THIS version.
+                    # Keeping the original author would attribute someone
+                    # else's edit to the first writer.
+                    "agent_id": agent_id,
+                    "updated_at": datetime.now(UTC),
+                },
+            )
+            .returning(Document)
+        )
+        return (await session.execute(stmt)).scalar_one()
 
     # C34 — a replacement this much smaller than what is stored is treated as
     # a truncated payload, not an intentional edit. 10% keeps ordinary
@@ -10527,20 +10545,21 @@ class PostgresService:
     # guard stays out of the way of genuinely tiny documents.
     _SHRINK_MIN_STORED_BYTES = 2048
 
-    async def _guard_document_shrink(self, tenant_id: str, collection: str, doc_id: str, data: dict) -> None:
+    async def _guard_document_shrink(
+        self, session: AsyncSession, tenant_id: str, collection: str, doc_id: str, data: dict
+    ) -> None:
         """Refuse an upsert that would replace a substantial document with a
         near-empty one. Raises ``ValueError`` (surfaced as 400) naming both
         sizes and the override, so a caller who MEANT it can retry."""
-        async with get_session() as session:
-            stored = (
-                await session.execute(
-                    select(Document.data).where(
-                        Document.tenant_id == tenant_id,
-                        Document.collection == collection,
-                        Document.doc_id == doc_id,
-                    )
+        stored = (
+            await session.execute(
+                select(Document.data).where(
+                    Document.tenant_id == tenant_id,
+                    Document.collection == collection,
+                    Document.doc_id == doc_id,
                 )
-            ).scalar_one_or_none()
+            )
+        ).scalar_one_or_none()
         if stored is None:
             return
         old_len = len(json.dumps(stored, ensure_ascii=False))
@@ -10586,9 +10605,9 @@ class PostgresService:
         # the path INDEXED documents take (the one the 2026-08-27 data loss
         # actually went through), so guarding only the sibling would have
         # missed the real incident.
-        if not force:
-            await self._guard_document_shrink(tenant_id, collection, doc_id, data)
         async with get_session() as session:
+            if not force:
+                await self._guard_document_shrink(session, tenant_id, collection, doc_id, data)
             stmt = (
                 pg_insert(Document)
                 .values(
@@ -10912,6 +10931,7 @@ class PostgresService:
         doc_id: str,
         system: bool = False,
         require_status: str | None = None,
+        session: AsyncSession | None = None,
     ) -> UUID | None:
         """Delete by (tenant_id, collection, doc_id). Returns the deleted id or None.
 
@@ -10925,20 +10945,30 @@ class PostgresService:
         rows and returns ``None``, indistinguishable from a missing one (no
         existence leak). Home-tenant scoped (deletes never span readable
         tenants).
+
+        ``session``: delete inside the caller's transaction, as
+        ``document_upsert``.
         """
         if collection.startswith("_") and not system:
             raise ValueError(f"Collection '{collection}' is system-managed; use the dedicated endpoint.")
-        async with get_session() as session:
-            base = delete(Document).where(
-                Document.tenant_id == tenant_id,
-                Document.collection == collection,
-                Document.doc_id == doc_id,
-            )
-            if require_status is not None:
-                base = base.where(Document.data["status"].astext == require_status)
-            stmt = base.returning(Document.id)
-            result = await session.execute(stmt)
-            return result.scalar_one_or_none()
+        if session is None:
+            async with get_session() as own:
+                return await self.document_delete_by_doc_id(
+                    tenant_id=tenant_id,
+                    collection=collection,
+                    doc_id=doc_id,
+                    system=system,
+                    require_status=require_status,
+                    session=own,
+                )
+        base = delete(Document).where(
+            Document.tenant_id == tenant_id,
+            Document.collection == collection,
+            Document.doc_id == doc_id,
+        )
+        if require_status is not None:
+            base = base.where(Document.data["status"].astext == require_status)
+        return (await session.execute(base.returning(Document.id))).scalar_one_or_none()
 
     async def document_update_status(
         self,
