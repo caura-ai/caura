@@ -94,6 +94,8 @@ router = APIRouter(prefix="/keystones", tags=["Keystones"])
 # The versions reads (plan row g1.12) are served under /api/v1 only. app.py also
 # mounts ``router`` under the legacy prefix, for the CRUD that predates them.
 versions_router = APIRouter(prefix="/keystones/versions", tags=["Keystones"])
+# Storage numbers versions in an int4, and refuses a larger one too.
+_MAX_VERSION = 2**31 - 1
 
 
 # ── Schemas ──
@@ -675,6 +677,7 @@ async def list_keystone_versions(
     before: int | None = Query(
         default=None,
         ge=1,
+        le=_MAX_VERSION,
         description="The next_before of the previous page: versions below it.",
     ),
     auth: AuthContext = Depends(get_auth_context),
@@ -701,7 +704,7 @@ async def list_keystone_versions(
 
 @versions_router.get("/{version}", responses={200: {"model": _oar.KeystoneVersionDetail}})
 async def get_keystone_version(
-    version: int = Path(..., ge=1),
+    version: int = Path(..., ge=1, le=_MAX_VERSION),
     tenant_id: str = Query(...),
     fleet_id: str | None = Query(default=None),
     agent_id: str | None = Query(default=None),

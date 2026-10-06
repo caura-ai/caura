@@ -230,6 +230,16 @@ async def test_bad_reads_and_writes_are_refused(client: AsyncClient) -> None:
     assert resp.status_code == 404
     resp = await client.get(f"{PREFIX}/keystones/versions", params={"tenant_id": tenant, "agent_id": "a1"})
     assert resp.status_code == 422  # an agent's rules are keyed on its fleet
+    # ``version`` is an int4: a number outside it is refused, not sent to Postgres.
+    for path, params, status in (
+        ("/versions/0", {}, 422),
+        (f"/versions/{2**31}", {}, 422),
+        ("/versions", {"before": 2**31}, 422),
+        (f"/versions/{2**31 - 1}", {}, 404),
+        ("/versions", {"before": 2**31 - 1}, 200),
+    ):
+        resp = await client.get(f"{PREFIX}/keystones{path}", params={"tenant_id": tenant, **params})
+        assert resp.status_code == status, (path, params, resp.text)
     resp = await client.post(
         f"{PREFIX}/keystones", json={"tenant_id": tenant, **_rule("b"), "actor_agent_id": 7}
     )

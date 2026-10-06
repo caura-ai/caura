@@ -23,7 +23,7 @@ import logging
 import re
 from typing import cast
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Path, Query, Request, Response
 
 from core_storage_api.schemas import DOCUMENT_FIELDS, orm_to_dict
 from core_storage_api.services.keystones import (
@@ -55,6 +55,10 @@ _DOC_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 # fail every agent's list. (A ``text`` column, such as ``fleet_id``'s, refuses
 # both outright.)
 _UNREADABLE_TEXT_RE = re.compile(r"[\x00\ud800-\udfff]")
+
+# ``keystone_versions.version`` is an int4. A larger number can't be bound to
+# a query, so the versions routes refuse it rather than fail with a 500.
+_MAX_VERSION = 2**31 - 1
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +319,7 @@ async def keystone_versions(
     fleet_id: str | None = None,
     agent_id: str | None = None,
     limit: int = Query(default=50, ge=1, le=100),
-    before: int | None = Query(default=None, ge=1),
+    before: int | None = Query(default=None, ge=1, le=_MAX_VERSION),
 ) -> dict:
     """The tenant's keystone versions, newest first, each with the rule-set
     hash of what it gives ``(fleet_id, agent_id)``.
@@ -336,8 +340,8 @@ async def keystone_versions(
 
 @router.get("/versions/{version}")
 async def keystone_version(
-    version: int,
     tenant_id: str,
+    version: int = Path(..., ge=1, le=_MAX_VERSION),
     fleet_id: str | None = None,
     agent_id: str | None = None,
 ) -> dict:

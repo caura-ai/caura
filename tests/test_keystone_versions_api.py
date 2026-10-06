@@ -96,6 +96,26 @@ async def test_an_unknown_version_is_not_found(monkeypatch) -> None:
     assert exc.value.status_code == 404
 
 
+async def test_a_version_storage_cannot_number_is_refused_here(
+    client, tenant_id, monkeypatch
+) -> None:
+    """Storage numbers versions in an int4: a larger ``version`` or ``before``
+    is a 422 here, without a call to storage."""
+    sc = _storage(monkeypatch, list_keystone_versions=_PAGE, get_keystone_version={})
+    headers = get_admin_headers()
+    versions = "/api/v1/keystones/versions"
+    for path, status in (
+        (f"{versions}/{2**31}?tenant_id={tenant_id}", 422),
+        (f"{versions}?tenant_id={tenant_id}&before={2**31}", 422),
+        (f"{versions}/{2**31 - 1}?tenant_id={tenant_id}", 200),
+        (f"{versions}?tenant_id={tenant_id}&before={2**31 - 1}", 200),
+    ):
+        resp = await client.get(path, headers=headers)
+        assert resp.status_code == status, (path, resp.text)
+    assert sc.get_keystone_version.await_count == 1
+    assert sc.list_keystone_versions.await_count == 1
+
+
 # ── end to end ────────────────────────────────────────────────────────────
 
 
