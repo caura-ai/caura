@@ -134,6 +134,23 @@ def _entropy_ok(value: str) -> bool:
     return len(value) >= 16 and _shannon_entropy(value) >= 3.0
 
 
+# An identifier's pieces: words of two or more lower-case letters, each with at
+# most one capital in front (``Player``, ``inventory``), or an upper-case run.
+# Each repeat starts at a capital, so a lower-case run splits only one way and a
+# failed match backtracks in linear time; ``(?:[A-Z]?[a-z]{2,})+`` says the same
+# but is exponential on a long lower-case run, and this scans user content.
+_IDENTIFIER_PIECE_RE = re.compile(r"[A-Z]?[a-z]{2,}(?:[A-Z][a-z]{2,})*|[A-Z]{2,}")
+_IDENTIFIER_BREAK_RE = re.compile(r"[-_0-9]+")
+
+
+def _reads_as_words(value: str) -> bool:
+    """True when ``value`` is spelt in words, split at ``-``, ``_`` and digits:
+    ``PlayerInventorySerializationHandler``, ``Hynix-Memory-Roadmap-2026-Plan``.
+    """
+    pieces = [p for p in _IDENTIFIER_BREAK_RE.split(value) if p]
+    return bool(pieces) and all(_IDENTIFIER_PIECE_RE.fullmatch(p) for p in pieces)
+
+
 def _token_body_ok(value: str) -> bool:
     """Gate for prefix rules whose prefix alone is too common to trust.
 
@@ -145,12 +162,26 @@ def _token_body_ok(value: str) -> bool:
     cases, with the entropy floor on top, keeps those out. Digits are not
     required: a 43-char random base64url body has none about once in 1,500
     draws, while it lacks a case about once in ten billion.
+
+    A PascalCase or Title-Case identifier has both cases and enough entropy,
+    so a body that reads as words is set aside too (L-227). A random body
+    reads as words far less often than it lacks a digit: over 2,000,000
+    draws, once for a 43-char base64url body, and never for a 48-char base62
+    one.
     """
     return (
         any(c.islower() for c in value)
         and any(c.isupper() for c in value)
         and _entropy_ok(value)
+        and not _reads_as_words(value)
     )
+
+
+def _openai_key_ok(value: str) -> bool:
+    """Token-shape gate on the body after ``sk-``, as ``_caura_credential_ok``
+    gates the body after its prefix: the prefix's own lower case would let an
+    upper-case body pass the mixed-case test."""
+    return _token_body_ok(value.removeprefix("sk-"))
 
 
 # Every prefix Caura mints or still accepts on a credential — see the Caura
@@ -400,7 +431,7 @@ _RULES: tuple[_Rule, ...] = (
         PIICategory.API_KEY,
         Severity.HIGH,
         _c(r"\bsk-[0-9A-Za-z_\-]{20,}"),
-        validator=_token_body_ok,
+        validator=_openai_key_ok,
     ),  # OpenAI project / service-account / admin
     # Caura's own credentials — every prefix the platform mints or still
     # accepts (see caura-enterprise ``common/credential_schemes.py``):

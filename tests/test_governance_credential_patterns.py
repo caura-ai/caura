@@ -10,12 +10,20 @@ must keep ignoring.
   rule could see (``_`` is a word character, so no ``\\b`` before ``API_KEY``).
 * The JSON spelling ``"api_key": "…"`` put the name's closing quote where the
   key/value rules required ``:`` or ``=``.
+* L-227: the token-shape gate took any mixed-case, high-entropy body for a
+  minted one, so PascalCase and Title-Case identifiers after ``mc_``, ``ca_``
+  or ``sk-`` scanned as keys, and the ``sk-`` rule gated its whole match, so the
+  prefix's own lower case let an upper-case body through.
 
 False positives here are not free — the drop policy 422s the write and the
 mask policy rewrites stored content — so every widening carries negatives.
 """
 
 from __future__ import annotations
+
+import random
+import string
+import time
 
 import pytest
 
@@ -158,3 +166,41 @@ def test_json_quoted_key_names(text: str):
     assert masked.count("«SECRET»") == 1
     # The JSON key name stays readable.
     assert masked.split('"')[1] in masked
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the mc_PlayerInventorySerializationHandler class",
+        "set ca_CertificateBundlePathForProduction in the chart",
+        "see the sk-Hynix-Memory-Roadmap-2026-Plan deck",
+        # Upper-case only once the prefix is set aside: a part number, not a key.
+        "order sk-X9K2-PQ7R-ZT4M-WB8N-HC3J today",
+    ],
+)
+def test_identifiers_after_a_key_prefix_are_not_keys(text: str):
+    """L-227: these were refused under drop and rewritten under mask."""
+    assert PIICategory.API_KEY not in _cats(text)
+
+
+_URLSAFE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+@pytest.mark.parametrize("prefix", ["mc_", "ca_", "sk-proj-", "sk-svcacct-"])
+def test_minted_bodies_are_still_keys(prefix: str):
+    """Control: a body that reads as words is rare in a random one, so the
+    gate that sets identifiers aside still flags every minted key."""
+    rng = random.Random(227)
+    keys = [prefix + "".join(rng.choices(_URLSAFE, k=43)) for _ in range(2000)]
+    missed = [key for key in keys if PIICategory.API_KEY not in _cats(key)]
+    assert missed == []
+
+
+def test_the_word_test_is_linear_on_a_long_lower_case_run():
+    """Control: the body reaches the word test (mixed case, high entropy), and a
+    nested word pattern would backtrack exponentially on its lower-case run.
+    This scans user content."""
+    body = string.ascii_lowercase + string.ascii_lowercase[:18] + "Z"
+    started = time.perf_counter()
+    scan("mc_" + body)
+    assert time.perf_counter() - started < 1.0
