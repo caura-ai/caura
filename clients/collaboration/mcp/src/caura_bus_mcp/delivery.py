@@ -7,9 +7,15 @@ from contextlib import suppress
 
 import httpx
 from caura_bus_core.bus import PlatformError
+from caura_bus_core.consult import PresentedResponses
 from caura_bus_core.protocol import Claim
 
 log = logging.getLogger(__name__)
+
+ALREADY_PRESENTED = (
+    "This response was already shown in this session (collect or recent). Do not act on it "
+    "again; ack this delivery_id."
+)
 
 
 class DeliverySession:
@@ -21,6 +27,8 @@ class DeliverySession:
         self.renewal: asyncio.Task | None = None
         self.reply_keys: set[tuple[str, str]] = set()
         self.reply_deliveries: dict[str, tuple[str, str, str]] = {}
+        # Responses already shown via collect/recent(reply_to) or an earlier wait.
+        self.presented = PresentedResponses()
 
     @staticmethod
     def public(claim):
@@ -48,7 +56,14 @@ class DeliverySession:
                     await self._observe_pause(claim)
                 elif claim.state == "leased" and (not self.renewal or self.renewal.done()):
                     self.renewal = asyncio.create_task(self._renew())
-            return {"delivery": self.public(claim), "notices": result.get("notices", [])}
+            delivery = self.public(claim)
+            if claim and claim.envelope.kind == "response" and not self.presented.add(claim.envelope.id):
+                # Already in this conversation: show attribution, not the body again,
+                # and leave the queued delivery for a normal ACK.
+                delivery["envelope"]["body"] = None
+                delivery["already_presented"] = True
+                delivery["note"] = ALREADY_PRESENTED
+            return {"delivery": delivery, "notices": result.get("notices", [])}
 
     async def _observe_pause(self, claim):
         token = claim.lease_token

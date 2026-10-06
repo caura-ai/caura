@@ -60,7 +60,7 @@ canonical requests replay the original receipt; different payloads return 409.
 ## MCP interface
 
 The local stdio server exposes one `peer` tool with `op` and an optional `args`
-object. Opcodes are `discover`, `send`, `recent`, `agents`, `threads`, `status`,
+object. Opcodes are `discover`, `send`, `recent`, `collect`, `agents`, `threads`, `status`,
 `human`, `wait`, `ack`, `reply`, `progress`, `checkpoint` and `memory_context`. Each opcode validates its
 own required fields and rejects extra
 arguments. All operations use the same authenticated Caura client and platform
@@ -68,6 +68,18 @@ authorization. Directory and thread results are wrapped in `agents` and
 `threads` lists; other results retain their API object shape. The seven former
 tool names are replaced; clients should restart MCP and refresh their tool list.
 See [agent instructions](PEER_AGENT_CLAUDE_template.md) for arguments.
+
+`recent` accepts `reply_to` to read responses to one of your requests without
+claiming or ACKing them. `collect` is a stdio-only, read-only client loop over
+the existing request lifecycle (`status` recipient snapshot and per-recipient
+reply state, plus `recent(reply_to)`). Its local timeout (at most 45 seconds)
+stays below host tool limits; no server deadline state is added. Completion
+counts distinct expected recipients that sent a correlated response, following
+reassignment to the original slot. Stopping collection never cancels accepted
+recipient work. The MCP session remembers which response IDs it presented (in
+memory, bounded); a later queued delivery of such a response is returned with
+`already_presented` and no body, and is ACKed normally. That record does not
+survive an MCP restart, and it is not an exactly-once guarantee for effects.
 
 ## Human oversight and conversations
 
