@@ -15,6 +15,9 @@ from .config import require_api_key
 from .protocol import Claim, Receipt, SendMessage
 from .retry import Backoff, retry_after_seconds, transient_status
 
+# Sent instead of a gap when retention removed history after the stream cursor.
+RESYNC_EVENT = "stream.resync_required"
+
 
 class HumanRequired(RuntimeError):
     def __init__(self, intervention):
@@ -271,8 +274,22 @@ class Bus:
             "POST", "interventions", json={"delivery_id": delivery_id, "reason": reason}
         )
 
+    async def resync(self):
+        """Reload durable inbox state over REST after the stream lost history.
+
+        A read, so transient failures are retried like other safe calls.
+        """
+        return await self.request("GET", "inbox/state", retry_safe=True)
+
     async def events(self, after=0):
-        """Resume a live stream by durable cursor; reconnect revalidates credentials."""
+        """Resume a live stream by durable cursor; reconnect revalidates credentials.
+
+        When retention removed events after the cursor, Caura sends
+        ``stream.resync_required`` instead of skipping them. That event is
+        yielded with ``state`` holding a fresh REST snapshot (``resync()``),
+        and the stream continues from the event's ``resume_after``. Consumers
+        must treat it as "anything may have changed", never as unknown noise.
+        """
         cursor = after
         backoff = Backoff(maximum=15)
         while True:
@@ -290,7 +307,20 @@ class Bus:
                         async for line in response.aiter_lines():
                             if line.startswith("data: "):
                                 event = json.loads(line[6:])
-                                cursor = event["seq"]
+                                if event.get("event_type") == RESYNC_EVENT:
+                                    # Advance only after the reload succeeds;
+                                    # a failed reload reconnects and resyncs again.
+                                    try:
+                                        state = await self.resync()
+                                    except PlatformError as exc:
+                                        if not transient_status(exc.status):
+                                            raise
+                                        break
+                                    event = {**event, "state": state}
+                                    payload = event.get("payload") or {}
+                                    cursor = int(payload.get("resume_after", event["seq"]))
+                                else:
+                                    cursor = event["seq"]
                                 backoff.reset()
                                 yield event
             except httpx.TransportError:

@@ -9,7 +9,7 @@ from typing import Literal
 
 import httpx
 import typer
-from caura_bus_core import Bus, PlatformError, ResponseCollector, SendMessage, load_config
+from caura_bus_core import RESYNC_EVENT, Bus, PlatformError, ResponseCollector, SendMessage, load_config
 from caura_bus_core.config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH
 
 from .hooks import install_hooks
@@ -252,6 +252,12 @@ def watch(config: Path | None = typer.Option(None), after: int = 0):
     async def run():
         async with Bus(load_config(config)) as bus:
             async for event in bus.events(after=after):
+                if event["event_type"] == RESYNC_EVENT:
+                    typer.echo(
+                        f"Caura: events before #{event['seq']} were removed by retention; "
+                        "current inbox state was reloaded.",
+                        err=True,
+                    )
                 typer.echo(json.dumps(event, ensure_ascii=False))
 
     try:
