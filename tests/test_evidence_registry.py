@@ -58,6 +58,17 @@ def test_generated_evidence_mirrors_are_current() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_generated_block_replacement_treats_backslashes_literally() -> None:
+    begin = SCRIPT_API["BEGIN"]
+    end = SCRIPT_API["END"]
+    current = f"before\n{begin}\nold\n{end}\nafter\n"
+    block = f"{begin}\nliteral \\1 and \\g<claim>\n{end}"
+
+    assert SCRIPT_API["replace_block"](current, block, ROOT / "README.md") == (
+        f"before\n{block}\nafter\n"
+    )
+
+
 def test_every_claim_has_structured_evidence_metadata() -> None:
     required = {
         "last_verified_at",
@@ -184,7 +195,9 @@ def test_full_context_baseline_stays_withheld_until_owner_approval() -> None:
 
     assert claim["status"] == "withheld"
     assert claim["approved_wording"] is None
-    assert claim["code_commit"]["repository"] == "https://github.com/caura-ai/caura-locomo"
+    assert (
+        claim["code_commit"]["repository"] == "https://github.com/caura-ai/caura-locomo"
+    )
     assert claim["raw_result_url"].endswith("outputs/uniform/results_judge_gpt-4o.json")
     assert claim["reproducible_harness_url"].endswith(
         "c55d3a3fe8df01533690c7f2e6874e6a0e67c9be"

@@ -18,7 +18,9 @@ See [`../evidence/claims.json`](../evidence/claims.json) and
 
 ## What we optimize for
 
-Accuracy sits inside the leading cluster. That's not the axis we push hardest along.
+The approved results above cover accuracy and token efficiency. Production
+fleet decisions also require workload-specific latency and governance
+validation; no current public production-latency figure is claimed.
 
 - **Latency** — a few hundred ms of search disappears behind one LLM call when you run one agent. The same overhead, multiplied across thousands of agents making millions of recall calls a day, decides whether a deployment is viable.
 - **Token efficiency** — recall returns the relevant slice, not the full

@@ -346,7 +346,7 @@ def replace_block(current: str, block: str, path: Path) -> str:
             f"{path.relative_to(ROOT)} must contain exactly one generated block; "
             f"found {len(matches)}"
         )
-    return pattern.sub(block, current, count=1)
+    return pattern.sub(lambda _match: block, current, count=1)
 
 
 def expected_files(registry: dict[str, Any]) -> dict[Path, str]:

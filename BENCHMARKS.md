@@ -4,10 +4,9 @@ How Caura (formerly MemClaw) performs on the two most-cited public agent-memory 
 **LoCoMo** and **LongMemEval** — plus the fleet-shaped dimensions those
 single-agent benchmarks can't measure.
 
-> **TL;DR** — On accuracy, Caura sits inside the leading cluster (Caura,
-> Mem0, Zep land in a narrow band). Where we push hardest, and where it
-> compounds at fleet scale, is **latency, token efficiency, and governance
-> correctness**.
+> **TL;DR** — The approved results below cover accuracy and token efficiency.
+> Production fleet decisions also require workload-specific latency and
+> governance validation; no current public production-latency figure is claimed.
 
 ## Results
 
