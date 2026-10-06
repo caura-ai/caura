@@ -10,6 +10,55 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.22.0](https://github.com/caura-ai/caura/compare/backend-v3.21.9...backend-v3.22.0) (2026-10-06)
+
+
+### Features
+
+* **audit:** filter the audit log by agent and memory, and page it with a keyset cursor ([#1842](https://github.com/caura-ai/caura/issues/1842)) ([2babd8d](https://github.com/caura-ai/caura/commit/2babd8d6d30e4c18be91dbf49f44b85e115ef82a))
+* **compose:** run the lifecycle scheduler in the stock stack ([#1827](https://github.com/caura-ai/caura/issues/1827)) ([7de50d6](https://github.com/caura-ai/caura/commit/7de50d69c266c7dd36ec8a3eb426fcd19f96368b))
+* **storage:** a backfill for rows whose parent is gone ([#1871](https://github.com/caura-ai/caura/issues/1871)) ([a1c13e1](https://github.com/caura-ai/caura/commit/a1c13e1f7618cf4f2d43a18382f4a572acbd9620))
+
+
+### Bug Fixes
+
+* **agent-digest:** run each org on the cadence it chose ([#1824](https://github.com/caura-ai/caura/issues/1824)) ([4aa1f59](https://github.com/caura-ai/caura/commit/4aa1f590b7e0c041329daeb37f7039c1a976f719))
+* **auth:** hold install credentials to the agent they own on tune and docs ([#1859](https://github.com/caura-ai/caura/issues/1859)) ([601e300](https://github.com/caura-ai/caura/commit/601e300cb73e505d51243c89fbd5ed0edd439a56))
+* **auth:** pair a scope_agent read with the caller's home tenant everywhere ([#1862](https://github.com/caura-ai/caura/issues/1862)) ([818cabe](https://github.com/caura-ai/caura/commit/818cabebfa75c062d4ce6bd733cb71dde308f978))
+* **core-operations:** the reconcile tick survives a 2xx it cannot read ([#1826](https://github.com/caura-ai/caura/issues/1826)) ([4cc6419](https://github.com/caura-ai/caura/commit/4cc64199460ad539895a01b94967b2169576fa5b))
+* **crystallizer:** reopen settled rows when a sweep setting changes, and settle an empty answer ([#1818](https://github.com/caura-ai/caura/issues/1818)) ([d485655](https://github.com/caura-ai/caura/commit/d485655d754a3a5cc0952617c7c772cd910c7bc6))
+* **documents:** a fleet-bound reader sees tenant-wide skills on every read ([#1870](https://github.com/caura-ai/caura/issues/1870)) ([315c0cc](https://github.com/caura-ai/caura/commit/315c0cc40e4376056bc055612280ab80e7b489ce))
+* **documents:** refuse agents awaiting approval and the interview collections ([#1865](https://github.com/caura-ai/caura/issues/1865)) ([348270d](https://github.com/caura-ai/caura/commit/348270d85ccf6a964143afdd724911de62119f47))
+* **enrichment:** merge the inline write-back and fan out its own dates ([#1855](https://github.com/caura-ai/caura/issues/1855)) ([6974a67](https://github.com/caura-ai/caura/commit/6974a670323a12636b6a02a4ac085b76c57b6efc))
+* **entities:** a relation re-upsert without a weight keeps the stored one ([#1831](https://github.com/caura-ai/caura/issues/1831)) ([4571ff1](https://github.com/caura-ai/caura/commit/4571ff1c3f7b4583616ca7379a74bc35c337a6e6))
+* **entities:** an upsert merges into the stored entity and never removes from it ([#1830](https://github.com/caura-ai/caura/issues/1830)) ([cd75e0f](https://github.com/caura-ai/caura/commit/cd75e0f0fad8fc8976f93a18c0451b6a4e590964))
+* **entities:** entity search finds aliases and takes the search text literally ([#1835](https://github.com/caura-ai/caura/issues/1835)) ([38e083d](https://github.com/caura-ai/caura/commit/38e083d7fa1be8068c92f55b70254873e54307b1))
+* **entities:** entity-linking fleet scope, merge counts and backfill paging ([#1834](https://github.com/caura-ai/caura/issues/1834)) ([e613e26](https://github.com/caura-ai/caura/commit/e613e26eef981658b2195109b9a4b8e8a3688bb7))
+* **entities:** extraction never writes a graph for text the memory no longer holds ([#1829](https://github.com/caura-ai/caura/issues/1829)) ([f867ed5](https://github.com/caura-ai/caura/commit/f867ed53d30f3efdf7ef66d5b91ef10949e09e3d))
+* **entities:** graph writes take the memory write's fleet and trust gates ([#1874](https://github.com/caura-ai/caura/issues/1874)) ([e5524ec](https://github.com/caura-ai/caura/commit/e5524ece0bf732572f60f6eda6d5dbc118fc389d))
+* **entities:** keep an entity hidden from an agent hidden by id and name ([#1866](https://github.com/caura-ai/caura/issues/1866)) ([a881fc4](https://github.com/caura-ai/caura/commit/a881fc46612e109ac8c150ae66715119c2d06fe3))
+* **entities:** make exact lookups agree with the natural-key index ([#1828](https://github.com/caura-ai/caura/issues/1828)) ([cdc671f](https://github.com/caura-ai/caura/commit/cdc671f582d66853a384233a706c49185d0719a5))
+* **entities:** nightly duplicate resolution merges within one fleet ([#1872](https://github.com/caura-ai/caura/issues/1872)) ([ad6df90](https://github.com/caura-ai/caura/commit/ad6df90a17ca4a2cbfb013e8c2cd68e112feebfa))
+* **evolve:** name a rule skip whose supplied ids were all out of scope ([#1836](https://github.com/caura-ai/caura/issues/1836)) ([2248831](https://github.com/caura-ai/caura/commit/224883182430846ac4fbfe3c2ba7da25f64e298c))
+* **ingest:** attribute the parent document and write facts in strong mode ([#1840](https://github.com/caura-ai/caura/issues/1840)) ([724454a](https://github.com/caura-ai/caura/commit/724454a04a48cfb0c216a3e1f572931e3b3c4656))
+* **ingest:** block shared address space and untyped URL responses ([#1838](https://github.com/caura-ai/caura/issues/1838)) ([16ee566](https://github.com/caura-ai/caura/commit/16ee56609f85f232ecd1f1dfd91e0c0bac1b1fc5))
+* **ingest:** build the parent summary from the governed facts ([#1857](https://github.com/caura-ai/caura/issues/1857)) ([43df44a](https://github.com/caura-ai/caura/commit/43df44a1d80b0cfa82a9fc41967fdf7d69b36943))
+* **ingest:** keep code nested in list items and blockquotes ([#1837](https://github.com/caura-ai/caura/issues/1837)) ([b1f01f5](https://github.com/caura-ai/caura/commit/b1f01f57411db4a28eeb515067ef613d6e61a1c2))
+* **ingest:** report failed sections and never cache a partial preview ([#1841](https://github.com/caura-ai/caura/issues/1841)) ([e9af600](https://github.com/caura-ai/caura/commit/e9af600545e39c8f5792ece65cd5bf0423846652))
+* **ingest:** serve the doc-hash cache from the caller's own runs only ([#1839](https://github.com/caura-ai/caura/issues/1839)) ([80a733e](https://github.com/caura-ai/caura/commit/80a733e68260e179fcdebcb988486de56d6bc747))
+* **lifecycle:** honour the per-tenant lifecycle automation switch in the nightly fanout ([#1823](https://github.com/caura-ai/caura/issues/1823)) ([14848fc](https://github.com/caura-ai/caura/commit/14848fcf8bbc6e68742c2b427b7b2ebeff4625ae))
+* **lifecycle:** never run an op unclaimed, and retry its success write in place ([#1821](https://github.com/caura-ai/caura/issues/1821)) ([071a8a2](https://github.com/caura-ai/caura/commit/071a8a26ecb8df73b1d11c8a7f5e75fb07edbd37))
+* **memories:** a content edit clears the old predicate and object with the subject ([#1832](https://github.com/caura-ai/caura/issues/1832)) ([90e14b5](https://github.com/caura-ai/caura/commit/90e14b5a231ae075d21520035cb096faee303d51))
+* **memories:** a parent PATCH reaches the rows derived from it ([#1860](https://github.com/caura-ai/caura/issues/1860)) ([2db09c6](https://github.com/caura-ai/caura/commit/2db09c68a57d1a1f2f4f3a1d62df43604fd9bb7d))
+* **memories:** an auto-chunked write keeps its links, inferred flag and types ([#1869](https://github.com/caura-ai/caura/issues/1869)) ([f01083b](https://github.com/caura-ai/caura/commit/f01083b1b38eb4808ef9ea57fc962eff6530829d))
+* **memory:** re-enrich and govern an edited memory's new text ([#1858](https://github.com/caura-ai/caura/issues/1858)) ([0538c8a](https://github.com/caura-ai/caura/commit/0538c8adff05debe70fdb31da0d4673921d3fab0))
+* **pipeline:** create an identifier subject's entity only after the row is written ([#1833](https://github.com/caura-ai/caura/issues/1833)) ([268a740](https://github.com/caura-ai/caura/commit/268a7408298a45de934e76e0eaf56fd3646c09e7))
+* **plugin:** the memory-flush turn honors the auto-write opt-out ([#1868](https://github.com/caura-ai/caura/issues/1868)) ([ea13ec8](https://github.com/caura-ai/caura/commit/ea13ec8570952375824d09493101587f5e13f1c4))
+* **storage:** add create-only agent registration for provisioning ([#1867](https://github.com/caura-ai/caura/issues/1867)) ([0b19738](https://github.com/caura-ai/caura/commit/0b197388fc779fceb7fed1dc22779003abd6071e))
+* **storage:** address a document by its exact collection and doc_id ([#1861](https://github.com/caura-ai/caura/issues/1861)) ([951249f](https://github.com/caura-ai/caura/commit/951249fbc8e890905590212f4c0d95ffb5cc338e))
+* **storage:** an entity named only as a memory's subject follows its visibility ([#1863](https://github.com/caura-ai/caura/issues/1863)) ([daf69f9](https://github.com/caura-ai/caura/commit/daf69f9f01c19567d1dd9f34a8a4dee17f86670e))
+* **storage:** index the ingest doc-hash lookup ([#1856](https://github.com/caura-ai/caura/issues/1856)) ([63c83e9](https://github.com/caura-ai/caura/commit/63c83e904d463dc073b6c547b32df0e87cf316ca))
+
 ## [3.21.9](https://github.com/caura-ai/caura/compare/backend-v3.21.8...backend-v3.21.9) (2026-10-04)
 
 

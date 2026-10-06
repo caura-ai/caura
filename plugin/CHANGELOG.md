@@ -4,6 +4,14 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [2.23.6](https://github.com/caura-ai/caura/compare/plugin-v2.23.5...plugin-v2.23.6) (2026-10-06)
+
+
+### Bug Fixes
+
+* **documents:** refuse agents awaiting approval and the interview collections ([#1865](https://github.com/caura-ai/caura/issues/1865)) ([348270d](https://github.com/caura-ai/caura/commit/348270d85ccf6a964143afdd724911de62119f47))
+* **plugin:** the memory-flush turn honors the auto-write opt-out ([#1868](https://github.com/caura-ai/caura/issues/1868)) ([ea13ec8](https://github.com/caura-ai/caura/commit/ea13ec8570952375824d09493101587f5e13f1c4))
+
 ## [2.23.5](https://github.com/caura-ai/caura/compare/plugin-v2.23.4...plugin-v2.23.5) (2026-10-04)
 
 
