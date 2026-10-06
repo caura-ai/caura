@@ -11,6 +11,10 @@ entity list and the graph for those readers too, and a relation is hidden from
 every reader once it has evidence and none of that evidence is live. Both come
 back if the delete is undone. Entities and relations with no memory behind them
 stay visible, as they do for agents.
+
+Search's graph expansion (``entity_expand_graph``) walked every edge, so one
+mined only from a deleted memory still decided which entities, and so which
+memories, graph boosting lifted. It follows the same rule now.
 """
 
 from __future__ import annotations
@@ -165,3 +169,28 @@ async def test_undoing_the_delete_brings_the_entity_and_its_edges_back() -> None
     assert edge in await _outgoing_ids(svc, shared.id, tenant)
     _entities, relations = await svc.entity_get_full_graph(tenant)
     assert edge in {r.id for r in relations}
+
+
+@pytest.mark.parametrize("use_union", [False, True])
+async def test_graph_expansion_walks_only_edges_with_live_evidence(use_union: bool) -> None:
+    svc = PostgresService()
+    tenant = _tenant()
+    note, kept = await _memory(svc, tenant), await _memory(svc, tenant)
+    hub = await _entity(svc, tenant, "Hub")
+    dead_out, live_out, bare_out, dead_in, live_in, beyond = [
+        (await _entity(svc, tenant, name)).id
+        for name in ("Dead out", "Live out", "Bare out", "Dead in", "Live in", "Beyond")
+    ]
+    await _relation(tenant, hub.id, dead_out, note.id)
+    # Its latest evidence is the deleted note, but a live memory asserted it too.
+    await _relation(tenant, hub.id, live_out, note.id, kept.id)
+    await _relation(tenant, hub.id, bare_out)
+    await _relation(tenant, dead_in, hub.id, note.id)
+    await _relation(tenant, live_in, hub.id, kept.id)
+    # A live edge, reachable only through the dead one: the second hop must not start there.
+    await _relation(tenant, dead_out, beyond, kept.id)
+
+    await svc.memory_soft_delete_by_ids(tenant, [note.id])
+
+    hops = await svc.entity_expand_graph([hub.id], tenant, None, max_hops=2, use_union=use_union)
+    assert set(hops) == {hub.id, live_out, bare_out, live_in}

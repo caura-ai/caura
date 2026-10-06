@@ -8387,6 +8387,9 @@ class PostgresService:
                     )
                     frontier = capped
 
+                # M-92: skip an edge mined only from soft-deleted memories, as
+                # every other relation reader does, so it neither steers
+                # boosting nor adds its far end to the next hop.
                 fwd = select(
                     Relation.to_entity_id,
                     Relation.relation_type,
@@ -8394,6 +8397,7 @@ class PostgresService:
                 ).where(
                     Relation.tenant_id == tenant_id,
                     Relation.from_entity_id.in_(frontier),
+                    _relation_has_live_evidence(),
                 )
                 rev = select(
                     Relation.from_entity_id,
@@ -8402,6 +8406,7 @@ class PostgresService:
                 ).where(
                     Relation.tenant_id == tenant_id,
                     Relation.to_entity_id.in_(frontier),
+                    _relation_has_live_evidence(),
                 )
                 if fleet_id:
                     fwd = fwd.where(or_(Relation.fleet_id == fleet_id, Relation.fleet_id.is_(None)))
