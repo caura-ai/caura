@@ -10829,8 +10829,8 @@ class PostgresService:
         else:
             tenant_pred = Document.tenant_id == tenant_id
         distance = Document.embedding.cosine_distance(query_embedding)
-        stmt = (
-            select(Document, distance.label("distance"))
+        nearest = (
+            select(Document.id, distance.label("distance"))
             .where(
                 tenant_pred,
                 Document.embedding.is_not(None),
@@ -10839,12 +10839,20 @@ class PostgresService:
             .limit(max(top_k, 1))
         )
         if collection is not None:
-            stmt = stmt.where(Document.collection == collection)
+            nearest = nearest.where(Document.collection == collection)
         if fleet_id:
-            stmt = stmt.where(_document_fleet_clause(collection, fleet_id))
+            nearest = nearest.where(_document_fleet_clause(collection, fleet_id))
         if status is not None:
-            stmt = stmt.where(Document.data["status"].astext == status)
+            nearest = nearest.where(Document.data["status"].astext == status)
+        # Re-sorted outside the scan; see ``_scan_past_other_tenants``.
+        found = nearest.subquery()
+        stmt = (
+            select(Document, found.c.distance)
+            .join(found, Document.id == found.c.id)
+            .order_by(found.c.distance)
+        )
         async with get_read_session() as session:
+            await _scan_past_other_tenants(session)
             result = await session.execute(stmt)
             return [(row.Document, 1.0 - float(row.distance)) for row in result.all()]
 
