@@ -10,6 +10,19 @@ Only the most recent releases are listed below. Every release, including those
 no longer shown here, is published with its full notes at
 [github.com/caura-ai/caura/releases](https://github.com/caura-ai/caura/releases).
 
+## [3.24.1](https://github.com/caura-ai/caura/compare/backend-v3.24.0...backend-v3.24.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **interview:** an LLM outage no longer consumes the window ([#1939](https://github.com/caura-ai/caura/issues/1939)) ([b896da5](https://github.com/caura-ai/caura/commit/b896da5cbb90d7462577caa334f49341962cff32))
+* **startup:** refuse deferred mode on the in-process event bus ([#1941](https://github.com/caura-ai/caura/issues/1941)) ([406ebe4](https://github.com/caura-ai/caura/commit/406ebe4e718b750b48459d2e7eadec0039ac0ffa))
+
+
+### Dependencies
+
+* bump the uv-minor-patch group across 4 directories with 9 updates ([#1878](https://github.com/caura-ai/caura/issues/1878)) ([20a7dec](https://github.com/caura-ai/caura/commit/20a7deca6e78aacdc696acbbb27995496f379f6c))
+
 ## [3.24.0](https://github.com/caura-ai/caura/compare/backend-v3.23.1...backend-v3.24.0) (2026-10-06)
 
 
