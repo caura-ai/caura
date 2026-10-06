@@ -8,6 +8,7 @@ The check refuses a release unless:
 
 * ``dist/`` holds exactly one wheel and one sdist for each of the four packages
   and nothing else, all at one version (and at ``--expect-version`` when given);
+* every distribution declares Apache-2.0 and ships its LICENSE and NOTICE;
 * every intra-family dependency is pinned to that exact version, so a published
   ``caura-bus-mcp`` can never resolve against a different ``caura-bus-core``;
 * the four wheels install into a fresh virtualenv created in an empty temporary
@@ -94,6 +95,11 @@ def check_pins(version: str, wheels: dict[str, Path]) -> None:
             metadata = email.parser.Parser().parsestr(archive.read(metadata_name).decode())
         if metadata["Version"] != version:
             fail(f"{wheel.name} metadata says {metadata['Version']}")
+        # Apache-2.0 4(a)/(d): every distribution carries the license text and NOTICE.
+        if metadata["License"] != "Apache-2.0" or {"LICENSE", "NOTICE"} - set(
+            metadata.get_all("License-File") or []
+        ):
+            fail(f"{wheel.name} must declare Apache-2.0 and ship LICENSE and NOTICE")
         requires = {}
         for requirement in metadata.get_all("Requires-Dist") or []:
             match = re.match(r"^([A-Za-z0-9_.-]+)\s*(.*)$", requirement)
