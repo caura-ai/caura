@@ -2593,3 +2593,89 @@ async def test_stop_grace_is_bounded() -> None:
 
     assert task.done()
     assert out["acked"] == []
+
+
+# ---------------------------------------------------------------------------
+# stop_consuming(): the consuming half of stop(), for a shutdown to run first
+# ---------------------------------------------------------------------------
+
+
+async def test_stop_consuming_ends_the_pull_loop_and_leaves_publishing_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-09: core-api reached ``stop()`` only after its flushes, and until then
+    its pull loops kept taking lifecycle runs a SIGKILL would strand.
+    ``stop_consuming()`` ends them at the top of shutdown: the running handler
+    finishes and is acked, the rest of its batch goes back, no new pull is made,
+    and publishing stays up for the work that drains after it."""
+    bus = PubSubEventBus(
+        project_id="proj", subscription_prefix="test", dual_subscribe=True
+    )
+    started = asyncio.Event()
+    finished: list[bool] = []
+
+    async def handler(_event: Event) -> None:
+        started.set()
+        await asyncio.sleep(0.2)
+        finished.append(True)
+
+    received = [
+        _make_received(EMBEDDED_EVENT_BYTES, "ack-1", {}),
+        _make_received(EMBEDDED_EVENT_BYTES, "ack-2", {}),
+    ]
+    out = _running_pull_loop(bus, received, handler)
+    monkeypatch.setattr(asyncio.get_running_loop(), "run_in_executor", _direct_run)
+    task = asyncio.create_task(bus._pull_loop("sub", [handler]))
+    bus._pull_tasks.append(task)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    await asyncio.wait_for(bus.stop_consuming(), timeout=5.0)
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert finished == [True], "the running handler was cancelled instead of drained"
+    assert out["acked"] == ["ack-1"]
+    assert out["nacked"] == [("ack-2", 0)]
+    assert bus._subscriber.pull.call_count == 1, "a new delivery was pulled"
+    assert bus._get_publish_executor() is not None
+    assert not bus.is_healthy, "a bus that no longer consumes reported healthy"
+    await bus.stop()
+
+
+async def test_stop_consuming_cancels_a_handler_that_outlasts_the_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the grace the handler is cancelled and awaited, so a lifecycle run
+    releases its claim inside the SIGTERM budget. That cancellation is the
+    shutdown's, not a halted subscription."""
+    bus = PubSubEventBus(
+        project_id="proj",
+        subscription_prefix="test",
+        dual_subscribe=True,
+        stop_grace_seconds=0.1,
+    )
+    started = asyncio.Event()
+    cancelled: list[bool] = []
+
+    async def handler(_event: Event) -> None:
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    out = _running_pull_loop(
+        bus, [_make_received(EMBEDDED_EVENT_BYTES, "ack-1", {})], handler
+    )
+    monkeypatch.setattr(asyncio.get_running_loop(), "run_in_executor", _direct_run)
+    task = asyncio.create_task(bus._pull_loop("sub", [handler]))
+    bus._pull_tasks.append(task)
+    await asyncio.wait_for(started.wait(), timeout=2.0)
+
+    await asyncio.wait_for(bus.stop_consuming(), timeout=3.0)
+
+    assert task.done()
+    assert cancelled == [True]
+    assert out["acked"] == []
+    assert bus._failed_subscriptions == set()
+    await bus.stop()

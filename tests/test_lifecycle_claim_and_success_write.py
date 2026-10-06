@@ -18,10 +18,17 @@ backfill handler also ignored its claim's answer, so a redelivery re-swept at
 once and republished an embed request for every row still queued; it now
 claims with a token and honours ``noop`` and ``claim_conflict`` as
 ``_run_action`` does.
+
+M-09 and L-231: a shutdown that outlasts the bus's stop grace cancels the
+handler. ``_run_action`` released its claim when cancelled mid-op, but not when
+cancelled while its success write waited to retry, and the backfill handler
+never did. Either way the row stayed claimed for the lease, and its redelivery
+nacked on the claim until then.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from functools import partial
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -234,3 +241,43 @@ async def test_the_backfill_retries_a_flaky_success_write_in_place():
         await consumer.handle_embed_backfill_request(_backfill_event())
     sweep.assert_awaited_once()
     assert _backfill_statuses(audit) == ["in_progress", "success", "success"]
+
+
+# ── a cancel on the way out (M-09, L-231) ─────────────────────────────────
+
+
+async def test_a_cancel_while_the_success_write_waits_still_records_the_success(
+    monkeypatch,
+):
+    """The op has run and its success write is waiting to retry when shutdown
+    cancels the handler. One bounded write records the success under the claim
+    before the cancellation goes on, so the redelivery acks instead of running
+    the op again."""
+    monkeypatch.setattr(
+        lifecycle_handlers, "_SUCCESS_WRITE_RETRY_DELAYS_SECONDS", (60.0,)
+    )
+    adapter = _Adapter(success_errors=[RuntimeError("storage 503")])
+    task = asyncio.create_task(_handler(adapter)(_event()))
+    for _ in range(200):
+        if len(adapter.writes) == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert adapter.runs == 1
+    assert _statuses(adapter) == ["in_progress", "success", "success"]
+    assert len({token for _, token in adapter.writes}) == 1
+
+
+async def test_a_backfill_cancelled_mid_sweep_releases_its_claim():
+    with _backfill([{}, {}]) as (sweep, audit):
+        sweep.side_effect = asyncio.CancelledError
+        with pytest.raises(asyncio.CancelledError):
+            await consumer.handle_embed_backfill_request(_backfill_event())
+    assert _backfill_statuses(audit) == ["in_progress", "failure"]
+    tokens = [c.kwargs.get("claim_token") for c in audit.await_args_list]
+    assert tokens[0] is not None and tokens[0] == tokens[1]
+    assert "cancelled" in audit.await_args_list[1].kwargs["error_message"]

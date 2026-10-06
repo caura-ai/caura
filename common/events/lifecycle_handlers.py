@@ -262,6 +262,51 @@ async def claim_audit_row(
     return True
 
 
+async def release_cancelled_claim(
+    write: _AuditWrite,
+    audit_id: int,
+    *,
+    org_id: str,
+    action: str,
+    claim_token: str,
+    finished_stats: dict | None = None,
+) -> None:
+    """Close a cancelled run's claim, so its redelivery need not wait out the lease.
+
+    A cancel is in practice a shutdown that outlasted the bus's stop grace. Left
+    alone, the row stays ``in_progress`` under this run's claim, and since the
+    message was neither acked nor nacked, its redelivery nacks on
+    ``claim_conflict`` until the lease expires, an hour later. A run cancelled
+    mid-op records a failure, so the redelivery claims the row and runs the op.
+    One cancelled once the op had finished (``finished_stats``) records the
+    success, so the redelivery acks instead of running it again (M-09).
+
+    Bounded by ``_CANCEL_RELEASE_TIMEOUT_SECONDS``, since it runs inside the
+    shutdown that cancelled it; past that the claim lapses with its lease. Never
+    raises: the caller re-raises the cancellation, which is not ours to swallow.
+    """
+    outcome: dict[str, object]
+    if finished_stats is None:
+        outcome = {
+            "status": "failure",
+            "error_message": "interrupted: the consumer was cancelled mid-run",
+        }
+    else:
+        outcome = {"status": "success", "stats": finished_stats}
+    try:
+        await asyncio.wait_for(
+            write(audit_id, org_id=org_id, claim_token=claim_token, **outcome),
+            timeout=_CANCEL_RELEASE_TIMEOUT_SECONDS,
+        )
+    except BaseException:
+        logger.warning(
+            "lifecycle audit claim release after cancellation failed; "
+            "the claim lapses with its lease",
+            exc_info=True,
+            extra={"audit_id": audit_id, "action": action},
+        )
+
+
 async def write_success(
     write: _AuditWrite,
     audit_id: int,
@@ -275,30 +320,42 @@ async def write_success(
 
     The work is done; a nack here would re-run all of it once the claim lease
     lapses. So a failed write is retried with the same token, which storage
-    accepts as the holder's own, before giving up to the nack.
+    accepts as the holder's own, before giving up to the nack. A cancel while it
+    retries still records the success, once and bounded.
     """
     delays = iter(_SUCCESS_WRITE_RETRY_DELAYS_SECONDS)
-    while True:
-        try:
-            finalize = await write(
-                audit_id,
-                org_id=org_id,
-                status="success",
-                stats=stats,
-                claim_token=claim_token,
-            )
-            break
-        except Exception:
-            delay = next(delays, None)
-            if delay is None:
-                raise
-            logger.warning(
-                "lifecycle audit success write failed; retrying in %ss",
-                delay,
-                exc_info=True,
-                extra={"audit_id": audit_id, "action": action},
-            )
-            await asyncio.sleep(delay)
+    try:
+        while True:
+            try:
+                finalize = await write(
+                    audit_id,
+                    org_id=org_id,
+                    status="success",
+                    stats=stats,
+                    claim_token=claim_token,
+                )
+                break
+            except Exception:
+                delay = next(delays, None)
+                if delay is None:
+                    raise
+                logger.warning(
+                    "lifecycle audit success write failed; retrying in %ss",
+                    delay,
+                    exc_info=True,
+                    extra={"audit_id": audit_id, "action": action},
+                )
+                await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        await release_cancelled_claim(
+            write,
+            audit_id,
+            org_id=org_id,
+            action=action,
+            claim_token=claim_token,
+            finished_stats=stats,
+        )
+        raise
 
     if isinstance(finalize, dict) and finalize.get("claim_lost"):
         # Our claim was taken over by another delivery while this run was
@@ -440,31 +497,15 @@ async def _run_action(
     try:
         count = await run_op(request)
     except asyncio.CancelledError:
-        # Cancelled mid-run -- in practice a shutdown that outlasted the bus's
-        # stop grace. ``except Exception`` does not see this, so the row used to
-        # stay ``in_progress`` under our claim, and since the message was neither
-        # acked nor nacked its redelivery hit ``claim_conflict`` and nacked until
-        # the claim lease expired, an hour later. Finalise the row as a failure
-        # with our token so the redelivery can claim it straight away, then
-        # re-raise: cancellation is not ours to swallow.
-        try:
-            await asyncio.wait_for(
-                adapter.update_lifecycle_audit_row(
-                    audit_id,
-                    org_id=org_id,
-                    status="failure",
-                    error_message="interrupted: the consumer was cancelled mid-run",
-                    claim_token=claim_token,
-                ),
-                timeout=_CANCEL_RELEASE_TIMEOUT_SECONDS,
-            )
-        except BaseException:
-            logger.warning(
-                "lifecycle audit claim release after cancellation failed; "
-                "the claim lapses with its lease",
-                exc_info=True,
-                extra={"audit_id": audit_id, "action": action},
-            )
+        # ``except Exception`` does not see this, so the row used to stay
+        # ``in_progress`` under our claim for the lease.
+        await release_cancelled_claim(
+            adapter.update_lifecycle_audit_row,
+            audit_id,
+            org_id=org_id,
+            action=action,
+            claim_token=claim_token,
+        )
         raise
     except Exception as exc:
         # ``PermanentOpError`` means the op has established that a retry cannot

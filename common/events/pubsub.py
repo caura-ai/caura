@@ -529,6 +529,9 @@ class PubSubEventBus(EventBus):
         self._dispatching: set[asyncio.Task[Any]] = set()
         self._stop_grace_seconds = stop_grace_seconds
         self._stopping = False
+        # Set by ``stop_consuming()``: the pull loops take nothing new, while
+        # publishing, which ``_stopping`` would refuse, carries on.
+        self._draining = False
         self._publish_concurrency = publish_concurrency
         # One-shot flag so the "subscribe without start()" warning fires
         # on the first publish only — otherwise we'd spam the log under
@@ -764,6 +767,8 @@ class PubSubEventBus(EventBus):
            cancelled its pull tasks and is actively tearing down.
            Checking this first means the graceful-shutdown window
            starts when ``stop()`` is *called*, not when it *completes*.
+           ``stop_consuming()``, which a shutdown can run before ``stop()``,
+           counts the same from when it is called.
         2. Handlers were registered via ``subscribe()`` but ``start()``
            was never awaited — the pull loops don't exist, so every
            inbound event is silently dropped. ``_failed_subscriptions``
@@ -785,7 +790,7 @@ class PubSubEventBus(EventBus):
         misconfigured pod is marked unhealthy instead of silently
         dropping events while the HTTP surface stays green.
         """
-        if self._stopped:
+        if self._stopped or self._draining:
             return False
         if self._handlers and not self._started:
             return False
@@ -1322,7 +1327,7 @@ class PubSubEventBus(EventBus):
             )
 
         current = asyncio.current_task()
-        while not self._stopping:
+        while not (self._stopping or self._draining):
             # Declared out here so the ``finally`` can always see them,
             # including when the pull itself raises before a batch exists.
             lease_keeper: asyncio.Task[Any] | None = None
@@ -1363,9 +1368,9 @@ class PubSubEventBus(EventBus):
                         )
                     )
                 for received in response.received_messages:
-                    if self._stopped:
-                        # ``stop()`` has begun (it sets ``_stopped`` first): hand
-                        # the rest of the batch straight back (deadline 0) for
+                    if self._stopped or self._draining:
+                        # ``stop()`` or ``stop_consuming()`` has begun: hand the
+                        # rest of the batch straight back (deadline 0) for
                         # another instance, rather than starting handlers the
                         # stop grace would only cancel.
                         nack_ids.setdefault(0, []).append(received.ack_id)
@@ -1554,7 +1559,7 @@ class PubSubEventBus(EventBus):
                 # the ``NotFound``/``PermissionDenied``/``InvalidArgument``
                 # branch above, since both classes of error are unsafe
                 # to retry without operator intervention.
-                if not self._stopping:
+                if not (self._stopping or self._draining):
                     self._failed_subscriptions.add(subscription_name)
                 raise
             except Exception:
@@ -1712,13 +1717,13 @@ class PubSubEventBus(EventBus):
         """Wait, bounded by ``stop_grace_seconds``, for pull tasks holding a
         batch to finish it.
 
-        Called by ``stop()`` after ``_stopping`` is set and BEFORE the subscriber
-        is closed: a task finishing its batch still needs the client to ack it,
-        and then exits on its own because the loop condition is false. Cancelling
-        straight away, as ``stop()`` used to, raised ``CancelledError`` inside
-        whatever handler was running -- a lifecycle run, for one, left its audit
-        row claimed ``in_progress`` until the claim lease expired, and its message
-        neither acked nor nacked.
+        Called by ``stop_consuming()`` after ``_draining`` is set and BEFORE the
+        subscriber is closed: a task finishing its batch still needs the client to ack
+        it, and then exits on its own because the loop condition is false. Cancelling
+        straight away, as ``stop()`` used to, raised ``CancelledError`` inside whatever
+        handler was running -- a lifecycle run, for one, left its audit row claimed
+        ``in_progress`` until the claim lease expired, and its message neither acked nor
+        nacked.
         """
         busy = {t for t in self._dispatching if not t.done()}
         if not busy or self._stop_grace_seconds <= 0:
@@ -1731,6 +1736,28 @@ class PubSubEventBus(EventBus):
                 len(pending),
                 self._stop_grace_seconds,
             )
+
+    async def stop_consuming(self) -> None:
+        """Take no new deliveries, and settle the ones in flight (M-09).
+
+        Split out of ``stop()`` for the reason ``release_broadcast_subscriptions``
+        is: a shutdown path runs it FIRST. core-api reached ``stop()`` only after
+        its flushes, and until then its pull loops kept taking lifecycle runs. A
+        SIGKILL landing first cancels nothing, so such a run left its audit row
+        claimed for the lease.
+
+        Each pull loop ends after its current batch, handing back what it has not
+        started. A batch still running after ``stop_grace_seconds`` is cancelled
+        and awaited, so a lifecycle handler releases its claim on the way out.
+        The subscriber stays open for ``stop()``, and publishing is untouched, so
+        work that drains after this can still publish. Idempotent.
+        """
+        self._draining = True
+        await self._drain_in_flight()
+        busy = [t for t in self._dispatching if not t.done()]
+        for t in busy:
+            t.cancel()
+        await asyncio.gather(*busy, return_exceptions=True)
 
     async def release_broadcast_subscriptions(self) -> None:
         """Delete this process's ephemeral broadcast subscriptions.
@@ -1878,9 +1905,10 @@ class PubSubEventBus(EventBus):
             # than logging NotFound.
             await self.release_broadcast_subscriptions()
             # Let handlers already running finish (bounded) while the subscriber
-            # can still ack for them; see ``_drain_in_flight``. ``_stopping`` is
-            # already set, so nothing new is started meanwhile.
-            await self._drain_in_flight()
+            # can still ack for them, then cancel the rest; see
+            # ``stop_consuming``, a no-op here if a shutdown already ran it.
+            # ``_stopping`` is already set, so nothing new is started meanwhile.
+            await self.stop_consuming()
             # Close the subscriber BEFORE cancelling/awaiting the pull
             # tasks. Pull threads are blocked inside a synchronous
             # `subscriber.pull(timeout=pull_timeout)` — asyncio
@@ -2007,6 +2035,7 @@ class PubSubEventBus(EventBus):
             self._background_tasks.clear()
             self._failed_subscriptions.clear()
             self._stopping = False
+            self._draining = False
             self._warned_missing_start = False
             if teardown_complete:
                 # Per-step Exception guards above log-and-continue, so
